@@ -2,10 +2,19 @@
 name = "script-kit-gpui"
 version = "0.1.0"
 edition = "2021"
+default-run = "script-kit-gpui"
+
+[lib]
+name = "script_kit_gpui"
+path = "src/lib.rs"
 
 [[bin]]
 name = "script-kit-gpui"
 path = "src/main.rs"
+
+[[bin]]
+name = "smoke-test"
+path = "src/bin/smoke-test.rs"
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed" }
@@ -14,3 +23,7 @@ notify = "6.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 shellexpand = "2.1"
+core-graphics = "0.24"
+cocoa = "0.26"
+objc = "0.2"
+dirs = "5.0"

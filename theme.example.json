@@ -1,0 +1,25 @@
+{
+  "colors": {
+    "background": {
+      "main": 1980410,
+      "title_bar": 2961712,
+      "search_box": 3947580,
+      "log_panel": 851213
+    },
+    "text": {
+      "primary": 16777215,
+      "secondary": 14737920,
+      "tertiary": 10066329,
+      "muted": 8421504,
+      "dimmed": 6710886
+    },
+    "accent": {
+      "selected": 31948
+    },
+    "ui": {
+      "border": 4609607,
+      "success": 65280
+    }
+  }
+}
+
