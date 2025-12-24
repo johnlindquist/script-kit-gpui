@@ -1,12 +1,53 @@
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Render,
     Window, WindowBounds, WindowOptions, SharedString, FocusHandle, Focusable,
-    WindowHandle,
+    WindowHandle, Timer,
 };
+use global_hotkey::{GlobalHotKeyManager, GlobalHotKeyEvent, hotkey::{HotKey, Modifiers, Code}};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 mod scripts;
 mod executor;
 mod logging;
+
+// Global state for hotkey signaling between threads
+static HOTKEY_TRIGGERED: AtomicBool = AtomicBool::new(false);
+static HOTKEY_TRIGGER_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// A simple model that polls for hotkey triggers
+struct HotkeyPoller {
+    window: WindowHandle<ScriptListApp>,
+}
+
+impl HotkeyPoller {
+    fn new(window: WindowHandle<ScriptListApp>) -> Self {
+        Self { window }
+    }
+    
+    fn start_polling(&self, cx: &mut Context<Self>) {
+        let window = self.window.clone();
+        cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
+            loop {
+                Timer::after(std::time::Duration::from_millis(100)).await;
+                
+                if HOTKEY_TRIGGERED.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    logging::log("HOTKEY", "Poller detected trigger");
+                    
+                    let window_clone = window.clone();
+                    let _ = cx.update(move |cx: &mut App| {
+                        let _ = window_clone.update(cx, |view: &mut ScriptListApp, win: &mut Window, cx: &mut Context<ScriptListApp>| {
+                            win.activate_window();
+                            let focus_handle = view.focus_handle(cx);
+                            win.focus(&focus_handle, cx);
+                            logging::log("HOTKEY", "Window activated and focused");
+                        });
+                        cx.activate(true);
+                    });
+                }
+            }
+        }).detach();
+    }
+}
 
 struct ScriptListApp {
     scripts: Vec<scripts::Script>,
@@ -302,7 +343,7 @@ impl Render for ScriptListApp {
                         div()
                             .text_xs()
                             .text_color(rgb(0x808080))
-                            .child("Esc to hide • Cmd+L logs")
+                            .child("Cmd+; toggle • Esc hide")
                     ),
             )
             // Search box
@@ -382,8 +423,58 @@ impl Render for ScriptListApp {
     }
 }
 
+fn start_hotkey_listener() {
+    std::thread::spawn(|| {
+        // Create hotkey manager in the background thread
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                logging::log("HOTKEY", &format!("Failed to create hotkey manager: {}", e));
+                return;
+            }
+        };
+        
+        // Register Cmd+; (semicolon) as the global hotkey
+        let hotkey = HotKey::new(Some(Modifiers::META), Code::Semicolon);
+        let hotkey_id = hotkey.id();
+        
+        if let Err(e) = manager.register(hotkey) {
+            logging::log("HOTKEY", &format!("Failed to register Cmd+;: {}", e));
+            return;
+        }
+        
+        logging::log("HOTKEY", &format!("Registered global hotkey Cmd+; (id: {})", hotkey_id));
+        
+        let receiver = GlobalHotKeyEvent::receiver();
+        
+        loop {
+            // Block waiting for hotkey events
+            if let Ok(event) = receiver.recv() {
+                if event.id == hotkey_id {
+                    let count = HOTKEY_TRIGGER_COUNT.fetch_add(1, Ordering::SeqCst);
+                    HOTKEY_TRIGGERED.store(true, Ordering::SeqCst);
+                    logging::log("HOTKEY", &format!("Cmd+; pressed (trigger #{})", count + 1));
+                }
+            }
+        }
+    });
+}
+
+fn start_hotkey_poller(cx: &mut App, window: WindowHandle<ScriptListApp>) {
+    // Create a poller entity that holds the window handle
+    let poller = cx.new(|_| HotkeyPoller::new(window));
+    
+    // Start the polling loop
+    poller.update(cx, |p, cx| {
+        p.start_polling(cx);
+    });
+}
+
 fn main() {
     logging::init();
+    
+    // Start hotkey listener in background thread BEFORE GPUI starts
+    start_hotkey_listener();
     
     Application::new().run(move |cx: &mut App| {
         logging::log("APP", "GPUI Application starting");
@@ -412,6 +503,9 @@ fn main() {
         
         cx.activate(true);
         
-        logging::log("APP", "Application ready - Esc to hide, Cmd+L for logs");
+        // Start polling for hotkey triggers
+        start_hotkey_poller(cx, window);
+        
+        logging::log("APP", "Application ready - Cmd+; to show, Esc to hide");
     });
 }
