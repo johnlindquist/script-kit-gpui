@@ -402,9 +402,16 @@ impl ScriptListApp {
             }
             "edit_script" => {
                 logging::log("UI", "Edit script action");
-                let filtered = self.filtered_scripts();
-                if let Some(script) = filtered.get(self.selected_index) {
-                    self.edit_script(&script.path);
+                let filtered = self.filtered_results();
+                if let Some(result) = filtered.get(self.selected_index) {
+                    match result {
+                        scripts::SearchResult::Script(script_match) => {
+                            self.edit_script(&script_match.script.path);
+                        }
+                        scripts::SearchResult::Scriptlet(_) => {
+                            self.last_output = Some(SharedString::from("Cannot edit scriptlets"));
+                        }
+                    }
                 } else {
                     self.last_output = Some(SharedString::from("No script selected"));
                 }
@@ -663,9 +670,9 @@ impl Render for ScriptListApp {
 
 impl ScriptListApp {
     fn render_script_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let filtered = self.filtered_scripts();
+        let filtered = self.filtered_results();
         let filtered_len = filtered.len();
-        let total_len = self.scripts.len();
+        let total_len = self.scripts.len() + self.scriptlets.len();
         let theme = &self.theme;
 
         // Build script list - tight, clean spacing
@@ -680,14 +687,24 @@ impl ScriptListApp {
                     .text_color(rgb(theme.colors.text.muted))
                     .font_family(".AppleSystemUIFont")
                     .child(if self.filter_text.is_empty() {
-                        "No scripts found".to_string()
+                        "No scripts or snippets found".to_string()
                     } else {
-                        format!("No scripts match '{}'", self.filter_text)
+                        format!("No results match '{}'", self.filter_text)
                     }),
             );
         } else {
-            for (idx, script) in filtered.iter().enumerate() {
+            for (idx, result) in filtered.iter().enumerate() {
                 let is_selected = idx == self.selected_index;
+                
+                // Get name and badge based on type
+                let (name_display, badge_text, badge_color) = match result {
+                    scripts::SearchResult::Script(sm) => {
+                        (format!("{}.{}", sm.script.name, sm.script.extension), "Script", 0x4a90e2u32)
+                    }
+                    scripts::SearchResult::Scriptlet(sm) => {
+                        (sm.scriptlet.name.clone(), "Snippet", 0x7ed321u32)
+                    }
+                };
                 
                 list_container = list_container.child(
                     div()
@@ -702,7 +719,21 @@ impl ScriptListApp {
                                 .bg(if is_selected { rgb(theme.colors.accent.selected) } else { rgb(theme.colors.background.main) })
                                 .text_color(if is_selected { rgb(theme.colors.text.primary) } else { rgb(theme.colors.text.secondary) })
                                 .font_family(".AppleSystemUIFont")
-                                .child(format!("{}.{}", script.name, script.extension))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .px(px(5.))
+                                        .py(px(2.))
+                                        .rounded(px(3.))
+                                        .bg(rgb(badge_color))
+                                        .text_color(rgb(0xffffff))
+                                        .child(badge_text)
+                                )
+                                .child(name_display)
                         ),
                 );
             }
@@ -1147,6 +1178,34 @@ impl ScriptListApp {
                     .text_xs()
                     .text_color(rgb(theme.colors.text.muted))
                     .child("Press Enter or Escape to continue")
+            )
+            .into_any_element()
+    }    
+    fn render_actions_dialog(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        
+        // Simple actions dialog stub
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .h_full()
+            .bg(rgb(theme.colors.background.main))
+            .rounded(px(12.))
+            .p(px(24.))
+            .text_color(rgb(theme.colors.text.primary))
+            .font_family(".AppleSystemUIFont")
+            .child(
+                div()
+                    .text_lg()
+                    .child("Actions (Cmd+K)")
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(theme.colors.text.muted))
+                    .mt(px(12.))
+                    .child("• Create script\n• Edit script\n• Reload\n• Settings\n• Quit")
             )
             .into_any_element()
     }
