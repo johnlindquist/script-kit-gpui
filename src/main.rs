@@ -1,6 +1,7 @@
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Render,
     Window, WindowBounds, WindowOptions, SharedString, FocusHandle, Focusable,
+    WindowHandle,
 };
 
 mod scripts;
@@ -13,6 +14,7 @@ struct ScriptListApp {
     filter_text: String,
     last_output: Option<SharedString>,
     focus_handle: FocusHandle,
+    show_logs: bool,
 }
 
 impl ScriptListApp {
@@ -25,6 +27,7 @@ impl ScriptListApp {
             filter_text: String::new(),
             last_output: None,
             focus_handle: cx.focus_handle(),
+            show_logs: false,
         }
     }
 
@@ -104,9 +107,14 @@ impl ScriptListApp {
         }
         cx.notify();
     }
+    
+    fn toggle_logs(&mut self, cx: &mut Context<Self>) {
+        self.show_logs = !self.show_logs;
+        logging::log("UI", &format!("Logs panel: {}", if self.show_logs { "shown" } else { "hidden" }));
+        cx.notify();
+    }
 }
 
-// CRITICAL: Implement Focusable trait for keyboard input to work
 impl Focusable for ScriptListApp {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -172,7 +180,41 @@ impl Render for ScriptListApp {
             }
         }
 
-        // Store filter_text for use in closure
+        // Build log panel if visible
+        let log_panel = if self.show_logs {
+            let logs = logging::get_last_logs(10);
+            let mut log_container = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .bg(rgb(0x0d0d0d))
+                .border_t_1()
+                .border_color(rgb(0x464647))
+                .p(px(8.))
+                .max_h(px(150.));
+            
+            log_container = log_container.child(
+                div()
+                    .text_color(rgb(0x808080))
+                    .text_xs()
+                    .pb(px(4.))
+                    .child("─── Logs (Cmd+L to toggle) ───")
+            );
+            
+            for log_line in logs.iter().rev() {
+                log_container = log_container.child(
+                    div()
+                        .text_color(rgb(0x00ff00))
+                        .text_xs()
+                        .child(log_line.clone())
+                );
+            }
+            
+            Some(log_container)
+        } else {
+            None
+        };
+
         let filter_display = if self.filter_text.is_empty() {
             SharedString::from("Type to search...")
         } else {
@@ -180,27 +222,45 @@ impl Render for ScriptListApp {
         };
         let filter_is_empty = self.filter_text.is_empty();
 
-        let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+        let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>| {
             let key_str = event.keystroke.key.to_lowercase();
-            logging::log("KEY", &format!("Key pressed: '{}', key_char: {:?}", key_str, event.keystroke.key_char));
+            let has_cmd = event.keystroke.modifiers.platform;
+            
+            logging::log("KEY", &format!("Key: '{}', cmd: {}, key_char: {:?}", key_str, has_cmd, event.keystroke.key_char));
+            
+            // Handle Cmd+key combinations
+            if has_cmd {
+                match key_str.as_str() {
+                    "l" => {
+                        this.toggle_logs(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             
             match key_str.as_str() {
                 "up" | "arrowup" => this.move_selection_up(cx),
                 "down" | "arrowdown" => this.move_selection_down(cx),
                 "enter" => this.execute_selected(cx),
-                "escape" => this.update_filter(None, false, true, cx),
+                "escape" => {
+                    // If filter has text, clear it. Otherwise minimize window.
+                    if !this.filter_text.is_empty() {
+                        this.update_filter(None, false, true, cx);
+                    } else {
+                        logging::log("APP", "Escape pressed - minimizing window");
+                        window.minimize_window();
+                    }
+                }
                 "backspace" => this.update_filter(None, true, false, cx),
                 _ => {
-                    // Try to get typed character from key_char first
                     if let Some(ref key_char) = event.keystroke.key_char {
                         if let Some(ch) = key_char.chars().next() {
-                            // Accept alphanumeric and common script name chars
                             if ch.is_alphanumeric() || ch == '-' || ch == '_' || ch == ' ' {
                                 this.update_filter(Some(ch), false, false, cx);
                             }
                         }
                     } else if event.keystroke.key.len() == 1 {
-                        // Fallback: single character key
                         if let Some(ch) = event.keystroke.key.chars().next() {
                             if ch.is_alphanumeric() || ch == '-' || ch == '_' {
                                 this.update_filter(Some(ch), false, false, cx);
@@ -211,7 +271,7 @@ impl Render for ScriptListApp {
             }
         });
 
-        div()
+        let mut main_div = div()
             .flex()
             .flex_col()
             .bg(rgb(0x1e1e1e))
@@ -219,7 +279,6 @@ impl Render for ScriptListApp {
             .h_full()
             .text_color(rgb(0xffffff))
             .key_context("script_list")
-            // CRITICAL: Track focus so we receive keyboard events
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
             // Title bar
@@ -231,8 +290,20 @@ impl Render for ScriptListApp {
                     .py(px(12.))
                     .border_b_1()
                     .border_color(rgb(0x464647))
-                    .text_lg()
-                    .child("Script Kit (GPUI PoC)"),
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_lg()
+                            .child("Script Kit (GPUI PoC)")
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x808080))
+                            .child("Esc to hide • Cmd+L logs")
+                    ),
             )
             // Search box
             .child(
@@ -272,37 +343,53 @@ impl Render for ScriptListApp {
                     .flex_1()
                     .w_full()
                     .child(list_container),
-            )
-            // Status bar
-            .child(
-                div()
-                    .bg(rgb(0x2d2d30))
-                    .w_full()
-                    .px(px(16.))
-                    .py(px(8.))
-                    .border_t_1()
-                    .border_color(rgb(0x464647))
-                    .text_color(rgb(0x999999))
-                    .child(
-                        if let Some(output) = &self.last_output {
-                            output.clone()
-                        } else {
-                            SharedString::from("Type to filter • ↑/↓ navigate • Enter execute • Esc clear")
-                        },
-                    ),
-            )
+            );
+        
+        // Add log panel if visible
+        if let Some(panel) = log_panel {
+            main_div = main_div.child(panel);
+        }
+        
+        // Status bar
+        main_div = main_div.child(
+            div()
+                .bg(rgb(0x2d2d30))
+                .w_full()
+                .px(px(16.))
+                .py(px(8.))
+                .border_t_1()
+                .border_color(rgb(0x464647))
+                .text_color(rgb(0x999999))
+                .flex()
+                .flex_row()
+                .justify_between()
+                .child(
+                    if let Some(output) = &self.last_output {
+                        output.clone()
+                    } else {
+                        SharedString::from("Type to filter • ↑/↓ navigate • Enter execute")
+                    }
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x666666))
+                        .child("Cmd+L logs")
+                ),
+        );
+        
+        main_div
     }
 }
 
 fn main() {
-    // Initialize logging first
     logging::init();
     
-    Application::new().run(|cx: &mut App| {
+    Application::new().run(move |cx: &mut App| {
         logging::log("APP", "GPUI Application starting");
         let bounds = Bounds::centered(None, size(px(500.), px(700.0)), cx);
         
-        let window = cx.open_window(
+        let window: WindowHandle<ScriptListApp> = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
@@ -314,18 +401,17 @@ fn main() {
         )
         .unwrap();
         
-        // CRITICAL: Focus the window and activate the app so keyboard input works
+        // Focus the window
         window
-            .update(cx, |view, window, cx| {
+            .update(cx, |view: &mut ScriptListApp, window: &mut Window, cx: &mut Context<ScriptListApp>| {
                 let focus_handle = view.focus_handle(cx);
                 window.focus(&focus_handle, cx);
                 logging::log("APP", "Focus set on ScriptListApp");
             })
             .unwrap();
         
-        // Activate the application (bring to front)
         cx.activate(true);
         
-        logging::log("APP", "Application ready and focused");
+        logging::log("APP", "Application ready - Escape to hide, Cmd+L for logs");
     });
 }
