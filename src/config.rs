@@ -5,6 +5,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub hotkey: HotkeyConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bun_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,8 +20,9 @@ impl Default for Config {
         Config {
             hotkey: HotkeyConfig {
                 modifiers: vec!["meta".to_string()],
-                key: "Digit0".to_string(),
+                key: "Semicolon".to_string(),  // Cmd+; matches main.rs default
             },
+            bun_path: None,  // Will use system PATH if not specified
         }
     }
 }
@@ -106,7 +109,8 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.hotkey.modifiers, vec!["meta"]);
-        assert_eq!(config.hotkey.key, "Digit0");
+        assert_eq!(config.hotkey.key, "Semicolon");
+        assert_eq!(config.bun_path, None);
     }
 
     #[test]
@@ -116,6 +120,7 @@ mod tests {
                 modifiers: vec!["ctrl".to_string(), "alt".to_string()],
                 key: "KeyA".to_string(),
             },
+            bun_path: Some("/usr/local/bin/bun".to_string()),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -123,5 +128,6 @@ mod tests {
 
         assert_eq!(deserialized.hotkey.modifiers, config.hotkey.modifiers);
         assert_eq!(deserialized.hotkey.key, config.hotkey.key);
+        assert_eq!(deserialized.bun_path, config.bun_path);
     }
 }
