@@ -10,11 +10,13 @@
 //! - Context-aware actions based on focused script
 
 use gpui::{
-    div, point, prelude::*, px, rgba, uniform_list, BoxShadow, Context, FocusHandle, Focusable, 
-    Hsla, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window,
+    div, point, prelude::*, px, rgb, rgba, uniform_list, App, BoxShadow, 
+    Context, FocusHandle, Focusable, Hsla, Render, ScrollStrategy, SharedString, 
+    UniformListScrollHandle, Window,
 };
 use std::sync::Arc;
 use crate::logging;
+use crate::theme;
 
 /// Callback for action selection
 /// Signature: (action_id: String)
@@ -167,20 +169,31 @@ pub struct ActionsDialog {
     pub focused_script: Option<ScriptInfo>,
     /// Scroll handle for uniform_list virtualization
     pub scroll_handle: UniformListScrollHandle,
+    /// Theme for consistent color styling
+    pub theme: Arc<theme::Theme>,
+}
+
+/// Helper function to combine a hex color with an alpha value
+/// Shifts hex left 8 bits and adds alpha to create RGBA value for gpui::rgba()
+#[inline]
+fn hex_with_alpha(hex: u32, alpha: u8) -> u32 {
+    (hex << 8) | (alpha as u32)
 }
 
 impl ActionsDialog {
     pub fn new(
         focus_handle: FocusHandle,
         on_select: ActionCallback,
+        theme: Arc<theme::Theme>,
     ) -> Self {
-        Self::with_script(focus_handle, on_select, None)
+        Self::with_script(focus_handle, on_select, None, theme)
     }
 
     pub fn with_script(
         focus_handle: FocusHandle,
         on_select: ActionCallback,
         focused_script: Option<ScriptInfo>,
+        theme: Arc<theme::Theme>,
     ) -> Self {
         let actions = Self::build_actions(&focused_script);
         let filtered_actions: Vec<usize> = (0..actions.len()).collect();
@@ -189,6 +202,15 @@ impl ActionsDialog {
             "ActionsDialog created with {} actions, script: {:?}", 
             actions.len(),
             focused_script.as_ref().map(|s| &s.name)
+        ));
+        
+        // Log theme color configuration for debugging
+        logging::log("ACTIONS_THEME", &format!(
+            "Theme colors applied: bg_main=#{:06x}, bg_search=#{:06x}, text_primary=#{:06x}, accent_selected=#{:06x}",
+            theme.colors.background.main,
+            theme.colors.background.search_box,
+            theme.colors.text.primary,
+            theme.colors.accent.selected
         ));
         
         ActionsDialog {
@@ -200,6 +222,7 @@ impl ActionsDialog {
             on_select,
             focused_script,
             scroll_handle: UniformListScrollHandle::new(),
+            theme,
         }
     }
 
@@ -324,7 +347,7 @@ impl ActionsDialog {
 }
 
 impl Focusable for ActionsDialog {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
@@ -360,26 +383,33 @@ impl Render for ActionsDialog {
             SharedString::from(self.search_text.clone())
         };
 
+        // Extract theme colors for input container
+        let search_box_bg = rgba(hex_with_alpha(self.theme.colors.background.search_box, 0xcc));
+        let border_color = rgba(hex_with_alpha(self.theme.colors.ui.border, 0x80));
+        let muted_text = rgb(self.theme.colors.text.muted);
+        let dimmed_text = rgb(self.theme.colors.text.dimmed);
+        let secondary_text = rgb(self.theme.colors.text.secondary);
+        
         let input_container = div()
             .w_full()
             .px(px(ITEM_PADDING_X))
             .py(px(ITEM_PADDING_Y))
-            .bg(rgba(0x2d2d2dcc)) // Semi-transparent darker bg
+            .bg(search_box_bg)
             .border_b_1()
-            .border_color(rgba(0x3d3d3d80))
+            .border_color(border_color)
             .flex()
             .flex_row()
             .gap_2()
             .items_center()
-            .child(div().text_color(rgba(0x888888ff)).text_sm().child("⚡"))
+            .child(div().text_color(muted_text).text_sm().child("⚡"))
             .child(
                 div()
                     .flex_1()
                     .text_sm()
                     .text_color(if self.search_text.is_empty() {
-                        rgba(0x666666ff)
+                        dimmed_text
                     } else {
-                        rgba(0xccccccff)
+                        secondary_text
                     })
                     .child(search_display),
             );
@@ -396,7 +426,7 @@ impl Render for ActionsDialog {
                         .w_full()
                         .py(px(16.))
                         .px(px(ITEM_PADDING_X))
-                        .text_color(rgba(0x666666ff))
+                        .text_color(dimmed_text)
                         .text_sm()
                         .child("No actions match your search"),
                 )
@@ -420,6 +450,12 @@ impl Render for ActionsDialog {
                         visible_range, this.filtered_actions.len()
                     ));
                     
+                    // Extract theme colors for list items
+                    let selected_bg = rgba(hex_with_alpha(this.theme.colors.accent.selected, 0xcc));
+                    let primary_text = rgb(this.theme.colors.text.primary);
+                    let tertiary_alpha = rgba(hex_with_alpha(this.theme.colors.text.tertiary, 0x99));
+                    let dimmed_alpha = rgba(hex_with_alpha(this.theme.colors.text.dimmed, 0x99));
+                    
                     let mut items = Vec::new();
                     
                     for idx in visible_range {
@@ -428,21 +464,21 @@ impl Render for ActionsDialog {
                                 let action: &Action = action; // Explicit type annotation
                                 let is_selected = idx == selected_index;
                                 let bg = if is_selected {
-                                    rgba(0x0e47a1cc) // Blue highlight, semi-transparent
+                                    selected_bg
                                 } else {
                                     rgba(0x00000000) // Transparent
                                 };
 
                                 let title_color = if is_selected {
-                                    rgba(0xffffffff)
+                                    rgb(0xffffff) // White when selected
                                 } else {
-                                    rgba(0xddddddff)
+                                    primary_text
                                 };
 
                                 let shortcut_color = if is_selected {
-                                    rgba(0xaaaaaa99)
+                                    tertiary_alpha
                                 } else {
-                                    rgba(0x66666699)
+                                    dimmed_alpha
                                 };
 
                                 // Clone strings for SharedString conversion
@@ -493,6 +529,11 @@ impl Render for ActionsDialog {
             .into_any_element()
         };
 
+        // Extract theme colors for main container
+        let main_bg = rgba(hex_with_alpha(self.theme.colors.background.main, 0xe6));
+        let container_border = rgba(hex_with_alpha(self.theme.colors.ui.border, 0x80));
+        let container_text = rgb(self.theme.colors.text.secondary);
+        
         // Main overlay popup container
         // Fixed width, max height, rounded corners, shadow, semi-transparent bg
         div()
@@ -500,13 +541,13 @@ impl Render for ActionsDialog {
             .flex_col()
             .w(px(POPUP_WIDTH))
             .max_h(px(POPUP_MAX_HEIGHT))
-            .bg(rgba(0x1e1e1ee6)) // Semi-transparent dark bg (90% opacity)
+            .bg(main_bg)
             .rounded(px(POPUP_CORNER_RADIUS))
             .shadow(Self::create_popup_shadow())
             .border_1()
-            .border_color(rgba(0x3d3d3d80))
+            .border_color(container_border)
             .overflow_hidden()
-            .text_color(rgba(0xccccccff))
+            .text_color(container_text)
             .key_context("actions_dialog")
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)

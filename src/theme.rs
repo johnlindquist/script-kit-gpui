@@ -748,7 +748,7 @@ mod tests {
         let theme = Theme::default();
         assert_eq!(theme.colors.background.main, 0x1e1e1e);
         assert_eq!(theme.colors.text.primary, 0xffffff);
-        assert_eq!(theme.colors.accent.selected, 0x007acc);
+        assert_eq!(theme.colors.accent.selected, 0xfbbf24);
         assert_eq!(theme.colors.ui.border, 0x464647);
     }
 
@@ -756,7 +756,7 @@ mod tests {
     fn test_color_scheme_default() {
         let scheme = ColorScheme::default();
         assert_eq!(scheme.background.title_bar, 0x2d2d30);
-        assert_eq!(scheme.text.secondary, 0xe0e0e0);
+        assert_eq!(scheme.text.secondary, 0xcccccc);
         assert_eq!(scheme.ui.success, 0x00ff00);
     }
 
@@ -809,10 +809,10 @@ mod tests {
     #[test]
     fn test_opacity_defaults() {
         let opacity = BackgroundOpacity::default();
-        assert_eq!(opacity.main, 0.85);
-        assert_eq!(opacity.title_bar, 0.9);
-        assert_eq!(opacity.search_box, 0.92);
-        assert_eq!(opacity.log_panel, 0.8);
+        assert_eq!(opacity.main, 0.60);
+        assert_eq!(opacity.title_bar, 0.65);
+        assert_eq!(opacity.search_box, 0.70);
+        assert_eq!(opacity.log_panel, 0.55);
     }
     
     #[test]

@@ -12,6 +12,54 @@
  * Environment:
  *   SDK_TEST_TIMEOUT=10    # Max seconds per test (default: 30)
  *   SDK_TEST_VERBOSE=true  # Extra debug output
+ * 
+ * =============================================================================
+ * MANUAL VERIFICATION TESTS - UI Bug Fixes
+ * =============================================================================
+ * 
+ * After running automated tests, manually verify these UI behaviors:
+ * 
+ * ## Bug Fix 1: Mouse Hover Highlighting
+ * 
+ * **Expected behavior:**
+ * - Start the app: `cargo run --release`
+ * - Wait for list items to load (e.g., scripts or choices)
+ * - Move mouse over list items
+ * - VERIFY: The highlighted item (with visual background) follows mouse cursor
+ * - VERIFY: Moving mouse up/down instantly updates which item is highlighted
+ * - VERIFY: Clicking a hovered item selects it
+ * 
+ * **Technical implementation:**
+ * - list_item.rs has .index() method to track each item's position
+ * - list_item.rs has .on_hover() handler to respond to mouse enter events
+ * - main.rs uses cx.listener() to update selected_index when mouse enters
+ * 
+ * ## Bug Fix 2: Scroll Jitter Prevention
+ * 
+ * **Expected behavior:**
+ * - Start the app: `cargo run --release`  
+ * - Use keyboard (Up/Down arrows) to navigate list items
+ * - VERIFY: List scrolls smoothly to keep selected item visible
+ * - VERIFY: No visual jitter or jumping when navigating
+ * - Now move mouse to hover over a different item (without clicking)
+ * - VERIFY: Hovering does NOT cause the list to scroll
+ * - VERIFY: Only keyboard navigation triggers scroll adjustments
+ * 
+ * **Technical implementation:**
+ * - last_scrolled_index tracks the last scroll position
+ * - scroll_to_selected_if_needed() helper skips redundant scroll_to_item calls
+ * - Keyboard navigation uses the helper (triggers scroll when needed)
+ * - Mouse hover updates selection WITHOUT triggering scroll
+ * 
+ * ## Combined Test Scenario
+ * 
+ * 1. Launch app with many items (enough to require scrolling)
+ * 2. Use keyboard to navigate to bottom of list (should scroll smoothly)
+ * 3. Hover mouse over items near top (should highlight them WITHOUT scrolling)
+ * 4. Press Down arrow (should scroll back to maintain keyboard position)
+ * 5. VERIFY: No jitter throughout this sequence
+ * 
+ * =============================================================================
  */
 
 import { readdir } from 'node:fs/promises';

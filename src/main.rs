@@ -2,7 +2,7 @@ use gpui::{
     div, svg, prelude::*, px, point, rgb, rgba, size, App, Application, Bounds, Context, Render,
     Window, WindowBounds, WindowOptions, SharedString, FocusHandle, Focusable, Entity,
     WindowHandle, Timer, Pixels, WindowBackgroundAppearance, AnyElement, BoxShadow, hsla,
-    uniform_list, UniformListScrollHandle, ScrollStrategy,
+    uniform_list, UniformListScrollHandle, ScrollStrategy, ElementId,
 };
 use global_hotkey::{GlobalHotKeyManager, GlobalHotKeyEvent, HotKeyState, hotkey::{HotKey, Modifiers, Code}};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,7 +24,12 @@ mod prompts;
 mod config;
 mod panel;
 mod actions;
+mod list_item;
 mod syntax;
+mod utils;
+
+use list_item::{ListItem, ListItemColors, LIST_ITEM_HEIGHT};
+use utils::strip_html_tags;
 
 use std::sync::{Arc, Mutex, mpsc};
 use protocol::{Message, Choice};
@@ -466,6 +471,8 @@ struct ScriptListApp {
     // P1: Cache for filtered_results() - invalidate on filter_text change only
     cached_filtered_results: Vec<scripts::SearchResult>,
     filter_cache_key: String,
+    // Scroll stabilization: track last scrolled-to index to avoid redundant scroll_to_item calls
+    last_scrolled_index: Option<usize>,
 }
 
 impl ScriptListApp {
@@ -536,6 +543,8 @@ impl ScriptListApp {
             // P1: Initialize filter cache
             cached_filtered_results: Vec::new(),
             filter_cache_key: String::from("\0_UNINITIALIZED_\0"), // Sentinel value to force initial compute
+            // Scroll stabilization: start with no last scrolled index
+            last_scrolled_index: None,
         }
     }
     
@@ -573,7 +582,10 @@ impl ScriptListApp {
         self.scripts = scripts::read_scripts();
         self.scriptlets = scripts::read_scriptlets();
         self.selected_index = 0;
+        self.last_scrolled_index = None; // Reset scroll tracking
+        logging::log_scroll_to_item(0, "scripts_refreshed");
         self.list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+        self.last_scrolled_index = Some(0);
         // P1: Invalidate cache when scripts change
         self.invalidate_filter_cache();
         logging::log("APP", &format!("Scripts refreshed: {} scripts, {} scriptlets loaded", self.scripts.len(), self.scriptlets.len()));
@@ -658,8 +670,8 @@ impl ScriptListApp {
     fn move_selection_up(&mut self, cx: &mut Context<Self>) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
-            // uniform_list handles scrolling automatically via scroll_to_item
-            self.list_scroll_handle.scroll_to_item(self.selected_index, ScrollStrategy::Nearest);
+            // Scroll stabilization: only call scroll_to_item if index actually changed
+            self.scroll_to_selected_if_needed("keyboard_up");
             logging::log("SCROLL", &format!("Up: selected_index={}", self.selected_index));
             cx.notify();
         }
@@ -669,9 +681,39 @@ impl ScriptListApp {
         let filtered_len = self.filtered_results().len();
         if self.selected_index < filtered_len.saturating_sub(1) {
             self.selected_index += 1;
-            // uniform_list handles scrolling automatically via scroll_to_item
-            self.list_scroll_handle.scroll_to_item(self.selected_index, ScrollStrategy::Nearest);
+            // Scroll stabilization: only call scroll_to_item if index actually changed
+            self.scroll_to_selected_if_needed("keyboard_down");
             logging::log("SCROLL", &format!("Down: selected_index={}", self.selected_index));
+            cx.notify();
+        }
+    }
+    
+    /// Scroll stabilization helper: only call scroll_to_item if we haven't already scrolled to this index.
+    /// This prevents scroll jitter from redundant scroll_to_item calls.
+    fn scroll_to_selected_if_needed(&mut self, reason: &str) {
+        let target = self.selected_index;
+        
+        // Check if we've already scrolled to this index
+        if self.last_scrolled_index == Some(target) {
+            logging::log_scroll_to_item(target, &format!("{} (SKIPPED - already at index)", reason));
+            return;
+        }
+        
+        // Log and perform the scroll
+        let perf_start = logging::log_scroll_perf_start(&format!("scroll_to_item_{}", reason));
+        logging::log_scroll_to_item(target, reason);
+        self.list_scroll_handle.scroll_to_item(target, ScrollStrategy::Nearest);
+        self.last_scrolled_index = Some(target);
+        logging::log_scroll_perf_end(&format!("scroll_to_item_{}", reason), perf_start);
+    }
+    
+    /// Update selected index from mouse hover and scroll if needed
+    fn set_selected_index_from_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.selected_index != index {
+            logging::log_mouse_hover_state(index, true, true);
+            self.selected_index = index;
+            // Don't scroll on hover - let the user scroll naturally with mouse
+            // This prevents scroll jitter when hovering near viewport edges
             cx.notify();
         }
     }
@@ -696,17 +738,26 @@ impl ScriptListApp {
         if clear {
             self.filter_text.clear();
             self.selected_index = 0;
+            self.last_scrolled_index = None; // Reset scroll tracking on filter change
+            logging::log_scroll_to_item(0, "filter_cleared");
             self.list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+            self.last_scrolled_index = Some(0);
             logging::log("SCROLL", "Filter cleared - reset: selected_index=0");
         } else if backspace && !self.filter_text.is_empty() {
             self.filter_text.pop();
             self.selected_index = 0;
+            self.last_scrolled_index = None; // Reset scroll tracking on filter change
+            logging::log_scroll_to_item(0, "filter_backspace");
             self.list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+            self.last_scrolled_index = Some(0);
             logging::log("SCROLL", "Filter backspace - reset: selected_index=0");
         } else if let Some(ch) = new_char {
             self.filter_text.push(ch);
             self.selected_index = 0;
+            self.last_scrolled_index = None; // Reset scroll tracking on filter change
+            logging::log_scroll_to_item(0, "filter_char_added");
             self.list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+            self.last_scrolled_index = Some(0);
             logging::log("SCROLL", &format!("Filter char '{}' - reset: selected_index=0", ch));
         }
         cx.notify();
@@ -730,11 +781,13 @@ impl ScriptListApp {
             let script_info = self.get_focused_script_info();
             let focus_handle = cx.focus_handle();
             
+            let theme_arc = std::sync::Arc::new(self.theme.clone());
             let dialog = cx.new(|_cx| {
                 ActionsDialog::with_script(
                     focus_handle.clone(),
                     std::sync::Arc::new(|_action_id| {}), // Empty callback - we handle via key events
                     script_info,
+                    theme_arc,
                 )
             });
             
@@ -806,10 +859,13 @@ impl ScriptListApp {
         
         std::thread::spawn(move || {
             use std::process::Command;
-            let _ = Command::new(&editor)
+            match Command::new(&editor)
                 .arg(&path_str)
-                .spawn();
-            logging::log("UI", &format!("Editor spawned: {}", editor));
+                .spawn()
+            {
+                Ok(_) => logging::log("UI", &format!("Successfully spawned editor: {}", editor)),
+                Err(e) => logging::log("ERROR", &format!("Failed to spawn editor '{}': {}", editor, e)),
+            }
         });
     }
     
@@ -1001,21 +1057,33 @@ impl ScriptListApp {
                 logging::log("UI", &format!("Opening browser: {}", url));
                 #[cfg(target_os = "macos")]
                 {
-                    let _ = std::process::Command::new("open")
+                    match std::process::Command::new("open")
                         .arg(&url)
-                        .spawn();
+                        .spawn()
+                    {
+                        Ok(_) => logging::log("UI", &format!("Successfully opened URL in browser: {}", url)),
+                        Err(e) => logging::log("ERROR", &format!("Failed to open URL '{}': {}", url, e)),
+                    }
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let _ = std::process::Command::new("xdg-open")
+                    match std::process::Command::new("xdg-open")
                         .arg(&url)
-                        .spawn();
+                        .spawn()
+                    {
+                        Ok(_) => logging::log("UI", &format!("Successfully opened URL in browser: {}", url)),
+                        Err(e) => logging::log("ERROR", &format!("Failed to open URL '{}': {}", url, e)),
+                    }
                 }
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = std::process::Command::new("cmd")
+                    match std::process::Command::new("cmd")
                         .args(["/C", "start", &url])
-                        .spawn();
+                        .spawn()
+                    {
+                        Ok(_) => logging::log("UI", &format!("Successfully opened URL in browser: {}", url)),
+                        Err(e) => logging::log("ERROR", &format!("Failed to open URL '{}': {}", url, e)),
+                    }
                 }
             }
          }
@@ -1099,7 +1167,10 @@ impl ScriptListApp {
         // Clear filter and selection state for fresh menu
         self.filter_text.clear();
         self.selected_index = 0;
+        self.last_scrolled_index = None; // Reset scroll tracking
+        logging::log_scroll_to_item(0, "reset_to_script_list");
         self.list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+        self.last_scrolled_index = Some(0);
         
         // Clear output
         self.last_output = None;
@@ -1654,19 +1725,11 @@ impl ScriptListApp {
             self.selected_index = filtered_len.saturating_sub(1);
         }
 
-        // Clone values needed for the uniform_list closure
-        let selected_index = self.selected_index;
+        // Note: selected_index is now accessed from `this` inside the processor closure
         
-        // P4: Pre-compute theme values - extract primitives before closure
-        // This avoids cloning the entire theme.colors struct
-        let text_primary = theme.colors.text.primary;
-        let text_secondary = theme.colors.text.secondary;
-        let text_muted = theme.colors.text.muted;
-        let text_dimmed = theme.colors.text.dimmed;
-        let accent_selected = theme.colors.accent.selected;
-        let accent_selected_subtle = theme.colors.accent.selected_subtle;
-        let background_main = theme.colors.background.main;
-        logging::log_debug("PERF", "P4: Pre-computed 7 theme values for render closure");
+        // P4: Pre-compute theme values using ListItemColors
+        let list_colors = ListItemColors::from_theme(theme);
+        logging::log_debug("PERF", "P4: Using ListItemColors for render closure");
 
         // Build script list using uniform_list for proper virtualized scrolling
         let list_element: AnyElement = if filtered_len == 0 {
@@ -1686,18 +1749,23 @@ impl ScriptListApp {
                 .into_any_element()
         } else {
             // Use uniform_list for automatic virtualized scrolling
+            // Note: Hover-to-select is implemented via on_mouse_down on each item wrapper
+            // to update selected_index when the user clicks (selecting on hover alone would
+            // be too aggressive - we update on hover enter instead for visual highlight)
             uniform_list(
                 "script-list",
                 filtered_len,
-                cx.processor(move |_this, visible_range: std::ops::Range<usize>, _window, _cx| {
+                cx.processor(move |this, visible_range: std::ops::Range<usize>, _window, cx| {
                     let mut items = Vec::new();
+                    // Get the current selected_index FIRST before borrowing this via get_filtered_results_cached
+                    let current_selected = this.selected_index;
                     // P1: Use cached filtered results inside closure
-                    let filtered = _this.get_filtered_results_cached();
+                    let filtered = this.get_filtered_results_cached();
                     logging::log("SCROLL", &format!("Script list visible range: {:?} ({} items)", visible_range.clone(), visible_range.clone().count()));
                     
-                    for ix in visible_range {
+                    for ix in visible_range.clone() {
                         if let Some(result) = filtered.get(ix) {
-                            let is_selected = ix == selected_index;
+                            let is_selected = ix == current_selected;
                             
                             // Get name, description, and shortcut based on type
                             let (name_display, description, shortcut) = match result {
@@ -1709,55 +1777,27 @@ impl ScriptListApp {
                                 }
                             };
                             
-                            // P4: Use pre-computed theme values (primitives, no clone needed)
-                            let selected_bg = rgba((accent_selected_subtle << 8) | 0x80);
-                            let hover_bg = rgba((accent_selected_subtle << 8) | 0x40);
+                            // Create hover handler that updates selected_index when mouse enters
+                            // This gives visual feedback matching keyboard navigation
+                            let hover_handler = cx.listener(move |this: &mut ScriptListApp, hovered: &bool, _window, cx| {
+                                if *hovered && this.selected_index != ix {
+                                    logging::log_mouse_enter(ix, None);
+                                    this.set_selected_index_from_hover(ix, cx);
+                                }
+                            });
                             
-                            // Build content with name + description
-                            let mut item_content = div()
-                                .flex_1().min_w(px(0.)).overflow_hidden()
-                                .flex().flex_col().gap(px(2.));
-                            
-                            // Name
-                            item_content = item_content.child(
-                                div().text_sm().font_weight(gpui::FontWeight::MEDIUM).overflow_hidden().child(name_display)
-                            );
-                            
-                            // P4: Use pre-computed accent_selected and text_muted
-                            if let Some(desc) = description {
-                                let desc_color = if is_selected { rgb(accent_selected) } else { rgb(text_muted) };
-                                item_content = item_content.child(
-                                    div().text_xs().text_color(desc_color).overflow_hidden().max_h(px(16.)).child(desc)
-                                );
-                            }
-                            
-                            // Fixed height item for uniform_list (52px = room for name + description + padding)
+                            // Use shared ListItem component for consistent design
+                            // Wrap in div with hover handler for hover-to-select behavior
                             items.push(
                                 div()
-                                    .id(ix)
-                                    .w_full()
-                                    .h(px(52.))  // Fixed height for uniform_list
-                                    .px(px(12.))
-                                    .flex()
-                                    .items_center()
+                                    .id(ElementId::NamedInteger("script-item".into(), ix as u64))
+                                    .on_hover(hover_handler)
                                     .child(
-                                        div()
-                                            .w_full()
-                                            .h_full()
-                                            .px(px(12.))
-                                            .bg(if is_selected { selected_bg } else { rgba(0x00000000) })
-                                            .hover(|s| s.bg(hover_bg))
-                                            // P4: Use pre-computed text_primary and text_secondary
-                                            .text_color(if is_selected { rgb(text_primary) } else { rgb(text_secondary) })
-                                            .font_family(".AppleSystemUIFont")
-                                            .cursor_pointer()
-                                            .flex().flex_row().items_center().justify_between().gap_2()
-                                            .child(item_content)
-                                            .child(
-                                                // P4: Use pre-computed text_dimmed
-                                                div().flex().flex_row().items_center().gap_2().flex_shrink_0()
-                                                    .child(if let Some(sc) = shortcut { div().text_xs().text_color(rgb(text_dimmed)).child(sc) } else { div() })
-                                            )
+                                        ListItem::new(name_display, list_colors)
+                                            .index(ix)
+                                            .description_opt(description)
+                                            .shortcut_opt(shortcut)
+                                            .selected(is_selected)
                                     ),
                             );
                         }
@@ -2062,11 +2102,10 @@ impl ScriptListApp {
         };
         let input_is_empty = self.arg_input_text.is_empty();
         
-        // P4: Pre-compute theme values for arg prompt
+        // P4: Pre-compute theme values for arg prompt using ListItemColors
+        let arg_list_colors = ListItemColors::from_theme(theme);
         let accent_selected = theme.colors.accent.selected;
-        let background_main = theme.colors.background.main;
         let text_primary = theme.colors.text.primary;
-        let text_secondary = theme.colors.text.secondary;
         let text_muted = theme.colors.text.muted;
         
         // P0: Clone data needed for uniform_list closure
@@ -2086,6 +2125,7 @@ impl ScriptListApp {
                 .into_any_element()
         } else {
             // P0: Use uniform_list for virtualized scrolling of arg choices
+            // Now uses shared ListItem component for consistent design with script list
             uniform_list(
                 "arg-choices",
                 filtered_choices_len,
@@ -2095,31 +2135,16 @@ impl ScriptListApp {
                         if let Some((_, choice)) = filtered_choices.get(ix) {
                             let is_selected = ix == arg_selected_index;
                             
-                            // P0: Fixed height items (40px) for uniform_list
-                            let mut item = div()
+                            // Use shared ListItem component for consistent design
+                            div()
                                 .id(ix)
-                                .w_full()
-                                .h(px(40.))  // P0: FIXED HEIGHT required for uniform_list
-                                .px(px(12.))
-                                .flex()
-                                .items_center()
                                 .child(
-                                    div()
-                                        .w_full()
-                                        .px(px(12.))
-                                        .py(px(8.))
-                                        .rounded(px(8.))
-                                        // P4: Use pre-computed theme values
-                                        .bg(if is_selected { rgb(accent_selected) } else { rgb(background_main) })
-                                        .text_color(if is_selected { rgb(text_primary) } else { rgb(text_secondary) })
-                                        .child(choice.name.clone())
-                                );
-                            
-                            // Note: For uniform_list with fixed height, we skip description 
-                            // to keep items at consistent 40px height
-                            item
+                                    ListItem::new(choice.name.clone(), arg_list_colors)
+                                        .description_opt(choice.description.clone())
+                                        .selected(is_selected)
+                                )
                         } else {
-                            div().id(ix).h(px(40.))
+                            div().id(ix).h(px(LIST_ITEM_HEIGHT))
                         }
                     }).collect()
                 },
@@ -2224,19 +2249,7 @@ impl ScriptListApp {
         let theme = &self.theme;
         
         // Strip HTML tags for plain text display
-        let display_text = {
-            let mut result = String::new();
-            let mut in_tag = false;
-            for ch in html.chars() {
-                match ch {
-                    '<' => in_tag = true,
-                    '>' => in_tag = false,
-                    _ if !in_tag => result.push(ch),
-                    _ => {}
-                }
-            }
-            result.trim().to_string()
-        };
+        let display_text = strip_html_tags(&html);
         
         let prompt_id = id.clone();
         let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {

@@ -9,7 +9,10 @@ use gpui::{
 };
 use std::sync::Arc;
 
+use crate::logging;
 use crate::protocol::Choice;
+use crate::theme;
+use crate::utils::strip_html_tags;
 
 /// Callback for prompt submission
 /// Signature: (id: String, value: Option<String>)
@@ -31,6 +34,7 @@ pub struct ArgPrompt {
     pub input_text: String,
     pub focus_handle: FocusHandle,
     pub on_submit: SubmitCallback,
+    pub theme: Arc<theme::Theme>,
 }
 
 impl ArgPrompt {
@@ -40,7 +44,10 @@ impl ArgPrompt {
         choices: Vec<Choice>,
         focus_handle: FocusHandle,
         on_submit: SubmitCallback,
+        theme: Arc<theme::Theme>,
     ) -> Self {
+        logging::log("PROMPTS", &format!("ArgPrompt::new with theme colors: bg={:#x}, text={:#x}", 
+            theme.colors.background.main, theme.colors.text.primary));
         let filtered_choices: Vec<usize> = (0..choices.len()).collect();
         ArgPrompt {
             id,
@@ -51,6 +58,7 @@ impl ArgPrompt {
             input_text: String::new(),
             focus_handle,
             on_submit,
+            theme,
         }
     }
 
@@ -120,6 +128,8 @@ impl Focusable for ArgPrompt {
     }
 }
 
+// Note: Focusable trait uses &gpui::App for compatibility with gpui framework
+
 impl Render for ArgPrompt {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
@@ -155,21 +165,21 @@ impl Render for ArgPrompt {
             .w_full()
             .px(px(16.))
             .py(px(12.))
-            .bg(rgb(0x2d2d2d))
+            .bg(rgb(self.theme.colors.background.search_box))
             .border_b_1()
-            .border_color(rgb(0x3d3d3d))
+            .border_color(rgb(self.theme.colors.ui.border))
             .flex()
             .flex_row()
             .gap_2()
             .items_center()
-            .child(div().text_color(rgb(0x888888)).child("🔍"))
+            .child(div().text_color(rgb(self.theme.colors.text.muted)).child("🔍"))
             .child(
                 div()
                     .flex_1()
                     .text_color(if self.input_text.is_empty() {
-                        rgb(0x666666)
+                        rgb(self.theme.colors.text.dimmed)
                     } else {
-                        rgb(0xcccccc)
+                        rgb(self.theme.colors.text.secondary)
                     })
                     .child(input_display),
             );
@@ -190,7 +200,7 @@ impl Render for ArgPrompt {
                     .w_full()
                     .py(px(32.))
                     .px(px(16.))
-                    .text_color(rgb(0x666666))
+                    .text_color(rgb(self.theme.colors.text.dimmed))
                     .child("No choices match your filter"),
             );
         } else {
@@ -198,21 +208,21 @@ impl Render for ArgPrompt {
                 if let Some(choice) = self.choices.get(choice_idx) {
                     let is_selected = idx == self.selected_index;
                     let bg = if is_selected {
-                        rgb(0x0e47a1) // Blue highlight
+                        rgb(self.theme.colors.accent.selected)
                     } else {
-                        rgb(0x1e1e1e)
+                        rgb(self.theme.colors.background.main)
                     };
 
                     let name_color = if is_selected {
-                        rgb(0xffffff)
+                        rgb(self.theme.colors.text.primary)
                     } else {
-                        rgb(0xcccccc)
+                        rgb(self.theme.colors.text.secondary)
                     };
 
                     let desc_color = if is_selected {
-                        rgb(0xaaaaaa)
+                        rgb(self.theme.colors.text.tertiary)
                     } else {
-                        rgb(0x888888)
+                        rgb(self.theme.colors.text.muted)
                     };
 
                     let mut choice_item = div()
@@ -221,7 +231,7 @@ impl Render for ArgPrompt {
                         .py(px(10.))
                         .bg(bg)
                         .border_b_1()
-                        .border_color(rgb(0x3d3d3d))
+                        .border_color(rgb(self.theme.colors.ui.border))
                         .flex()
                         .flex_col()
                         .gap_1();
@@ -257,8 +267,8 @@ impl Render for ArgPrompt {
             .w_full()
             .h_full()            // Fill container height completely
             .min_h(px(0.))       // Allow proper flex behavior
-            .bg(rgb(0x1e1e1e))
-            .text_color(rgb(0xcccccc))
+            .bg(rgb(self.theme.colors.background.main))
+            .text_color(rgb(self.theme.colors.text.secondary))
             .key_context("arg_prompt")
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
@@ -279,6 +289,7 @@ pub struct DivPrompt {
     pub tailwind: Option<String>,
     pub focus_handle: FocusHandle,
     pub on_submit: SubmitCallback,
+    pub theme: Arc<theme::Theme>,
 }
 
 impl DivPrompt {
@@ -288,48 +299,18 @@ impl DivPrompt {
         tailwind: Option<String>,
         focus_handle: FocusHandle,
         on_submit: SubmitCallback,
+        theme: Arc<theme::Theme>,
     ) -> Self {
+        logging::log("PROMPTS", &format!("DivPrompt::new with theme colors: bg={:#x}, text={:#x}", 
+            theme.colors.background.main, theme.colors.text.primary));
         DivPrompt {
             id,
             html,
             tailwind,
             focus_handle,
             on_submit,
+            theme,
         }
-    }
-
-    /// Extract plain text from HTML by removing tags
-    /// Simple regex-based strip for prototype
-    fn strip_html_tags(html: &str) -> String {
-        let mut result = String::new();
-        let mut in_tag = false;
-        let mut pending_space = false;
-
-        for ch in html.chars() {
-            match ch {
-                '<' => in_tag = true,
-                '>' => {
-                    in_tag = false;
-                    pending_space = true; // Add space between tags
-                }
-                _ if !in_tag => {
-                    if ch.is_whitespace() {
-                        if !result.is_empty() && !result.ends_with(' ') {
-                            pending_space = true;
-                        }
-                    } else {
-                        if pending_space && !result.is_empty() {
-                            result.push(' ');
-                            pending_space = false;
-                        }
-                        result.push(ch);
-                    }
-                }
-                _ => {} // Skip characters inside tags
-            }
-        }
-
-        result.trim().to_string()
     }
 
     /// Submit - always with None value (just acknowledgment)
@@ -344,6 +325,8 @@ impl Focusable for DivPrompt {
     }
 }
 
+// Note: Focusable trait uses &gpui::App for compatibility with gpui framework
+
 impl Render for DivPrompt {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, _cx: &mut Context<Self>| {
@@ -355,8 +338,8 @@ impl Render for DivPrompt {
             }
         });
 
-        // Extract and render text content
-        let display_text = Self::strip_html_tags(&self.html);
+        // Extract and render text content using shared utility
+        let display_text = strip_html_tags(&self.html);
 
         // Main container - fills entire window height with no bottom gap
         // Content area uses flex_1 to fill all remaining space
@@ -366,8 +349,8 @@ impl Render for DivPrompt {
             .w_full()
             .h_full()            // Fill container height completely  
             .min_h(px(0.))       // Allow proper flex behavior
-            .bg(rgb(0x1e1e1e))
-            .text_color(rgb(0xcccccc))
+            .bg(rgb(self.theme.colors.background.main))
+            .text_color(rgb(self.theme.colors.text.secondary))
             .p(px(16.))
             .key_context("div_prompt")
             .track_focus(&self.focus_handle)

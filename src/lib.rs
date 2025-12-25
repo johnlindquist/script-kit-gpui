@@ -5,9 +5,12 @@
 
 pub mod config;
 pub mod executor;
+pub mod list_item;
 pub mod logging;
 pub mod panel;
 pub mod protocol;
 pub mod prompts;
 pub mod scripts;
 pub mod syntax;
+pub mod theme;
+pub mod utils;
