@@ -394,6 +394,10 @@ pub enum Message {
     #[serde(rename = "hide")]
     Hide {},
 
+    /// Open URL in default browser
+    #[serde(rename = "browse")]
+    Browse { url: String },
+
     /// Execute shell command
     #[serde(rename = "exec")]
     Exec {
@@ -501,6 +505,7 @@ impl Message {
             Message::Mouse { .. } => None,
             Message::Show {} => None,
             Message::Hide {} => None,
+            Message::Browse { .. } => None,
             Message::Exec { .. } => None,
             // UI update (no ID)
             Message::SetPanel { .. } => None,
@@ -710,6 +715,11 @@ impl Message {
     /// Create a hide message
     pub fn hide() -> Self {
         Message::Hide {}
+    }
+
+    /// Create a browse message to open URL in default browser
+    pub fn browse(url: String) -> Self {
+        Message::Browse { url }
     }
 
     /// Create an exec message

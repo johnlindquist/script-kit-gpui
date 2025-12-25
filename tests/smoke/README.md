@@ -16,6 +16,7 @@ These are **not Rust tests** - they are TypeScript fixture scripts that verify t
 |------|---------|-------|
 | `hello-world.ts` | Basic sanity check | SDK preload, div(), md(), clean exit |
 | `hello-world-args.ts` | Interactive prompts | arg() with simple/structured choices, multi-step flow |
+| `test-window-reset.ts` | Window state reset | NEEDS_RESET flag, fresh UI after script completion |
 
 ### Multi-Monitor Testing
 
@@ -24,6 +25,14 @@ These are **not Rust tests** - they are TypeScript fixture scripts that verify t
 | `scripts/test-monitor-positioning.ts` | Multi-monitor window positioning | Window appears on mouse cursor's monitor |
 
 See [Multi-Monitor Test](#multi-monitor-positioning-test) section below for detailed usage.
+
+### Window Reset Testing
+
+| File | Purpose | Tests |
+|------|---------|-------|
+| `test-window-reset.ts` | Window state reset after script exit | NEEDS_RESET flag clears stale UI |
+
+See [Window Reset Test](#window-reset-test) section below for detailed usage.
 
 ## Quick Start
 
@@ -187,6 +196,54 @@ await div(md(`# Result: ${result}`));
 
 // Always log completion
 console.error('[SMOKE] test-name.ts completed!');
+```
+
+## Window Reset Test
+
+The `tests/smoke/test-window-reset.ts` script tests that window state properly resets after a script completes and the window hides.
+
+### Why This Test Exists
+
+When a script completes, the window hides. If the user presses the hotkey to show the window again, it should display a fresh script list (ScriptList mode), not the stale content from the previous script.
+
+This is controlled by the `NEEDS_RESET` atomic flag in `src/main.rs`:
+1. When a script completes/exits, `NEEDS_RESET` is set to `true`
+2. When the hotkey shows the window, it checks `NEEDS_RESET`
+3. If `true`, it resets the view to ScriptList mode before showing
+
+### How to Run the Test
+
+1. **Build the app**: `cargo build`
+2. **Run the test script**:
+   ```bash
+   ./target/debug/script-kit-gpui tests/smoke/test-window-reset.ts
+   ```
+3. **Wait 2 seconds** - the script will auto-exit
+4. **Press your hotkey** (Ctrl+Cmd+O) to show the window
+5. **Verify**: Window should show the script list, NOT the div content
+
+### Expected Behavior
+
+| Step | Expected Result |
+|------|-----------------|
+| Script runs | Shows div with "Window Reset Test" heading |
+| After 2 seconds | Window hides automatically |
+| Press hotkey | Window shows fresh ScriptList (search bar, script list) |
+
+### Debugging Failed Tests
+
+If the window shows stale content after hotkey:
+
+1. **Check NEEDS_RESET flag**: Verify `script_exited` sets `NEEDS_RESET.store(true, ...)`
+2. **Check hotkey handler**: Verify it checks `NEEDS_RESET.load(...)` and resets view
+3. **Check view reset**: Verify `set_content(ViewContent::ScriptList)` is called
+
+### Expected Logs
+
+```
+[SMOKE] test-window-reset.ts starting...
+[SMOKE] Waiting 2 seconds before exit...
+[SMOKE] test-window-reset.ts completed - window should reset on next hotkey!
 ```
 
 ## Multi-Monitor Positioning Test

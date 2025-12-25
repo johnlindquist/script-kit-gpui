@@ -4,6 +4,9 @@ use std::io::{Write, BufReader};
 use crate::protocol::{Message, JsonlReader, serialize_message};
 use crate::logging;
 
+/// Embedded SDK content (included at compile time)
+const EMBEDDED_SDK: &str = include_str!("../scripts/kit-sdk.ts");
+
 /// Find an executable, checking common locations that GUI apps might miss
 fn find_executable(name: &str) -> Option<PathBuf> {
     logging::log("EXEC", &format!("Looking for executable: {}", name));
@@ -40,33 +43,68 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Extract the embedded SDK to disk if needed
+/// Returns the path to the extracted SDK file
+fn ensure_sdk_extracted() -> Option<PathBuf> {
+    // Target path: ~/.kit/lib/kit-sdk.ts
+    let kit_lib = dirs::home_dir()?.join(".kit/lib");
+    let sdk_path = kit_lib.join("kit-sdk.ts");
+    
+    // Create dir if needed
+    if !kit_lib.exists() {
+        if let Err(e) = std::fs::create_dir_all(&kit_lib) {
+            logging::log("EXEC", &format!("Failed to create SDK dir: {}", e));
+            return None;
+        }
+    }
+    
+    // Write if missing (always write to ensure latest version)
+    // In production, we might want to add version checking
+    if !sdk_path.exists() {
+        if let Err(e) = std::fs::write(&sdk_path, EMBEDDED_SDK) {
+            logging::log("EXEC", &format!("Failed to write SDK: {}", e));
+            return None;
+        }
+        logging::log("EXEC", &format!("Extracted SDK to {}", sdk_path.display()));
+    }
+    
+    Some(sdk_path)
+}
+
 /// Find the SDK path, checking standard locations
 fn find_sdk_path() -> Option<PathBuf> {
     logging::log("EXEC", "Looking for SDK...");
     
-    // 1. Check ~/.kenv/lib/kit-sdk.ts (production location)
+    // 1. Check ~/.kenv/lib/kit-sdk.ts (user override - highest priority)
     if let Some(home) = dirs::home_dir() {
         let kenv_sdk = home.join(".kenv/lib/kit-sdk.ts");
-        logging::log("EXEC", &format!("  Checking: {}", kenv_sdk.display()));
+        logging::log("EXEC", &format!("  Checking user override: {}", kenv_sdk.display()));
         if kenv_sdk.exists() {
-            logging::log("EXEC", &format!("  FOUND SDK: {}", kenv_sdk.display()));
+            logging::log("EXEC", &format!("  FOUND SDK (user override): {}", kenv_sdk.display()));
             return Some(kenv_sdk);
         }
     }
     
-    // 2. Check relative to executable (for deployed app)
+    // 2. Extract embedded SDK to ~/.kit/lib/kit-sdk.ts (production)
+    logging::log("EXEC", "  Trying to extract embedded SDK...");
+    if let Some(sdk_path) = ensure_sdk_extracted() {
+        logging::log("EXEC", &format!("  FOUND SDK (embedded): {}", sdk_path.display()));
+        return Some(sdk_path);
+    }
+    
+    // 3. Check relative to executable (for app bundle)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             let sdk_path = exe_dir.join("kit-sdk.ts");
-            logging::log("EXEC", &format!("  Checking: {}", sdk_path.display()));
+            logging::log("EXEC", &format!("  Checking exe dir: {}", sdk_path.display()));
             if sdk_path.exists() {
-                logging::log("EXEC", &format!("  FOUND SDK: {}", sdk_path.display()));
+                logging::log("EXEC", &format!("  FOUND SDK (exe dir): {}", sdk_path.display()));
                 return Some(sdk_path);
             }
         }
     }
     
-    // 3. Development fallback - project scripts directory
+    // 4. Development fallback - project scripts directory
     let dev_sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/kit-sdk.ts");
     logging::log("EXEC", &format!("  Checking dev path: {}", dev_sdk.display()));
     if dev_sdk.exists() {

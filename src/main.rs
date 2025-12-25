@@ -272,6 +272,7 @@ fn calculate_eye_line_bounds_on_mouse_display(
 static HOTKEY_TRIGGERED: AtomicBool = AtomicBool::new(false);
 static HOTKEY_TRIGGER_COUNT: AtomicU64 = AtomicU64::new(0);
 static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false); // Track window visibility for toggle (starts hidden)
+static NEEDS_RESET: AtomicBool = AtomicBool::new(false); // Track if window needs reset to script list on next show
 
 /// Application state - what view are we currently showing
 #[derive(Debug, Clone)]
@@ -302,6 +303,8 @@ type SharedSession = Arc<Mutex<Option<executor::ScriptSession>>>;
 enum PromptMessage {
     ShowArg { id: String, placeholder: String, choices: Vec<Choice> },
     ShowDiv { id: String, html: String, tailwind: Option<String> },
+    HideWindow,
+    OpenBrowser { url: String },
     ScriptExit,
 }
 
@@ -322,16 +325,22 @@ impl HotkeyPoller {
                 Timer::after(std::time::Duration::from_millis(100)).await;
                 
                 if HOTKEY_TRIGGERED.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    logging::log("HOTKEY", "=== Hotkey triggered ===");
+                    logging::log("VISIBILITY", "");
+                    logging::log("VISIBILITY", "╔════════════════════════════════════════════════════════════╗");
+                    logging::log("VISIBILITY", "║  HOTKEY TRIGGERED - TOGGLE WINDOW                          ║");
+                    logging::log("VISIBILITY", "╚════════════════════════════════════════════════════════════╝");
                     
                     // Check current visibility state for toggle behavior
                     let is_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                    let needs_reset = NEEDS_RESET.load(Ordering::SeqCst);
+                    logging::log("VISIBILITY", &format!("State check: WINDOW_VISIBLE={}, NEEDS_RESET={}", is_visible, needs_reset));
                     
                     if is_visible {
+                        logging::log("VISIBILITY", "Decision: HIDE (window is currently visible)");
                         // Update visibility state FIRST to prevent race conditions
                         // Even though the hide is async, we mark it as hidden immediately
                         WINDOW_VISIBLE.store(false, Ordering::SeqCst);
-                        logging::log("HOTKEY", "Visibility state updated: visible -> hidden");
+                        logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
                         
                         // Window is visible - check if in prompt mode
                         let window_clone = window.clone();
@@ -360,12 +369,10 @@ impl HotkeyPoller {
                             logging::log("HOTKEY", "Window hidden via cx.hide()");
                         });
                     } else {
+                        logging::log("VISIBILITY", "Decision: SHOW (window is currently hidden)");
                         // Update visibility state FIRST to prevent race conditions
                         WINDOW_VISIBLE.store(true, Ordering::SeqCst);
-                        logging::log("HOTKEY", "Visibility state updated: hidden -> visible");
-                        
-                        // Window is hidden - SHOW it
-                        logging::log("HOTKEY", "Showing window (toggle: hidden -> visible)");
+                        logging::log("VISIBILITY", "WINDOW_VISIBLE set to: true");
                         
                         let window_clone = window.clone();
                         let _ = cx.update(move |cx: &mut App| {
@@ -400,13 +407,22 @@ impl HotkeyPoller {
                                 let focus_handle = view.focus_handle(cx);
                                 win.focus(&focus_handle, cx);
                                 logging::log("HOTKEY", "Window activated and focused");
+                                
+                                // Step 5: Check if we need to reset to script list (after script completion)
+                                if NEEDS_RESET.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                                    logging::log("VISIBILITY", "NEEDS_RESET was true - clearing and resetting to script list");
+                                    view.reset_to_script_list(cx);
+                                }
                             });
                             
-                            logging::log("HOTKEY", "Window shown - hotkey handling complete");
+                            logging::log("VISIBILITY", "Window show sequence complete");
                         });
                     }
                     
-                    logging::log("HOTKEY", "=== Hotkey handling complete ===");
+                    let final_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                    let final_reset = NEEDS_RESET.load(Ordering::SeqCst);
+                    logging::log("VISIBILITY", &format!("Final state: WINDOW_VISIBLE={}, NEEDS_RESET={}", final_visible, final_reset));
+                    logging::log("VISIBILITY", "═══════════════════════════════════════════════════════════════");
                 }
             }
         }).detach();
@@ -788,6 +804,12 @@ impl ScriptListApp {
                                     Message::Exit { .. } => {
                                         Some(PromptMessage::ScriptExit)
                                     }
+                                    Message::Hide {} => {
+                                        Some(PromptMessage::HideWindow)
+                                    }
+                                    Message::Browse { url } => {
+                                        Some(PromptMessage::OpenBrowser { url })
+                                    }
                                     _ => None,
                                 };
                                 
@@ -849,8 +871,53 @@ impl ScriptListApp {
                 cx.notify();
             }
             PromptMessage::ScriptExit => {
-                logging::log("EXEC", "Script exited, calling reset_to_script_list");
+                logging::log("VISIBILITY", "=== ScriptExit message received ===");
+                let is_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                logging::log("VISIBILITY", &format!("WINDOW_VISIBLE is: {} (script exit doesn't change this)", is_visible));
+                
+                // Set flag so next hotkey show will reset to script list
+                NEEDS_RESET.store(true, Ordering::SeqCst);
+                logging::log("VISIBILITY", "NEEDS_RESET set to: true");
+                
                 self.reset_to_script_list(cx);
+                logging::log("VISIBILITY", "reset_to_script_list() called");
+            }
+            PromptMessage::HideWindow => {
+                logging::log("VISIBILITY", "=== HideWindow message received ===");
+                let was_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                logging::log("VISIBILITY", &format!("WINDOW_VISIBLE was: {}", was_visible));
+                
+                // CRITICAL: Update visibility state so hotkey toggle works correctly
+                WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
+                
+                // Set flag so next hotkey show will reset to script list
+                NEEDS_RESET.store(true, Ordering::SeqCst);
+                logging::log("VISIBILITY", "NEEDS_RESET set to: true");
+                
+                cx.hide();
+                logging::log("VISIBILITY", "cx.hide() called - window should now be hidden");
+            }
+            PromptMessage::OpenBrowser { url } => {
+                logging::log("UI", &format!("Opening browser: {}", url));
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg(&url)
+                        .spawn();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&url)
+                        .spawn();
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", &url])
+                        .spawn();
+                }
             }
          }
       }
@@ -904,6 +971,11 @@ impl ScriptListApp {
         self.arg_input_text.clear();
         self.arg_selected_index = 0;
         
+        // Clear filter and selection state for fresh menu
+        self.filter_text.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        
         // Clear output
         self.last_output = None;
         
@@ -916,7 +988,7 @@ impl ScriptListApp {
             *session_guard = None;
         }
         
-        logging::log("UI", "State reset complete - view is now ScriptList");
+        logging::log("UI", "State reset complete - view is now ScriptList (filter, selection, scroll cleared)");
         cx.notify();
     }
     
