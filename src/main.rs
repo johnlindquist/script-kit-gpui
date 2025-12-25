@@ -1194,7 +1194,7 @@ impl ScriptListApp {
                                 .flex()
                                 .flex_row()
                                 .w_full()
-                                .font_family("Berkeley Mono, SF Mono, Menlo, Monaco, monospace")
+                                .font_family("Menlo")
                                 .text_xs()
                                 .min_h(px(16.)); // Line height
                             
@@ -1358,7 +1358,7 @@ impl ScriptListApp {
                                 .flex()
                                 .flex_row()
                                 .w_full()
-                                .font_family("Berkeley Mono, SF Mono, Menlo, Monaco, monospace")
+                                .font_family("Menlo")
                                 .text_xs()
                                 .min_h(px(16.)); // Line height
                             
