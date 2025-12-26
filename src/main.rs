@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 use gpui::{
     div, svg, prelude::*, px, point, rgb, rgba, size, App, Application, Bounds, Context, Render,
     Window, WindowBounds, WindowOptions, SharedString, FocusHandle, Focusable, Entity,
@@ -43,6 +45,7 @@ use syntax::highlight_code_lines;
 use panel::DEFAULT_PLACEHOLDER;
 
 /// Channel for sending prompt messages from script thread to UI
+#[allow(dead_code)]
 type PromptChannel = (mpsc::Sender<PromptMessage>, mpsc::Receiver<PromptMessage>);
 
 /// Get the current global mouse cursor position using macOS Core Graphics API.
@@ -292,6 +295,7 @@ enum AppView {
     /// Showing the script list
     ScriptList,
     /// Showing the actions dialog (mini searchable popup)
+    #[allow(dead_code)]
     ActionsDialog,
     /// Showing an arg prompt from a script
     ArgPrompt {
@@ -449,6 +453,7 @@ struct ErrorNotification {
     /// Severity level (affects styling)
     severity: ErrorSeverity,
     /// Timestamp when the notification was created (for auto-dismiss)
+    #[allow(dead_code)]
     created_at: std::time::Instant,
 }
 
@@ -461,6 +466,7 @@ struct ScriptListApp {
     focus_handle: FocusHandle,
     show_logs: bool,
     theme: theme::Theme,
+    #[allow(dead_code)]
     config: config::Config,
     // Interactive script state
     current_view: AppView,
@@ -529,7 +535,7 @@ impl ScriptListApp {
         logging::log("UI", "Script Kit logo SVG loaded for header rendering");
         
         // Start cursor blink timer
-        cx.spawn(async move |this, mut cx| {
+        cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(std::time::Duration::from_millis(530)).await;
                 let _ = cx.update(|cx| {
@@ -613,6 +619,7 @@ impl ScriptListApp {
     /// 
     /// The notification will auto-dismiss after 5 seconds.
     /// Call this when an operation fails and you want to inform the user.
+    #[allow(dead_code)]
     fn show_error(&mut self, message: String, severity: ErrorSeverity, cx: &mut Context<Self>) {
         logging::log("ERROR", &format!("Showing error notification: {} (severity: {:?})", message, severity));
         
@@ -625,7 +632,7 @@ impl ScriptListApp {
         cx.notify();
         
         // Set up auto-dismiss timer (5 seconds)
-        cx.spawn(async move |this, mut cx| {
+        cx.spawn(async move |this, cx| {
             Timer::after(std::time::Duration::from_secs(5)).await;
             let _ = cx.update(|cx| {
                 this.update(cx, |app, cx| {
@@ -655,6 +662,7 @@ impl ScriptListApp {
         cx.notify();
     }
     
+    #[allow(dead_code)]
     fn refresh_scripts(&mut self, cx: &mut Context<Self>) {
         self.scripts = scripts::read_scripts();
         self.scriptlets = scripts::read_scriptlets();
@@ -724,6 +732,7 @@ impl ScriptListApp {
     }
     
     /// P1: Invalidate filter cache (call when scripts/scriptlets change)
+    #[allow(dead_code)]
     fn invalidate_filter_cache(&mut self) {
         logging::log_debug("CACHE", "Filter cache INVALIDATED");
         self.filter_cache_key = String::from("\0_INVALIDATED_\0");
@@ -763,11 +772,13 @@ impl ScriptListApp {
     }
     
     /// Invalidate the preview cache (call when selection might change to different script)
+    #[allow(dead_code)]
     fn invalidate_preview_cache(&mut self) {
         self.preview_cache_path = None;
         self.preview_cache_lines.clear();
     }
 
+    #[allow(dead_code)]
     fn filtered_scripts(&self) -> Vec<scripts::Script> {
         if self.filter_text.is_empty() {
             self.scripts.clone()
@@ -799,7 +810,7 @@ impl ScriptListApp {
     
     /// Scroll stabilization helper: only call scroll_to_item if we haven't already scrolled to this index.
     /// This prevents scroll jitter from redundant scroll_to_item calls.
-    fn scroll_to_selected_if_needed(&mut self, reason: &str) {
+    fn scroll_to_selected_if_needed(&mut self, _reason: &str) {
         let target = self.selected_index;
         
         // Check if we've already scrolled to this index
@@ -894,6 +905,7 @@ impl ScriptListApp {
     }
     
     /// Handle action selection from the actions dialog
+    #[allow(dead_code)]
     fn handle_action(&mut self, action_id: String, cx: &mut Context<Self>) {
         logging::log("UI", &format!("Action selected: {}", action_id));
         
@@ -947,6 +959,7 @@ impl ScriptListApp {
     }
     
     /// Edit a script in $EDITOR
+    #[allow(dead_code)]
     fn edit_script(&mut self, path: &std::path::Path) {
         logging::log("UI", &format!("Opening script in editor: {}", path.display()));
         
@@ -1428,6 +1441,7 @@ impl Render for ScriptListApp {
 
 impl ScriptListApp {
     /// Read the first N lines of a script file for preview
+    #[allow(dead_code)]
     fn read_script_preview(path: &std::path::Path, max_lines: usize) -> String {
         match std::fs::read_to_string(path) {
             Ok(content) => {
@@ -1879,7 +1893,7 @@ impl ScriptListApp {
         // P1: Use cached filtered results
         let filtered = self.get_filtered_results_cached();
         let filtered_len = filtered.len();
-        let total_len = self.scripts.len() + self.scriptlets.len();
+        let _total_len = self.scripts.len() + self.scriptlets.len();
         let theme = &self.theme;
         
         // Handle edge cases - keep selected_index in valid bounds
@@ -2263,7 +2277,7 @@ impl ScriptListApp {
     fn render_arg_prompt(&mut self, id: String, placeholder: String, choices: Vec<Choice>, cx: &mut Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let filtered = self.filtered_arg_choices();
-        let filtered_len = filtered.len();
+        let _filtered_len = filtered.len();
         
         // Key handler for arg prompt
         let prompt_id = id.clone();

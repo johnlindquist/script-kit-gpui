@@ -10,6 +10,8 @@
 //! - 'update': App sends live updates to script
 //! - 'exit': Script or app signals termination
 
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
 use tracing::{debug, warn};

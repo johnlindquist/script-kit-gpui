@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 /// Error severity for UI display
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {
     Info,     // Blue - informational
@@ -10,6 +11,7 @@ pub enum ErrorSeverity {
 }
 
 /// Domain-specific errors for Script Kit
+#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum ScriptKitError {
     #[error("Script execution failed: {message}")]
@@ -34,6 +36,7 @@ pub enum ScriptKitError {
     Window(String),
 }
 
+#[allow(dead_code)]
 impl ScriptKitError {
     pub fn severity(&self) -> ErrorSeverity {
         match self {
@@ -60,9 +63,11 @@ impl ScriptKitError {
     }
 }
 
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, ScriptKitError>;
 
 /// Extension trait for ergonomic error logging
+#[allow(dead_code)]
 pub trait NotifyResultExt<T> {
     fn log_err(self) -> Option<T>;
     fn warn_on_err(self) -> Option<T>;

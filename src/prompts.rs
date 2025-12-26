@@ -4,6 +4,8 @@
 //! - ArgPrompt: Selectable list with search/filtering
 //! - DivPrompt: HTML content display
 
+#![allow(dead_code)]
+
 use gpui::{
     div, prelude::*, px, rgb, Context, FocusHandle, Focusable, Render, SharedString, Window,
 };

@@ -4,6 +4,8 @@
 //
 // Also provides placeholder configuration for input fields
 
+#![allow(dead_code)]
+
 /// Vibrancy configuration for GPUI window background appearance
 /// 
 /// GPUI supports three WindowBackgroundAppearance values:

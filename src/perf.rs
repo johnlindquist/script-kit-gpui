@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Performance instrumentation and benchmarking utilities
 //!
 //! This module provides timing utilities for measuring:

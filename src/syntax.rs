@@ -6,6 +6,8 @@
 //! NOTE: syntect's default syntax set doesn't include TypeScript, so we use
 //! JavaScript syntax for .ts files (which works well for highlighting).
 
+#![allow(dead_code)]
+
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;

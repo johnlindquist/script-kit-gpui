@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Structured JSONL logging for AI agents and human-readable stderr output.
 //!
 //! This module provides dual-output logging:

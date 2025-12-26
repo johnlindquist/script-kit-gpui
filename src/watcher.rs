@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use notify::{Watcher, RecursiveMode, Result as NotifyResult, recommended_watcher};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::path::PathBuf;

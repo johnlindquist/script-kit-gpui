@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 //! Script Kit GPUI - A GPUI-based launcher for Script Kit
 //!
 //! This library provides the core functionality for executing scripts
@@ -15,5 +17,6 @@ pub mod protocol;
 pub mod prompts;
 pub mod scripts;
 pub mod syntax;
+pub mod terminal;
 pub mod theme;
 pub mod utils;

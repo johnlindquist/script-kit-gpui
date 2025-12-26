@@ -9,6 +9,8 @@
 //! - Semi-transparent background
 //! - Context-aware actions based on focused script
 
+#![allow(dead_code)]
+
 use gpui::{
     div, point, prelude::*, px, rgb, rgba, uniform_list, App, BoxShadow, 
     Context, FocusHandle, Focusable, Hsla, Render, ScrollStrategy, SharedString, 

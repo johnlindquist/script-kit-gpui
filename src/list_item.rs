@@ -3,6 +3,8 @@
 //! This module provides a reusable, theme-aware list item component that can be
 //! used in both the main script list and arg prompt choice lists.
 
+#![allow(dead_code)]
+
 use gpui::*;
 use crate::logging;
 

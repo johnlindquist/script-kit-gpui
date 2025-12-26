@@ -238,6 +238,7 @@ pub struct Theme {
     pub vibrancy: Option<VibrancySettings>,
 }
 
+#[allow(dead_code)]
 impl CursorStyle {
     /// Create a default blinking cursor style
     pub fn default_focused() -> Self {
@@ -248,6 +249,7 @@ impl CursorStyle {
     }
 }
 
+#[allow(dead_code)]
 impl FocusColorScheme {
     /// Convert to a standard ColorScheme
     pub fn to_color_scheme(&self) -> ColorScheme {
@@ -324,6 +326,7 @@ impl ColorScheme {
     }
 
     /// Create an unfocused (dimmed) version of this color scheme
+    #[allow(dead_code)]
     pub fn to_unfocused(&self) -> Self {
         fn darken_hex(color: HexColor) -> HexColor {
             // Reduce brightness by blending towards mid-gray
@@ -388,6 +391,7 @@ impl Default for Theme {
     }
 }
 
+#[allow(dead_code)]
 impl Theme {
     /// Get the appropriate color scheme based on window focus state
     /// 
@@ -639,6 +643,7 @@ pub fn load_theme() -> Theme {
 ///     }
 /// })
 /// ```
+#[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub struct ListItemColors {
     /// Normal item background (usually transparent)
@@ -659,6 +664,7 @@ pub struct ListItemColors {
     pub border: Rgba,
 }
 
+#[allow(dead_code)]
 impl ListItemColors {
     /// Create ListItemColors from a ColorScheme
     /// 
@@ -707,6 +713,7 @@ impl ListItemColors {
     }
 }
 
+#[allow(dead_code)]
 impl ColorScheme {
     /// Extract only the colors needed for list item rendering
     /// 
@@ -720,6 +727,7 @@ impl ColorScheme {
 /// Lightweight struct for input field rendering
 /// 
 /// Pre-computes colors for search boxes, text inputs, etc.
+#[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub struct InputFieldColors {
     /// Background color of the input
@@ -734,6 +742,7 @@ pub struct InputFieldColors {
     pub cursor: Rgba,
 }
 
+#[allow(dead_code)]
 impl InputFieldColors {
     /// Create InputFieldColors from a ColorScheme
     pub fn from_color_scheme(colors: &ColorScheme) -> Self {
@@ -750,6 +759,7 @@ impl InputFieldColors {
     }
 }
 
+#[allow(dead_code)]
 impl ColorScheme {
     /// Extract colors for input field rendering
     pub fn input_field_colors(&self) -> InputFieldColors {

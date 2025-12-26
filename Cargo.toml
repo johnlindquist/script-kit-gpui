@@ -36,3 +36,9 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "time"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tracing-appender = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal integration dependencies (Tier 2 - Alacritty)
+# Versions chosen to match Zed's current known-working configuration (Dec 2025)
+portable-pty = "0.8"           # PTY management for process spawning
+alacritty_terminal = "0.25"    # Zed uses 0.25.1-rc1, this gets latest 0.25.x stable
+vte = "0.15"                   # ANSI escape sequence parser, required by alacritty_terminal 0.25

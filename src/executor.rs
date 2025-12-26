@@ -189,6 +189,7 @@ impl ProcessHandle {
     
     /// Check if process is still running (Unix only)
     #[cfg(unix)]
+    #[allow(dead_code)]
     fn is_alive(&self) -> bool {
         // Use kill -0 to check if process exists
         Command::new("kill")
@@ -240,6 +241,7 @@ impl ScriptSession {
     }
 }
 
+#[allow(dead_code)]
 impl SplitSession {
     /// Check if the child process is still running
     pub fn is_running(&mut self) -> bool {
@@ -275,6 +277,7 @@ impl SplitSession {
     }
 }
 
+#[allow(dead_code)]
 impl ScriptSession {
     /// Send a message to the running script
     pub fn send_message(&mut self, msg: &Message) -> Result<(), String> {
@@ -482,6 +485,7 @@ fn spawn_script(cmd: &str, args: &[&str]) -> Result<ScriptSession, String> {
 }
 
 /// Execute a script and return its output (non-interactive, for backwards compatibility)
+#[allow(dead_code)]
 #[instrument(skip_all, fields(script_path = %path.display()))]
 pub fn execute_script(path: &Path) -> Result<String, String> {
     let start = Instant::now();
@@ -595,6 +599,7 @@ pub fn execute_script(path: &Path) -> Result<String, String> {
 }
 
 /// Run a command and capture its output
+#[allow(dead_code)]
 fn run_command(cmd: &str, args: &[&str]) -> Result<String, String> {
     // Try to find the executable in common locations
     let executable = find_executable(cmd)
