@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Child, ChildStdin, ChildStdout, Stdio};
 use std::io::{Write, BufReader};
+use std::time::Instant;
 use crate::protocol::{Message, JsonlReader, serialize_message};
 use crate::logging;
+use tracing::{info, error, debug, instrument};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -332,7 +334,10 @@ impl ScriptSession {
 }
 
 /// Execute a script with bidirectional JSONL communication
+#[instrument(skip_all, fields(script_path = %path.display()))]
 pub fn execute_script_interactive(path: &Path) -> Result<ScriptSession, String> {
+    let start = Instant::now();
+    debug!(path = %path.display(), "Starting interactive script execution");
     logging::log("EXEC", &format!("execute_script_interactive: {}", path.display()));
     
     let path_str = path
@@ -348,10 +353,17 @@ pub fn execute_script_interactive(path: &Path) -> Result<ScriptSession, String> 
         logging::log("EXEC", &format!("Trying: bun run --preload {} {}", sdk_str, path_str));
         match spawn_script("bun", &["run", "--preload", sdk_str, path_str]) {
             Ok(session) => {
+                info!(
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    runtime = "bun",
+                    preload = true,
+                    "Script session started"
+                );
                 logging::log("EXEC", "SUCCESS: bun with preload");
                 return Ok(session);
             }
             Err(e) => {
+                debug!(error = %e, runtime = "bun", preload = true, "Spawn attempt failed");
                 logging::log("EXEC", &format!("FAILED: bun with preload: {}", e));
             }
         }
@@ -362,10 +374,17 @@ pub fn execute_script_interactive(path: &Path) -> Result<ScriptSession, String> 
         logging::log("EXEC", &format!("Trying: bun run {}", path_str));
         match spawn_script("bun", &["run", path_str]) {
             Ok(session) => {
+                info!(
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    runtime = "bun",
+                    preload = false,
+                    "Script session started"
+                );
                 logging::log("EXEC", "SUCCESS: bun without preload");
                 return Ok(session);
             }
             Err(e) => {
+                debug!(error = %e, runtime = "bun", preload = false, "Spawn attempt failed");
                 logging::log("EXEC", &format!("FAILED: bun without preload: {}", e));
             }
         }
@@ -376,10 +395,16 @@ pub fn execute_script_interactive(path: &Path) -> Result<ScriptSession, String> 
         logging::log("EXEC", &format!("Trying: node {}", path_str));
         match spawn_script("node", &[path_str]) {
             Ok(session) => {
+                info!(
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    runtime = "node",
+                    "Script session started"
+                );
                 logging::log("EXEC", "SUCCESS: node");
                 return Ok(session);
             }
             Err(e) => {
+                debug!(error = %e, runtime = "node", "Spawn attempt failed");
                 logging::log("EXEC", &format!("FAILED: node: {}", e));
             }
         }
@@ -389,17 +414,24 @@ pub fn execute_script_interactive(path: &Path) -> Result<ScriptSession, String> 
         "Failed to execute script '{}' interactively. Make sure bun or node is installed.",
         path.display()
     );
+    error!(
+        duration_ms = start.elapsed().as_millis() as u64,
+        path = %path.display(),
+        "All script execution methods failed"
+    );
     logging::log("EXEC", &format!("ALL METHODS FAILED: {}", err));
     Err(err)
 }
 
 /// Spawn a script as an interactive process with piped stdin/stdout
+#[instrument(skip_all, fields(cmd = %cmd))]
 fn spawn_script(cmd: &str, args: &[&str]) -> Result<ScriptSession, String> {
     // Try to find the executable in common locations
     let executable = find_executable(cmd)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| cmd.to_string());
     
+    debug!(executable = %executable, args = ?args, "Spawning script process");
     logging::log("EXEC", &format!("spawn_script: {} {:?}", executable, args));
     
     let mut command = Command::new(&executable);
@@ -418,12 +450,14 @@ fn spawn_script(cmd: &str, args: &[&str]) -> Result<ScriptSession, String> {
     }
     
     let mut child = command.spawn().map_err(|e| {
+        error!(error = %e, executable = %executable, "Process spawn failed");
         let err = format!("Failed to spawn '{}': {}", executable, e);
         logging::log("EXEC", &format!("SPAWN ERROR: {}", err));
         err
     })?;
 
     let pid = child.id();
+    info!(pid = pid, pgid = pid, executable = %executable, "Process spawned");
     logging::log("EXEC", &format!("Process spawned with PID: {} (PGID: {})", pid, pid));
 
     let stdin = child
@@ -448,7 +482,10 @@ fn spawn_script(cmd: &str, args: &[&str]) -> Result<ScriptSession, String> {
 }
 
 /// Execute a script and return its output (non-interactive, for backwards compatibility)
+#[instrument(skip_all, fields(script_path = %path.display()))]
 pub fn execute_script(path: &Path) -> Result<String, String> {
+    let start = Instant::now();
+    debug!(path = %path.display(), "Starting blocking script execution");
     logging::log("EXEC", &format!("execute_script (blocking): {}", path.display()));
     
     let path_str = path
@@ -463,10 +500,17 @@ pub fn execute_script(path: &Path) -> Result<String, String> {
     logging::log("EXEC", &format!("Trying: kit run {}", path_str));
     match run_command("kit", &["run", path_str]) {
         Ok(output) => {
+            info!(
+                duration_ms = start.elapsed().as_millis() as u64,
+                output_bytes = output.len(),
+                runtime = "kit",
+                "Script completed"
+            );
             logging::log("EXEC", &format!("SUCCESS: kit (output: {} bytes)", output.len()));
             return Ok(output);
         }
         Err(e) => {
+            debug!(error = %e, runtime = "kit", "Command failed");
             logging::log("EXEC", &format!("FAILED: kit: {}", e));
         }
     }
@@ -478,10 +522,18 @@ pub fn execute_script(path: &Path) -> Result<String, String> {
             logging::log("EXEC", &format!("Trying: bun run --preload {} {}", sdk_str, path_str));
             match run_command("bun", &["run", "--preload", sdk_str, path_str]) {
                 Ok(output) => {
+                    info!(
+                        duration_ms = start.elapsed().as_millis() as u64,
+                        output_bytes = output.len(),
+                        runtime = "bun",
+                        preload = true,
+                        "Script completed"
+                    );
                     logging::log("EXEC", &format!("SUCCESS: bun with preload (output: {} bytes)", output.len()));
                     return Ok(output);
                 }
                 Err(e) => {
+                    debug!(error = %e, runtime = "bun", preload = true, "Command failed");
                     logging::log("EXEC", &format!("FAILED: bun with preload: {}", e));
                 }
             }
@@ -491,10 +543,18 @@ pub fn execute_script(path: &Path) -> Result<String, String> {
         logging::log("EXEC", &format!("Trying: bun run {} (no preload)", path_str));
         match run_command("bun", &["run", path_str]) {
             Ok(output) => {
+                info!(
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    output_bytes = output.len(),
+                    runtime = "bun",
+                    preload = false,
+                    "Script completed"
+                );
                 logging::log("EXEC", &format!("SUCCESS: bun (output: {} bytes)", output.len()));
                 return Ok(output);
             }
             Err(e) => {
+                debug!(error = %e, runtime = "bun", preload = false, "Command failed");
                 logging::log("EXEC", &format!("FAILED: bun: {}", e));
             }
         }
@@ -505,10 +565,17 @@ pub fn execute_script(path: &Path) -> Result<String, String> {
         logging::log("EXEC", &format!("Trying: node {}", path_str));
         match run_command("node", &[path_str]) {
             Ok(output) => {
+                info!(
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    output_bytes = output.len(),
+                    runtime = "node",
+                    "Script completed"
+                );
                 logging::log("EXEC", &format!("SUCCESS: node (output: {} bytes)", output.len()));
                 return Ok(output);
             }
             Err(e) => {
+                debug!(error = %e, runtime = "node", "Command failed");
                 logging::log("EXEC", &format!("FAILED: node: {}", e));
             }
         }
@@ -517,6 +584,11 @@ pub fn execute_script(path: &Path) -> Result<String, String> {
     let err = format!(
         "Failed to execute script '{}'. Make sure kit, bun, or node is installed.",
         path.display()
+    );
+    error!(
+        duration_ms = start.elapsed().as_millis() as u64,
+        path = %path.display(),
+        "All script execution methods failed"
     );
     logging::log("EXEC", &format!("ALL METHODS FAILED: {}", err));
     Err(err)

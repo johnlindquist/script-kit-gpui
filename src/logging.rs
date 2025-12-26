@@ -1,60 +1,187 @@
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::OnceLock;
+//! Structured JSONL logging for AI agents and human-readable stderr output.
+//!
+//! This module provides dual-output logging:
+//! - **JSONL to file** (~/.kit/logs/script-kit-gpui.jsonl) - structured for AI agent parsing
+//! - **Pretty to stderr** - human-readable for developers
+//!
+//! # Usage
+//!
+//! ```rust
+//! use script_kit_gpui::logging;
+//!
+//! fn main() {
+//!     // Initialize logging - MUST keep guard alive for duration of program
+//!     let _guard = logging::init();
+//!     
+//!     // Use tracing macros directly
+//!     tracing::info!(event_type = "app_start", "Application started");
+//!     tracing::error!(error_code = 42, "Something went wrong");
+//! }
+//! ```
+//!
+//! # JSONL Output Format
+//!
+//! Each line is a valid JSON object:
+//! ```json
+//! {"timestamp":"2024-12-25T10:30:45.123Z","level":"INFO","target":"script_kit_gpui::main","message":"Script executed","fields":{"event_type":"script_event","script_id":"abc","duration_ms":42}}
+//! ```
+
 use std::collections::VecDeque;
+use std::fs::{self, OpenOptions};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-static LOG_FILE: OnceLock<Mutex<File>> = OnceLock::new();
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
+
+// =============================================================================
+// LEGACY SUPPORT - In-memory log buffer for UI display
+// =============================================================================
+
 static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-
 const MAX_LOG_LINES: usize = 50;
 
-pub fn init() {
-    // Initialize log buffer
+/// Guard that must be kept alive for the duration of the program.
+/// Dropping this guard will flush and close the log file.
+pub struct LoggingGuard {
+    _file_guard: WorkerGuard,
+}
+
+/// Initialize the dual-output logging system.
+///
+/// Returns a guard that MUST be kept alive for the duration of the program.
+/// Dropping the guard will flush remaining logs and close the file.
+///
+/// # Example
+///
+/// ```rust
+/// fn main() {
+///     let _guard = logging::init();
+///     // ... rest of program
+/// } // guard dropped here, logs flushed
+/// ```
+pub fn init() -> LoggingGuard {
+    // Initialize legacy log buffer for UI display
     let _ = LOG_BUFFER.set(Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)));
-    
-    let path = std::env::temp_dir().join("script-kit-gpui.log");
-    println!("========================================");
-    println!("[SCRIPT-KIT-GPUI] Log file: {}", path.display());
-    println!("========================================");
-    
-    if let Ok(file) = OpenOptions::new()
+
+    // Create log directory
+    let log_dir = get_log_dir();
+    if let Err(e) = fs::create_dir_all(&log_dir) {
+        eprintln!("[LOGGING] Failed to create log directory: {}", e);
+    }
+
+    let log_path = log_dir.join("script-kit-gpui.jsonl");
+
+    // Print log location for discoverability
+    eprintln!("========================================");
+    eprintln!("[SCRIPT-KIT-GPUI] JSONL log: {}", log_path.display());
+    eprintln!("[SCRIPT-KIT-GPUI] Pretty logs: stderr");
+    eprintln!("========================================");
+
+    // Open log file with append mode
+    let file = OpenOptions::new()
         .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&path)
-    {
-        let _ = LOG_FILE.set(Mutex::new(file));
-        log("APP", "Application started");
+        .append(true)
+        .open(&log_path)
+        .unwrap_or_else(|e| {
+            eprintln!("[LOGGING] Failed to open log file: {}", e);
+            // Fallback to /dev/null equivalent
+            OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .expect("Failed to open /dev/null")
+        });
+
+    // Create non-blocking writer for file (prevents UI freeze)
+    let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file);
+
+    // Environment filter - default to info, allow override via RUST_LOG
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,gpui=warn,hyper=warn,reqwest=warn"));
+
+    // JSONL layer for file output (AI agents)
+    let json_layer = fmt::layer()
+        .json()
+        .with_writer(non_blocking_file)
+        .with_timer(fmt::time::UtcTime::rfc_3339())
+        .with_target(true)
+        .with_level(true)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false)
+        .with_span_events(FmtSpan::NONE);
+
+    // Pretty layer for stderr (human developers)
+    let pretty_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(true)
+        .with_target(true)
+        .with_level(true)
+        .with_thread_ids(false)
+        .compact();
+
+    // Initialize the subscriber with both layers
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(json_layer)
+        .with(pretty_layer)
+        .init();
+
+    tracing::info!(
+        event_type = "app_lifecycle",
+        action = "started",
+        log_path = %log_path.display(),
+        "Application logging initialized"
+    );
+
+    LoggingGuard {
+        _file_guard: file_guard,
     }
 }
 
+/// Get the log directory path (~/.kit/logs/)
+fn get_log_dir() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".kit").join("logs"))
+        .unwrap_or_else(|| std::env::temp_dir().join("script-kit-logs"))
+}
+
+/// Get the path to the JSONL log file
+pub fn log_path() -> PathBuf {
+    get_log_dir().join("script-kit-gpui.jsonl")
+}
+
+// =============================================================================
+// BACKWARD COMPATIBILITY - Legacy log() function wrappers
+// =============================================================================
+
+/// Legacy log function - wraps tracing::info! for backward compatibility.
+///
+/// Prefer using tracing macros directly for structured fields:
+/// ```rust
+/// tracing::info!(category = "UI", duration_ms = 42, "Button clicked");
+/// ```
 pub fn log(category: &str, message: &str) {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    
-    let line = format!("[{}] [{}] {}", timestamp, category, message);
-    
-    // Always print to stdout
-    println!("{}", line);
-    
-    // Add to in-memory buffer for UI display
+    // Add to legacy buffer for UI display
+    add_to_buffer(category, message);
+
+    // Use tracing for actual logging
+    tracing::info!(category = category, legacy = true, "{}", message);
+}
+
+/// Add a log entry to the in-memory buffer for UI display
+fn add_to_buffer(category: &str, message: &str) {
     if let Some(buffer) = LOG_BUFFER.get() {
         if let Ok(mut buf) = buffer.lock() {
             if buf.len() >= MAX_LOG_LINES {
                 buf.pop_front();
             }
             buf.push_back(format!("[{}] {}", category, message));
-        }
-    }
-    
-    // Write to file (no flush - let OS buffer for performance)
-    if let Some(mutex) = LOG_FILE.get() {
-        if let Ok(mut file) = mutex.lock() {
-            let _ = writeln!(file, "{}", line);
         }
     }
 }
@@ -79,20 +206,129 @@ pub fn get_last_logs(n: usize) -> Vec<String> {
     Vec::new()
 }
 
-pub fn log_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("script-kit-gpui.log")
-}
-
 /// Debug-only logging - compiled out in release builds
 /// Use for verbose performance/scroll/cache logging
 #[cfg(debug_assertions)]
 pub fn log_debug(category: &str, message: &str) {
-    log(category, message);
+    add_to_buffer(category, message);
+    tracing::debug!(category = category, legacy = true, "{}", message);
 }
 
 #[cfg(not(debug_assertions))]
 pub fn log_debug(_category: &str, _message: &str) {
     // No-op in release builds
+}
+
+// =============================================================================
+// STRUCTURED LOGGING HELPERS
+// These provide typed, structured logging for common operations
+// =============================================================================
+
+/// Log a script execution event with structured fields
+pub fn log_script_event(
+    script_id: &str,
+    action: &str,
+    duration_ms: Option<u64>,
+    success: bool,
+) {
+    add_to_buffer("SCRIPT", &format!("{} {} (success={})", action, script_id, success));
+    
+    match duration_ms {
+        Some(duration) => {
+            tracing::info!(
+                event_type = "script_event",
+                script_id = script_id,
+                action = action,
+                duration_ms = duration,
+                success = success,
+                "Script {} {}", action, script_id
+            );
+        }
+        None => {
+            tracing::info!(
+                event_type = "script_event",
+                script_id = script_id,
+                action = action,
+                success = success,
+                "Script {} {}", action, script_id
+            );
+        }
+    }
+}
+
+/// Log a UI event with structured fields
+pub fn log_ui_event(component: &str, action: &str, details: Option<&str>) {
+    let msg = match details {
+        Some(d) => format!("{} {} - {}", component, action, d),
+        None => format!("{} {}", component, action),
+    };
+    add_to_buffer("UI", &msg);
+
+    tracing::info!(
+        event_type = "ui_event",
+        component = component,
+        action = action,
+        details = details,
+        "{}", msg
+    );
+}
+
+/// Log a keyboard event with structured fields
+pub fn log_key_event(key: &str, modifiers: &str, action: &str) {
+    add_to_buffer("KEY", &format!("{} {} ({})", action, key, modifiers));
+
+    tracing::debug!(
+        event_type = "key_event",
+        key = key,
+        modifiers = modifiers,
+        action = action,
+        "Key {} {}", action, key
+    );
+}
+
+/// Log a performance metric with structured fields
+pub fn log_perf(operation: &str, duration_ms: u64, threshold_ms: u64) {
+    let is_slow = duration_ms > threshold_ms;
+    let level_marker = if is_slow { "SLOW" } else { "OK" };
+
+    add_to_buffer("PERF", &format!("{} {}ms [{}]", operation, duration_ms, level_marker));
+
+    if is_slow {
+        tracing::warn!(
+            event_type = "performance",
+            operation = operation,
+            duration_ms = duration_ms,
+            threshold_ms = threshold_ms,
+            is_slow = true,
+            "Slow operation: {} took {}ms (threshold: {}ms)", operation, duration_ms, threshold_ms
+        );
+    } else {
+        tracing::debug!(
+            event_type = "performance",
+            operation = operation,
+            duration_ms = duration_ms,
+            threshold_ms = threshold_ms,
+            is_slow = false,
+            "Operation {} completed in {}ms", operation, duration_ms
+        );
+    }
+}
+
+/// Log an error with structured fields and context
+pub fn log_error(category: &str, error: &str, context: Option<&str>) {
+    let msg = match context {
+        Some(ctx) => format!("{}: {} (context: {})", category, error, ctx),
+        None => format!("{}: {}", category, error),
+    };
+    add_to_buffer("ERROR", &msg);
+
+    tracing::error!(
+        event_type = "error",
+        category = category,
+        error_message = error,
+        context = context,
+        "{}", msg
+    );
 }
 
 // =============================================================================
@@ -103,22 +339,47 @@ pub fn log_debug(_category: &str, _message: &str) {
 
 /// Log mouse enter event on a list item
 pub fn log_mouse_enter(item_index: usize, item_id: Option<&str>) {
-    let id_info = item_id.map(|id| format!(" id={}", id)).unwrap_or_default();
-    log("MOUSE_HOVER", &format!("ENTER item_index={}{}", item_index, id_info));
+    let id_info = item_id.unwrap_or("none");
+    add_to_buffer("MOUSE_HOVER", &format!("ENTER item_index={} id={}", item_index, id_info));
+
+    tracing::debug!(
+        event_type = "mouse_hover",
+        action = "enter",
+        item_index = item_index,
+        item_id = id_info,
+        "Mouse enter item {}", item_index
+    );
 }
 
 /// Log mouse leave event on a list item
 pub fn log_mouse_leave(item_index: usize, item_id: Option<&str>) {
-    let id_info = item_id.map(|id| format!(" id={}", id)).unwrap_or_default();
-    log("MOUSE_HOVER", &format!("LEAVE item_index={}{}", item_index, id_info));
+    let id_info = item_id.unwrap_or("none");
+    add_to_buffer("MOUSE_HOVER", &format!("LEAVE item_index={} id={}", item_index, id_info));
+
+    tracing::debug!(
+        event_type = "mouse_hover",
+        action = "leave",
+        item_index = item_index,
+        item_id = id_info,
+        "Mouse leave item {}", item_index
+    );
 }
 
 /// Log mouse hover state change (for tracking focus/highlight transitions)
 pub fn log_mouse_hover_state(item_index: usize, is_hovered: bool, is_focused: bool) {
-    log("MOUSE_HOVER", &format!(
+    add_to_buffer("MOUSE_HOVER", &format!(
         "STATE item_index={} hovered={} focused={}",
         item_index, is_hovered, is_focused
     ));
+
+    tracing::debug!(
+        event_type = "mouse_hover",
+        action = "state_change",
+        item_index = item_index,
+        is_hovered = is_hovered,
+        is_focused = is_focused,
+        "Hover state: item {} hovered={} focused={}", item_index, is_hovered, is_focused
+    );
 }
 
 // =============================================================================
@@ -129,34 +390,69 @@ pub fn log_mouse_hover_state(item_index: usize, is_hovered: bool, is_focused: bo
 
 /// Log scroll position change
 pub fn log_scroll_position(scroll_top: f32, visible_start: usize, visible_end: usize) {
-    log("SCROLL_STATE", &format!(
+    add_to_buffer("SCROLL_STATE", &format!(
         "POSITION scroll_top={:.2} visible_range={}..{}",
         scroll_top, visible_start, visible_end
     ));
+
+    tracing::debug!(
+        event_type = "scroll_state",
+        action = "position",
+        scroll_top = scroll_top,
+        visible_start = visible_start,
+        visible_end = visible_end,
+        "Scroll position: {:.2} (visible {}..{})", scroll_top, visible_start, visible_end
+    );
 }
 
 /// Log scroll_to_item call
 pub fn log_scroll_to_item(target_index: usize, reason: &str) {
-    log("SCROLL_STATE", &format!(
+    add_to_buffer("SCROLL_STATE", &format!(
         "SCROLL_TO_ITEM target={} reason={}",
         target_index, reason
     ));
+
+    tracing::debug!(
+        event_type = "scroll_state",
+        action = "scroll_to_item",
+        target_index = target_index,
+        reason = reason,
+        "Scroll to item {} (reason: {})", target_index, reason
+    );
 }
 
 /// Log scroll bounds/viewport info
 pub fn log_scroll_bounds(viewport_height: f32, content_height: f32, item_count: usize) {
-    log("SCROLL_STATE", &format!(
+    add_to_buffer("SCROLL_STATE", &format!(
         "BOUNDS viewport={:.2} content={:.2} items={}",
         viewport_height, content_height, item_count
     ));
+
+    tracing::debug!(
+        event_type = "scroll_state",
+        action = "bounds",
+        viewport_height = viewport_height,
+        content_height = content_height,
+        item_count = item_count,
+        "Scroll bounds: viewport={:.2} content={:.2} items={}", viewport_height, content_height, item_count
+    );
 }
 
 /// Log scroll adjustment (when scroll position is programmatically corrected)
 pub fn log_scroll_adjustment(from: f32, to: f32, reason: &str) {
-    log("SCROLL_STATE", &format!(
+    add_to_buffer("SCROLL_STATE", &format!(
         "ADJUSTMENT from={:.2} to={:.2} reason={}",
         from, to, reason
     ));
+
+    tracing::debug!(
+        event_type = "scroll_state",
+        action = "adjustment",
+        from = from,
+        to = to,
+        reason = reason,
+        "Scroll adjustment: {:.2} -> {:.2} ({})", from, to, reason
+    );
 }
 
 // =============================================================================
@@ -165,13 +461,25 @@ pub fn log_scroll_adjustment(from: f32, to: f32, reason: &str) {
 // Purpose: Log timing information for scroll operations to detect jitter sources
 // =============================================================================
 
-/// Log scroll operation timing
+/// Log scroll operation timing - returns start timestamp
 pub fn log_scroll_perf_start(operation: &str) -> u128 {
     let start = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros())
         .unwrap_or(0);
-    log_debug("SCROLL_PERF", &format!("START {} at={}", operation, start));
+
+    #[cfg(debug_assertions)]
+    {
+        add_to_buffer("SCROLL_PERF", &format!("START {} at={}", operation, start));
+        tracing::trace!(
+            event_type = "scroll_perf",
+            action = "start",
+            operation = operation,
+            start_micros = start,
+            "Scroll perf start: {}", operation
+        );
+    }
+
     start
 }
 
@@ -182,30 +490,88 @@ pub fn log_scroll_perf_end(operation: &str, start_micros: u128) {
         .map(|d| d.as_micros())
         .unwrap_or(0);
     let duration = end.saturating_sub(start_micros);
-    log_debug("SCROLL_PERF", &format!(
-        "END {} duration_us={}",
-        operation, duration
-    ));
+
+    #[cfg(debug_assertions)]
+    {
+        add_to_buffer("SCROLL_PERF", &format!("END {} duration_us={}", operation, duration));
+        tracing::trace!(
+            event_type = "scroll_perf",
+            action = "end",
+            operation = operation,
+            duration_us = duration,
+            "Scroll perf end: {} ({}us)", operation, duration
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (operation, duration); // Silence unused warnings
+    }
 }
 
 /// Log scroll frame timing (for detecting dropped frames)
 pub fn log_scroll_frame(frame_time_ms: f32, expected_frame_ms: f32) {
     let is_slow = frame_time_ms > expected_frame_ms * 1.5;
-    let marker = if is_slow { " [SLOW]" } else { "" };
-    log_debug("SCROLL_PERF", &format!(
-        "FRAME time={:.2}ms expected={:.2}ms{}",
-        frame_time_ms, expected_frame_ms, marker
-    ));
+
+    #[cfg(debug_assertions)]
+    {
+        let marker = if is_slow { " [SLOW]" } else { "" };
+        add_to_buffer("SCROLL_PERF", &format!(
+            "FRAME time={:.2}ms expected={:.2}ms{}",
+            frame_time_ms, expected_frame_ms, marker
+        ));
+
+        if is_slow {
+            tracing::warn!(
+                event_type = "scroll_perf",
+                action = "frame",
+                frame_time_ms = frame_time_ms,
+                expected_frame_ms = expected_frame_ms,
+                is_slow = true,
+                "Slow frame: {:.2}ms (expected {:.2}ms)", frame_time_ms, expected_frame_ms
+            );
+        } else {
+            tracing::trace!(
+                event_type = "scroll_perf",
+                action = "frame",
+                frame_time_ms = frame_time_ms,
+                expected_frame_ms = expected_frame_ms,
+                is_slow = false,
+                "Frame: {:.2}ms", frame_time_ms
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (frame_time_ms, expected_frame_ms, is_slow);
+    }
 }
 
 /// Log scroll event rate (for detecting rapid scroll input)
 pub fn log_scroll_event_rate(events_per_second: f32) {
     let is_rapid = events_per_second > 60.0;
-    let marker = if is_rapid { " [RAPID]" } else { "" };
-    log_debug("SCROLL_PERF", &format!(
-        "EVENT_RATE eps={:.1}{}",
-        events_per_second, marker
-    ));
+
+    #[cfg(debug_assertions)]
+    {
+        let marker = if is_rapid { " [RAPID]" } else { "" };
+        add_to_buffer("SCROLL_PERF", &format!("EVENT_RATE eps={:.1}{}", events_per_second, marker));
+
+        if is_rapid {
+            tracing::debug!(
+                event_type = "scroll_perf",
+                action = "event_rate",
+                events_per_second = events_per_second,
+                is_rapid = true,
+                "Rapid scroll events: {:.1}/s", events_per_second
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (events_per_second, is_rapid);
+    }
 }
 
 // =============================================================================
@@ -218,57 +584,121 @@ pub fn log_scroll_event_rate(events_per_second: f32) {
 pub fn log_key_event_rate(events_per_sec: f64) {
     let is_fast = events_per_sec > 30.0;
     let is_very_fast = events_per_sec > 60.0;
-    let marker = if is_very_fast {
-        " [VERY_FAST]"
-    } else if is_fast {
-        " [FAST]"
-    } else {
-        ""
-    };
-    log_debug("SCROLL_PERF", &format!(
-        "KEY_EVENT_RATE eps={:.1}{}",
-        events_per_sec, marker
-    ));
+
+    #[cfg(debug_assertions)]
+    {
+        let marker = if is_very_fast {
+            " [VERY_FAST]"
+        } else if is_fast {
+            " [FAST]"
+        } else {
+            ""
+        };
+        add_to_buffer("SCROLL_PERF", &format!("KEY_EVENT_RATE eps={:.1}{}", events_per_sec, marker));
+
+        tracing::debug!(
+            event_type = "scroll_perf",
+            action = "key_event_rate",
+            events_per_sec = events_per_sec,
+            is_fast = is_fast,
+            is_very_fast = is_very_fast,
+            "Key event rate: {:.1}/s", events_per_sec
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (events_per_sec, is_fast, is_very_fast);
+    }
 }
 
 /// Log frame timing gap (when frames take longer than expected)
 pub fn log_frame_gap(gap_ms: u64) {
-    let is_significant = gap_ms > 16; // More than one frame at 60fps
+    let is_significant = gap_ms > 16;
     let is_severe = gap_ms > 100;
-    let marker = if is_severe {
-        " [SEVERE]"
-    } else if is_significant {
-        " [SLOW]"
-    } else {
-        ""
-    };
-    log_debug("SCROLL_PERF", &format!(
-        "FRAME_GAP gap_ms={}{}",
-        gap_ms, marker
-    ));
+
+    #[cfg(debug_assertions)]
+    {
+        let marker = if is_severe {
+            " [SEVERE]"
+        } else if is_significant {
+            " [SLOW]"
+        } else {
+            ""
+        };
+        add_to_buffer("SCROLL_PERF", &format!("FRAME_GAP gap_ms={}{}", gap_ms, marker));
+
+        if is_severe {
+            tracing::warn!(
+                event_type = "scroll_perf",
+                action = "frame_gap",
+                gap_ms = gap_ms,
+                is_severe = true,
+                "Severe frame gap: {}ms", gap_ms
+            );
+        } else if is_significant {
+            tracing::debug!(
+                event_type = "scroll_perf",
+                action = "frame_gap",
+                gap_ms = gap_ms,
+                is_significant = true,
+                "Frame gap: {}ms", gap_ms
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (gap_ms, is_significant, is_severe);
+    }
 }
 
 /// Log scroll queue depth (number of pending scroll operations)
 pub fn log_scroll_queue_depth(depth: usize) {
     let is_backed_up = depth > 5;
     let is_critical = depth > 20;
-    let marker = if is_critical {
-        " [CRITICAL]"
-    } else if is_backed_up {
-        " [BACKED_UP]"
-    } else {
-        ""
-    };
-    log_debug("SCROLL_PERF", &format!(
-        "QUEUE_DEPTH depth={}{}",
-        depth, marker
-    ));
+
+    #[cfg(debug_assertions)]
+    {
+        let marker = if is_critical {
+            " [CRITICAL]"
+        } else if is_backed_up {
+            " [BACKED_UP]"
+        } else {
+            ""
+        };
+        add_to_buffer("SCROLL_PERF", &format!("QUEUE_DEPTH depth={}{}", depth, marker));
+
+        if is_critical {
+            tracing::warn!(
+                event_type = "scroll_perf",
+                action = "queue_depth",
+                depth = depth,
+                is_critical = true,
+                "Critical queue depth: {}", depth
+            );
+        } else if is_backed_up {
+            tracing::debug!(
+                event_type = "scroll_perf",
+                action = "queue_depth",
+                depth = depth,
+                is_backed_up = true,
+                "Queue backed up: {}", depth
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (depth, is_backed_up, is_critical);
+    }
 }
 
 /// Log render stall (when render blocks for too long)
 pub fn log_render_stall(duration_ms: u64) {
     let is_stall = duration_ms > 16;
     let is_hang = duration_ms > 100;
+
     let marker = if is_hang {
         " [HANG]"
     } else if is_stall {
@@ -276,28 +706,91 @@ pub fn log_render_stall(duration_ms: u64) {
     } else {
         ""
     };
-    log("SCROLL_PERF", &format!(
-        "RENDER_STALL duration_ms={}{}",
-        duration_ms, marker
-    ));
+    add_to_buffer("SCROLL_PERF", &format!("RENDER_STALL duration_ms={}{}", duration_ms, marker));
+
+    if is_hang {
+        tracing::error!(
+            event_type = "scroll_perf",
+            action = "render_stall",
+            duration_ms = duration_ms,
+            is_hang = true,
+            "Render hang: {}ms", duration_ms
+        );
+    } else if is_stall {
+        tracing::warn!(
+            event_type = "scroll_perf",
+            action = "render_stall",
+            duration_ms = duration_ms,
+            is_stall = true,
+            "Render stall: {}ms", duration_ms
+        );
+    }
 }
 
 /// Log scroll operation batch (when multiple scroll events are coalesced)
 pub fn log_scroll_batch(batch_size: usize, coalesced_from: usize) {
     if coalesced_from > batch_size {
-        log_debug("SCROLL_PERF", &format!(
-            "BATCH_COALESCE processed={} from={}",
-            batch_size, coalesced_from
-        ));
+        #[cfg(debug_assertions)]
+        {
+            add_to_buffer("SCROLL_PERF", &format!(
+                "BATCH_COALESCE processed={} from={}",
+                batch_size, coalesced_from
+            ));
+
+            tracing::debug!(
+                event_type = "scroll_perf",
+                action = "batch_coalesce",
+                batch_size = batch_size,
+                coalesced_from = coalesced_from,
+                "Coalesced {} scroll events to {}", coalesced_from, batch_size
+            );
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = (batch_size, coalesced_from);
+        }
     }
 }
 
 /// Log key repeat timing for debugging fast scroll issues
 pub fn log_key_repeat_timing(key: &str, interval_ms: u64, repeat_count: u32) {
     let is_fast = interval_ms < 50;
-    let marker = if is_fast { " [FAST_REPEAT]" } else { "" };
-    log_debug("SCROLL_PERF", &format!(
-        "KEY_REPEAT key={} interval_ms={} count={}{}",
-        key, interval_ms, repeat_count, marker
-    ));
+
+    #[cfg(debug_assertions)]
+    {
+        let marker = if is_fast { " [FAST_REPEAT]" } else { "" };
+        add_to_buffer("SCROLL_PERF", &format!(
+            "KEY_REPEAT key={} interval_ms={} count={}{}",
+            key, interval_ms, repeat_count, marker
+        ));
+
+        tracing::debug!(
+            event_type = "scroll_perf",
+            action = "key_repeat",
+            key = key,
+            interval_ms = interval_ms,
+            repeat_count = repeat_count,
+            is_fast = is_fast,
+            "Key repeat: {} interval={}ms count={}", key, interval_ms, repeat_count
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (key, interval_ms, repeat_count, is_fast);
+    }
 }
+
+// =============================================================================
+// CONVENIENCE MACROS (re-exported)
+// =============================================================================
+
+// Re-export tracing for use by other modules
+// Example usage:
+//   use crate::logging;
+//   logging::info!(event_type = "action", "Something happened");
+//
+// Or import tracing directly:
+//   use tracing::{info, error, warn, debug, trace};
+pub use tracing;

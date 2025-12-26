@@ -4,6 +4,8 @@
 //! with bidirectional JSONL communication.
 
 pub mod config;
+pub mod designs;
+pub mod error;
 pub mod executor;
 pub mod list_item;
 pub mod logging;

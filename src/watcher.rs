@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use shellexpand;
 use std::process::Command;
+use tracing::{info, warn};
 
 /// Event emitted when config needs to be reloaded
 #[derive(Debug, Clone)]
@@ -105,6 +106,11 @@ impl ConfigWatcher {
         // Watch the directory containing config.ts
         watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
 
+        info!(
+            path = %watch_path.display(),
+            target = "config.ts",
+            "Config watcher started"
+        );
         eprintln!(
             "Config watcher started, watching {:?} for changes to config.ts",
             watch_path
@@ -144,16 +150,19 @@ impl ConfigWatcher {
                                 let _ = tx_clone.send(ConfigReloadEvent::Reload);
                                 let mut flag = debounce_flag.lock().unwrap();
                                 *flag = false;
+                                info!(file = "config.ts", "Config file changed, emitting reload event");
                                 eprintln!("Config file changed, emitting reload event");
                             });
                         }
                     }
                 }
                 Ok(Err(e)) => {
+                    warn!(error = %e, watcher = "config", "File watcher error");
                     eprintln!("File watcher error: {}", e);
                 }
                 Err(_) => {
                     // Channel closed, exit watch loop
+                    info!(watcher = "config", "Config watcher shutting down");
                     eprintln!("Config watcher shutting down");
                     break;
                 }
@@ -244,6 +253,11 @@ impl ThemeWatcher {
         // Watch the directory containing theme.json
         watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
 
+        info!(
+            path = %watch_path.display(),
+            target = "theme.json",
+            "Theme watcher started"
+        );
         eprintln!(
             "Theme watcher started, watching {:?} for changes to theme.json",
             watch_path
@@ -283,16 +297,19 @@ impl ThemeWatcher {
                                 let _ = tx_clone.send(ThemeReloadEvent::Reload);
                                 let mut flag = debounce_flag.lock().unwrap();
                                 *flag = false;
+                                info!(file = "theme.json", "Theme file changed, emitting reload event");
                                 eprintln!("Theme file changed, emitting reload event");
                             });
                         }
                     }
                 }
                 Ok(Err(e)) => {
+                    warn!(error = %e, watcher = "theme", "File watcher error");
                     eprintln!("File watcher error: {}", e);
                 }
                 Err(_) => {
                     // Channel closed, exit watch loop
+                    info!(watcher = "theme", "Theme watcher shutting down");
                     eprintln!("Theme watcher shutting down");
                     break;
                 }
@@ -378,6 +395,11 @@ impl ScriptWatcher {
         // Watch the scripts directory recursively
         watcher.watch(&scripts_path, RecursiveMode::Recursive)?;
 
+        info!(
+            path = %scripts_path.display(),
+            recursive = true,
+            "Script watcher started"
+        );
         eprintln!(
             "Script watcher started, watching {:?} recursively for changes",
             scripts_path
@@ -411,16 +433,19 @@ impl ScriptWatcher {
                                 let _ = tx_clone.send(ScriptReloadEvent::Reload);
                                 let mut flag = debounce_flag.lock().unwrap();
                                 *flag = false;
+                                info!(directory = "scripts", "Script directory changed, emitting reload event");
                                 eprintln!("Script directory changed, emitting reload event");
                             });
                         }
                     }
                 }
                 Ok(Err(e)) => {
+                    warn!(error = %e, watcher = "scripts", "File watcher error");
                     eprintln!("File watcher error: {}", e);
                 }
                 Err(_) => {
                     // Channel closed, exit watch loop
+                    info!(watcher = "scripts", "Script watcher shutting down");
                     eprintln!("Script watcher shutting down");
                     break;
                 }
@@ -485,6 +510,7 @@ impl AppearanceWatcher {
         let mut last_appearance: Option<AppearanceChangeEvent> = None;
         let poll_interval = Duration::from_secs(2);
 
+        info!(poll_interval_secs = 2, "Appearance watcher started");
         eprintln!("Appearance watcher started, polling system appearance every 2 seconds");
 
         loop {
@@ -493,14 +519,17 @@ impl AppearanceWatcher {
 
             // Send event if appearance changed
             if last_appearance != Some(current_appearance.clone()) {
+                let mode = match current_appearance {
+                    AppearanceChangeEvent::Dark => "dark",
+                    AppearanceChangeEvent::Light => "light",
+                };
+                info!(mode = mode, "System appearance changed");
                 eprintln!(
                     "System appearance changed to: {}",
-                    match current_appearance {
-                        AppearanceChangeEvent::Dark => "dark",
-                        AppearanceChangeEvent::Light => "light",
-                    }
+                    mode
                 );
                 if let Err(_) = tx.send(current_appearance.clone()) {
+                    info!(watcher = "appearance", "Appearance watcher receiver dropped, shutting down");
                     eprintln!("Appearance watcher receiver dropped, shutting down");
                     break;
                 }

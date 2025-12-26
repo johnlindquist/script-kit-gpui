@@ -29,3 +29,10 @@ objc = "0.2"
 dirs = "5.0"
 smallvec = "1.15"
 syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "time"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing-appender = "0.2"
+chrono = { version = "0.4", features = ["serde"] }

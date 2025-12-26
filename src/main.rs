@@ -28,9 +28,13 @@ mod list_item;
 mod syntax;
 mod utils;
 mod perf;
+mod error;
+mod designs;
 
 use list_item::{ListItem, ListItemColors, LIST_ITEM_HEIGHT};
 use utils::strip_html_tags;
+use error::ErrorSeverity;
+use designs::{DesignVariant, uses_default_renderer};
 
 use std::sync::{Arc, Mutex, mpsc};
 use protocol::{Message, Choice};
@@ -437,6 +441,17 @@ impl HotkeyPoller {
     }
 }
 
+/// Error notification to display to the user
+#[derive(Debug, Clone)]
+struct ErrorNotification {
+    /// The error message to display
+    message: String,
+    /// Severity level (affects styling)
+    severity: ErrorSeverity,
+    /// Timestamp when the notification was created (for auto-dismiss)
+    created_at: std::time::Instant,
+}
+
 struct ScriptListApp {
     scripts: Vec<scripts::Script>,
     scriptlets: Vec<scripts::Scriptlet>,
@@ -477,6 +492,10 @@ struct ScriptListApp {
     // Preview cache: avoid re-reading file and re-highlighting on every render
     preview_cache_path: Option<String>,
     preview_cache_lines: Vec<syntax::HighlightedLine>,
+    // Error notification for user-friendly error feedback
+    error_notification: Option<ErrorNotification>,
+    // Current design variant for hot-swappable UI designs
+    current_design: DesignVariant,
 }
 
 impl ScriptListApp {
@@ -552,6 +571,10 @@ impl ScriptListApp {
             // Preview cache: start empty, will populate on first render
             preview_cache_path: None,
             preview_cache_lines: Vec::new(),
+            // Error notification: start with none
+            error_notification: None,
+            // Design system: start with default design
+            current_design: DesignVariant::default(),
         }
     }
     
@@ -571,6 +594,53 @@ impl ScriptListApp {
         // Now process collected messages
         for msg in messages {
             self.handle_prompt_message(msg, cx);
+        }
+    }
+    
+    /// Switch to a different design variant
+    /// 
+    /// This allows hot-swapping between design styles without restarting.
+    /// Use Cmd+1 through Cmd+0 to switch designs.
+    fn switch_design(&mut self, variant: DesignVariant, cx: &mut Context<Self>) {
+        if self.current_design != variant {
+            logging::log("UI", &format!("Switching design: {:?} -> {:?}", self.current_design, variant));
+            self.current_design = variant;
+            cx.notify();
+        }
+    }
+    
+    /// Show an error notification to the user
+    /// 
+    /// The notification will auto-dismiss after 5 seconds.
+    /// Call this when an operation fails and you want to inform the user.
+    fn show_error(&mut self, message: String, severity: ErrorSeverity, cx: &mut Context<Self>) {
+        logging::log("ERROR", &format!("Showing error notification: {} (severity: {:?})", message, severity));
+        
+        self.error_notification = Some(ErrorNotification {
+            message,
+            severity,
+            created_at: std::time::Instant::now(),
+        });
+        
+        cx.notify();
+        
+        // Set up auto-dismiss timer (5 seconds)
+        cx.spawn(async move |this, mut cx| {
+            Timer::after(std::time::Duration::from_secs(5)).await;
+            let _ = cx.update(|cx| {
+                this.update(cx, |app, cx| {
+                    app.clear_error(cx);
+                })
+            });
+        }).detach();
+    }
+    
+    /// Clear the current error notification
+    fn clear_error(&mut self, cx: &mut Context<Self>) {
+        if self.error_notification.is_some() {
+            logging::log("ERROR", "Clearing error notification");
+            self.error_notification = None;
+            cx.notify();
         }
     }
     
@@ -1384,6 +1454,64 @@ impl ScriptListApp {
         }
     }
     
+    /// Render the error notification if one exists
+    /// 
+    /// Returns None if no notification is present.
+    /// Uses theme colors (colors.ui.error, colors.ui.warning, colors.ui.info)
+    /// styled with bg, rounded corners, padding.
+    fn render_error_notification(&self) -> Option<impl IntoElement> {
+        let notification = self.error_notification.as_ref()?;
+        
+        // Get the appropriate color based on severity
+        let bg_color = match notification.severity {
+            ErrorSeverity::Error | ErrorSeverity::Critical => self.theme.colors.ui.error,
+            ErrorSeverity::Warning => self.theme.colors.ui.warning,
+            ErrorSeverity::Info => self.theme.colors.ui.info,
+        };
+        
+        // Use contrasting text color (white for all severities works well)
+        let text_color = 0xffffff;
+        
+        // Icon based on severity
+        let icon = match notification.severity {
+            ErrorSeverity::Critical => "⛔",
+            ErrorSeverity::Error => "✕",
+            ErrorSeverity::Warning => "⚠",
+            ErrorSeverity::Info => "ℹ",
+        };
+        
+        Some(
+            div()
+                .w_full()
+                .mx(px(16.))
+                .mt(px(8.))
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .bg(rgb(bg_color))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .font_family(".AppleSystemUIFont")
+                // Icon
+                .child(
+                    div()
+                        .text_color(rgb(text_color))
+                        .text_sm()
+                        .child(icon)
+                )
+                // Message text
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(rgb(text_color))
+                        .text_sm()
+                        .child(notification.message.clone())
+                )
+        )
+    }
+    
     /// Render the preview panel showing details of the selected script/scriptlet
     fn render_preview_panel(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
         let filtered = self.filtered_results();
@@ -1739,6 +1867,15 @@ impl ScriptListApp {
     }
     
     fn render_script_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        // Design dispatch: check if we should use a custom renderer
+        // Currently all variants use the default implementation.
+        // When custom renderers are implemented, they will be called here.
+        if !uses_default_renderer(self.current_design) {
+            // Future: return custom_renderer.render_script_list(self, cx);
+            // For now, log and fall through to default
+            logging::log("UI", &format!("Custom renderer for {:?} not yet implemented, using default", self.current_design));
+        }
+        
         // P1: Use cached filtered results
         let filtered = self.get_filtered_results_cached();
         let filtered_len = filtered.len();
@@ -1878,6 +2015,67 @@ impl ScriptListApp {
                         this.toggle_actions(cx, window); 
                         return; 
                     }
+                    // Cmd+1 through Cmd+0 for design switching
+                    "1" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(1) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "2" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(2) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "3" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(3) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "4" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(4) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "5" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(5) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "6" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(6) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "7" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(7) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "8" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(8) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "9" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(9) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
+                    "0" => {
+                        if let Some(variant) = DesignVariant::from_keyboard_number(0) {
+                            this.switch_design(variant, cx);
+                        }
+                        return;
+                    }
                     _ => {}
                 }
             }
@@ -1997,8 +2195,15 @@ impl ScriptListApp {
                     .mx(px(16.))
                     .h(px(1.))
                     .bg(rgba((theme.colors.ui.border << 8) | 0x60))
-            )
-            // Main content area - 50/50 split: List on left, Preview on right
+            );
+        
+        // Add error notification if present (at the top of the content area)
+        if let Some(notification) = self.render_error_notification() {
+            main_div = main_div.child(notification);
+        }
+        
+        // Main content area - 50/50 split: List on left, Preview on right
+        main_div = main_div
             // Uses min_h(px(0.)) to prevent flex children from overflowing
             .child(
                 div()

@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
+use tracing::{debug, warn};
 
 /// A choice option for arg() prompts
 ///
@@ -751,7 +752,73 @@ impl Message {
 /// # Returns
 /// * `Result<Message, serde_json::Error>` - Parsed message or deserialization error
 pub fn parse_message(line: &str) -> Result<Message, serde_json::Error> {
-    serde_json::from_str(line)
+    serde_json::from_str(line).map_err(|e| {
+        // Log the raw input and error for debugging
+        warn!(
+            raw_input = %line,
+            error = %e,
+            "Failed to parse JSONL message"
+        );
+        e
+    })
+}
+
+/// Result type for graceful message parsing
+#[derive(Debug)]
+pub enum ParseResult {
+    /// Successfully parsed a known message type
+    Ok(Message),
+    /// Unknown message type - contains the type name and raw JSON
+    UnknownType { message_type: String, raw: String },
+    /// JSON parsing failed entirely
+    ParseError(serde_json::Error),
+}
+
+/// Parse a message with graceful handling of unknown types
+///
+/// Unlike `parse_message`, this function handles unknown message types
+/// gracefully by logging a warning and returning `ParseResult::UnknownType`
+/// instead of failing.
+///
+/// # Arguments
+/// * `line` - A JSON string (typically one line from JSONL)
+///
+/// # Returns
+/// * `ParseResult` - Either a parsed message, unknown type info, or parse error
+pub fn parse_message_graceful(line: &str) -> ParseResult {
+    // First, try to parse as a known Message
+    match serde_json::from_str::<Message>(line) {
+        Ok(msg) => {
+            debug!(message_id = ?msg.id(), "Successfully parsed message");
+            ParseResult::Ok(msg)
+        }
+        Err(e) => {
+            // Check if this is an unknown message type
+            // Try parsing as generic JSON to extract the "type" field
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(msg_type) = value.get("type").and_then(|t| t.as_str()) {
+                    // Valid JSON with "type" field, but unknown type
+                    warn!(
+                        message_type = %msg_type,
+                        raw_input = %line,
+                        "Unknown message type received - ignoring"
+                    );
+                    return ParseResult::UnknownType {
+                        message_type: msg_type.to_string(),
+                        raw: line.to_string(),
+                    };
+                }
+            }
+            
+            // Not valid JSON or missing type field
+            warn!(
+                raw_input = %line,
+                error = %e,
+                "Failed to parse JSONL message - invalid JSON"
+            );
+            ParseResult::ParseError(e)
+        }
+    }
 }
 
 /// Serialize a message to JSONL format
@@ -789,10 +856,68 @@ impl<R: Read> JsonlReader<R> {
     pub fn next_message(&mut self) -> Result<Option<Message>, Box<dyn std::error::Error>> {
         let mut line = String::new();
         match self.reader.read_line(&mut line)? {
-            0 => Ok(None), // EOF
-            _ => {
-                let msg = parse_message(line.trim())?;
+            0 => {
+                debug!("Reached end of JSONL stream");
+                Ok(None)
+            }
+            bytes_read => {
+                debug!(bytes_read, "Read line from JSONL stream");
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    debug!("Skipping empty line in JSONL stream");
+                    return self.next_message(); // Skip empty lines
+                }
+                let msg = parse_message(trimmed)?;
                 Ok(Some(msg))
+            }
+        }
+    }
+
+    /// Read the next message with graceful unknown type handling
+    ///
+    /// Unlike `next_message`, this method uses `parse_message_graceful` to
+    /// handle unknown message types without errors. Unknown types are logged
+    /// and skipped, continuing to read the next message.
+    ///
+    /// # Returns
+    /// * `Ok(Some(Message))` - Successfully parsed known message
+    /// * `Ok(None)` - End of stream
+    /// * `Err(e)` - IO error (not parse errors for unknown types)
+    pub fn next_message_graceful(&mut self) -> Result<Option<Message>, std::io::Error> {
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line)? {
+                0 => {
+                    debug!("Reached end of JSONL stream");
+                    return Ok(None);
+                }
+                _ => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        debug!("Skipping empty line in JSONL stream");
+                        continue;
+                    }
+
+                    match parse_message_graceful(trimmed) {
+                        ParseResult::Ok(msg) => return Ok(Some(msg)),
+                        ParseResult::UnknownType { message_type, .. } => {
+                            // Already logged in parse_message_graceful
+                            debug!(
+                                message_type = %message_type,
+                                "Skipping unknown message type, continuing to next message"
+                            );
+                            continue;
+                        }
+                        ParseResult::ParseError(e) => {
+                            // Log but continue - graceful degradation
+                            warn!(
+                                error = %e,
+                                "Skipping malformed message, continuing to next message"
+                            );
+                            continue;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1721,5 +1846,96 @@ mod tests {
         assert_eq!(serde_json::to_string(&MouseAction::Move).unwrap(), "\"move\"");
         assert_eq!(serde_json::to_string(&MouseAction::Click).unwrap(), "\"click\"");
         assert_eq!(serde_json::to_string(&MouseAction::SetPosition).unwrap(), "\"setPosition\"");
+    }
+
+    // ============================================================
+    // GRACEFUL PARSING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_parse_message_graceful_known_type() {
+        let json = r#"{"type":"arg","id":"1","placeholder":"Pick","choices":[]}"#;
+        match parse_message_graceful(json) {
+            ParseResult::Ok(Message::Arg { id, .. }) => {
+                assert_eq!(id, "1");
+            }
+            _ => panic!("Expected ParseResult::Ok with Arg message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_message_graceful_unknown_type() {
+        let json = r#"{"type":"futureFeature","id":"1","data":"test"}"#;
+        match parse_message_graceful(json) {
+            ParseResult::UnknownType { message_type, raw } => {
+                assert_eq!(message_type, "futureFeature");
+                assert_eq!(raw, json);
+            }
+            _ => panic!("Expected ParseResult::UnknownType"),
+        }
+    }
+
+    #[test]
+    fn test_parse_message_graceful_invalid_json() {
+        let json = "not valid json at all";
+        match parse_message_graceful(json) {
+            ParseResult::ParseError(_) => {}
+            _ => panic!("Expected ParseResult::ParseError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_message_graceful_missing_type_field() {
+        let json = r#"{"id":"1","data":"test"}"#;
+        match parse_message_graceful(json) {
+            ParseResult::ParseError(_) => {}
+            _ => panic!("Expected ParseResult::ParseError for missing type field"),
+        }
+    }
+
+    #[test]
+    fn test_jsonl_reader_skips_empty_lines() {
+        use std::io::Cursor;
+        
+        let jsonl = "\n{\"type\":\"beep\"}\n\n{\"type\":\"show\"}\n";
+        let cursor = Cursor::new(jsonl);
+        let mut reader = JsonlReader::new(cursor);
+        
+        // First message should be beep (skipping initial empty line)
+        let msg1 = reader.next_message().unwrap();
+        assert!(matches!(msg1, Some(Message::Beep {})));
+        
+        // Second message should be show (skipping intermediate empty lines)
+        let msg2 = reader.next_message().unwrap();
+        assert!(matches!(msg2, Some(Message::Show {})));
+        
+        // Should be EOF
+        let msg3 = reader.next_message().unwrap();
+        assert!(msg3.is_none());
+    }
+
+    #[test]
+    fn test_jsonl_reader_graceful_skips_unknown() {
+        use std::io::Cursor;
+        
+        let jsonl = r#"{"type":"unknownType","id":"1"}
+{"type":"beep"}
+{"type":"anotherUnknown","data":"test"}
+{"type":"show"}
+"#;
+        let cursor = Cursor::new(jsonl);
+        let mut reader = JsonlReader::new(cursor);
+        
+        // Should skip unknownType and return beep
+        let msg1 = reader.next_message_graceful().unwrap();
+        assert!(matches!(msg1, Some(Message::Beep {})));
+        
+        // Should skip anotherUnknown and return show
+        let msg2 = reader.next_message_graceful().unwrap();
+        assert!(matches!(msg2, Some(Message::Show {})));
+        
+        // Should be EOF
+        let msg3 = reader.next_message_graceful().unwrap();
+        assert!(msg3.is_none());
     }
 }

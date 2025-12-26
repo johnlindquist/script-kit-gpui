@@ -15,6 +15,8 @@
 | **State Updates** | Always call `cx.notify()` after modifying state |
 | **Keyboard Events** | Use `cx.listener()` pattern, coalesce rapid events (20ms window) |
 | **Window Positioning** | Use `Bounds::centered(Some(display_id), size, cx)` for multi-monitor |
+| **Error Handling** | Use `anyhow::Result` + `.context()` for propagation, `NotifyResultExt` for user display |
+| **Logging** | Use `tracing` with JSONL format, typed fields, include `correlation_id` and `duration_ms` |
 
 ---
 
@@ -517,17 +519,379 @@ npx tsx scripts/scroll-bench.ts
 
 ```
 src/
-  main.rs       # App entry, window setup, main render loop
-  theme.rs      # Theme system, ColorScheme, focus-aware colors
+  main.rs       # App entry, window setup, main render loop, ErrorNotification UI
+  error.rs      # ScriptKitError enum, ErrorSeverity, NotifyResultExt trait
+  theme.rs      # Theme system, ColorScheme, focus-aware colors, error/warning/info colors
   prompts.rs    # ArgPrompt, DivPrompt interactive prompts
   actions.rs    # ActionsDialog popup
-  protocol.rs   # JSON message protocol
-  scripts.rs    # Script loading and execution
+  protocol.rs   # JSON message protocol with ParseResult for graceful error handling
+  scripts.rs    # Script loading and execution with tracing instrumentation
+  config.rs     # Config loading with defaults fallback
+  executor.rs   # Script execution with timing spans and structured logging
+  watcher.rs    # File watchers with observability instrumentation
   panel.rs      # macOS panel configuration
   perf.rs       # Performance timing utilities
-  logging.rs    # Log functions
+  logging.rs    # Dual-output logging: JSONL to ~/.kit/logs/, pretty to stderr
+  lib.rs        # Module exports
   utils.rs      # Shared utilities (strip_html_tags, etc.)
 ```
+
+### Log File Location
+
+Logs are written to `~/.kit/logs/script-kit-gpui.jsonl` in JSONL format for AI agent consumption.
+
+---
+
+## 11. Error Handling
+
+### Error Type Selection
+
+Use the right error type for the job:
+
+| Crate | When to Use |
+|-------|-------------|
+| `anyhow` | Application-level errors, CLI tools, error propagation |
+| `thiserror` | Library code, domain-specific errors, when callers need to match on error types |
+
+```rust
+// Cargo.toml
+[dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+```
+
+### anyhow for Application Errors
+
+Use `anyhow::Result` throughout application code:
+
+```rust
+use anyhow::{Context, Result};
+
+fn load_config(path: &Path) -> Result<Config> {
+    let content = std::fs::read_to_string(path)
+        .context("Failed to read config file")?;
+    
+    let config: Config = serde_json::from_str(&content)
+        .context("Failed to parse config JSON")?;
+    
+    Ok(config)
+}
+
+fn main() -> Result<()> {
+    let config = load_config(Path::new("~/.kit/config.json"))
+        .context("Config initialization failed")?;
+    
+    // Application logic...
+    Ok(())
+}
+```
+
+### thiserror for Domain Errors
+
+Use `thiserror` when callers need to handle specific error variants:
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ScriptError {
+    #[error("Script not found: {path}")]
+    NotFound { path: String },
+    
+    #[error("Script execution failed: {0}")]
+    ExecutionFailed(String),
+    
+    #[error("Invalid script format: {0}")]
+    InvalidFormat(#[from] serde_json::Error),
+    
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+// Callers can match on specific errors
+match run_script(&path) {
+    Ok(output) => handle_output(output),
+    Err(ScriptError::NotFound { path }) => show_not_found_dialog(&path),
+    Err(ScriptError::ExecutionFailed(msg)) => log_execution_error(&msg),
+    Err(e) => show_generic_error(e),
+}
+```
+
+### Result Propagation with Context
+
+Always add context when propagating errors up the call stack:
+
+```rust
+// GOOD: Adds context at each level
+fn load_theme() -> Result<Theme> {
+    let path = get_theme_path()
+        .context("Failed to determine theme path")?;
+    
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read theme file: {}", path.display()))?;
+    
+    let theme: Theme = serde_json::from_str(&content)
+        .context("Failed to parse theme JSON")?;
+    
+    Ok(theme)
+}
+
+// BAD: Loses context
+fn load_theme_bad() -> Result<Theme> {
+    let path = get_theme_path()?;  // What failed?
+    let content = std::fs::read_to_string(&path)?;  // Which file?
+    let theme: Theme = serde_json::from_str(&content)?;  // What was wrong?
+    Ok(theme)
+}
+```
+
+### User Notification Pattern (Toast)
+
+Display errors to users with auto-dismissing toasts:
+
+```rust
+/// Extension trait for ergonomic error display
+pub trait NotifyResultExt<T> {
+    fn notify_err(self, cx: &mut Context<impl Render>) -> Option<T>;
+}
+
+impl<T, E: std::fmt::Display> NotifyResultExt<T> for Result<T, E> {
+    fn notify_err(self, cx: &mut Context<impl Render>) -> Option<T> {
+        match self {
+            Ok(value) => Some(value),
+            Err(e) => {
+                // Always log first
+                tracing::error!(error = %e, "Operation failed");
+                
+                // Show toast to user
+                show_toast(cx, ToastOptions {
+                    message: e.to_string(),
+                    level: ToastLevel::Error,
+                    auto_dismiss_ms: 5000,  // 5 seconds
+                });
+                
+                None
+            }
+        }
+    }
+}
+
+// Usage
+fn handle_save(&mut self, cx: &mut Context<Self>) {
+    if let Some(saved) = self.save_file().notify_err(cx) {
+        self.show_success_message(&saved);
+    }
+    // Error already displayed to user if save_file() failed
+}
+```
+
+### Error Handling Best Practices
+
+| Pattern | Description |
+|---------|-------------|
+| Log before display | Always `tracing::error!()` before showing to user |
+| Context at boundaries | Add `.context()` at function call boundaries |
+| Typed errors for APIs | Use `thiserror` for public library APIs |
+| anyhow for apps | Use `anyhow` for application/CLI code |
+| Don't panic | Use `Result` instead of `.unwrap()` or `.expect()` |
+| Auto-dismiss toasts | 5 seconds is standard, 10 for critical errors |
+
+---
+
+## 12. Logging & Observability
+
+### Tracing Crate Setup
+
+Use the `tracing` ecosystem for structured logging:
+
+```rust
+// Cargo.toml
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+```
+
+### Initialization
+
+```rust
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+fn init_logging() {
+    // JSONL to file (for AI agents and log analysis)
+    let file_appender = tracing_appender::rolling::daily("logs", "app.jsonl");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    
+    let json_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_writer(non_blocking);
+    
+    // Pretty output to stdout (for humans)
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_target(true);
+    
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env().add_directive("script_kit=debug".parse().unwrap()))
+        .with(json_layer)
+        .with(stdout_layer)
+        .init();
+}
+```
+
+### JSONL Format
+
+Logs are written as one JSON object per line:
+
+```json
+{"timestamp":"2024-01-15T10:30:45.123Z","level":"INFO","target":"script_kit::executor","message":"Script executed","fields":{"script_name":"hello.ts","duration_ms":142,"exit_code":0}}
+{"timestamp":"2024-01-15T10:30:45.265Z","level":"ERROR","target":"script_kit::theme","message":"Theme load failed","fields":{"path":"/Users/x/.kit/theme.json","error":"Invalid JSON"}}
+```
+
+### Using tracing Macros
+
+```rust
+use tracing::{info, warn, error, debug, trace, instrument, span, Level};
+
+// Basic logging with typed fields
+info!(script_name = %name, duration_ms = elapsed, "Script completed");
+warn!(attempt = retry_count, max_attempts = 3, "Retrying operation");
+error!(error = ?e, path = %file_path, "Failed to load file");
+
+// Debug for development, trace for very verbose
+debug!(selected_index = idx, total_items = len, "Selection changed");
+trace!(raw_event = ?event, "Received keyboard event");
+```
+
+### Spans for Timing
+
+Use spans to track operation duration:
+
+```rust
+use tracing::{instrument, info_span, Instrument};
+
+// Automatic span with #[instrument]
+#[instrument(skip(self, cx), fields(script_count = scripts.len()))]
+fn load_scripts(&mut self, scripts: Vec<Script>, cx: &mut Context<Self>) {
+    // Duration automatically recorded when function exits
+    for script in scripts {
+        self.process_script(script);
+    }
+}
+
+// Manual span for async or partial timing
+async fn execute_script(&self, script: &Script) -> Result<Output> {
+    let span = info_span!("execute_script", 
+        script_name = %script.name,
+        script_path = %script.path.display()
+    );
+    
+    async {
+        let start = Instant::now();
+        let result = self.run_process(script).await?;
+        
+        info!(
+            duration_ms = start.elapsed().as_millis() as u64,
+            exit_code = result.exit_code,
+            "Script execution complete"
+        );
+        
+        Ok(result)
+    }.instrument(span).await
+}
+```
+
+### Correlation IDs
+
+Track related operations across the codebase:
+
+```rust
+use uuid::Uuid;
+
+fn handle_user_action(&mut self, action: Action, cx: &mut Context<Self>) {
+    let correlation_id = Uuid::new_v4().to_string();
+    
+    let span = info_span!("user_action", 
+        correlation_id = %correlation_id,
+        action_type = ?action.action_type()
+    );
+    let _guard = span.enter();
+    
+    info!("Action started");
+    
+    // All nested logs will include correlation_id
+    self.validate_action(&action)?;
+    self.execute_action(&action)?;
+    self.update_ui(cx);
+    
+    info!("Action completed");
+}
+```
+
+### Log Levels Guide
+
+| Level | When to Use | Example |
+|-------|-------------|---------|
+| `error!` | Operation failed, needs attention | Script crash, file not found |
+| `warn!` | Unexpected but handled | Retry succeeded, fallback used |
+| `info!` | Important business events | Script executed, theme loaded |
+| `debug!` | Development troubleshooting | Selection changed, filter applied |
+| `trace!` | Very verbose, rarely enabled | Raw events, internal state dumps |
+
+### Performance Logging Pattern
+
+```rust
+use std::time::Instant;
+use tracing::{info, warn};
+
+const SLOW_THRESHOLD_MS: u64 = 100;
+
+fn render_list(&self, range: Range<usize>) -> Vec<impl IntoElement> {
+    let start = Instant::now();
+    
+    let items = self.build_list_items(range);
+    
+    let duration_ms = start.elapsed().as_millis() as u64;
+    
+    if duration_ms > SLOW_THRESHOLD_MS {
+        warn!(
+            duration_ms,
+            item_count = items.len(),
+            threshold_ms = SLOW_THRESHOLD_MS,
+            "Slow render detected"
+        );
+    } else {
+        debug!(duration_ms, item_count = items.len(), "Render complete");
+    }
+    
+    items
+}
+```
+
+### Log Tags for Filtering
+
+Use consistent target names for easy filtering:
+
+```rust
+// In different modules, logs automatically get module path as target
+// script_kit::ui, script_kit::executor, script_kit::theme
+
+// Filter examples:
+// RUST_LOG=script_kit::ui=debug  # Only UI logs
+// RUST_LOG=script_kit=info       # All info+ logs
+// RUST_LOG=script_kit::executor=trace  # Verbose executor logs
+```
+
+### Logging Best Practices
+
+| Pattern | Description |
+|---------|-------------|
+| Use typed fields | `duration_ms = 42` not `"duration: 42ms"` |
+| Include correlation IDs | Track related operations across functions |
+| Use spans for timing | Automatic duration tracking |
+| Non-blocking file writes | Use `tracing_appender::non_blocking` |
+| Dual output | JSONL to file, pretty to stdout |
+| Structured over interpolation | `info!(count = 5, "Items")` not `info!("Items: {}", 5)` |
 
 ---
 

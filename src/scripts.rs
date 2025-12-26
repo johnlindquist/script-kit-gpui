@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::env;
 use std::fs;
 use std::cmp::Ordering;
+use tracing::{debug, warn, instrument};
 
 #[derive(Clone, Debug)]
 pub struct Script {
@@ -92,7 +93,14 @@ fn extract_metadata(path: &PathBuf) -> Option<String> {
             }
             None
         }
-        Err(_) => None,
+        Err(e) => {
+            debug!(
+                error = %e,
+                path = %path.display(),
+                "Could not read script file for metadata extraction"
+            );
+            None
+        }
     }
 }
 
@@ -189,16 +197,21 @@ fn parse_scriptlet_section(section: &str) -> Option<Scriptlet> {
 /// Reads scriptlets from ~/.kenv/scriptlets/scriptlets.md
 /// Returns a sorted list of Scriptlet structs
 /// Returns empty vec if file doesn't exist or is inaccessible
+#[instrument(level = "debug", skip_all)]
 pub fn read_scriptlets() -> Vec<Scriptlet> {
     let home = match env::var("HOME") {
         Ok(home_path) => PathBuf::from(home_path),
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!(error = %e, "HOME environment variable not set, cannot read scriptlets");
+            return vec![];
+        }
     };
 
     let scriptlets_file = home.join(".kenv/scriptlets/scriptlets.md");
 
     // Check if file exists
     if !scriptlets_file.exists() {
+        debug!(path = %scriptlets_file.display(), "Scriptlets file does not exist");
         return vec![];
     }
 
@@ -231,26 +244,39 @@ pub fn read_scriptlets() -> Vec<Scriptlet> {
             // Sort by name
             scriptlets.sort_by(|a, b| a.name.cmp(&b.name));
 
+            debug!(count = scriptlets.len(), "Loaded scriptlets");
             scriptlets
         }
-        Err(_) => vec![],
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %scriptlets_file.display(),
+                "Failed to read scriptlets file"
+            );
+            vec![]
+        }
     }
 }
 
 /// Reads scripts from ~/.kenv/scripts directory
 /// Returns a sorted list of Script structs for .ts and .js files
 /// Returns empty vec if directory doesn't exist or is inaccessible
+#[instrument(level = "debug", skip_all)]
 pub fn read_scripts() -> Vec<Script> {
     // Expand ~ to home directory using HOME environment variable
     let home = match env::var("HOME") {
         Ok(home_path) => PathBuf::from(home_path),
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!(error = %e, "HOME environment variable not set, cannot read scripts");
+            return vec![];
+        }
     };
 
     let scripts_dir = home.join(".kenv/scripts");
 
     // Check if directory exists
     if !scripts_dir.exists() {
+        debug!(path = %scripts_dir.display(), "Scripts directory does not exist");
         return vec![];
     }
 
@@ -287,12 +313,20 @@ pub fn read_scripts() -> Vec<Script> {
                 }
             }
         }
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %scripts_dir.display(),
+                "Failed to read scripts directory"
+            );
+            return vec![];
+        }
     }
 
     // Sort by name
     scripts.sort_by(|a, b| a.name.cmp(&b.name));
 
+    debug!(count = scripts.len(), "Loaded scripts");
     scripts
 }
 

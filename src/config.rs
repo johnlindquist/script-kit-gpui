@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::path::PathBuf;
+use tracing::{info, warn, instrument};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -27,12 +28,13 @@ impl Default for Config {
     }
 }
 
+#[instrument(name = "load_config")]
 pub fn load_config() -> Config {
     let config_path = PathBuf::from(shellexpand::tilde("~/.kit/config.ts").as_ref());
 
     // Check if config file exists
     if !config_path.exists() {
-        eprintln!("Config file not found at {:?}, using defaults", config_path);
+        info!(path = %config_path.display(), "Config file not found, using defaults");
         return Config::default();
     }
 
@@ -47,14 +49,14 @@ pub fn load_config() -> Config {
 
     match build_output {
         Err(e) => {
-            eprintln!("Failed to transpile config with bun: {}", e);
+            warn!(error = %e, "Failed to transpile config with bun, using defaults");
             return Config::default();
         }
         Ok(output) => {
             if !output.status.success() {
-                eprintln!(
-                    "bun build failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                warn!(
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "bun build failed, using defaults"
                 );
                 return Config::default();
             }
@@ -72,14 +74,14 @@ pub fn load_config() -> Config {
 
     match json_output {
         Err(e) => {
-            eprintln!("Failed to execute bun to extract JSON: {}", e);
+            warn!(error = %e, "Failed to execute bun to extract JSON, using defaults");
             return Config::default();
         }
         Ok(output) => {
             if !output.status.success() {
-                eprintln!(
-                    "bun execution failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                warn!(
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "bun execution failed, using defaults"
                 );
                 return Config::default();
             }
@@ -88,12 +90,15 @@ pub fn load_config() -> Config {
             let json_str = String::from_utf8_lossy(&output.stdout);
             match serde_json::from_str::<Config>(json_str.trim()) {
                 Ok(config) => {
-                    eprintln!("Successfully loaded config from {:?}", config_path);
+                    info!(path = %config_path.display(), "Successfully loaded config");
                     config
                 }
                 Err(e) => {
-                    eprintln!("Failed to parse config JSON: {}", e);
-                    eprintln!("JSON output was: {}", json_str);
+                    warn!(
+                        error = %e,
+                        json_output = %json_str,
+                        "Failed to parse config JSON, using defaults"
+                    );
                     Config::default()
                 }
             }

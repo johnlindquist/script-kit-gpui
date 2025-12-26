@@ -2,6 +2,7 @@ use gpui::{rgb, rgba, Hsla, Rgba};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
+use tracing::{info, warn, error, debug};
 
 /// Hex color representation (u32)
 pub type HexColor = u32;
@@ -152,6 +153,30 @@ pub struct UIColors {
     pub border: HexColor,
     /// Success color for logs (0x00ff00 - green)
     pub success: HexColor,
+    /// Error color for error messages (0xef4444 - red-500)
+    #[serde(default = "default_error_color")]
+    pub error: HexColor,
+    /// Warning color for warning messages (0xf59e0b - amber-500)
+    #[serde(default = "default_warning_color")]
+    pub warning: HexColor,
+    /// Info color for informational messages (0x3b82f6 - blue-500)
+    #[serde(default = "default_info_color")]
+    pub info: HexColor,
+}
+
+/// Default error color (red-500)
+fn default_error_color() -> HexColor {
+    0xef4444
+}
+
+/// Default warning color (amber-500)
+fn default_warning_color() -> HexColor {
+    0xf59e0b
+}
+
+/// Default info color (blue-500)
+fn default_info_color() -> HexColor {
+    0x3b82f6
 }
 
 /// Cursor styling for text input
@@ -260,6 +285,9 @@ impl ColorScheme {
             ui: UIColors {
                 border: 0x464647,
                 success: 0x00ff00,
+                error: 0xef4444,   // red-500
+                warning: 0xf59e0b, // amber-500
+                info: 0x3b82f6,    // blue-500
             },
         }
     }
@@ -288,6 +316,9 @@ impl ColorScheme {
             ui: UIColors {
                 border: 0xd0d0d0,
                 success: 0x00a000,
+                error: 0xdc2626,   // red-600 (darker for light mode)
+                warning: 0xd97706, // amber-600 (darker for light mode)
+                info: 0x2563eb,    // blue-600 (darker for light mode)
             },
         }
     }
@@ -331,6 +362,9 @@ impl ColorScheme {
             ui: UIColors {
                 border: darken_hex(self.ui.border),
                 success: darken_hex(self.ui.success),
+                error: darken_hex(self.ui.error),
+                warning: darken_hex(self.ui.warning),
+                info: darken_hex(self.ui.info),
             },
         }
     }
@@ -457,12 +491,12 @@ pub fn detect_system_appearance() -> bool {
             // If the command succeeds and returns "Dark", we're in dark mode
             let stdout = String::from_utf8_lossy(&output.stdout);
             let is_dark = stdout.to_lowercase().contains("dark");
-            eprintln!("System appearance detected: {}", if is_dark { "dark" } else { "light" });
+            info!(appearance = if is_dark { "dark" } else { "light" }, "System appearance detected");
             is_dark
         }
         Err(_) => {
             // Command failed or not available (e.g., light mode on macOS returns error)
-            eprintln!("System appearance detection failed or light mode detected, defaulting to light");
+            debug!("System appearance detection failed or light mode detected, defaulting to light");
             false
         }
     }
@@ -509,7 +543,7 @@ pub fn load_theme() -> Theme {
 
     // Check if theme file exists
     if !theme_path.exists() {
-        eprintln!("Theme file not found at {:?}, detecting system appearance", theme_path);
+        warn!(path = %theme_path.display(), "Theme file not found, using defaults based on system appearance");
         // Auto-select based on system appearance
         let is_dark = detect_system_appearance();
         let color_scheme = if is_dark {
@@ -531,7 +565,7 @@ pub fn load_theme() -> Theme {
     // Read and parse the JSON file
     match std::fs::read_to_string(&theme_path) {
         Err(e) => {
-            eprintln!("Failed to read theme file: {}", e);
+            error!(path = %theme_path.display(), error = %e, "Failed to read theme file, using defaults");
             let is_dark = detect_system_appearance();
             let color_scheme = if is_dark {
                 ColorScheme::dark_default()
@@ -551,13 +585,17 @@ pub fn load_theme() -> Theme {
         Ok(contents) => {
             match serde_json::from_str::<Theme>(&contents) {
                 Ok(theme) => {
-                    eprintln!("Successfully loaded theme from {:?}", theme_path);
+                    info!(path = %theme_path.display(), "Successfully loaded theme");
                     log_theme_config(&theme);
                     theme
                 }
                 Err(e) => {
-                    eprintln!("Failed to parse theme JSON: {}", e);
-                    eprintln!("Theme content was: {}", contents);
+                    error!(
+                        path = %theme_path.display(),
+                        error = %e,
+                        "Failed to parse theme JSON, using defaults"
+                    );
+                    debug!(content = %contents, "Malformed theme file content");
                     let is_dark = detect_system_appearance();
                     let color_scheme = if is_dark {
                         ColorScheme::dark_default()
@@ -631,7 +669,7 @@ impl ListItemColors {
         let selected_subtle = colors.accent.selected_subtle;
         
         #[cfg(debug_assertions)]
-        eprintln!("[THEME] Extracting list item colors: selected_subtle=#{:06x}", selected_subtle);
+        debug!(selected_subtle = format!("#{:06x}", selected_subtle), "Extracting list item colors");
         
         ListItemColors {
             background: rgba(0x00000000),  // Fully transparent
@@ -700,7 +738,7 @@ impl InputFieldColors {
     /// Create InputFieldColors from a ColorScheme
     pub fn from_color_scheme(colors: &ColorScheme) -> Self {
         #[cfg(debug_assertions)]
-        eprintln!("[THEME] Extracting input field colors");
+        debug!("Extracting input field colors");
         
         InputFieldColors {
             background: rgba((colors.background.search_box << 8) | 0x80),
@@ -728,15 +766,39 @@ fn log_theme_config(theme: &Theme) {
     let opacity = theme.get_opacity();
     let shadow = theme.get_drop_shadow();
     let vibrancy = theme.get_vibrancy();
-    eprintln!("Theme opacity: main={:.2}, title_bar={:.2}, search_box={:.2}, log_panel={:.2}",
-        opacity.main, opacity.title_bar, opacity.search_box, opacity.log_panel);
-    eprintln!("Theme shadow: enabled={}, blur={:.1}, spread={:.1}, offset=({:.1}, {:.1}), opacity={:.2}",
-        shadow.enabled, shadow.blur_radius, shadow.spread_radius, shadow.offset_x, shadow.offset_y, shadow.opacity);
-    eprintln!("Theme vibrancy: enabled={}, material={}",
-        vibrancy.enabled, vibrancy.material);
-    // Log button/accent colors for observability
-    eprintln!("Theme accent: selected=#{:06x}, selected_subtle=#{:06x}, button_text=#{:06x}",
-        theme.colors.accent.selected, theme.colors.accent.selected_subtle, theme.colors.accent.button_text);
+    debug!(
+        opacity_main = opacity.main,
+        opacity_title_bar = opacity.title_bar,
+        opacity_search_box = opacity.search_box,
+        opacity_log_panel = opacity.log_panel,
+        "Theme opacity configured"
+    );
+    debug!(
+        shadow_enabled = shadow.enabled,
+        blur_radius = shadow.blur_radius,
+        spread_radius = shadow.spread_radius,
+        offset_x = shadow.offset_x,
+        offset_y = shadow.offset_y,
+        shadow_opacity = shadow.opacity,
+        "Theme shadow configured"
+    );
+    debug!(
+        vibrancy_enabled = vibrancy.enabled,
+        material = %vibrancy.material,
+        "Theme vibrancy configured"
+    );
+    debug!(
+        selected = format!("#{:06x}", theme.colors.accent.selected),
+        selected_subtle = format!("#{:06x}", theme.colors.accent.selected_subtle),
+        button_text = format!("#{:06x}", theme.colors.accent.button_text),
+        "Theme accent colors"
+    );
+    debug!(
+        error = format!("#{:06x}", theme.colors.ui.error),
+        warning = format!("#{:06x}", theme.colors.ui.warning),
+        info = format!("#{:06x}", theme.colors.ui.info),
+        "Theme status colors"
+    );
 }
 
 #[cfg(test)]
