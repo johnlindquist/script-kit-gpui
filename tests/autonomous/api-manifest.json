@@ -1,0 +1,871 @@
+{
+  "generated_at": "2025-12-26T20:30:18.217Z",
+  "total_apis": 63,
+  "tested_apis": 3,
+  "coverage_percent": 5,
+  "apis": [
+    {
+      "name": "arg",
+      "tier": "core",
+      "demoScript": "gpui-arg.ts",
+      "testFile": "test-core-prompts.ts",
+      "autoSubmit": true,
+      "status": "tested",
+      "usageExamples": [
+        "const command = await arg(\"Enter a shell command\", [",
+        "const command = await arg(\"Enter a shell command\", ["
+      ]
+    },
+    {
+      "name": "beep",
+      "tier": "system",
+      "demoScript": "gpui-beep.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await beep()",
+        "await beep()"
+      ]
+    },
+    {
+      "name": "blur",
+      "tier": "utility",
+      "demoScript": "gpui-window-control.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await blur()",
+        "await blur()"
+      ]
+    },
+    {
+      "name": "browse",
+      "tier": "storage",
+      "demoScript": "gpui-browse.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await browse(selected)",
+        "await browse(selected)"
+      ]
+    },
+    {
+      "name": "chat",
+      "tier": "media",
+      "demoScript": "gpui-chat.ts",
+      "testFile": "test-media-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const result = await chat({",
+        "const result = await chat({",
+        "chat.addMessage({"
+      ]
+    },
+    {
+      "name": "clipboard",
+      "tier": "system",
+      "demoScript": "gpui-clipboard.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "await clipboard.writeText(\"Hello from Script Kit!\")",
+        "const text = await clipboard.readText()"
+      ]
+    },
+    {
+      "name": "compile",
+      "tier": "storage",
+      "demoScript": "gpui-compile.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "const compiler = compile(template)"
+      ]
+    },
+    {
+      "name": "copy",
+      "tier": "system",
+      "demoScript": "gpui-clipboard.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await copy(\"Copied via copy()\")",
+        "await copy(\"Copied via copy()\")"
+      ]
+    },
+    {
+      "name": "db",
+      "tier": "storage",
+      "demoScript": "gpui-db.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const todosDb = await db({",
+        "const todosDb = await db({"
+      ]
+    },
+    {
+      "name": "del",
+      "tier": "utility",
+      "demoScript": "gpui-http.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const deleted = await del(\"https://jsonplaceholder.typicode.com/posts/1\")",
+        "const deleted = await del(\"https://jsonplaceholder.typicode.com/posts/1\")"
+      ]
+    },
+    {
+      "name": "div",
+      "tier": "core",
+      "demoScript": "gpui-div.ts",
+      "testFile": "test-core-prompts.ts",
+      "autoSubmit": true,
+      "status": "tested",
+      "usageExamples": [
+        "await div(md(`# Generated Letter",
+        "await div(md(`# Generated Letter"
+      ]
+    },
+    {
+      "name": "download",
+      "tier": "utility",
+      "demoScript": "gpui-download.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "await download(url, destination)",
+        "await download(url, destination)"
+      ]
+    },
+    {
+      "name": "drop",
+      "tier": "files",
+      "demoScript": "gpui-drop.ts",
+      "testFile": "test-file-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const files = await drop()",
+        "const files = await drop()"
+      ]
+    },
+    {
+      "name": "editFile",
+      "tier": "storage",
+      "demoScript": "gpui-edit.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget"
+    },
+    {
+      "name": "editor",
+      "tier": "core",
+      "demoScript": "gpui-editor.ts",
+      "testFile": "test-core-prompts.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const code = await editor()",
+        "const tsCode = await editor(`",
+        "const code = await editor()"
+      ]
+    },
+    {
+      "name": "env",
+      "tier": "forms",
+      "demoScript": "gpui-env.ts",
+      "testFile": "test-form-inputs.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const apiKey = await env(\"MY_API_KEY\")",
+        "const outputDir = await env(\"OUTPUT_DIR\", async () => {",
+        "const apiKey = await env(\"MY_API_KEY\")"
+      ]
+    },
+    {
+      "name": "exec",
+      "tier": "utility",
+      "demoScript": "gpui-exec.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const result = await exec(command, {",
+        "const result = await exec(command, {"
+      ]
+    },
+    {
+      "name": "exit",
+      "tier": "utility",
+      "demoScript": "gpui-submit-exit.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "exit(0)"
+      ]
+    },
+    {
+      "name": "eyeDropper",
+      "tier": "media",
+      "demoScript": "gpui-eye-dropper.ts",
+      "testFile": "test-media-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const color = await eyeDropper()",
+        "const color = await eyeDropper()"
+      ]
+    },
+    {
+      "name": "fields",
+      "tier": "forms",
+      "demoScript": "gpui-fields.ts",
+      "testFile": "test-form-inputs.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const [firstName, lastName] = await fields([\"First Name\", \"Last Name\"])",
+        "const [email, age, website] = await fields([",
+        "const [firstName, lastName] = await fields([\"First Name\", \"Last Name\"])"
+      ]
+    },
+    {
+      "name": "find",
+      "tier": "media",
+      "demoScript": "gpui-find.ts",
+      "testFile": "test-media-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const file = await find(\"Search for a file\", {",
+        "const file = await find(\"Search for a file\", {"
+      ]
+    },
+    {
+      "name": "form",
+      "tier": "forms",
+      "demoScript": "gpui-form.ts",
+      "testFile": "test-form-inputs.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const result = await form(`",
+        "const result = await form(`"
+      ]
+    },
+    {
+      "name": "get",
+      "tier": "utility",
+      "demoScript": "gpui-http.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const todos = await get(\"https://jsonplaceholder.typicode.com/todos/1\")",
+        "const todos = await get(\"https://jsonplaceholder.typicode.com/todos/1\")"
+      ]
+    },
+    {
+      "name": "getSelectedText",
+      "tier": "system",
+      "demoScript": "gpui-get-selected-text.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const selected = await getSelectedText()",
+        "const selected = await getSelectedText()"
+      ]
+    },
+    {
+      "name": "hide",
+      "tier": "utility",
+      "demoScript": "gpui-window-control.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await hide()",
+        "await hide()"
+      ]
+    },
+    {
+      "name": "home",
+      "tier": "storage",
+      "demoScript": "gpui-paths.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "cwd: home(),"
+      ]
+    },
+    {
+      "name": "hotkey",
+      "tier": "files",
+      "demoScript": "gpui-hotkey.ts",
+      "testFile": "test-file-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const keyInfo = await hotkey(\"Press a keyboard shortcut\")",
+        "const keyInfo = await hotkey(\"Press a keyboard shortcut\")"
+      ]
+    },
+    {
+      "name": "inspect",
+      "tier": "storage",
+      "demoScript": "gpui-inspect.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await inspect(data)",
+        "await inspect(data)"
+      ]
+    },
+    {
+      "name": "isBin",
+      "tier": "storage",
+      "demoScript": "gpui-file-checks.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "isBin: await isBin(p)",
+        "isBin: await isBin(p)"
+      ]
+    },
+    {
+      "name": "isDir",
+      "tier": "storage",
+      "demoScript": "gpui-file-checks.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "isDir: await isDir(p),",
+        "isDir: await isDir(p),"
+      ]
+    },
+    {
+      "name": "isFile",
+      "tier": "storage",
+      "demoScript": "gpui-file-checks.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "isFile: await isFile(p),",
+        "isFile: await isFile(p),"
+      ]
+    },
+    {
+      "name": "kenvPath",
+      "tier": "storage",
+      "demoScript": "gpui-paths.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "kenv: kenvPath(),",
+        "kenvScripts: kenvPath(\"scripts\"),",
+        "| \\`kenvPath()\\` | \\`${paths.kenv}\\` |"
+      ]
+    },
+    {
+      "name": "keyboard",
+      "tier": "system",
+      "demoScript": "gpui-keyboard.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await keyboard.type(\"Hello from Script Kit!\")"
+      ]
+    },
+    {
+      "name": "kitPath",
+      "tier": "storage",
+      "demoScript": "gpui-paths.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "kit: kitPath(),",
+        "kitDb: kitPath(\"db\"),",
+        "| \\`kitPath()\\` | \\`${paths.kit}\\` |"
+      ]
+    },
+    {
+      "name": "md",
+      "tier": "utility",
+      "demoScript": "gpui-div.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "await div(md(`# Generated Letter"
+      ]
+    },
+    {
+      "name": "memoryMap",
+      "tier": "storage",
+      "demoScript": "gpui-memory-map.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "memoryMap.set(\"user\", { name: \"John\", age: 30 })",
+        "memoryMap.set(\"settings\", { theme: \"dark\", language: \"en\" })",
+        "const user = memoryMap.get(\"user\")"
+      ]
+    },
+    {
+      "name": "menu",
+      "tier": "system",
+      "demoScript": "gpui-menu.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await menu(\"🚀\", [\"gpui-editor\", \"gpui-select\", \"gpui-notify\"])",
+        "await menu(\"🚀\", [\"gpui-editor\", \"gpui-select\", \"gpui-notify\"])"
+      ]
+    },
+    {
+      "name": "mic",
+      "tier": "media",
+      "demoScript": "gpui-mic.ts",
+      "testFile": "test-media-apis.ts",
+      "autoSubmit": false,
+      "status": "hardware",
+      "usageExamples": [
+        "const audioBuffer = await mic()",
+        "const audioBuffer = await mic()"
+      ]
+    },
+    {
+      "name": "micro",
+      "tier": "core",
+      "demoScript": "gpui-micro.ts",
+      "testFile": "test-core-prompts.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const action = await micro(\"Quick action\", [\"Save\", \"Load\", \"New\", \"Exit\"])",
+        "const action = await micro(\"Quick action\", [\"Save\", \"Load\", \"New\", \"Exit\"])"
+      ]
+    },
+    {
+      "name": "mini",
+      "tier": "core",
+      "demoScript": "gpui-mini.ts",
+      "testFile": "test-core-prompts.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const fruit = await mini(\"Pick a fruit\", [\"Apple\", \"Banana\", \"Cherry\", \"Date\"])",
+        "const fruit = await mini(\"Pick a fruit\", [\"Apple\", \"Banana\", \"Cherry\", \"Date\"])"
+      ]
+    },
+    {
+      "name": "mouse",
+      "tier": "system",
+      "demoScript": "gpui-mouse.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await mouse.move([",
+        "await mouse.setPosition({ x: 500, y: 500 })",
+        "await mouse.leftClick()"
+      ]
+    },
+    {
+      "name": "notify",
+      "tier": "system",
+      "demoScript": "gpui-notify.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await notify(\"Select some text in any app, then press Enter\")",
+        "await notify(\"Select some text in any app, then press Enter\")"
+      ]
+    },
+    {
+      "name": "paste",
+      "tier": "system",
+      "demoScript": "gpui-clipboard.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const pasted = await paste()",
+        "const pasted = await paste()"
+      ]
+    },
+    {
+      "name": "patch",
+      "tier": "utility",
+      "demoScript": "gpui-http.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const patched = await patch(\"https://jsonplaceholder.typicode.com/posts/1\", {",
+        "const patched = await patch(\"https://jsonplaceholder.typicode.com/posts/1\", {"
+      ]
+    },
+    {
+      "name": "path",
+      "tier": "files",
+      "demoScript": "gpui-path.ts",
+      "testFile": "test-file-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "return await path({",
+        "return await path({"
+      ]
+    },
+    {
+      "name": "post",
+      "tier": "utility",
+      "demoScript": "gpui-http.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const created = await post(\"https://jsonplaceholder.typicode.com/posts\", {",
+        "const created = await post(\"https://jsonplaceholder.typicode.com/posts\", {"
+      ]
+    },
+    {
+      "name": "put",
+      "tier": "utility",
+      "demoScript": "gpui-http.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const updated = await put(\"https://jsonplaceholder.typicode.com/posts/1\", {",
+        "const updated = await put(\"https://jsonplaceholder.typicode.com/posts/1\", {"
+      ]
+    },
+    {
+      "name": "run",
+      "tier": "storage",
+      "demoScript": "gpui-run.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const result = await run(selected)",
+        "const result = await run(selected)"
+      ]
+    },
+    {
+      "name": "say",
+      "tier": "system",
+      "demoScript": "gpui-say.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await say(text)",
+        "await say(\"Hello from Script Kit!\", \"Samantha\")",
+        "await say(text)"
+      ]
+    },
+    {
+      "name": "select",
+      "tier": "core",
+      "demoScript": "gpui-select.ts",
+      "testFile": "test-core-prompts.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const languages = await select(\"Select languages you know\", [",
+        "const languages = await select(\"Select languages you know\", ["
+      ]
+    },
+    {
+      "name": "setSelectedText",
+      "tier": "system",
+      "demoScript": "gpui-selected-text.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await setSelectedText(newText)",
+        "await setSelectedText(newText)"
+      ]
+    },
+    {
+      "name": "setStatus",
+      "tier": "system",
+      "demoScript": "gpui-set-status.ts",
+      "testFile": "test-system-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await setStatus({",
+        "await setStatus({",
+        "await setStatus({"
+      ]
+    },
+    {
+      "name": "show",
+      "tier": "utility",
+      "demoScript": "gpui-window-control.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await show()",
+        "await show()"
+      ]
+    },
+    {
+      "name": "store",
+      "tier": "storage",
+      "demoScript": "gpui-store.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "await store.set(\"lastRun\", new Date().toISOString())",
+        "await store.set(\"runCount\", ((await store.get(\"runCount\")) || 0) + 1)",
+        "const lastRun = await store.get(\"lastRun\")"
+      ]
+    },
+    {
+      "name": "submit",
+      "tier": "utility",
+      "demoScript": "gpui-submit-exit.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "submit(\"Auto-selected!\")"
+      ]
+    },
+    {
+      "name": "template",
+      "tier": "forms",
+      "demoScript": "gpui-template.ts",
+      "testFile": "test-form-inputs.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const letter = await template(`",
+        "const letter = await template(`"
+      ]
+    },
+    {
+      "name": "term",
+      "tier": "media",
+      "demoScript": "gpui-term.ts",
+      "testFile": "test-media-apis.ts",
+      "autoSubmit": true,
+      "status": "tested",
+      "usageExamples": [
+        "const output = await term(\"ls -la ~\")",
+        "const output = await term(\"ls -la ~\")"
+      ]
+    },
+    {
+      "name": "tmpPath",
+      "tier": "storage",
+      "demoScript": "gpui-paths.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "const imagePath = tmpPath(\"webcam-capture.jpg\")"
+      ]
+    },
+    {
+      "name": "trash",
+      "tier": "utility",
+      "demoScript": "gpui-trash.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "await trash(testFile)",
+        "await trash(testFile)"
+      ]
+    },
+    {
+      "name": "uuid",
+      "tier": "storage",
+      "demoScript": "gpui-uuid.ts",
+      "testFile": "test-storage-apis.ts",
+      "autoSubmit": false,
+      "status": "untested",
+      "usageExamples": [
+        "const ids = Array.from({ length: 5 }, () => uuid())"
+      ]
+    },
+    {
+      "name": "wait",
+      "tier": "utility",
+      "demoScript": "gpui-wait.ts",
+      "testFile": "test-utility-apis.ts",
+      "autoSubmit": false,
+      "status": "fire-and-forget",
+      "usageExamples": [
+        "await wait(1000)",
+        "await wait(2000)",
+        "await wait(2000)"
+      ]
+    },
+    {
+      "name": "webcam",
+      "tier": "media",
+      "demoScript": "gpui-webcam.ts",
+      "testFile": "test-media-apis.ts",
+      "autoSubmit": false,
+      "status": "hardware",
+      "usageExamples": [
+        "const imageBuffer = await webcam()",
+        "const imageBuffer = await webcam()"
+      ]
+    },
+    {
+      "name": "widget",
+      "tier": "media",
+      "demoScript": "gpui-widget.ts",
+      "testFile": "test-media-apis.ts",
+      "autoSubmit": true,
+      "status": "untested",
+      "usageExamples": [
+        "const w = await widget(`",
+        "const w = await widget(`"
+      ]
+    }
+  ],
+  "tiers": {
+    "core": {
+      "total": 6,
+      "tested": 2,
+      "apis": [
+        "arg",
+        "div",
+        "editor",
+        "mini",
+        "micro",
+        "select"
+      ]
+    },
+    "forms": {
+      "total": 4,
+      "tested": 0,
+      "apis": [
+        "fields",
+        "form",
+        "template",
+        "env"
+      ]
+    },
+    "system": {
+      "total": 12,
+      "tested": 0,
+      "apis": [
+        "beep",
+        "say",
+        "notify",
+        "setStatus",
+        "menu",
+        "copy",
+        "paste",
+        "clipboard",
+        "keyboard",
+        "mouse",
+        "getSelectedText",
+        "setSelectedText"
+      ]
+    },
+    "files": {
+      "total": 3,
+      "tested": 0,
+      "apis": [
+        "hotkey",
+        "drop",
+        "path"
+      ]
+    },
+    "media": {
+      "total": 7,
+      "tested": 1,
+      "apis": [
+        "chat",
+        "term",
+        "widget",
+        "webcam",
+        "mic",
+        "eyeDropper",
+        "find"
+      ]
+    },
+    "utility": {
+      "total": 15,
+      "tested": 0,
+      "apis": [
+        "exec",
+        "get",
+        "post",
+        "put",
+        "patch",
+        "del",
+        "download",
+        "trash",
+        "show",
+        "hide",
+        "blur",
+        "submit",
+        "exit",
+        "wait",
+        "md"
+      ]
+    },
+    "storage": {
+      "total": 16,
+      "tested": 0,
+      "apis": [
+        "uuid",
+        "compile",
+        "home",
+        "kenvPath",
+        "kitPath",
+        "tmpPath",
+        "isFile",
+        "isDir",
+        "isBin",
+        "db",
+        "store",
+        "memoryMap",
+        "browse",
+        "editFile",
+        "run",
+        "inspect"
+      ]
+    }
+  }
+}
