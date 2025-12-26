@@ -3041,14 +3041,18 @@ fn main() {
             })
             .unwrap();
         
+        // Configure window as floating panel on macOS (do this before hiding)
+        // We need to briefly activate to configure the panel, then hide
         cx.activate(true);
-        
-        // Configure window as floating panel on macOS
         configure_as_floating_panel();
         
-        // IMPORTANT: Update visibility state now that window is actually created and visible
-        WINDOW_VISIBLE.store(true, Ordering::SeqCst);
-        logging::log("HOTKEY", "Window visibility state set to true (window now visible)");
+        // DEV MODE: Start hidden to prevent window from re-opening on hot reload
+        // The window will appear when the user presses the hotkey
+        cx.hide();
+        
+        // IMPORTANT: Window starts hidden, waiting for hotkey to show
+        WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+        logging::log("HOTKEY", "Window starts hidden (use hotkey to show)");
         
         start_hotkey_event_handler(cx, window);
         
