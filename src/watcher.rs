@@ -330,7 +330,7 @@ impl Drop for ThemeWatcher {
     }
 }
 
-/// Watches ~/.kenv/scripts directory for changes and emits reload events
+/// Watches ~/.kenv/scripts and ~/.kenv/scriptlets directories for changes and emits reload events
 pub struct ScriptWatcher {
     tx: Option<Sender<ScriptReloadEvent>>,
     watcher_thread: Option<thread::JoinHandle<()>>,
@@ -374,9 +374,12 @@ impl ScriptWatcher {
 
     /// Internal watch loop running in background thread
     fn watch_loop(tx: Sender<ScriptReloadEvent>) -> NotifyResult<()> {
-        // Expand the scripts path
+        // Expand the scripts and scriptlets paths
         let scripts_path = PathBuf::from(
             shellexpand::tilde("~/.kenv/scripts").as_ref()
+        );
+        let scriptlets_path = PathBuf::from(
+            shellexpand::tilde("~/.kenv/scriptlets").as_ref()
         );
 
         // Create a debounce timer using Arc<Mutex>
@@ -395,6 +398,20 @@ impl ScriptWatcher {
 
         // Watch the scripts directory recursively
         watcher.watch(&scripts_path, RecursiveMode::Recursive)?;
+        
+        // Watch the scriptlets directory recursively (for *.md files)
+        if scriptlets_path.exists() {
+            watcher.watch(&scriptlets_path, RecursiveMode::Recursive)?;
+            info!(
+                path = %scriptlets_path.display(),
+                recursive = true,
+                "Scriptlets watcher started"
+            );
+            eprintln!(
+                "Script watcher started, watching {:?} recursively for scriptlets",
+                scriptlets_path
+            );
+        }
 
         info!(
             path = %scripts_path.display(),

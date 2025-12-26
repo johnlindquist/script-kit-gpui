@@ -196,9 +196,9 @@ fn parse_scriptlet_section(section: &str) -> Option<Scriptlet> {
     })
 }
 
-/// Reads scriptlets from ~/.kenv/scriptlets/scriptlets.md
-/// Returns a sorted list of Scriptlet structs
-/// Returns empty vec if file doesn't exist or is inaccessible
+/// Reads scriptlets from all *.md files in ~/.kenv/scriptlets/
+/// Returns a sorted list of Scriptlet structs parsed from markdown
+/// Returns empty vec if directory doesn't exist or is inaccessible
 #[instrument(level = "debug", skip_all)]
 pub fn read_scriptlets() -> Vec<Scriptlet> {
     let home = match env::var("HOME") {
@@ -207,6 +207,86 @@ pub fn read_scriptlets() -> Vec<Scriptlet> {
             warn!(error = %e, "HOME environment variable not set, cannot read scriptlets");
             return vec![];
         }
+    };
+
+    let scriptlets_dir = home.join(".kenv/scriptlets");
+
+    // Check if directory exists
+    if !scriptlets_dir.exists() {
+        debug!(path = %scriptlets_dir.display(), "Scriptlets directory does not exist");
+        return vec![];
+    }
+
+    let mut scriptlets = Vec::new();
+
+    // Read all .md files in the scriptlets directory
+    match fs::read_dir(&scriptlets_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                
+                // Only process .md files
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                
+                // Skip if not a file
+                if !path.is_file() {
+                    continue;
+                }
+                
+                debug!(path = %path.display(), "Reading scriptlets file");
+                
+                match fs::read_to_string(&path) {
+                    Ok(content) => {
+                        // Split by ## headings
+                        let mut current_section = String::new();
+                        for line in content.lines() {
+                            if line.starts_with("##") && !current_section.is_empty() {
+                                // Parse previous section
+                                if let Some(scriptlet) = parse_scriptlet_section(&current_section) {
+                                    scriptlets.push(scriptlet);
+                                }
+                                current_section = line.to_string();
+                            } else {
+                                current_section.push('\n');
+                                current_section.push_str(line);
+                            }
+                        }
+
+                        // Parse the last section
+                        if !current_section.is_empty() {
+                            if let Some(scriptlet) = parse_scriptlet_section(&current_section) {
+                                scriptlets.push(scriptlet);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "Failed to read scriptlets file"
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %scriptlets_dir.display(),
+                "Failed to read scriptlets directory"
+            );
+            return vec![];
+        }
+    }
+
+    // Sort by name
+    scriptlets.sort_by(|a, b| a.name.cmp(&b.name));
+
+    debug!(count = scriptlets.len(), "Loaded scriptlets from all .md files");
+    scriptlets
+}
     };
 
     let scriptlets_file = home.join(".kenv/scriptlets/scriptlets.md");

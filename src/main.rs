@@ -735,7 +735,6 @@ impl ScriptListApp {
         cx.notify();
     }
     
-    #[allow(dead_code)]
     fn refresh_scripts(&mut self, cx: &mut Context<Self>) {
         self.scripts = scripts::read_scripts();
         self.scriptlets = scripts::read_scriptlets();
@@ -2987,10 +2986,14 @@ fn main() {
         logging::log("APP", &format!("Failed to start appearance watcher: {}", e));
     }
     
-
     let (mut config_watcher, config_rx) = watcher::ConfigWatcher::new();
     if let Err(e) = config_watcher.start() {
         logging::log("APP", &format!("Failed to start config watcher: {}", e));
+    }
+    
+    let (mut script_watcher, script_rx) = watcher::ScriptWatcher::new();
+    if let Err(e) = script_watcher.start() {
+        logging::log("APP", &format!("Failed to start script watcher: {}", e));
     }
     Application::new().run(move |cx: &mut App| {
         logging::log("APP", "GPUI Application starting");
@@ -3059,6 +3062,23 @@ fn main() {
                     let _ = cx.update(|cx| {
                         let _ = window_for_config.update(cx, |view: &mut ScriptListApp, _window: &mut Window, ctx: &mut Context<ScriptListApp>| {
                             view.update_config(ctx);
+                        });
+                    });
+                }
+            }
+        }).detach();
+        
+        // Script/scriptlets reload watcher - watches ~/.kenv/scripts/ and ~/.kenv/scriptlets/
+        let window_for_scripts = window;
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            loop {
+                Timer::after(std::time::Duration::from_millis(200)).await;
+                
+                if script_rx.try_recv().is_ok() {
+                    logging::log("APP", "Scripts or scriptlets changed, reloading");
+                    let _ = cx.update(|cx| {
+                        let _ = window_for_scripts.update(cx, |view: &mut ScriptListApp, _window: &mut Window, ctx: &mut Context<ScriptListApp>| {
+                            view.refresh_scripts(ctx);
                         });
                     });
                 }
