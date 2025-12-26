@@ -1545,6 +1545,13 @@ globalThis.setSelectedText = async function setSelectedText(text: string): Promi
  * @throws If accessibility permission not granted
  */
 globalThis.getSelectedText = async function getSelectedText(): Promise<string> {
+  // Auto-hide the Script Kit window so the previous app regains focus
+  // and its text selection becomes accessible
+  await globalThis.hide();
+  
+  // Small delay to ensure focus has transferred to the previous app
+  await new Promise(resolve => setTimeout(resolve, 50));
+  
   const id = nextId();
   
   return new Promise((resolve, reject) => {
