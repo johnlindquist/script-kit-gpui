@@ -51,8 +51,8 @@ pub struct PtyManager {
     master: Box<dyn MasterPty + Send>,
     /// The child process running in the PTY
     child: Box<dyn Child + Send + Sync>,
-    /// Reader for PTY output
-    reader: Box<dyn Read + Send>,
+    /// Reader for PTY output (Option to allow taking ownership)
+    reader: Option<Box<dyn Read + Send>>,
     /// Writer for PTY input
     writer: Box<dyn Write + Send>,
     /// Current terminal dimensions
@@ -224,10 +224,18 @@ impl PtyManager {
         Ok(Self {
             master: pair.master,
             child,
-            reader,
+            reader: Some(reader),
             writer,
             size,
         })
+    }
+    
+    /// Takes ownership of the PTY reader for use in a background thread.
+    /// 
+    /// After calling this, `read()` will return an error.
+    /// This is used to move the reader to a background thread for non-blocking I/O.
+    pub fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.reader.take()
     }
 
     /// Detects the default shell for the current platform.
@@ -313,13 +321,20 @@ impl PtyManager {
     /// Returns an I/O error if the read fails.
     #[inline]
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let result = self.reader.read(buf);
-        if let Ok(n) = &result {
-            if *n > 0 {
-                debug!(bytes = n, "Read from PTY");
+        match &mut self.reader {
+            Some(reader) => {
+                let result = reader.read(buf);
+                if let Ok(n) = &result {
+                    if *n > 0 {
+                        debug!(bytes = n, "Read from PTY");
+                    }
+                }
+                result
             }
+            None => Err(io::Error::other(
+                "PTY reader has been taken for background thread",
+            )),
         }
-        result
     }
 
     /// Writes input to the PTY.
@@ -419,16 +434,6 @@ impl PtyManager {
         self.child.kill().context("Failed to kill child process")?;
         info!("Child process killed");
         Ok(())
-    }
-
-    /// Takes the reader, consuming it from the manager.
-    ///
-    /// This is useful when you need to move the reader to another thread.
-    /// After calling this, `read()` will no longer work on this manager.
-    pub fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
-        // We can't actually take since we only have one reader
-        // The reader could be cloned at construction time if needed
-        None
     }
 
     /// Gets a reference to the master PTY.

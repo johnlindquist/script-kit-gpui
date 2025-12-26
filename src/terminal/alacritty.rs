@@ -352,7 +352,7 @@ pub struct TerminalHandle {
     state: Arc<Mutex<TerminalState>>,
     /// Event proxy for receiving terminal events (shared with Term).
     event_proxy: EventProxy,
-    /// PTY manager for process I/O.
+    /// PTY manager for process I/O (writing only - reading happens in background thread).
     pty: PtyManager,
     /// Theme adapter for colors.
     #[allow(dead_code)]
@@ -360,8 +360,10 @@ pub struct TerminalHandle {
     /// Current terminal dimensions.
     cols: u16,
     rows: u16,
-    /// Buffer for reading from PTY.
-    read_buffer: Vec<u8>,
+    /// Receiver for PTY output from background reader thread.
+    pty_output_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    /// Flag to signal background reader to stop.
+    reader_stop_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for TerminalHandle {
@@ -428,9 +430,12 @@ impl TerminalHandle {
         rows: u16,
         scrollback_lines: usize,
     ) -> Result<Self> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        
         // Always spawn an interactive shell - never use -c which exits after command
         // If a command is provided, we'll write it to the PTY after creation
-        let pty = PtyManager::with_size(cols, rows).context("Failed to create PTY")?;
+        let mut pty = PtyManager::with_size(cols, rows).context("Failed to create PTY")?;
 
         // Create terminal configuration
         let config = TermConfig {
@@ -450,6 +455,52 @@ impl TerminalHandle {
 
         // Create theme adapter with defaults
         let theme = ThemeAdapter::dark_default();
+        
+        // Create channel for PTY output from background reader
+        let (pty_output_tx, pty_output_rx) = mpsc::channel();
+        
+        // Create stop flag for background reader
+        let reader_stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_clone = reader_stop_flag.clone();
+        
+        // Take the PTY reader and spawn background thread
+        if let Some(mut reader) = pty.take_reader() {
+            std::thread::spawn(move || {
+                let mut buffer = vec![0u8; PTY_READ_BUFFER_SIZE];
+                loop {
+                    // Check if we should stop
+                    if stop_flag_clone.load(Ordering::Relaxed) {
+                        trace!("PTY reader thread stopping");
+                        break;
+                    }
+                    
+                    // Read from PTY (this blocks, but that's OK in a background thread)
+                    match reader.read(&mut buffer) {
+                        Ok(0) => {
+                            // EOF - PTY closed
+                            trace!("PTY EOF in reader thread");
+                            break;
+                        }
+                        Ok(n) => {
+                            // Send data to main thread
+                            if pty_output_tx.send(buffer[..n].to_vec()).is_err() {
+                                // Channel closed, stop reading
+                                trace!("PTY output channel closed");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::Interrupted {
+                                warn!(error = %e, "Error reading from PTY in background thread");
+                                break;
+                            }
+                            // Interrupted - continue reading
+                        }
+                    }
+                }
+                trace!("PTY reader thread exiting");
+            });
+        }
 
         let mut handle = Self {
             state,
@@ -458,7 +509,8 @@ impl TerminalHandle {
             theme,
             cols,
             rows,
-            read_buffer: vec![0u8; PTY_READ_BUFFER_SIZE],
+            pty_output_rx,
+            reader_stop_flag,
         };
 
         // If a command was provided, send it to the interactive shell
@@ -497,37 +549,23 @@ impl TerminalHandle {
 
     /// Processes PTY output through terminal parser.
     ///
-    /// Reads available data from the PTY and processes it through the
-    /// VTE parser to update the terminal grid. Returns any events
-    /// generated during processing.
+    /// Reads available data from the channel (sent by background reader thread)
+    /// and processes it through the VTE parser to update the terminal grid.
+    /// Returns any events generated during processing.
     ///
-    /// This method is non-blocking - it reads whatever data is available
-    /// without waiting.
+    /// This method is non-blocking - it only processes data that's already
+    /// been read by the background thread.
     ///
     /// # Returns
     ///
     /// A vector of terminal events generated during processing.
     #[instrument(level = "trace", skip(self))]
     pub fn process(&mut self) -> Vec<TerminalEvent> {
-        // Try to read from PTY (non-blocking would be ideal, but we'll handle errors)
-        match self.pty.read(&mut self.read_buffer) {
-            Ok(0) => {
-                // EOF - terminal closed
-                trace!("PTY EOF");
-            }
-            Ok(n) => {
-                trace!(bytes = n, "Read from PTY");
-
-                // Process bytes through VTE parser
-                let mut state = self.state.lock().unwrap();
-                state.process_bytes(&self.read_buffer[..n]);
-            }
-            Err(e) => {
-                // WouldBlock is expected for non-blocking reads
-                if e.kind() != std::io::ErrorKind::WouldBlock {
-                    warn!(error = %e, "Error reading from PTY");
-                }
-            }
+        // Process all available data from the background reader thread (non-blocking)
+        while let Ok(data) = self.pty_output_rx.try_recv() {
+            trace!(bytes = data.len(), "Processing PTY data from channel");
+            let mut state = self.state.lock().unwrap();
+            state.process_bytes(&data);
         }
 
         // Collect and return events
@@ -712,6 +750,14 @@ impl TerminalHandle {
     /// Gets a reference to the theme adapter.
     pub fn theme(&self) -> &ThemeAdapter {
         &self.theme
+    }
+}
+
+impl Drop for TerminalHandle {
+    fn drop(&mut self) {
+        // Signal the background reader thread to stop
+        self.reader_stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        debug!("TerminalHandle dropped, signaled reader thread to stop");
     }
 }
 
