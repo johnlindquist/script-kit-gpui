@@ -17,6 +17,10 @@ These are **not Rust tests** - they are TypeScript fixture scripts that verify t
 | `hello-world.ts` | Basic sanity check | SDK preload, div(), md(), clean exit |
 | `hello-world-args.ts` | Interactive prompts | arg() with simple/structured choices, multi-step flow |
 | `test-window-reset.ts` | Window state reset | NEEDS_RESET flag, fresh UI after script completion |
+| `test-error-handling.ts` | Error scenarios | Thrown errors, TypeError, ReferenceError, graceful exit |
+| `test-user-cancel.ts` | Cancellation handling | Escape key, prompt cancel, graceful exit on cancel |
+| `test-empty-choices.ts` | Edge cases | Single choice, many choices (scroll), empty choices array |
+| `test-process-cleanup.ts` | Process lifecycle | Process termination, resource cleanup |
 
 ### Multi-Monitor Testing
 
