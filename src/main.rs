@@ -8,6 +8,7 @@ use gpui::{
 };
 use global_hotkey::{GlobalHotKeyManager, GlobalHotKeyEvent, HotKeyState, hotkey::{HotKey, Modifiers, Code}};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use core_graphics::event::CGEvent;
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use cocoa::appkit::NSApp;
@@ -34,6 +35,8 @@ mod error;
 mod designs;
 mod term_prompt;
 mod terminal;
+#[cfg(target_os = "macos")]
+mod selected_text;
 
 use list_item::{ListItem, ListItemColors, LIST_ITEM_HEIGHT};
 use utils::strip_html_tags;
@@ -284,7 +287,14 @@ fn calculate_eye_line_bounds_on_mouse_display(
 }
 
 // Global state for hotkey signaling between threads
-static HOTKEY_TRIGGERED: AtomicBool = AtomicBool::new(false);
+// HOTKEY_CHANNEL: Event-driven async_channel for hotkey events (replaces AtomicBool polling)
+static HOTKEY_CHANNEL: OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> = OnceLock::new();
+
+/// Get the hotkey channel, initializing it on first access
+fn hotkey_channel() -> &'static (async_channel::Sender<()>, async_channel::Receiver<()>) {
+    HOTKEY_CHANNEL.get_or_init(|| async_channel::bounded(10))
+}
+
 static HOTKEY_TRIGGER_COUNT: AtomicU64 = AtomicU64::new(0);
 static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false); // Track window visibility for toggle (starts hidden)
 static NEEDS_RESET: AtomicBool = AtomicBool::new(false); // Track if window needs reset to script list on next show
@@ -388,7 +398,7 @@ fn start_stdin_listener() -> async_channel::Receiver<ExternalCommand> {
     rx
 }
 
-/// A simple model that polls for hotkey triggers
+/// A simple model that listens for hotkey triggers via async_channel (event-driven)
 struct HotkeyPoller {
     window: WindowHandle<ScriptListApp>,
 }
@@ -398,113 +408,110 @@ impl HotkeyPoller {
         Self { window }
     }
     
-    fn start_polling(&self, cx: &mut Context<Self>) {
+    fn start_listening(&self, cx: &mut Context<Self>) {
         let window = self.window;
+        // Event-driven: recv().await yields immediately when hotkey is pressed
+        // No polling - replaces 100ms Timer::after loop
         cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
-            loop {
-                Timer::after(std::time::Duration::from_millis(100)).await;
+            logging::log("HOTKEY", "Hotkey listener started (event-driven via async_channel)");
+            
+            while let Ok(()) = hotkey_channel().1.recv().await {
+                logging::log("VISIBILITY", "");
+                logging::log("VISIBILITY", "╔════════════════════════════════════════════════════════════╗");
+                logging::log("VISIBILITY", "║  HOTKEY TRIGGERED - TOGGLE WINDOW                          ║");
+                logging::log("VISIBILITY", "╚════════════════════════════════════════════════════════════╝");
                 
-                if HOTKEY_TRIGGERED.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    logging::log("VISIBILITY", "");
-                    logging::log("VISIBILITY", "╔════════════════════════════════════════════════════════════╗");
-                    logging::log("VISIBILITY", "║  HOTKEY TRIGGERED - TOGGLE WINDOW                          ║");
-                    logging::log("VISIBILITY", "╚════════════════════════════════════════════════════════════╝");
+                // Check current visibility state for toggle behavior
+                let is_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                let needs_reset = NEEDS_RESET.load(Ordering::SeqCst);
+                logging::log("VISIBILITY", &format!("State check: WINDOW_VISIBLE={}, NEEDS_RESET={}", is_visible, needs_reset));
+                
+                if is_visible {
+                    logging::log("VISIBILITY", "Decision: HIDE (window is currently visible)");
+                    // Update visibility state FIRST to prevent race conditions
+                    // Even though the hide is async, we mark it as hidden immediately
+                    WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                    logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
                     
-                    // Check current visibility state for toggle behavior
-                    let is_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
-                    let needs_reset = NEEDS_RESET.load(Ordering::SeqCst);
-                    logging::log("VISIBILITY", &format!("State check: WINDOW_VISIBLE={}, NEEDS_RESET={}", is_visible, needs_reset));
+                    // Window is visible - check if in prompt mode
+                    let window_clone = window;
                     
-                    if is_visible {
-                        logging::log("VISIBILITY", "Decision: HIDE (window is currently visible)");
-                        // Update visibility state FIRST to prevent race conditions
-                        // Even though the hide is async, we mark it as hidden immediately
-                        WINDOW_VISIBLE.store(false, Ordering::SeqCst);
-                        logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
-                        
-                        // Window is visible - check if in prompt mode
-                        let window_clone = window;
-                        
-                        // First check if we're in a prompt - if so, cancel and hide
-                        let mut in_prompt = false;
-                        let _ = cx.update(move |cx: &mut App| {
-                            let _ = window_clone.update(cx, |view: &mut ScriptListApp, _win: &mut Window, ctx: &mut Context<ScriptListApp>| {
-                                if view.is_in_prompt() {
-                                    logging::log("HOTKEY", "In prompt mode - canceling script before hiding");
-                                    view.cancel_script_execution(ctx);
-                                    in_prompt = true;
-                                }
-                            });
-                            
-                            // Always hide the window when hotkey pressed while visible
-                            logging::log("HOTKEY", "Hiding window (toggle: visible -> hidden)");
-                            // PERF: Measure window hide latency
-                            let hide_start = std::time::Instant::now();
-                            cx.hide();
-                            let hide_elapsed = hide_start.elapsed();
-                            logging::log("PERF", &format!(
-                                "Window hide took {:.2}ms",
-                                hide_elapsed.as_secs_f64() * 1000.0
-                            ));
-                            logging::log("HOTKEY", "Window hidden via cx.hide()");
+                    // First check if we're in a prompt - if so, cancel and hide
+                    let _ = cx.update(move |cx: &mut App| {
+                        let _ = window_clone.update(cx, |view: &mut ScriptListApp, _win: &mut Window, ctx: &mut Context<ScriptListApp>| {
+                            if view.is_in_prompt() {
+                                logging::log("HOTKEY", "In prompt mode - canceling script before hiding");
+                                view.cancel_script_execution(ctx);
+                            }
                         });
-                    } else {
-                        logging::log("VISIBILITY", "Decision: SHOW (window is currently hidden)");
-                        // Update visibility state FIRST to prevent race conditions
-                        WINDOW_VISIBLE.store(true, Ordering::SeqCst);
-                        logging::log("VISIBILITY", "WINDOW_VISIBLE set to: true");
                         
-                        let window_clone = window;
-                        let _ = cx.update(move |cx: &mut App| {
-                            // Step 1: Calculate new bounds on display with mouse, at eye-line height
-                            let window_size = size(px(750.), px(500.0));
-                            let new_bounds = calculate_eye_line_bounds_on_mouse_display(window_size, cx);
-                            
-                            logging::log("HOTKEY", &format!(
-                                "Calculated bounds: origin=({:.0}, {:.0}) size={:.0}x{:.0}",
-                                f64::from(new_bounds.origin.x),
-                                f64::from(new_bounds.origin.y),
-                                f64::from(new_bounds.size.width),
-                                f64::from(new_bounds.size.height)
-                            ));
-                            
-                            // Step 2: FIRST activate the app (makes window visible)
-                            // We MUST activate first because move_key_window_to() uses NSApp().keyWindow
-                            // and hidden windows are NOT the key window
-                            // Step 2: Move window FIRST (before activation)
-                            // We use move_first_window_to_bounds which doesn't depend on keyWindow
-                            // This ensures the window is in the right position before it becomes visible
-                            move_first_window_to_bounds(&new_bounds);
-                            logging::log("HOTKEY", "Window repositioned to mouse display");
-                            
-                            // Step 3: NOW activate the app (makes window visible at new position)
-                            cx.activate(true);
-                            logging::log("HOTKEY", "App activated (window now visible)");
-                            
-                            // Step 4: Activate the specific window and focus it
-                            let _ = window_clone.update(cx, |view: &mut ScriptListApp, win: &mut Window, cx: &mut Context<ScriptListApp>| {
-                                win.activate_window();
-                                let focus_handle = view.focus_handle(cx);
-                                win.focus(&focus_handle, cx);
-                                logging::log("HOTKEY", "Window activated and focused");
-                                
-                                // Step 5: Check if we need to reset to script list (after script completion)
-                                if NEEDS_RESET.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                                    logging::log("VISIBILITY", "NEEDS_RESET was true - clearing and resetting to script list");
-                                    view.reset_to_script_list(cx);
-                                }
-                            });
-                            
-                            logging::log("VISIBILITY", "Window show sequence complete");
-                        });
-                    }
+                        // Always hide the window when hotkey pressed while visible
+                        logging::log("HOTKEY", "Hiding window (toggle: visible -> hidden)");
+                        // PERF: Measure window hide latency
+                        let hide_start = std::time::Instant::now();
+                        cx.hide();
+                        let hide_elapsed = hide_start.elapsed();
+                        logging::log("PERF", &format!(
+                            "Window hide took {:.2}ms",
+                            hide_elapsed.as_secs_f64() * 1000.0
+                        ));
+                        logging::log("HOTKEY", "Window hidden via cx.hide()");
+                    });
+                } else {
+                    logging::log("VISIBILITY", "Decision: SHOW (window is currently hidden)");
+                    // Update visibility state FIRST to prevent race conditions
+                    WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+                    logging::log("VISIBILITY", "WINDOW_VISIBLE set to: true");
                     
-                    let final_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
-                    let final_reset = NEEDS_RESET.load(Ordering::SeqCst);
-                    logging::log("VISIBILITY", &format!("Final state: WINDOW_VISIBLE={}, NEEDS_RESET={}", final_visible, final_reset));
-                    logging::log("VISIBILITY", "═══════════════════════════════════════════════════════════════");
+                    let window_clone = window;
+                    let _ = cx.update(move |cx: &mut App| {
+                        // Step 1: Calculate new bounds on display with mouse, at eye-line height
+                        let window_size = size(px(750.), px(500.0));
+                        let new_bounds = calculate_eye_line_bounds_on_mouse_display(window_size, cx);
+                        
+                        logging::log("HOTKEY", &format!(
+                            "Calculated bounds: origin=({:.0}, {:.0}) size={:.0}x{:.0}",
+                            f64::from(new_bounds.origin.x),
+                            f64::from(new_bounds.origin.y),
+                            f64::from(new_bounds.size.width),
+                            f64::from(new_bounds.size.height)
+                        ));
+                        
+                        // Step 2: Move window FIRST (before activation)
+                        // We use move_first_window_to_bounds which doesn't depend on keyWindow
+                        // This ensures the window is in the right position before it becomes visible
+                        move_first_window_to_bounds(&new_bounds);
+                        logging::log("HOTKEY", "Window repositioned to mouse display");
+                        
+                        // Step 3: NOW activate the app (makes window visible at new position)
+                        cx.activate(true);
+                        logging::log("HOTKEY", "App activated (window now visible)");
+                        
+                        // Step 4: Activate the specific window and focus it
+                        let _ = window_clone.update(cx, |view: &mut ScriptListApp, win: &mut Window, cx: &mut Context<ScriptListApp>| {
+                            win.activate_window();
+                            let focus_handle = view.focus_handle(cx);
+                            win.focus(&focus_handle, cx);
+                            logging::log("HOTKEY", "Window activated and focused");
+                            
+                            // Step 5: Check if we need to reset to script list (after script completion)
+                            if NEEDS_RESET.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                                logging::log("VISIBILITY", "NEEDS_RESET was true - clearing and resetting to script list");
+                                view.reset_to_script_list(cx);
+                            }
+                        });
+                        
+                        logging::log("VISIBILITY", "Window show sequence complete");
+                    });
                 }
+                
+                let final_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                let final_reset = NEEDS_RESET.load(Ordering::SeqCst);
+                logging::log("VISIBILITY", &format!("Final state: WINDOW_VISIBLE={}, NEEDS_RESET={}", final_visible, final_reset));
+                logging::log("VISIBILITY", "═══════════════════════════════════════════════════════════════");
             }
+            
+            logging::log("HOTKEY", "Hotkey listener exiting (channel closed)");
         }).detach();
     }
 }
@@ -538,8 +545,8 @@ struct ScriptListApp {
     // Prompt-specific state (used when view is ArgPrompt or DivPrompt)
     arg_input_text: String,
     arg_selected_index: usize,
-    // Channel for receiving prompt messages from script thread
-    prompt_receiver: Option<mpsc::Receiver<PromptMessage>>,
+    // Channel for receiving prompt messages from script thread (async_channel for event-driven)
+    prompt_receiver: Option<async_channel::Receiver<PromptMessage>>,
     // Channel for sending responses back to script
     response_sender: Option<mpsc::Sender<Message>>,
     // Scroll handle for uniform_list (automatic virtualized scrolling)
@@ -645,25 +652,6 @@ impl ScriptListApp {
             error_notification: None,
             // Design system: start with default design
             current_design: DesignVariant::default(),
-        }
-    }
-    
-    /// Poll for prompt messages from the script thread
-    fn poll_prompt_messages(&mut self, cx: &mut Context<Self>) {
-        // Collect messages first to avoid borrow conflicts
-        let messages: Vec<PromptMessage> = if let Some(ref receiver) = self.prompt_receiver {
-            let mut msgs = Vec::new();
-            while let Ok(msg) = receiver.try_recv() {
-                msgs.push(msg);
-            }
-            msgs
-        } else {
-            Vec::new()
-        };
-        
-        // Now process collected messages
-        for msg in messages {
-            self.handle_prompt_message(msg, cx);
         }
     }
     
@@ -1078,9 +1066,27 @@ impl ScriptListApp {
                 
                 *self.script_session.lock().unwrap() = Some(session);
                 
-                // Create channel for script thread to send prompt messages to UI
-                let (tx, rx) = mpsc::channel();
+                // Create async_channel for script thread to send prompt messages to UI (event-driven)
+                let (tx, rx) = async_channel::unbounded();
+                let rx_for_listener = rx.clone();
                 self.prompt_receiver = Some(rx);
+                
+                // Spawn event-driven listener for prompt messages (replaces 50ms polling)
+                cx.spawn(async move |this, cx| {
+                    logging::log("EXEC", "Prompt message listener started (event-driven)");
+                    
+                    // Event-driven: recv().await yields until a message arrives
+                    while let Ok(msg) = rx_for_listener.recv().await {
+                        logging::log("EXEC", &format!("Prompt message received: {:?}", msg));
+                        let _ = cx.update(|cx| {
+                            this.update(cx, |app, cx| {
+                                app.handle_prompt_message(msg, cx);
+                            })
+                        });
+                    }
+                    
+                    logging::log("EXEC", "Prompt message listener exiting (channel closed)");
+                }).detach();
                 
                 // We need separate threads for reading and writing to avoid deadlock
                 // The read thread blocks on receive_message(), so we can't check for responses in the same loop
@@ -1166,7 +1172,7 @@ impl ScriptListApp {
                                 };
                                 
                                 if let Some(prompt_msg) = prompt_msg {
-                                    if tx.send(prompt_msg).is_err() {
+                                    if tx.send_blocking(prompt_msg).is_err() {
                                         logging::log("EXEC", "Prompt channel closed, reader exiting");
                                         break;
                                     }
@@ -1174,12 +1180,12 @@ impl ScriptListApp {
                             }
                             Ok(None) => {
                                 logging::log("EXEC", "Script stdout closed (EOF)");
-                                let _ = tx.send(PromptMessage::ScriptExit);
+                                let _ = tx.send_blocking(PromptMessage::ScriptExit);
                                 break;
                             }
                             Err(e) => {
                                 logging::log("EXEC", &format!("Error reading from script: {}", e));
-                                let _ = tx.send(PromptMessage::ScriptExit);
+                                let _ = tx.send_blocking(PromptMessage::ScriptExit);
                                 break;
                             }
                         }
@@ -1573,8 +1579,8 @@ impl Render for ScriptListApp {
             window.focus(&self.focus_handle, cx);
         }
         
-        // Poll for prompt messages from script thread
-        self.poll_prompt_messages(cx);
+        // NOTE: Prompt messages are now handled via event-driven async_channel listener
+        // spawned in execute_interactive() - no polling needed in render()
         
         // Dispatch to appropriate view - clone to avoid borrow issues
         let current_view = self.current_view.clone();
@@ -2903,7 +2909,10 @@ fn start_hotkey_listener(config: config::Config) {
                 // This prevents double-triggering on a single key press
                 if event.id == hotkey_id && event.state == HotKeyState::Pressed {
                     let count = HOTKEY_TRIGGER_COUNT.fetch_add(1, Ordering::SeqCst);
-                    HOTKEY_TRIGGERED.store(true, Ordering::SeqCst);
+                    // Send via async_channel for immediate event-driven handling (replaces AtomicBool polling)
+                    if hotkey_channel().0.send_blocking(()).is_err() {
+                        logging::log("HOTKEY", "Hotkey channel closed, cannot send");
+                    }
                     logging::log("HOTKEY", &format!("{} pressed (trigger #{})", hotkey_display, count + 1));
                 } else if event.id == hotkey_id && event.state == HotKeyState::Released {
                     // Ignore key release events - just log for debugging
@@ -2956,10 +2965,10 @@ fn configure_as_floating_panel() {
 #[cfg(not(target_os = "macos"))]
 fn configure_as_floating_panel() {}
 
-fn start_hotkey_poller(cx: &mut App, window: WindowHandle<ScriptListApp>) {
-    let poller = cx.new(|_| HotkeyPoller::new(window));
-    poller.update(cx, |p, cx| {
-        p.start_polling(cx);
+fn start_hotkey_event_handler(cx: &mut App, window: WindowHandle<ScriptListApp>) {
+    let handler = cx.new(|_| HotkeyPoller::new(window));
+    handler.update(cx, |p, cx| {
+        p.start_listening(cx);
     });
 }
 
@@ -3022,22 +3031,21 @@ fn main() {
         WINDOW_VISIBLE.store(true, Ordering::SeqCst);
         logging::log("HOTKEY", "Window visibility state set to true (window now visible)");
         
-        start_hotkey_poller(cx, window);
+        start_hotkey_event_handler(cx, window);
         
+        // Appearance change watcher - event-driven with async_channel
         let window_for_appearance = window;
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            loop {
-                Timer::after(std::time::Duration::from_millis(200)).await;
-                
-                if appearance_rx.try_recv().is_ok() {
-                    logging::log("APP", "System appearance changed, updating theme");
-                    let _ = cx.update(|cx| {
-                        let _ = window_for_appearance.update(cx, |view: &mut ScriptListApp, _window: &mut Window, ctx: &mut Context<ScriptListApp>| {
-                            view.update_theme(ctx);
-                        });
+            // Event-driven: blocks until appearance change event received
+            while let Ok(_event) = appearance_rx.recv().await {
+                logging::log("APP", "System appearance changed, updating theme");
+                let _ = cx.update(|cx| {
+                    let _ = window_for_appearance.update(cx, |view: &mut ScriptListApp, _window: &mut Window, ctx: &mut Context<ScriptListApp>| {
+                        view.update_theme(ctx);
                     });
-                }
+                });
             }
+            logging::log("APP", "Appearance watcher channel closed");
         }).detach();
         
         // Config reload watcher - watches ~/.kit/config.ts for changes
@@ -3057,20 +3065,8 @@ fn main() {
             }
         }).detach();
         
-        // Prompt message poller - checks for script messages and triggers re-render
-        let window_for_prompts = window;
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            loop {
-                Timer::after(std::time::Duration::from_millis(50)).await;
-                
-                let _ = cx.update(|cx| {
-                    let _ = window_for_prompts.update(cx, |view: &mut ScriptListApp, _window: &mut Window, ctx: &mut Context<ScriptListApp>| {
-                        // Trigger render which will poll messages
-                        view.poll_prompt_messages(ctx);
-                    });
-                });
-            }
-        }).detach();
+        // NOTE: Prompt message listener is now spawned per-script in execute_interactive()
+        // using event-driven async_channel instead of 50ms polling
         
         // Test command file watcher - allows smoke tests to trigger script execution
         let window_for_test = window;

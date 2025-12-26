@@ -471,7 +471,7 @@ impl Drop for ScriptWatcher {
 /// This watcher polls the system appearance setting every 2 seconds by running
 /// the `defaults read -g AppleInterfaceStyle` command on macOS.
 pub struct AppearanceWatcher {
-    tx: Option<Sender<AppearanceChangeEvent>>,
+    tx: Option<async_channel::Sender<AppearanceChangeEvent>>,
     watcher_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -480,8 +480,8 @@ impl AppearanceWatcher {
     ///
     /// Returns a tuple of (watcher, receiver) where receiver will emit AppearanceChangeEvent
     /// when the system appearance changes.
-    pub fn new() -> (Self, Receiver<AppearanceChangeEvent>) {
-        let (tx, rx) = channel();
+    pub fn new() -> (Self, async_channel::Receiver<AppearanceChangeEvent>) {
+        let (tx, rx) = async_channel::bounded(100);
         let watcher = AppearanceWatcher {
             tx: Some(tx),
             watcher_thread: None,
@@ -507,7 +507,7 @@ impl AppearanceWatcher {
     }
 
     /// Internal watch loop running in background thread
-    fn watch_loop(tx: Sender<AppearanceChangeEvent>) -> Result<(), String> {
+    fn watch_loop(tx: async_channel::Sender<AppearanceChangeEvent>) -> Result<(), String> {
         let mut last_appearance: Option<AppearanceChangeEvent> = None;
         let poll_interval = Duration::from_secs(2);
 
@@ -529,7 +529,7 @@ impl AppearanceWatcher {
                     "System appearance changed to: {}",
                     mode
                 );
-                if tx.send(current_appearance.clone()).is_err() {
+                if tx.send_blocking(current_appearance.clone()).is_err() {
                     info!(watcher = "appearance", "Appearance watcher receiver dropped, shutting down");
                     eprintln!("Appearance watcher receiver dropped, shutting down");
                     break;
