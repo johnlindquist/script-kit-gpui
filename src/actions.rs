@@ -182,6 +182,8 @@ pub struct ActionsDialog {
     pub design_variant: DesignVariant,
     /// Cursor visibility for blinking (controlled externally)
     pub cursor_visible: bool,
+    /// When true, hide the search input (used when rendered inline in main.rs header)
+    pub hide_search: bool,
 }
 
 /// Helper function to combine a hex color with an alpha value
@@ -256,12 +258,18 @@ impl ActionsDialog {
             theme,
             design_variant,
             cursor_visible: true,
+            hide_search: false,
         }
     }
     
     /// Update cursor visibility (called from parent's blink timer)
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.cursor_visible = visible;
+    }
+    
+    /// Hide the search input (for inline mode where header has search)
+    pub fn set_hide_search(&mut self, hide: bool) {
+        self.hide_search = hide;
     }
 
     /// Build the complete actions list based on focused script
@@ -770,9 +778,11 @@ impl Render for ActionsDialog {
         
         // Calculate dynamic height based on number of items
         // Each item is ACTION_ITEM_HEIGHT, plus search box height (~44px), plus padding
+        // When hide_search is true, we don't include the search box height
         let num_items = self.filtered_actions.len();
-        let items_height = (num_items as f32 * ACTION_ITEM_HEIGHT).min(POPUP_MAX_HEIGHT - 60.0);
-        let total_height = items_height + 60.0; // 60px for search box + padding
+        let search_box_height = if self.hide_search { 0.0 } else { 60.0 };
+        let items_height = (num_items as f32 * ACTION_ITEM_HEIGHT).min(POPUP_MAX_HEIGHT - search_box_height);
+        let total_height = items_height + search_box_height; // search box height (if shown) + padding
         
         // Main overlay popup container
         // Fixed width, dynamic height based on content, rounded corners, shadow, semi-transparent bg
@@ -792,7 +802,7 @@ impl Render for ActionsDialog {
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
             .child(actions_container)
-            .child(input_container)
+            .when(!self.hide_search, |d| d.child(input_container))
     }
 }
 

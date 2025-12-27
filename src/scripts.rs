@@ -6,6 +6,8 @@ use std::fs;
 use std::cmp::Ordering;
 use tracing::{debug, warn, instrument};
 
+pub use crate::builtins::BuiltInEntry;
+
 #[derive(Clone, Debug)]
 pub struct Script {
     pub name: String,
@@ -40,11 +42,19 @@ pub struct ScriptletMatch {
     pub score: i32,
 }
 
-/// Unified search result that can be either a Script or Scriptlet
+/// Represents a scored match result for fuzzy search on built-in entries
+#[derive(Clone, Debug)]
+pub struct BuiltInMatch {
+    pub entry: BuiltInEntry,
+    pub score: i32,
+}
+
+/// Unified search result that can be a Script, Scriptlet, or BuiltIn
 #[derive(Clone, Debug)]
 pub enum SearchResult {
     Script(ScriptMatch),
     Scriptlet(ScriptletMatch),
+    BuiltIn(BuiltInMatch),
 }
 
 impl SearchResult {
@@ -53,6 +63,7 @@ impl SearchResult {
         match self {
             SearchResult::Script(sm) => &sm.script.name,
             SearchResult::Scriptlet(sm) => &sm.scriptlet.name,
+            SearchResult::BuiltIn(bm) => &bm.entry.name,
         }
     }
 
@@ -61,6 +72,7 @@ impl SearchResult {
         match self {
             SearchResult::Script(sm) => sm.script.description.as_deref(),
             SearchResult::Scriptlet(sm) => sm.scriptlet.description.as_deref(),
+            SearchResult::BuiltIn(bm) => Some(&bm.entry.description),
         }
     }
 
@@ -69,6 +81,7 @@ impl SearchResult {
         match self {
             SearchResult::Script(sm) => sm.score,
             SearchResult::Scriptlet(sm) => sm.score,
+            SearchResult::BuiltIn(bm) => bm.score,
         }
     }
 
@@ -77,6 +90,7 @@ impl SearchResult {
         match self {
             SearchResult::Script(_) => "Script",
             SearchResult::Scriptlet(_) => "Snippet",
+            SearchResult::BuiltIn(_) => "Built-in",
         }
     }
 }
@@ -501,10 +515,99 @@ pub fn fuzzy_search_scriptlets(scriptlets: &[Scriptlet], query: &str) -> Vec<Scr
     matches
 }
 
-/// Perform unified fuzzy search across both scripts and scriptlets
+/// Fuzzy search built-in entries by query string
+/// Searches across name, description, and keywords
+/// Returns results sorted by relevance score (highest first)
+pub fn fuzzy_search_builtins(entries: &[BuiltInEntry], query: &str) -> Vec<BuiltInMatch> {
+    if query.is_empty() {
+        // If no query, return all entries with equal score, sorted by name
+        return entries.iter().map(|e| BuiltInMatch {
+            entry: e.clone(),
+            score: 0,
+        }).collect();
+    }
+
+    let query_lower = query.to_lowercase();
+    let mut matches = Vec::new();
+
+    for entry in entries {
+        let mut score = 0i32;
+        let name_lower = entry.name.to_lowercase();
+
+        // Score by name match - highest priority
+        if let Some(pos) = name_lower.find(&query_lower) {
+            // Bonus for exact substring match at start of name
+            score += if pos == 0 { 100 } else { 75 };
+        }
+
+        // Fuzzy character matching in name (characters in order)
+        if is_fuzzy_match(&name_lower, &query_lower) {
+            score += 50;
+        }
+
+        // Score by description match - medium priority
+        if entry.description.to_lowercase().contains(&query_lower) {
+            score += 25;
+        }
+
+        // Score by keyword match - high priority (keywords are designed for matching)
+        for keyword in &entry.keywords {
+            if keyword.to_lowercase().contains(&query_lower) {
+                score += 75;  // Keywords are specifically meant for matching
+                break;  // Only count once even if multiple keywords match
+            }
+        }
+
+        // Fuzzy match on keywords
+        for keyword in &entry.keywords {
+            if is_fuzzy_match(&keyword.to_lowercase(), &query_lower) {
+                score += 30;
+                break;  // Only count once
+            }
+        }
+
+        if score > 0 {
+            matches.push(BuiltInMatch {
+                entry: entry.clone(),
+                score,
+            });
+        }
+    }
+
+    // Sort by score (highest first), then by name for ties
+    matches.sort_by(|a, b| {
+        match b.score.cmp(&a.score) {
+            Ordering::Equal => a.entry.name.cmp(&b.entry.name),
+            other => other,
+        }
+    });
+
+    matches
+}
+
+/// Perform unified fuzzy search across scripts, scriptlets, and built-ins
 /// Returns combined and ranked results sorted by relevance
+/// Built-ins appear at the TOP of results (before scripts) when scores are equal
 pub fn fuzzy_search_unified(scripts: &[Script], scriptlets: &[Scriptlet], query: &str) -> Vec<SearchResult> {
+    fuzzy_search_unified_with_builtins(scripts, scriptlets, &[], query)
+}
+
+/// Perform unified fuzzy search across scripts, scriptlets, and built-ins
+/// Returns combined and ranked results sorted by relevance
+/// Built-ins appear at the TOP of results (before scripts) when scores are equal
+pub fn fuzzy_search_unified_with_builtins(
+    scripts: &[Script],
+    scriptlets: &[Scriptlet],
+    builtins: &[BuiltInEntry],
+    query: &str,
+) -> Vec<SearchResult> {
     let mut results = Vec::new();
+
+    // Search built-ins first (they should appear at top when scores are equal)
+    let builtin_matches = fuzzy_search_builtins(builtins, query);
+    for bm in builtin_matches {
+        results.push(SearchResult::BuiltIn(bm));
+    }
 
     // Search scripts
     let script_matches = fuzzy_search_scripts(scripts, query);
@@ -518,13 +621,20 @@ pub fn fuzzy_search_unified(scripts: &[Script], scriptlets: &[Scriptlet], query:
         results.push(SearchResult::Scriptlet(sm));
     }
 
-    // Sort by score (highest first), then by type (scripts first), then by name
+    // Sort by score (highest first), then by type (builtins first, then scripts, then scriptlets), then by name
     results.sort_by(|a, b| {
         match b.score().cmp(&a.score()) {
             Ordering::Equal => {
-                // Prefer scripts over scriptlets when scores are equal
-                let type_order_a = match a { SearchResult::Script(_) => 0, SearchResult::Scriptlet(_) => 1 };
-                let type_order_b = match b { SearchResult::Script(_) => 0, SearchResult::Scriptlet(_) => 1 };
+                // Prefer builtins over scripts over scriptlets when scores are equal
+                let type_order = |r: &SearchResult| -> i32 {
+                    match r {
+                        SearchResult::BuiltIn(_) => 0,  // Built-ins first
+                        SearchResult::Script(_) => 1,
+                        SearchResult::Scriptlet(_) => 2,
+                    }
+                };
+                let type_order_a = type_order(a);
+                let type_order_b = type_order(b);
                 match type_order_a.cmp(&type_order_b) {
                     Ordering::Equal => a.name().cmp(b.name()),
                     other => other,
@@ -1159,6 +1269,7 @@ mod tests {
         match &results[0] {
             SearchResult::Script(_) => {}, // Correct
             SearchResult::Scriptlet(_) => panic!("Script should be first"),
+            SearchResult::BuiltIn(_) => panic!("Script should be first"),
         }
     }
 
@@ -2048,6 +2159,7 @@ code here
         match &results[0] {
             SearchResult::Script(_) => {},
             SearchResult::Scriptlet(_) => panic!("Expected Script first"),
+            SearchResult::BuiltIn(_) => panic!("Expected Script first"),
         }
     }
 
@@ -2199,5 +2311,264 @@ code here
         let has_scriptlet = results.iter().any(|r| matches!(r, SearchResult::Scriptlet(_)));
         assert!(has_script);
         assert!(has_scriptlet);
+    }
+
+    // ============================================
+    // BUILT-IN SEARCH TESTS
+    // ============================================
+
+    fn create_test_builtins() -> Vec<BuiltInEntry> {
+        use crate::builtins::BuiltInFeature;
+        vec![
+            BuiltInEntry {
+                id: "builtin-clipboard-history".to_string(),
+                name: "Clipboard History".to_string(),
+                description: "View and manage your clipboard history".to_string(),
+                keywords: vec!["clipboard".to_string(), "history".to_string(), "paste".to_string(), "copy".to_string()],
+                feature: BuiltInFeature::ClipboardHistory,
+            },
+            BuiltInEntry {
+                id: "builtin-app-launcher".to_string(),
+                name: "App Launcher".to_string(),
+                description: "Search and launch installed applications".to_string(),
+                keywords: vec!["app".to_string(), "launch".to_string(), "open".to_string(), "application".to_string()],
+                feature: BuiltInFeature::AppLauncher,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_fuzzy_search_builtins_by_name() {
+        let builtins = create_test_builtins();
+        let results = fuzzy_search_builtins(&builtins, "clipboard");
+        
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "Clipboard History");
+        assert!(results[0].score > 0);
+    }
+
+    #[test]
+    fn test_fuzzy_search_builtins_by_keyword() {
+        let builtins = create_test_builtins();
+        
+        // "paste" is a keyword for clipboard history
+        let results = fuzzy_search_builtins(&builtins, "paste");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "Clipboard History");
+        
+        // "launch" is a keyword for app launcher
+        let results = fuzzy_search_builtins(&builtins, "launch");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "App Launcher");
+    }
+
+    #[test]
+    fn test_fuzzy_search_builtins_partial_keyword() {
+        let builtins = create_test_builtins();
+        
+        // "clip" should match "clipboard" keyword
+        let results = fuzzy_search_builtins(&builtins, "clip");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "Clipboard History");
+        
+        // "app" should match "app" keyword in App Launcher
+        let results = fuzzy_search_builtins(&builtins, "app");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "App Launcher");
+    }
+
+    #[test]
+    fn test_fuzzy_search_builtins_by_description() {
+        let builtins = create_test_builtins();
+        
+        // "manage" is in clipboard history description
+        let results = fuzzy_search_builtins(&builtins, "manage");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "Clipboard History");
+        
+        // "installed" is in app launcher description
+        let results = fuzzy_search_builtins(&builtins, "installed");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "App Launcher");
+    }
+
+    #[test]
+    fn test_fuzzy_search_builtins_empty_query() {
+        let builtins = create_test_builtins();
+        let results = fuzzy_search_builtins(&builtins, "");
+        
+        assert_eq!(results.len(), 2);
+        // Both should have score 0
+        assert_eq!(results[0].score, 0);
+        assert_eq!(results[1].score, 0);
+    }
+
+    #[test]
+    fn test_fuzzy_search_builtins_no_match() {
+        let builtins = create_test_builtins();
+        let results = fuzzy_search_builtins(&builtins, "nonexistent");
+        
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_builtin_match_struct() {
+        use crate::builtins::BuiltInFeature;
+        
+        let entry = BuiltInEntry {
+            id: "test".to_string(),
+            name: "Test Entry".to_string(),
+            description: "Test description".to_string(),
+            keywords: vec!["test".to_string()],
+            feature: BuiltInFeature::ClipboardHistory,
+        };
+        
+        let builtin_match = BuiltInMatch {
+            entry: entry.clone(),
+            score: 100,
+        };
+        
+        assert_eq!(builtin_match.entry.name, "Test Entry");
+        assert_eq!(builtin_match.score, 100);
+    }
+
+    #[test]
+    fn test_search_result_builtin_variant() {
+        use crate::builtins::BuiltInFeature;
+        
+        let entry = BuiltInEntry {
+            id: "test".to_string(),
+            name: "Test Built-in".to_string(),
+            description: "Test built-in description".to_string(),
+            keywords: vec!["test".to_string()],
+            feature: BuiltInFeature::AppLauncher,
+        };
+        
+        let result = SearchResult::BuiltIn(BuiltInMatch {
+            entry,
+            score: 75,
+        });
+        
+        assert_eq!(result.name(), "Test Built-in");
+        assert_eq!(result.description(), Some("Test built-in description"));
+        assert_eq!(result.score(), 75);
+        assert_eq!(result.type_label(), "Built-in");
+    }
+
+    #[test]
+    fn test_unified_search_with_builtins() {
+        let scripts = vec![
+            Script {
+                name: "my-clipboard".to_string(),
+                path: PathBuf::from("/clipboard.ts"),
+                extension: "ts".to_string(),
+                description: Some("My clipboard script".to_string()),
+            },
+        ];
+
+        let scriptlets = vec![
+            Scriptlet {
+                name: "Clipboard Helper".to_string(),
+                description: Some("Helper for clipboard".to_string()),
+                code: "clipboard()".to_string(),
+                tool: "ts".to_string(),
+                shortcut: None,
+                expand: None,
+            },
+        ];
+
+        let builtins = create_test_builtins();
+
+        let results = fuzzy_search_unified_with_builtins(&scripts, &scriptlets, &builtins, "clipboard");
+        
+        // All three should match
+        assert_eq!(results.len(), 3);
+        
+        // Verify all types are present
+        let has_builtin = results.iter().any(|r| matches!(r, SearchResult::BuiltIn(_)));
+        let has_script = results.iter().any(|r| matches!(r, SearchResult::Script(_)));
+        let has_scriptlet = results.iter().any(|r| matches!(r, SearchResult::Scriptlet(_)));
+        
+        assert!(has_builtin);
+        assert!(has_script);
+        assert!(has_scriptlet);
+    }
+
+    #[test]
+    fn test_unified_search_builtins_appear_at_top() {
+        let scripts = vec![
+            Script {
+                name: "history".to_string(),
+                path: PathBuf::from("/history.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+        ];
+
+        let builtins = create_test_builtins();
+
+        let results = fuzzy_search_unified_with_builtins(&scripts, &[], &builtins, "history");
+        
+        // Both should match (Clipboard History builtin and history script)
+        assert!(results.len() >= 2);
+        
+        // When scores are equal, built-ins should appear first
+        // Check that the first result is a built-in if scores are equal
+        if results.len() >= 2 && results[0].score() == results[1].score() {
+            match &results[0] {
+                SearchResult::BuiltIn(_) => {}, // Expected
+                _ => panic!("Built-in should appear before script when scores are equal"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_unified_search_backward_compatible() {
+        // Ensure the original fuzzy_search_unified still works without builtins
+        let scripts = vec![
+            Script {
+                name: "test".to_string(),
+                path: PathBuf::from("/test.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+        ];
+
+        let scriptlets = vec![
+            Scriptlet {
+                name: "Test Snippet".to_string(),
+                description: None,
+                code: "test()".to_string(),
+                tool: "ts".to_string(),
+                shortcut: None,
+                expand: None,
+            },
+        ];
+
+        let results = fuzzy_search_unified(&scripts, &scriptlets, "test");
+        
+        // Should still work without builtins
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_builtin_keyword_matching_priority() {
+        let builtins = create_test_builtins();
+        
+        // "copy" matches keyword in clipboard history
+        let results = fuzzy_search_builtins(&builtins, "copy");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.name, "Clipboard History");
+        assert!(results[0].score >= 75); // Keyword match gives 75 points
+    }
+
+    #[test]
+    fn test_builtin_fuzzy_keyword_matching() {
+        let builtins = create_test_builtins();
+        
+        // "hist" should fuzzy match "history" keyword
+        let results = fuzzy_search_builtins(&builtins, "hist");
+        assert!(results.len() >= 1);
+        assert_eq!(results[0].entry.name, "Clipboard History");
     }
 }

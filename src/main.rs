@@ -49,6 +49,10 @@ mod window_control;
 mod file_search;
 mod toast_manager;
 
+// Built-in features registry
+mod builtins;
+mod app_launcher;
+
 use tray::{TrayManager, TrayMenuAction};
 use editor::EditorPrompt;
 use window_resize::{ViewType, height_for_view, resize_first_window_to_height, initial_window_height, reset_resize_debounce, defer_resize_to_view};
@@ -1078,6 +1082,10 @@ impl ScriptListApp {
                     logging::log("EXEC", &format!("Executing scriptlet: {}", scriptlet_match.scriptlet.name));
                     self.execute_scriptlet(&scriptlet_match.scriptlet, cx);
                 }
+                scripts::SearchResult::BuiltIn(builtin_match) => {
+                    logging::log("EXEC", &format!("Executing built-in: {}", builtin_match.entry.name));
+                    self.execute_builtin(&builtin_match.entry, cx);
+                }
             }
         }
     }
@@ -1185,6 +1193,9 @@ impl ScriptListApp {
                 )
             });
             
+            // Hide the dialog's built-in search input since header already has search
+            dialog.update(cx, |d, _| d.set_hide_search(true));
+            
             // Focus the dialog's internal focus handle
             let dialog_focus_handle = dialog.read(cx).focus_handle.clone();
             self.actions_dialog = Some(dialog.clone());
@@ -1217,6 +1228,9 @@ impl ScriptListApp {
                         }
                         scripts::SearchResult::Scriptlet(_) => {
                             self.last_output = Some(SharedString::from("Cannot edit scriptlets"));
+                        }
+                        scripts::SearchResult::BuiltIn(_) => {
+                            self.last_output = Some(SharedString::from("Cannot edit built-in features"));
                         }
                     }
                 } else {
@@ -1962,6 +1976,29 @@ impl ScriptListApp {
         // For now, just log it - scriptlets are passive code snippets
         // Future implementation could copy to clipboard, execute, or display
         self.last_output = Some(SharedString::from(format!("Scriptlet: {}", scriptlet.name)));
+    }
+    
+    /// Execute a built-in feature
+    fn execute_builtin(&mut self, entry: &builtins::BuiltInEntry, _cx: &mut Context<Self>) {
+        logging::log("EXEC", &format!("Executing built-in: {} (id: {})", entry.name, entry.id));
+        
+        match &entry.feature {
+            builtins::BuiltInFeature::ClipboardHistory => {
+                logging::log("EXEC", "Opening Clipboard History");
+                // TODO: Switch to clipboard history view
+                self.last_output = Some(SharedString::from("Clipboard History (coming soon)"));
+            }
+            builtins::BuiltInFeature::AppLauncher => {
+                logging::log("EXEC", "Opening App Launcher");
+                // TODO: Switch to app launcher view
+                self.last_output = Some(SharedString::from("App Launcher (coming soon)"));
+            }
+            builtins::BuiltInFeature::App(app_name) => {
+                logging::log("EXEC", &format!("Launching app: {}", app_name));
+                // TODO: Launch the specific application
+                self.last_output = Some(SharedString::from(format!("Launching: {}", app_name)));
+            }
+        }
     }
     
     /// Handle a prompt message from the script
@@ -2901,6 +2938,97 @@ impl ScriptListApp {
                         
                         panel = panel.child(code_container);
                     }
+                    scripts::SearchResult::BuiltIn(builtin_match) => {
+                        let builtin = &builtin_match.entry;
+                        
+                        // Built-in name header
+                        panel = panel.child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(text_primary))
+                                .pb(px(spacing.padding_sm))
+                                .child(builtin.name.clone())
+                        );
+                        
+                        // Description
+                        panel = panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .pb(px(spacing.padding_md))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted))
+                                        .pb(px(spacing.padding_xs / 2.0))
+                                        .child("Description")
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(text_secondary))
+                                        .child(builtin.description.clone())
+                                )
+                        );
+                        
+                        // Keywords
+                        if !builtin.keywords.is_empty() {
+                            panel = panel.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .pb(px(spacing.padding_md))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(text_muted))
+                                            .pb(px(spacing.padding_xs / 2.0))
+                                            .child("Keywords")
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(text_secondary))
+                                            .child(builtin.keywords.join(", "))
+                                    )
+                            );
+                        }
+                        
+                        // Divider
+                        panel = panel.child(
+                            div()
+                                .w_full()
+                                .h(px(visual.border_thin))
+                                .bg(rgba((ui_border << 8) | 0x60))
+                                .my(px(spacing.padding_sm))
+                        );
+                        
+                        // Feature type indicator
+                        let feature_type: String = match &builtin.feature {
+                            builtins::BuiltInFeature::ClipboardHistory => "Clipboard History Manager".to_string(),
+                            builtins::BuiltInFeature::AppLauncher => "Application Launcher".to_string(),
+                            builtins::BuiltInFeature::App(name) => name.clone(),
+                        };
+                        panel = panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted))
+                                        .pb(px(spacing.padding_xs / 2.0))
+                                        .child("Feature Type")
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(text_secondary))
+                                        .child(feature_type)
+                                )
+                        );
+                    }
                 }
             }
             None => {
@@ -2941,6 +3069,10 @@ impl ScriptListApp {
                 scripts::SearchResult::Scriptlet(m) => {
                     // Scriptlets don't have a path, use name as identifier
                     Some(ScriptInfo::new(&m.scriptlet.name, format!("scriptlet:{}", &m.scriptlet.name)))
+                }
+                scripts::SearchResult::BuiltIn(m) => {
+                    // Built-ins use their id as identifier
+                    Some(ScriptInfo::new(&m.entry.name, format!("builtin:{}", &m.entry.id)))
                 }
             }
         } else {

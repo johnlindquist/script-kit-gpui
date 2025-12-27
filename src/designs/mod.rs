@@ -394,6 +394,9 @@ pub fn render_design_item(
                 SearchResult::Scriptlet(sm) => {
                     (sm.scriptlet.name.clone(), sm.scriptlet.description.clone(), sm.scriptlet.shortcut.clone())
                 }
+                SearchResult::BuiltIn(bm) => {
+                    (bm.entry.name.clone(), Some(bm.entry.description.clone()), None)
+                }
             };
             
             ListItem::new(name, list_colors)

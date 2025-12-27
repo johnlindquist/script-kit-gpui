@@ -15,6 +15,34 @@ pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 14.0;
 /// Default UI scale
 pub const DEFAULT_UI_SCALE: f32 = 1.0;
 
+/// Default built-in feature flags
+pub const DEFAULT_CLIPBOARD_HISTORY: bool = true;
+pub const DEFAULT_APP_LAUNCHER: bool = true;
+
+/// Configuration for built-in features (clipboard history, app launcher, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltInConfig {
+    /// Enable clipboard history built-in (default: true)
+    #[serde(default = "default_clipboard_history")]
+    pub clipboard_history: bool,
+    /// Enable app launcher built-in (default: true)
+    #[serde(default = "default_app_launcher")]
+    pub app_launcher: bool,
+}
+
+fn default_clipboard_history() -> bool { DEFAULT_CLIPBOARD_HISTORY }
+fn default_app_launcher() -> bool { DEFAULT_APP_LAUNCHER }
+
+impl Default for BuiltInConfig {
+    fn default() -> Self {
+        BuiltInConfig {
+            clipboard_history: DEFAULT_CLIPBOARD_HISTORY,
+            app_launcher: DEFAULT_APP_LAUNCHER,
+        }
+    }
+}
+
 /// Content padding configuration for prompts (terminal, editor, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentPadding {
@@ -59,6 +87,9 @@ pub struct Config {
     /// UI scale factor (1.0 = 100%)
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "uiScale")]
     pub ui_scale: Option<f32>,
+    /// Built-in features configuration (clipboard history, app launcher, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "builtIns")]
+    pub built_ins: Option<BuiltInConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +111,7 @@ impl Default for Config {
             editor_font_size: None,    // Will use DEFAULT_EDITOR_FONT_SIZE via getter
             terminal_font_size: None,  // Will use DEFAULT_TERMINAL_FONT_SIZE via getter
             ui_scale: None,  // Will use DEFAULT_UI_SCALE via getter
+            built_ins: None,  // Will use BuiltInConfig::default() via getter
         }
     }
 }
@@ -117,6 +149,12 @@ impl Config {
     #[allow(dead_code)]  // Will be used for UI scaling
     pub fn get_ui_scale(&self) -> f32 {
         self.ui_scale.unwrap_or(DEFAULT_UI_SCALE)
+    }
+
+    /// Returns the built-in features configuration, or defaults if not configured
+    #[allow(dead_code)]  // Will be used by builtins module
+    pub fn get_builtins(&self) -> BuiltInConfig {
+        self.built_ins.clone().unwrap_or_default()
     }
 }
 
@@ -245,6 +283,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -280,6 +319,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
         assert_eq!(config.bun_path, Some("/custom/path/bun".to_string()));
     }
@@ -297,6 +337,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
         assert_eq!(config.bun_path, None);
     }
@@ -314,6 +355,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -336,6 +378,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -425,6 +468,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         assert_eq!(config.hotkey.modifiers.len(), 0);
@@ -448,6 +492,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_size: None,
                 ui_scale: None,
+                built_ins: None,
             };
 
             let json = serde_json::to_string(&config).unwrap();
@@ -470,6 +515,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -492,6 +538,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -515,6 +562,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         // Config editor takes precedence
@@ -540,6 +588,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         // Should fall back to EDITOR env var
@@ -571,6 +620,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         // Should fall back to "code" default
@@ -602,6 +652,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
 
         // Config editor should win
@@ -702,6 +753,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
         
         let padding = config.get_padding();
@@ -729,6 +781,7 @@ mod tests {
             editor_font_size: Some(16.0),
             terminal_font_size: None,
             ui_scale: None,
+            built_ins: None,
         };
         
         assert_eq!(config.get_editor_font_size(), 16.0);
@@ -753,6 +806,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: Some(12.0),
             ui_scale: None,
+            built_ins: None,
         };
         
         assert_eq!(config.get_terminal_font_size(), 12.0);
@@ -777,6 +831,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_size: None,
             ui_scale: Some(1.5),
+            built_ins: None,
         };
         
         assert_eq!(config.get_ui_scale(), 1.5);
@@ -862,6 +917,7 @@ mod tests {
             editor_font_size: Some(16.0),
             terminal_font_size: Some(12.0),
             ui_scale: Some(1.5),
+            built_ins: None,
         };
         
         let json = serde_json::to_string(&config).unwrap();
@@ -881,5 +937,175 @@ mod tests {
         assert_eq!(DEFAULT_EDITOR_FONT_SIZE, 14.0);
         assert_eq!(DEFAULT_TERMINAL_FONT_SIZE, 14.0);
         assert_eq!(DEFAULT_UI_SCALE, 1.0);
+    }
+
+    // BuiltInConfig tests
+    #[test]
+    fn test_builtin_config_default() {
+        let config = BuiltInConfig::default();
+        assert!(config.clipboard_history);
+        assert!(config.app_launcher);
+    }
+
+    #[test]
+    fn test_builtin_config_serialization_camel_case() {
+        let config = BuiltInConfig {
+            clipboard_history: true,
+            app_launcher: false,
+        };
+        
+        let json = serde_json::to_string(&config).unwrap();
+        
+        // Should use camelCase in JSON
+        assert!(json.contains("clipboardHistory"));
+        assert!(json.contains("appLauncher"));
+        // Should NOT use snake_case
+        assert!(!json.contains("clipboard_history"));
+        assert!(!json.contains("app_launcher"));
+    }
+
+    #[test]
+    fn test_builtin_config_deserialization_camel_case() {
+        let json = r#"{
+            "clipboardHistory": false,
+            "appLauncher": true
+        }"#;
+        
+        let config: BuiltInConfig = serde_json::from_str(json).unwrap();
+        
+        assert!(!config.clipboard_history);
+        assert!(config.app_launcher);
+    }
+
+    #[test]
+    fn test_builtin_config_deserialization_with_defaults() {
+        // Partial config - missing fields should use defaults
+        let json = r#"{"clipboardHistory": false}"#;
+        let config: BuiltInConfig = serde_json::from_str(json).unwrap();
+        
+        assert!(!config.clipboard_history);
+        assert!(config.app_launcher);  // Default true
+    }
+
+    #[test]
+    fn test_config_with_builtins() {
+        let config = Config {
+            hotkey: HotkeyConfig {
+                modifiers: vec!["meta".to_string()],
+                key: "Semicolon".to_string(),
+            },
+            bun_path: None,
+            editor: None,
+            padding: None,
+            editor_font_size: None,
+            terminal_font_size: None,
+            ui_scale: None,
+            built_ins: Some(BuiltInConfig {
+                clipboard_history: true,
+                app_launcher: false,
+            }),
+        };
+        
+        let builtins = config.get_builtins();
+        assert!(builtins.clipboard_history);
+        assert!(!builtins.app_launcher);
+    }
+
+    #[test]
+    fn test_config_get_builtins_default() {
+        let config = Config::default();
+        let builtins = config.get_builtins();
+        
+        // Should return defaults when built_ins is None
+        assert!(builtins.clipboard_history);
+        assert!(builtins.app_launcher);
+    }
+
+    #[test]
+    fn test_config_deserialization_with_builtins() {
+        let json = r#"{
+            "hotkey": {
+                "modifiers": ["meta"],
+                "key": "Semicolon"
+            },
+            "builtIns": {
+                "clipboardHistory": true,
+                "appLauncher": false
+            }
+        }"#;
+        
+        let config: Config = serde_json::from_str(json).unwrap();
+        
+        assert!(config.built_ins.is_some());
+        let builtins = config.get_builtins();
+        assert!(builtins.clipboard_history);
+        assert!(!builtins.app_launcher);
+    }
+
+    #[test]
+    fn test_config_deserialization_without_builtins() {
+        // Existing configs without builtIns should still work
+        let json = r#"{
+            "hotkey": {
+                "modifiers": ["meta"],
+                "key": "Semicolon"
+            }
+        }"#;
+        
+        let config: Config = serde_json::from_str(json).unwrap();
+        
+        assert!(config.built_ins.is_none());
+        
+        // Getter should return defaults
+        let builtins = config.get_builtins();
+        assert!(builtins.clipboard_history);
+        assert!(builtins.app_launcher);
+    }
+
+    #[test]
+    fn test_config_serialization_skips_none_builtins() {
+        let config = Config::default();
+        let json = serde_json::to_string(&config).unwrap();
+        
+        // None values should not appear in JSON
+        assert!(!json.contains("builtIns"));
+    }
+
+    #[test]
+    fn test_config_serialization_includes_set_builtins() {
+        let config = Config {
+            hotkey: HotkeyConfig {
+                modifiers: vec!["meta".to_string()],
+                key: "Semicolon".to_string(),
+            },
+            bun_path: None,
+            editor: None,
+            padding: None,
+            editor_font_size: None,
+            terminal_font_size: None,
+            ui_scale: None,
+            built_ins: Some(BuiltInConfig::default()),
+        };
+        
+        let json = serde_json::to_string(&config).unwrap();
+        
+        assert!(json.contains("builtIns"));
+        assert!(json.contains("clipboardHistory"));
+        assert!(json.contains("appLauncher"));
+    }
+
+    #[test]
+    fn test_builtin_config_roundtrip() {
+        // Test full roundtrip serialization/deserialization
+        let original = BuiltInConfig {
+            clipboard_history: false,
+            app_launcher: true,
+        };
+        
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: BuiltInConfig = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(original.clipboard_history, restored.clipboard_history);
+        assert_eq!(original.app_launcher, restored.app_launcher);
     }
 }
