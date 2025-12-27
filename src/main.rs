@@ -691,6 +691,7 @@ struct ErrorNotification {
 struct ScriptListApp {
     scripts: Vec<scripts::Script>,
     scriptlets: Vec<scripts::Scriptlet>,
+    builtin_entries: Vec<builtins::BuiltInEntry>,
     selected_index: usize,
     filter_text: String,
     last_output: Option<SharedString>,
@@ -753,6 +754,9 @@ impl ScriptListApp {
         let theme = theme::load_theme();
         let config = config::load_config();
         
+        // Load built-in entries based on config
+        let builtin_entries = builtins::get_builtin_entries(&config.get_builtins());
+        
         let total_elapsed = load_start.elapsed();
         logging::log("PERF", &format!(
             "Startup loading: {:.2}ms total ({} scripts in {:.2}ms, {} scriptlets in {:.2}ms)",
@@ -764,6 +768,7 @@ impl ScriptListApp {
         ));
         logging::log("APP", &format!("Loaded {} scripts from ~/.kenv/scripts", scripts.len()));
         logging::log("APP", &format!("Loaded {} scriptlets from ~/.kenv/scriptlets/scriptlets.md", scriptlets.len()));
+        logging::log("APP", &format!("Loaded {} built-in features", builtin_entries.len()));
         logging::log("APP", "Loaded theme with system appearance detection");
         logging::log("APP", &format!("Loaded config: hotkey={:?}+{}, bun_path={:?}", 
             config.hotkey.modifiers, config.hotkey.key, config.bun_path));
@@ -796,6 +801,7 @@ impl ScriptListApp {
         ScriptListApp {
             scripts,
             scriptlets,
+            builtin_entries,
             selected_index: 0,
             filter_text: String::new(),
             last_output: None,
@@ -963,7 +969,12 @@ impl ScriptListApp {
         if self.filter_text != self.filter_cache_key {
             logging::log_debug("CACHE", &format!("Filter cache MISS - recomputing for '{}'", self.filter_text));
             let search_start = std::time::Instant::now();
-            self.cached_filtered_results = scripts::fuzzy_search_unified(&self.scripts, &self.scriptlets, &self.filter_text);
+            self.cached_filtered_results = scripts::fuzzy_search_unified_with_builtins(
+                &self.scripts, 
+                &self.scriptlets, 
+                &self.builtin_entries,
+                &self.filter_text
+            );
             self.filter_cache_key = self.filter_text.clone();
             let search_elapsed = search_start.elapsed();
             
@@ -973,7 +984,7 @@ impl ScriptListApp {
                     self.filter_text,
                     search_elapsed.as_secs_f64() * 1000.0,
                     self.cached_filtered_results.len(),
-                    self.scripts.len() + self.scriptlets.len()
+                    self.scripts.len() + self.scriptlets.len() + self.builtin_entries.len()
                 ));
             }
         } else {
