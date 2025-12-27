@@ -59,6 +59,47 @@ cargo check && cargo clippy --all-targets -- -D warnings && cargo test
 | **SDK Preload** | Scripts import `../../scripts/kit-sdk` for global functions (arg, div, md) |
 | **Arrow Key Names** | ALWAYS match BOTH: `"up" \| "arrowup"`, `"down" \| "arrowdown"`, `"left" \| "arrowleft"`, `"right" \| "arrowright"` |
 | **Visual Testing** | Use `./scripts/visual-test.sh <test.ts> <seconds>` to capture screenshots for layout debugging |
+| **AI Log Mode** | Set `SCRIPT_KIT_AI_LOG=1` for token-efficient compact logs (see below) |
+
+---
+
+## AI Compact Log Format
+
+When `SCRIPT_KIT_AI_LOG=1`, stderr uses token-efficient format for AI agents:
+
+**Format:** `SS.mmm|L|C|message`
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| SS.mmm | Seconds.millis in current minute | `13.150` |
+| L | Level: `i`=INFO `w`=WARN `e`=ERROR `d`=DEBUG `t`=TRACE | `i` |
+| C | Category code (see below) | `P` |
+
+**Category Codes:**
+
+| Code | Category | Code | Category |
+|------|----------|------|----------|
+| P | POSITION | A | APP |
+| U | UI | S | STDIN |
+| H | HOTKEY | V | VISIBILITY |
+| E | EXEC | K | KEY |
+| F | FOCUS | T | THEME |
+| C | CACHE | R | PERF |
+| W | WINDOW_MGR | X | ERROR |
+| M | MOUSE_HOVER | L | SCROLL_STATE |
+| Q | SCROLL_PERF | D | DESIGN |
+| G | SCRIPT | N | CONFIG |
+
+**Example transformation:**
+```
+# Standard (85 chars):
+2025-12-27T15:22:13.150Z INFO script_kit_gpui::logging: Selected display origin=(0,0)
+
+# Compact (28 chars, 67% reduction):
+13.150|i|P|Selected display origin=(0,0)
+```
+
+**Enable:** `SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1`
 
 ---
 
@@ -1109,6 +1150,16 @@ Use consistent target names for easy filtering:
 | Non-blocking file writes | Use `tracing_appender::non_blocking` |
 | Dual output | JSONL to file, pretty to stdout |
 | Structured over interpolation | `info!(count = 5, "Items")` not `info!("Items: {}", 5)` |
+
+### AI Compact Log Mode
+
+For token-efficient logging when AI agents are reading logs, set `SCRIPT_KIT_AI_LOG=1`:
+
+```bash
+SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
+```
+
+This outputs compact format to stderr: `SS.mmm|L|C|message` (see "AI Compact Log Format" section above for the full legend). Standard JSONL continues to be written to `~/.kit/logs/` for full detail when needed.
 
 ---
 

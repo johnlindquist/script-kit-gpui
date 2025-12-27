@@ -4,6 +4,18 @@
 //! This module provides dual-output logging:
 //! - **JSONL to file** (~/.kit/logs/script-kit-gpui.jsonl) - structured for AI agent parsing
 //! - **Pretty to stderr** - human-readable for developers
+//! - **Compact AI mode** (SCRIPT_KIT_AI_LOG=1) - ultra-compact line format for AI context
+//!
+//! # Compact AI Format
+//!
+//! When `SCRIPT_KIT_AI_LOG=1` is set, stderr uses compact format:
+//! ```text
+//! SS.mmm|L|C|message
+//! ```
+//! Where:
+//! - SS.mmm = seconds.milliseconds within current minute (resets each minute)
+//! - L = single char level (i/w/e/d/t)
+//! - C = single char category code (see AGENTS.md for legend)
 //!
 //! # Usage
 //!
@@ -26,16 +38,253 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracing::field::{Field, Visit};
+use tracing::{Level, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
+
+// =============================================================================
+// COMPACT AI FORMAT (SCRIPT_KIT_AI_LOG=1)
+// =============================================================================
+
+/// Category code mapping for compact AI logs.
+/// See AGENTS.md for the full legend.
+fn category_to_code(category: &str) -> char {
+    match category.to_uppercase().as_str() {
+        "POSITION" => 'P',
+        "APP" => 'A',
+        "UI" => 'U',
+        "STDIN" => 'S',
+        "HOTKEY" => 'H',
+        "VISIBILITY" => 'V',
+        "EXEC" => 'E',
+        "KEY" => 'K',
+        "FOCUS" => 'F',
+        "THEME" => 'T',
+        "CACHE" => 'C',
+        "PERF" => 'R',
+        "WINDOW_MGR" => 'W',
+        "ERROR" => 'X',
+        "MOUSE_HOVER" => 'M',
+        "SCROLL_STATE" => 'L',
+        "SCROLL_PERF" => 'Q',
+        "SCRIPT" => 'B', // B for Bun/script
+        "RESIZE" => 'Z',
+        "TRAY" => 'H', // Tray is part of Hotkey subsystem
+        "DESIGN" => 'D', // Design system
+        _ => '-', // Unknown category
+    }
+}
+
+/// Convert tracing Level to single char
+fn level_to_char(level: Level) -> char {
+    match level {
+        Level::ERROR => 'e',
+        Level::WARN => 'w',
+        Level::INFO => 'i',
+        Level::DEBUG => 'd',
+        Level::TRACE => 't',
+    }
+}
+
+/// Infer category code from tracing target path
+fn infer_category_from_target(target: &str) -> char {
+    // Match by module name in the target path
+    // Group patterns by their category code to satisfy clippy
+    if target.contains("executor") {
+        'E' // Execution
+    } else if target.contains("theme") {
+        'T' // Theme
+    } else if target.contains("window_manager") || target.contains("window_control") {
+        'W' // Window manager
+    } else if target.contains("stdin") || target.contains("protocol") {
+        'S' // Stdin/protocol
+    } else if target.contains("hotkey") || target.contains("tray") {
+        'H' // Hotkey
+    } else if target.contains("scripts") || target.contains("file_search") {
+        'G' // Script loaGing (not execution)
+    } else if target.contains("config") {
+        'N' // coNfig
+    } else if target.contains("watcher")
+        || target.contains("clipboard")
+        || target.contains("logging")
+    {
+        'A' // App lifecycle/subsystems
+    } else if target.contains("panel")
+        || target.contains("prompts")
+        || target.contains("editor")
+        || target.contains("terminal")
+        || target.contains("term_prompt")
+        || target.contains("pty")
+        || target.contains("syntax")
+    {
+        'U' // UI components
+    } else if target.contains("perf") {
+        'R' // peRformance
+    } else if target.contains("resize") {
+        'Z' // resiZe
+    } else {
+        '-' // Unknown
+    }
+}
+
+/// Get seconds.milliseconds within current minute
+fn get_minute_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_millis = now.as_millis();
+    let millis_in_minute = total_millis % 60_000;
+    let seconds = millis_in_minute / 1000;
+    let millis = millis_in_minute % 1000;
+    format!("{:02}.{:03}", seconds, millis)
+}
+
+/// Visitor to extract category field from tracing events
+struct CategoryExtractor {
+    category: Option<String>,
+    message: String,
+}
+
+impl CategoryExtractor {
+    fn new() -> Self {
+        Self {
+            category: None,
+            message: String::new(),
+        }
+    }
+}
+
+impl Visit for CategoryExtractor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "category" => self.category = Some(value.to_string()),
+            "message" => self.message = value.to_string(),
+            // Skip legacy field
+            "legacy" => {}
+            _ => {
+                // Append other fields to message
+                if !self.message.is_empty() {
+                    self.message.push(' ');
+                }
+                let _ = write!(self.message, "{}={}", field.name(), value);
+            }
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "category" => self.category = Some(format!("{:?}", value)),
+            "message" => self.message = format!("{:?}", value),
+            // Skip legacy field
+            "legacy" => {}
+            _ => {
+                if !self.message.is_empty() {
+                    self.message.push(' ');
+                }
+                let _ = write!(self.message, "{}={:?}", field.name(), value);
+            }
+        }
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        if field.name() != "legacy" {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            let _ = write!(self.message, "{}={}", field.name(), value);
+        }
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() != "legacy" {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            let _ = write!(self.message, "{}={}", field.name(), value);
+        }
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        if field.name() != "legacy" {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            let _ = write!(self.message, "{}={}", field.name(), value);
+        }
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        if field.name() != "legacy" {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            let _ = write!(self.message, "{}={:.2}", field.name(), value);
+        }
+    }
+}
+
+/// Compact AI formatter for stderr output.
+/// Format: `SS.mmm|L|C|message`
+pub struct CompactAiFormatter;
+
+impl<S, N> FormatEvent<S, N> for CompactAiFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let timestamp = get_minute_timestamp();
+        let level_char = level_to_char(*event.metadata().level());
+
+        // Extract category and message from fields
+        let mut extractor = CategoryExtractor::new();
+        event.record(&mut extractor);
+
+        // Infer category from target if not explicitly set
+        let category_code = if let Some(ref cat) = extractor.category {
+            category_to_code(cat)
+        } else {
+            // Try to infer from target (e.g., script_kit_gpui::executor -> E)
+            let target = event.metadata().target();
+            infer_category_from_target(target)
+        };
+
+        // Build the compact line
+        writeln!(
+            writer,
+            "{}|{}|{}|{}",
+            timestamp, level_char, category_code, extractor.message
+        )
+    }
+}
+
+/// Wrapper to make stderr compatible with MakeWriter
+struct StderrWriter;
+
+impl<'a> MakeWriter<'a> for StderrWriter {
+    type Writer = std::io::Stderr;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        std::io::stderr()
+    }
+}
 
 // =============================================================================
 // LEGACY SUPPORT - In-memory log buffer for UI display
@@ -66,6 +315,11 @@ pub fn init() -> LoggingGuard {
     // Initialize legacy log buffer for UI display
     let _ = LOG_BUFFER.set(Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)));
 
+    // Check for AI compact log mode
+    let ai_log_mode = std::env::var("SCRIPT_KIT_AI_LOG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     // Create log directory
     let log_dir = get_log_dir();
     if let Err(e) = fs::create_dir_all(&log_dir) {
@@ -74,11 +328,13 @@ pub fn init() -> LoggingGuard {
 
     let log_path = log_dir.join("script-kit-gpui.jsonl");
 
-    // Print log location for discoverability
-    eprintln!("========================================");
-    eprintln!("[SCRIPT-KIT-GPUI] JSONL log: {}", log_path.display());
-    eprintln!("[SCRIPT-KIT-GPUI] Pretty logs: stderr");
-    eprintln!("========================================");
+    // Print log location for discoverability (only in non-AI mode)
+    if !ai_log_mode {
+        eprintln!("========================================");
+        eprintln!("[SCRIPT-KIT-GPUI] JSONL log: {}", log_path.display());
+        eprintln!("[SCRIPT-KIT-GPUI] Pretty logs: stderr");
+        eprintln!("========================================");
+    }
 
     // Open log file with append mode
     let file = OpenOptions::new()
@@ -114,26 +370,42 @@ pub fn init() -> LoggingGuard {
         .with_line_number(false)
         .with_span_events(FmtSpan::NONE);
 
-    // Pretty layer for stderr (human developers)
-    let pretty_layer = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(true)
-        .with_target(true)
-        .with_level(true)
-        .with_thread_ids(false)
-        .compact();
+    if ai_log_mode {
+        // Compact AI layer for stderr (token-efficient for AI agents)
+        let ai_layer = fmt::layer()
+            .with_writer(StderrWriter)
+            .with_ansi(false)
+            .event_format(CompactAiFormatter);
 
-    // Initialize the subscriber with both layers
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(json_layer)
-        .with(pretty_layer)
-        .init();
+        // Initialize the subscriber with JSON file + compact stderr
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(json_layer)
+            .with(ai_layer)
+            .init();
+    } else {
+        // Pretty layer for stderr (human developers)
+        let pretty_layer = fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_ansi(true)
+            .with_target(true)
+            .with_level(true)
+            .with_thread_ids(false)
+            .compact();
+
+        // Initialize the subscriber with JSON file + pretty stderr
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(json_layer)
+            .with(pretty_layer)
+            .init();
+    }
 
     tracing::info!(
         event_type = "app_lifecycle",
         action = "started",
         log_path = %log_path.display(),
+        ai_log_mode = ai_log_mode,
         "Application logging initialized"
     );
 
