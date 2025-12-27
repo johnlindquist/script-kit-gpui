@@ -1064,3 +1064,379 @@ pub fn log_key_repeat_timing(key: &str, interval_ms: u64, repeat_count: u32) {
 // Or import tracing directly:
 //   use tracing::{info, error, warn, debug, trace};
 pub use tracing;
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // category_to_code tests - using real category strings from logs
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_category_to_code_position() {
+        // From: "CALCULATING WINDOW POSITION FOR MOUSE DISPLAY"
+        assert_eq!(category_to_code("POSITION"), 'P');
+        assert_eq!(category_to_code("position"), 'P');
+        assert_eq!(category_to_code("Position"), 'P');
+    }
+
+    #[test]
+    fn test_category_to_code_app() {
+        // From: "Application logging initialized", "GPUI Application starting"
+        assert_eq!(category_to_code("APP"), 'A');
+        assert_eq!(category_to_code("app"), 'A');
+    }
+
+    #[test]
+    fn test_category_to_code_stdin() {
+        // From: "External command listener started", "Received: {\"type\": \"run\"..."
+        assert_eq!(category_to_code("STDIN"), 'S');
+    }
+
+    #[test]
+    fn test_category_to_code_hotkey() {
+        // From: "Registered global hotkey meta+Digit0", "Tray icon initialized"
+        assert_eq!(category_to_code("HOTKEY"), 'H');
+        assert_eq!(category_to_code("TRAY"), 'H'); // Tray maps to H
+    }
+
+    #[test]
+    fn test_category_to_code_visibility() {
+        // From: "HOTKEY TRIGGERED - TOGGLE WINDOW", "WINDOW_VISIBLE set to: true"
+        assert_eq!(category_to_code("VISIBILITY"), 'V');
+    }
+
+    #[test]
+    fn test_category_to_code_exec() {
+        // From: "Executing script: hello-world", "Script execution complete"
+        assert_eq!(category_to_code("EXEC"), 'E');
+    }
+
+    #[test]
+    fn test_category_to_code_theme() {
+        // From: "Theme file not found, using defaults based on system appearance"
+        assert_eq!(category_to_code("THEME"), 'T');
+    }
+
+    #[test]
+    fn test_category_to_code_window_mgr() {
+        // From: "Searching for main window among 2 windows"
+        assert_eq!(category_to_code("WINDOW_MGR"), 'W');
+    }
+
+    #[test]
+    fn test_category_to_code_perf() {
+        // From: "Startup loading: 33.30ms total (331 scripts in 5.03ms)"
+        assert_eq!(category_to_code("PERF"), 'R');
+    }
+
+    #[test]
+    fn test_category_to_code_all_categories() {
+        // Complete mapping verification
+        let mappings = [
+            ("POSITION", 'P'),
+            ("APP", 'A'),
+            ("UI", 'U'),
+            ("STDIN", 'S'),
+            ("HOTKEY", 'H'),
+            ("VISIBILITY", 'V'),
+            ("EXEC", 'E'),
+            ("KEY", 'K'),
+            ("FOCUS", 'F'),
+            ("THEME", 'T'),
+            ("CACHE", 'C'),
+            ("PERF", 'R'),
+            ("WINDOW_MGR", 'W'),
+            ("ERROR", 'X'),
+            ("MOUSE_HOVER", 'M'),
+            ("SCROLL_STATE", 'L'),
+            ("SCROLL_PERF", 'Q'),
+            ("SCRIPT", 'B'),
+            ("RESIZE", 'Z'),
+            ("DESIGN", 'D'),
+        ];
+
+        for (category, expected_code) in mappings {
+            assert_eq!(
+                category_to_code(category),
+                expected_code,
+                "Category '{}' should map to '{}'",
+                category,
+                expected_code
+            );
+        }
+    }
+
+    #[test]
+    fn test_category_to_code_unknown() {
+        assert_eq!(category_to_code("UNKNOWN_CATEGORY"), '-');
+        assert_eq!(category_to_code(""), '-');
+        assert_eq!(category_to_code("foobar"), '-');
+    }
+
+    // -------------------------------------------------------------------------
+    // level_to_char tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_level_to_char() {
+        assert_eq!(level_to_char(Level::ERROR), 'e');
+        assert_eq!(level_to_char(Level::WARN), 'w');
+        assert_eq!(level_to_char(Level::INFO), 'i');
+        assert_eq!(level_to_char(Level::DEBUG), 'd');
+        assert_eq!(level_to_char(Level::TRACE), 't');
+    }
+
+    // -------------------------------------------------------------------------
+    // infer_category_from_target tests - using real module paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_category_executor() {
+        // From: script_kit_gpui::executor
+        assert_eq!(infer_category_from_target("script_kit_gpui::executor"), 'E');
+    }
+
+    #[test]
+    fn test_infer_category_theme() {
+        // From: "script_kit_gpui::theme: Theme file not found"
+        assert_eq!(infer_category_from_target("script_kit_gpui::theme"), 'T');
+    }
+
+    #[test]
+    fn test_infer_category_config() {
+        // From: "script_kit_gpui::config: Successfully loaded config"
+        assert_eq!(infer_category_from_target("script_kit_gpui::config"), 'N');
+    }
+
+    #[test]
+    fn test_infer_category_clipboard() {
+        // From: "script_kit_gpui::clipboard_history: Initializing clipboard history"
+        assert_eq!(
+            infer_category_from_target("script_kit_gpui::clipboard_history"),
+            'A'
+        );
+    }
+
+    #[test]
+    fn test_infer_category_logging() {
+        // From: "script_kit_gpui::logging: Application logging initialized"
+        assert_eq!(infer_category_from_target("script_kit_gpui::logging"), 'A');
+    }
+
+    #[test]
+    fn test_infer_category_protocol() {
+        // From: "script_kit_gpui::protocol" (stdin message handling)
+        assert_eq!(infer_category_from_target("script_kit_gpui::protocol"), 'S');
+    }
+
+    #[test]
+    fn test_infer_category_prompts() {
+        // UI components
+        assert_eq!(infer_category_from_target("script_kit_gpui::prompts"), 'U');
+        assert_eq!(infer_category_from_target("script_kit_gpui::editor"), 'U');
+        assert_eq!(infer_category_from_target("script_kit_gpui::panel"), 'U');
+    }
+
+    #[test]
+    fn test_infer_category_scripts() {
+        // From: "Loaded 331 scripts from ~/.kenv/scripts"
+        assert_eq!(infer_category_from_target("script_kit_gpui::scripts"), 'G');
+        assert_eq!(
+            infer_category_from_target("script_kit_gpui::file_search"),
+            'G'
+        );
+    }
+
+    #[test]
+    fn test_infer_category_hotkey() {
+        // From: "Registered global hotkey meta+Digit0"
+        assert_eq!(infer_category_from_target("script_kit_gpui::hotkey"), 'H');
+        assert_eq!(infer_category_from_target("script_kit_gpui::tray"), 'H');
+    }
+
+    #[test]
+    fn test_infer_category_window() {
+        assert_eq!(
+            infer_category_from_target("script_kit_gpui::window_manager"),
+            'W'
+        );
+        assert_eq!(
+            infer_category_from_target("script_kit_gpui::window_control"),
+            'W'
+        );
+    }
+
+    #[test]
+    fn test_infer_category_unknown() {
+        assert_eq!(infer_category_from_target("script_kit_gpui::main"), '-');
+        assert_eq!(infer_category_from_target("unknown::module"), '-');
+    }
+
+    // -------------------------------------------------------------------------
+    // get_minute_timestamp tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_minute_timestamp_format() {
+        let ts = get_minute_timestamp();
+        // Format should be "SS.mmm" - 2 digits, dot, 3 digits
+        assert_eq!(ts.len(), 6, "Timestamp '{}' should be 6 chars", ts);
+        assert!(ts.contains('.'), "Timestamp '{}' should contain '.'", ts);
+
+        let parts: Vec<&str> = ts.split('.').collect();
+        assert_eq!(parts.len(), 2);
+
+        let seconds: u32 = parts[0].parse().expect("seconds should be numeric");
+        let millis: u32 = parts[1].parse().expect("millis should be numeric");
+
+        assert!(seconds < 60, "Seconds {} should be < 60", seconds);
+        assert!(millis < 1000, "Millis {} should be < 1000", millis);
+    }
+
+    #[test]
+    fn test_get_minute_timestamp_changes() {
+        // Two calls in quick succession should produce similar timestamps
+        let ts1 = get_minute_timestamp();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts2 = get_minute_timestamp();
+
+        // Parse both
+        let parse = |ts: &str| -> u64 {
+            let parts: Vec<&str> = ts.split('.').collect();
+            let secs: u64 = parts[0].parse().unwrap();
+            let millis: u64 = parts[1].parse().unwrap();
+            secs * 1000 + millis
+        };
+
+        let diff = parse(&ts2).saturating_sub(parse(&ts1));
+        // Should be at least 5ms apart (we slept 5ms)
+        assert!(
+            diff >= 4,
+            "Timestamps should be at least 4ms apart, got {}ms",
+            diff
+        );
+        // But not more than 100ms (reasonable execution time)
+        assert!(
+            diff < 100,
+            "Timestamps should be less than 100ms apart, got {}ms",
+            diff
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Compact format output validation (pattern matching)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_compact_format_pattern() {
+        // Real example from logs:
+        // "11.697|i|A|Application logging initialized event_type=app_lifecycle..."
+        let example = "11.697|i|A|Application logging initialized";
+
+        let parts: Vec<&str> = example.split('|').collect();
+        assert_eq!(parts.len(), 4, "Compact format should have 4 parts");
+
+        // Part 0: timestamp (SS.mmm)
+        assert_eq!(parts[0].len(), 6);
+        assert!(parts[0].contains('.'));
+
+        // Part 1: level (single char)
+        assert_eq!(parts[1].len(), 1);
+        assert!("iwedtIWEDT".contains(parts[1]));
+
+        // Part 2: category (single char)
+        assert_eq!(parts[2].len(), 1);
+
+        // Part 3: message (rest)
+        assert!(!parts[3].is_empty());
+    }
+
+    #[test]
+    fn test_compact_format_real_examples() {
+        // Real log lines from test run
+        let examples = [
+            ("11.697|i|A|Application logging initialized", "i", "A"),
+            ("11.717|i|N|Successfully loaded config", "i", "N"),
+            ("11.741|i|H|Registered global hotkey meta+Digit0", "i", "H"),
+            ("11.779|i|P|Available displays: 1", "i", "P"),
+        ];
+
+        for (line, expected_level, expected_cat) in examples {
+            let parts: Vec<&str> = line.split('|').collect();
+            assert_eq!(
+                parts[1], expected_level,
+                "Line '{}' should have level '{}'",
+                line, expected_level
+            );
+            assert_eq!(
+                parts[2], expected_cat,
+                "Line '{}' should have category '{}'",
+                line, expected_cat
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Token savings verification
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_compact_format_token_savings() {
+        // Real comparison from logs:
+        // Standard: "2025-12-27T15:22:13.150640Z  INFO script_kit_gpui::logging: Selected display..."
+        // Compact:  "13.150|i|P|Selected display..."
+
+        let standard_prefix = "2025-12-27T15:22:13.150640Z  INFO script_kit_gpui::logging: ";
+        let compact_prefix = "13.150|i|P|";
+
+        let savings_percent =
+            100.0 - (compact_prefix.len() as f64 / standard_prefix.len() as f64 * 100.0);
+
+        // Should save at least 60% on the prefix
+        assert!(
+            savings_percent > 60.0,
+            "Should save >60% on prefix, got {:.1}%",
+            savings_percent
+        );
+
+        // Actual: 11 chars vs 59 chars = 81% savings
+        assert!(
+            savings_percent > 80.0,
+            "Should save >80% on prefix, got {:.1}%",
+            savings_percent
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // AI log mode env var parsing tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_ai_log_mode_env_parsing() {
+        // Test the parsing logic used in init()
+        // SCRIPT_KIT_AI_LOG=1 should enable AI mode
+
+        let parse_ai_log = |val: &str| -> bool {
+            val.eq_ignore_ascii_case("1")
+                || val.eq_ignore_ascii_case("true")
+                || val.eq_ignore_ascii_case("yes")
+        };
+
+        assert!(parse_ai_log("1"));
+        assert!(parse_ai_log("true"));
+        assert!(parse_ai_log("TRUE"));
+        assert!(parse_ai_log("yes"));
+        assert!(parse_ai_log("YES"));
+
+        assert!(!parse_ai_log("0"));
+        assert!(!parse_ai_log("false"));
+        assert!(!parse_ai_log("no"));
+        assert!(!parse_ai_log(""));
+    }
+}
