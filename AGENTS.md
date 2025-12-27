@@ -15,7 +15,19 @@ Script KIT GPUI is a complete rewrite of Script Kit into the GPUI framework. The
 □ 4. Update bead status when starting/completing work
 □ 5. Write tests FIRST (TDD) - see Section 14 for test patterns
 □ 6. Include correlation_id in all log entries
-□ 7. Run smoke tests after UI changes: ./target/debug/script-kit-gpui tests/smoke/hello-world.ts
+□ 7. TEST UI CHANGES via stdin JSON protocol (see "Autonomous Testing Protocol" below)
+```
+
+### CRITICAL: How to Test UI Changes
+
+**NEVER pass scripts as command line arguments.** The app uses stdin JSON messages:
+
+```bash
+# CORRECT - Use stdin JSON protocol
+echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-editor-height.ts"}' | ./target/debug/script-kit-gpui 2>&1
+
+# WRONG - Command line args don't work!
+./target/debug/script-kit-gpui tests/smoke/hello-world.ts  # THIS DOES NOTHING
 ```
 
 ### Quick Verification Command
@@ -46,6 +58,7 @@ cargo check && cargo clippy --all-targets -- -D warnings && cargo test
 | **Verification Gate** | Always run `cargo check && cargo clippy && cargo test` before commits |
 | **SDK Preload** | Scripts import `../../scripts/kit-sdk` for global functions (arg, div, md) |
 | **Arrow Key Names** | ALWAYS match BOTH: `"up" \| "arrowup"`, `"down" \| "arrowdown"`, `"left" \| "arrowleft"`, `"right" \| "arrowright"` |
+| **Visual Testing** | Use `./scripts/visual-test.sh <test.ts> <seconds>` to capture screenshots for layout debugging |
 
 ---
 
@@ -56,63 +69,138 @@ cargo check && cargo clippy --all-targets -- -D warnings && cargo test
 
 The app accepts JSONL commands via stdin for automated testing. This is the ONLY way to test UI behavior without manual interaction.
 
-### Testing Process
+### The Build-Test-Iterate Loop
 
-1. **Build the app:**
-   ```bash
-   cargo build
-   ```
-
-2. **Send commands via stdin:**
-   ```bash
-   # Run a script that shows an editor
-   (echo '{"type": "run", "path": "/path/to/test-script.ts"}'; sleep 5) | ./target/debug/script-kit-gpui 2>&1 | grep -i "your_search_term"
-   ```
-
-3. **Available commands:**
-   ```json
-   {"type": "run", "path": "/absolute/path/to/script.ts"}
-   {"type": "show"}
-   {"type": "hide"}
-   ```
-
-4. **Create test scripts in `~/.kenv/scripts/`:**
-   ```typescript
-   // test-editor.ts - Tests editor functionality
-   const result = await editor("test content", "text")
-   console.log("Result:", result)
-   ```
-
-5. **Check logs for behavior:**
-   - Logs go to stderr (pretty) and `~/.kit/logs/script-kit-gpui.jsonl` (machine-readable)
-   - Filter with `grep -i "EDITOR\|KEY\|FOCUS"` to trace specific functionality
-
-### Example: Testing Editor Arrow Keys
+**MANDATORY WORKFLOW for any UI/feature changes:**
 
 ```bash
-# Create test script
-cat > ~/.kenv/scripts/test-editor-keys.ts << 'EOF'
-const result = await editor("line1\nline2\nline3", "text")
-console.log("Result:", result)
-EOF
+# 1. Build
+cargo build
 
-# Run test and check for keyboard handling logs
-(echo '{"type": "run", "path": "'$HOME'/.kenv/scripts/test-editor-keys.ts"}'; sleep 5) | \
-  ./target/debug/script-kit-gpui 2>&1 | grep -i "key\|arrow\|editor"
+# 2. Run test via stdin JSON (NOT command line args!)
+echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-editor-height.ts"}' | ./target/debug/script-kit-gpui 2>&1
+
+# 3. Check output for expected behavior
+# 4. If broken, fix code and repeat from step 1
 ```
+
+**This loop is NON-NEGOTIABLE.** Do not ask the user to test. Do not skip testing. Run the test yourself, read the logs, fix issues, repeat.
+
+### Available stdin Commands
+
+```json
+{"type": "run", "path": "/absolute/path/to/script.ts"}
+{"type": "show"}
+{"type": "hide"}
+{"type": "setFilter", "text": "search term"}
+```
+
+### Test Scripts Location
+
+Test scripts live in `tests/smoke/` and use the SDK:
+
+```typescript
+// tests/smoke/test-my-feature.ts
+import '../../scripts/kit-sdk';
+
+console.error('[SMOKE] test starting...');
+const result = await editor("test content", "typescript");
+console.error('[SMOKE] result:', result);
+```
+
+### Checking Logs
+
+```bash
+# Stderr shows pretty logs during execution
+# JSONL logs are at ~/.kit/logs/script-kit-gpui.jsonl
+
+# Filter for specific behavior:
+echo '{"type": "run", "path": "..."}' | ./target/debug/script-kit-gpui 2>&1 | grep -iE 'RESIZE|editor|height'
+
+# Check structured logs:
+tail -50 ~/.kit/logs/script-kit-gpui.jsonl | grep -i resize
+```
+
+### Example: Testing Window Resize
+
+```bash
+# Run the editor height test
+echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-editor-height.ts"}' | ./target/debug/script-kit-gpui 2>&1 | grep -iE 'RESIZE|height_for_view|700'
+
+# Expected output should show:
+# height_for_view(EditorPrompt) = 700
+# Resize: 501 -> 700
+```
+
+### Visual Testing with Screenshots
+
+**For UI layout issues that can't be verified through logs alone, use the visual test script:**
+
+```bash
+# Run visual test - launches app, waits for render, captures screenshot, terminates
+./scripts/visual-test.sh tests/smoke/test-editor-height.ts 3
+
+# Output:
+# Screenshot: .test-screenshots/test-editor-height-20251227-012813.png
+# Log: .test-screenshots/test-editor-height-20251227-012813.log
+```
+
+**The visual test script (`scripts/visual-test.sh`):**
+1. Builds the project
+2. Launches the app with your test script via stdin JSON
+3. Waits N seconds for the window to render (default: 2s)
+4. Captures a screenshot using macOS `screencapture`
+5. Terminates the app
+6. Saves screenshot and logs to `.test-screenshots/`
+
+**Reading screenshots programmatically:**
+```bash
+# After running visual test, read the screenshot to analyze UI state
+# The screenshot path is output by the script
+```
+
+**When to use visual testing:**
+- Layout issues (content not filling space, wrong sizes)
+- Styling problems (colors, borders, spacing)
+- Component visibility issues
+- Any UI behavior that logs alone can't verify
+
+**Screenshot analysis workflow:**
+1. Run `./scripts/visual-test.sh <test-script.ts> <wait-seconds>`
+2. Read the screenshot file to see actual rendered state
+3. Compare against expected behavior
+4. If broken, fix code and repeat
+
+**Example: Debugging editor height issue:**
+```bash
+# 1. Run visual test
+./scripts/visual-test.sh tests/smoke/test-editor-height.ts 3
+
+# 2. Check the screenshot - does editor fill the 700px window?
+# 3. Check the log for height values:
+grep -E 'height|700|resize' .test-screenshots/test-editor-height-*.log
+
+# 4. If editor is too small, the issue is in layout code
+# 5. Fix and repeat until screenshot shows correct layout
+```
+
+### Anti-Patterns
+
+| Wrong | Right |
+|-------|-------|
+| `./target/debug/script-kit-gpui test.ts` | `echo '{"type":"run",...}' \| ./target/debug/script-kit-gpui` |
+| "I can't test this without manual interaction" | Use stdin protocol, add logging, verify in output |
+| "The user should test this" | YOU must test it using the stdin protocol |
+| Committing without running the test | Run `cargo build && echo '...' \| ./target/debug/...` |
+| "I can't see what the UI looks like" | Use `./scripts/visual-test.sh` to capture and read screenshots |
+| Guessing at layout issues | Capture screenshot, read it, analyze actual vs expected |
 
 ### Why This Matters
 
 - **Keyboard events require a visible window** - the window must be activated via the protocol
 - **Focus must be set correctly** - check logs for `focus_handle.is_focused=true`
 - **Key names vary by platform** - GPUI may send `"up"` OR `"arrowup"` for arrow keys
-
-### Anti-Pattern: Skipping Autonomous Testing
-
-```
-❌ WRONG: "I can't test keyboard events without manual interaction"
-✅ RIGHT: Use stdin protocol to trigger UI, add logging, verify behavior in logs
-```
+- **Layout issues are only visible at runtime** - you MUST run the app to see them
 </critical>
 
 ---
