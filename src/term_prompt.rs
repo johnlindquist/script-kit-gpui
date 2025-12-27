@@ -266,7 +266,8 @@ impl TermPrompt {
     /// typically reducing to ~50-100 elements per frame.
     fn render_content(&self, content: &TerminalContent) -> impl IntoElement {
         let colors = &self.theme.colors;
-        let default_bg = rgb(colors.background.log_panel);
+        // Use main background color to match window - no visible seam
+        let default_bg = rgb(colors.background.main);
         let cursor_bg = rgb(colors.accent.selected);
         let default_fg = rgb(colors.text.primary);
         
@@ -343,7 +344,7 @@ impl TermPrompt {
                     rgb(fg_u32)
                 };
                 
-                let has_custom_bg = is_cursor_start || (bg_u32 != 0x000000 && bg_u32 != colors.background.log_panel);
+                let has_custom_bg = is_cursor_start || (bg_u32 != 0x000000 && bg_u32 != colors.background.main);
                 
                 let mut span = div()
                     .w(px(batch_width))
@@ -522,11 +523,12 @@ impl Render for TermPrompt {
         // Main container with terminal styling
         // Use explicit height if available, otherwise fall back to size_full
         // NO padding - terminal content should fill edge-to-edge
+        // Use main background color to match window - no visible seam at edges
         let container = div()
             .flex()
             .flex_col()
             .w_full()
-            .bg(rgb(colors.background.log_panel)) // Dark terminal background
+            .bg(rgb(colors.background.main))
             .text_color(rgb(colors.text.primary))
             .overflow_hidden() // Clip any overflow
             .key_context("term_prompt")

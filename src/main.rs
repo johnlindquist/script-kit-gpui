@@ -3483,7 +3483,6 @@ impl ScriptListApp {
         // Use design tokens for GLOBAL theming
         let tokens = get_tokens(self.current_design);
         let design_colors = tokens.colors();
-        let design_visual = tokens.visual();
         
         // Use design tokens for global theming
         let opacity = self.theme.get_opacity();
@@ -3497,6 +3496,7 @@ impl ScriptListApp {
         
         // Container with explicit height. We wrap the entity in a sized div because
         // GPUI entities don't automatically inherit parent flex sizing.
+        // NOTE: No rounded corners for terminal - it should fill edge-to-edge
         div()
             .flex()
             .flex_col()
@@ -3505,7 +3505,6 @@ impl ScriptListApp {
             .w_full()
             .h(content_height)
             .overflow_hidden()
-            .rounded(px(design_visual.radius_lg))
             .child(
                 div()
                     .size_full()
