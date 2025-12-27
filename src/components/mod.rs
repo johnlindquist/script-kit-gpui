@@ -30,4 +30,4 @@
 pub mod button;
 
 // Re-export commonly used types
-pub use button::{Button, ButtonColors, ButtonVariant, OnClickCallback};
+pub use button::{Button, ButtonColors, ButtonVariant};

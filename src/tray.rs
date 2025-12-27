@@ -149,16 +149,19 @@ impl TrayManager {
     }
 
     /// Returns the menu item ID for "Open Script Kit"
+    #[allow(dead_code)]
     pub fn open_script_kit_id(&self) -> &str {
         &self.open_script_kit_id
     }
 
     /// Returns the menu item ID for "Settings"
+    #[allow(dead_code)]
     pub fn settings_id(&self) -> &str {
         &self.settings_id
     }
 
     /// Returns the menu item ID for "Quit"
+    #[allow(dead_code)]
     pub fn quit_id(&self) -> &str {
         &self.quit_id
     }

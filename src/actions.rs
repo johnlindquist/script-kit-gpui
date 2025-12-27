@@ -571,7 +571,7 @@ impl Render for ActionsDialog {
                     let item_tokens = get_tokens(design_variant);
                     let item_colors = item_tokens.colors();
                     let item_spacing = item_tokens.spacing();
-                    let item_visual = item_tokens.visual();
+                    let _item_visual = item_tokens.visual();
                     
                     // Extract colors for list items - MATCH main list styling exactly
                     // Uses accent_selected_subtle with 0x80 alpha (same as ListItem)

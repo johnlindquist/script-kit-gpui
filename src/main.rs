@@ -39,8 +39,12 @@ mod components;
 #[cfg(target_os = "macos")]
 mod selected_text;
 mod tray;
+mod editor;
+mod window_resize;
 
 use tray::{TrayManager, TrayMenuAction};
+use editor::EditorPrompt;
+use window_resize::{ViewType, height_for_view, resize_first_window_to_height};
 
 use list_item::{ListItem, ListItemColors, LIST_ITEM_HEIGHT};
 use utils::strip_html_tags;
@@ -331,6 +335,12 @@ enum AppView {
         id: String,
         entity: Entity<term_prompt::TermPrompt>,
     },
+    /// Showing an editor prompt from a script
+    EditorPrompt {
+        #[allow(dead_code)]
+        id: String,
+        entity: Entity<EditorPrompt>,
+    },
 }
 
 /// Wrapper to hold a script session that can be shared across async boundaries
@@ -355,6 +365,7 @@ enum PromptMessage {
     ShowArg { id: String, placeholder: String, choices: Vec<Choice> },
     ShowDiv { id: String, html: String, tailwind: Option<String> },
     ShowTerm { id: String, command: Option<String> },
+    ShowEditor { id: String, content: Option<String>, language: Option<String> },
     HideWindow,
     OpenBrowser { url: String },
     ScriptExit,
@@ -973,12 +984,61 @@ impl ScriptListApp {
             self.list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
             self.last_scrolled_index = Some(0);
         }
+        
+        // Trigger window resize based on new filter results
+        self.update_window_size();
+        
         cx.notify();
     }
     
     fn toggle_logs(&mut self, cx: &mut Context<Self>) {
         self.show_logs = !self.show_logs;
         cx.notify();
+    }
+    
+    /// Update window size based on current view and item count.
+    /// This implements dynamic window resizing:
+    /// - Script list: resize based on filtered results
+    /// - Arg prompt: resize based on filtered choices
+    /// - Div/Editor/Term: use full height
+    fn update_window_size(&self) {
+        let (view_type, item_count) = match &self.current_view {
+            AppView::ScriptList => {
+                let count = self.filtered_results().len();
+                (ViewType::ScriptList, count)
+            }
+            AppView::ArgPrompt { choices, .. } => {
+                let filtered = self.get_filtered_arg_choices(choices);
+                if filtered.is_empty() && choices.is_empty() {
+                    (ViewType::ArgPromptNoChoices, 0)
+                } else {
+                    (ViewType::ArgPromptWithChoices, filtered.len())
+                }
+            }
+            AppView::DivPrompt { .. } => (ViewType::DivPrompt, 0),
+            AppView::EditorPrompt { .. } => (ViewType::EditorPrompt, 0),
+            AppView::TermPrompt { .. } => (ViewType::TermPrompt, 0),
+            AppView::ActionsDialog => {
+                // Actions dialog is an overlay, don't resize
+                return;
+            }
+        };
+        
+        let target_height = height_for_view(view_type, item_count);
+        resize_first_window_to_height(target_height);
+    }
+    
+    /// Helper to get filtered arg choices without cloning
+    fn get_filtered_arg_choices<'a>(&self, choices: &'a [Choice]) -> Vec<&'a Choice> {
+        if self.arg_input_text.is_empty() {
+            choices.iter().collect()
+        } else {
+            let filter = self.arg_input_text.to_lowercase();
+            choices
+                .iter()
+                .filter(|c| c.name.to_lowercase().contains(&filter))
+                .collect()
+        }
     }
     
     fn toggle_actions(&mut self, cx: &mut Context<Self>, window: &mut Window) {
@@ -1213,12 +1273,15 @@ impl ScriptListApp {
                                     Message::Div { id, html, tailwind } => {
                                         Some(PromptMessage::ShowDiv { id, html, tailwind })
                                     }
-                                    Message::Term { id, command } => {
-                                        Some(PromptMessage::ShowTerm { id, command })
-                                    }
-                                    Message::Exit { .. } => {
-                                        Some(PromptMessage::ScriptExit)
-                                    }
+                                                Message::Term { id, command } => {
+                                                    Some(PromptMessage::ShowTerm { id, command })
+                                                }
+                                                Message::Editor { id, content, language, .. } => {
+                                                    Some(PromptMessage::ShowEditor { id, content, language })
+                                                }
+                                                Message::Exit { .. } => {
+                                                    Some(PromptMessage::ScriptExit)
+                                                }
                                     Message::Hide {} => {
                                         Some(PromptMessage::HideWindow)
                                     }
@@ -1275,15 +1338,24 @@ impl ScriptListApp {
         match msg {
             PromptMessage::ShowArg { id, placeholder, choices } => {
                 logging::log("UI", &format!("Showing arg prompt: {} with {} choices", id, choices.len()));
+                let choice_count = choices.len();
                 self.current_view = AppView::ArgPrompt { id, placeholder, choices };
                 self.arg_input_text.clear();
                 self.arg_selected_index = 0;
                 self.focused_input = FocusedInput::ArgPrompt;
+                // Resize window based on number of choices
+                let target_height = if choice_count == 0 {
+                    height_for_view(ViewType::ArgPromptNoChoices, 0)
+                } else {
+                    height_for_view(ViewType::ArgPromptWithChoices, choice_count)
+                };
+                resize_first_window_to_height(target_height);
                 cx.notify();
             }
             PromptMessage::ShowDiv { id, html, tailwind } => {
                 logging::log("UI", &format!("Showing div prompt: {}", id));
                 self.current_view = AppView::DivPrompt { id, html, tailwind };
+                resize_first_window_to_height(height_for_view(ViewType::DivPrompt, 0));
                 cx.notify();
             }
             PromptMessage::ShowTerm { id, command } => {
@@ -1311,6 +1383,7 @@ impl ScriptListApp {
                     Ok(term_prompt) => {
                         let entity = cx.new(|_| term_prompt);
                         self.current_view = AppView::TermPrompt { id, entity };
+                        resize_first_window_to_height(height_for_view(ViewType::TermPrompt, 0));
                         cx.notify();
                     }
                     Err(e) => {
@@ -1318,6 +1391,36 @@ impl ScriptListApp {
                         logging::log("ERROR", &format!("Failed to create terminal: {}", e));
                     }
                 }
+            }
+            PromptMessage::ShowEditor { id, content, language } => {
+                logging::log("UI", &format!("Showing editor prompt: {} (language: {:?})", id, language));
+                
+                // Create submit callback for editor
+                let response_sender = self.response_sender.clone();
+                let submit_callback: std::sync::Arc<dyn Fn(String, Option<String>) + Send + Sync> = 
+                    std::sync::Arc::new(move |id, value| {
+                        if let Some(ref sender) = response_sender {
+                            let response = Message::Submit { id, value };
+                            if let Err(e) = sender.send(response) {
+                                logging::log("UI", &format!("Failed to send editor response: {}", e));
+                            }
+                        }
+                    });
+                
+                let editor_prompt = EditorPrompt::new(
+                    id.clone(),
+                    content.unwrap_or_default(),
+                    language.unwrap_or_else(|| "typescript".to_string()),
+                    self.focus_handle.clone(),
+                    submit_callback,
+                    std::sync::Arc::new(self.theme.clone()),
+                );
+                
+                let entity = cx.new(|_| editor_prompt);
+                self.current_view = AppView::EditorPrompt { id, entity };
+                self.focused_input = FocusedInput::None; // Editor handles its own focus
+                resize_first_window_to_height(height_for_view(ViewType::EditorPrompt, 0));
+                cx.notify();
             }
             PromptMessage::ScriptExit => {
                 logging::log("VISIBILITY", "=== ScriptExit message received ===");
@@ -1460,6 +1563,7 @@ impl ScriptListApp {
             AppView::ArgPrompt { .. } => "ArgPrompt",
             AppView::DivPrompt { .. } => "DivPrompt",
             AppView::TermPrompt { .. } => "TermPrompt",
+            AppView::EditorPrompt { .. } => "EditorPrompt",
         };
         
         logging::log("UI", &format!("Resetting to script list (was: {})", old_view));
@@ -1492,6 +1596,10 @@ impl ScriptListApp {
         self.list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
         self.last_scrolled_index = Some(0);
         
+        // Resize window for script list
+        let count = self.scripts.len() + self.scriptlets.len();
+        resize_first_window_to_height(height_for_view(ViewType::ScriptList, count));
+        
         // Clear output
         self.last_output = None;
         
@@ -1510,7 +1618,7 @@ impl ScriptListApp {
     
     /// Check if we're currently in a prompt view (script is running)
     fn is_in_prompt(&self) -> bool {
-        matches!(self.current_view, AppView::ArgPrompt { .. } | AppView::DivPrompt { .. } | AppView::TermPrompt { .. })
+        matches!(self.current_view, AppView::ArgPrompt { .. } | AppView::DivPrompt { .. } | AppView::TermPrompt { .. } | AppView::EditorPrompt { .. })
     }
       
       /// Submit a response to the current prompt
@@ -1648,6 +1756,7 @@ impl Render for ScriptListApp {
             AppView::ArgPrompt { id, placeholder, choices } => self.render_arg_prompt(id, placeholder, choices, cx),
             AppView::DivPrompt { id, html, tailwind } => self.render_div_prompt(id, html, tailwind, cx),
             AppView::TermPrompt { entity, .. } => self.render_term_prompt(entity, cx),
+            AppView::EditorPrompt { entity, .. } => self.render_editor_prompt(entity, cx),
         }
     }
 }
@@ -2615,6 +2724,7 @@ impl ScriptListApp {
                     if !this.arg_input_text.is_empty() {
                         this.arg_input_text.pop();
                         this.arg_selected_index = 0;
+                        this.update_window_size();
                         cx.notify();
                     }
                 }
@@ -2624,6 +2734,7 @@ impl ScriptListApp {
                             if !ch.is_control() {
                                 this.arg_input_text.push(ch);
                                 this.arg_selected_index = 0;
+                                this.update_window_size();
                                 cx.notify();
                             }
                         }
@@ -2869,6 +2980,30 @@ impl ScriptListApp {
     }
     
     fn render_term_prompt(&mut self, entity: Entity<term_prompt::TermPrompt>, _cx: &mut Context<Self>) -> AnyElement {
+        // Use design tokens for GLOBAL theming
+        let tokens = get_tokens(self.current_design);
+        let design_colors = tokens.colors();
+        let design_visual = tokens.visual();
+        
+        // Use design tokens for global theming
+        let opacity = self.theme.get_opacity();
+        let bg_hex = design_colors.background;
+        let bg_with_alpha = self.hex_to_rgba_with_opacity(bg_hex, opacity.main);
+        let box_shadows = self.create_box_shadows();
+        
+        div()
+            .flex()
+            .flex_col()
+            .bg(rgba(bg_with_alpha))
+            .shadow(box_shadows)
+            .w_full()
+            .h_full()
+            .rounded(px(design_visual.radius_lg))
+            .child(entity)
+            .into_any_element()
+    }
+    
+    fn render_editor_prompt(&mut self, entity: Entity<EditorPrompt>, _cx: &mut Context<Self>) -> AnyElement {
         // Use design tokens for GLOBAL theming
         let tokens = get_tokens(self.current_design);
         let design_colors = tokens.colors();

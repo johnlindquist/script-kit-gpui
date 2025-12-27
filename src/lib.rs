@@ -8,6 +8,7 @@
 pub mod components;
 pub mod config;
 pub mod designs;
+pub mod editor;
 pub mod error;
 pub mod executor;
 pub mod list_item;
@@ -25,3 +26,4 @@ pub mod theme;
 #[cfg(not(test))]
 pub mod tray;
 pub mod utils;
+pub mod window_resize;
