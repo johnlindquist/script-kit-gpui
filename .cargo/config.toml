@@ -1,0 +1,7 @@
+# Cargo configuration for script-kit-gpui
+#
+# Run tests with single thread to avoid race condition in syntect's
+# static resource cleanup during parallel test teardown.
+
+[env]
+RUST_TEST_THREADS = "1"
