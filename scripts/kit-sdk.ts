@@ -119,6 +119,42 @@ export interface FindOptions {
 }
 
 // =============================================================================
+// Arg Types (for all calling conventions)
+// =============================================================================
+
+/**
+ * Configuration object for arg() - supports all Script Kit v1 options
+ */
+export interface ArgConfig {
+  placeholder?: string;
+  choices?: ChoicesInput;
+  hint?: string;
+  /** Called when the prompt is first shown */
+  onInit?: () => void | Promise<void>;
+  /** Called when user submits a value */
+  onSubmit?: (value: string) => void | Promise<void>;
+  /** Keyboard shortcuts for actions */
+  shortcuts?: Array<{
+    key: string;
+    name: string;
+    action: () => void;
+  }>;
+}
+
+/**
+ * Function that generates choices - can be sync or async
+ * If it takes an input parameter, it's called on each keystroke for filtering
+ */
+export type ChoicesFunction = 
+  | (() => (string | Choice)[] | Promise<(string | Choice)[]>)
+  | ((input: string) => (string | Choice)[] | Promise<(string | Choice)[]>);
+
+/**
+ * All valid types for the choices parameter
+ */
+export type ChoicesInput = (string | Choice)[] | ChoicesFunction;
+
+// =============================================================================
 // TIER 5A: Utility Types
 // =============================================================================
 
@@ -574,8 +610,20 @@ rl.on('line', (line: string) => {
 declare global {
   /**
    * Prompt user for input with optional choices
+   * 
+   * Supports multiple calling conventions:
+   * - arg() - no arguments, show text input
+   * - arg('placeholder') - placeholder text, no choices
+   * - arg('placeholder', ['a','b','c']) - with string array choices
+   * - arg('placeholder', [{name, value}]) - with structured choices
+   * - arg('placeholder', async () => [...]) - with async function returning choices
+   * - arg('placeholder', (input) => [...]) - with filter function
+   * - arg({placeholder, choices, ...}) - config object with all options
    */
-  function arg(placeholder: string, choices: (string | Choice)[]): Promise<string>;
+  function arg(): Promise<string>;
+  function arg(placeholder: string): Promise<string>;
+  function arg(placeholder: string, choices: ChoicesInput): Promise<string>;
+  function arg(config: ArgConfig): Promise<string>;
   
   /**
    * Display HTML content to user
@@ -1069,22 +1117,133 @@ declare global {
   function inspect(data: unknown): Promise<void>;
 }
 
+/**
+ * Normalize a single choice to {name, value} format
+ */
+function normalizeChoice(c: string | Choice): Choice {
+  if (typeof c === 'string') {
+    return { name: c, value: c };
+  }
+  return c;
+}
+
+/**
+ * Normalize an array of choices to Choice[] format
+ * Handles undefined, empty arrays, and mixed string/object arrays
+ */
+function normalizeChoices(choices: (string | Choice)[] | undefined | null): Choice[] {
+  if (!choices || !Array.isArray(choices)) {
+    return [];
+  }
+  return choices.map(normalizeChoice);
+}
+
+/**
+ * Check if a value is a function
+ */
+function isFunction(value: unknown): value is (...args: unknown[]) => unknown {
+  return typeof value === 'function';
+}
+
+/**
+ * Check if a value is an ArgConfig object (not an array, not a function, has object properties)
+ */
+function isArgConfig(value: unknown): value is ArgConfig {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !isFunction(value)
+  );
+}
+
 globalThis.arg = async function arg(
-  placeholder: string,
-  choices: (string | Choice)[]
+  placeholderOrConfig?: string | ArgConfig,
+  choicesInput?: ChoicesInput
 ): Promise<string> {
   const id = nextId();
   
-  const normalizedChoices: Choice[] = choices.map((c) => {
-    if (typeof c === 'string') {
-      return { name: c, value: c };
+  // Parse arguments to extract placeholder and choices
+  let placeholder = '';
+  let choices: ChoicesInput | undefined;
+  let config: ArgConfig | undefined;
+  
+  // Handle different calling conventions:
+  // 1. arg() - no arguments
+  // 2. arg('placeholder') - string only
+  // 3. arg('placeholder', choices) - string + choices
+  // 4. arg({...}) - config object
+  
+  if (placeholderOrConfig === undefined) {
+    // arg() - no arguments, empty prompt
+    placeholder = '';
+    choices = undefined;
+  } else if (typeof placeholderOrConfig === 'string') {
+    // arg('placeholder') or arg('placeholder', choices)
+    placeholder = placeholderOrConfig;
+    choices = choicesInput;
+  } else if (isArgConfig(placeholderOrConfig)) {
+    // arg({placeholder, choices, ...})
+    config = placeholderOrConfig;
+    placeholder = config.placeholder ?? '';
+    choices = config.choices;
+  }
+  
+  // Resolve choices if it's a function (sync or async)
+  let resolvedChoices: (string | Choice)[] = [];
+  
+  if (choices === undefined || choices === null) {
+    // No choices - text input mode
+    resolvedChoices = [];
+  } else if (Array.isArray(choices)) {
+    // Static array of choices
+    resolvedChoices = choices;
+  } else if (isFunction(choices)) {
+    // Function that returns choices
+    // Check if the function expects an argument (filter function) or not (generator function)
+    // For initial display, call with empty string if it takes an argument
+    try {
+      // Use type assertion to call the function with appropriate signature
+      // If function.length > 0, it expects an input parameter (filter function)
+      // Otherwise, it's a simple generator function
+      let result: (string | Choice)[] | Promise<(string | Choice)[]>;
+      if (choices.length > 0) {
+        // Filter function: (input: string) => choices
+        result = (choices as (input: string) => (string | Choice)[] | Promise<(string | Choice)[]>)('');
+      } else {
+        // Generator function: () => choices
+        result = (choices as () => (string | Choice)[] | Promise<(string | Choice)[]>)();
+      }
+      // Handle both sync and async functions
+      if (result instanceof Promise) {
+        resolvedChoices = await result;
+      } else {
+        resolvedChoices = result;
+      }
+    } catch {
+      // If the function fails, fall back to empty choices
+      resolvedChoices = [];
     }
-    return c;
-  });
+  }
+  
+  // Normalize all choices to {name, value} format
+  const normalizedChoices = normalizeChoices(resolvedChoices);
+  
+  // Call onInit callback if provided
+  if (config?.onInit) {
+    await Promise.resolve(config.onInit());
+  }
 
   return new Promise((resolve) => {
-    pending.set(id, (msg: SubmitMessage) => {
-      resolve(msg.value ?? '');
+    pending.set(id, async (msg: SubmitMessage) => {
+      const value = msg.value ?? '';
+      
+      // Call onSubmit callback if provided
+      if (config?.onSubmit) {
+        await Promise.resolve(config.onSubmit(value));
+      }
+      
+      resolve(value);
     });
     
     const message: ArgMessage = {

@@ -22,4 +22,6 @@ pub mod term_prompt;
 pub mod syntax;
 pub mod terminal;
 pub mod theme;
+#[cfg(not(test))]
+pub mod tray;
 pub mod utils;

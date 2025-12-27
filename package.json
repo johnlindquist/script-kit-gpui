@@ -1,5 +1,12 @@
 {
   "devDependencies": {
     "typescript": "^5.9.3"
+  },
+  "imports": {
+    "@johnlindquist/kit": "./scripts/kit-sdk.ts",
+    "#kit": "./scripts/kit-sdk.ts"
+  },
+  "scripts": {
+    "postinstall": "mkdir -p node_modules/@johnlindquist/kit && ln -sf ../../../scripts/kit-sdk.ts node_modules/@johnlindquist/kit/index.ts && echo '{\"name\":\"@johnlindquist/kit\",\"version\":\"999.0.0-local\",\"main\":\"./index.ts\",\"types\":\"./index.ts\"}' > node_modules/@johnlindquist/kit/package.json"
   }
 }

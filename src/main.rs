@@ -38,6 +38,9 @@ mod terminal;
 mod components;
 #[cfg(target_os = "macos")]
 mod selected_text;
+mod tray;
+
+use tray::{TrayManager, TrayMenuAction};
 
 use list_item::{ListItem, ListItemColors, LIST_ITEM_HEIGHT};
 use utils::strip_html_tags;
@@ -3127,6 +3130,19 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         logging::log("APP", "GPUI Application starting");
         
+        // Initialize tray icon and menu
+        // MUST be done after Application::new() creates the NSApplication
+        let tray_manager = match TrayManager::new() {
+            Ok(tm) => {
+                logging::log("TRAY", "Tray icon initialized successfully");
+                Some(tm)
+            }
+            Err(e) => {
+                logging::log("TRAY", &format!("Failed to initialize tray icon: {}", e));
+                None
+            }
+        };
+        
         // Calculate window bounds: centered on display with mouse, at eye-line height
         let window_size = size(px(750.), px(500.0));
         let bounds = calculate_eye_line_bounds_on_mouse_display(window_size, cx);
@@ -3294,6 +3310,88 @@ fn main() {
             
             logging::log("STDIN", "Async stdin command handler exiting");
         }).detach();
+        
+        // Tray menu event handler - polls for menu events
+        // Clone config for use in tray handler
+        let config_for_tray = config::load_config();
+        if let Some(tray_mgr) = tray_manager {
+            let window_for_tray = window;
+            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                logging::log("TRAY", "Tray menu event handler started");
+                
+                loop {
+                    // Poll for tray menu events every 100ms
+                    Timer::after(std::time::Duration::from_millis(100)).await;
+                    
+                    // Check for menu events
+                    if let Ok(event) = tray_mgr.menu_event_receiver().try_recv() {
+                        match tray_mgr.match_menu_event(&event) {
+                            Some(TrayMenuAction::OpenScriptKit) => {
+                                logging::log("TRAY", "Open Script Kit menu item clicked");
+                                let _ = cx.update(|cx| {
+                                    // Show and focus window (same logic as hotkey handler)
+                                    WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+                                    
+                                    // Calculate new bounds on display with mouse
+                                    let window_size = size(px(750.), px(500.0));
+                                    let new_bounds = calculate_eye_line_bounds_on_mouse_display(window_size, cx);
+                                    
+                                    // Move window first
+                                    move_first_window_to_bounds(&new_bounds);
+                                    
+                                    // Activate the app
+                                    cx.activate(true);
+                                    
+                                    // Configure as floating panel on first show
+                                    if !PANEL_CONFIGURED.swap(true, Ordering::SeqCst) {
+                                        configure_as_floating_panel();
+                                    }
+                                    
+                                    // Focus the window
+                                    let _ = window_for_tray.update(cx, |view: &mut ScriptListApp, win: &mut Window, ctx: &mut Context<ScriptListApp>| {
+                                        win.activate_window();
+                                        let focus_handle = view.focus_handle(ctx);
+                                        win.focus(&focus_handle, ctx);
+                                        
+                                        // Reset if needed
+                                        if NEEDS_RESET.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                                            view.reset_to_script_list(ctx);
+                                        }
+                                    });
+                                });
+                            }
+                            Some(TrayMenuAction::Settings) => {
+                                logging::log("TRAY", "Settings menu item clicked");
+                                // Open config file in editor
+                                let editor = config_for_tray.get_editor();
+                                let config_path = shellexpand::tilde("~/.kit/config.ts").to_string();
+                                
+                                logging::log("TRAY", &format!("Opening {} in editor '{}'", config_path, editor));
+                                match std::process::Command::new(&editor)
+                                    .arg(&config_path)
+                                    .spawn()
+                                {
+                                    Ok(_) => logging::log("TRAY", &format!("Spawned editor: {}", editor)),
+                                    Err(e) => logging::log("TRAY", &format!("Failed to spawn editor '{}': {}", editor, e)),
+                                }
+                            }
+                            Some(TrayMenuAction::Quit) => {
+                                logging::log("TRAY", "Quit menu item clicked");
+                                let _ = cx.update(|cx| {
+                                    cx.quit();
+                                });
+                                break; // Exit the polling loop
+                            }
+                            None => {
+                                logging::log("TRAY", "Unknown menu event received");
+                            }
+                        }
+                    }
+                }
+                
+                logging::log("TRAY", "Tray menu event handler exiting");
+            }).detach();
+        }
         
         logging::log("APP", "Application ready - Cmd+; to show, Esc to hide, Cmd+K for actions");
     });

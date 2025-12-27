@@ -1,0 +1,14 @@
+# Bun configuration for Script Kit GPUI
+#
+# @johnlindquist/kit Import Redirect
+# ----------------------------------
+# Scripts can use `import "@johnlindquist/kit"` and it resolves to our local SDK.
+# This is achieved via a postinstall script in package.json that creates a symlink
+# at node_modules/@johnlindquist/kit -> scripts/kit-sdk.ts
+#
+# The symlink is created automatically when running `bun install` or `npm install`.
+# This allows scripts to have editor type hints from the package while actually
+# loading our new SDK implementation.
+#
+# Note: Bun's bunfig.toml doesn't support path aliasing for external packages.
+# The package.json postinstall approach is the reliable solution.

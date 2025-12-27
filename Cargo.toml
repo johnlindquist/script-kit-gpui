@@ -51,5 +51,11 @@ arboard = "3.6"                # Clipboard access for setSelectedText fallback
 # Note: We use core-graphics directly for Cmd+V simulation (more reliable than enigo on macOS)
 macos-accessibility-client = "0.0.1"  # Permission checking for accessibility APIs
 
+# System tray / menu bar integration
+tray-icon = "0.21"                    # Cross-platform tray icon (includes muda for menus)
+resvg = "0.45"                        # SVG to PNG conversion for tray icon
+usvg = "0.45"                         # SVG parsing (used by resvg)
+tiny-skia = "0.11"                    # 2D graphics library for SVG rendering
+
 [build-dependencies]
 dirs = "5.0"  # For build.rs to copy SDK to ~/.kit/lib/
