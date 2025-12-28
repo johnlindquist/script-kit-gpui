@@ -7,6 +7,7 @@
 //!
 //! - [`Button`] - Interactive button with variants (Primary, Ghost, Icon)
 //! - [`Toast`] - Toast notification with variants (Success, Warning, Error, Info)
+//! - [`Scrollbar`] - Minimal native-style scrollbar for overlay on lists
 //!
 //! # Usage
 //!
@@ -38,10 +39,13 @@
 //! - **Theme integration**: Use `from_theme()` or `from_design()` for colors
 
 pub mod button;
+pub mod scrollbar;
 pub mod toast;
 
 // Re-export commonly used types
 pub use button::{Button, ButtonColors, ButtonVariant};
+#[allow(unused_imports)]
+pub use scrollbar::{Scrollbar, ScrollbarColors, SCROLLBAR_WIDTH, MIN_THUMB_HEIGHT, SCROLLBAR_PADDING};
 // These re-exports form the public API - allow unused since not all are used in every crate
 #[allow(unused_imports)]
 pub use toast::{Toast, ToastAction, ToastColors, ToastVariant};
