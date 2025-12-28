@@ -284,16 +284,20 @@ impl RenderOnce for ListItem {
             .justify_center();
         
         // Name - 14px font, medium weight (tighter than before)
+        // Single-line with ellipsis truncation for long content
         item_content = item_content.child(
             div()
                 .text_size(px(14.))
                 .font_weight(FontWeight::MEDIUM)
                 .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
                 .line_height(px(18.))
                 .child(self.name)
         );
         
         // Description - 12px font, muted color (never changes on selection - only bg shows selection)
+        // Single-line with ellipsis truncation for long content
         if let Some(desc) = self.description {
             let desc_color = rgb(colors.text_muted);
             item_content = item_content.child(
@@ -303,6 +307,7 @@ impl RenderOnce for ListItem {
                     .text_color(desc_color)
                     .overflow_hidden()
                     .text_ellipsis()
+                    .whitespace_nowrap()
                     .child(desc)
             );
         }
