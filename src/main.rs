@@ -771,33 +771,70 @@ impl ScriptListApp {
         // Load built-in entries based on config
         let builtin_entries = builtins::get_builtin_entries(&config.get_builtins());
         
-        // Load installed applications for main search (if enabled in config)
-        let apps_start = std::time::Instant::now();
-        let apps = if config.get_builtins().app_launcher {
-            app_launcher::scan_applications().clone()
-        } else {
-            Vec::new()
-        };
-        let apps_elapsed = apps_start.elapsed();
+        // Apps are loaded in the background to avoid blocking startup
+        // Start with empty list, will be populated asynchronously
+        let apps = Vec::new();
         
         let total_elapsed = load_start.elapsed();
         logging::log("PERF", &format!(
-            "Startup loading: {:.2}ms total ({} scripts in {:.2}ms, {} scriptlets in {:.2}ms, {} apps in {:.2}ms)",
+            "Startup loading: {:.2}ms total ({} scripts in {:.2}ms, {} scriptlets in {:.2}ms, apps loading in background)",
             total_elapsed.as_secs_f64() * 1000.0,
             scripts.len(),
             scripts_elapsed.as_secs_f64() * 1000.0,
             scriptlets.len(),
-            scriptlets_elapsed.as_secs_f64() * 1000.0,
-            apps.len(),
-            apps_elapsed.as_secs_f64() * 1000.0
+            scriptlets_elapsed.as_secs_f64() * 1000.0
         ));
         logging::log("APP", &format!("Loaded {} scripts from ~/.kenv/scripts", scripts.len()));
         logging::log("APP", &format!("Loaded {} scriptlets from ~/.kenv/scriptlets/scriptlets.md", scriptlets.len()));
         logging::log("APP", &format!("Loaded {} built-in features", builtin_entries.len()));
-        logging::log("APP", &format!("Loaded {} applications from system", apps.len()));
+        logging::log("APP", "Applications loading in background...");
         logging::log("APP", "Loaded theme with system appearance detection");
         logging::log("APP", &format!("Loaded config: hotkey={:?}+{}, bun_path={:?}", 
             config.hotkey.modifiers, config.hotkey.key, config.bun_path));
+        
+        // Load apps in background thread to avoid blocking startup
+        let app_launcher_enabled = config.get_builtins().app_launcher;
+        if app_launcher_enabled {
+            // Use a channel to send loaded apps back to main thread
+            let (tx, rx) = std::sync::mpsc::channel::<(Vec<app_launcher::AppInfo>, std::time::Duration)>();
+            
+            // Spawn background thread for app scanning
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let apps = app_launcher::scan_applications().clone();
+                let elapsed = start.elapsed();
+                let _ = tx.send((apps, elapsed));
+            });
+            
+            // Poll for results using a spawned task
+            cx.spawn(async move |this, cx| {
+                // Poll the channel periodically
+                loop {
+                    Timer::after(std::time::Duration::from_millis(50)).await;
+                    match rx.try_recv() {
+                        Ok((apps, elapsed)) => {
+                            let app_count = apps.len();
+                            let _ = cx.update(|cx| {
+                                this.update(cx, |app, cx| {
+                                    app.apps = apps;
+                                    // Invalidate filter cache since apps changed
+                                    app.filter_cache_key = String::from("\0_APPS_LOADED_\0");
+                                    logging::log("APP", &format!(
+                                        "Background app loading complete: {} apps in {:.2}ms",
+                                        app_count,
+                                        elapsed.as_secs_f64() * 1000.0
+                                    ));
+                                    cx.notify();
+                                })
+                            });
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+            }).detach();
+        }
         logging::log("UI", "Script Kit logo SVG loaded for header rendering");
         
         // Start cursor blink timer - updates all inputs that track cursor visibility
