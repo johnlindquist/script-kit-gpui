@@ -60,7 +60,7 @@ cargo check && cargo clippy --all-targets -- -D warnings && cargo test
 | **Verification Gate** | Always run `cargo check && cargo clippy && cargo test` before commits |
 | **SDK Preload** | Test scripts import `../../scripts/kit-sdk`; runtime uses embedded SDK extracted to `~/.kenv/sdk/` |
 | **Arrow Key Names** | ALWAYS match BOTH: `"up" \| "arrowup"`, `"down" \| "arrowdown"`, `"left" \| "arrowleft"`, `"right" \| "arrowright"` |
-| **Visual Testing** | Use `./scripts/visual-test.sh <test.ts> <seconds>` to capture screenshots for layout debugging |
+| **Visual Testing** | Use stdin JSON protocol + `captureScreenshot()` SDK function, save to `./test-screenshots/`, then read the file |
 | **AI Log Mode** | Set `SCRIPT_KIT_AI_LOG=1` for token-efficient compact logs (see below) |
 | **Config Settings** | Font sizes and padding are configurable via `~/.kenv/config.ts` - use `config.get_*()` helpers |
 
@@ -181,54 +181,52 @@ echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-editor-height.ts"}' | .
 
 ### Visual Testing with Screenshots
 
-**For UI layout issues that can't be verified through logs alone, use the visual test script:**
+**For UI layout issues that can't be verified through logs alone, use the stdin JSON protocol combined with the SDK's `captureScreenshot()` function.**
 
-```bash
-# Run visual test - launches app, waits for render, captures screenshot, terminates
-./scripts/visual-test.sh tests/smoke/test-editor-height.ts 3
+**The workflow:**
+1. Create a test script that uses `captureScreenshot()` to capture the UI state
+2. Save the screenshot to `./test-screenshots/` using Node's `fs` module
+3. Run the test via stdin JSON protocol
+4. Read the resulting screenshot file to verify the UI
 
-# Output:
-# Screenshot: .test-screenshots/test-editor-height-20251227-012813.png
-# Log: .test-screenshots/test-editor-height-20251227-012813.log
-```
-
-**The visual test script (`scripts/visual-test.sh`):**
-1. Builds the project
-2. Launches the app with your test script via stdin JSON
-3. Waits N seconds for the window to render (default: 2s)
-4. Captures a screenshot using macOS `screencapture`
-5. Terminates the app
-6. Saves screenshot and logs to `.test-screenshots/`
-
-**Reading screenshots programmatically:**
-```bash
-# After running visual test, read the screenshot to analyze UI state
-# The screenshot path is output by the script
-```
-
-**SDK Screenshot Capture (in-script):**
+**Example test script with screenshot capture:**
 ```typescript
-// Use the SDK's captureScreenshot() function for programmatic testing
+// tests/smoke/test-my-layout.ts
 import '../../scripts/kit-sdk';
+import { writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
 
-// Capture screenshot from within a test script
+// Set up your UI state
+await div(`<div class="p-4 bg-blue-500">Test Content</div>`);
+
+// Wait for render
+await new Promise(resolve => setTimeout(resolve, 500));
+
+// Capture screenshot
 const screenshot = await captureScreenshot();
 console.error(`Screenshot: ${screenshot.width}x${screenshot.height}`);
-// screenshot.data contains base64-encoded PNG
+
+// Save to ./test-screenshots/
+const screenshotDir = join(process.cwd(), 'test-screenshots');
+mkdirSync(screenshotDir, { recursive: true });
+
+const filename = `test-my-layout-${Date.now()}.png`;
+const filepath = join(screenshotDir, filename);
+writeFileSync(filepath, Buffer.from(screenshot.data, 'base64'));
+
+console.error(`[SCREENSHOT] Saved to: ${filepath}`);
+
+// Exit cleanly
+process.exit(0);
 ```
 
-**Visual Test Utilities (tests/autonomous/screenshot-utils.ts):**
-```typescript
-import { saveScreenshot, analyzeContentFill, generateReport } from './screenshot-utils';
+**Running the visual test:**
+```bash
+# Build and run via stdin JSON protocol
+cargo build && echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-my-layout.ts"}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
 
-// Save screenshot to .test-screenshots/
-const path = await saveScreenshot(screenshot.data, 'my-test');
-
-// Analyze if content fills expected area
-const analysis = await analyzeContentFill(path, expectedHeight);
-if (!analysis.pass) {
-  console.error(`Visual check failed: ${analysis.message}`);
-}
+# The screenshot will be saved to ./test-screenshots/test-my-layout-<timestamp>.png
+# Read the file to analyze the UI state
 ```
 
 **When to use visual testing:**
@@ -238,22 +236,42 @@ if (!analysis.pass) {
 - Any UI behavior that logs alone can't verify
 
 **Screenshot analysis workflow:**
-1. Run `./scripts/visual-test.sh <test-script.ts> <wait-seconds>`
-2. Read the screenshot file to see actual rendered state
-3. Compare against expected behavior
-4. If broken, fix code and repeat
+1. Write a test script that sets up UI state and calls `captureScreenshot()`
+2. Save the base64 PNG data to `./test-screenshots/`
+3. Run via stdin JSON: `echo '{"type":"run",...}' | ./target/debug/script-kit-gpui`
+4. Read the resulting screenshot file to verify actual vs expected
+5. If broken, fix code and repeat
 
 **Example: Debugging editor height issue:**
+```typescript
+// tests/smoke/test-editor-height-visual.ts
+import '../../scripts/kit-sdk';
+import { writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+
+// Open editor with specific content
+const editorPromise = editor("function test() {\n  return 42;\n}", "typescript");
+
+// Wait for editor to render
+await new Promise(resolve => setTimeout(resolve, 1000));
+
+// Capture and save screenshot
+const screenshot = await captureScreenshot();
+const screenshotDir = join(process.cwd(), 'test-screenshots');
+mkdirSync(screenshotDir, { recursive: true });
+const filepath = join(screenshotDir, `editor-height-${Date.now()}.png`);
+writeFileSync(filepath, Buffer.from(screenshot.data, 'base64'));
+console.error(`[SCREENSHOT] ${filepath}`);
+
+// Now you can read this file to check if editor fills the expected height
+```
+
 ```bash
-# 1. Run visual test
-./scripts/visual-test.sh tests/smoke/test-editor-height.ts 3
+# Run the test
+echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-editor-height-visual.ts"}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
 
-# 2. Check the screenshot - does editor fill the 700px window?
-# 3. Check the log for height values:
-grep -E 'height|700|resize' .test-screenshots/test-editor-height-*.log
-
-# 4. If editor is too small, the issue is in layout code
-# 5. Fix and repeat until screenshot shows correct layout
+# Read the screenshot to analyze - look for the filepath in stderr output
+# The screenshot shows actual rendered state for visual verification
 ```
 
 ### Anti-Patterns
@@ -264,8 +282,8 @@ grep -E 'height|700|resize' .test-screenshots/test-editor-height-*.log
 | "I can't test this without manual interaction" | Use stdin protocol, add logging, verify in output |
 | "The user should test this" | YOU must test it using the stdin protocol |
 | Committing without running the test | Run `cargo build && echo '...' \| ./target/debug/...` |
-| "I can't see what the UI looks like" | Use `./scripts/visual-test.sh` to capture and read screenshots |
-| Guessing at layout issues | Capture screenshot, read it, analyze actual vs expected |
+| "I can't see what the UI looks like" | Write test script with `captureScreenshot()`, save to `./test-screenshots/`, read the file |
+| Guessing at layout issues | Use `captureScreenshot()` in test, save PNG to `./test-screenshots/`, read and analyze |
 | Running without `SCRIPT_KIT_AI_LOG=1` | ALWAYS use AI log mode to save tokens |
 
 ### Why This Matters
@@ -1416,7 +1434,7 @@ tests/
 
 | Type | Location | Purpose | Run Command |
 |------|----------|---------|-------------|
-| **Smoke Tests** | `tests/smoke/` | Full E2E flows | `./target/debug/script-kit-gpui tests/smoke/hello-world.ts` |
+| **Smoke Tests** | `tests/smoke/` | Full E2E flows | `echo '{"type":"run","path":"..."}' \| ./target/debug/script-kit-gpui` |
 | **SDK Tests** | `tests/sdk/` | Individual API methods | `bun run tests/sdk/test-arg.ts` |
 | **Rust Unit Tests** | `src/*.rs` | Internal Rust functions | `cargo test` |
 
@@ -1512,11 +1530,11 @@ bun run scripts/test-runner.ts
 # Run single SDK test
 bun run scripts/test-runner.ts tests/sdk/test-arg.ts
 
-# Run with full GPUI integration
-cargo build && ./target/debug/script-kit-gpui tests/sdk/test-arg.ts
+# Run with full GPUI integration (use stdin JSON protocol)
+cargo build && echo '{"type": "run", "path": "'$(pwd)'/tests/sdk/test-arg.ts"}' | ./target/debug/script-kit-gpui
 
-# Run smoke tests
-./target/debug/script-kit-gpui tests/smoke/hello-world.ts
+# Run smoke tests (use stdin JSON protocol)
+echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/hello-world.ts"}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
 
 # Run Rust unit tests (safe, no system side effects)
 cargo test

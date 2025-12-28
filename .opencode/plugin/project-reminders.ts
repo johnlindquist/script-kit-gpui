@@ -17,7 +17,8 @@ const TESTING_REMINDER = `
 ## Testing Protocol
 - **Run app**: \`echo '{"type":"run","path":"..."}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1\`
 - **Before commit**: \`cargo check && cargo clippy && cargo test\`
-- **Visual test**: \`./scripts/visual-test.sh tests/smoke/<test>.ts 3\`
+- **Visual changes**: MUST write test script using \`captureScreenshot()\`, save PNG to \`./test-screenshots/\`, read file to verify
+- **If user provides image**: YOU MUST use visual testing - create test, capture screenshot, compare, fix issues shown in image
 `.trim()
 
 const COMBINED_REMINDER = `
