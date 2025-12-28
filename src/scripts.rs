@@ -7,6 +7,9 @@ use std::cmp::Ordering;
 use tracing::{debug, warn, instrument};
 
 pub use crate::builtins::BuiltInEntry;
+use crate::frecency::FrecencyStore;
+use crate::list_item::GroupedListItem;
+use crate::app_launcher::AppInfo;
 
 #[derive(Clone, Debug)]
 pub struct Script {
@@ -119,27 +122,89 @@ impl SearchResult {
     }
 }
 
-/// Extract metadata from script file comments
-/// Looks for lines starting with "// Description:"
-fn extract_metadata(path: &PathBuf) -> Option<String> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            for line in content.lines().take(20) {  // Check only first 20 lines
-                if line.trim().starts_with("// Description:") {
-                    if let Some(desc) = line.split("// Description:").nth(1) {
-                        return Some(desc.trim().to_string());
+/// Metadata extracted from script file comments
+#[derive(Debug, Default, Clone)]
+pub struct ScriptMetadata {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Parse a single metadata line with lenient matching
+/// Supports patterns like:
+/// - "//Name:Value"
+/// - "//Name: Value"
+/// - "// Name:Value"
+/// - "// Name: Value"
+/// - "//  Name:Value"
+/// - "//  Name: Value"
+/// - "//\tName:Value"
+/// - "//\tName: Value"
+///
+/// Returns Some((key, value)) if the line is a valid metadata comment, None otherwise.
+/// Key matching is case-insensitive.
+pub fn parse_metadata_line(line: &str) -> Option<(String, String)> {
+    // Must start with //
+    let after_slashes = line.strip_prefix("//")?;
+    
+    // Skip any whitespace (spaces or tabs) after the slashes
+    let trimmed = after_slashes.trim_start();
+    
+    // Find the colon that separates key from value
+    let colon_pos = trimmed.find(':')?;
+    
+    // Key is before the colon (no spaces in key names like "Name", "Description")
+    let key = trimmed[..colon_pos].trim();
+    
+    // Key must be a single word (no spaces)
+    if key.is_empty() || key.contains(' ') {
+        return None;
+    }
+    
+    // Value is after the colon, trimmed
+    let value = trimmed[colon_pos + 1..].trim();
+    
+    Some((key.to_string(), value.to_string()))
+}
+
+/// Extract metadata from script content
+/// Parses lines looking for "// Name:" and "// Description:" with lenient matching
+/// Only checks the first 20 lines of the file
+pub fn extract_script_metadata(content: &str) -> ScriptMetadata {
+    let mut metadata = ScriptMetadata::default();
+    
+    for line in content.lines().take(20) {
+        if let Some((key, value)) = parse_metadata_line(line) {
+            match key.to_lowercase().as_str() {
+                "name" => {
+                    if metadata.name.is_none() && !value.is_empty() {
+                        metadata.name = Some(value);
                     }
                 }
+                "description" => {
+                    if metadata.description.is_none() && !value.is_empty() {
+                        metadata.description = Some(value);
+                    }
+                }
+                _ => {} // Ignore other metadata keys for now
             }
-            None
         }
+    }
+    
+    metadata
+}
+
+/// Extract metadata from script file comments
+/// Looks for lines starting with "// Name:" and "// Description:" with lenient matching
+fn extract_metadata(path: &PathBuf) -> ScriptMetadata {
+    match fs::read_to_string(path) {
+        Ok(content) => extract_script_metadata(&content),
         Err(e) => {
             debug!(
                 error = %e,
                 path = %path.display(),
                 "Could not read script file for metadata extraction"
             );
-            None
+            ScriptMetadata::default()
         }
     }
 }
@@ -354,23 +419,28 @@ pub fn read_scripts() -> Vec<Script> {
     match std::fs::read_dir(&scripts_dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
+                if let Ok(file_metadata) = entry.metadata() {
+                    if file_metadata.is_file() {
                         let path = entry.path();
                         
                         // Check extension
                         if let Some(ext) = path.extension() {
                             if let Some(ext_str) = ext.to_str() {
                                 if ext_str == "ts" || ext_str == "js" {
-                                    // Get filename without extension
+                                    // Get filename without extension as fallback
                                     if let Some(file_name) = path.file_stem() {
-                                        if let Some(name) = file_name.to_str() {
-                                            let description = extract_metadata(&path);
+                                        if let Some(filename_str) = file_name.to_str() {
+                                            let script_metadata = extract_metadata(&path);
+                                            
+                                            // Use metadata name if available, otherwise filename
+                                            let name = script_metadata.name
+                                                .unwrap_or_else(|| filename_str.to_string());
+                                            
                                             scripts.push(Script {
-                                                name: name.to_string(),
+                                                name,
                                                 path: path.clone(),
                                                 extension: ext_str.to_string(),
-                                                description,
+                                                description: script_metadata.description,
                                             });
                                         }
                                     }
@@ -906,6 +976,146 @@ pub fn fuzzy_search_unified_with_windows(
     });
 
     results
+}
+
+/// Maximum number of items to show in the RECENT section
+const MAX_RECENT_ITEMS: usize = 10;
+
+/// Get grouped results with RECENT/MAIN sections based on frecency
+///
+/// This function creates a grouped view of search results:
+///
+/// **When filter_text is empty (grouped view):**
+/// 1. Returns `SectionHeader("RECENT")` if any items have frecency score > 0
+/// 2. Recent items sorted by frecency score (top 5-10 with score > 0)
+/// 3. Returns `SectionHeader("MAIN")`
+/// 4. Remaining items sorted alphabetically by name
+///
+/// **When filter_text has content (search mode):**
+/// - Returns flat list of `Item(index)` - no headers
+/// - Uses existing fuzzy_search_unified logic for filtering
+///
+/// # Arguments
+/// * `scripts` - Scripts to include in results
+/// * `scriptlets` - Scriptlets to include in results
+/// * `builtins` - Built-in entries to include in results
+/// * `apps` - Application entries to include in results
+/// * `frecency_store` - Store containing frecency data for ranking
+/// * `filter_text` - Search filter text (empty = grouped view, non-empty = search mode)
+///
+/// # Returns
+/// `(Vec<GroupedListItem>, Vec<SearchResult>)` - Grouped items and the flat results array.
+/// The `usize` in `Item(usize)` is the index into the flat results array.
+///
+/// # Example
+/// ```ignore
+/// let frecency_store = FrecencyStore::new();
+/// let (grouped, results) = get_grouped_results(
+///     &scripts, &scriptlets, &builtins, &apps,
+///     &frecency_store, ""
+/// );
+/// // grouped contains: [SectionHeader("RECENT"), Item(0), Item(1), SectionHeader("MAIN"), ...]
+/// // results contains the flat array of SearchResults
+/// ```
+#[instrument(level = "debug", skip_all, fields(filter_len = filter_text.len()))]
+pub fn get_grouped_results(
+    scripts: &[Script],
+    scriptlets: &[Scriptlet],
+    builtins: &[BuiltInEntry],
+    apps: &[AppInfo],
+    frecency_store: &FrecencyStore,
+    filter_text: &str,
+) -> (Vec<GroupedListItem>, Vec<SearchResult>) {
+    // Get all unified search results
+    let results = fuzzy_search_unified_all(scripts, scriptlets, builtins, apps, filter_text);
+    
+    // Search mode: return flat list with no headers
+    if !filter_text.is_empty() {
+        let grouped: Vec<GroupedListItem> = (0..results.len())
+            .map(GroupedListItem::Item)
+            .collect();
+        debug!(
+            result_count = results.len(),
+            "Search mode: returning flat list"
+        );
+        return (grouped, results);
+    }
+    
+    // Grouped view mode: create RECENT and MAIN sections
+    let mut grouped = Vec::new();
+    
+    // Get recent items from frecency store
+    let recent_items = frecency_store.get_recent_items(MAX_RECENT_ITEMS);
+    
+    // Build a set of paths that are "recent" (have frecency score > 0)
+    let recent_paths: std::collections::HashSet<String> = recent_items
+        .iter()
+        .filter(|(_, score): &&(String, f64)| *score > 0.0)
+        .map(|(path, _): &(String, f64)| path.clone())
+        .collect();
+    
+    // Map each result to its frecency score (if any)
+    // We need to get the path for each result type
+    let get_result_path = |result: &SearchResult| -> Option<String> {
+        match result {
+            SearchResult::Script(sm) => Some(sm.script.path.to_string_lossy().to_string()),
+            SearchResult::App(am) => Some(am.app.path.to_string_lossy().to_string()),
+            SearchResult::BuiltIn(bm) => Some(format!("builtin:{}", bm.entry.name)),
+            SearchResult::Scriptlet(sm) => Some(format!("scriptlet:{}", sm.scriptlet.name)),
+            SearchResult::Window(wm) => Some(format!("window:{}:{}", wm.window.app, wm.window.title)),
+        }
+    };
+    
+    // Find indices of results that are "recent"
+    let mut recent_indices: Vec<(usize, f64)> = Vec::new();
+    let mut main_indices: Vec<usize> = Vec::new();
+    
+    for (idx, result) in results.iter().enumerate() {
+        if let Some(path) = get_result_path(result) {
+            let score = frecency_store.get_score(&path);
+            if score > 0.0 && recent_paths.contains(&path) {
+                recent_indices.push((idx, score));
+            } else {
+                main_indices.push(idx);
+            }
+        } else {
+            main_indices.push(idx);
+        }
+    }
+    
+    // Sort recent items by frecency score (highest first)
+    recent_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    
+    // Limit recent items to MAX_RECENT_ITEMS
+    recent_indices.truncate(MAX_RECENT_ITEMS);
+    
+    // Sort main items alphabetically by name
+    main_indices.sort_by(|&a, &b| results[a].name().cmp(results[b].name()));
+    
+    // Build grouped list
+    if !recent_indices.is_empty() {
+        grouped.push(GroupedListItem::SectionHeader("RECENT".to_string()));
+        for (idx, _score) in &recent_indices {
+            grouped.push(GroupedListItem::Item(*idx));
+        }
+    }
+    
+    // Always add MAIN section if there are any items
+    if !main_indices.is_empty() || !recent_indices.is_empty() {
+        grouped.push(GroupedListItem::SectionHeader("MAIN".to_string()));
+        for idx in main_indices {
+            grouped.push(GroupedListItem::Item(idx));
+        }
+    }
+    
+    debug!(
+        recent_count = recent_indices.len(),
+        main_count = grouped.len().saturating_sub(recent_indices.len()).saturating_sub(if recent_indices.is_empty() { 1 } else { 2 }),
+        total_grouped = grouped.len(),
+        "Grouped view: created RECENT/MAIN sections"
+    );
+    
+    (grouped, results)
 }
 
 #[cfg(test)]
@@ -1605,6 +1815,289 @@ mod tests {
             description: None, // Would be extracted from file if existed
         };
         assert_eq!(script.name, "test");
+    }
+
+    // ============================================
+    // NAME METADATA PARSING TESTS
+    // ============================================
+    
+    #[test]
+    fn test_parse_metadata_line_name_basic() {
+        // Basic case: "// Name: Test"
+        let line = "// Name: Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_no_space_after_slashes() {
+        // "//Name:Test" - no spaces
+        let line = "//Name:Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_space_after_colon() {
+        // "//Name: Test" - space after colon
+        let line = "//Name: Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_space_before_key() {
+        // "// Name:Test" - space before key
+        let line = "// Name:Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_full_spacing() {
+        // "// Name: Test" - standard spacing
+        let line = "// Name: Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_multiple_spaces() {
+        // "//  Name:Test" - multiple spaces after slashes
+        let line = "//  Name:Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_multiple_spaces_and_colon_space() {
+        // "//  Name: Test" - multiple spaces after slashes and space after colon
+        let line = "//  Name: Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_with_tab() {
+        // "//\tName:Test" - tab after slashes
+        let line = "//\tName:Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_name_with_tab_and_space_after_colon() {
+        // "//\tName: Test" - tab after slashes, space after colon
+        let line = "//\tName: Test";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "name");
+        assert_eq!(value, "Test");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_case_insensitive_name() {
+        // Case insensitivity: "// name: Test", "// NAME: Test"
+        for line in ["// name: Test", "// NAME: Test", "// NaMe: Test"] {
+            let result = parse_metadata_line(line);
+            assert!(result.is_some(), "Failed for: {}", line);
+            let (key, value) = result.unwrap();
+            assert_eq!(key.to_lowercase(), "name");
+            assert_eq!(value, "Test");
+        }
+    }
+
+    #[test]
+    fn test_parse_metadata_line_description() {
+        // Should also work for Description
+        let line = "// Description: My script description";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "description");
+        assert_eq!(value, "My script description");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_not_a_comment() {
+        // Non-comment lines should return None
+        let line = "const name = 'test';";
+        let result = parse_metadata_line(line);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_metadata_line_no_colon() {
+        // Comment without colon should return None
+        let line = "// Just a comment";
+        let result = parse_metadata_line(line);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_script_metadata_name_and_description() {
+        let content = r#"// Name: My Script Name
+// Description: This is my script
+const x = 1;
+"#;
+        let metadata = extract_script_metadata(content);
+        assert_eq!(metadata.name, Some("My Script Name".to_string()));
+        assert_eq!(metadata.description, Some("This is my script".to_string()));
+    }
+
+    #[test]
+    fn test_extract_script_metadata_name_only() {
+        let content = r#"// Name: My Script
+const x = 1;
+"#;
+        let metadata = extract_script_metadata(content);
+        assert_eq!(metadata.name, Some("My Script".to_string()));
+        assert_eq!(metadata.description, None);
+    }
+
+    #[test]
+    fn test_extract_script_metadata_description_only() {
+        let content = r#"// Description: A description
+const x = 1;
+"#;
+        let metadata = extract_script_metadata(content);
+        assert_eq!(metadata.name, None);
+        assert_eq!(metadata.description, Some("A description".to_string()));
+    }
+
+    #[test]
+    fn test_extract_script_metadata_no_metadata() {
+        let content = r#"const x = 1;
+console.log(x);
+"#;
+        let metadata = extract_script_metadata(content);
+        assert_eq!(metadata.name, None);
+        assert_eq!(metadata.description, None);
+    }
+
+    #[test]
+    fn test_extract_script_metadata_lenient_whitespace() {
+        // Test all the lenient whitespace variants for Name
+        let variants = [
+            "//Name:Test",
+            "//Name: Test",
+            "// Name:Test",
+            "// Name: Test",
+            "//  Name:Test",
+            "//  Name: Test",
+            "//\tName:Test",
+            "//\tName: Test",
+        ];
+        
+        for content in variants {
+            let full_content = format!("{}\nconst x = 1;", content);
+            let metadata = extract_script_metadata(&full_content);
+            assert_eq!(
+                metadata.name,
+                Some("Test".to_string()),
+                "Failed for variant: {}",
+                content
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_script_metadata_first_name_wins() {
+        // If multiple Name: lines exist, the first one wins
+        let content = r#"// Name: First Name
+// Name: Second Name
+const x = 1;
+"#;
+        let metadata = extract_script_metadata(content);
+        assert_eq!(metadata.name, Some("First Name".to_string()));
+    }
+
+    #[test]
+    fn test_extract_script_metadata_empty_value_ignored() {
+        // Empty value should be ignored
+        let content = r#"// Name:
+// Description: Has a description
+const x = 1;
+"#;
+        let metadata = extract_script_metadata(content);
+        assert_eq!(metadata.name, None);
+        assert_eq!(metadata.description, Some("Has a description".to_string()));
+    }
+
+    #[test]
+    fn test_parse_metadata_line_value_with_colons() {
+        // Value can contain colons (e.g., URLs)
+        let line = "// Description: Visit https://example.com for more info";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (key, value) = result.unwrap();
+        assert_eq!(key.to_lowercase(), "description");
+        assert_eq!(value, "Visit https://example.com for more info");
+    }
+
+    #[test]
+    fn test_parse_metadata_line_value_with_leading_trailing_spaces() {
+        // Value should be trimmed
+        let line = "// Name:   Padded Value   ";
+        let result = parse_metadata_line(line);
+        assert!(result.is_some());
+        let (_, value) = result.unwrap();
+        assert_eq!(value, "Padded Value");
+    }
+
+    #[test]
+    fn test_extract_script_metadata_only_first_20_lines() {
+        // Metadata after line 20 should be ignored
+        let mut content = String::new();
+        for i in 1..=25 {
+            if i == 22 {
+                content.push_str("// Name: Too Late\n");
+            } else {
+                content.push_str(&format!("// Comment line {}\n", i));
+            }
+        }
+        let metadata = extract_script_metadata(&content);
+        assert_eq!(metadata.name, None);
+    }
+
+    #[test]
+    fn test_extract_script_metadata_within_first_20_lines() {
+        // Metadata within first 20 lines should be captured
+        let mut content = String::new();
+        for i in 1..=25 {
+            if i == 15 {
+                content.push_str("// Name: Just In Time\n");
+            } else {
+                content.push_str(&format!("// Comment line {}\n", i));
+            }
+        }
+        let metadata = extract_script_metadata(&content);
+        assert_eq!(metadata.name, Some("Just In Time".to_string()));
     }
 
     // ============================================
@@ -2932,5 +3425,184 @@ code here
         
         assert_eq!(results.len(), 1);
         assert!(matches!(&results[0], SearchResult::Script(_)));
+    }
+
+    // ============================================
+    // GROUPED RESULTS (FRECENCY) TESTS
+    // ============================================
+
+    #[test]
+    fn test_get_grouped_results_search_mode_flat_list() {
+        let scripts = vec![
+            Script {
+                name: "open".to_string(),
+                path: PathBuf::from("/open.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+            Script {
+                name: "save".to_string(),
+                path: PathBuf::from("/save.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+        ];
+        let scriptlets: Vec<Scriptlet> = vec![];
+        let builtins: Vec<BuiltInEntry> = vec![];
+        let apps: Vec<AppInfo> = vec![];
+        let frecency_store = FrecencyStore::new();
+        
+        // Search mode: non-empty filter should return flat list
+        let (grouped, results) = get_grouped_results(
+            &scripts, &scriptlets, &builtins, &apps,
+            &frecency_store, "open"
+        );
+        
+        // Should be a flat list with no headers
+        assert!(!grouped.is_empty());
+        for item in &grouped {
+            assert!(matches!(item, GroupedListItem::Item(_)));
+        }
+        assert_eq!(results.len(), 1); // Only "open" matches
+    }
+
+    #[test]
+    fn test_get_grouped_results_empty_filter_grouped_view() {
+        let scripts = vec![
+            Script {
+                name: "alpha".to_string(),
+                path: PathBuf::from("/alpha.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+            Script {
+                name: "beta".to_string(),
+                path: PathBuf::from("/beta.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+        ];
+        let scriptlets: Vec<Scriptlet> = vec![];
+        let builtins: Vec<BuiltInEntry> = vec![];
+        let apps: Vec<AppInfo> = vec![];
+        let frecency_store = FrecencyStore::new();
+        
+        // Empty filter should return grouped view
+        let (grouped, results) = get_grouped_results(
+            &scripts, &scriptlets, &builtins, &apps,
+            &frecency_store, ""
+        );
+        
+        // Results should contain all items
+        assert_eq!(results.len(), 2);
+        
+        // Grouped should have MAIN section (no RECENT since frecency is empty)
+        assert!(!grouped.is_empty());
+        
+        // First item should be MAIN section header
+        assert!(matches!(&grouped[0], GroupedListItem::SectionHeader(s) if s == "MAIN"));
+    }
+
+    #[test]
+    fn test_get_grouped_results_with_frecency() {
+        let scripts = vec![
+            Script {
+                name: "alpha".to_string(),
+                path: PathBuf::from("/alpha.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+            Script {
+                name: "beta".to_string(),
+                path: PathBuf::from("/beta.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+            Script {
+                name: "gamma".to_string(),
+                path: PathBuf::from("/gamma.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+        ];
+        let scriptlets: Vec<Scriptlet> = vec![];
+        let builtins: Vec<BuiltInEntry> = vec![];
+        let apps: Vec<AppInfo> = vec![];
+        
+        // Create frecency store and record usage for one script
+        let mut frecency_store = FrecencyStore::new();
+        frecency_store.record_use("/beta.ts");
+        
+        // Empty filter should return grouped view with RECENT section
+        let (grouped, results) = get_grouped_results(
+            &scripts, &scriptlets, &builtins, &apps,
+            &frecency_store, ""
+        );
+        
+        // Results should contain all items
+        assert_eq!(results.len(), 3);
+        
+        // Grouped should have both RECENT and MAIN sections
+        let section_headers: Vec<&str> = grouped.iter()
+            .filter_map(|item| match item {
+                GroupedListItem::SectionHeader(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        
+        assert!(section_headers.contains(&"RECENT"));
+        assert!(section_headers.contains(&"MAIN"));
+    }
+
+    #[test]
+    fn test_get_grouped_results_empty_inputs() {
+        let scripts: Vec<Script> = vec![];
+        let scriptlets: Vec<Scriptlet> = vec![];
+        let builtins: Vec<BuiltInEntry> = vec![];
+        let apps: Vec<AppInfo> = vec![];
+        let frecency_store = FrecencyStore::new();
+        
+        let (grouped, results) = get_grouped_results(
+            &scripts, &scriptlets, &builtins, &apps,
+            &frecency_store, ""
+        );
+        
+        // Both should be empty when no inputs
+        assert!(results.is_empty());
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn test_get_grouped_results_items_reference_correct_indices() {
+        let scripts = vec![
+            Script {
+                name: "first".to_string(),
+                path: PathBuf::from("/first.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+            Script {
+                name: "second".to_string(),
+                path: PathBuf::from("/second.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+        ];
+        let scriptlets: Vec<Scriptlet> = vec![];
+        let builtins: Vec<BuiltInEntry> = vec![];
+        let apps: Vec<AppInfo> = vec![];
+        let frecency_store = FrecencyStore::new();
+        
+        let (grouped, results) = get_grouped_results(
+            &scripts, &scriptlets, &builtins, &apps,
+            &frecency_store, ""
+        );
+        
+        // All Item indices should be valid indices into results
+        for item in &grouped {
+            if let GroupedListItem::Item(idx) = item {
+                assert!(*idx < results.len(), "Index {} out of bounds for results len {}", idx, results.len());
+            }
+        }
     }
 }
