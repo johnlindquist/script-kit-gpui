@@ -5179,18 +5179,6 @@ impl ScriptListApp {
                             .child(preview_panel)
                     )
             )
-            // Footer
-            .child(
-                div()
-                    .w_full()
-                    .px(px(design_spacing.padding_lg))
-                    .py(px(design_spacing.padding_sm + design_visual.border_normal))
-                    .border_t_1()
-                    .border_color(rgba((ui_border << 8) | 0x60))
-                    .text_xs()
-                    .text_color(rgb(text_muted))
-                    .child("↑↓ navigate • ⏎ paste • Esc back")
-            )
             .into_any_element()
     }
     
