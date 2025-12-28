@@ -5066,9 +5066,11 @@ impl ScriptListApp {
                                 .description_opt(Some(relative_time))
                                 .selected(is_selected);
                             
-                            // Add thumbnail for images
+                            // Add thumbnail for images, text icon for text entries
                             if let Some(render_image) = cached_image {
                                 item = item.icon_image(render_image);
+                            } else if entry.content_type == clipboard_history::ContentType::Text {
+                                item = item.icon("📄");
                             }
                             
                             div()
