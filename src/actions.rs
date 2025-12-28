@@ -539,30 +539,32 @@ impl Render for ActionsDialog {
             )
             .child(
                 // Search input field with focus indicator
-                // Use fixed width AND min/max constraints to absolutely prevent resize when typing
-                // The container itself has overflow_hidden to clip any content that might shift
+                // CRITICAL: Use flex_shrink_0 to prevent flexbox from shrinking this container
+                // The border/bg MUST stay at fixed width regardless of content
                 div()
+                    .flex_shrink_0()  // PREVENT flexbox from shrinking this!
                     .w(px(240.0))
                     .min_w(px(240.0))
                     .max_w(px(240.0))
+                    .h(px(28.0))      // Fixed height too
+                    .min_h(px(28.0))
+                    .max_h(px(28.0))
                     .overflow_hidden()
                     .px(px(spacing.padding_sm))
                     .py(px(spacing.padding_xs))
-                    .bg(if self.search_text.is_empty() { rgba(0x00000000) } else { 
-                        // Subtle inner background when there's text
-                        if self.design_variant == DesignVariant::Default {
-                            rgba(hex_with_alpha(self.theme.colors.background.main, 0x40))
-                        } else {
-                            rgba(hex_with_alpha(colors.background, 0x40))
-                        }
+                    // ALWAYS show background - just vary intensity
+                    .bg(if self.design_variant == DesignVariant::Default {
+                        rgba(hex_with_alpha(self.theme.colors.background.main, if self.search_text.is_empty() { 0x20 } else { 0x40 }))
+                    } else {
+                        rgba(hex_with_alpha(colors.background, if self.search_text.is_empty() { 0x20 } else { 0x40 }))
                     })
                     .rounded(px(visual.radius_sm))
                     .border_1()
+                    // ALWAYS show border - just vary intensity
                     .border_color(if !self.search_text.is_empty() { 
-                        // Show subtle focus border when typing
                         focus_border_color
                     } else { 
-                        rgba(0x00000000) 
+                        border_color
                     })
                     .flex()
                     .flex_row()
