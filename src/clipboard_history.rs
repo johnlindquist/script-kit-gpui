@@ -77,6 +77,77 @@ static DB_CONNECTION: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 /// Flag to stop the monitoring thread
 static STOP_MONITORING: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 
+/// Global image cache for decoded RenderImages (thread-safe)
+/// Key: entry ID, Value: decoded RenderImage
+static IMAGE_CACHE: OnceLock<Mutex<std::collections::HashMap<String, Arc<RenderImage>>>> =
+    OnceLock::new();
+
+/// Cached clipboard entries to avoid re-fetching from SQLite on each view open
+/// Updated whenever a new entry is added
+static ENTRY_CACHE: OnceLock<Mutex<Vec<ClipboardEntry>>> = OnceLock::new();
+
+/// Timestamp of last cache update
+static CACHE_UPDATED: OnceLock<Mutex<i64>> = OnceLock::new();
+
+/// Get the global image cache, initializing if needed
+fn get_image_cache() -> &'static Mutex<std::collections::HashMap<String, Arc<RenderImage>>> {
+    IMAGE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Get the global entry cache, initializing if needed  
+fn get_entry_cache() -> &'static Mutex<Vec<ClipboardEntry>> {
+    ENTRY_CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Get cached image by entry ID
+pub fn get_cached_image(id: &str) -> Option<Arc<RenderImage>> {
+    get_image_cache().lock().ok()?.get(id).cloned()
+}
+
+/// Cache a decoded image
+pub fn cache_image(id: &str, image: Arc<RenderImage>) {
+    if let Ok(mut cache) = get_image_cache().lock() {
+        cache.insert(id.to_string(), image);
+        debug!(id = %id, cache_size = cache.len(), "Cached decoded image");
+    }
+}
+
+/// Get cached clipboard entries (faster than querying SQLite)
+/// Falls back to SQLite if cache is empty
+pub fn get_cached_entries(limit: usize) -> Vec<ClipboardEntry> {
+    if let Ok(cache) = get_entry_cache().lock() {
+        if !cache.is_empty() {
+            let result: Vec<_> = cache.iter().take(limit).cloned().collect();
+            debug!(count = result.len(), cached = true, "Retrieved clipboard entries from cache");
+            return result;
+        }
+    }
+    // Fall back to database
+    get_clipboard_history(limit)
+}
+
+/// Invalidate the entry cache (called when entries change)
+#[allow(dead_code)]
+fn invalidate_entry_cache() {
+    if let Ok(mut cache) = get_entry_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// Refresh the entry cache from database
+fn refresh_entry_cache() {
+    let entries = get_clipboard_history(MAX_HISTORY_ENTRIES);
+    if let Ok(mut cache) = get_entry_cache().lock() {
+        *cache = entries;
+        debug!(count = cache.len(), "Refreshed entry cache");
+    }
+    if let Some(updated) = CACHE_UPDATED.get() {
+        if let Ok(mut ts) = updated.lock() {
+            *ts = chrono::Utc::now().timestamp();
+        }
+    }
+}
+
 /// Get the database path (~/.kenv/clipboard-history.db)
 fn get_db_path() -> Result<PathBuf> {
     let kenv_dir = PathBuf::from(shellexpand::tilde("~/.kenv").as_ref());
@@ -131,7 +202,9 @@ fn get_connection() -> Result<Arc<Mutex<Connection>>> {
 ///
 /// This should be called once at application startup. It will:
 /// 1. Create the SQLite database if it doesn't exist
-/// 2. Start a background thread that polls the clipboard every 500ms
+/// 2. Pre-warm the entry cache
+/// 3. Pre-decode images in background
+/// 4. Start a background thread that polls the clipboard every 500ms
 ///
 /// # Errors
 /// Returns error if database creation fails.
@@ -140,6 +213,17 @@ pub fn init_clipboard_history() -> Result<()> {
 
     // Initialize the database connection
     let _conn = get_connection().context("Failed to initialize database")?;
+
+    // Initialize the cache timestamp
+    let _ = CACHE_UPDATED.set(Mutex::new(0));
+
+    // Pre-warm the entry cache from database
+    refresh_entry_cache();
+
+    // Pre-decode images in a background thread
+    thread::spawn(|| {
+        prewarm_image_cache();
+    });
 
     // Initialize the stop flag
     let stop_flag = Arc::new(Mutex::new(false));
@@ -155,6 +239,29 @@ pub fn init_clipboard_history() -> Result<()> {
 
     info!("Clipboard history initialized");
     Ok(())
+}
+
+/// Pre-warm the image cache by decoding all cached image entries
+fn prewarm_image_cache() {
+    let entries = get_cached_entries(100);
+    let mut decoded_count = 0;
+
+    for entry in entries {
+        if entry.content_type == ContentType::Image {
+            // Skip if already cached
+            if get_cached_image(&entry.id).is_some() {
+                continue;
+            }
+
+            // Decode and cache
+            if let Some(render_image) = decode_to_render_image(&entry.content) {
+                cache_image(&entry.id, render_image);
+                decoded_count += 1;
+            }
+        }
+    }
+
+    info!(decoded_count, "Pre-warmed image cache");
 }
 
 /// Stop the clipboard monitoring thread
@@ -225,8 +332,23 @@ fn clipboard_monitor_loop(stop_flag: Arc<Mutex<bool>>) -> Result<()> {
 
                 // Encode image as base64 PNG
                 if let Ok(base64_content) = encode_image_as_base64(&image_data) {
+                    // Add entry first to get the ID
                     if let Err(e) = add_entry(&base64_content, ContentType::Image) {
                         warn!(error = %e, "Failed to add image entry to history");
+                    } else {
+                        // Pre-decode the image immediately so it's ready for display
+                        // This runs in the background monitor thread, not during render
+                        if let Some(render_image) = decode_to_render_image(&base64_content) {
+                            // Get the entry ID from the cache (it was just added)
+                            if let Ok(cache) = get_entry_cache().lock() {
+                                if let Some(entry) = cache.first() {
+                                    if entry.content_type == ContentType::Image {
+                                        cache_image(&entry.id, render_image);
+                                        debug!(id = %entry.id, "Pre-cached new image during monitoring");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 last_image_hash = Some(hash);
@@ -292,6 +414,9 @@ fn add_entry(content: &str, content_type: ContentType) -> Result<()> {
         )
         .context("Failed to update existing entry timestamp")?;
         debug!(id = %existing_id, "Updated existing clipboard entry timestamp");
+        // Refresh cache to reflect updated ordering
+        drop(conn);
+        refresh_entry_cache();
         return Ok(());
     }
 
@@ -306,6 +431,12 @@ fn add_entry(content: &str, content_type: ContentType) -> Result<()> {
 
     // Enforce LRU eviction
     enforce_max_entries(&conn)?;
+
+    // Drop lock before refreshing cache
+    drop(conn);
+
+    // Refresh the entry cache so it includes the new entry
+    refresh_entry_cache();
 
     Ok(())
 }

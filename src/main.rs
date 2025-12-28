@@ -2157,8 +2157,9 @@ impl ScriptListApp {
         match &entry.feature {
             builtins::BuiltInFeature::ClipboardHistory => {
                 logging::log("EXEC", "Opening Clipboard History");
-                let entries = clipboard_history::get_clipboard_history(100);
-                logging::log("EXEC", &format!("Loaded {} clipboard entries", entries.len()));
+                // Use cached entries for faster loading
+                let entries = clipboard_history::get_cached_entries(100);
+                logging::log("EXEC", &format!("Loaded {} clipboard entries (cached)", entries.len()));
                 self.current_view = AppView::ClipboardHistoryView {
                     entries,
                     filter: String::new(),
@@ -4862,13 +4863,25 @@ impl ScriptListApp {
         let bg_with_alpha = self.hex_to_rgba_with_opacity(bg_hex, opacity.main);
         let box_shadows = self.create_box_shadows();
         
-        // Pre-decode and cache images for visible entries
-        // Do this ONCE before rendering, not inside the render closure
+        // Use global image cache from clipboard_history module
+        // Images are pre-decoded in the background monitor thread, so this is fast
+        // Only decode if not already in the global cache (fallback)
         for entry in &entries {
-            if entry.content_type == clipboard_history::ContentType::Image 
-               && !self.clipboard_image_cache.contains_key(&entry.id) {
-                if let Some(render_image) = clipboard_history::decode_to_render_image(&entry.content) {
-                    self.clipboard_image_cache.insert(entry.id.clone(), render_image);
+            if entry.content_type == clipboard_history::ContentType::Image {
+                // Check global cache first, then local cache
+                if clipboard_history::get_cached_image(&entry.id).is_none()
+                   && !self.clipboard_image_cache.contains_key(&entry.id) {
+                    // Fallback: decode now if not pre-cached
+                    if let Some(render_image) = clipboard_history::decode_to_render_image(&entry.content) {
+                        // Store in global cache for future use
+                        clipboard_history::cache_image(&entry.id, render_image.clone());
+                        self.clipboard_image_cache.insert(entry.id.clone(), render_image);
+                    }
+                } else if let Some(cached) = clipboard_history::get_cached_image(&entry.id) {
+                    // Copy from global cache to local cache for this render
+                    if !self.clipboard_image_cache.contains_key(&entry.id) {
+                        self.clipboard_image_cache.insert(entry.id.clone(), cached);
+                    }
                 }
             }
         }
