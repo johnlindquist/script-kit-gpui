@@ -2452,6 +2452,47 @@ impl ScriptListApp {
     fn execute_scriptlet(&mut self, scriptlet: &scripts::Scriptlet, cx: &mut Context<Self>) {
         logging::log("EXEC", &format!("Executing scriptlet: {} (tool: {})", scriptlet.name, scriptlet.tool));
         
+        let tool = scriptlet.tool.to_lowercase();
+        
+        // TypeScript/Kit scriptlets need to run interactively (they may use SDK prompts)
+        // These should be spawned like regular scripts, not run synchronously
+        if matches!(tool.as_str(), "kit" | "ts" | "bun" | "deno" | "js") {
+            logging::log("EXEC", &format!("TypeScript scriptlet '{}' - running interactively", scriptlet.name));
+            
+            // Write scriptlet content to a temp file
+            let temp_dir = std::env::temp_dir();
+            let temp_file = temp_dir.join(format!("scriptlet-{}-{}.ts", 
+                scriptlet.name.to_lowercase().replace(' ', "-"),
+                std::process::id()
+            ));
+            
+            if let Err(e) = std::fs::write(&temp_file, &scriptlet.code) {
+                logging::log("ERROR", &format!("Failed to write temp scriptlet file: {}", e));
+                self.toast_manager.push(
+                    components::toast::Toast::error(
+                        format!("Failed to write scriptlet: {}", e),
+                        &self.theme
+                    ).duration_ms(Some(5000))
+                );
+                cx.notify();
+                return;
+            }
+            
+            // Create a Script struct and run it interactively
+            let script = scripts::Script {
+                name: scriptlet.name.clone(),
+                description: scriptlet.description.clone(),
+                path: temp_file,
+                extension: "ts".to_string(),
+            };
+            
+            self.execute_interactive(&script, cx);
+            return;
+        }
+        
+        // For non-TypeScript tools (bash, python, etc.), run synchronously
+        // These don't use the SDK and won't block waiting for input
+        
         // Convert scripts::Scriptlet to scriptlets::Scriptlet for executor
         let exec_scriptlet = scriptlets::Scriptlet {
             name: scriptlet.name.clone(),
