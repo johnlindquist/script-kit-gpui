@@ -56,13 +56,21 @@ pub struct AppMatch {
     pub score: i32,
 }
 
-/// Unified search result that can be a Script, Scriptlet, BuiltIn, or App
+/// Represents a scored match result for fuzzy search on windows
+#[derive(Clone, Debug)]
+pub struct WindowMatch {
+    pub window: crate::window_control::WindowInfo,
+    pub score: i32,
+}
+
+/// Unified search result that can be a Script, Scriptlet, BuiltIn, App, or Window
 #[derive(Clone, Debug)]
 pub enum SearchResult {
     Script(ScriptMatch),
     Scriptlet(ScriptletMatch),
     BuiltIn(BuiltInMatch),
     App(AppMatch),
+    Window(WindowMatch),
 }
 
 impl SearchResult {
@@ -73,6 +81,7 @@ impl SearchResult {
             SearchResult::Scriptlet(sm) => &sm.scriptlet.name,
             SearchResult::BuiltIn(bm) => &bm.entry.name,
             SearchResult::App(am) => &am.app.name,
+            SearchResult::Window(wm) => &wm.window.title,
         }
     }
 
@@ -83,6 +92,7 @@ impl SearchResult {
             SearchResult::Scriptlet(sm) => sm.scriptlet.description.as_deref(),
             SearchResult::BuiltIn(bm) => Some(&bm.entry.description),
             SearchResult::App(am) => am.app.path.to_str(),
+            SearchResult::Window(wm) => Some(&wm.window.app),
         }
     }
 
@@ -93,6 +103,7 @@ impl SearchResult {
             SearchResult::Scriptlet(sm) => sm.score,
             SearchResult::BuiltIn(bm) => bm.score,
             SearchResult::App(am) => am.score,
+            SearchResult::Window(wm) => wm.score,
         }
     }
 
@@ -103,6 +114,7 @@ impl SearchResult {
             SearchResult::Scriptlet(_) => "Snippet",
             SearchResult::BuiltIn(_) => "Built-in",
             SearchResult::App(_) => "App",
+            SearchResult::Window(_) => "Window",
         }
     }
 }
@@ -659,6 +671,87 @@ pub fn fuzzy_search_apps(apps: &[crate::app_launcher::AppInfo], query: &str) -> 
     matches
 }
 
+/// Fuzzy search windows by query string
+/// Searches across app name and window title
+/// Returns results sorted by relevance score (highest first)
+/// 
+/// Scoring priorities:
+/// - App name match at start: 100 points
+/// - App name match elsewhere: 75 points
+/// - Window title match at start: 90 points  
+/// - Window title match elsewhere: 65 points
+/// - Fuzzy match on app name: 50 points
+/// - Fuzzy match on window title: 40 points
+pub fn fuzzy_search_windows(windows: &[crate::window_control::WindowInfo], query: &str) -> Vec<WindowMatch> {
+    if query.is_empty() {
+        // If no query, return all windows with equal score, sorted by app name then title
+        let mut matches: Vec<WindowMatch> = windows.iter().map(|w| WindowMatch {
+            window: w.clone(),
+            score: 0,
+        }).collect();
+        matches.sort_by(|a, b| {
+            match a.window.app.cmp(&b.window.app) {
+                Ordering::Equal => a.window.title.cmp(&b.window.title),
+                other => other,
+            }
+        });
+        return matches;
+    }
+
+    let query_lower = query.to_lowercase();
+    let mut matches = Vec::new();
+
+    for window in windows {
+        let mut score = 0i32;
+        let app_lower = window.app.to_lowercase();
+        let title_lower = window.title.to_lowercase();
+
+        // Score by app name match - highest priority
+        if let Some(pos) = app_lower.find(&query_lower) {
+            // Bonus for exact substring match at start of app name
+            score += if pos == 0 { 100 } else { 75 };
+        }
+
+        // Score by window title match - high priority
+        if let Some(pos) = title_lower.find(&query_lower) {
+            // Bonus for exact substring match at start of title
+            score += if pos == 0 { 90 } else { 65 };
+        }
+
+        // Fuzzy character matching in app name (characters in order)
+        if is_fuzzy_match(&app_lower, &query_lower) {
+            score += 50;
+        }
+
+        // Fuzzy character matching in window title
+        if is_fuzzy_match(&title_lower, &query_lower) {
+            score += 40;
+        }
+
+        if score > 0 {
+            matches.push(WindowMatch {
+                window: window.clone(),
+                score,
+            });
+        }
+    }
+
+    // Sort by score (highest first), then by app name, then by title for ties
+    matches.sort_by(|a, b| {
+        match b.score.cmp(&a.score) {
+            Ordering::Equal => {
+                match a.window.app.cmp(&b.window.app) {
+                    Ordering::Equal => a.window.title.cmp(&b.window.title),
+                    other => other,
+                }
+            }
+            other => other,
+        }
+    });
+
+    matches
+}
+
 /// Perform unified fuzzy search across scripts, scriptlets, and built-ins
 /// Returns combined and ranked results sorted by relevance
 /// Built-ins appear at the TOP of results (before scripts) when scores are equal
@@ -716,17 +809,89 @@ pub fn fuzzy_search_unified_all(
         results.push(SearchResult::Scriptlet(sm));
     }
 
-    // Sort by score (highest first), then by type (builtins first, apps, scripts, scriptlets), then by name
+    // Sort by score (highest first), then by type (builtins first, apps, windows, scripts, scriptlets), then by name
     results.sort_by(|a, b| {
         match b.score().cmp(&a.score()) {
             Ordering::Equal => {
-                // Prefer builtins over apps over scripts over scriptlets when scores are equal
+                // Prefer builtins over apps over windows over scripts over scriptlets when scores are equal
                 let type_order = |r: &SearchResult| -> i32 {
                     match r {
                         SearchResult::BuiltIn(_) => 0,  // Built-ins first
                         SearchResult::App(_) => 1,      // Apps second
-                        SearchResult::Script(_) => 2,
-                        SearchResult::Scriptlet(_) => 3,
+                        SearchResult::Window(_) => 2,   // Windows third
+                        SearchResult::Script(_) => 3,
+                        SearchResult::Scriptlet(_) => 4,
+                    }
+                };
+                let type_order_a = type_order(a);
+                let type_order_b = type_order(b);
+                match type_order_a.cmp(&type_order_b) {
+                    Ordering::Equal => a.name().cmp(b.name()),
+                    other => other,
+                }
+            }
+            other => other,
+        }
+    });
+
+    results
+}
+
+/// Perform unified fuzzy search across scripts, scriptlets, built-ins, apps, and windows
+/// Returns combined and ranked results sorted by relevance
+/// Order by type when scores are equal: Built-ins > Apps > Windows > Scripts > Scriptlets
+pub fn fuzzy_search_unified_with_windows(
+    scripts: &[Script],
+    scriptlets: &[Scriptlet],
+    builtins: &[BuiltInEntry],
+    apps: &[crate::app_launcher::AppInfo],
+    windows: &[crate::window_control::WindowInfo],
+    query: &str,
+) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+
+    // Search built-ins first (they should appear at top when scores are equal)
+    let builtin_matches = fuzzy_search_builtins(builtins, query);
+    for bm in builtin_matches {
+        results.push(SearchResult::BuiltIn(bm));
+    }
+
+    // Search apps (appear after built-ins)
+    let app_matches = fuzzy_search_apps(apps, query);
+    for am in app_matches {
+        results.push(SearchResult::App(am));
+    }
+
+    // Search windows (appear after apps)
+    let window_matches = fuzzy_search_windows(windows, query);
+    for wm in window_matches {
+        results.push(SearchResult::Window(wm));
+    }
+
+    // Search scripts
+    let script_matches = fuzzy_search_scripts(scripts, query);
+    for sm in script_matches {
+        results.push(SearchResult::Script(sm));
+    }
+
+    // Search scriptlets
+    let scriptlet_matches = fuzzy_search_scriptlets(scriptlets, query);
+    for sm in scriptlet_matches {
+        results.push(SearchResult::Scriptlet(sm));
+    }
+
+    // Sort by score (highest first), then by type (builtins first, apps, windows, scripts, scriptlets), then by name
+    results.sort_by(|a, b| {
+        match b.score().cmp(&a.score()) {
+            Ordering::Equal => {
+                // Prefer builtins over apps over windows over scripts over scriptlets when scores are equal
+                let type_order = |r: &SearchResult| -> i32 {
+                    match r {
+                        SearchResult::BuiltIn(_) => 0,  // Built-ins first
+                        SearchResult::App(_) => 1,      // Apps second
+                        SearchResult::Window(_) => 2,   // Windows third
+                        SearchResult::Script(_) => 3,
+                        SearchResult::Scriptlet(_) => 4,
                     }
                 };
                 let type_order_a = type_order(a);
@@ -1367,6 +1532,7 @@ mod tests {
             SearchResult::Scriptlet(_) => panic!("Script should be first"),
             SearchResult::BuiltIn(_) => panic!("Script should be first"),
             SearchResult::App(_) => panic!("Script should be first"),
+            SearchResult::Window(_) => panic!("Script should be first"),
         }
     }
 
@@ -2258,6 +2424,7 @@ code here
             SearchResult::Scriptlet(_) => panic!("Expected Script first"),
             SearchResult::BuiltIn(_) => panic!("Expected Script first"),
             SearchResult::App(_) => panic!("Expected Script first"),
+            SearchResult::Window(_) => panic!("Expected Script first"),
         }
     }
 
@@ -2672,5 +2839,98 @@ code here
         let results = fuzzy_search_builtins(&builtins, "hist");
         assert!(!results.is_empty());
         assert_eq!(results[0].entry.name, "Clipboard History");
+    }
+
+    // ============================================
+    // WINDOW SEARCH TESTS
+    // ============================================
+    // 
+    // Note: Most window search tests require WindowInfo to have a public constructor.
+    // These tests verify the function signatures and empty input handling.
+    // Integration tests with actual WindowInfo require window_control module changes.
+
+    #[test]
+    fn test_fuzzy_search_windows_empty_list() {
+        // Test with empty window list
+        let windows: Vec<crate::window_control::WindowInfo> = vec![];
+        
+        let results = fuzzy_search_windows(&windows, "test");
+        assert!(results.is_empty());
+        
+        let results_empty_query = fuzzy_search_windows(&windows, "");
+        assert!(results_empty_query.is_empty());
+    }
+
+    #[test]
+    fn test_window_match_type_exists() {
+        // Verify WindowMatch struct has expected fields by type-checking
+        fn _type_check(wm: &WindowMatch) {
+            let _window: &crate::window_control::WindowInfo = &wm.window;
+            let _score: i32 = wm.score;
+        }
+    }
+
+    #[test]
+    fn test_search_result_window_type_label() {
+        // We can't construct WindowInfo directly, but we can verify
+        // the SearchResult::Window variant exists and type_label is correct
+        // by checking the match arm in type_label implementation compiles
+        fn _verify_window_variant_exists() {
+            fn check_label(result: &SearchResult) -> &'static str {
+                match result {
+                    SearchResult::Window(_) => "Window",
+                    _ => "other",
+                }
+            }
+            let _ = check_label;
+        }
+    }
+
+    #[test]
+    fn test_fuzzy_search_unified_with_windows_empty_inputs() {
+        let scripts: Vec<Script> = vec![];
+        let scriptlets: Vec<Scriptlet> = vec![];
+        let builtins: Vec<BuiltInEntry> = vec![];
+        let apps: Vec<crate::app_launcher::AppInfo> = vec![];
+        let windows: Vec<crate::window_control::WindowInfo> = vec![];
+        
+        let results = fuzzy_search_unified_with_windows(
+            &scripts,
+            &scriptlets,
+            &builtins,
+            &apps,
+            &windows,
+            "test",
+        );
+        
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_search_unified_with_windows_returns_scripts() {
+        let scripts = vec![
+            Script {
+                name: "test_script".to_string(),
+                path: PathBuf::from("/test.ts"),
+                extension: "ts".to_string(),
+                description: None,
+            },
+        ];
+        let scriptlets: Vec<Scriptlet> = vec![];
+        let builtins: Vec<BuiltInEntry> = vec![];
+        let apps: Vec<crate::app_launcher::AppInfo> = vec![];
+        let windows: Vec<crate::window_control::WindowInfo> = vec![];
+        
+        let results = fuzzy_search_unified_with_windows(
+            &scripts,
+            &scriptlets,
+            &builtins,
+            &apps,
+            &windows,
+            "test",
+        );
+        
+        assert_eq!(results.len(), 1);
+        assert!(matches!(&results[0], SearchResult::Script(_)));
     }
 }

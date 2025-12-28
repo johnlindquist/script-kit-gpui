@@ -449,6 +449,12 @@ enum AppView {
         filter: String,
         selected_index: usize,
     },
+    /// Showing window switcher
+    WindowSwitcherView {
+        windows: Vec<window_control::WindowInfo>,
+        filter: String,
+        selected_index: usize,
+    },
 }
 
 /// Wrapper to hold a script session that can be shared across async boundaries
@@ -728,6 +734,8 @@ struct ScriptListApp {
     arg_list_scroll_handle: UniformListScrollHandle,
     // Scroll handle for clipboard history list
     clipboard_list_scroll_handle: UniformListScrollHandle,
+    // Scroll handle for window switcher list
+    window_list_scroll_handle: UniformListScrollHandle,
     // Actions popup overlay
     show_actions_popup: bool,
     // ActionsDialog entity for focus management
@@ -882,6 +890,7 @@ impl ScriptListApp {
             list_scroll_handle: UniformListScrollHandle::new(),
             arg_list_scroll_handle: UniformListScrollHandle::new(),
             clipboard_list_scroll_handle: UniformListScrollHandle::new(),
+            window_list_scroll_handle: UniformListScrollHandle::new(),
             show_actions_popup: false,
             actions_dialog: None,
             cursor_visible: true,
@@ -1179,6 +1188,10 @@ impl ScriptListApp {
                     logging::log("EXEC", &format!("Launching app: {}", app_match.app.name));
                     self.execute_app(&app_match.app, cx);
                 }
+                scripts::SearchResult::Window(window_match) => {
+                    logging::log("EXEC", &format!("Focusing window: {}", window_match.window.title));
+                    self.execute_window_focus(&window_match.window, cx);
+                }
             }
         }
     }
@@ -1258,6 +1271,18 @@ impl ScriptListApp {
                 } else {
                     let filter_lower = filter.to_lowercase();
                     apps.iter().filter(|a| a.name.to_lowercase().contains(&filter_lower)).count()
+                };
+                (ViewType::ScriptList, filtered_count)
+            }
+            AppView::WindowSwitcherView { windows, filter, .. } => {
+                let filtered_count = if filter.is_empty() {
+                    windows.len()
+                } else {
+                    let filter_lower = filter.to_lowercase();
+                    windows.iter().filter(|w| {
+                        w.title.to_lowercase().contains(&filter_lower) || 
+                        w.app.to_lowercase().contains(&filter_lower)
+                    }).count()
                 };
                 (ViewType::ScriptList, filtered_count)
             }
@@ -1347,6 +1372,9 @@ impl ScriptListApp {
                         }
                         scripts::SearchResult::App(_) => {
                             self.last_output = Some(SharedString::from("Cannot edit applications"));
+                        }
+                        scripts::SearchResult::Window(_) => {
+                            self.last_output = Some(SharedString::from("Cannot edit windows"));
                         }
                     }
                 } else {
@@ -2169,6 +2197,32 @@ impl ScriptListApp {
                 }
                 cx.notify();
             }
+            builtins::BuiltInFeature::WindowSwitcher => {
+                logging::log("EXEC", "Opening Window Switcher");
+                // Load windows when view is opened (windows change frequently)
+                match window_control::list_windows() {
+                    Ok(windows) => {
+                        logging::log("EXEC", &format!("Loaded {} windows", windows.len()));
+                        self.current_view = AppView::WindowSwitcherView {
+                            windows,
+                            filter: String::new(),
+                            selected_index: 0,
+                        };
+                        // Use standard height for window switcher view
+                        defer_resize_to_view(ViewType::ScriptList, 0, cx);
+                    }
+                    Err(e) => {
+                        logging::log("ERROR", &format!("Failed to list windows: {}", e));
+                        self.toast_manager.push(
+                            components::toast::Toast::error(
+                                format!("Failed to list windows: {}", e),
+                                &self.theme
+                            ).duration_ms(Some(5000))
+                        );
+                    }
+                }
+                cx.notify();
+            }
         }
     }
     
@@ -2183,6 +2237,27 @@ impl ScriptListApp {
         } else {
             logging::log("EXEC", &format!("Launched app: {}", app.name));
             // Hide window after launching app
+            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+            cx.hide();
+        }
+    }
+    
+    /// Focus a window from the main search results
+    fn execute_window_focus(&mut self, window: &window_control::WindowInfo, cx: &mut Context<Self>) {
+        logging::log("EXEC", &format!("Focusing window: {} - {}", window.app, window.title));
+        
+        if let Err(e) = window_control::focus_window(window.id) {
+            logging::log("ERROR", &format!("Failed to focus window: {}", e));
+            self.toast_manager.push(
+                components::toast::Toast::error(
+                    format!("Failed to focus window: {}", e),
+                    &self.theme
+                ).duration_ms(Some(5000))
+            );
+            cx.notify();
+        } else {
+            logging::log("EXEC", &format!("Focused window: {}", window.title));
+            // Hide Script Kit after focusing window
             WINDOW_VISIBLE.store(false, Ordering::SeqCst);
             cx.hide();
         }
@@ -2464,6 +2539,7 @@ impl ScriptListApp {
                                         scripts::SearchResult::Scriptlet(m) => m.scriptlet.name.clone(),
                                         scripts::SearchResult::BuiltIn(m) => m.entry.name.clone(),
                                         scripts::SearchResult::App(m) => m.app.name.clone(),
+                                        scripts::SearchResult::Window(m) => m.window.title.clone(),
                                     }
                                 })
                             } else {
@@ -2594,6 +2670,27 @@ impl ScriptListApp {
                                 None,
                             )
                         }
+                        AppView::WindowSwitcherView { windows, filter, selected_index } => {
+                            let filtered_count = if filter.is_empty() {
+                                windows.len()
+                            } else {
+                                let filter_lower = filter.to_lowercase();
+                                windows.iter().filter(|w| {
+                                    w.title.to_lowercase().contains(&filter_lower) ||
+                                    w.app.to_lowercase().contains(&filter_lower)
+                                }).count()
+                            };
+                            (
+                                "windowSwitcher".to_string(),
+                                None,
+                                None,
+                                filter.clone(),
+                                windows.len(),
+                                filtered_count,
+                                *selected_index as i32,
+                                None,
+                            )
+                        }
                     };
                 
                 // Focus state: we use focused_input as a proxy since we don't have Window access here.
@@ -2686,6 +2783,7 @@ impl ScriptListApp {
             AppView::EditorPrompt { .. } => "EditorPrompt",
             AppView::ClipboardHistoryView { .. } => "ClipboardHistoryView",
             AppView::AppLauncherView { .. } => "AppLauncherView",
+            AppView::WindowSwitcherView { .. } => "WindowSwitcherView",
         };
         
         let old_focused_input = self.focused_input;
@@ -2754,7 +2852,8 @@ impl ScriptListApp {
             AppView::TermPrompt { .. } | 
             AppView::EditorPrompt { .. } |
             AppView::ClipboardHistoryView { .. } |
-            AppView::AppLauncherView { .. }
+            AppView::AppLauncherView { .. } |
+            AppView::WindowSwitcherView { .. }
         )
     }
       
@@ -2915,6 +3014,9 @@ impl Render for ScriptListApp {
             }
             AppView::AppLauncherView { apps, filter, selected_index } => {
                 self.render_app_launcher(apps, filter, selected_index, cx)
+            }
+            AppView::WindowSwitcherView { windows, filter, selected_index } => {
+                self.render_window_switcher(windows, filter, selected_index, cx)
             }
         }
     }
@@ -3410,6 +3512,7 @@ impl ScriptListApp {
                             builtins::BuiltInFeature::ClipboardHistory => "Clipboard History Manager".to_string(),
                             builtins::BuiltInFeature::AppLauncher => "Application Launcher".to_string(),
                             builtins::BuiltInFeature::App(name) => name.clone(),
+                            builtins::BuiltInFeature::WindowSwitcher => "Window Manager".to_string(),
                         };
                         panel = panel.child(
                             div()
@@ -3516,6 +3619,92 @@ impl ScriptListApp {
                                 )
                         );
                     }
+                    scripts::SearchResult::Window(window_match) => {
+                        let window = &window_match.window;
+                        
+                        // Window title header
+                        panel = panel.child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(text_primary))
+                                .pb(px(spacing.padding_sm))
+                                .child(window.title.clone())
+                        );
+                        
+                        // App name
+                        panel = panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .pb(px(spacing.padding_md))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted))
+                                        .pb(px(spacing.padding_xs / 2.0))
+                                        .child("Application")
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(text_secondary))
+                                        .child(window.app.clone())
+                                )
+                        );
+                        
+                        // Bounds
+                        panel = panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .pb(px(spacing.padding_md))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted))
+                                        .pb(px(spacing.padding_xs / 2.0))
+                                        .child("Position & Size")
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(text_secondary))
+                                        .child(format!("{}×{} at ({}, {})", 
+                                            window.bounds.width, window.bounds.height,
+                                            window.bounds.x, window.bounds.y))
+                                )
+                        );
+                        
+                        // Divider
+                        panel = panel.child(
+                            div()
+                                .w_full()
+                                .h(px(visual.border_thin))
+                                .bg(rgba((ui_border << 8) | 0x60))
+                                .my(px(spacing.padding_sm))
+                        );
+                        
+                        // Type indicator
+                        panel = panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted))
+                                        .pb(px(spacing.padding_xs / 2.0))
+                                        .child("Type")
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(text_secondary))
+                                        .child("Window")
+                                )
+                        );
+                    }
                 }
             }
             None => {
@@ -3564,6 +3753,10 @@ impl ScriptListApp {
                 scripts::SearchResult::App(m) => {
                     // Apps use their path as identifier
                     Some(ScriptInfo::new(&m.app.name, m.app.path.to_string_lossy().to_string()))
+                }
+                scripts::SearchResult::Window(m) => {
+                    // Windows use their id as identifier
+                    Some(ScriptInfo::new(&m.window.title, format!("window:{}", m.window.id)))
                 }
             }
         } else {
@@ -5451,6 +5644,542 @@ impl ScriptListApp {
                     .child("↑↓ navigate • ⏎ launch • Esc back")
             )
             .into_any_element()
+    }
+    
+    /// Render window switcher view with 50/50 split layout
+    fn render_window_switcher(
+        &mut self,
+        windows: Vec<window_control::WindowInfo>,
+        filter: String,
+        selected_index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Use design tokens for GLOBAL theming
+        let tokens = get_tokens(self.current_design);
+        let design_colors = tokens.colors();
+        let design_spacing = tokens.spacing();
+        let design_typography = tokens.typography();
+        let design_visual = tokens.visual();
+        
+        // Use design tokens for global theming
+        let opacity = self.theme.get_opacity();
+        let bg_hex = design_colors.background;
+        let bg_with_alpha = self.hex_to_rgba_with_opacity(bg_hex, opacity.main);
+        let box_shadows = self.create_box_shadows();
+        
+        // Filter windows based on current filter
+        let filtered_windows: Vec<_> = if filter.is_empty() {
+            windows.iter().enumerate().collect()
+        } else {
+            let filter_lower = filter.to_lowercase();
+            windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| {
+                    w.title.to_lowercase().contains(&filter_lower) ||
+                    w.app.to_lowercase().contains(&filter_lower)
+                })
+                .collect()
+        };
+        let filtered_len = filtered_windows.len();
+        
+        // Key handler for window switcher
+        let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+            let key_str = event.keystroke.key.to_lowercase();
+            logging::log("KEY", &format!("WindowSwitcher key: '{}'", key_str));
+            
+            if let AppView::WindowSwitcherView { windows, filter, selected_index } = &mut this.current_view {
+                // Apply filter to get current filtered list
+                let filtered_windows: Vec<_> = if filter.is_empty() {
+                    windows.iter().enumerate().collect()
+                } else {
+                    let filter_lower = filter.to_lowercase();
+                    windows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, w)| {
+                            w.title.to_lowercase().contains(&filter_lower) ||
+                            w.app.to_lowercase().contains(&filter_lower)
+                        })
+                        .collect()
+                };
+                let filtered_len = filtered_windows.len();
+                
+                match key_str.as_str() {
+                    "up" | "arrowup" => {
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                            this.window_list_scroll_handle.scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                            cx.notify();
+                        }
+                    }
+                    "down" | "arrowdown" => {
+                        if *selected_index < filtered_len.saturating_sub(1) {
+                            *selected_index += 1;
+                            this.window_list_scroll_handle.scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                            cx.notify();
+                        }
+                    }
+                    "enter" => {
+                        // Focus selected window and hide Script Kit
+                        if let Some((_, window_info)) = filtered_windows.get(*selected_index) {
+                            logging::log("EXEC", &format!("Focusing window: {}", window_info.title));
+                            if let Err(e) = window_control::focus_window(window_info.id) {
+                                logging::log("ERROR", &format!("Failed to focus window: {}", e));
+                                this.toast_manager.push(
+                                    components::toast::Toast::error(
+                                        format!("Failed to focus window: {}", e),
+                                        &this.theme
+                                    ).duration_ms(Some(5000))
+                                );
+                                cx.notify();
+                            } else {
+                                logging::log("EXEC", &format!("Focused window: {}", window_info.title));
+                                WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                                cx.hide();
+                                NEEDS_RESET.store(true, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    "escape" => {
+                        logging::log("KEY", "ESC in WindowSwitcher - returning to script list");
+                        this.reset_to_script_list(cx);
+                    }
+                    "backspace" => {
+                        if !filter.is_empty() {
+                            filter.pop();
+                            *selected_index = 0;
+                            this.window_list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+                            cx.notify();
+                        }
+                    }
+                    // Number keys for quick window actions - extract window_id to avoid borrow issues
+                    "1" | "2" | "3" | "4" | "m" | "n" | "c" => {
+                        if let Some((_, window_info)) = filtered_windows.get(*selected_index) {
+                            let window_id = window_info.id;
+                            let action = match key_str.as_str() {
+                                "1" => "tile_left",
+                                "2" => "tile_right",
+                                "3" => "tile_top",
+                                "4" => "tile_bottom",
+                                "m" => "maximize",
+                                "n" => "minimize",
+                                "c" => "close",
+                                _ => unreachable!(),
+                            };
+                            // Drop the borrow before calling execute_window_action
+                            drop(filtered_windows);
+                            this.execute_window_action(window_id, action, cx);
+                        }
+                    }
+                    _ => {
+                        if let Some(ref key_char) = event.keystroke.key_char {
+                            if let Some(ch) = key_char.chars().next() {
+                                if !ch.is_control() && ch.is_alphanumeric() {
+                                    filter.push(ch);
+                                    *selected_index = 0;
+                                    this.window_list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        let input_display = if filter.is_empty() {
+            SharedString::from("Search windows...")
+        } else {
+            SharedString::from(filter.clone())
+        };
+        let input_is_empty = filter.is_empty();
+        
+        // Pre-compute colors
+        let list_colors = ListItemColors::from_design(&design_colors);
+        let text_primary = design_colors.text_primary;
+        let text_muted = design_colors.text_muted;
+        let text_dimmed = design_colors.text_dimmed;
+        let ui_border = design_colors.border;
+        
+        // Build virtualized list
+        let list_element: AnyElement = if filtered_len == 0 {
+            div()
+                .w_full()
+                .py(px(design_spacing.padding_xl))
+                .text_center()
+                .text_color(rgb(design_colors.text_muted))
+                .font_family(design_typography.font_family)
+                .child(if filter.is_empty() { 
+                    "No windows found" 
+                } else { 
+                    "No windows match your filter" 
+                })
+                .into_any_element()
+        } else {
+            // Clone data for the closure
+            let windows_for_closure: Vec<_> = filtered_windows.iter().map(|(i, w)| (*i, (*w).clone())).collect();
+            let selected = selected_index;
+            
+            uniform_list(
+                "window-switcher",
+                filtered_len,
+                move |visible_range, _window, _cx| {
+                    visible_range.map(|ix| {
+                        if let Some((_, window_info)) = windows_for_closure.get(ix) {
+                            let is_selected = ix == selected;
+                            
+                            // Format: "AppName: Window Title"
+                            let name = format!("{}: {}", window_info.app, window_info.title);
+                            
+                            // Format bounds as description
+                            let description = format!(
+                                "{}×{} at ({}, {})",
+                                window_info.bounds.width,
+                                window_info.bounds.height,
+                                window_info.bounds.x,
+                                window_info.bounds.y
+                            );
+                            
+                            div()
+                                .id(ix)
+                                .child(
+                                    ListItem::new(name, list_colors)
+                                        .description_opt(Some(description))
+                                        .selected(is_selected)
+                                )
+                        } else {
+                            div().id(ix).h(px(LIST_ITEM_HEIGHT))
+                        }
+                    }).collect()
+                },
+            )
+            .h_full()
+            .track_scroll(&self.window_list_scroll_handle)
+            .into_any_element()
+        };
+        
+        // Build actions panel for selected window
+        let selected_window = filtered_windows.get(selected_index).map(|(_, w)| (*w).clone());
+        let actions_panel = self.render_window_actions_panel(&selected_window, &design_colors, &design_spacing, &design_typography, &design_visual, cx);
+        
+        div()
+            .flex()
+            .flex_col()
+            .bg(rgba(bg_with_alpha))
+            .shadow(box_shadows)
+            .w_full()
+            .h_full()
+            .rounded(px(design_visual.radius_lg))
+            .text_color(rgb(text_primary))
+            .font_family(design_typography.font_family)
+            .key_context("window_switcher")
+            .track_focus(&self.focus_handle)
+            .on_key_down(handle_key)
+            // Header with input
+            .child(
+                div()
+                    .w_full()
+                    .px(px(design_spacing.padding_lg))
+                    .py(px(design_spacing.padding_md))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    // Title
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text_dimmed))
+                            .child("🪟 Windows")
+                    )
+                    // Search input with blinking cursor
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .text_lg()
+                            .text_color(if input_is_empty { rgb(text_muted) } else { rgb(text_primary) })
+                            .when(input_is_empty, |d| d.child(
+                                div()
+                                    .w(px(design_visual.border_normal))
+                                    .h(px(design_typography.font_size_lg * design_typography.line_height_normal))
+                                    .mr(px(design_spacing.padding_xs))
+                                    .when(self.cursor_visible, |d| d.bg(rgb(text_primary)))
+                            ))
+                            .child(input_display)
+                            .when(!input_is_empty, |d| d.child(
+                                div()
+                                    .w(px(design_visual.border_normal))
+                                    .h(px(design_typography.font_size_lg * design_typography.line_height_normal))
+                                    .ml(px(design_visual.border_normal))
+                                    .when(self.cursor_visible, |d| d.bg(rgb(text_primary)))
+                            ))
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text_dimmed))
+                            .child(format!("{} windows", windows.len()))
+                    ),
+            )
+            // Divider
+            .child(
+                div()
+                    .mx(px(design_spacing.padding_lg))
+                    .h(px(design_visual.border_thin))
+                    .bg(rgba((ui_border << 8) | 0x60))
+            )
+            // Main content area - 50/50 split: Window list on left, Actions on right
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .overflow_hidden()
+                    // Left side: Window list (50% width)
+                    .child(
+                        div()
+                            .w_1_2()
+                            .h_full()
+                            .min_h(px(0.))
+                            .py(px(design_spacing.padding_xs))
+                            .child(list_element)
+                    )
+                    // Right side: Actions panel (50% width)
+                    .child(
+                        div()
+                            .w_1_2()
+                            .h_full()
+                            .min_h(px(0.))
+                            .overflow_hidden()
+                            .child(actions_panel)
+                    )
+            )
+            // Footer
+            .child(
+                div()
+                    .w_full()
+                    .px(px(design_spacing.padding_lg))
+                    .py(px(design_spacing.padding_sm + design_visual.border_normal))
+                    .border_t_1()
+                    .border_color(rgba((ui_border << 8) | 0x60))
+                    .text_xs()
+                    .text_color(rgb(text_muted))
+                    .child("↑↓ navigate • ⏎ focus • 1-4 tile • M max • N min • C close • Esc back")
+            )
+            .into_any_element()
+    }
+    
+    /// Render the actions panel for window switcher
+    fn render_window_actions_panel(
+        &self,
+        selected_window: &Option<window_control::WindowInfo>,
+        colors: &designs::DesignColors,
+        spacing: &designs::DesignSpacing,
+        typography: &designs::DesignTypography,
+        visual: &designs::DesignVisual,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let bg_main = colors.background;
+        let ui_border = colors.border;
+        let text_primary = colors.text_primary;
+        let text_muted = colors.text_muted;
+        let text_secondary = colors.text_secondary;
+        
+        let mut panel = div()
+            .w_full()
+            .h_full()
+            .bg(rgb(bg_main))
+            .border_l_1()
+            .border_color(rgba((ui_border << 8) | 0x80))
+            .p(px(spacing.padding_lg))
+            .flex()
+            .flex_col()
+            .overflow_y_hidden()
+            .font_family(typography.font_family);
+        
+        match selected_window {
+            Some(window) => {
+                // Window info header
+                panel = panel.child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(text_primary))
+                        .pb(px(spacing.padding_sm))
+                        .child(window.title.clone())
+                );
+                
+                // App name
+                panel = panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(text_secondary))
+                        .pb(px(spacing.padding_md))
+                        .child(window.app.clone())
+                );
+                
+                // Bounds info
+                panel = panel.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(text_muted))
+                        .pb(px(spacing.padding_lg))
+                        .child(format!(
+                            "{}×{} at ({}, {})",
+                            window.bounds.width,
+                            window.bounds.height,
+                            window.bounds.x,
+                            window.bounds.y
+                        ))
+                );
+                
+                // Divider
+                panel = panel.child(
+                    div()
+                        .w_full()
+                        .h(px(visual.border_thin))
+                        .bg(rgba((ui_border << 8) | 0x60))
+                        .mb(px(spacing.padding_lg))
+                );
+                
+                // Actions header
+                panel = panel.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(text_muted))
+                        .pb(px(spacing.padding_md))
+                        .child("Actions (keyboard shortcuts)")
+                );
+                
+                // Action buttons grid - using text labels with shortcuts
+                let action_items = [
+                    ("1", "← Tile Left Half"),
+                    ("2", "→ Tile Right Half"),
+                    ("3", "↑ Tile Top Half"),
+                    ("4", "↓ Tile Bottom Half"),
+                    ("M", "□ Maximize"),
+                    ("N", "_ Minimize"),
+                    ("⏎", "◉ Focus"),
+                    ("C", "✕ Close"),
+                ];
+                
+                for (key, label) in action_items {
+                    panel = panel.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .py(px(spacing.padding_xs))
+                            // Key badge
+                            .child(
+                                div()
+                                    .w(px(24.0))
+                                    .h(px(20.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(visual.radius_sm))
+                                    .bg(rgba((colors.background_tertiary << 8) | 0x80))
+                                    .text_xs()
+                                    .text_color(rgb(text_secondary))
+                                    .child(key)
+                            )
+                            // Label
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(text_primary))
+                                    .child(label)
+                            )
+                    );
+                }
+            }
+            None => {
+                // Empty state
+                panel = panel.child(
+                    div()
+                        .w_full()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(text_muted))
+                        .child("No window selected")
+                );
+            }
+        }
+        
+        panel
+    }
+    
+    /// Execute a window action (tile, maximize, minimize, close)
+    fn execute_window_action(&mut self, window_id: u32, action: &str, cx: &mut Context<Self>) {
+        logging::log("EXEC", &format!("Window action: {} on window {}", action, window_id));
+        
+        let result = match action {
+            "tile_left" => window_control::tile_window(window_id, window_control::TilePosition::LeftHalf),
+            "tile_right" => window_control::tile_window(window_id, window_control::TilePosition::RightHalf),
+            "tile_top" => window_control::tile_window(window_id, window_control::TilePosition::TopHalf),
+            "tile_bottom" => window_control::tile_window(window_id, window_control::TilePosition::BottomHalf),
+            "maximize" => window_control::maximize_window(window_id),
+            "minimize" => window_control::minimize_window(window_id),
+            "close" => window_control::close_window(window_id),
+            "focus" => window_control::focus_window(window_id),
+            _ => {
+                logging::log("ERROR", &format!("Unknown window action: {}", action));
+                return;
+            }
+        };
+        
+        match result {
+            Ok(()) => {
+                logging::log("EXEC", &format!("Window action {} succeeded", action));
+                
+                // Show success toast
+                self.toast_manager.push(
+                    components::toast::Toast::success(
+                        format!("Window {}", action.replace("_", " ")),
+                        &self.theme
+                    ).duration_ms(Some(2000))
+                );
+                
+                // Refresh window list after action
+                if let AppView::WindowSwitcherView { windows, selected_index, .. } = &mut self.current_view {
+                    match window_control::list_windows() {
+                        Ok(new_windows) => {
+                            *windows = new_windows;
+                            // Adjust selected index if needed
+                            if *selected_index >= windows.len() && !windows.is_empty() {
+                                *selected_index = windows.len() - 1;
+                            }
+                        }
+                        Err(e) => {
+                            logging::log("ERROR", &format!("Failed to refresh windows: {}", e));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                logging::log("ERROR", &format!("Window action {} failed: {}", action, e));
+                
+                // Show error toast
+                self.toast_manager.push(
+                    components::toast::Toast::error(
+                        format!("Failed to {}: {}", action.replace("_", " "), e),
+                        &self.theme
+                    ).duration_ms(Some(5000))
+                );
+            }
+        }
+        
+        cx.notify();
     }
 }
 

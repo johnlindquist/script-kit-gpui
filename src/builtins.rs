@@ -29,6 +29,8 @@ pub enum BuiltInFeature {
     AppLauncher,
     /// Individual application entry (for future use when apps appear in search)
     App(String),
+    /// Window switcher for managing and tiling windows
+    WindowSwitcher,
 }
 
 /// A built-in feature entry that appears in the main search
@@ -120,6 +122,18 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
         debug!("app_launcher enabled - apps will appear in main search");
     }
 
+    if config.window_switcher {
+        entries.push(BuiltInEntry::new_with_icon(
+            "builtin-window-switcher",
+            "Window Switcher",
+            "Switch, tile, and manage open windows",
+            vec!["window", "switch", "tile", "focus", "manage", "switcher"],
+            BuiltInFeature::WindowSwitcher,
+            "🪟",
+        ));
+        debug!("Added Window Switcher built-in entry");
+    }
+
     debug!(count = entries.len(), "Built-in entries loaded");
     entries
 }
@@ -134,6 +148,7 @@ mod tests {
         let config = BuiltInConfig::default();
         assert!(config.clipboard_history);
         assert!(config.app_launcher);
+        assert!(config.window_switcher);
     }
 
     #[test]
@@ -141,9 +156,11 @@ mod tests {
         let config = BuiltInConfig {
             clipboard_history: false,
             app_launcher: true,
+            window_switcher: false,
         };
         assert!(!config.clipboard_history);
         assert!(config.app_launcher);
+        assert!(!config.window_switcher);
     }
 
     #[test]
@@ -151,8 +168,8 @@ mod tests {
         let config = BuiltInConfig::default();
         let entries = get_builtin_entries(&config);
 
-        // Only clipboard history is a built-in now (apps appear directly in search)
-        assert_eq!(entries.len(), 1);
+        // Clipboard history and window switcher are built-ins (apps appear directly in search)
+        assert_eq!(entries.len(), 2);
 
         // Check clipboard history entry
         let clipboard = entries.iter().find(|e| e.id == "builtin-clipboard-history");
@@ -165,6 +182,19 @@ mod tests {
         assert!(clipboard.keywords.contains(&"paste".to_string()));
         assert!(clipboard.keywords.contains(&"copy".to_string()));
 
+        // Check window switcher entry
+        let window_switcher = entries.iter().find(|e| e.id == "builtin-window-switcher");
+        assert!(window_switcher.is_some());
+        let window_switcher = window_switcher.unwrap();
+        assert_eq!(window_switcher.name, "Window Switcher");
+        assert_eq!(window_switcher.feature, BuiltInFeature::WindowSwitcher);
+        assert!(window_switcher.keywords.contains(&"window".to_string()));
+        assert!(window_switcher.keywords.contains(&"switch".to_string()));
+        assert!(window_switcher.keywords.contains(&"tile".to_string()));
+        assert!(window_switcher.keywords.contains(&"focus".to_string()));
+        assert!(window_switcher.keywords.contains(&"manage".to_string()));
+        assert!(window_switcher.keywords.contains(&"switcher".to_string()));
+
         // Note: App Launcher built-in removed - apps now appear directly in main search
     }
 
@@ -173,6 +203,7 @@ mod tests {
         let config = BuiltInConfig {
             clipboard_history: true,
             app_launcher: false,
+            window_switcher: false,
         };
         let entries = get_builtin_entries(&config);
 
@@ -186,6 +217,7 @@ mod tests {
         let config = BuiltInConfig {
             clipboard_history: false,
             app_launcher: true,
+            window_switcher: false,
         };
         let entries = get_builtin_entries(&config);
 
@@ -198,10 +230,26 @@ mod tests {
         let config = BuiltInConfig {
             clipboard_history: false,
             app_launcher: false,
+            window_switcher: false,
         };
         let entries = get_builtin_entries(&config);
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_get_builtin_entries_window_switcher_only() {
+        let config = BuiltInConfig {
+            clipboard_history: false,
+            app_launcher: false,
+            window_switcher: true,
+        };
+        let entries = get_builtin_entries(&config);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "builtin-window-switcher");
+        assert_eq!(entries[0].feature, BuiltInFeature::WindowSwitcher);
+        assert_eq!(entries[0].icon, Some("🪟".to_string()));
     }
 
     #[test]
@@ -211,10 +259,19 @@ mod tests {
             BuiltInFeature::ClipboardHistory
         );
         assert_eq!(BuiltInFeature::AppLauncher, BuiltInFeature::AppLauncher);
+        assert_eq!(
+            BuiltInFeature::WindowSwitcher,
+            BuiltInFeature::WindowSwitcher
+        );
         assert_ne!(
             BuiltInFeature::ClipboardHistory,
             BuiltInFeature::AppLauncher
         );
+        assert_ne!(
+            BuiltInFeature::ClipboardHistory,
+            BuiltInFeature::WindowSwitcher
+        );
+        assert_ne!(BuiltInFeature::AppLauncher, BuiltInFeature::WindowSwitcher);
 
         // Test App variant
         assert_eq!(
@@ -293,10 +350,12 @@ mod tests {
         let config = BuiltInConfig {
             clipboard_history: true,
             app_launcher: false,
+            window_switcher: true,
         };
 
         let cloned = config.clone();
         assert_eq!(config.clipboard_history, cloned.clipboard_history);
         assert_eq!(config.app_launcher, cloned.app_launcher);
+        assert_eq!(config.window_switcher, cloned.window_switcher);
     }
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use std::path::PathBuf;
-use tracing::{info, warn, instrument};
+use std::process::Command;
+use tracing::{info, instrument, warn};
 
 /// Default padding values for content areas
 pub const DEFAULT_PADDING_TOP: f32 = 8.0;
@@ -18,6 +18,7 @@ pub const DEFAULT_UI_SCALE: f32 = 1.0;
 /// Default built-in feature flags
 pub const DEFAULT_CLIPBOARD_HISTORY: bool = true;
 pub const DEFAULT_APP_LAUNCHER: bool = true;
+pub const DEFAULT_WINDOW_SWITCHER: bool = true;
 
 /// Configuration for built-in features (clipboard history, app launcher, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,16 +30,27 @@ pub struct BuiltInConfig {
     /// Enable app launcher built-in (default: true)
     #[serde(default = "default_app_launcher")]
     pub app_launcher: bool,
+    /// Enable window switcher built-in (default: true)
+    #[serde(default = "default_window_switcher")]
+    pub window_switcher: bool,
 }
 
-fn default_clipboard_history() -> bool { DEFAULT_CLIPBOARD_HISTORY }
-fn default_app_launcher() -> bool { DEFAULT_APP_LAUNCHER }
+fn default_clipboard_history() -> bool {
+    DEFAULT_CLIPBOARD_HISTORY
+}
+fn default_app_launcher() -> bool {
+    DEFAULT_APP_LAUNCHER
+}
+fn default_window_switcher() -> bool {
+    DEFAULT_WINDOW_SWITCHER
+}
 
 impl Default for BuiltInConfig {
     fn default() -> Self {
         BuiltInConfig {
             clipboard_history: DEFAULT_CLIPBOARD_HISTORY,
             app_launcher: DEFAULT_APP_LAUNCHER,
+            window_switcher: DEFAULT_WINDOW_SWITCHER,
         }
     }
 }
@@ -54,9 +66,15 @@ pub struct ContentPadding {
     pub right: f32,
 }
 
-fn default_padding_top() -> f32 { DEFAULT_PADDING_TOP }
-fn default_padding_left() -> f32 { DEFAULT_PADDING_LEFT }
-fn default_padding_right() -> f32 { DEFAULT_PADDING_RIGHT }
+fn default_padding_top() -> f32 {
+    DEFAULT_PADDING_TOP
+}
+fn default_padding_left() -> f32 {
+    DEFAULT_PADDING_LEFT
+}
+fn default_padding_right() -> f32 {
+    DEFAULT_PADDING_RIGHT
+}
 
 impl Default for ContentPadding {
     fn default() -> Self {
@@ -79,10 +97,18 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding: Option<ContentPadding>,
     /// Font size for the editor prompt (in pixels)
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "editorFontSize")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "editorFontSize"
+    )]
     pub editor_font_size: Option<f32>,
     /// Font size for the terminal prompt (in pixels)
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "terminalFontSize")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "terminalFontSize"
+    )]
     pub terminal_font_size: Option<f32>,
     /// UI scale factor (1.0 = 100%)
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "uiScale")]
@@ -103,15 +129,15 @@ impl Default for Config {
         Config {
             hotkey: HotkeyConfig {
                 modifiers: vec!["meta".to_string()],
-                key: "Semicolon".to_string(),  // Cmd+; matches main.rs default
+                key: "Semicolon".to_string(), // Cmd+; matches main.rs default
             },
-            bun_path: None,  // Will use system PATH if not specified
-            editor: None,    // Will use $EDITOR or fallback to "code"
-            padding: None,   // Will use ContentPadding::default() via getter
-            editor_font_size: None,    // Will use DEFAULT_EDITOR_FONT_SIZE via getter
-            terminal_font_size: None,  // Will use DEFAULT_TERMINAL_FONT_SIZE via getter
-            ui_scale: None,  // Will use DEFAULT_UI_SCALE via getter
-            built_ins: None,  // Will use BuiltInConfig::default() via getter
+            bun_path: None,           // Will use system PATH if not specified
+            editor: None,             // Will use $EDITOR or fallback to "code"
+            padding: None,            // Will use ContentPadding::default() via getter
+            editor_font_size: None,   // Will use DEFAULT_EDITOR_FONT_SIZE via getter
+            terminal_font_size: None, // Will use DEFAULT_TERMINAL_FONT_SIZE via getter
+            ui_scale: None,           // Will use DEFAULT_UI_SCALE via getter
+            built_ins: None,          // Will use BuiltInConfig::default() via getter
         }
     }
 }
@@ -119,7 +145,7 @@ impl Default for Config {
 impl Config {
     /// Returns the configured editor, falling back to $EDITOR env var or "code" (VS Code)
     /// Used by ActionsDialog "Open in Editor" action
-    #[allow(dead_code)]  // Will be used by ActionsDialog worker
+    #[allow(dead_code)] // Will be used by ActionsDialog worker
     pub fn get_editor(&self) -> String {
         self.editor
             .clone()
@@ -128,31 +154,32 @@ impl Config {
     }
 
     /// Returns the content padding, or defaults if not configured
-    #[allow(dead_code)]  // Will be used by TermPrompt/EditorPrompt workers
+    #[allow(dead_code)] // Will be used by TermPrompt/EditorPrompt workers
     pub fn get_padding(&self) -> ContentPadding {
         self.padding.clone().unwrap_or_default()
     }
 
     /// Returns the editor font size, or DEFAULT_EDITOR_FONT_SIZE if not configured
-    #[allow(dead_code)]  // Will be used by EditorPrompt worker
+    #[allow(dead_code)] // Will be used by EditorPrompt worker
     pub fn get_editor_font_size(&self) -> f32 {
         self.editor_font_size.unwrap_or(DEFAULT_EDITOR_FONT_SIZE)
     }
 
     /// Returns the terminal font size, or DEFAULT_TERMINAL_FONT_SIZE if not configured
-    #[allow(dead_code)]  // Will be used by TermPrompt worker
+    #[allow(dead_code)] // Will be used by TermPrompt worker
     pub fn get_terminal_font_size(&self) -> f32 {
-        self.terminal_font_size.unwrap_or(DEFAULT_TERMINAL_FONT_SIZE)
+        self.terminal_font_size
+            .unwrap_or(DEFAULT_TERMINAL_FONT_SIZE)
     }
 
     /// Returns the UI scale factor, or DEFAULT_UI_SCALE if not configured
-    #[allow(dead_code)]  // Will be used for UI scaling
+    #[allow(dead_code)] // Will be used for UI scaling
     pub fn get_ui_scale(&self) -> f32 {
         self.ui_scale.unwrap_or(DEFAULT_UI_SCALE)
     }
 
     /// Returns the built-in features configuration, or defaults if not configured
-    #[allow(dead_code)]  // Will be used by builtins module
+    #[allow(dead_code)] // Will be used by builtins module
     pub fn get_builtins(&self) -> BuiltInConfig {
         self.built_ins.clone().unwrap_or_default()
     }
@@ -233,7 +260,9 @@ pub fn load_config() -> Config {
                                 key: \"Semicolon\"\n\
                               }\n\
                             } satisfies Config;"
-                        } else if e.to_string().contains("missing field `modifiers`") || e.to_string().contains("missing field `key`") {
+                        } else if e.to_string().contains("missing field `modifiers`")
+                            || e.to_string().contains("missing field `key`")
+                        {
                             "\n\nHint: The 'hotkey' field requires 'modifiers' (array) and 'key' (string). Example:\n\
                             hotkey: {\n\
                               modifiers: [\"meta\"],  // \"meta\", \"ctrl\", \"alt\", \"shift\"\n\
@@ -242,7 +271,7 @@ pub fn load_config() -> Config {
                         } else {
                             ""
                         };
-                        
+
                         warn!(
                             error = %e,
                             json_output = %json_str,
@@ -520,7 +549,7 @@ mod tests {
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("vim"));
-        
+
         let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.editor, Some("vim".to_string()));
     }
@@ -544,7 +573,7 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         // Editor should not appear in JSON when None (skip_serializing_if)
         assert!(!json.contains("editor"));
-        
+
         let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.editor, None);
     }
@@ -573,10 +602,10 @@ mod tests {
     fn test_get_editor_from_env() {
         // Save current EDITOR value
         let original_editor = std::env::var("EDITOR").ok();
-        
+
         // Set EDITOR env var
         std::env::set_var("EDITOR", "emacs");
-        
+
         let config = Config {
             hotkey: HotkeyConfig {
                 modifiers: vec!["meta".to_string()],
@@ -593,7 +622,7 @@ mod tests {
 
         // Should fall back to EDITOR env var
         assert_eq!(config.get_editor(), "emacs");
-        
+
         // Restore original EDITOR value
         match original_editor {
             Some(val) => std::env::set_var("EDITOR", val),
@@ -605,10 +634,10 @@ mod tests {
     fn test_get_editor_default() {
         // Save current EDITOR value
         let original_editor = std::env::var("EDITOR").ok();
-        
+
         // Remove EDITOR env var
         std::env::remove_var("EDITOR");
-        
+
         let config = Config {
             hotkey: HotkeyConfig {
                 modifiers: vec!["meta".to_string()],
@@ -625,7 +654,7 @@ mod tests {
 
         // Should fall back to "code" default
         assert_eq!(config.get_editor(), "code");
-        
+
         // Restore original EDITOR value
         if let Some(val) = original_editor {
             std::env::set_var("EDITOR", val);
@@ -636,10 +665,10 @@ mod tests {
     fn test_config_editor_priority() {
         // Save current EDITOR value
         let original_editor = std::env::var("EDITOR").ok();
-        
+
         // Set EDITOR env var
         std::env::set_var("EDITOR", "emacs");
-        
+
         // Config with editor set should take precedence over env var
         let config = Config {
             hotkey: HotkeyConfig {
@@ -657,7 +686,7 @@ mod tests {
 
         // Config editor should win
         assert_eq!(config.get_editor(), "vim");
-        
+
         // Restore original EDITOR value
         match original_editor {
             Some(val) => std::env::set_var("EDITOR", val),
@@ -696,10 +725,10 @@ mod tests {
             left: 16.0,
             right: 16.0,
         };
-        
+
         let json = serde_json::to_string(&padding).unwrap();
         let deserialized: ContentPadding = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.top, 10.0);
         assert_eq!(deserialized.left, 16.0);
         assert_eq!(deserialized.right, 16.0);
@@ -710,7 +739,7 @@ mod tests {
         // If only some fields are present, defaults should fill in
         let json = r#"{"top": 20.0}"#;
         let padding: ContentPadding = serde_json::from_str(json).unwrap();
-        
+
         assert_eq!(padding.top, 20.0);
         assert_eq!(padding.left, DEFAULT_PADDING_LEFT);
         assert_eq!(padding.right, DEFAULT_PADDING_RIGHT);
@@ -730,7 +759,7 @@ mod tests {
     fn test_config_get_padding_default() {
         let config = Config::default();
         let padding = config.get_padding();
-        
+
         assert_eq!(padding.top, DEFAULT_PADDING_TOP);
         assert_eq!(padding.left, DEFAULT_PADDING_LEFT);
         assert_eq!(padding.right, DEFAULT_PADDING_RIGHT);
@@ -755,7 +784,7 @@ mod tests {
             ui_scale: None,
             built_ins: None,
         };
-        
+
         let padding = config.get_padding();
         assert_eq!(padding.top, 10.0);
         assert_eq!(padding.left, 20.0);
@@ -783,7 +812,7 @@ mod tests {
             ui_scale: None,
             built_ins: None,
         };
-        
+
         assert_eq!(config.get_editor_font_size(), 16.0);
     }
 
@@ -808,7 +837,7 @@ mod tests {
             ui_scale: None,
             built_ins: None,
         };
-        
+
         assert_eq!(config.get_terminal_font_size(), 12.0);
     }
 
@@ -833,7 +862,7 @@ mod tests {
             ui_scale: Some(1.5),
             built_ins: None,
         };
-        
+
         assert_eq!(config.get_ui_scale(), 1.5);
     }
 
@@ -855,13 +884,13 @@ mod tests {
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
-        
+
         assert!(config.padding.is_some());
         let padding = config.get_padding();
         assert_eq!(padding.top, 10.0);
         assert_eq!(padding.left, 16.0);
         assert_eq!(padding.right, 16.0);
-        
+
         assert_eq!(config.get_editor_font_size(), 16.0);
         assert_eq!(config.get_terminal_font_size(), 14.0);
         assert_eq!(config.get_ui_scale(), 1.2);
@@ -878,13 +907,13 @@ mod tests {
         }"#;
 
         let config: Config = serde_json::from_str(json).unwrap();
-        
+
         // All UI settings should be None
         assert!(config.padding.is_none());
         assert!(config.editor_font_size.is_none());
         assert!(config.terminal_font_size.is_none());
         assert!(config.ui_scale.is_none());
-        
+
         // Getters should return defaults
         assert_eq!(config.get_padding().top, DEFAULT_PADDING_TOP);
         assert_eq!(config.get_editor_font_size(), DEFAULT_EDITOR_FONT_SIZE);
@@ -896,7 +925,7 @@ mod tests {
     fn test_config_serialization_skips_none_ui_settings() {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
-        
+
         // None values should not appear in JSON
         assert!(!json.contains("padding"));
         assert!(!json.contains("editorFontSize"));
@@ -919,9 +948,9 @@ mod tests {
             ui_scale: Some(1.5),
             built_ins: None,
         };
-        
+
         let json = serde_json::to_string(&config).unwrap();
-        
+
         assert!(json.contains("padding"));
         assert!(json.contains("editorFontSize"));
         assert!(json.contains("terminalFontSize"));
@@ -945,6 +974,7 @@ mod tests {
         let config = BuiltInConfig::default();
         assert!(config.clipboard_history);
         assert!(config.app_launcher);
+        assert!(config.window_switcher);
     }
 
     #[test]
@@ -952,29 +982,34 @@ mod tests {
         let config = BuiltInConfig {
             clipboard_history: true,
             app_launcher: false,
+            window_switcher: true,
         };
-        
+
         let json = serde_json::to_string(&config).unwrap();
-        
+
         // Should use camelCase in JSON
         assert!(json.contains("clipboardHistory"));
         assert!(json.contains("appLauncher"));
+        assert!(json.contains("windowSwitcher"));
         // Should NOT use snake_case
         assert!(!json.contains("clipboard_history"));
         assert!(!json.contains("app_launcher"));
+        assert!(!json.contains("window_switcher"));
     }
 
     #[test]
     fn test_builtin_config_deserialization_camel_case() {
         let json = r#"{
             "clipboardHistory": false,
-            "appLauncher": true
+            "appLauncher": true,
+            "windowSwitcher": false
         }"#;
-        
+
         let config: BuiltInConfig = serde_json::from_str(json).unwrap();
-        
+
         assert!(!config.clipboard_history);
         assert!(config.app_launcher);
+        assert!(!config.window_switcher);
     }
 
     #[test]
@@ -982,9 +1017,10 @@ mod tests {
         // Partial config - missing fields should use defaults
         let json = r#"{"clipboardHistory": false}"#;
         let config: BuiltInConfig = serde_json::from_str(json).unwrap();
-        
+
         assert!(!config.clipboard_history);
-        assert!(config.app_launcher);  // Default true
+        assert!(config.app_launcher); // Default true
+        assert!(config.window_switcher); // Default true
     }
 
     #[test]
@@ -1003,22 +1039,25 @@ mod tests {
             built_ins: Some(BuiltInConfig {
                 clipboard_history: true,
                 app_launcher: false,
+                window_switcher: true,
             }),
         };
-        
+
         let builtins = config.get_builtins();
         assert!(builtins.clipboard_history);
         assert!(!builtins.app_launcher);
+        assert!(builtins.window_switcher);
     }
 
     #[test]
     fn test_config_get_builtins_default() {
         let config = Config::default();
         let builtins = config.get_builtins();
-        
+
         // Should return defaults when built_ins is None
         assert!(builtins.clipboard_history);
         assert!(builtins.app_launcher);
+        assert!(builtins.window_switcher);
     }
 
     #[test]
@@ -1030,16 +1069,18 @@ mod tests {
             },
             "builtIns": {
                 "clipboardHistory": true,
-                "appLauncher": false
+                "appLauncher": false,
+                "windowSwitcher": true
             }
         }"#;
-        
+
         let config: Config = serde_json::from_str(json).unwrap();
-        
+
         assert!(config.built_ins.is_some());
         let builtins = config.get_builtins();
         assert!(builtins.clipboard_history);
         assert!(!builtins.app_launcher);
+        assert!(builtins.window_switcher);
     }
 
     #[test]
@@ -1051,22 +1092,23 @@ mod tests {
                 "key": "Semicolon"
             }
         }"#;
-        
+
         let config: Config = serde_json::from_str(json).unwrap();
-        
+
         assert!(config.built_ins.is_none());
-        
+
         // Getter should return defaults
         let builtins = config.get_builtins();
         assert!(builtins.clipboard_history);
         assert!(builtins.app_launcher);
+        assert!(builtins.window_switcher);
     }
 
     #[test]
     fn test_config_serialization_skips_none_builtins() {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
-        
+
         // None values should not appear in JSON
         assert!(!json.contains("builtIns"));
     }
@@ -1086,12 +1128,13 @@ mod tests {
             ui_scale: None,
             built_ins: Some(BuiltInConfig::default()),
         };
-        
+
         let json = serde_json::to_string(&config).unwrap();
-        
+
         assert!(json.contains("builtIns"));
         assert!(json.contains("clipboardHistory"));
         assert!(json.contains("appLauncher"));
+        assert!(json.contains("windowSwitcher"));
     }
 
     #[test]
@@ -1100,12 +1143,15 @@ mod tests {
         let original = BuiltInConfig {
             clipboard_history: false,
             app_launcher: true,
+            window_switcher: true,
         };
-        
+
         let json = serde_json::to_string(&original).unwrap();
         let restored: BuiltInConfig = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(original.clipboard_history, restored.clipboard_history);
         assert_eq!(original.app_launcher, restored.app_launcher);
+        assert_eq!(original.window_switcher, restored.window_switcher);
     }
+
 }

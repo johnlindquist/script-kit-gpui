@@ -410,6 +410,10 @@ pub fn render_design_item(
                     };
                     (am.app.name.clone(), None, None, Some(icon))
                 }
+                SearchResult::Window(wm) => {
+                    // Windows get a window emoji, title as name, app as description
+                    (wm.window.title.clone(), Some(wm.window.app.clone()), None, Some(IconKind::Emoji("🪟".to_string())))
+                }
             };
             
             ListItem::new(name, list_colors)
