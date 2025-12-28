@@ -19,8 +19,8 @@ pub enum IconKind {
 }
 
 /// Fixed height for list items (same as main script list)
-/// Reduced from 52px to 40px for tighter, more compact layout matching original Script Kit design
-pub const LIST_ITEM_HEIGHT: f32 = 40.0;
+/// Reduced from 52px to 34px for tighter, more compact layout matching original Script Kit design
+pub const LIST_ITEM_HEIGHT: f32 = 34.0;
 
 /// Pre-computed colors for ListItem rendering
 /// 
@@ -235,6 +235,8 @@ impl RenderOnce for ListItem {
         
         // Icon element (if present) - displayed on the left
         // Supports both emoji strings and PNG image data
+        // Icon text color matches the item's text color (primary when selected, secondary otherwise)
+        let icon_text_color = if self.selected { rgb(colors.text_primary) } else { rgb(colors.text_secondary) };
         let icon_element = match &self.icon {
             Some(IconKind::Emoji(emoji)) => {
                 div()
@@ -244,6 +246,7 @@ impl RenderOnce for ListItem {
                     .items_center()
                     .justify_center()
                     .text_sm()
+                    .text_color(icon_text_color)
                     .flex_shrink_0()
                     .child(emoji.clone())
             }
@@ -290,13 +293,9 @@ impl RenderOnce for ListItem {
                 .child(self.name)
         );
         
-        // Description - 12px font, muted color (tighter than before)
+        // Description - 12px font, muted color (never changes on selection - only bg shows selection)
         if let Some(desc) = self.description {
-            let desc_color = if self.selected { 
-                rgb(colors.accent_selected) 
-            } else { 
-                rgb(colors.text_muted) 
-            };
+            let desc_color = rgb(colors.text_muted);
             item_content = item_content.child(
                 div()
                     .text_size(px(12.))
