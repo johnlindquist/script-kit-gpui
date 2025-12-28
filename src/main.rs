@@ -4381,6 +4381,8 @@ impl ScriptListApp {
             let has_cmd = event.keystroke.modifiers.platform;
             
             if has_cmd {
+                let has_shift = event.keystroke.modifiers.shift;
+                
                 match key_str.as_str() {
                     "l" => { 
                         this.toggle_logs(cx); 
@@ -4393,6 +4395,43 @@ impl ScriptListApp {
                     // Cmd+1 cycles through all designs
                     "1" => {
                         this.cycle_design(cx);
+                        return;
+                    }
+                    // Script context shortcuts (require a selected script)
+                    "e" => {
+                        // Cmd+E - Edit Script
+                        this.handle_action("edit_script".to_string(), cx);
+                        return;
+                    }
+                    "f" if has_shift => {
+                        // Cmd+Shift+F - Reveal in Finder
+                        this.handle_action("reveal_in_finder".to_string(), cx);
+                        return;
+                    }
+                    "c" if has_shift => {
+                        // Cmd+Shift+C - Copy Path
+                        this.handle_action("copy_path".to_string(), cx);
+                        return;
+                    }
+                    // Global shortcuts
+                    "n" => {
+                        // Cmd+N - Create Script
+                        this.handle_action("create_script".to_string(), cx);
+                        return;
+                    }
+                    "r" => {
+                        // Cmd+R - Reload Scripts
+                        this.handle_action("reload_scripts".to_string(), cx);
+                        return;
+                    }
+                    "," => {
+                        // Cmd+, - Settings
+                        this.handle_action("settings".to_string(), cx);
+                        return;
+                    }
+                    "q" => {
+                        // Cmd+Q - Quit
+                        this.handle_action("quit".to_string(), cx);
                         return;
                     }
                     _ => {}
