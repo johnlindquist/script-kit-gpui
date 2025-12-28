@@ -5,6 +5,9 @@
  * Comprehensive test runner that enables fully autonomous testing without manual interaction.
  * Spawns the script-kit-gpui binary with AUTO_SUBMIT mode and monitors for results.
  *
+ * IMPORTANT: Uses stdin JSON protocol to run scripts. Command line arguments do NOT work!
+ * Protocol: echo '{"type":"run","path":"/abs/path/test.ts"}' | ./script-kit-gpui
+ *
  * Usage:
  *   bun run scripts/test-harness.ts                          # Run all autonomous tests
  *   bun run scripts/test-harness.ts tests/autonomous/*.ts    # Run specific tests
@@ -16,6 +19,7 @@
  *   AUTO_SUBMIT_DELAY_MS=100    # Delay before auto-submit (default: 100)
  *   BINARY_PATH=./target/debug/script-kit-gpui  # Path to binary
  *   HEADLESS=true               # Skip UI rendering (if supported)
+ *   SCRIPT_KIT_AI_LOG=1         # Enable compact AI logs (auto-set by harness)
  *
  * Exit Codes:
  *   0 = All tests passed
@@ -23,6 +27,9 @@
  *   2 = Test runner error
  *   3 = Timeout exceeded
  *   4 = Crash detected
+ *
+ * Test Result JSONL Format (stdout from test scripts):
+ *   {"test": "name", "status": "pass"|"fail"|"skip", "timestamp": "...", "duration_ms": 123}
  */
 
 import { spawn, type Subprocess } from 'bun';
@@ -340,9 +347,10 @@ async function runTestFile(testPath: string): Promise<TestFileResult> {
   let proc: Subprocess | null = null;
 
   try {
-    // Spawn the script-kit-gpui binary with the test script
+    // Spawn the script-kit-gpui binary using stdin JSON protocol
+    // CRITICAL: Command line args don't work! Must use stdin JSON messages.
     proc = spawn({
-      cmd: [BINARY_PATH, testPath],
+      cmd: [BINARY_PATH],
       cwd: PROJECT_ROOT,
       env: {
         ...process.env,
@@ -350,12 +358,20 @@ async function runTestFile(testPath: string): Promise<TestFileResult> {
         AUTO_SUBMIT_DELAY_MS: String(AUTO_SUBMIT_DELAY_MS),
         TEST_TIMEOUT_MS: String(TIMEOUT_MS),
         HEADLESS: HEADLESS ? 'true' : 'false',
+        SCRIPT_KIT_AI_LOG: '1',  // Enable compact AI logs
         // Ensure Rust logging goes to stderr
         RUST_LOG: process.env.RUST_LOG || 'info',
       },
+      stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
     });
+
+    // Send the run command via stdin JSON protocol
+    const runCommand = JSON.stringify({ type: 'run', path: testPath }) + '\n';
+    logVerbose(`Sending stdin command: ${runCommand.trim()}`);
+    proc.stdin.write(runCommand);
+    proc.stdin.end();
 
     // Create timeout promise
     const timeoutId = setTimeout(() => {

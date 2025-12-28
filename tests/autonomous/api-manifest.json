@@ -1,7 +1,8 @@
 {
-  "generated_at": "2025-12-26T21:00:00.000Z",
+  "generated_at": "2025-12-27T00:00:00.000Z",
   "total_apis": 63,
   "tested_apis": 40,
+  "untested_apis": 23,
   "coverage_percent": 63,
   "coverage_by_tier": {
     "TIER_1_core": { "tested": 6, "total": 6, "percent": 100 },
@@ -11,6 +12,23 @@
     "TIER_4B_utility": { "tested": 10, "total": 15, "percent": 67 },
     "TIER_5A_storage": { "tested": 9, "total": 16, "percent": 56 },
     "TIER_5B_media": { "tested": 5, "total": 7, "percent": 71 }
+  },
+  "test_harness": {
+    "command": "bun run scripts/test-harness.ts",
+    "default_timeout_ms": 30000,
+    "exit_codes": {
+      "0": "All tests passed",
+      "1": "Some tests failed",
+      "2": "Test runner error",
+      "3": "Timeout exceeded",
+      "4": "Crash detected"
+    },
+    "env_vars": {
+      "AUTO_SUBMIT": "true (enables automatic prompt submission)",
+      "AUTO_SUBMIT_DELAY_MS": "100 (delay before auto-submit)",
+      "SCRIPT_KIT_AI_LOG": "1 (compact AI log format)",
+      "TEST_TIMEOUT_MS": "30000 (per-test timeout)"
+    }
   },
   "apis": [
     {

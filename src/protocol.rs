@@ -18,13 +18,18 @@ use tracing::{debug, warn};
 
 /// A choice option for arg() prompts
 ///
-/// Supports Script Kit API: name, value, and optional description
+/// Supports Script Kit API: name, value, and optional description.
+/// Semantic IDs are generated for AI-driven UX targeting.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Choice {
     pub name: String,
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Semantic ID for AI targeting. Format: choice:{index}:{value_slug}
+    /// This field is typically generated at render time, not provided by scripts.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "semanticId")]
+    pub semantic_id: Option<String>,
 }
 
 /// A field definition for form/fields prompts
@@ -182,6 +187,113 @@ pub struct FileSearchResultEntry {
     pub modified_at: Option<String>,
 }
 
+/// Element type for UI element querying (getElements)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ElementType {
+    Choice,
+    Input,
+    Button,
+    Panel,
+    List,
+}
+
+/// Information about a UI element returned by getElements
+///
+/// Contains semantic ID, type, text content, and state information
+/// for AI-driven UX targeting.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementInfo {
+    /// Semantic ID for targeting (e.g., "choice:0:apple")
+    pub semantic_id: String,
+    /// Element type (choice, input, button, panel, list)
+    #[serde(rename = "type")]
+    pub element_type: ElementType,
+    /// Display text of the element
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Value (for choices/inputs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Whether this element is currently selected
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<bool>,
+    /// Whether this element is currently focused
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focused: Option<bool>,
+    /// Index in parent container (for list items)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+}
+
+impl ElementInfo {
+    /// Create a new ElementInfo for a choice element
+    pub fn choice(index: usize, name: &str, value: &str, selected: bool) -> Self {
+        ElementInfo {
+            semantic_id: generate_semantic_id("choice", index, value),
+            element_type: ElementType::Choice,
+            text: Some(name.to_string()),
+            value: Some(value.to_string()),
+            selected: Some(selected),
+            focused: None,
+            index: Some(index),
+        }
+    }
+
+    /// Create a new ElementInfo for an input element
+    pub fn input(name: &str, value: Option<&str>, focused: bool) -> Self {
+        ElementInfo {
+            semantic_id: generate_semantic_id_named("input", name),
+            element_type: ElementType::Input,
+            text: None,
+            value: value.map(|s| s.to_string()),
+            selected: None,
+            focused: Some(focused),
+            index: None,
+        }
+    }
+
+    /// Create a new ElementInfo for a button element
+    pub fn button(index: usize, label: &str) -> Self {
+        ElementInfo {
+            semantic_id: generate_semantic_id("button", index, label),
+            element_type: ElementType::Button,
+            text: Some(label.to_string()),
+            value: None,
+            selected: None,
+            focused: None,
+            index: Some(index),
+        }
+    }
+
+    /// Create a new ElementInfo for a panel element
+    pub fn panel(name: &str) -> Self {
+        ElementInfo {
+            semantic_id: generate_semantic_id_named("panel", name),
+            element_type: ElementType::Panel,
+            text: None,
+            value: None,
+            selected: None,
+            focused: None,
+            index: None,
+        }
+    }
+
+    /// Create a new ElementInfo for a list element
+    pub fn list(name: &str, item_count: usize) -> Self {
+        ElementInfo {
+            semantic_id: generate_semantic_id_named("list", name),
+            element_type: ElementType::List,
+            text: Some(format!("{} items", item_count)),
+            value: None,
+            selected: None,
+            focused: None,
+            index: None,
+        }
+    }
+}
+
 /// Script error data for structured error reporting
 ///
 /// Sent when a script execution fails, providing detailed error information
@@ -267,6 +379,7 @@ impl Choice {
             name,
             value,
             description: None,
+            semantic_id: None,
         }
     }
 
@@ -275,8 +388,115 @@ impl Choice {
             name,
             value,
             description: Some(description),
+            semantic_id: None,
         }
     }
+    
+    /// Generate and set the semantic ID for this choice.
+    /// Format: choice:{index}:{value_slug}
+    /// 
+    /// The value_slug is created by:
+    /// - Converting to lowercase
+    /// - Replacing spaces and underscores with hyphens
+    /// - Removing non-alphanumeric characters (except hyphens)
+    /// - Truncating to 20 characters
+    pub fn with_semantic_id(mut self, index: usize) -> Self {
+        self.semantic_id = Some(generate_semantic_id("choice", index, &self.value));
+        self
+    }
+    
+    /// Set the semantic ID directly (for custom IDs)
+    pub fn set_semantic_id(&mut self, id: String) {
+        self.semantic_id = Some(id);
+    }
+    
+    /// Generate the semantic ID without setting it (for external use)
+    pub fn generate_id(&self, index: usize) -> String {
+        generate_semantic_id("choice", index, &self.value)
+    }
+}
+
+/// Generate a semantic ID for an element.
+/// 
+/// Format: {type}:{index}:{value_slug}
+/// 
+/// # Arguments
+/// * `element_type` - The element type (e.g., "choice", "button", "input")
+/// * `index` - The numeric index of the element
+/// * `value` - The value to convert to a slug
+/// 
+/// # Returns
+/// A semantic ID string in the format: type:index:slug
+pub fn generate_semantic_id(element_type: &str, index: usize, value: &str) -> String {
+    let slug = value_to_slug(value);
+    format!("{}:{}:{}", element_type, index, slug)
+}
+
+/// Generate a semantic ID for named elements (no index).
+/// 
+/// Format: {type}:{name}
+/// 
+/// # Arguments
+/// * `element_type` - The element type (e.g., "input", "panel", "window")
+/// * `name` - The name of the element
+/// 
+/// # Returns
+/// A semantic ID string in the format: type:name
+pub fn generate_semantic_id_named(element_type: &str, name: &str) -> String {
+    let slug = value_to_slug(name);
+    format!("{}:{}", element_type, slug)
+}
+
+/// Convert a value string to a URL-safe slug suitable for semantic IDs.
+/// 
+/// - Converts to lowercase
+/// - Replaces spaces and underscores with hyphens
+/// - Removes non-alphanumeric characters (except hyphens)
+/// - Collapses multiple hyphens to single
+/// - Truncates to 20 characters
+/// - Removes leading/trailing hyphens
+pub fn value_to_slug(value: &str) -> String {
+    let slug: String = value
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            ' ' | '_' => '-',
+            c if c.is_alphanumeric() || c == '-' => c,
+            _ => '-',
+        })
+        .collect();
+    
+    // Collapse multiple hyphens and trim
+    let mut result = String::with_capacity(20);
+    let mut prev_hyphen = false;
+    
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_hyphen && !result.is_empty() {
+                result.push('-');
+            }
+            prev_hyphen = true;
+        } else {
+            result.push(c);
+            prev_hyphen = false;
+        }
+        
+        if result.len() >= 20 {
+            break;
+        }
+    }
+    
+    // Remove trailing hyphen
+    if result.ends_with('-') {
+        result.pop();
+    }
+    
+    // Ensure non-empty
+    if result.is_empty() {
+        result.push_str("item");
+    }
+    
+    result
 }
 
 /// Protocol message with type discrimination via serde tag
@@ -805,6 +1025,80 @@ pub enum Message {
     },
 
     // ============================================================
+    // STATE QUERY
+    // ============================================================
+
+    /// Request current UI state without modifying it
+    #[serde(rename = "getState")]
+    GetState {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+
+    /// Response with current UI state
+    #[serde(rename = "stateResult")]
+    StateResult {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        /// Current prompt type
+        #[serde(rename = "promptType")]
+        prompt_type: String,
+        /// Prompt ID if active
+        #[serde(rename = "promptId", skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
+        /// Placeholder text if applicable
+        #[serde(skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+        /// Current input/filter value
+        #[serde(rename = "inputValue")]
+        input_value: String,
+        /// Total number of choices
+        #[serde(rename = "choiceCount")]
+        choice_count: usize,
+        /// Number of visible/filtered choices
+        #[serde(rename = "visibleChoiceCount")]
+        visible_choice_count: usize,
+        /// Currently selected index (-1 if none)
+        #[serde(rename = "selectedIndex")]
+        selected_index: i32,
+        /// Value of the selected choice
+        #[serde(rename = "selectedValue", skip_serializing_if = "Option::is_none")]
+        selected_value: Option<String>,
+        /// Whether the window has focus
+        #[serde(rename = "isFocused")]
+        is_focused: bool,
+        /// Whether the window is visible
+        #[serde(rename = "windowVisible")]
+        window_visible: bool,
+    },
+
+    // ============================================================
+    // ELEMENT QUERY (AI-driven UX)
+    // ============================================================
+
+    /// Request visible UI elements with semantic IDs
+    #[serde(rename = "getElements")]
+    GetElements {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        /// Maximum number of elements to return (default: 50)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+
+    /// Response with list of visible UI elements
+    #[serde(rename = "elementsResult")]
+    ElementsResult {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        /// List of visible UI elements
+        elements: Vec<ElementInfo>,
+        /// Total number of elements (may be larger than returned if limit applied)
+        #[serde(rename = "totalCount")]
+        total_count: usize,
+    },
+
+    // ============================================================
     // ERROR REPORTING
     // ============================================================
 
@@ -950,6 +1244,12 @@ impl Message {
             // Screenshot capture (use request_id)
             Message::CaptureScreenshot { request_id, .. } => Some(request_id),
             Message::ScreenshotResult { request_id, .. } => Some(request_id),
+            // State query (use request_id)
+            Message::GetState { request_id, .. } => Some(request_id),
+            Message::StateResult { request_id, .. } => Some(request_id),
+            // Element query (use request_id)
+            Message::GetElements { request_id, .. } => Some(request_id),
+            Message::ElementsResult { request_id, .. } => Some(request_id),
             // Error reporting (no ID)
             Message::SetError { .. } => None,
         }
@@ -1435,6 +1735,74 @@ impl Message {
             data,
             width,
             height,
+        }
+    }
+
+    // ============================================================
+    // Constructor methods for state query
+    // ============================================================
+
+    /// Create a get state request
+    pub fn get_state(request_id: String) -> Self {
+        Message::GetState { request_id }
+    }
+
+    /// Create a state result response
+    #[allow(clippy::too_many_arguments)]
+    pub fn state_result(
+        request_id: String,
+        prompt_type: String,
+        prompt_id: Option<String>,
+        placeholder: Option<String>,
+        input_value: String,
+        choice_count: usize,
+        visible_choice_count: usize,
+        selected_index: i32,
+        selected_value: Option<String>,
+        is_focused: bool,
+        window_visible: bool,
+    ) -> Self {
+        Message::StateResult {
+            request_id,
+            prompt_type,
+            prompt_id,
+            placeholder,
+            input_value,
+            choice_count,
+            visible_choice_count,
+            selected_index,
+            selected_value,
+            is_focused,
+            window_visible,
+        }
+    }
+
+    // ============================================================
+    // Constructor methods for element query
+    // ============================================================
+
+    /// Create a get elements request
+    pub fn get_elements(request_id: String) -> Self {
+        Message::GetElements {
+            request_id,
+            limit: None,
+        }
+    }
+
+    /// Create a get elements request with limit
+    pub fn get_elements_with_limit(request_id: String, limit: usize) -> Self {
+        Message::GetElements {
+            request_id,
+            limit: Some(limit),
+        }
+    }
+
+    /// Create an elements result response
+    pub fn elements_result(request_id: String, elements: Vec<ElementInfo>, total_count: usize) -> Self {
+        Message::ElementsResult {
+            request_id,
+            elements,
+            total_count,
         }
     }
 
@@ -3491,5 +3859,393 @@ mod tests {
             }
             _ => panic!("Expected SetError message"),
         }
+    }
+
+    // ============================================================
+    // SEMANTIC ID TESTS
+    // ============================================================
+
+    #[test]
+    fn test_value_to_slug_basic() {
+        assert_eq!(value_to_slug("apple"), "apple");
+        assert_eq!(value_to_slug("Apple"), "apple");
+        assert_eq!(value_to_slug("APPLE"), "apple");
+    }
+
+    #[test]
+    fn test_value_to_slug_spaces() {
+        assert_eq!(value_to_slug("red apple"), "red-apple");
+        assert_eq!(value_to_slug("red  apple"), "red-apple"); // multiple spaces
+        assert_eq!(value_to_slug("  apple  "), "apple"); // leading/trailing spaces become hyphens then trimmed
+    }
+
+    #[test]
+    fn test_value_to_slug_special_chars() {
+        assert_eq!(value_to_slug("apple_pie"), "apple-pie");
+        assert_eq!(value_to_slug("apple@pie!"), "apple-pie");
+        assert_eq!(value_to_slug("hello-world"), "hello-world");
+    }
+
+    #[test]
+    fn test_value_to_slug_truncation() {
+        let long_value = "this is a very long value that exceeds twenty characters";
+        let slug = value_to_slug(long_value);
+        assert!(slug.len() <= 20);
+        assert_eq!(slug, "this-is-a-very-long");
+    }
+
+    #[test]
+    fn test_value_to_slug_empty() {
+        assert_eq!(value_to_slug(""), "item");
+        assert_eq!(value_to_slug("   "), "item");
+        assert_eq!(value_to_slug("@#$%"), "item"); // all special chars
+    }
+
+    #[test]
+    fn test_generate_semantic_id() {
+        assert_eq!(generate_semantic_id("choice", 0, "apple"), "choice:0:apple");
+        assert_eq!(generate_semantic_id("choice", 5, "Red Apple"), "choice:5:red-apple");
+        assert_eq!(generate_semantic_id("button", 1, "Submit Form"), "button:1:submit-form");
+    }
+
+    #[test]
+    fn test_generate_semantic_id_named() {
+        assert_eq!(generate_semantic_id_named("input", "filter"), "input:filter");
+        assert_eq!(generate_semantic_id_named("panel", "preview"), "panel:preview");
+        assert_eq!(generate_semantic_id_named("window", "Main Window"), "window:main-window");
+    }
+
+    #[test]
+    fn test_choice_with_semantic_id() {
+        let choice = Choice::new("Apple".to_string(), "apple".to_string())
+            .with_semantic_id(0);
+        assert_eq!(choice.semantic_id, Some("choice:0:apple".to_string()));
+    }
+
+    #[test]
+    fn test_choice_generate_id() {
+        let choice = Choice::new("Red Apple".to_string(), "red_apple".to_string());
+        assert_eq!(choice.generate_id(3), "choice:3:red-apple");
+    }
+
+    #[test]
+    fn test_choice_set_semantic_id() {
+        let mut choice = Choice::new("Test".to_string(), "test".to_string());
+        choice.set_semantic_id("custom:id:value".to_string());
+        assert_eq!(choice.semantic_id, Some("custom:id:value".to_string()));
+    }
+
+    #[test]
+    fn test_choice_serialization_with_semantic_id() {
+        let choice = Choice::new("Apple".to_string(), "apple".to_string())
+            .with_semantic_id(0);
+        let json = serde_json::to_string(&choice).unwrap();
+        assert!(json.contains("\"semanticId\":\"choice:0:apple\""));
+    }
+
+    #[test]
+    fn test_choice_serialization_without_semantic_id() {
+        let choice = Choice::new("Apple".to_string(), "apple".to_string());
+        let json = serde_json::to_string(&choice).unwrap();
+        assert!(!json.contains("semanticId")); // Should be skipped when None
+    }
+
+    #[test]
+    fn test_choice_deserialization_with_semantic_id() {
+        let json = r#"{"name":"Apple","value":"apple","semanticId":"choice:0:apple"}"#;
+        let choice: Choice = serde_json::from_str(json).unwrap();
+        assert_eq!(choice.name, "Apple");
+        assert_eq!(choice.value, "apple");
+        assert_eq!(choice.semantic_id, Some("choice:0:apple".to_string()));
+    }
+
+    #[test]
+    fn test_choice_deserialization_without_semantic_id() {
+        let json = r#"{"name":"Apple","value":"apple"}"#;
+        let choice: Choice = serde_json::from_str(json).unwrap();
+        assert_eq!(choice.name, "Apple");
+        assert_eq!(choice.value, "apple");
+        assert_eq!(choice.semantic_id, None);
+    }
+
+    // ============================================================
+    // STATE QUERY TESTS
+    // ============================================================
+
+    #[test]
+    fn test_serialize_get_state() {
+        let msg = Message::get_state("req-001".to_string());
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains("\"type\":\"getState\""));
+        assert!(json.contains("\"requestId\":\"req-001\""));
+    }
+
+    #[test]
+    fn test_parse_get_state() {
+        let json = r#"{"type":"getState","requestId":"req-002"}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::GetState { request_id } => {
+                assert_eq!(request_id, "req-002");
+            }
+            _ => panic!("Expected GetState message"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_state_result() {
+        let msg = Message::state_result(
+            "req-001".to_string(),
+            "arg".to_string(),
+            Some("prompt-123".to_string()),
+            Some("Pick a fruit".to_string()),
+            "app".to_string(),
+            15,
+            5,
+            2,
+            Some("apple".to_string()),
+            true,
+            true,
+        );
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains("\"type\":\"stateResult\""));
+        assert!(json.contains("\"requestId\":\"req-001\""));
+        assert!(json.contains("\"promptType\":\"arg\""));
+        assert!(json.contains("\"promptId\":\"prompt-123\""));
+        assert!(json.contains("\"inputValue\":\"app\""));
+        assert!(json.contains("\"choiceCount\":15"));
+        assert!(json.contains("\"visibleChoiceCount\":5"));
+        assert!(json.contains("\"selectedIndex\":2"));
+        assert!(json.contains("\"selectedValue\":\"apple\""));
+        assert!(json.contains("\"isFocused\":true"));
+        assert!(json.contains("\"windowVisible\":true"));
+    }
+
+    #[test]
+    fn test_parse_state_result() {
+        let json = r#"{"type":"stateResult","requestId":"req-003","promptType":"div","inputValue":"","choiceCount":0,"visibleChoiceCount":0,"selectedIndex":-1,"isFocused":true,"windowVisible":true}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::StateResult { 
+                request_id, 
+                prompt_type, 
+                prompt_id,
+                input_value,
+                choice_count,
+                visible_choice_count,
+                selected_index,
+                selected_value,
+                is_focused,
+                window_visible,
+                ..
+            } => {
+                assert_eq!(request_id, "req-003");
+                assert_eq!(prompt_type, "div");
+                assert_eq!(prompt_id, None);
+                assert_eq!(input_value, "");
+                assert_eq!(choice_count, 0);
+                assert_eq!(visible_choice_count, 0);
+                assert_eq!(selected_index, -1);
+                assert_eq!(selected_value, None);
+                assert!(is_focused);
+                assert!(window_visible);
+            }
+            _ => panic!("Expected StateResult message"),
+        }
+    }
+
+    #[test]
+    fn test_get_state_id() {
+        let msg = Message::get_state("req-id".to_string());
+        assert_eq!(msg.id(), Some("req-id"));
+    }
+
+    #[test]
+    fn test_state_result_id() {
+        let msg = Message::state_result(
+            "req-id".to_string(),
+            "arg".to_string(),
+            None,
+            None,
+            "".to_string(),
+            0, 0, -1, None,
+            false, false,
+        );
+        assert_eq!(msg.id(), Some("req-id"));
+    }
+
+    // ============================================================
+    // ELEMENT TYPE AND ELEMENT INFO TESTS
+    // ============================================================
+
+    #[test]
+    fn test_element_type_serialization() {
+        assert_eq!(serde_json::to_string(&ElementType::Choice).unwrap(), "\"choice\"");
+        assert_eq!(serde_json::to_string(&ElementType::Input).unwrap(), "\"input\"");
+        assert_eq!(serde_json::to_string(&ElementType::Button).unwrap(), "\"button\"");
+        assert_eq!(serde_json::to_string(&ElementType::Panel).unwrap(), "\"panel\"");
+        assert_eq!(serde_json::to_string(&ElementType::List).unwrap(), "\"list\"");
+    }
+
+    #[test]
+    fn test_element_info_choice() {
+        let elem = ElementInfo::choice(0, "Apple", "apple", true);
+        assert_eq!(elem.semantic_id, "choice:0:apple");
+        assert_eq!(elem.element_type, ElementType::Choice);
+        assert_eq!(elem.text, Some("Apple".to_string()));
+        assert_eq!(elem.value, Some("apple".to_string()));
+        assert_eq!(elem.selected, Some(true));
+        assert_eq!(elem.index, Some(0));
+    }
+
+    #[test]
+    fn test_element_info_input() {
+        let elem = ElementInfo::input("filter", Some("test"), true);
+        assert_eq!(elem.semantic_id, "input:filter");
+        assert_eq!(elem.element_type, ElementType::Input);
+        assert_eq!(elem.value, Some("test".to_string()));
+        assert_eq!(elem.focused, Some(true));
+    }
+
+    #[test]
+    fn test_element_info_button() {
+        let elem = ElementInfo::button(1, "Submit");
+        assert_eq!(elem.semantic_id, "button:1:submit");
+        assert_eq!(elem.element_type, ElementType::Button);
+        assert_eq!(elem.text, Some("Submit".to_string()));
+    }
+
+    #[test]
+    fn test_element_info_panel() {
+        let elem = ElementInfo::panel("preview");
+        assert_eq!(elem.semantic_id, "panel:preview");
+        assert_eq!(elem.element_type, ElementType::Panel);
+    }
+
+    #[test]
+    fn test_element_info_list() {
+        let elem = ElementInfo::list("choices", 15);
+        assert_eq!(elem.semantic_id, "list:choices");
+        assert_eq!(elem.element_type, ElementType::List);
+        assert_eq!(elem.text, Some("15 items".to_string()));
+    }
+
+    #[test]
+    fn test_element_info_serialization() {
+        let elem = ElementInfo::choice(0, "Apple", "apple", true);
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"semanticId\":\"choice:0:apple\""));
+        assert!(json.contains("\"type\":\"choice\""));
+        assert!(json.contains("\"text\":\"Apple\""));
+        assert!(json.contains("\"value\":\"apple\""));
+        assert!(json.contains("\"selected\":true"));
+        assert!(json.contains("\"index\":0"));
+        // Optional fields should be omitted when None
+        assert!(!json.contains("\"focused\""));
+    }
+
+    #[test]
+    fn test_element_info_deserialization() {
+        let json = r#"{"semanticId":"choice:0:apple","type":"choice","text":"Apple","value":"apple","selected":true,"index":0}"#;
+        let elem: ElementInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(elem.semantic_id, "choice:0:apple");
+        assert_eq!(elem.element_type, ElementType::Choice);
+        assert_eq!(elem.text, Some("Apple".to_string()));
+        assert_eq!(elem.value, Some("apple".to_string()));
+        assert_eq!(elem.selected, Some(true));
+        assert_eq!(elem.index, Some(0));
+    }
+
+    // ============================================================
+    // GET ELEMENTS MESSAGE TESTS
+    // ============================================================
+
+    #[test]
+    fn test_serialize_get_elements() {
+        let msg = Message::get_elements("req-elem-1".to_string());
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains("\"type\":\"getElements\""));
+        assert!(json.contains("\"requestId\":\"req-elem-1\""));
+        // Optional limit should be omitted when None
+        assert!(!json.contains("\"limit\""));
+    }
+
+    #[test]
+    fn test_serialize_get_elements_with_limit() {
+        let msg = Message::get_elements_with_limit("req-elem-2".to_string(), 25);
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains("\"type\":\"getElements\""));
+        assert!(json.contains("\"limit\":25"));
+    }
+
+    #[test]
+    fn test_parse_get_elements() {
+        let json = r#"{"type":"getElements","requestId":"req-elem-3"}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::GetElements { request_id, limit } => {
+                assert_eq!(request_id, "req-elem-3");
+                assert_eq!(limit, None);
+            }
+            _ => panic!("Expected GetElements message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_get_elements_with_limit() {
+        let json = r#"{"type":"getElements","requestId":"req-elem-4","limit":50}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::GetElements { request_id, limit } => {
+                assert_eq!(request_id, "req-elem-4");
+                assert_eq!(limit, Some(50));
+            }
+            _ => panic!("Expected GetElements message"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_elements_result() {
+        let elements = vec![
+            ElementInfo::choice(0, "Apple", "apple", true),
+            ElementInfo::choice(1, "Banana", "banana", false),
+        ];
+        let msg = Message::elements_result("req-elem-5".to_string(), elements, 2);
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains("\"type\":\"elementsResult\""));
+        assert!(json.contains("\"requestId\":\"req-elem-5\""));
+        assert!(json.contains("\"totalCount\":2"));
+        assert!(json.contains("\"elements\""));
+        assert!(json.contains("\"semanticId\":\"choice:0:apple\""));
+    }
+
+    #[test]
+    fn test_parse_elements_result() {
+        let json = r#"{"type":"elementsResult","requestId":"req-elem-6","elements":[{"semanticId":"choice:0:apple","type":"choice","text":"Apple","value":"apple","selected":true,"index":0}],"totalCount":15}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::ElementsResult { request_id, elements, total_count } => {
+                assert_eq!(request_id, "req-elem-6");
+                assert_eq!(elements.len(), 1);
+                assert_eq!(elements[0].semantic_id, "choice:0:apple");
+                assert_eq!(total_count, 15);
+            }
+            _ => panic!("Expected ElementsResult message"),
+        }
+    }
+
+    #[test]
+    fn test_get_elements_message_ids() {
+        assert_eq!(Message::get_elements("a".to_string()).id(), Some("a"));
+        assert_eq!(Message::get_elements_with_limit("b".to_string(), 10).id(), Some("b"));
+        assert_eq!(Message::elements_result("c".to_string(), vec![], 0).id(), Some("c"));
+    }
+
+    #[test]
+    fn test_elements_result_empty() {
+        let msg = Message::elements_result("req-empty".to_string(), vec![], 0);
+        let json = serialize_message(&msg).unwrap();
+        assert!(json.contains("\"elements\":[]"));
+        assert!(json.contains("\"totalCount\":0"));
     }
 }

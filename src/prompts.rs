@@ -12,7 +12,7 @@ use gpui::{
 use std::sync::Arc;
 
 use crate::logging;
-use crate::protocol::Choice;
+use crate::protocol::{Choice, generate_semantic_id};
 use crate::theme;
 use crate::utils::strip_html_tags;
 use crate::designs::{DesignVariant, get_tokens};
@@ -273,6 +273,7 @@ impl Render for ArgPrompt {
             self.get_search_colors(&colors);
 
         let input_container = div()
+            .id(gpui::ElementId::Name("input:filter".into()))
             .w_full()
             .px(px(spacing.item_padding_x))
             .py(px(spacing.padding_md))
@@ -298,6 +299,7 @@ impl Render for ArgPrompt {
         // Render choice list - fills all available vertical space
         // Uses flex_1() to grow and fill the remaining height after input container
         let mut choices_container = div()
+            .id(gpui::ElementId::Name("list:choices".into()))
             .flex()
             .flex_col()
             .flex_1()            // Grow to fill available space (no bottom gap)
@@ -319,10 +321,16 @@ impl Render for ArgPrompt {
                 if let Some(choice) = self.choices.get(choice_idx) {
                     let is_selected = idx == self.selected_index;
                     
+                    // Generate semantic ID for this choice
+                    // Use the choice's semantic_id if set, otherwise generate one
+                    let semantic_id = choice.semantic_id.clone()
+                        .unwrap_or_else(|| generate_semantic_id("choice", idx, &choice.value));
+                    
                     // Use helper method for item colors
                     let (bg, name_color, desc_color) = self.get_item_colors(is_selected, &colors);
 
                     let mut choice_item = div()
+                        .id(gpui::ElementId::Name(semantic_id.clone().into()))
                         .w_full()
                         .px(px(spacing.item_padding_x))
                         .py(px(spacing.item_padding_y))
@@ -360,9 +368,13 @@ impl Render for ArgPrompt {
         // Use helper method for container colors
         let (main_bg, container_text) = self.get_container_colors(&colors);
 
+        // Generate semantic ID for the header based on prompt ID
+        let header_semantic_id = format!("header:{}", self.id);
+        
         // Main container - fills entire window height with no bottom gap
         // Layout: input_container (fixed height) + choices_container (flex_1 fills rest)
         div()
+            .id(gpui::ElementId::Name("window:arg".into()))
             .flex()
             .flex_col()
             .w_full()
@@ -373,7 +385,12 @@ impl Render for ArgPrompt {
             .key_context("arg_prompt")
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
-            .child(input_container)
+            .child(
+                // Header wrapper with semantic ID
+                div()
+                    .id(gpui::ElementId::Name(header_semantic_id.into()))
+                    .child(input_container)
+            )
             .child(choices_container)  // Uses flex_1 to fill all remaining space to bottom
     }
 }
@@ -475,9 +492,13 @@ impl Render for DivPrompt {
             )
         };
 
+        // Generate semantic IDs for div prompt elements
+        let panel_semantic_id = format!("panel:content-{}", self.id);
+        
         // Main container - fills entire window height with no bottom gap
         // Content area uses flex_1 to fill all remaining space
         div()
+            .id(gpui::ElementId::Name("window:div".into()))
             .flex()
             .flex_col()
             .w_full()
@@ -491,6 +512,7 @@ impl Render for DivPrompt {
             .on_key_down(handle_key)
             .child(
                 div()
+                    .id(gpui::ElementId::Name(panel_semantic_id.into()))
                     .flex_1()            // Grow to fill available space to bottom
                     .min_h(px(0.))       // Allow shrinking
                     .w_full()

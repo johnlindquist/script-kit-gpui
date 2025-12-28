@@ -81,6 +81,7 @@ pub type OnHoverCallback = Box<dyn Fn(usize, bool) + 'static>;
 /// - Shortcut badge (optional, right-aligned)
 /// - Selection state with themed colors
 /// - Hover callback for mouse interaction (optional)
+/// - Semantic ID for AI-driven targeting (optional)
 ///
 /// # Example
 /// ```ignore
@@ -91,6 +92,7 @@ pub type OnHoverCallback = Box<dyn Fn(usize, bool) + 'static>;
 ///     .shortcut("⌘K")
 ///     .selected(true)
 ///     .index(0)
+///     .semantic_id("choice:0:my-script")
 ///     .on_hover(Box::new(|index, hovered| {
 ///         if hovered { println!("Hovered item {}", index); }
 ///     }))
@@ -107,6 +109,8 @@ pub struct ListItem {
     index: Option<usize>,
     /// Optional callback triggered when mouse enters/leaves this item
     on_hover: Option<OnHoverCallback>,
+    /// Semantic ID for AI-driven UX targeting. Format: {type}:{index}:{value}
+    semantic_id: Option<String>,
 }
 
 impl ListItem {
@@ -121,6 +125,7 @@ impl ListItem {
             colors,
             index: None,
             on_hover: None,
+            semantic_id: None,
         }
     }
     
@@ -134,6 +139,19 @@ impl ListItem {
     /// The callback receives (index, is_hovered) where is_hovered is true when entering.
     pub fn on_hover(mut self, callback: OnHoverCallback) -> Self {
         self.on_hover = Some(callback);
+        self
+    }
+    
+    /// Set the semantic ID for AI-driven UX targeting.
+    /// Format: {type}:{index}:{value} (e.g., "choice:0:apple")
+    pub fn semantic_id(mut self, id: impl Into<String>) -> Self {
+        self.semantic_id = Some(id.into());
+        self
+    }
+    
+    /// Set an optional semantic ID (convenience for Option<String>)
+    pub fn semantic_id_opt(mut self, id: Option<String>) -> Self {
+        self.semantic_id = id;
         self
     }
 
@@ -209,6 +227,7 @@ impl RenderOnce for ListItem {
         let colors = self.colors;
         let index = self.index;
         let on_hover_callback = self.on_hover;
+        let semantic_id = self.semantic_id;
         
         // Selection colors with alpha
         let selected_bg = rgba((colors.accent_selected_subtle << 8) | 0x80);
@@ -328,8 +347,16 @@ impl RenderOnce for ListItem {
                     .child(shortcut_element)
             );
         
-        // Use index for element ID (default to 0 if not set)
-        let element_idx = index.unwrap_or(0);
+        // Use semantic_id for element ID if available, otherwise fall back to index
+        // This allows AI agents to target elements by their semantic meaning
+        let element_id = if let Some(ref sem_id) = semantic_id {
+            // Use semantic ID as the element ID for better targeting
+            ElementId::Name(sem_id.clone().into())
+        } else {
+            // Fall back to index-based ID
+            let element_idx = index.unwrap_or(0);
+            ElementId::NamedInteger("list-item".into(), element_idx as u64)
+        };
         
         // Base container with ID for stateful interactivity (reduced horizontal padding)
         let mut container = div()
@@ -338,7 +365,7 @@ impl RenderOnce for ListItem {
             .px(px(8.))
             .flex()
             .items_center()
-            .id(ElementId::NamedInteger("list-item".into(), element_idx as u64));
+            .id(element_id);
         
         // Add hover handler if we have both index and callback
         if let (Some(idx), Some(callback)) = (index, on_hover_callback) {

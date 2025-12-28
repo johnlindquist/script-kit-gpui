@@ -491,6 +491,8 @@ enum PromptMessage {
     },
     /// Unhandled message type from script - shows warning toast
     UnhandledMessage { message_type: String },
+    /// Request to get current UI state - triggers StateResult response
+    GetState { request_id: String },
 }
 
 /// External commands that can be sent to the app via stdin
@@ -1852,6 +1854,17 @@ impl ScriptListApp {
                                     continue;
                                 }
                                 
+                                // Handle GetState - needs UI state, forward to UI thread
+                                if let Message::GetState { request_id } = &msg {
+                                    logging::log("EXEC", &format!("GetState request: {}", request_id));
+                                    let prompt_msg = PromptMessage::GetState { request_id: request_id.clone() };
+                                    if tx.send_blocking(prompt_msg).is_err() {
+                                        logging::log("EXEC", "Prompt channel closed, reader exiting");
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                
                                 // Handle CaptureScreenshot directly (no UI needed)
                                 if let Message::CaptureScreenshot { request_id } = &msg {
                                     tracing::info!(request_id = %request_id, "Capturing screenshot");
@@ -2398,6 +2411,184 @@ impl ScriptListApp {
                 
                 self.toast_manager.push(toast);
                 cx.notify();
+            }
+            PromptMessage::GetState { request_id } => {
+                logging::log("UI", &format!("Collecting state for request: {}", request_id));
+                
+                // Collect current UI state
+                let (prompt_type, prompt_id, placeholder, input_value, choice_count, visible_choice_count, selected_index, selected_value) = 
+                    match &self.current_view {
+                        AppView::ScriptList => {
+                            let filtered_len = self.filtered_results().len();
+                            let selected_value = if self.selected_index < filtered_len {
+                                self.filtered_results().get(self.selected_index).map(|r| {
+                                    match r {
+                                        scripts::SearchResult::Script(m) => m.script.name.clone(),
+                                        scripts::SearchResult::Scriptlet(m) => m.scriptlet.name.clone(),
+                                        scripts::SearchResult::BuiltIn(m) => m.entry.name.clone(),
+                                        scripts::SearchResult::App(m) => m.app.name.clone(),
+                                    }
+                                })
+                            } else {
+                                None
+                            };
+                            (
+                                "none".to_string(),
+                                None,
+                                None,
+                                self.filter_text.clone(),
+                                self.scripts.len() + self.scriptlets.len() + self.builtin_entries.len() + self.apps.len(),
+                                filtered_len,
+                                self.selected_index as i32,
+                                selected_value,
+                            )
+                        }
+                        AppView::ArgPrompt { id, placeholder, choices } => {
+                            let filtered = self.get_filtered_arg_choices(choices);
+                            let selected_value = if self.arg_selected_index < filtered.len() {
+                                filtered.get(self.arg_selected_index).map(|c| c.value.clone())
+                            } else {
+                                None
+                            };
+                            (
+                                "arg".to_string(),
+                                Some(id.clone()),
+                                Some(placeholder.clone()),
+                                self.arg_input_text.clone(),
+                                choices.len(),
+                                filtered.len(),
+                                self.arg_selected_index as i32,
+                                selected_value,
+                            )
+                        }
+                        AppView::DivPrompt { id, .. } => {
+                            (
+                                "div".to_string(),
+                                Some(id.clone()),
+                                None,
+                                String::new(),
+                                0,
+                                0,
+                                -1,
+                                None,
+                            )
+                        }
+                        AppView::FormPrompt { id, .. } => {
+                            (
+                                "form".to_string(),
+                                Some(id.clone()),
+                                None,
+                                String::new(),
+                                0,
+                                0,
+                                -1,
+                                None,
+                            )
+                        }
+                        AppView::TermPrompt { id, .. } => {
+                            (
+                                "term".to_string(),
+                                Some(id.clone()),
+                                None,
+                                String::new(),
+                                0,
+                                0,
+                                -1,
+                                None,
+                            )
+                        }
+                        AppView::EditorPrompt { id, .. } => {
+                            (
+                                "editor".to_string(),
+                                Some(id.clone()),
+                                None,
+                                String::new(),
+                                0,
+                                0,
+                                -1,
+                                None,
+                            )
+                        }
+                        AppView::ActionsDialog => {
+                            (
+                                "actions".to_string(),
+                                None,
+                                None,
+                                String::new(),
+                                0,
+                                0,
+                                -1,
+                                None,
+                            )
+                        }
+                        AppView::ClipboardHistoryView { entries, filter, selected_index } => {
+                            let filtered_count = if filter.is_empty() {
+                                entries.len()
+                            } else {
+                                let filter_lower = filter.to_lowercase();
+                                entries.iter().filter(|e| e.content.to_lowercase().contains(&filter_lower)).count()
+                            };
+                            (
+                                "clipboardHistory".to_string(),
+                                None,
+                                None,
+                                filter.clone(),
+                                entries.len(),
+                                filtered_count,
+                                *selected_index as i32,
+                                None,
+                            )
+                        }
+                        AppView::AppLauncherView { apps, filter, selected_index } => {
+                            let filtered_count = if filter.is_empty() {
+                                apps.len()
+                            } else {
+                                let filter_lower = filter.to_lowercase();
+                                apps.iter().filter(|a| a.name.to_lowercase().contains(&filter_lower)).count()
+                            };
+                            (
+                                "appLauncher".to_string(),
+                                None,
+                                None,
+                                filter.clone(),
+                                apps.len(),
+                                filtered_count,
+                                *selected_index as i32,
+                                None,
+                            )
+                        }
+                    };
+                
+                // Focus state: we use focused_input as a proxy since we don't have Window access here.
+                // When window is visible and we're tracking an input, we're focused.
+                let window_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                let is_focused = window_visible && self.focused_input != FocusedInput::None;
+                
+                // Create the response
+                let response = Message::state_result(
+                    request_id.clone(),
+                    prompt_type,
+                    prompt_id,
+                    placeholder,
+                    input_value,
+                    choice_count,
+                    visible_choice_count,
+                    selected_index,
+                    selected_value,
+                    is_focused,
+                    window_visible,
+                );
+                
+                logging::log("UI", &format!("Sending state result for request: {}", request_id));
+                
+                // Send the response
+                if let Some(ref sender) = self.response_sender {
+                    if let Err(e) = sender.send(response) {
+                        logging::log("ERROR", &format!("Failed to send state result: {}", e));
+                    }
+                } else {
+                    logging::log("ERROR", "No response sender available for state result");
+                }
             }
          }
       }

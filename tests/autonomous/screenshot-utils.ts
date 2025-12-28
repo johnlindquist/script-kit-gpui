@@ -307,3 +307,60 @@ export async function cleanupOldScreenshots(keepCount: number = 10): Promise<num
   
   return toDelete.length;
 }
+
+/**
+ * Get stats about the screenshot directory
+ * @returns Directory-level statistics
+ */
+export async function getScreenshotDirectoryStats(): Promise<{
+  count: number;
+  totalSize: number;
+  oldest: string;
+  newest: string;
+}> {
+  const dir = path.resolve(process.cwd(), SCREENSHOT_DIR);
+  
+  try {
+    const files = await fs.readdir(dir);
+    const pngFiles = files.filter((f: string) => f.endsWith('.png'));
+    
+    if (pngFiles.length === 0) {
+      return {
+        count: 0,
+        totalSize: 0,
+        oldest: '',
+        newest: '',
+      };
+    }
+    
+    // Get stats for each file
+    const filesWithStats = await Promise.all(
+      pngFiles.map(async (file: string) => {
+        const filepath = path.join(dir, file);
+        const stat = await fs.stat(filepath);
+        return { filepath, mtime: stat.mtime, size: stat.size };
+      })
+    );
+    
+    // Sort by mtime to find oldest and newest
+    filesWithStats.sort((a: { mtime: Date }, b: { mtime: Date }) => 
+      a.mtime.getTime() - b.mtime.getTime()
+    );
+    
+    const totalSize = filesWithStats.reduce((sum: number, f: { size: number }) => sum + f.size, 0);
+    
+    return {
+      count: filesWithStats.length,
+      totalSize,
+      oldest: filesWithStats[0].filepath,
+      newest: filesWithStats[filesWithStats.length - 1].filepath,
+    };
+  } catch {
+    return {
+      count: 0,
+      totalSize: 0,
+      oldest: '',
+      newest: '',
+    };
+  }
+}
