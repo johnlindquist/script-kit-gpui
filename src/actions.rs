@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::logging;
 use crate::theme;
 use crate::designs::{DesignVariant, DesignColors, get_tokens};
+use crate::components::scrollbar::{Scrollbar, ScrollbarColors};
 
 /// Callback for action selection
 /// Signature: (action_id: String)
@@ -629,7 +630,36 @@ impl Render for ActionsDialog {
                 filtered_len, selected_index
             ));
             
-            uniform_list(
+            // Calculate scrollbar parameters
+            // Container height for actions (excluding search box)
+            let search_box_height = if self.hide_search { 0.0 } else { 60.0 };
+            let container_height = (filtered_len as f32 * ACTION_ITEM_HEIGHT).min(POPUP_MAX_HEIGHT - search_box_height);
+            let visible_items = (container_height / ACTION_ITEM_HEIGHT) as usize;
+            
+            // Use selected_index as approximate scroll offset
+            // When scrolling, the selected item should be visible, so this gives a reasonable estimate
+            let scroll_offset = if selected_index > visible_items.saturating_sub(1) {
+                selected_index.saturating_sub(visible_items / 2)
+            } else {
+                0
+            };
+            
+            // Get scrollbar colors from theme or design
+            let scrollbar_colors = if self.design_variant == DesignVariant::Default {
+                ScrollbarColors::from_theme(&self.theme)
+            } else {
+                ScrollbarColors::from_design(&colors)
+            };
+            
+            // Create scrollbar (only visible if content overflows)
+            let scrollbar = Scrollbar::new(
+                filtered_len,
+                visible_items,
+                scroll_offset,
+                scrollbar_colors,
+            ).container_height(container_height);
+            
+            let list = uniform_list(
                 "actions-list",
                 filtered_len,
                 cx.processor(move |this: &mut ActionsDialog, visible_range, _window, _cx| {
@@ -787,8 +817,16 @@ impl Render for ActionsDialog {
             )
             .flex_1()
             .w_full()
-            .track_scroll(&self.scroll_handle)
-            .into_any_element()
+            .track_scroll(&self.scroll_handle);
+            
+            // Wrap uniform_list in a relative container with scrollbar overlay
+            div()
+                .relative()
+                .flex_1()
+                .w_full()
+                .child(list)
+                .child(scrollbar)
+                .into_any_element()
         };
 
         // Use helper method for container colors
