@@ -79,6 +79,9 @@ use actions::{ActionsDialog, ScriptInfo};
 use syntax::highlight_code_lines;
 use panel::{DEFAULT_PLACEHOLDER, CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y};
 
+/// Width of the left accent bar for selected items (matches actions.rs)
+pub const ACCENT_BAR_WIDTH: f32 = 3.0;
+
 /// Channel for sending prompt messages from script thread to UI
 #[allow(dead_code)]
 type PromptChannel = (mpsc::Sender<PromptMessage>, mpsc::Receiver<PromptMessage>);
@@ -4392,11 +4395,24 @@ impl ScriptListApp {
                                             colors,
                                         );
                                         
+                                        // Get accent color for the left bar
+                                        let accent_color = rgb(colors.accent_selected);
+                                        
                                         // Wrap in div with hover handler for hover-to-select behavior
+                                        // Add left accent bar (3px width) - visible when selected
                                         items.push(
                                             div()
                                                 .id(ElementId::NamedInteger("script-item".into(), ix as u64))
                                                 .on_hover(hover_handler)
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .child(
+                                                    div()
+                                                        .w(px(ACCENT_BAR_WIDTH))
+                                                        .h_full()
+                                                        .bg(if is_selected { accent_color } else { rgba(0x00000000) })
+                                                )
                                                 .child(item_element),
                                         );
                                     }
@@ -5023,9 +5039,22 @@ impl ScriptListApp {
                         if let Some((_, choice)) = filtered_choices.get(ix) {
                             let is_selected = ix == arg_selected_index;
                             
+                            // Get accent color for the left bar
+                            let accent_color = rgb(arg_list_colors.accent_selected);
+                            
                             // Use shared ListItem component for consistent design
+                            // Add left accent bar (3px width) - visible when selected
                             div()
                                 .id(ix)
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(px(ACCENT_BAR_WIDTH))
+                                        .h_full()
+                                        .bg(if is_selected { accent_color } else { rgba(0x00000000) })
+                                )
                                 .child(
                                     ListItem::new(choice.name.clone(), arg_list_colors)
                                         .description_opt(choice.description.clone())
