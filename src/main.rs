@@ -494,6 +494,16 @@ enum PromptMessage {
     ShowForm { id: String, html: String },
     ShowTerm { id: String, command: Option<String> },
     ShowEditor { id: String, content: Option<String>, language: Option<String> },
+    /// Path picker prompt for file/folder selection
+    ShowPath { id: String, start_path: Option<String>, hint: Option<String> },
+    /// Environment variable prompt with optional secret handling
+    ShowEnv { id: String, key: String, prompt: Option<String>, secret: bool },
+    /// Drag and drop prompt for file uploads
+    ShowDrop { id: String, placeholder: Option<String>, hint: Option<String> },
+    /// Template prompt for tab-through string templates
+    ShowTemplate { id: String, template: String },
+    /// Multi-select prompt from choices
+    ShowSelect { id: String, placeholder: Option<String>, choices: Vec<Choice>, multiple: bool },
     HideWindow,
     OpenBrowser { url: String },
     ScriptExit,
@@ -2367,6 +2377,22 @@ impl ScriptListApp {
                                                 Message::Editor { id, content, language, .. } => {
                                                     Some(PromptMessage::ShowEditor { id, content, language })
                                                 }
+                                                // New prompt types (scaffolding)
+                                                Message::Path { id, start_path, hint } => {
+                                                    Some(PromptMessage::ShowPath { id, start_path, hint })
+                                                }
+                                                Message::Env { id, key, secret } => {
+                                                    Some(PromptMessage::ShowEnv { id, key, prompt: None, secret: secret.unwrap_or(false) })
+                                                }
+                                                Message::Drop { id } => {
+                                                    Some(PromptMessage::ShowDrop { id, placeholder: None, hint: None })
+                                                }
+                                                Message::Template { id, template } => {
+                                                    Some(PromptMessage::ShowTemplate { id, template })
+                                                }
+                                                Message::Select { id, placeholder, choices, multiple } => {
+                                                    Some(PromptMessage::ShowSelect { id, placeholder: Some(placeholder), choices, multiple: multiple.unwrap_or(false) })
+                                                }
                                                 Message::Exit { .. } => {
                                                     Some(PromptMessage::ScriptExit)
                                                 }
@@ -2653,10 +2679,13 @@ impl ScriptListApp {
                 // Use cached entries for faster loading
                 let entries = clipboard_history::get_cached_entries(100);
                 logging::log("EXEC", &format!("Loaded {} clipboard entries (cached)", entries.len()));
+                // Initial selected_index should be 1 (first entry after "Today" header)
+                // Index 0 is the time group header which is not selectable
+                let initial_selected = if entries.is_empty() { 0 } else { 1 };
                 self.current_view = AppView::ClipboardHistoryView {
                     entries,
                     filter: String::new(),
-                    selected_index: 0,
+                    selected_index: initial_selected,
                 };
                 // Use standard height for clipboard history view
                 defer_resize_to_view(ViewType::ScriptList, 0, cx);
@@ -3288,6 +3317,55 @@ impl ScriptListApp {
                 } else {
                     logging::log("WARN", "ForceSubmit received but no active prompt to submit to");
                 }
+            }
+            // ============================================================
+            // NEW PROMPT TYPES (scaffolding - TODO: implement full UI)
+            // ============================================================
+            PromptMessage::ShowPath { id, start_path, hint } => {
+                tracing::info!(id, ?start_path, ?hint, "ShowPath received - TODO: implement UI");
+                logging::log("UI", &format!("ShowPath prompt received: {} (start: {:?}, hint: {:?})", id, start_path, hint));
+                // TODO: Create PathPrompt entity and switch to it
+                // For now, just log that we received it
+                let toast = Toast::warning("Path prompt not yet implemented".to_string(), &self.theme)
+                    .duration_ms(Some(3000));
+                self.toast_manager.push(toast);
+                cx.notify();
+            }
+            PromptMessage::ShowEnv { id, key, prompt, secret } => {
+                tracing::info!(id, key, ?prompt, secret, "ShowEnv received - TODO: implement UI");
+                logging::log("UI", &format!("ShowEnv prompt received: {} (key: {}, secret: {})", id, key, secret));
+                // TODO: Create EnvPrompt entity and switch to it
+                let toast = Toast::warning("Env prompt not yet implemented".to_string(), &self.theme)
+                    .duration_ms(Some(3000));
+                self.toast_manager.push(toast);
+                cx.notify();
+            }
+            PromptMessage::ShowDrop { id, placeholder, hint } => {
+                tracing::info!(id, ?placeholder, ?hint, "ShowDrop received - TODO: implement UI");
+                logging::log("UI", &format!("ShowDrop prompt received: {} (placeholder: {:?})", id, placeholder));
+                // TODO: Create DropPrompt entity and switch to it
+                let toast = Toast::warning("Drop prompt not yet implemented".to_string(), &self.theme)
+                    .duration_ms(Some(3000));
+                self.toast_manager.push(toast);
+                cx.notify();
+            }
+            PromptMessage::ShowTemplate { id, template } => {
+                tracing::info!(id, template, "ShowTemplate received - TODO: implement UI");
+                logging::log("UI", &format!("ShowTemplate prompt received: {} (template: {})", id, template));
+                // TODO: Create TemplatePrompt entity and switch to it
+                let toast = Toast::warning("Template prompt not yet implemented".to_string(), &self.theme)
+                    .duration_ms(Some(3000));
+                self.toast_manager.push(toast);
+                cx.notify();
+            }
+            PromptMessage::ShowSelect { id, placeholder, choices, multiple } => {
+                tracing::info!(id, ?placeholder, choice_count = choices.len(), multiple, "ShowSelect received - TODO: implement UI");
+                logging::log("UI", &format!("ShowSelect prompt received: {} ({} choices, multiple: {})", id, choices.len(), multiple));
+                // TODO: Create SelectPrompt entity and switch to it
+                let toast = Toast::warning("Select prompt not yet implemented".to_string(), &self.theme)
+                    .duration_ms(Some(3000));
+                self.toast_manager.push(toast);
+                cx.notify();
             }
          }
       }
@@ -4770,9 +4848,11 @@ impl ScriptListApp {
                 }
                 "backspace" => this.update_filter(None, true, false, cx),
                 _ => {
+                    // Allow all printable characters (not control chars like Tab, Escape)
+                    // This enables searching for filenames with special chars like ".ts", ".md"
                     if let Some(ref key_char) = event.keystroke.key_char {
                         if let Some(ch) = key_char.chars().next() {
-                            if ch.is_alphanumeric() || ch == '-' || ch == '_' || ch == ' ' {
+                            if !ch.is_control() {
                                 this.update_filter(Some(ch), false, false, cx);
                             }
                         }
@@ -6697,9 +6777,10 @@ impl ScriptListApp {
                         }
                     }
                     _ => {
+                        // Allow all printable characters for window search
                         if let Some(ref key_char) = event.keystroke.key_char {
                             if let Some(ch) = key_char.chars().next() {
-                                if !ch.is_control() && ch.is_alphanumeric() {
+                                if !ch.is_control() {
                                     filter.push(ch);
                                     *selected_index = 0;
                                     this.window_list_scroll_handle.scroll_to_item(0, ScrollStrategy::Top);

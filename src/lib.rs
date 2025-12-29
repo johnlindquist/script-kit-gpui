@@ -44,3 +44,7 @@ pub mod frecency;
 
 // Scriptlet parsing and variable substitution
 pub mod scriptlets;
+
+// OCR module - macOS Vision framework integration
+#[cfg(feature = "ocr")]
+pub mod ocr;

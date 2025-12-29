@@ -1,0 +1,393 @@
+//! ArgPrompt - Interactive argument selection with search
+//!
+//! Features:
+//! - Searchable list of choices
+//! - Keyboard navigation (up/down)
+//! - Live filtering as you type
+//! - Submit selected choice or cancel with Escape
+
+use gpui::{
+    div, prelude::*, px, rgb, Context, FocusHandle, Focusable, Render, SharedString, Window,
+};
+use std::sync::Arc;
+
+use crate::logging;
+use crate::protocol::{Choice, generate_semantic_id};
+use crate::theme;
+use crate::designs::{DesignVariant, get_tokens};
+
+use super::SubmitCallback;
+
+/// ArgPrompt - Interactive argument selection with search
+///
+/// Features:
+/// - Searchable list of choices
+/// - Keyboard navigation (up/down)
+/// - Live filtering as you type
+/// - Submit selected choice or cancel with Escape
+pub struct ArgPrompt {
+    pub id: String,
+    pub placeholder: String,
+    pub choices: Vec<Choice>,
+    pub filtered_choices: Vec<usize>, // Indices into choices
+    pub selected_index: usize,         // Index within filtered_choices
+    pub input_text: String,
+    pub focus_handle: FocusHandle,
+    pub on_submit: SubmitCallback,
+    pub theme: Arc<theme::Theme>,
+    /// Design variant for styling (defaults to Default for theme-based styling)
+    pub design_variant: DesignVariant,
+}
+
+impl ArgPrompt {
+    pub fn new(
+        id: String,
+        placeholder: String,
+        choices: Vec<Choice>,
+        focus_handle: FocusHandle,
+        on_submit: SubmitCallback,
+        theme: Arc<theme::Theme>,
+    ) -> Self {
+        Self::with_design(id, placeholder, choices, focus_handle, on_submit, theme, DesignVariant::Default)
+    }
+    
+    pub fn with_design(
+        id: String,
+        placeholder: String,
+        choices: Vec<Choice>,
+        focus_handle: FocusHandle,
+        on_submit: SubmitCallback,
+        theme: Arc<theme::Theme>,
+        design_variant: DesignVariant,
+    ) -> Self {
+        logging::log("PROMPTS", &format!("ArgPrompt::new with theme colors: bg={:#x}, text={:#x}, design: {:?}", 
+            theme.colors.background.main, theme.colors.text.primary, design_variant));
+        let filtered_choices: Vec<usize> = (0..choices.len()).collect();
+        ArgPrompt {
+            id,
+            placeholder,
+            choices,
+            filtered_choices,
+            selected_index: 0,
+            input_text: String::new(),
+            focus_handle,
+            on_submit,
+            theme,
+            design_variant,
+        }
+    }
+
+    /// Refilter choices based on current input_text
+    fn refilter(&mut self) {
+        let filter_lower = self.input_text.to_lowercase();
+        self.filtered_choices = self
+            .choices
+            .iter()
+            .enumerate()
+            .filter(|(_, choice)| choice.name.to_lowercase().contains(&filter_lower))
+            .map(|(idx, _)| idx)
+            .collect();
+        self.selected_index = 0; // Reset selection when filtering
+    }
+
+    /// Handle character input - append to input_text and refilter
+    fn handle_char(&mut self, ch: char, cx: &mut Context<Self>) {
+        self.input_text.push(ch);
+        self.refilter();
+        cx.notify();
+    }
+
+    /// Handle backspace - remove last character and refilter
+    fn handle_backspace(&mut self, cx: &mut Context<Self>) {
+        if !self.input_text.is_empty() {
+            self.input_text.pop();
+            self.refilter();
+            cx.notify();
+        }
+    }
+
+    /// Move selection up within filtered choices
+    fn move_up(&mut self, cx: &mut Context<Self>) {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+            cx.notify();
+        }
+    }
+
+    /// Move selection down within filtered choices
+    fn move_down(&mut self, cx: &mut Context<Self>) {
+        if self.selected_index < self.filtered_choices.len().saturating_sub(1) {
+            self.selected_index += 1;
+            cx.notify();
+        }
+    }
+
+    /// Submit the selected choice, or input_text if no choices available
+    fn submit_selected(&mut self) {
+        if let Some(&choice_idx) = self.filtered_choices.get(self.selected_index) {
+            // Case 1: There are filtered choices - submit the selected one
+            if let Some(choice) = self.choices.get(choice_idx) {
+                (self.on_submit)(self.id.clone(), Some(choice.value.clone()));
+            }
+        } else if !self.input_text.is_empty() {
+            // Case 2: No choices available but user typed something - submit input_text
+            (self.on_submit)(self.id.clone(), Some(self.input_text.clone()));
+        }
+        // Case 3: No choices and no input - do nothing (prevent empty submissions)
+    }
+
+    /// Cancel - submit None
+    fn submit_cancel(&mut self) {
+        (self.on_submit)(self.id.clone(), None);
+    }
+    
+    /// Get colors for search box based on design variant
+    /// Returns: (search_box_bg, border_color, muted_text, dimmed_text, secondary_text)
+    fn get_search_colors(&self, colors: &crate::designs::DesignColors) -> (gpui::Rgba, gpui::Rgba, gpui::Rgba, gpui::Rgba, gpui::Rgba) {
+        if self.design_variant == DesignVariant::Default {
+            (
+                rgb(self.theme.colors.background.search_box),
+                rgb(self.theme.colors.ui.border),
+                rgb(self.theme.colors.text.muted),
+                rgb(self.theme.colors.text.dimmed),
+                rgb(self.theme.colors.text.secondary),
+            )
+        } else {
+            (
+                rgb(colors.background_secondary),
+                rgb(colors.border),
+                rgb(colors.text_muted),
+                rgb(colors.text_dimmed),
+                rgb(colors.text_secondary),
+            )
+        }
+    }
+    
+    /// Get colors for main container based on design variant
+    /// Returns: (main_bg, container_text)
+    fn get_container_colors(&self, colors: &crate::designs::DesignColors) -> (gpui::Rgba, gpui::Rgba) {
+        if self.design_variant == DesignVariant::Default {
+            (
+                rgb(self.theme.colors.background.main),
+                rgb(self.theme.colors.text.secondary),
+            )
+        } else {
+            (
+                rgb(colors.background),
+                rgb(colors.text_secondary),
+            )
+        }
+    }
+    
+    /// Get colors for a choice item based on selection state and design variant
+    /// Returns: (bg, name_color, desc_color)
+    fn get_item_colors(&self, is_selected: bool, colors: &crate::designs::DesignColors) -> (gpui::Rgba, gpui::Rgba, gpui::Rgba) {
+        if self.design_variant == DesignVariant::Default {
+            (
+                if is_selected {
+                    rgb(self.theme.colors.accent.selected)
+                } else {
+                    rgb(self.theme.colors.background.main)
+                },
+                if is_selected {
+                    rgb(self.theme.colors.text.primary)
+                } else {
+                    rgb(self.theme.colors.text.secondary)
+                },
+                if is_selected {
+                    rgb(self.theme.colors.text.tertiary)
+                } else {
+                    rgb(self.theme.colors.text.muted)
+                },
+            )
+        } else {
+            (
+                if is_selected {
+                    rgb(colors.background_selected)
+                } else {
+                    rgb(colors.background)
+                },
+                if is_selected {
+                    rgb(colors.text_on_accent)
+                } else {
+                    rgb(colors.text_secondary)
+                },
+                if is_selected {
+                    rgb(colors.text_secondary)
+                } else {
+                    rgb(colors.text_muted)
+                },
+            )
+        }
+    }
+}
+
+impl Focusable for ArgPrompt {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for ArgPrompt {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Get design tokens for the current design variant
+        let tokens = get_tokens(self.design_variant);
+        let colors = tokens.colors();
+        let spacing = tokens.spacing();
+        let visual = tokens.visual();
+        
+        let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+            let key_str = event.keystroke.key.to_lowercase();
+            
+            match key_str.as_str() {
+                "up" | "arrowup" => this.move_up(cx),
+                "down" | "arrowdown" => this.move_down(cx),
+                "enter" => this.submit_selected(),
+                "escape" => this.submit_cancel(),
+                "backspace" => this.handle_backspace(cx),
+                _ => {
+                    // Try to capture printable characters
+                    if let Some(ref key_char) = event.keystroke.key_char {
+                        if let Some(ch) = key_char.chars().next() {
+                            if !ch.is_control() {
+                                this.handle_char(ch, cx);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Render input field
+        let input_display = if self.input_text.is_empty() {
+            SharedString::from(self.placeholder.clone())
+        } else {
+            SharedString::from(self.input_text.clone())
+        };
+
+        // Use helper method for design/theme color extraction
+        let (search_box_bg, border_color, muted_text, dimmed_text, secondary_text) = 
+            self.get_search_colors(&colors);
+
+        let input_container = div()
+            .id(gpui::ElementId::Name("input:filter".into()))
+            .w_full()
+            .px(px(spacing.item_padding_x))
+            .py(px(spacing.padding_md))
+            .bg(search_box_bg)
+            .border_b_1()
+            .border_color(border_color)
+            .flex()
+            .flex_row()
+            .gap_2()
+            .items_center()
+            .child(div().text_color(muted_text).child("🔍"))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(if self.input_text.is_empty() {
+                        dimmed_text
+                    } else {
+                        secondary_text
+                    })
+                    .child(input_display),
+            );
+
+        // Render choice list - fills all available vertical space
+        // Uses flex_1() to grow and fill the remaining height after input container
+        let mut choices_container = div()
+            .id(gpui::ElementId::Name("list:choices".into()))
+            .flex()
+            .flex_col()
+            .flex_1()            // Grow to fill available space (no bottom gap)
+            .min_h(px(0.))       // Allow shrinking (prevents overflow)
+            .w_full()
+            .overflow_y_hidden(); // Clip content at container boundary
+
+        if self.filtered_choices.is_empty() {
+            choices_container = choices_container.child(
+                div()
+                    .w_full()
+                    .py(px(spacing.padding_xl))
+                    .px(px(spacing.item_padding_x))
+                    .text_color(dimmed_text)
+                    .child("No choices match your filter"),
+            );
+        } else {
+            for (idx, &choice_idx) in self.filtered_choices.iter().enumerate() {
+                if let Some(choice) = self.choices.get(choice_idx) {
+                    let is_selected = idx == self.selected_index;
+                    
+                    // Generate semantic ID for this choice
+                    // Use the choice's semantic_id if set, otherwise generate one
+                    let semantic_id = choice.semantic_id.clone()
+                        .unwrap_or_else(|| generate_semantic_id("choice", idx, &choice.value));
+                    
+                    // Use helper method for item colors
+                    let (bg, name_color, desc_color) = self.get_item_colors(is_selected, &colors);
+
+                    let mut choice_item = div()
+                        .id(gpui::ElementId::Name(semantic_id.clone().into()))
+                        .w_full()
+                        .px(px(spacing.item_padding_x))
+                        .py(px(spacing.item_padding_y))
+                        .bg(bg)
+                        .border_b_1()
+                        .border_color(border_color)
+                        .rounded(px(visual.radius_sm))
+                        .flex()
+                        .flex_col()
+                        .gap_1();
+
+                    // Choice name (bold-ish via uppercase and text styling)
+                    choice_item = choice_item.child(
+                        div()
+                            .text_color(name_color)
+                            .text_base()
+                            .child(choice.name.clone()),
+                    );
+
+                    // Choice description if present (dimmed)
+                    if let Some(desc) = &choice.description {
+                        choice_item = choice_item.child(
+                            div()
+                                .text_color(desc_color)
+                                .text_sm()
+                                .child(desc.clone()),
+                        );
+                    }
+
+                    choices_container = choices_container.child(choice_item);
+                }
+            }
+        }
+
+        // Use helper method for container colors
+        let (main_bg, container_text) = self.get_container_colors(&colors);
+
+        // Generate semantic ID for the header based on prompt ID
+        let header_semantic_id = format!("header:{}", self.id);
+        
+        // Main container - fills entire window height with no bottom gap
+        // Layout: input_container (fixed height) + choices_container (flex_1 fills rest)
+        div()
+            .id(gpui::ElementId::Name("window:arg".into()))
+            .flex()
+            .flex_col()
+            .w_full()
+            .h_full()            // Fill container height completely
+            .min_h(px(0.))       // Allow proper flex behavior
+            .bg(main_bg)
+            .text_color(container_text)
+            .key_context("arg_prompt")
+            .track_focus(&self.focus_handle)
+            .on_key_down(handle_key)
+            .child(
+                // Header wrapper with semantic ID
+                div()
+                    .id(gpui::ElementId::Name(header_semantic_id.into()))
+                    .child(input_container)
+            )
+            .child(choices_container)  // Uses flex_1 to fill all remaining space to bottom
+    }
+}
