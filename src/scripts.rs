@@ -295,9 +295,22 @@ fn extract_code_block(text: &str) -> Option<(String, String)> {
     None
 }
 
+/// Convert a name to a command slug (lowercase, spaces/special chars to hyphens)
+fn slugify_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 /// Parse a single scriptlet section from markdown
 /// Input should be text from ## Name to the next ## or end of file
-fn parse_scriptlet_section(section: &str) -> Option<Scriptlet> {
+/// `source_path` is the path to the .md file containing the scriptlet
+fn parse_scriptlet_section(section: &str, source_path: Option<&std::path::Path>) -> Option<Scriptlet> {
     let lines: Vec<&str> = section.lines().collect();
     if lines.is_empty() {
         return None;
@@ -324,6 +337,12 @@ fn parse_scriptlet_section(section: &str) -> Option<Scriptlet> {
     // Extract code block
     let (tool, code) = extract_code_block(section)?;
     
+    // Generate command slug from name
+    let command = slugify_name(&name);
+    
+    // Build file_path with anchor if source_path is provided
+    let file_path = source_path.map(|p| format!("{}#{}", p.display(), command));
+    
     Some(Scriptlet {
         name,
         description: metadata.get("description").cloned(),
@@ -332,8 +351,8 @@ fn parse_scriptlet_section(section: &str) -> Option<Scriptlet> {
         shortcut: metadata.get("shortcut").cloned(),
         expand: metadata.get("expand").cloned(),
         group: None,
-        file_path: None,
-        command: None,
+        file_path,
+        command: Some(command),
     })
 }
 
@@ -385,7 +404,7 @@ pub fn read_scriptlets() -> Vec<Scriptlet> {
                         for line in content.lines() {
                             if line.starts_with("##") && !current_section.is_empty() {
                                 // Parse previous section
-                                if let Some(scriptlet) = parse_scriptlet_section(&current_section) {
+                                if let Some(scriptlet) = parse_scriptlet_section(&current_section, Some(&path)) {
                                     scriptlets.push(scriptlet);
                                 }
                                 current_section = line.to_string();
@@ -397,7 +416,7 @@ pub fn read_scriptlets() -> Vec<Scriptlet> {
 
                         // Parse the last section
                         if !current_section.is_empty() {
-                            if let Some(scriptlet) = parse_scriptlet_section(&current_section) {
+                            if let Some(scriptlet) = parse_scriptlet_section(&current_section, Some(&path)) {
                                 scriptlets.push(scriptlet);
                             }
                         }
@@ -1513,7 +1532,7 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_basic() {
         let section = "## Test Snippet\n\n```ts\nconst x = 1;\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_some());
         let s = scriptlet.unwrap();
         assert_eq!(s.name, "Test Snippet");
@@ -1525,7 +1544,7 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_with_metadata() {
         let section = "## Open File\n\n<!-- \nshortcut: cmd o\n-->\n\n```ts\nawait exec('open')\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_some());
         let s = scriptlet.unwrap();
         assert_eq!(s.name, "Open File");
@@ -1536,7 +1555,7 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_with_description() {
         let section = "## Test\n\n<!-- \ndescription: Test description\n-->\n\n```bash\necho test\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_some());
         let s = scriptlet.unwrap();
         assert_eq!(s.description, Some("Test description".to_string()));
@@ -1545,7 +1564,7 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_with_expand() {
         let section = "## Execute Plan\n\n<!-- \nexpand: plan,,\n-->\n\n```paste\nPlease execute\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_some());
         let s = scriptlet.unwrap();
         assert_eq!(s.expand, Some("plan,,".to_string()));
@@ -1591,14 +1610,14 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_none_without_heading() {
         let section = "Some text without heading\n```ts\ncode\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_none());
     }
 
     #[test]
     fn test_parse_scriptlet_none_without_code_block() {
         let section = "## Name\nNo code block here";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_none());
     }
 
@@ -1823,14 +1842,14 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_empty_heading() {
         let section = "## \n\n```ts\ncode\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_none());
     }
 
     #[test]
     fn test_parse_scriptlet_whitespace_only_heading() {
         let section = "##   \n\n```ts\ncode\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_none());
     }
 
@@ -2141,7 +2160,7 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_preserves_whitespace_in_code() {
         let section = "## WhitespaceTest\n\n```ts\n  const x = 1;\n    const y = 2;\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_some());
         let s = scriptlet.unwrap();
         // Code should preserve relative indentation
@@ -2152,7 +2171,7 @@ mod tests {
     #[test]
     fn test_parse_scriptlet_multiline_code() {
         let section = "## MultiLine\n\n```ts\nconst obj = {\n  key: value,\n  other: thing\n};\nconsole.log(obj);\n```";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_some());
         let s = scriptlet.unwrap();
         assert!(s.code.contains("obj"));
@@ -2597,7 +2616,7 @@ third()
         let mut count = 0;
         for section in sections.iter().skip(1) {
             let full_section = format!("## {}", section);
-            if let Some(scriptlet) = parse_scriptlet_section(&full_section) {
+            if let Some(scriptlet) = parse_scriptlet_section(&full_section, None) {
                 count += 1;
                 assert!(!scriptlet.name.is_empty());
             }
@@ -2652,7 +2671,7 @@ third()
     fn test_parse_scriptlet_with_html_comment_no_fence() {
         // Test that parse_scriptlet_section requires code block even with metadata
         let section = "## NoCode\n\n<!-- description: Test -->\nJust text";
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_none());
     }
 
@@ -2787,7 +2806,7 @@ open("https://example.com");
         let sections: Vec<&str> = markdown.split("## ").collect();
         let mut parsed = 0;
         for section in sections.iter().skip(1) {
-            if let Some(scriptlet) = parse_scriptlet_section(&format!("## {}", section)) {
+            if let Some(scriptlet) = parse_scriptlet_section(&format!("## {}", section), None) {
                 parsed += 1;
                 assert!(!scriptlet.name.is_empty());
                 assert!(!scriptlet.code.is_empty());
@@ -2851,7 +2870,7 @@ const str = "test\nline";
 const obj = { key: "value" };
 ```"#;
 
-        let scriptlet = parse_scriptlet_section(section);
+        let scriptlet = parse_scriptlet_section(section, None);
         assert!(scriptlet.is_some());
         let s = scriptlet.unwrap();
         assert!(s.code.contains("regex"));
@@ -2933,7 +2952,7 @@ custom: value
 code here
 ```"#;
 
-        let scriptlet = parse_scriptlet_section(section).unwrap();
+        let scriptlet = parse_scriptlet_section(section, None).unwrap();
         
         assert_eq!(scriptlet.name, "Complete");
         assert_eq!(scriptlet.description, Some("Full description here".to_string()));

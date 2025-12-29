@@ -9,6 +9,9 @@ use gpui::{
 use global_hotkey::{GlobalHotKeyManager, GlobalHotKeyEvent, HotKeyState, hotkey::{HotKey, Modifiers, Code}};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
+
+mod process_manager;
+use process_manager::PROCESS_MANAGER;
 use core_graphics::event::CGEvent;
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use cocoa::appkit::NSApp;
@@ -298,6 +301,55 @@ fn capture_app_screenshot() -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::E
     Err("Screenshot capture is only supported on macOS".into())
 }
 
+/// Render a path string with highlighted matched characters.
+/// 
+/// Takes the display path, the filename that was matched against, and the indices
+/// of matched characters in the filename. Returns a vector of (text, is_highlighted)
+/// tuples for rendering.
+fn render_path_with_highlights(
+    display_path: &str,
+    filename: &str,
+    filename_indices: &[usize],
+) -> Vec<(String, bool)> {
+    if filename_indices.is_empty() {
+        return vec![(display_path.to_string(), false)];
+    }
+    
+    // Find where the filename starts in the display path
+    let filename_start = if let Some(pos) = display_path.rfind(filename) {
+        pos
+    } else if let Some(pos) = display_path.rfind('/') {
+        pos + 1
+    } else {
+        0
+    };
+    
+    let mut result = Vec::new();
+    let chars: Vec<char> = display_path.chars().collect();
+    let mut current_text = String::new();
+    let mut current_highlighted = false;
+    
+    for (i, ch) in chars.iter().enumerate() {
+        let is_in_filename = i >= filename_start;
+        let filename_char_idx = if is_in_filename { i - filename_start } else { usize::MAX };
+        let is_highlighted = is_in_filename && filename_indices.contains(&filename_char_idx);
+        
+        if is_highlighted != current_highlighted && !current_text.is_empty() {
+            result.push((current_text.clone(), current_highlighted));
+            current_text.clear();
+        }
+        
+        current_text.push(*ch);
+        current_highlighted = is_highlighted;
+    }
+    
+    if !current_text.is_empty() {
+        result.push((current_text, current_highlighted));
+    }
+    
+    result
+}
+
 /// Calculate window bounds positioned at eye-line height on the display containing the mouse cursor.
 /// 
 /// - Finds the display where the mouse cursor is located
@@ -406,6 +458,13 @@ static HOTKEY_TRIGGER_COUNT: AtomicU64 = AtomicU64::new(0);
 static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false); // Track window visibility for toggle (starts hidden)
 static NEEDS_RESET: AtomicBool = AtomicBool::new(false); // Track if window needs reset to script list on next show
 static PANEL_CONFIGURED: AtomicBool = AtomicBool::new(false); // Track if floating panel has been configured (one-time setup on first show)
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false); // Track if shutdown signal received (prevents new script spawns)
+
+/// Check if shutdown has been requested (prevents new script spawns during shutdown)
+#[allow(dead_code)]
+pub fn is_shutting_down() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
 
 /// Application state - what view are we currently showing
 #[derive(Debug, Clone)]
@@ -1759,6 +1818,9 @@ impl ScriptListApp {
             }
             "quit" => {
                 logging::log("UI", "Quit action");
+                // Clean up processes and PID file before quitting
+                PROCESS_MANAGER.kill_all_processes();
+                PROCESS_MANAGER.remove_main_pid();
                 cx.quit();
             }
             "__cancel__" => {
@@ -4117,6 +4179,40 @@ impl ScriptListApp {
                     scripts::SearchResult::Script(script_match) => {
                         let script = &script_match.script;
                         
+                        // Source indicator with match highlighting (e.g., "script: foo.ts")
+                        let filename = &script_match.filename;
+                        let filename_indices = &script_match.match_indices.filename_indices;
+                        
+                        // Render filename with highlighted matched characters
+                        let path_segments = render_path_with_highlights(filename, filename, filename_indices);
+                        let accent_color = colors.accent;
+                        
+                        let mut path_div = div()
+                            .flex()
+                            .flex_row()
+                            .text_xs()
+                            .font_family(typography.font_family_mono)
+                            .pb(px(spacing.padding_xs))
+                            .overflow_x_hidden()
+                            .child(
+                                div()
+                                    .text_color(rgba((text_muted << 8) | 0x99))
+                                    .child("script: ")
+                            );
+                        
+                        for (text, is_highlighted) in path_segments {
+                            let color = if is_highlighted {
+                                rgb(accent_color)
+                            } else {
+                                rgba((text_muted << 8) | 0x99)
+                            };
+                            path_div = path_div.child(
+                                div().text_color(color).child(text)
+                            );
+                        }
+                        
+                        panel = panel.child(path_div);
+                        
                         // Script name header
                         panel = panel.child(
                             div()
@@ -4126,8 +4222,6 @@ impl ScriptListApp {
                                 .pb(px(spacing.padding_sm))
                                 .child(format!("{}.{}", script.name, script.extension))
                         );
-                        
-
                         
                         // Description (if present)
                         if let Some(desc) = &script.description {
@@ -4216,6 +4310,41 @@ impl ScriptListApp {
                     }
                     scripts::SearchResult::Scriptlet(scriptlet_match) => {
                         let scriptlet = &scriptlet_match.scriptlet;
+                        
+                        // Source indicator with match highlighting (e.g., "scriptlet: foo.md")
+                        if let Some(ref display_file_path) = scriptlet_match.display_file_path {
+                            let filename_indices = &scriptlet_match.match_indices.filename_indices;
+                            
+                            // Render filename with highlighted matched characters
+                            let path_segments = render_path_with_highlights(display_file_path, display_file_path, filename_indices);
+                            let accent_color = colors.accent;
+                            
+                            let mut path_div = div()
+                                .flex()
+                                .flex_row()
+                                .text_xs()
+                                .font_family(typography.font_family_mono)
+                                .pb(px(spacing.padding_xs))
+                                .overflow_x_hidden()
+                                .child(
+                                    div()
+                                        .text_color(rgba((text_muted << 8) | 0x99))
+                                        .child("scriptlet: ")
+                                );
+                            
+                            for (text, is_highlighted) in path_segments {
+                                let color = if is_highlighted {
+                                    rgb(accent_color)
+                                } else {
+                                    rgba((text_muted << 8) | 0x99)
+                                };
+                                path_div = path_div.child(
+                                    div().text_color(color).child(text)
+                                );
+                            }
+                            
+                            panel = panel.child(path_div);
+                        }
                         
                         // Scriptlet name header
                         panel = panel.child(
@@ -8759,6 +8888,52 @@ fn start_hotkey_event_handler(cx: &mut App, window: WindowHandle<ScriptListApp>)
 fn main() {
     logging::init();
     
+    // Write main PID file for orphan detection on crash
+    if let Err(e) = PROCESS_MANAGER.write_main_pid() {
+        logging::log("APP", &format!("Failed to write main PID file: {}", e));
+    } else {
+        logging::log("APP", "Main PID file written");
+    }
+    
+    // Clean up any orphaned processes from a previous crash
+    let orphans_killed = PROCESS_MANAGER.cleanup_orphans();
+    if orphans_killed > 0 {
+        logging::log("APP", &format!("Cleaned up {} orphaned process(es) from previous session", orphans_killed));
+    }
+    
+    // Register signal handlers for graceful shutdown
+    // Using libc directly since ctrlc crate is not available
+    #[cfg(unix)]
+    {
+        extern "C" fn handle_signal(sig: libc::c_int) {
+            logging::log("SIGNAL", &format!("Received signal {}", sig));
+            
+            // Set shutdown flag to prevent new script spawns
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+            
+            // Kill all tracked child processes
+            logging::log("SIGNAL", "Killing all child processes");
+            PROCESS_MANAGER.kill_all_processes();
+            
+            // Remove main PID file
+            PROCESS_MANAGER.remove_main_pid();
+            
+            // For SIGINT/SIGTERM, exit gracefully
+            // Note: We can't call cx.quit() from here since we're in a signal handler
+            // The process will terminate after killing children
+            logging::log("SIGNAL", "Exiting after signal cleanup");
+            std::process::exit(0);
+        }
+        
+        unsafe {
+            // Register handlers for common termination signals
+            libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+            libc::signal(libc::SIGHUP, handle_signal as libc::sighandler_t);
+            logging::log("APP", "Signal handlers registered (SIGINT, SIGTERM, SIGHUP)");
+        }
+    }
+    
     // Initialize clipboard history monitoring (background thread)
     if let Err(e) = clipboard_history::init_clipboard_history() {
         logging::log("APP", &format!("Failed to initialize clipboard history: {}", e));
@@ -9115,6 +9290,9 @@ fn main() {
                             }
                             Some(TrayMenuAction::Quit) => {
                                 logging::log("TRAY", "Quit menu item clicked");
+                                // Clean up processes and PID file before quitting
+                                PROCESS_MANAGER.kill_all_processes();
+                                PROCESS_MANAGER.remove_main_pid();
                                 let _ = cx.update(|cx| {
                                     cx.quit();
                                 });
