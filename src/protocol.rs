@@ -2179,38 +2179,56 @@ pub enum ParseResult {
 ///
 /// # Returns
 /// * `ParseResult` - Either a parsed message, unknown type info, or parse error
+///
+/// # Performance
+/// This function uses single-parse optimization: it parses to serde_json::Value
+/// first, then converts to Message. This avoids double-parsing on unknown types.
 pub fn parse_message_graceful(line: &str) -> ParseResult {
-    // First, try to parse as a known Message
-    match serde_json::from_str::<Message>(line) {
-        Ok(msg) => {
-            debug!(message_id = ?msg.id(), "Successfully parsed message");
-            ParseResult::Ok(msg)
-        }
+    // P1-11 FIX: Single parse - parse to Value first, then convert
+    // This avoids double-parsing: previously we tried Message first, then Value on failure
+    let value: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
         Err(e) => {
-            // Check if this is an unknown message type
-            // Try parsing as generic JSON to extract the "type" field
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(msg_type) = value.get("type").and_then(|t| t.as_str()) {
-                    // Valid JSON with "type" field, but unknown type
-                    warn!(
-                        message_type = %msg_type,
-                        raw_input = %line,
-                        "Unknown message type received - ignoring"
-                    );
-                    return ParseResult::UnknownType {
-                        message_type: msg_type.to_string(),
-                        raw: line.to_string(),
-                    };
-                }
-            }
-            
-            // Not valid JSON or missing type field
             warn!(
                 raw_input = %line,
                 error = %e,
                 "Failed to parse JSONL message - invalid JSON"
             );
-            ParseResult::ParseError(e)
+            return ParseResult::ParseError(e);
+        }
+    };
+
+    // Check for type field and extract it as owned String before consuming value
+    let msg_type: String = match value.get("type").and_then(|t| t.as_str()) {
+        Some(t) => t.to_string(),
+        None => {
+            // Missing type field - create a synthetic error
+            let e = serde_json::from_str::<Message>("{}").unwrap_err();
+            warn!(
+                raw_input = %line,
+                "Failed to parse JSONL message - missing 'type' field"
+            );
+            return ParseResult::ParseError(e);
+        }
+    };
+
+    // Try to convert Value to Message (consumes value)
+    match serde_json::from_value::<Message>(value) {
+        Ok(msg) => {
+            debug!(message_id = ?msg.id(), "Successfully parsed message");
+            ParseResult::Ok(msg)
+        }
+        Err(_) => {
+            // Valid JSON with "type" field, but unknown type
+            warn!(
+                message_type = %msg_type,
+                raw_input = %line,
+                "Unknown message type received - ignoring"
+            );
+            ParseResult::UnknownType {
+                message_type: msg_type,
+                raw: line.to_string(),
+            }
         }
     }
 }
@@ -2229,8 +2247,14 @@ pub fn serialize_message(msg: &Message) -> Result<String, serde_json::Error> {
 /// JSONL reader for streaming/chunked message reads
 ///
 /// Provides utilities to read messages one at a time from a reader.
+///
+/// # Performance
+/// Uses a reusable line buffer to avoid allocating a new String per line read.
+/// The buffer is cleared and reused between reads (P1-12 optimization).
 pub struct JsonlReader<R: Read> {
     reader: BufReader<R>,
+    /// Reusable line buffer - cleared and reused per read to avoid allocations
+    line_buffer: String,
 }
 
 impl<R: Read> JsonlReader<R> {
@@ -2238,6 +2262,8 @@ impl<R: Read> JsonlReader<R> {
     pub fn new(reader: R) -> Self {
         JsonlReader {
             reader: BufReader::new(reader),
+            // Pre-allocate reasonable capacity for typical JSON messages
+            line_buffer: String::with_capacity(1024),
         }
     }
 
@@ -2248,15 +2274,16 @@ impl<R: Read> JsonlReader<R> {
     /// * `Ok(None)` - End of stream
     /// * `Err(e)` - Parse error
     pub fn next_message(&mut self) -> Result<Option<Message>, Box<dyn std::error::Error>> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line)? {
+        // P1-12 FIX: Reuse buffer instead of allocating new String each call
+        self.line_buffer.clear();
+        match self.reader.read_line(&mut self.line_buffer)? {
             0 => {
                 debug!("Reached end of JSONL stream");
                 Ok(None)
             }
             bytes_read => {
                 debug!(bytes_read, "Read line from JSONL stream");
-                let trimmed = line.trim();
+                let trimmed = self.line_buffer.trim();
                 if trimmed.is_empty() {
                     debug!("Skipping empty line in JSONL stream");
                     return self.next_message(); // Skip empty lines
@@ -2279,14 +2306,15 @@ impl<R: Read> JsonlReader<R> {
     /// * `Err(e)` - IO error (not parse errors for unknown types)
     pub fn next_message_graceful(&mut self) -> Result<Option<Message>, std::io::Error> {
         loop {
-            let mut line = String::new();
-            match self.reader.read_line(&mut line)? {
+            // P1-12 FIX: Reuse buffer instead of allocating new String each iteration
+            self.line_buffer.clear();
+            match self.reader.read_line(&mut self.line_buffer)? {
                 0 => {
                     debug!("Reached end of JSONL stream");
                     return Ok(None);
                 }
                 _ => {
-                    let trimmed = line.trim();
+                    let trimmed = self.line_buffer.trim();
                     if trimmed.is_empty() {
                         debug!("Skipping empty line in JSONL stream");
                         continue;

@@ -23,8 +23,10 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use gpui::RenderImage;
+use lru::LruCache;
 use rusqlite::{params, Connection};
 use smallvec::SmallVec;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -34,6 +36,10 @@ use uuid::Uuid;
 
 /// Maximum number of entries to keep in history (LRU eviction)
 const MAX_HISTORY_ENTRIES: usize = 1000;
+
+/// Maximum number of decoded images to keep in memory (LRU eviction)
+/// Each image can be 1-4MB, so 100 images = ~100-400MB max memory
+const MAX_IMAGE_CACHE_ENTRIES: usize = 100;
 
 /// Polling interval for clipboard changes
 const POLL_INTERVAL_MS: u64 = 500;
@@ -79,8 +85,8 @@ static STOP_MONITORING: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 
 /// Global image cache for decoded RenderImages (thread-safe)
 /// Key: entry ID, Value: decoded RenderImage
-static IMAGE_CACHE: OnceLock<Mutex<std::collections::HashMap<String, Arc<RenderImage>>>> =
-    OnceLock::new();
+/// Uses LRU eviction to cap memory usage at ~100-400MB (100 images max)
+static IMAGE_CACHE: OnceLock<Mutex<LruCache<String, Arc<RenderImage>>>> = OnceLock::new();
 
 /// Cached clipboard entries to avoid re-fetching from SQLite on each view open
 /// Updated whenever a new entry is added
@@ -90,8 +96,11 @@ static ENTRY_CACHE: OnceLock<Mutex<Vec<ClipboardEntry>>> = OnceLock::new();
 static CACHE_UPDATED: OnceLock<Mutex<i64>> = OnceLock::new();
 
 /// Get the global image cache, initializing if needed
-fn get_image_cache() -> &'static Mutex<std::collections::HashMap<String, Arc<RenderImage>>> {
-    IMAGE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn get_image_cache() -> &'static Mutex<LruCache<String, Arc<RenderImage>>> {
+    IMAGE_CACHE.get_or_init(|| {
+        let cap = NonZeroUsize::new(MAX_IMAGE_CACHE_ENTRIES).expect("cache size must be non-zero");
+        Mutex::new(LruCache::new(cap))
+    })
 }
 
 /// Get the global entry cache, initializing if needed  
@@ -99,16 +108,27 @@ fn get_entry_cache() -> &'static Mutex<Vec<ClipboardEntry>> {
     ENTRY_CACHE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Get cached image by entry ID
+/// Get cached image by entry ID (updates LRU order)
 pub fn get_cached_image(id: &str) -> Option<Arc<RenderImage>> {
     get_image_cache().lock().ok()?.get(id).cloned()
 }
 
-/// Cache a decoded image
+/// Cache a decoded image (with LRU eviction at MAX_IMAGE_CACHE_ENTRIES limit)
 pub fn cache_image(id: &str, image: Arc<RenderImage>) {
     if let Ok(mut cache) = get_image_cache().lock() {
-        cache.insert(id.to_string(), image);
-        debug!(id = %id, cache_size = cache.len(), "Cached decoded image");
+        // LruCache automatically evicts oldest entry when capacity is exceeded
+        let evicted = cache.len() >= cache.cap().get();
+        cache.put(id.to_string(), image);
+        if evicted {
+            debug!(
+                id = %id,
+                cache_size = cache.len(),
+                max_size = MAX_IMAGE_CACHE_ENTRIES,
+                "Cached decoded image (evicted oldest)"
+            );
+        } else {
+            debug!(id = %id, cache_size = cache.len(), "Cached decoded image");
+        }
     }
 }
 
