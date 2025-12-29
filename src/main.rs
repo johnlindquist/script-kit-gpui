@@ -6233,12 +6233,15 @@ impl ScriptListApp {
                     });
                 let dialog = cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
-                    ActionsDialog::with_path(
+                    let mut dialog = ActionsDialog::with_path(
                         focus_handle,
                         action_callback,
                         &path_info,
                         theme_arc,
-                    )
+                    );
+                    // Hide the search box - PathPrompt already has one in its header
+                    dialog.set_hide_search(true);
+                    dialog
                 });
                 self.actions_dialog = Some(dialog.clone());
                 self.show_actions_popup = true;
@@ -6268,7 +6271,7 @@ impl ScriptListApp {
             .overflow_hidden()
             .rounded(px(design_visual.radius_lg))
             .child(div().size_full().child(entity))
-            // Actions dialog overlays on top (upper-right corner, matching main menu)
+            // Actions dialog overlays on top (upper-right corner, below the header bar)
             .when_some(actions_dialog, |d, dialog| {
                 d.child(
                     div()
@@ -6276,7 +6279,7 @@ impl ScriptListApp {
                         .inset_0()
                         .flex()
                         .justify_end()
-                        .pt(px(8.))
+                        .pt(px(52.))  // Clear the header bar (~44px header + 8px margin)
                         .pr(px(8.))
                         .child(dialog)
                 )
