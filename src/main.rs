@@ -71,7 +71,7 @@ use frecency::FrecencyStore;
 use scripts::get_grouped_results;
 use error::ErrorSeverity;
 use designs::{DesignVariant, render_design_item, get_tokens};
-use components::{Button, ButtonColors, ButtonVariant};
+use components::{Button, ButtonColors, ButtonVariant, Scrollbar, ScrollbarColors};
 
 use std::sync::{Arc, Mutex, mpsc};
 use protocol::{Message, Choice};
@@ -4345,7 +4345,36 @@ impl ScriptListApp {
             let grouped_items_clone = grouped_items.clone();
             let flat_results_clone = flat_results.clone();
             
-            uniform_list(
+            // Calculate scrollbar parameters
+            // Estimate visible items based on typical container height
+            // The actual container height varies, but we use a reasonable estimate
+            let estimated_container_height = 400.0_f32; // Typical visible height
+            let visible_items = (estimated_container_height / LIST_ITEM_HEIGHT) as usize;
+            
+            // Use selected_index as approximate scroll offset
+            // When scrolling, the selected item should be visible, so this gives a reasonable estimate
+            let scroll_offset = if self.selected_index > visible_items.saturating_sub(1) {
+                self.selected_index.saturating_sub(visible_items / 2)
+            } else {
+                0
+            };
+            
+            // Get scrollbar colors from theme or design
+            let scrollbar_colors = if is_default_design {
+                ScrollbarColors::from_theme(theme)
+            } else {
+                ScrollbarColors::from_design(&design_colors)
+            };
+            
+            // Create scrollbar (only visible if content overflows)
+            let scrollbar = Scrollbar::new(
+                item_count,
+                visible_items,
+                scroll_offset,
+                scrollbar_colors,
+            ).container_height(estimated_container_height);
+            
+            let list = uniform_list(
                 "script-list",
                 item_count,
                 cx.processor(move |this, visible_range: std::ops::Range<usize>, _window, cx| {
@@ -4408,8 +4437,20 @@ impl ScriptListApp {
                 }),
             )
             .h_full()
-            .track_scroll(&self.list_scroll_handle)
-            .into_any_element()
+            .track_scroll(&self.list_scroll_handle);
+            
+            // Wrap uniform_list in a relative container with scrollbar overlay
+            // NOTE: The wrapper needs flex + h_full for uniform_list to properly calculate visible range
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .w_full()
+                .h_full()
+                .child(list)
+                .child(scrollbar)
+                .into_any_element()
         };
 
         // Log panel

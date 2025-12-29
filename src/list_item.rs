@@ -406,12 +406,11 @@ impl RenderOnce for ListItem {
         };
         
         // Base container with ID for stateful interactivity
-        // Horizontal padding px(4.) to provide slight inset from window edge
+        // Right padding only - accent bar should be flush with left edge
         let mut container = div()
             .w_full()
             .h(px(LIST_ITEM_HEIGHT))
-            .pl(px(4.)) // Left padding only (accent bar goes inside)
-            .pr(px(4.)) // Right padding
+            .pr(px(4.)) // Right padding only (accent bar flush with left edge)
             .flex()
             .flex_row()
             .items_center()
