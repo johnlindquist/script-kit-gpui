@@ -12,7 +12,7 @@
 //! ```no_run
 //! use script_kit_gpui::keyboard_monitor::{KeyboardMonitor, KeyEvent};
 //!
-//! let monitor = KeyboardMonitor::new(|event: KeyEvent| {
+//! let mut monitor = KeyboardMonitor::new(|event: KeyEvent| {
 //!     println!("Key pressed: {:?}", event.character);
 //! });
 //!

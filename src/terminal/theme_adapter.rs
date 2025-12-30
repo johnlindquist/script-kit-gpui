@@ -618,18 +618,25 @@ mod tests {
     }
 
     #[test]
-    fn test_from_theme_uses_ui_colors_for_ansi() {
+    fn test_from_theme_uses_terminal_colors_for_ansi() {
         let theme = Theme::default();
         let adapter = ThemeAdapter::from_theme(&theme);
 
-        // Green should be mapped from success color
-        assert_eq!(adapter.ansi_color(2), hex_to_rgb(theme.colors.ui.success));
-        // Red should be mapped from error color
-        assert_eq!(adapter.ansi_color(1), hex_to_rgb(theme.colors.ui.error));
-        // Yellow should be mapped from warning color
-        assert_eq!(adapter.ansi_color(3), hex_to_rgb(theme.colors.ui.warning));
-        // Blue should be mapped from info color
-        assert_eq!(adapter.ansi_color(4), hex_to_rgb(theme.colors.ui.info));
+        // ANSI colors are now mapped from theme.colors.terminal (not ui colors)
+        // This provides full terminal color customization via theme.json
+        assert_eq!(adapter.ansi_color(1), hex_to_rgb(theme.colors.terminal.red));
+        assert_eq!(
+            adapter.ansi_color(2),
+            hex_to_rgb(theme.colors.terminal.green)
+        );
+        assert_eq!(
+            adapter.ansi_color(3),
+            hex_to_rgb(theme.colors.terminal.yellow)
+        );
+        assert_eq!(
+            adapter.ansi_color(4),
+            hex_to_rgb(theme.colors.terminal.blue)
+        );
     }
 
     #[test]

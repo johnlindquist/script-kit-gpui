@@ -1133,6 +1133,11 @@ enum PromptMessage {
     ForceSubmit {
         value: serde_json::Value,
     },
+    /// Show HUD overlay message
+    ShowHud {
+        text: String,
+        duration_ms: Option<u64>,
+    },
 }
 
 /// External commands that can be sent to the app via stdin
@@ -1353,6 +1358,21 @@ struct ErrorNotification {
     created_at: std::time::Instant,
 }
 
+/// HUD (Heads-Up Display) state for showing brief overlay messages
+/// Position: Bottom-center (80% down screen)
+/// Duration: 2000ms default
+/// Shape: Pill (40px tall, 120-400px wide)
+/// Style: Dark translucent background
+#[derive(Debug, Clone)]
+struct HudState {
+    /// The text to display
+    text: String,
+    /// When the HUD was shown (for auto-dismiss)
+    show_time: std::time::Instant,
+    /// Duration in milliseconds
+    duration_ms: u64,
+}
+
 struct ScriptListApp {
     scripts: Vec<scripts::Script>,
     scriptlets: Vec<scripts::Scriptlet>,
@@ -1439,6 +1459,14 @@ struct ScriptListApp {
     // Pending path action result - when set, execute this action on the stored path
     // Tuple of (action_id, path_info) to handle the action
     pending_path_action_result: Arc<Mutex<Option<(String, PathInfo)>>>,
+    /// HUD overlay state - brief message displayed at bottom-center
+    hud_state: Option<HudState>,
+    /// Alias registry: lowercase_alias -> script_path (for O(1) lookup)
+    /// Conflict rule: first-registered wins
+    alias_registry: std::collections::HashMap<String, String>,
+    /// Shortcut registry: shortcut -> script_path (for O(1) lookup)
+    /// Conflict rule: first-registered wins
+    shortcut_registry: std::collections::HashMap<String, String>,
 }
 
 /// Result of alias matching - either a Script or Scriptlet
@@ -1647,6 +1675,11 @@ impl ScriptListApp {
             path_actions_search_text: Arc::new(Mutex::new(String::new())),
             // Pending path action result - action_id + path_info to execute
             pending_path_action_result: Arc::new(Mutex::new(None)),
+            // HUD overlay state - starts as None (no HUD shown)
+            hud_state: None,
+            // Alias/shortcut registries - populated in rebuild_registries()
+            alias_registry: std::collections::HashMap::new(),
+            shortcut_registry: std::collections::HashMap::new(),
         }
     }
 
@@ -1762,6 +1795,13 @@ impl ScriptListApp {
             .scroll_to_item(0, ScrollStrategy::Top);
         self.last_scrolled_index = Some(0);
         self.invalidate_filter_cache();
+
+        // Rebuild alias/shortcut registries and show HUD for any conflicts
+        let conflicts = self.rebuild_registries();
+        for conflict in conflicts {
+            self.show_hud(conflict, Some(4000), cx); // 4s for conflict messages
+        }
+
         logging::log(
             "APP",
             &format!(
@@ -3825,6 +3865,9 @@ impl ScriptListApp {
                                     Message::Browse { url } => {
                                         Some(PromptMessage::OpenBrowser { url })
                                     }
+                                    Message::Hud { text, duration_ms } => {
+                                        Some(PromptMessage::ShowHud { text, duration_ms })
+                                    }
                                     other => {
                                         // Get the message type name for user feedback
                                         let msg_type = format!("{:?}", other);
@@ -5305,6 +5348,9 @@ impl ScriptListApp {
                 defer_resize_to_view(view_type, choice_count, cx);
                 cx.notify();
             }
+            PromptMessage::ShowHud { text, duration_ms } => {
+                self.show_hud(text, duration_ms, cx);
+            }
         }
     }
 
@@ -5355,6 +5401,209 @@ impl ScriptListApp {
         // Reset to script list view
         self.reset_to_script_list(cx);
         logging::log("EXEC", "=== Script cancellation complete ===");
+    }
+
+    /// Show a HUD (heads-up display) overlay message
+    /// Position: Bottom-center (80% down screen)
+    /// Duration: 2000ms default, configurable
+    /// Shape: Pill (40px tall, variable width)
+    fn show_hud(&mut self, text: String, duration_ms: Option<u64>, cx: &mut Context<Self>) {
+        let duration = duration_ms.unwrap_or(2000);
+        logging::log(
+            "UI",
+            &format!("Showing HUD: '{}' for {}ms", text, duration),
+        );
+
+        self.hud_state = Some(HudState {
+            text,
+            show_time: std::time::Instant::now(),
+            duration_ms: duration,
+        });
+
+        // Spawn auto-dismiss timer
+        let duration_duration = std::time::Duration::from_millis(duration);
+        cx.spawn(async move |this, cx| {
+            Timer::after(duration_duration).await;
+            let _ = cx.update(|cx| {
+                this.update(cx, |app, cx| {
+                    // Only dismiss if the HUD is still showing the same message
+                    // (prevents race conditions with rapid HUD calls)
+                    if let Some(ref hud) = app.hud_state {
+                        if hud.show_time.elapsed() >= duration_duration {
+                            logging::log("UI", "HUD auto-dismiss");
+                            app.hud_state = None;
+                            cx.notify();
+                        }
+                    }
+                })
+            });
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    /// Render HUD overlay if active
+    /// Returns an overlay element positioned at bottom-center
+    fn render_hud(&self, _cx: &App) -> Option<impl IntoElement> {
+        let hud = self.hud_state.as_ref()?;
+        let colors = &self.theme.colors;
+
+        // Check if HUD has expired (belt-and-suspenders with timer)
+        if hud.show_time.elapsed().as_millis() as u64 > hud.duration_ms {
+            return None;
+        }
+
+        let text = hud.text.clone();
+
+        // HUD pill styling: dark translucent background, rounded, centered text
+        Some(
+            div()
+                .id("hud-overlay")
+                // Position at bottom-center using absolute positioning
+                .absolute()
+                .bottom(px(80.))  // 80px from bottom
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                // The pill itself
+                .child(
+                    div()
+                        .id("hud-pill")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(24.))
+                        .py(px(10.))
+                        .min_w(px(120.))
+                        .max_w(px(400.))
+                        .h(px(40.))
+                        // Dark translucent background (75% opacity = 0xBF)
+                        .bg(rgba(0x000000BF))
+                        .rounded(px(20.))  // Pill shape
+                        // Optional subtle border (30% opacity = 0x4D)
+                        .border_1()
+                        .border_color(rgba((colors.ui.border << 8) | 0x4D))
+                        // Text styling
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(rgb(0xFFFFFF))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(text)
+                        )
+                )
+        )
+    }
+
+    /// Rebuild alias and shortcut registries from current scripts/scriptlets.
+    /// Returns a list of conflict messages (if any) for HUD display.
+    /// Conflict rule: first-registered wins - duplicates are blocked.
+    fn rebuild_registries(&mut self) -> Vec<String> {
+        let mut conflicts = Vec::new();
+        self.alias_registry.clear();
+        self.shortcut_registry.clear();
+
+        // Register script aliases
+        for script in &self.scripts {
+            if let Some(ref alias) = script.alias {
+                let alias_lower = alias.to_lowercase();
+                if let Some(existing_path) = self.alias_registry.get(&alias_lower) {
+                    conflicts.push(format!(
+                        "Alias conflict: '{}' already used by {}",
+                        alias,
+                        std::path::Path::new(existing_path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| existing_path.clone())
+                    ));
+                    logging::log(
+                        "ALIAS",
+                        &format!(
+                            "Conflict: alias '{}' in {} blocked (already used by {})",
+                            alias,
+                            script.path.display(),
+                            existing_path
+                        ),
+                    );
+                } else {
+                    self.alias_registry
+                        .insert(alias_lower, script.path.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        // Register scriptlet aliases
+        for scriptlet in &self.scriptlets {
+            if let Some(ref alias) = scriptlet.alias {
+                let alias_lower = alias.to_lowercase();
+                if let Some(existing_path) = self.alias_registry.get(&alias_lower) {
+                    conflicts.push(format!(
+                        "Alias conflict: '{}' already used by {}",
+                        alias,
+                        std::path::Path::new(existing_path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| existing_path.clone())
+                    ));
+                    logging::log(
+                        "ALIAS",
+                        &format!(
+                            "Conflict: alias '{}' in {} blocked (already used by {})",
+                            alias, scriptlet.name, existing_path
+                        ),
+                    );
+                } else {
+                    let path = scriptlet
+                        .file_path
+                        .clone()
+                        .unwrap_or_else(|| scriptlet.name.clone());
+                    self.alias_registry.insert(alias_lower, path);
+                }
+            }
+
+            // Register scriptlet shortcuts
+            if let Some(ref shortcut) = scriptlet.shortcut {
+                let shortcut_lower = shortcut.to_lowercase();
+                if let Some(existing_path) = self.shortcut_registry.get(&shortcut_lower) {
+                    conflicts.push(format!(
+                        "Shortcut conflict: '{}' already used by {}",
+                        shortcut,
+                        std::path::Path::new(existing_path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| existing_path.clone())
+                    ));
+                    logging::log(
+                        "SHORTCUT",
+                        &format!(
+                            "Conflict: shortcut '{}' in {} blocked (already used by {})",
+                            shortcut, scriptlet.name, existing_path
+                        ),
+                    );
+                } else {
+                    let path = scriptlet
+                        .file_path
+                        .clone()
+                        .unwrap_or_else(|| scriptlet.name.clone());
+                    self.shortcut_registry.insert(shortcut_lower, path);
+                }
+            }
+        }
+
+        logging::log(
+            "REGISTRY",
+            &format!(
+                "Rebuilt registries: {} aliases, {} shortcuts, {} conflicts",
+                self.alias_registry.len(),
+                self.shortcut_registry.len(),
+                conflicts.len()
+            ),
+        );
+
+        conflicts
     }
 
     /// Reset all state and return to the script list view.
@@ -5674,7 +5923,7 @@ impl Render for ScriptListApp {
         // but also need to match on self.current_view. Future optimization: refactor render
         // methods to take &str/&[T] references instead of owned values.
         let current_view = self.current_view.clone();
-        match current_view {
+        let view_content = match current_view {
             AppView::ScriptList => self.render_script_list(cx),
             AppView::ActionsDialog => self.render_actions_dialog(cx),
             AppView::ArgPrompt {
@@ -5712,7 +5961,22 @@ impl Render for ScriptListApp {
                 filter,
                 selected_index,
             } => self.render_design_gallery(filter, selected_index, cx),
+        };
+
+        // Wrap view content in container for HUD overlay
+        // HUD is shown at bottom-center across all views
+        let mut container = div()
+            .relative()
+            .w_full()
+            .h_full()
+            .child(view_content);
+
+        // Add HUD overlay if active (bottom-center)
+        if let Some(hud) = self.render_hud(cx) {
+            container = container.child(hud);
         }
+
+        container
     }
 }
 
@@ -7441,6 +7705,8 @@ impl ScriptListApp {
         if let Some(toasts) = self.render_toasts(cx) {
             container = container.child(toasts);
         }
+
+        // Note: HUD overlay is added at the top-level render() method for all views
 
         container.into_any_element()
     }
