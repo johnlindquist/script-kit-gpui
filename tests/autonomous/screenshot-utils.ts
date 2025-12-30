@@ -50,38 +50,38 @@ function generateTimestamp(): string {
  */
 export async function saveScreenshot(data: string, name: string): Promise<string> {
   await ensureScreenshotDir();
-  
+
   // Sanitize name for filesystem
   const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '-');
   const timestamp = generateTimestamp();
   const filename = `${safeName}-${timestamp}.png`;
   const filepath = path.resolve(process.cwd(), SCREENSHOT_DIR, filename);
-  
+
   // Decode base64 and write to file
   // Use Bun's Buffer which is globally available
   const buffer = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
   await fs.writeFile(filepath, buffer);
-  
+
   return filepath;
 }
 
 /**
  * Parse PNG header to get image dimensions
  * Works with both base64 strings and file paths
- * 
+ *
  * PNG format:
  * - Magic bytes (8): 89 50 4E 47 0D 0A 1A 0A
  * - IHDR chunk length (4): always 0x0000000D (13)
  * - IHDR chunk type (4): "IHDR"
  * - Width (4): big-endian uint32 at offset 16
  * - Height (4): big-endian uint32 at offset 20
- * 
+ *
  * @param input - Base64-encoded PNG or file path
  * @returns {width, height} in pixels
  */
 export async function getImageDimensions(input: string): Promise<{ width: number; height: number }> {
   let bytes: Uint8Array;
-  
+
   // Determine if input is a file path or base64 data
   if (input.includes('/') || input.includes('\\') || input.endsWith('.png')) {
     // It's a file path - read only the first 24 bytes (header)
@@ -92,7 +92,7 @@ export async function getImageDimensions(input: string): Promise<{ width: number
     const decoded = atob(input.slice(0, 48)); // 48 base64 chars = 36 bytes, enough for header
     bytes = Uint8Array.from(decoded, (c) => c.charCodeAt(0));
   }
-  
+
   // Validate PNG magic bytes
   const PNG_MAGIC = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
   for (let i = 0; i < PNG_MAGIC.length; i++) {
@@ -100,13 +100,13 @@ export async function getImageDimensions(input: string): Promise<{ width: number
       throw new Error(`Invalid PNG file: magic bytes mismatch at position ${i}`);
     }
   }
-  
+
   // Read width and height from IHDR chunk (big-endian uint32)
   // Width is at bytes 16-19, Height is at bytes 20-23
   const dataView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const width = dataView.getUint32(16, false); // false = big-endian
   const height = dataView.getUint32(20, false);
-  
+
   return { width, height };
 }
 
@@ -140,11 +140,11 @@ export async function analyzeContentFill(
     const dimensions = await getImageDimensions(screenshotPath);
     const heightDiff = Math.abs(dimensions.height - expectedHeight);
     const pass = heightDiff <= tolerance;
-    
+
     const emptySpacePercent = dimensions.height > expectedHeight
       ? ((dimensions.height - expectedHeight) / dimensions.height) * 100
       : 0;
-    
+
     return {
       pass,
       message: pass
@@ -184,25 +184,25 @@ export function generateReport(
     `Screenshot: ${screenshotPath}`,
     `Result: ${analysis.message}`,
   ];
-  
+
   if (analysis.actualWidth !== undefined && analysis.actualHeight !== undefined) {
     lines.push(`Dimensions: ${analysis.actualWidth}x${analysis.actualHeight}px`);
   }
-  
+
   if (analysis.expectedHeight !== undefined) {
     lines.push(`Expected Height: ${analysis.expectedHeight}px`);
   }
-  
+
   if (analysis.heightDifference !== undefined) {
     lines.push(`Height Difference: ${analysis.heightDifference}px`);
   }
-  
+
   if (analysis.emptySpacePercent !== undefined && analysis.emptySpacePercent > 0) {
     lines.push(`Empty Space: ${analysis.emptySpacePercent}%`);
   }
-  
+
   lines.push(`══════════════════════════════════════════════════════`);
-  
+
   return lines.join('\n');
 }
 
@@ -221,22 +221,22 @@ export async function screenshotsMatch(
       fs.readFile(path1),
       fs.readFile(path2),
     ]);
-    
+
     const bytes1 = new Uint8Array(buffer1);
     const bytes2 = new Uint8Array(buffer2);
-    
+
     // Quick length check
     if (bytes1.length !== bytes2.length) {
       return false;
     }
-    
+
     // Byte-by-byte comparison
     for (let i = 0; i < bytes1.length; i++) {
       if (bytes1[i] !== bytes2[i]) {
         return false;
       }
     }
-    
+
     return true;
   } catch {
     return false;
@@ -258,7 +258,7 @@ export async function getScreenshotStats(screenshotPath: string): Promise<{
     getImageDimensions(screenshotPath),
     fs.stat(screenshotPath),
   ]);
-  
+
   return {
     width: dimensions.width,
     height: dimensions.height,
@@ -273,11 +273,11 @@ export async function getScreenshotStats(screenshotPath: string): Promise<{
  */
 export async function listScreenshots(): Promise<string[]> {
   const dir = path.resolve(process.cwd(), SCREENSHOT_DIR);
-  
+
   try {
     const files = await fs.readdir(dir);
     const pngFiles = files.filter((f: string) => f.endsWith('.png'));
-    
+
     // Get stats for each file to sort by mtime
     const filesWithStats = await Promise.all(
       pngFiles.map(async (file: string) => {
@@ -286,12 +286,12 @@ export async function listScreenshots(): Promise<string[]> {
         return { filepath, mtime: stat.mtime };
       })
     );
-    
+
     // Sort by mtime, newest first
-    filesWithStats.sort((a: { mtime: Date }, b: { mtime: Date }) => 
+    filesWithStats.sort((a: { mtime: Date }, b: { mtime: Date }) =>
       b.mtime.getTime() - a.mtime.getTime()
     );
-    
+
     return filesWithStats.map((f: { filepath: string }) => f.filepath);
   } catch {
     return [];
@@ -305,14 +305,14 @@ export async function listScreenshots(): Promise<string[]> {
  */
 export async function cleanupOldScreenshots(keepCount: number = 10): Promise<number> {
   const screenshots = await listScreenshots();
-  
+
   if (screenshots.length <= keepCount) {
     return 0;
   }
-  
+
   const toDelete = screenshots.slice(keepCount);
   await Promise.all(toDelete.map((f: string) => fs.unlink(f)));
-  
+
   return toDelete.length;
 }
 
@@ -327,11 +327,11 @@ export async function getScreenshotDirectoryStats(): Promise<{
   newest: string;
 }> {
   const dir = path.resolve(process.cwd(), SCREENSHOT_DIR);
-  
+
   try {
     const files = await fs.readdir(dir);
     const pngFiles = files.filter((f: string) => f.endsWith('.png'));
-    
+
     if (pngFiles.length === 0) {
       return {
         count: 0,
@@ -340,7 +340,7 @@ export async function getScreenshotDirectoryStats(): Promise<{
         newest: '',
       };
     }
-    
+
     // Get stats for each file
     const filesWithStats = await Promise.all(
       pngFiles.map(async (file: string) => {
@@ -349,14 +349,14 @@ export async function getScreenshotDirectoryStats(): Promise<{
         return { filepath, mtime: stat.mtime, size: stat.size };
       })
     );
-    
+
     // Sort by mtime to find oldest and newest
-    filesWithStats.sort((a: { mtime: Date }, b: { mtime: Date }) => 
+    filesWithStats.sort((a: { mtime: Date }, b: { mtime: Date }) =>
       a.mtime.getTime() - b.mtime.getTime()
     );
-    
+
     const totalSize = filesWithStats.reduce((sum: number, f: { size: number }) => sum + f.size, 0);
-    
+
     return {
       count: filesWithStats.length,
       totalSize,
@@ -378,7 +378,7 @@ export async function getScreenshotDirectoryStats(): Promise<{
 // ============================================================================
 
 // Directory for baseline screenshots
-const BASELINE_DIR = 'test-screenshots/baselines';
+const BASELINE_DIR = '.test-screenshots/baselines';
 
 /**
  * Detailed diff result with additional metadata
@@ -445,19 +445,19 @@ export async function baselineExists(testName: string): Promise<boolean> {
  */
 export async function createBaseline(testName: string, screenshotPath: string): Promise<string> {
   await ensureBaselineDir();
-  
+
   const baselinePath = getBaselinePath(testName);
-  
+
   // Copy screenshot to baseline location
   const data = await fs.readFile(screenshotPath);
   await fs.writeFile(baselinePath, data);
-  
+
   return baselinePath;
 }
 
 /**
  * Compare a screenshot against its baseline with detailed results
- * 
+ *
  * @param testName - Name of the test (determines baseline filename)
  * @param actualPath - Path to the actual screenshot to compare
  * @param options - Comparison options
@@ -474,10 +474,10 @@ export async function screenshotsDiff(
     generateDiffImage = true,
     autoCreateBaseline = false,
   } = options;
-  
+
   const baselinePath = getBaselinePath(testName);
   const hasBaseline = await baselineExists(testName);
-  
+
   // If no baseline exists
   if (!hasBaseline) {
     if (autoCreateBaseline) {
@@ -496,7 +496,7 @@ export async function screenshotsDiff(
         dimensionsMatch: true,
       };
     }
-    
+
     return {
       testName,
       baselinePath,
@@ -512,17 +512,17 @@ export async function screenshotsDiff(
       error: `No baseline exists for test "${testName}". Create one with createBaseline() or set autoCreateBaseline: true`,
     };
   }
-  
+
   // Compare against baseline
   const diffResult = await compareImages(baselinePath, actualPath, {
     tolerance,
     thresholdPercent,
     generateDiffImage,
-    diffImagePath: generateDiffImage 
+    diffImagePath: generateDiffImage
       ? path.resolve(process.cwd(), BASELINE_DIR, `${testName.replace(/[^a-zA-Z0-9_-]/g, '-')}-diff.png`)
       : undefined,
   });
-  
+
   return {
     testName,
     baselinePath,
@@ -535,7 +535,7 @@ export async function screenshotsDiff(
 /**
  * Assert that a screenshot matches its baseline within tolerance
  * Throws an error if images don't match, suitable for test assertions
- * 
+ *
  * @param testName - Name of the test
  * @param actualPath - Path to the actual screenshot
  * @param options - Comparison options
@@ -550,12 +550,12 @@ export async function assertVisuallySimilar(
     thresholdPercent: 0.1, // Default 0.1% tolerance
     ...options,
   });
-  
+
   if (result.isNewBaseline) {
     console.log(`[BASELINE] Created new baseline for "${testName}": ${result.baselinePath}`);
     return;
   }
-  
+
   if (!result.match) {
     const details = [
       `Visual regression detected for "${testName}"`,
@@ -563,15 +563,15 @@ export async function assertVisuallySimilar(
       `Baseline: ${result.baselinePath}`,
       `Actual: ${result.actualPath}`,
     ];
-    
+
     if (result.diffImagePath) {
       details.push(`Diff image: ${result.diffImagePath}`);
     }
-    
+
     if (result.error) {
       details.push(`Error: ${result.error}`);
     }
-    
+
     throw new Error(details.join('\n'));
   }
 }
@@ -604,11 +604,11 @@ export function formatDiffResultJSONL(result: DetailedDiffResult): string {
 export async function listBaselines(): Promise<Array<{ testName: string; path: string }>> {
   await ensureBaselineDir();
   const dir = path.resolve(process.cwd(), BASELINE_DIR);
-  
+
   try {
     const files = await fs.readdir(dir);
     const pngFiles = files.filter((f: string) => f.endsWith('.png') && !f.endsWith('-diff.png'));
-    
+
     return pngFiles.map((f: string) => ({
       testName: f.replace('.png', ''),
       path: path.join(dir, f),

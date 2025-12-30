@@ -285,7 +285,7 @@ const screenshot = await captureScreenshot();
 console.error(`[VISUAL] Captured: ${screenshot.width}x${screenshot.height}`);
 
 // Save screenshot
-const dir = join(process.cwd(), 'test-screenshots');
+const dir = join(process.cwd(), '.test-screenshots');
 mkdirSync(dir, { recursive: true });
 
 const filename = `${FEATURE_NAME}-${Date.now()}.png`;
@@ -301,12 +301,12 @@ process.exit(0);
 
 ```bash
 # Create baseline
-mv test-screenshots/feature-name-xxx.png test-screenshots/baselines/feature-name.png
+mv .test-screenshots/feature-name-xxx.png .test-screenshots/baselines/feature-name.png
 
 # Compare to baseline
 bun run tests/autonomous/compare-baseline.ts \
-  test-screenshots/current.png \
-  test-screenshots/baselines/expected.png
+  .test-screenshots/current.png \
+  .test-screenshots/baselines/expected.png
 ```
 
 ### Tolerance Configuration

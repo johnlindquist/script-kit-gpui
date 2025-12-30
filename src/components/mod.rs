@@ -11,6 +11,8 @@
 //! - [`FormTextField`] - Text input for text/password/email/number types
 //! - [`FormTextArea`] - Multi-line text input
 //! - [`FormCheckbox`] - Checkbox with label
+//! - [`PromptHeader`] - Header component with search input, buttons, and logo
+//! - [`PromptContainer`] - Container component for consistent prompt window layout
 //!
 //! # Usage
 //!
@@ -53,6 +55,8 @@
 
 pub mod button;
 pub mod form_fields;
+pub mod prompt_container;
+pub mod prompt_header;
 pub mod scrollbar;
 pub mod toast;
 
@@ -65,3 +69,7 @@ pub use scrollbar::{Scrollbar, ScrollbarColors, SCROLLBAR_WIDTH, MIN_THUMB_HEIGH
 // These re-exports form the public API - allow unused since not all are used in every crate
 #[allow(unused_imports)]
 pub use toast::{Toast, ToastAction, ToastColors, ToastVariant};
+#[allow(unused_imports)]
+pub use prompt_header::{PromptHeader, PromptHeaderColors, PromptHeaderConfig};
+#[allow(unused_imports)]
+pub use prompt_container::{PromptContainer, PromptContainerColors, PromptContainerConfig};

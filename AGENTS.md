@@ -60,7 +60,7 @@ cargo check && cargo clippy --all-targets -- -D warnings && cargo test
 | **Verification Gate** | Always run `cargo check && cargo clippy && cargo test` before commits |
 | **SDK Preload** | Test scripts import `../../scripts/kit-sdk`; runtime uses embedded SDK extracted to `~/.kenv/sdk/` |
 | **Arrow Key Names** | ALWAYS match BOTH: `"up" \| "arrowup"`, `"down" \| "arrowdown"`, `"left" \| "arrowleft"`, `"right" \| "arrowright"` |
-| **Visual Testing** | Use stdin JSON protocol + `captureScreenshot()` SDK function, save to `./test-screenshots/`, then read the file |
+| **Visual Testing** | Use stdin JSON protocol + `captureScreenshot()` SDK function, save to `./.test-screenshots/`, then read the file |
 | **AI Log Mode** | Set `SCRIPT_KIT_AI_LOG=1` for token-efficient compact logs (see below) |
 | **Config Settings** | Font sizes and padding are configurable via `~/.kenv/config.ts` - use `config.get_*()` helpers |
 
@@ -185,7 +185,7 @@ echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-editor-height.ts"}' | .
 
 **The workflow:**
 1. Create a test script that uses `captureScreenshot()` to capture the UI state
-2. Save the screenshot to `./test-screenshots/` using Node's `fs` module
+2. Save the screenshot to `./.test-screenshots/` using Node's `fs` module
 3. Run the test via stdin JSON protocol
 4. Read the resulting screenshot file to verify the UI
 
@@ -206,7 +206,7 @@ await new Promise(resolve => setTimeout(resolve, 500));
 const screenshot = await captureScreenshot();
 console.error(`Screenshot: ${screenshot.width}x${screenshot.height}`);
 
-// Save to ./test-screenshots/
+// Save to ./.test-screenshots/
 const screenshotDir = join(process.cwd(), 'test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 
@@ -225,7 +225,7 @@ process.exit(0);
 # Build and run via stdin JSON protocol
 cargo build && echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-my-layout.ts"}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
 
-# The screenshot will be saved to ./test-screenshots/test-my-layout-<timestamp>.png
+# The screenshot will be saved to ./.test-screenshots/test-my-layout-<timestamp>.png
 # Read the file to analyze the UI state
 ```
 
@@ -237,7 +237,7 @@ cargo build && echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-my-layou
 
 **Screenshot analysis workflow:**
 1. Write a test script that sets up UI state and calls `captureScreenshot()`
-2. Save the base64 PNG data to `./test-screenshots/`
+2. Save the base64 PNG data to `./.test-screenshots/`
 3. Run via stdin JSON: `echo '{"type":"run",...}' | ./target/debug/script-kit-gpui`
 4. Read the resulting screenshot file to verify actual vs expected
 5. If broken, fix code and repeat
@@ -282,8 +282,8 @@ echo '{"type": "run", "path": "'$(pwd)'/tests/smoke/test-editor-height-visual.ts
 | "I can't test this without manual interaction" | Use stdin protocol, add logging, verify in output |
 | "The user should test this" | YOU must test it using the stdin protocol |
 | Committing without running the test | Run `cargo build && echo '...' \| ./target/debug/...` |
-| "I can't see what the UI looks like" | Write test script with `captureScreenshot()`, save to `./test-screenshots/`, read the file |
-| Guessing at layout issues | Use `captureScreenshot()` in test, save PNG to `./test-screenshots/`, read and analyze |
+| "I can't see what the UI looks like" | Write test script with `captureScreenshot()`, save to `./.test-screenshots/`, read the file |
+| Guessing at layout issues | Use `captureScreenshot()` in test, save PNG to `./.test-screenshots/`, read and analyze |
 | Running without `SCRIPT_KIT_AI_LOG=1` | ALWAYS use AI log mode to save tokens |
 
 ### Why This Matters

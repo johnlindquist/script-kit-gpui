@@ -184,6 +184,6 @@ echo '{"type": "triggerBuiltin", "name": "design-gallery"}' | SCRIPT_KIT_AI_LOG=
 
 # Visual verification
 # 1. Create test script with captureScreenshot()
-# 2. Save to ./test-screenshots/
+# 2. Save to ./.test-screenshots/
 # 3. Read file to verify
 ```

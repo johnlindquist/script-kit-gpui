@@ -200,7 +200,7 @@ cargo build && echo '{"type":"run","path":"'$(pwd)'/tests/smoke/hello-world.ts"}
 # Capture screenshot for visual test
 cargo build && echo '{"type":"run","path":"'$(pwd)'/tests/smoke/test-visual-baseline.ts"}' | ./target/debug/script-kit-gpui 2>&1
 
-# Screenshots saved to ./test-screenshots/
+# Screenshots saved to ./.test-screenshots/
 ```
 
 ---

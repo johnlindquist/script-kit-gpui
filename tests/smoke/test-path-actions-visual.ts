@@ -24,7 +24,7 @@ console.error('[SMOKE] Path prompt displayed, capturing initial screenshot');
 
 // Capture initial state
 const screenshot1 = await captureScreenshot();
-const dir = join(process.cwd(), 'test-screenshots');
+const dir = join(process.cwd(), '.test-screenshots');
 mkdirSync(dir, { recursive: true });
 
 const path1 = join(dir, 'path-actions-initial-' + Date.now() + '.png');

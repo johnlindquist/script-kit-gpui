@@ -15,10 +15,10 @@ console.error('[TEST] Capturing screenshot of Design Gallery view');
 try {
   const screenshot = await captureScreenshot();
   console.error(`[TEST] Screenshot captured: ${screenshot.width}x${screenshot.height}`);
-  
-  const screenshotDir = join(process.cwd(), 'test-screenshots');
+
+  const screenshotDir = join(process.cwd(), '.test-screenshots');
   mkdirSync(screenshotDir, { recursive: true });
-  
+
   const filename = `design-gallery-view-${Date.now()}.png`;
   const filepath = join(screenshotDir, filename);
   writeFileSync(filepath, Buffer.from(screenshot.data, 'base64'));

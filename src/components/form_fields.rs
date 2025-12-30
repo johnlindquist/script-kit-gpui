@@ -157,9 +157,9 @@ pub struct FormTextField {
     /// Pre-computed colors
     colors: FormFieldColors,
     /// Current text value
-    value: String,
+    pub value: String,
     /// Cursor position in the text
-    cursor_position: usize,
+    pub cursor_position: usize,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
     /// Whether to mask the text (for password fields)
@@ -201,6 +201,15 @@ impl FormTextField {
         self.cursor_position = value.len();
         self.value = value.clone();
         self.state.set_value(value);
+    }
+
+    /// Get the focus handle for this text field
+    ///
+    /// This allows parent components to delegate focus to this field.
+    /// Used by FormPromptState to implement the Focusable trait by returning
+    /// the child's focus handle instead of its own, preventing focus stealing.
+    pub fn get_focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
     }
 
     /// Handle text input
@@ -273,7 +282,7 @@ impl Focusable for FormTextField {
 }
 
 impl Render for FormTextField {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         let is_focused = self.focus_handle.is_focused(window);
         let display_text = self.display_text();
@@ -281,6 +290,9 @@ impl Render for FormTextField {
         let label = self.field.label.clone();
         let cursor_pos = self.cursor_position;
         let has_value = !self.value.is_empty();
+        
+        // Log focus state for debugging
+        crate::logging::log("FIELD", &format!("TextField[{}] render: is_focused={}, value='{}'", self.field.name, is_focused, self.value));
 
         // Calculate border and background based on focus
         let border_color = if is_focused {
@@ -295,6 +307,26 @@ impl Render for FormTextField {
         };
 
         let field_name = self.field.name.clone();
+        let field_name_for_log = field_name.clone();
+        
+        // Keyboard handler for text input
+        let handle_key = cx.listener(move |this: &mut Self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+            let key = event.keystroke.key.as_str();
+            crate::logging::log("FIELD", &format!("TextField[{}] key: '{}' (key_char: {:?})", field_name_for_log, key, event.keystroke.key_char));
+            
+            // First handle special keys (backspace, delete, arrows, etc.)
+            this.handle_key_down(event, cx);
+            
+            // Then handle printable character input
+            if let Some(ref key_char) = event.keystroke.key_char {
+                if let Some(ch) = key_char.chars().next() {
+                    if !ch.is_control() {
+                        crate::logging::log("FIELD", &format!("TextField[{}] inserting char: '{}'", field_name_for_log, ch));
+                        this.handle_input(&ch.to_string(), cx);
+                    }
+                }
+            }
+        });
 
         // Build cursor element
         let cursor_element = div()
@@ -349,18 +381,20 @@ impl Render for FormTextField {
             content
         };
 
-        // Build the main container
+        // Build the main container - horizontal layout with label beside input
         let mut container = div()
             .id(ElementId::Name(format!("form-field-{}", field_name).into()))
             .flex()
-            .flex_col()
-            .gap(px(4.))
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
             .w_full();
 
-        // Add label if present
+        // Add label if present - fixed width for alignment
         if let Some(label_text) = label {
             container = container.child(
                 div()
+                    .w(px(120.))
                     .text_sm()
                     .text_color(rgb(colors.label))
                     .font_weight(FontWeight::MEDIUM)
@@ -368,14 +402,24 @@ impl Render for FormTextField {
             );
         }
 
-        // Add input container
+        // Add input container - fills remaining space
+        // Handle click to focus this field
+        let focus_handle_for_click = self.focus_handle.clone();
+        let handle_click = cx.listener(move |_this: &mut Self, _event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
+            crate::logging::log("FIELD", "TextField clicked - focusing");
+            focus_handle_for_click.focus(window, cx);
+        });
+        
         container.child(
             div()
+                .id(ElementId::Name(format!("input-{}", field_name).into()))
                 .track_focus(&self.focus_handle)
+                .on_key_down(handle_key)
+                .on_click(handle_click)
                 .flex()
                 .flex_row()
                 .items_center()
-                .w_full()
+                .flex_1()
                 .h(px(36.))
                 .px(px(12.))
                 .bg(bg_color)
@@ -410,9 +454,9 @@ pub struct FormTextArea {
     /// Pre-computed colors
     colors: FormFieldColors,
     /// Current text value (lines)
-    value: String,
+    pub value: String,
     /// Cursor position in the text
-    cursor_position: usize,
+    pub cursor_position: usize,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
     /// Number of visible rows
@@ -453,6 +497,15 @@ impl FormTextArea {
         self.cursor_position = value.len();
         self.value = value.clone();
         self.state.set_value(value);
+    }
+
+    /// Get the focus handle for this text area
+    ///
+    /// This allows parent components to delegate focus to this field.
+    /// Used by FormPromptState to implement the Focusable trait by returning
+    /// the child's focus handle instead of its own, preventing focus stealing.
+    pub fn get_focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
     }
 
     /// Handle text input
@@ -522,7 +575,7 @@ impl Focusable for FormTextArea {
 }
 
 impl Render for FormTextArea {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         let is_focused = self.focus_handle.is_focused(window);
         let display_text = self.value.clone();
@@ -547,6 +600,21 @@ impl Render for FormTextArea {
         let height = (rows as f32) * 24.0 + 16.0; // Add padding
 
         let field_name = self.field.name.clone();
+        
+        // Keyboard handler for text input
+        let handle_key = cx.listener(|this: &mut Self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+            // First handle special keys (backspace, delete, arrows, etc.)
+            this.handle_key_down(event, cx);
+            
+            // Then handle printable character input
+            if let Some(ref key_char) = event.keystroke.key_char {
+                if let Some(ch) = key_char.chars().next() {
+                    if !ch.is_control() {
+                        this.handle_input(&ch.to_string(), cx);
+                    }
+                }
+            }
+        });
 
         // Build text content
         let text_content: Div = if has_value {
@@ -563,18 +631,21 @@ impl Render for FormTextArea {
                 .child(placeholder)
         };
 
-        // Build the main container
+        // Build the main container - horizontal layout with label beside textarea
         let mut container = div()
             .id(ElementId::Name(format!("form-textarea-{}", field_name).into()))
             .flex()
-            .flex_col()
-            .gap(px(4.))
+            .flex_row()
+            .items_start()  // Align label to top of textarea
+            .gap(px(12.))
             .w_full();
 
-        // Add label if present
+        // Add label if present - fixed width for alignment
         if let Some(label_text) = label {
             container = container.child(
                 div()
+                    .w(px(120.))
+                    .pt(px(8.))  // Align with textarea padding
                     .text_sm()
                     .text_color(rgb(colors.label))
                     .font_weight(FontWeight::MEDIUM)
@@ -582,13 +653,15 @@ impl Render for FormTextArea {
             );
         }
 
-        // Add input container
+        // Add input container - fills remaining space
         container.child(
             div()
+                .id(ElementId::Name(format!("textarea-{}", field_name).into()))
                 .track_focus(&self.focus_handle)
+                .on_key_down(handle_key)
                 .flex()
                 .flex_col()
-                .w_full()
+                .flex_1()
                 .h(px(height))
                 .px(px(12.))
                 .py(px(8.))
@@ -693,10 +766,17 @@ impl Render for FormCheckbox {
         };
 
         let field_name = self.field.name.clone();
+        
+        // Keyboard handler for Space key to toggle
+        let handle_key = cx.listener(|this: &mut Self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+            let key = event.keystroke.key.as_str();
+            if key == "space" || key == " " {
+                this.toggle(cx);
+            }
+        });
 
         // Build checkbox box with optional checkmark
         let mut checkbox_box = div()
-            .track_focus(&self.focus_handle)
             .flex()
             .items_center()
             .justify_center()
@@ -718,24 +798,38 @@ impl Render for FormCheckbox {
             );
         }
 
+        // Main container - horizontal layout consistent with other form fields
         div()
             .id(ElementId::Name(format!("form-checkbox-{}", field_name).into()))
+            .track_focus(&self.focus_handle)
+            .on_key_down(handle_key)
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.))
+            .gap(px(12.))
+            .w_full()
             .cursor_pointer()
             .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                 this.toggle(cx);
             }))
-            // Checkbox box
-            .child(checkbox_box)
-            // Label
+            // Empty label area for alignment with other fields
+            .child(div().w(px(120.)))
+            // Checkbox and label group
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(colors.text))
-                    .child(label)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    // Checkbox box
+                    .child(checkbox_box)
+                    // Label
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(colors.text))
+                            .child(label)
+                    )
             )
     }
 }

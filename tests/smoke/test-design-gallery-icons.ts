@@ -17,8 +17,8 @@ await new Promise(resolve => setTimeout(resolve, 500));
 // Capture screenshot
 const screenshot = await captureScreenshot();
 
-// Save to ./test-screenshots/
-const screenshotDir = join(process.cwd(), 'test-screenshots');
+// Save to ./.test-screenshots/
+const screenshotDir = join(process.cwd(), '.test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 
 const filepath = join(screenshotDir, 'design-gallery-icons.png');

@@ -7,8 +7,8 @@
 //! - Submit selected path
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, svg, uniform_list, Context, FocusHandle, Focusable, Render, 
-    SharedString, UniformListScrollHandle, Window,
+    div, prelude::*, uniform_list, Context, FocusHandle, Focusable, Render, 
+    UniformListScrollHandle, Window,
 };
 use std::sync::{Arc, Mutex};
 use std::path::Path;
@@ -17,7 +17,10 @@ use crate::logging;
 use crate::theme;
 use crate::designs::{DesignVariant, get_tokens};
 use crate::list_item::{ListItem, ListItemColors, IconKind};
-use crate::components::button::{Button, ButtonVariant, ButtonColors};
+use crate::components::{
+    PromptHeader, PromptHeaderColors, PromptHeaderConfig,
+    PromptContainer, PromptContainerColors, PromptContainerConfig,
+};
 
 /// Callback for prompt submission
 /// Signature: (id: String, value: Option<String>)
@@ -415,7 +418,6 @@ impl Render for PathPrompt {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = get_tokens(self.design_variant);
         let design_colors = tokens.colors();
-        let spacing = tokens.spacing();
 
         let handle_key = cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
             let key_str = event.keystroke.key.to_lowercase();
@@ -472,20 +474,6 @@ impl Render for PathPrompt {
             ListItemColors::from_design(&design_colors)
         };
 
-        let (main_bg, text_color, text_muted) = if self.design_variant == DesignVariant::Default {
-            (
-                rgb(self.theme.colors.background.main), 
-                rgb(self.theme.colors.text.primary),
-                rgb(self.theme.colors.text.secondary),
-            )
-        } else {
-            (
-                rgb(design_colors.background), 
-                rgb(design_colors.text_primary),
-                rgb(design_colors.text_secondary),
-            )
-        };
-
         // Clone values needed for the closure
         let filtered_count = self.filtered_entries.len();
         let selected_index = self.selected_index;
@@ -531,32 +519,6 @@ impl Render for PathPrompt {
         .flex_1()
         .w_full();
 
-        // Search box showing path prefix + filter text + cursor
-        // Layout: /Users/john/Documents/|search_text▎ [Select ↵] | [Actions ⌘K] | [Logo]
-        let path_prefix = format!("{}/", self.current_path.trim_end_matches('/'));
-        let filter_is_empty = self.filter_text.is_empty();
-        
-        // Get accent color for buttons and logo
-        let accent_color = if self.design_variant == DesignVariant::Default {
-            self.theme.colors.accent.selected
-        } else {
-            design_colors.accent
-        };
-        
-        // Get dimmed color for separators (60% opacity)
-        let text_dimmed = if self.design_variant == DesignVariant::Default {
-            self.theme.colors.text.dimmed
-        } else {
-            design_colors.text_dimmed
-        };
-        
-        // Create button colors from theme/design
-        let button_colors = if self.design_variant == DesignVariant::Default {
-            ButtonColors::from_theme(&self.theme)
-        } else {
-            ButtonColors::from_design(&design_colors)
-        };
-        
         // Get entity handles for click callbacks
         let handle_select = cx.entity().downgrade();
         let handle_actions = cx.entity().downgrade();
@@ -568,248 +530,74 @@ impl Render for PathPrompt {
         let actions_search_text = self.actions_search_text.lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let actions_search_is_empty = actions_search_text.is_empty();
-        let actions_search_display = if actions_search_is_empty {
-            SharedString::from("Search actions...")
-        } else {
-            SharedString::from(actions_search_text)
-        };
-        
-        // Get search box background color
-        let search_box_bg = if self.design_variant == DesignVariant::Default {
-            self.theme.colors.background.search_box
-        } else {
-            design_colors.background
-        };
-        
-        // Get muted text color
-        let text_muted_hex = if self.design_variant == DesignVariant::Default {
-            self.theme.colors.text.muted
-        } else {
-            design_colors.text_muted
-        };
-        
-        let header = div()
-            .id(gpui::ElementId::Name("search:path-filter".into()))
-            .w_full()
-            .px(px(16.))  // Match main menu padding
-            .py(px(8.))   // Match main menu padding
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.)) // Match main menu gap
-            // Left side: Search input with path prefix + filter text + blinking cursor
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .text_lg()
-                    .text_color(if filter_is_empty { text_muted } else { text_color })
-                    // Path prefix in muted color
-                    .child(
-                        div()
-                            .text_color(text_muted)
-                            .child(path_prefix)
-                    )
-                    // When empty: cursor FIRST (at left), then user types
-                    // When typing: text, then cursor at end
-                    // ALWAYS render cursor div to prevent layout shift
-                    .when(filter_is_empty, |d| d.child(
-                        div()
-                            .w(px(2.))
-                            .h(px(20.))  // Cursor height
-                            .my(px(2.))
-                            .rounded(px(1.))
-                            .when(self.cursor_visible && !show_actions, |d| d.bg(text_color))
-                    ))
-                    .when(!filter_is_empty, |d| d
-                        .child(
-                            div()
-                                .text_color(text_color)
-                                .child(self.filter_text.clone())
-                        )
-                        .child(
-                            div()
-                                .w(px(2.))
-                                .h(px(20.))  // Cursor height
-                                .my(px(2.))
-                                .ml(px(2.))
-                                .rounded(px(1.))
-                                .when(self.cursor_visible && !show_actions, |d| d.bg(text_color))
-                        )
-                    )
-            )
-            // Right side: CLS-free button area with relative/absolute positioning
-            // Both states are always rendered at the same position, visibility toggled via opacity
-            .child(
-                div()
-                    .relative()
-                    .h(px(28.))  // Fixed height to prevent vertical CLS
-                    .flex()
-                    .items_center()
-                    // Layer 1: Buttons (Select + Actions) - visible when actions NOT showing
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_end()
-                            // Visibility: hidden when actions popup is shown
-                            .when(show_actions, |d| d.opacity(0.).invisible())
-                            // Select button with click handler
-                            .child(
-                                Button::new("Select", button_colors)
-                                    .variant(ButtonVariant::Ghost)
-                                    .shortcut("↵")
-                                    .on_click(Box::new(move |_, _window, cx| {
-                                        if let Some(prompt) = handle_select.upgrade() {
-                                            prompt.update(cx, |this, cx| {
-                                                this.submit_selected(cx);
-                                            });
-                                        }
-                                    }))
-                            )
-                            // Separator
-                            .child(
-                                div()
-                                    .mx(px(4.))
-                                    .text_color(rgba((text_dimmed << 8) | 0x60))  // 60% opacity
-                                    .text_sm()
-                                    .child("|")
-                            )
-                            // Actions button with click handler
-                            .child(
-                                Button::new("Actions", button_colors)
-                                    .variant(ButtonVariant::Ghost)
-                                    .shortcut("⌘K")
-                                    .on_click(Box::new(move |_, _window, cx| {
-                                        if let Some(prompt) = handle_actions.upgrade() {
-                                            prompt.update(cx, |this, cx| {
-                                                this.toggle_actions(cx);
-                                            });
-                                        }
-                                    }))
-                            )
-                            // Separator before logo
-                            .child(
-                                div()
-                                    .mx(px(4.))
-                                    .text_color(rgba((text_dimmed << 8) | 0x60))  // 60% opacity
-                                    .text_sm()
-                                    .child("|")
-                            )
-                    )
-                    // Layer 2: Actions search input - visible when actions ARE showing
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_end()
-                            .gap(px(8.))
-                            // Visibility: hidden when actions popup is NOT shown
-                            .when(!show_actions, |d| d.opacity(0.).invisible())
-                            // ⌘K indicator
-                            .child(
-                                div()
-                                    .text_color(rgb(text_dimmed))
-                                    .text_xs()
-                                    .child("⌘K")
-                            )
-                            // Search input display - compact style matching buttons
-                            // CRITICAL: Fixed width prevents resize when typing
-                            .child(
-                                div()
-                                    .flex_shrink_0()  // PREVENT flexbox from shrinking this
-                                    .w(px(130.0))     // Compact width
-                                    .min_w(px(130.0))
-                                    .max_w(px(130.0))
-                                    .h(px(24.0))      // Comfortable height with padding
-                                    .min_h(px(24.0))
-                                    .max_h(px(24.0))
-                                    .overflow_hidden()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .px(px(8.))       // Comfortable horizontal padding
-                                    .rounded(px(4.))  // Match button border radius
-                                    // ALWAYS show background - just vary intensity
-                                    .bg(rgba((search_box_bg << 8) | if actions_search_is_empty { 0x40 } else { 0x80 }))
-                                    .border_1()
-                                    // ALWAYS show border - just vary intensity
-                                    .border_color(rgba((accent_color << 8) | if actions_search_is_empty { 0x20 } else { 0x40 }))
-                                    .text_sm()
-                                    .text_color(if actions_search_is_empty { rgb(text_muted_hex) } else { text_color })
-                                    // Cursor before placeholder when empty
-                                    .when(actions_search_is_empty, |d| d.child(
-                                        div()
-                                            .w(px(2.))
-                                            .h(px(14.))  // Cursor height for comfortable input
-                                            .mr(px(2.))
-                                            .rounded(px(1.))
-                                            .when(self.cursor_visible, |d| d.bg(rgb(accent_color)))
-                                    ))
-                                    .child(actions_search_display)
-                                    // Cursor after text when not empty
-                                    .when(!actions_search_is_empty, |d| d.child(
-                                        div()
-                                            .w(px(2.))
-                                            .h(px(14.))  // Cursor height for comfortable input
-                                            .ml(px(2.))
-                                            .rounded(px(1.))
-                                            .when(self.cursor_visible, |d| d.bg(rgb(accent_color)))
-                                    ))
-                            )
-                            // Separator after search input
-                            .child(
-                                div()
-                                    .mx(px(4.))
-                                    .text_color(rgba((text_dimmed << 8) | 0x60))  // 60% opacity
-                                    .text_sm()
-                                    .child("|")
-                            )
-                    )
-            )
-            // Script Kit Logo - ALWAYS visible
-            .child(
-                svg()
-                    .external_path(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo.svg"))
-                    .size(px(16.))  // Match main menu size
-                    .text_color(rgb(accent_color))
-            );
 
-        // Hint at bottom with updated navigation instructions
+        // Create path prefix for display in search input
+        let path_prefix = format!("{}/", self.current_path.trim_end_matches('/'));
+
+        // Create header colors and config using shared components
+        let header_colors = if self.design_variant == DesignVariant::Default {
+            PromptHeaderColors::from_theme(&self.theme)
+        } else {
+            PromptHeaderColors::from_design(&design_colors)
+        };
+
+        let header_config = PromptHeaderConfig::new()
+            .filter_text(self.filter_text.clone())
+            .placeholder("Type to filter...")
+            .path_prefix(Some(path_prefix))
+            .primary_button_label("Select")
+            .primary_button_shortcut("↵")
+            .show_actions_button(true)
+            .cursor_visible(self.cursor_visible)
+            .actions_mode(show_actions)
+            .actions_search_text(actions_search_text)
+            .focused(!show_actions);
+
+        let header = PromptHeader::new(header_config, header_colors)
+            .on_primary_click(Box::new(move |_, _window, cx| {
+                if let Some(prompt) = handle_select.upgrade() {
+                    prompt.update(cx, |this, cx| {
+                        this.submit_selected(cx);
+                    });
+                }
+            }))
+            .on_actions_click(Box::new(move |_, _window, cx| {
+                if let Some(prompt) = handle_actions.upgrade() {
+                    prompt.update(cx, |this, cx| {
+                        this.toggle_actions(cx);
+                    });
+                }
+            }));
+
+        // Create hint text for footer
         let hint_text = self.hint.clone().unwrap_or_else(|| {
             format!("{} items • ↑↓ navigate • ←→ in/out • Enter open • Tab into • ⌘K actions • Esc cancel", filtered_count)
         });
-        let footer = div()
-            .w_full()
-            .pt_2()
-            .text_xs()
-            .text_color(text_muted)
-            .child(hint_text);
 
+        // Create container colors and config
+        let container_colors = if self.design_variant == DesignVariant::Default {
+            PromptContainerColors::from_theme(&self.theme)
+        } else {
+            PromptContainerColors::from_design(&design_colors)
+        };
+
+        let container_config = PromptContainerConfig::new()
+            .show_divider(true)
+            .hint(hint_text);
+
+        // Build the final container with the outer wrapper for key handling and focus
         div()
             .id(gpui::ElementId::Name("window:path".into()))
-            .flex()
-            .flex_col()
             .w_full()
             .h_full()
-            .bg(main_bg)
-            .text_color(text_color)
-            .p(px(spacing.padding_lg))
-            .gap_2()
             .key_context("path_prompt")
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
-            .child(header)
-            .child(list)
-            .child(footer)
+            .child(
+                PromptContainer::new(container_colors)
+                    .config(container_config)
+                    .header(header)
+                    .content(list)
+            )
     }
 }

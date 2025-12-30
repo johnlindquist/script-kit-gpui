@@ -16,8 +16,8 @@ console.error('[SMOKE] Capturing screenshot...');
 const screenshot = await captureScreenshot();
 console.error(`[SMOKE] Screenshot: ${screenshot.width}x${screenshot.height}`);
 
-// Save to ./test-screenshots/
-const screenshotDir = join(process.cwd(), 'test-screenshots');
+// Save to ./.test-screenshots/
+const screenshotDir = join(process.cwd(), '.test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 
 const filename = `design-gallery-${Date.now()}.png`;

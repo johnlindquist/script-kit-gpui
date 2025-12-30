@@ -12,8 +12,8 @@ await new Promise(resolve => setTimeout(resolve, 1500));
 const screenshot = await captureScreenshot();
 console.error(`[SMOKE] Screenshot: ${screenshot.width}x${screenshot.height}`);
 
-// Save to ./test-screenshots/
-const screenshotDir = join(process.cwd(), 'test-screenshots');
+// Save to ./.test-screenshots/
+const screenshotDir = join(process.cwd(), '.test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 
 const filename = `section-headers-${Date.now()}.png`;

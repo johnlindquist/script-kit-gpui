@@ -553,6 +553,8 @@ pub struct FormPromptState {
     pub focused_index: usize,
     /// Focus handle for this form
     pub focus_handle: FocusHandle,
+    /// Whether we've done initial focus
+    pub did_initial_focus: bool,
 }
 
 impl FormPromptState {
@@ -595,6 +597,7 @@ impl FormPromptState {
             colors,
             focused_index: 0,
             focus_handle: cx.focus_handle(),
+            did_initial_focus: false,
         }
     }
 
@@ -656,11 +659,149 @@ impl FormPromptState {
             }
         })
     }
+    
+    /// Handle keyboard input by forwarding to the currently focused field
+    pub fn handle_key_input(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        if let Some((_, entity)) = self.fields.get(self.focused_index) {
+            let key = event.keystroke.key.as_str();
+            
+            match entity {
+                FormFieldEntity::TextField(e) => {
+                    e.update(cx, |field, cx| {
+                        // Handle special keys
+                        match key {
+                            "backspace" => {
+                                if field.cursor_position > 0 {
+                                    field.cursor_position -= 1;
+                                    field.value.remove(field.cursor_position);
+                                    field.state.set_value(field.value.clone());
+                                    cx.notify();
+                                }
+                            }
+                            "delete" => {
+                                if field.cursor_position < field.value.len() {
+                                    field.value.remove(field.cursor_position);
+                                    field.state.set_value(field.value.clone());
+                                    cx.notify();
+                                }
+                            }
+                            "left" | "arrowleft" => {
+                                if field.cursor_position > 0 {
+                                    field.cursor_position -= 1;
+                                    cx.notify();
+                                }
+                            }
+                            "right" | "arrowright" => {
+                                if field.cursor_position < field.value.len() {
+                                    field.cursor_position += 1;
+                                    cx.notify();
+                                }
+                            }
+                            "home" => {
+                                field.cursor_position = 0;
+                                cx.notify();
+                            }
+                            "end" => {
+                                field.cursor_position = field.value.len();
+                                cx.notify();
+                            }
+                            _ => {
+                                // Handle printable character input
+                                if let Some(ref key_char) = event.keystroke.key_char {
+                                    if let Some(ch) = key_char.chars().next() {
+                                        if !ch.is_control() {
+                                            field.value.insert(field.cursor_position, ch);
+                                            field.cursor_position += ch.len_utf8();
+                                            field.state.set_value(field.value.clone());
+                                            cx.notify();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                FormFieldEntity::TextArea(e) => {
+                    e.update(cx, |field, cx| {
+                        // Handle special keys
+                        match key {
+                            "backspace" => {
+                                if field.cursor_position > 0 {
+                                    field.cursor_position -= 1;
+                                    field.value.remove(field.cursor_position);
+                                    field.state.set_value(field.value.clone());
+                                    cx.notify();
+                                }
+                            }
+                            "delete" => {
+                                if field.cursor_position < field.value.len() {
+                                    field.value.remove(field.cursor_position);
+                                    field.state.set_value(field.value.clone());
+                                    cx.notify();
+                                }
+                            }
+                            "left" | "arrowleft" => {
+                                if field.cursor_position > 0 {
+                                    field.cursor_position -= 1;
+                                    cx.notify();
+                                }
+                            }
+                            "right" | "arrowright" => {
+                                if field.cursor_position < field.value.len() {
+                                    field.cursor_position += 1;
+                                    cx.notify();
+                                }
+                            }
+                            "home" => {
+                                field.cursor_position = 0;
+                                cx.notify();
+                            }
+                            "end" => {
+                                field.cursor_position = field.value.len();
+                                cx.notify();
+                            }
+                            _ => {
+                                // Handle printable character input
+                                if let Some(ref key_char) = event.keystroke.key_char {
+                                    if let Some(ch) = key_char.chars().next() {
+                                        if !ch.is_control() {
+                                            field.value.insert(field.cursor_position, ch);
+                                            field.cursor_position += ch.len_utf8();
+                                            field.state.set_value(field.value.clone());
+                                            cx.notify();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                FormFieldEntity::Checkbox(e) => {
+                    // Space toggles checkbox
+                    if key == "space" || key == " " {
+                        e.update(cx, |checkbox, cx| {
+                            checkbox.toggle(cx);
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Render for FormPromptState {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        
+        // Focus the first field on initial render
+        if !self.did_initial_focus && !self.fields.is_empty() {
+            self.did_initial_focus = true;
+            if let Some(focus_handle) = self.current_focus_handle(cx) {
+                focus_handle.focus(window, cx);
+                let is_focused = focus_handle.is_focused(window);
+                logging::log("FORM", &format!("Initial focus set on first field (is_focused={})", is_focused));
+            }
+        }
         
         // Build the form fields container
         let mut container = div()
@@ -688,6 +829,31 @@ impl Render for FormPromptState {
         }
         
         container
+    }
+}
+
+/// Delegated Focusable implementation for FormPromptState
+///
+/// This implements the "delegated focus" pattern from Zed's BufferSearchBar:
+/// Instead of returning our own focus_handle, we return the focused field's handle.
+/// This prevents the parent container from "stealing" focus from child fields during re-renders.
+///
+/// When GPUI asks "what should be focused?", we answer with the currently focused
+/// text field's handle, so focus stays on the actual input field, not the form container.
+impl Focusable for FormPromptState {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        // Return the focused field's handle, not our own
+        // This delegates focus management to the child field, preventing focus stealing
+        if let Some((_, entity)) = self.fields.get(self.focused_index) {
+            match entity {
+                FormFieldEntity::TextField(e) => e.read(cx).get_focus_handle(),
+                FormFieldEntity::TextArea(e) => e.read(cx).get_focus_handle(),
+                FormFieldEntity::Checkbox(e) => e.read(cx).focus_handle(cx),
+            }
+        } else {
+            // Fallback to our own handle if no fields exist
+            self.focus_handle.clone()
+        }
     }
 }
 
@@ -4515,6 +4681,15 @@ impl Render for ScriptListApp {
                     }
                 }
             }
+            AppView::FormPrompt { entity, .. } => {
+                // FormPrompt uses delegated Focusable - get focus handle from the currently focused field
+                // This prevents the parent from stealing focus from form text fields
+                let form_focus_handle = entity.read(cx).focus_handle(cx);
+                let is_focused = form_focus_handle.is_focused(window);
+                if !is_focused {
+                    window.focus(&form_focus_handle, cx);
+                }
+            }
             _ => {
                 // Other views use the parent's focus handle
                 let is_focused = self.focus_handle.is_focused(window);
@@ -6498,14 +6673,20 @@ impl ScriptListApp {
         let entity_for_submit = entity.clone();
         let entity_for_tab = entity.clone();
         let entity_for_shift_tab = entity.clone();
+        let entity_for_input = entity.clone();
         
         let prompt_id_for_key = prompt_id.clone();
-        let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
+        // Key handler for form navigation (Enter/Tab/Escape)
+        // NOTE: Currently unused because form fields handle their own focus via delegated Focusable
+        // Keeping for reference in case we need to re-enable parent-level key handling
+        let _handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
             let key_str = event.keystroke.key.to_lowercase();
             let has_shift = event.keystroke.modifiers.shift;
             
-            logging::log("KEY", &format!("FormPrompt key: '{}' (shift: {})", key_str, has_shift));
+            logging::log("KEY", &format!("FormPrompt key: '{}' (shift: {}, key_char: {:?})", key_str, has_shift, event.keystroke.key_char));
             
+            // Handle form-level keys (Enter, Escape, Tab) at this level
+            // Forward all other keys to the focused form field for text input
             match key_str.as_str() {
                 "enter" => {
                     // Enter submits the form - collect all field values
@@ -6532,7 +6713,15 @@ impl ScriptListApp {
                         });
                     }
                 }
-                _ => {}
+                _ => {
+                    // Forward all other keys (characters, backspace, arrows, etc.) to the focused field
+                    // This is necessary because GPUI requires track_focus() to receive key events,
+                    // and we need the parent to have focus to handle Enter/Escape/Tab.
+                    // The form fields' individual on_key_down handlers don't fire when parent has focus.
+                    entity_for_input.update(cx, |form, cx| {
+                        form.handle_key_input(event, cx);
+                    });
+                }
             }
         });
         
@@ -6554,6 +6743,9 @@ impl ScriptListApp {
         // Button colors from theme
         let button_colors = ButtonColors::from_theme(&self.theme);
         
+        // Form fields have their own focus handles and on_key_down handlers.
+        // We DO NOT track_focus on the container - the fields handle their own focus.
+        // Enter/Escape/Tab are handled by a window-level key handler (see handle_form_navigation_keys).
         div()
             .flex()
             .flex_col()
@@ -6566,8 +6758,6 @@ impl ScriptListApp {
             .text_color(rgb(design_colors.text_primary))
             .font_family(design_typography.font_family)
             .key_context("form_prompt")
-            .track_focus(&self.focus_handle)
-            .on_key_down(handle_key)
             // Content area with form fields
             .child(
                 div()

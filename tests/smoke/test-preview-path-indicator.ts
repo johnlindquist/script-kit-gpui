@@ -3,7 +3,7 @@
 
 /**
  * SMOKE TEST: test-preview-path-indicator.ts
- * 
+ *
  * This test verifies that the preview panel shows a subtle source path
  * indicator at the top, helping users identify where scripts/scriptlets
  * come from (e.g., ~/.kenv/scriptlets/foo.md#my-snippet)
@@ -32,7 +32,7 @@ helping users quickly identify where a script or scriptlet comes from.
 ~/.kenv/scripts/my-script.ts
 \`\`\`
 
-### For Scriptlets  
+### For Scriptlets
 \`\`\`
 ~/.kenv/scriptlets/foo.md#my-snippet-name
 \`\`\`
@@ -66,8 +66,8 @@ console.error('[SMOKE] Capturing screenshot...');
 const screenshot = await captureScreenshot();
 console.error(`[SMOKE] Screenshot: ${screenshot.width}x${screenshot.height}`);
 
-// Save to ./test-screenshots/
-const screenshotDir = join(process.cwd(), 'test-screenshots');
+// Save to ./.test-screenshots/
+const screenshotDir = join(process.cwd(), '.test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 
 const filename = `preview-path-indicator-${Date.now()}.png`;

@@ -116,7 +116,7 @@ if [[ -z "$TEST_NAME" ]]; then
 fi
 
 # Directories
-BASELINE_DIR="$PROJECT_DIR/test-screenshots/baselines"
+BASELINE_DIR="$PROJECT_DIR/.test-screenshots/baselines"
 TEMP_DIR="$PROJECT_DIR/.test-screenshots"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
@@ -140,7 +140,7 @@ output_json() {
   local diff_percent="$2"
   local is_new_baseline="$3"
   local error_msg="$4"
-  
+
   echo "{\"test\":\"${TEST_NAME}\",\"status\":\"${status}\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"diff_percent\":${diff_percent},\"is_new_baseline\":${is_new_baseline},\"baseline\":\"${BASELINE_PATH}\",\"actual\":\"${ACTUAL_PATH}\",\"diff\":\"${DIFF_PATH}\",\"error\":${error_msg:-null}}"
 }
 

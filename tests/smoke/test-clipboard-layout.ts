@@ -1,4 +1,4 @@
-// Name: Clipboard Layout Test  
+// Name: Clipboard Layout Test
 // Description: Captures screenshot of clipboard history to verify layout is not smooshed
 
 import '../../scripts/kit-sdk';
@@ -16,8 +16,8 @@ console.error('[SMOKE] Capturing screenshot...');
 const screenshot = await captureScreenshot();
 console.error(`[SMOKE] Screenshot: ${screenshot.width}x${screenshot.height}`);
 
-// Save to ./test-screenshots/
-const screenshotDir = join(process.cwd(), 'test-screenshots');
+// Save to ./.test-screenshots/
+const screenshotDir = join(process.cwd(), '.test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 
 const filename = `clipboard-layout-${Date.now()}.png`;

@@ -26,7 +26,7 @@ console.error(`[SMOKE] Screenshot: ${screenshot.width}x${screenshot.height}`);
 // Save to test-screenshots directory using Bun's built-in fs
 const fs = require('fs');
 const path = require('path');
-const screenshotDir = path.join(process.cwd(), 'test-screenshots');
+const screenshotDir = path.join(process.cwd(), '.test-screenshots');
 fs.mkdirSync(screenshotDir, { recursive: true });
 
 const filename = `header-buttons-visual-${Date.now()}.png`;

@@ -5,36 +5,17 @@ import type { Plugin } from "@opencode-ai/plugin"
  * 
  * Enforces quality gates before commits by:
  * 1. Detecting git commit attempts in tool calls
- * 2. Injecting reminder to run verification commands first
- * 3. Tracking whether verification was run in the session
+ * 2. Tracking whether verification was run in the session
+ * 3. Adding reminders via system prompt
+ * 
+ * Uses documented hooks: tool.execute.before, tool.execute.after
  */
 
 const VERIFICATION_COMMANDS = `cargo check && cargo clippy --all-targets -- -D warnings && cargo test`
 
-const PRE_COMMIT_REMINDER = `
-<verification-gate>
-## MANDATORY: Pre-Commit Verification
-
-Before ANY git commit, you MUST run:
-\`\`\`bash
-${VERIFICATION_COMMANDS}
-\`\`\`
-
-**Commit is BLOCKED until all three pass:**
-1. \`cargo check\` - Type errors, borrow checker
-2. \`cargo clippy\` - Lints, anti-patterns (treat warnings as errors)
-3. \`cargo test\` - Unit + integration tests
-
-**If any fail:** Fix the issues first, then retry verification.
-
-**Evidence required:** Show the passing output in your response before committing.
-</verification-gate>
-`.trim()
-
 const COMMIT_PATTERNS = [
   /git\s+commit/i,
   /git\s+add\s+.*&&\s*git\s+commit/i,
-  /"command"\s*:\s*"[^"]*git\s+commit/i,
 ]
 
 const VERIFICATION_PATTERNS = [
@@ -61,18 +42,35 @@ function containsVerificationCommand(text: string): boolean {
   return VERIFICATION_PATTERNS.every(pattern => pattern.test(text))
 }
 
+// Type for tool execution input
+interface ToolInput {
+  tool: string
+  sessionID: string
+  callID: string
+  args?: Record<string, unknown>
+  result?: Record<string, unknown>
+}
+
 export const VerificationGate: Plugin = async () => {
+  // Reset state on plugin load
+  verificationRanInSession = false
+  lastVerificationTime = 0
+  
   return {
-    // Track when verification commands are run
-    "tool.bash.post": async (input, _output) => {
-      const command = input.params?.command || ""
+    // Track when verification commands are run (after execution)
+    "tool.execute.after": async (input: ToolInput) => {
+      if (input.tool !== "bash") return
+      
+      const args = input.args || {}
+      const result = input.result || {}
+      const command = (args.command as string) || ""
+      const output = (result.output as string) || ""
       
       // Check if this was a verification command
       if (containsVerificationCommand(command)) {
         // Only mark as verified if command succeeded (no error in result)
-        const result = input.result?.output || ""
-        const hasError = /error\[E\d+\]|^error:/im.test(result) ||
-                        /warning:.*\n.*= help:/m.test(result) && /--\s*-D\s*warnings/.test(command)
+        const hasError = /error\[E\d+\]|^error:/im.test(output) ||
+                        /warning:.*\n.*= help:/m.test(output) && /--\s*-D\s*warnings/.test(command)
         
         if (!hasError) {
           verificationRanInSession = true
@@ -81,30 +79,35 @@ export const VerificationGate: Plugin = async () => {
       }
     },
 
-    // Intercept commit attempts and inject reminder if verification not done
-    "tool.bash.pre": async (input, output) => {
-      const command = input.params?.command || ""
+    // Intercept commit attempts and warn if verification not done (before execution)
+    "tool.execute.before": async (input: ToolInput) => {
+      if (input.tool !== "bash") return
+      
+      const args = input.args || {}
+      const command = (args.command as string) || ""
       
       if (containsCommitAttempt(command)) {
         // Check if verification was run recently
         if (!verificationRanInSession || isVerificationStale()) {
-          // Inject a strong reminder
-          output.messages = output.messages || []
-          output.messages.push({
-            role: "user",
-            content: PRE_COMMIT_REMINDER + "\n\n**WARNING**: No recent verification detected. Run the verification commands before committing!"
-          })
+          // Log warning - system prompt injection is the reliable approach for enforcement
+          console.log("[VerificationGate] Commit attempted without recent verification")
         }
       }
     },
 
     // Add verification reminder to system prompt
     "experimental.chat.system.transform": async (_input, output) => {
+      const verificationStatus = verificationRanInSession && !isVerificationStale()
+        ? "✅ Verification recently passed"
+        : "⏳ Verification pending"
+      
       const reminder = `
 <verification-gate-policy>
 Before any git commit in this Rust project, ALWAYS run:
 \`${VERIFICATION_COMMANDS}\`
 All three must pass. Show evidence of passing before committing.
+
+Current status: ${verificationStatus}
 </verification-gate-policy>
 `.trim()
       
@@ -118,6 +121,14 @@ All three must pass. Show evidence of passing before committing.
         : "Verification gate: PENDING - run cargo check && cargo clippy && cargo test before commit"
       
       output.context.push(`<verification-state>${state}</verification-state>`)
+    },
+    
+    // Reset state on new session
+    event: async ({ event }) => {
+      if (event.type === "session.created") {
+        verificationRanInSession = false
+        lastVerificationTime = 0
+      }
     }
   }
 }

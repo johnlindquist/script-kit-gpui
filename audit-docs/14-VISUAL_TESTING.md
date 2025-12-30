@@ -57,8 +57,8 @@ Infrastructure:
 | SDK function | `scripts/kit-sdk.ts` → `captureScreenshot()` |
 | Diff engine | `tests/autonomous/screenshot-diff.ts` |
 | Utilities | `tests/autonomous/screenshot-utils.ts` |
-| Baselines | `test-screenshots/baselines/` |
-| Test output | `test-screenshots/` |
+| Baselines | `.test-screenshots/baselines/` |
+| Test output | `.test-screenshots/` |
 
 ## SDK Function: captureScreenshot()
 
@@ -86,7 +86,7 @@ import { join } from 'path';
 
 const screenshot = await captureScreenshot();
 
-const dir = join(process.cwd(), 'test-screenshots');
+const dir = join(process.cwd(), '.test-screenshots');
 mkdirSync(dir, { recursive: true });
 
 const filename = `test-${Date.now()}.png`;
@@ -114,8 +114,8 @@ console.error(`[SCREENSHOT] Saved: ${filepath}`);
 import { compareScreenshots, ComparisonResult } from './screenshot-diff';
 
 const result: ComparisonResult = await compareScreenshots(
-  'test-screenshots/current.png',
-  'test-screenshots/baselines/expected.png',
+  '.test-screenshots/current.png',
+  '.test-screenshots/baselines/expected.png',
   {
     tolerance: 0.01,  // 1% difference allowed
     generateDiff: true,
@@ -200,7 +200,7 @@ const screenshot = await captureScreenshot();
 console.error(`[VISUAL] Captured: ${screenshot.width}x${screenshot.height}`);
 
 // 4. Save to test-screenshots/
-const dir = join(process.cwd(), 'test-screenshots');
+const dir = join(process.cwd(), '.test-screenshots');
 mkdirSync(dir, { recursive: true });
 
 const filename = `visual-test-${Date.now()}.png`;
@@ -222,7 +222,7 @@ cargo build && \
   SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
 
 # Check output
-ls -la test-screenshots/
+ls -la .test-screenshots/
 ```
 
 ### Comparing to Baseline
@@ -230,8 +230,8 @@ ls -la test-screenshots/
 ```bash
 # Run comparison script
 bun run tests/autonomous/compare-baseline.ts \
-  test-screenshots/visual-test-xxx.png \
-  test-screenshots/baselines/expected.png
+  .test-screenshots/visual-test-xxx.png \
+  .test-screenshots/baselines/expected.png
 ```
 
 ## Gaps and Limitations
@@ -279,11 +279,11 @@ Add baselines for these states:
 ./scripts/generate-baselines.sh
 
 # Would create:
-# - test-screenshots/baselines/empty-prompt.png
-# - test-screenshots/baselines/list-with-items.png
-# - test-screenshots/baselines/selected-item.png
-# - test-screenshots/baselines/focused-window.png
-# - test-screenshots/baselines/unfocused-window.png
+# - .test-screenshots/baselines/empty-prompt.png
+# - .test-screenshots/baselines/list-with-items.png
+# - .test-screenshots/baselines/selected-item.png
+# - .test-screenshots/baselines/focused-window.png
+# - .test-screenshots/baselines/unfocused-window.png
 ```
 
 ### P2: Add CI Integration
@@ -318,7 +318,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: visual-diffs
-          path: test-screenshots/*-diff.png
+          path: .test-screenshots/*-diff.png
 ```
 
 ### P3: Add Perceptual Diff
