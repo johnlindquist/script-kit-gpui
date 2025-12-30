@@ -2184,12 +2184,7 @@ impl Message {
     ///
     /// Coordinates are relative to the window's content area.
     /// Button can be "left", "right", or "middle".
-    pub fn simulate_click_with_button(
-        request_id: String,
-        x: f64,
-        y: f64,
-        button: String,
-    ) -> Self {
+    pub fn simulate_click_with_button(request_id: String, x: f64, y: f64, button: String) -> Self {
         Message::SimulateClick {
             request_id,
             x,
@@ -5509,8 +5504,7 @@ mod tests {
 
     #[test]
     fn test_parse_simulate_click_with_button() {
-        let json =
-            r#"{"type":"simulateClick","requestId":"req-click-4","x":100,"y":200,"button":"middle"}"#;
+        let json = r#"{"type":"simulateClick","requestId":"req-click-4","x":100,"y":200,"button":"middle"}"#;
         let msg = parse_message(json).unwrap();
         match msg {
             Message::SimulateClick {

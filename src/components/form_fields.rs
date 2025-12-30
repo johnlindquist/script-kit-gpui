@@ -622,6 +622,22 @@ impl Render for FormTextArea {
         let height = (rows as f32) * 24.0 + 16.0; // Add padding
 
         let field_name = self.field.name.clone();
+        let field_name_for_log = field_name.clone();
+
+        // Handle click to focus this field
+        let focus_handle_for_click = self.focus_handle.clone();
+        let handle_click = cx.listener(
+            move |_this: &mut Self,
+                  _event: &ClickEvent,
+                  window: &mut Window,
+                  cx: &mut Context<Self>| {
+                crate::logging::log(
+                    "FIELD",
+                    &format!("TextArea[{}] clicked - focusing", field_name_for_log),
+                );
+                focus_handle_for_click.focus(window, cx);
+            },
+        );
 
         // Keyboard handler for text input
         let handle_key = cx.listener(
@@ -688,6 +704,7 @@ impl Render for FormTextArea {
                 .id(ElementId::Name(format!("textarea-{}", field_name).into()))
                 .track_focus(&self.focus_handle)
                 .on_key_down(handle_key)
+                .on_click(handle_click)
                 .flex()
                 .flex_col()
                 .flex_1()

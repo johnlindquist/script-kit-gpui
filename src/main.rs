@@ -1612,7 +1612,7 @@ impl ScriptListApp {
         })
         .detach();
 
-        ScriptListApp {
+        let mut app = ScriptListApp {
             scripts,
             scriptlets,
             builtin_entries,
@@ -1677,10 +1677,24 @@ impl ScriptListApp {
             pending_path_action_result: Arc::new(Mutex::new(None)),
             // HUD overlay state - starts as None (no HUD shown)
             hud_state: None,
-            // Alias/shortcut registries - populated in rebuild_registries()
+            // Alias/shortcut registries - populated below
             alias_registry: std::collections::HashMap::new(),
             shortcut_registry: std::collections::HashMap::new(),
+        };
+
+        // Build initial alias/shortcut registries (conflicts logged, not shown via HUD on startup)
+        let conflicts = app.rebuild_registries();
+        if !conflicts.is_empty() {
+            logging::log(
+                "STARTUP",
+                &format!(
+                    "Found {} alias/shortcut conflicts on startup",
+                    conflicts.len()
+                ),
+            );
         }
+
+        app
     }
 
     /// Switch to a different design variant
@@ -1966,14 +1980,15 @@ impl ScriptListApp {
     }
 
     /// Find a script or scriptlet by alias (case-insensitive exact match)
-    /// Returns the first match found (scripts are searched before scriptlets)
+    /// Uses O(1) registry lookup instead of O(n) iteration
     fn find_alias_match(&self, alias: &str) -> Option<AliasMatch> {
         let alias_lower = alias.to_lowercase();
 
-        // Search scripts first
-        for script in &self.scripts {
-            if let Some(ref script_alias) = script.alias {
-                if script_alias.to_lowercase() == alias_lower {
+        // O(1) lookup in registry
+        if let Some(path) = self.alias_registry.get(&alias_lower) {
+            // Find the script/scriptlet by path
+            for script in &self.scripts {
+                if script.path.to_string_lossy() == *path {
                     logging::log(
                         "ALIAS",
                         &format!("Found script match: '{}' -> '{}'", alias, script.name),
@@ -1981,12 +1996,11 @@ impl ScriptListApp {
                     return Some(AliasMatch::Script(script.clone()));
                 }
             }
-        }
 
-        // Then search scriptlets
-        for scriptlet in &self.scriptlets {
-            if let Some(ref scriptlet_alias) = scriptlet.alias {
-                if scriptlet_alias.to_lowercase() == alias_lower {
+            // Check scriptlets by file_path or name
+            for scriptlet in &self.scriptlets {
+                let scriptlet_path = scriptlet.file_path.as_ref().unwrap_or(&scriptlet.name);
+                if scriptlet_path == path {
                     logging::log(
                         "ALIAS",
                         &format!("Found scriptlet match: '{}' -> '{}'", alias, scriptlet.name),
@@ -1994,6 +2008,15 @@ impl ScriptListApp {
                     return Some(AliasMatch::Scriptlet(scriptlet.clone()));
                 }
             }
+
+            // Path in registry but not found in current scripts (stale entry)
+            logging::log(
+                "ALIAS",
+                &format!(
+                    "Stale registry entry: '{}' -> '{}' (not found)",
+                    alias, path
+                ),
+            );
         }
 
         None
@@ -5409,10 +5432,7 @@ impl ScriptListApp {
     /// Shape: Pill (40px tall, variable width)
     fn show_hud(&mut self, text: String, duration_ms: Option<u64>, cx: &mut Context<Self>) {
         let duration = duration_ms.unwrap_or(2000);
-        logging::log(
-            "UI",
-            &format!("Showing HUD: '{}' for {}ms", text, duration),
-        );
+        logging::log("UI", &format!("Showing HUD: '{}' for {}ms", text, duration));
 
         self.hud_state = Some(HudState {
             text,
@@ -5462,7 +5482,7 @@ impl ScriptListApp {
                 .id("hud-overlay")
                 // Position at bottom-center using absolute positioning
                 .absolute()
-                .bottom(px(80.))  // 80px from bottom
+                .bottom(px(80.)) // 80px from bottom
                 .left_0()
                 .right_0()
                 .flex()
@@ -5481,7 +5501,7 @@ impl ScriptListApp {
                         .h(px(40.))
                         // Dark translucent background (75% opacity = 0xBF)
                         .bg(rgba(0x000000BF))
-                        .rounded(px(20.))  // Pill shape
+                        .rounded(px(20.)) // Pill shape
                         // Optional subtle border (30% opacity = 0x4D)
                         .border_1()
                         .border_color(rgba((colors.ui.border << 8) | 0x4D))
@@ -5492,9 +5512,9 @@ impl ScriptListApp {
                                 .text_color(rgb(0xFFFFFF))
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(text)
-                        )
-                )
+                                .child(text),
+                        ),
+                ),
         )
     }
 
@@ -5965,11 +5985,7 @@ impl Render for ScriptListApp {
 
         // Wrap view content in container for HUD overlay
         // HUD is shown at bottom-center across all views
-        let mut container = div()
-            .relative()
-            .w_full()
-            .h_full()
-            .child(view_content);
+        let mut container = div().relative().w_full().h_full().child(view_content);
 
         // Add HUD overlay if active (bottom-center)
         if let Some(hud) = self.render_hud(cx) {
@@ -7672,6 +7688,7 @@ impl ScriptListApp {
                             // Preview panel ALWAYS renders (visible behind actions overlay)
                             .child(self.render_preview_panel(cx))
                             // Actions dialog overlays on top using absolute positioning
+                            // Includes a backdrop to capture clicks outside the dialog
                             .when_some(
                                 if self.show_actions_popup {
                                     self.actions_dialog.clone()
@@ -7679,15 +7696,39 @@ impl ScriptListApp {
                                     None
                                 },
                                 |d, dialog| {
+                                    // Create click handler for backdrop to dismiss dialog
+                                    let backdrop_click = cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
+                                        logging::log("FOCUS", "Actions backdrop clicked - dismissing dialog");
+                                        this.show_actions_popup = false;
+                                        this.actions_dialog = None;
+                                        this.focused_input = FocusedInput::MainFilter;
+                                        window.focus(&this.focus_handle, cx);
+                                        cx.notify();
+                                    });
+
                                     d.child(
                                         div()
                                             .absolute()
                                             .inset_0() // Cover entire preview area
-                                            .flex()
-                                            .justify_end()
-                                            .pr(px(8.)) // Small padding from right edge
-                                            .pt(px(8.)) // Small padding from top
-                                            .child(dialog),
+                                            // Backdrop layer - captures clicks outside the dialog
+                                            .child(
+                                                div()
+                                                    .id("actions-backdrop")
+                                                    .absolute()
+                                                    .inset_0()
+                                                    .on_click(backdrop_click)
+                                            )
+                                            // Dialog container - positioned at top-right
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .inset_0()
+                                                    .flex()
+                                                    .justify_end()
+                                                    .pr(px(8.)) // Small padding from right edge
+                                                    .pt(px(8.)) // Small padding from top
+                                                    .child(dialog),
+                                            ),
                                     )
                                 },
                             ),
