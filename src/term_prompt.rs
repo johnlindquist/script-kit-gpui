@@ -5,7 +5,8 @@
 
 use gpui::{
     div, prelude::*, px, rgb, Context, FocusHandle, Focusable, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Timer, Window,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    Timer, Window,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -776,6 +777,30 @@ impl Render for TermPrompt {
                     }
                 }),
             )
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                // Get scroll direction from delta
+                // Lines: direct line count, Pixels: convert based on cell height
+                let lines = match event.delta {
+                    ScrollDelta::Lines(point) => point.y,
+                    ScrollDelta::Pixels(point) => {
+                        // Convert pixels to lines by dividing by cell height
+                        // Pixels implements Div<Pixels> -> f32
+                        let cell_height = px(this.cell_height());
+                        point.y / cell_height
+                    }
+                };
+                
+                // Convert to integer lines (positive = scroll down, negative = scroll up)
+                // In terminal scrollback: negative delta scrolls up into history
+                // We invert because terminal scroll() uses positive = scroll up (into history)
+                let scroll_lines = -lines.round() as i32;
+                
+                if scroll_lines != 0 {
+                    this.terminal.scroll(scroll_lines);
+                    trace!(delta = scroll_lines, "Mouse wheel scroll");
+                    cx.notify();
+                }
+            }))
             .on_key_down(handle_key);
 
         // Apply bell flash border if active

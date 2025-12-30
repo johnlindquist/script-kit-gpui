@@ -80,3 +80,10 @@ pub mod ocr;
 
 // Script scheduling with cron expressions and natural language
 pub mod scheduler;
+
+// Storybook - Component preview system for development
+// NOTE: Temporarily disabled due to GPUI API changes (overflow_scroll, when_some, etc.)
+// pub mod storybook;
+
+// Stories - Component story definitions for the storybook
+// pub mod stories;
