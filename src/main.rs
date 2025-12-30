@@ -319,9 +319,14 @@ fn move_first_window_to_bounds(bounds: &Bounds<Pixels>) {
 /// 1. Uses xcap::Window::all() to enumerate windows
 /// 2. Finds the Script Kit window by app name or title
 /// 3. Captures the window directly to an image buffer
-/// 4. Encodes to PNG in memory (no temp files)
-fn capture_app_screenshot() -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error + Send + Sync>>
-{
+/// 4. Optionally scales down to 1x resolution if hi_dpi is false
+/// 5. Encodes to PNG in memory (no temp files)
+///
+/// # Arguments
+/// * `hi_dpi` - If true, return full retina resolution (2x). If false, scale down to 1x.
+fn capture_app_screenshot(
+    hi_dpi: bool,
+) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error + Send + Sync>> {
     use image::codecs::png::PngEncoder;
     use image::ImageEncoder;
     use xcap::Window;
@@ -343,21 +348,46 @@ fn capture_app_screenshot() -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::E
             tracing::debug!(
                 app_name = %app_name,
                 title = %title,
+                hi_dpi = hi_dpi,
                 "Found Script Kit window for screenshot"
             );
 
             let image = window.capture_image()?;
-            let width = image.width();
-            let height = image.height();
+            let original_width = image.width();
+            let original_height = image.height();
+
+            // Scale down to 1x if not hi_dpi mode (xcap captures at retina resolution on macOS)
+            let (final_image, width, height) = if hi_dpi {
+                (image, original_width, original_height)
+            } else {
+                // Scale down by 2x for 1x resolution
+                let new_width = original_width / 2;
+                let new_height = original_height / 2;
+                let resized = image::imageops::resize(
+                    &image,
+                    new_width,
+                    new_height,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                tracing::debug!(
+                    original_width = original_width,
+                    original_height = original_height,
+                    new_width = new_width,
+                    new_height = new_height,
+                    "Scaled screenshot to 1x resolution"
+                );
+                (resized, new_width, new_height)
+            };
 
             // Encode to PNG in memory (no temp files needed)
             let mut png_data = Vec::new();
             let encoder = PngEncoder::new(&mut png_data);
-            encoder.write_image(&image, width, height, image::ExtendedColorType::Rgba8)?;
+            encoder.write_image(&final_image, width, height, image::ExtendedColorType::Rgba8)?;
 
             tracing::debug!(
                 width = width,
                 height = height,
+                hi_dpi = hi_dpi,
                 file_size = png_data.len(),
                 "Screenshot captured with xcap"
             );
@@ -1897,8 +1927,8 @@ impl ScriptListApp {
         self.scriptlets = scripts::read_scriptlets();
         self.selected_index = 0;
         self.last_scrolled_index = None;
-        self.list_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
+        // Use main_list_state for variable-height list (not the legacy list_scroll_handle)
+        self.main_list_state.scroll_to_reveal_item(0);
         self.last_scrolled_index = Some(0);
         self.invalidate_filter_cache();
 
@@ -2213,8 +2243,11 @@ impl ScriptListApp {
         }
     }
 
-    /// Scroll stabilization helper: only call scroll_to_item if we haven't already scrolled to this index.
-    /// This prevents scroll jitter from redundant scroll_to_item calls.
+    /// Scroll stabilization helper: only call scroll_to_reveal_item if we haven't already scrolled to this index.
+    /// This prevents scroll jitter from redundant scroll calls.
+    ///
+    /// NOTE: Uses main_list_state (ListState) for the variable-height list() component,
+    /// not the legacy list_scroll_handle (UniformListScrollHandle).
     fn scroll_to_selected_if_needed(&mut self, _reason: &str) {
         let target = self.selected_index;
 
@@ -2223,9 +2256,9 @@ impl ScriptListApp {
             return;
         }
 
-        // Perform the scroll (logging removed for performance)
-        self.list_scroll_handle
-            .scroll_to_item(target, ScrollStrategy::Nearest);
+        // Perform the scroll using ListState for variable-height list
+        // This scrolls the actual list() component used in render_script_list
+        self.main_list_state.scroll_to_reveal_item(target);
         self.last_scrolled_index = Some(target);
     }
 
@@ -2345,22 +2378,22 @@ impl ScriptListApp {
             self.filter_text.clear();
             self.selected_index = 0;
             self.last_scrolled_index = None;
-            self.list_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Top);
+            // Use main_list_state for variable-height list (not the legacy list_scroll_handle)
+            self.main_list_state.scroll_to_reveal_item(0);
             self.last_scrolled_index = Some(0);
         } else if backspace && !self.filter_text.is_empty() {
             self.filter_text.pop();
             self.selected_index = 0;
             self.last_scrolled_index = None;
-            self.list_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Top);
+            // Use main_list_state for variable-height list (not the legacy list_scroll_handle)
+            self.main_list_state.scroll_to_reveal_item(0);
             self.last_scrolled_index = Some(0);
         } else if let Some(ch) = new_char {
             self.filter_text.push(ch);
             self.selected_index = 0;
             self.last_scrolled_index = None;
-            self.list_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Top);
+            // Use main_list_state for variable-height list (not the legacy list_scroll_handle)
+            self.main_list_state.scroll_to_reveal_item(0);
             self.last_scrolled_index = Some(0);
         }
 
@@ -3884,10 +3917,11 @@ impl ScriptListApp {
                                 }
 
                                 // Handle CaptureScreenshot directly (no UI needed)
-                                if let Message::CaptureScreenshot { request_id } = &msg {
-                                    tracing::info!(request_id = %request_id, "Capturing screenshot");
+                                if let Message::CaptureScreenshot { request_id, hi_dpi } = &msg {
+                                    let hi_dpi_mode = hi_dpi.unwrap_or(false);
+                                    tracing::info!(request_id = %request_id, hi_dpi = hi_dpi_mode, "Capturing screenshot");
 
-                                    let response = match capture_app_screenshot() {
+                                    let response = match capture_app_screenshot(hi_dpi_mode) {
                                         Ok((png_data, width, height)) => {
                                             use base64::Engine;
                                             let base64_data =
@@ -3897,6 +3931,7 @@ impl ScriptListApp {
                                                 request_id = %request_id,
                                                 width = width,
                                                 height = height,
+                                                hi_dpi = hi_dpi_mode,
                                                 data_len = base64_data.len(),
                                                 "Screenshot captured successfully"
                                             );
@@ -5818,8 +5853,8 @@ impl ScriptListApp {
         self.filter_text.clear();
         self.selected_index = 0;
         self.last_scrolled_index = None;
-        self.list_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
+        // Use main_list_state for variable-height list (not the legacy list_scroll_handle)
+        self.main_list_state.scroll_to_reveal_item(0);
         self.last_scrolled_index = Some(0);
 
         // Resize window for script list content
@@ -12287,17 +12322,12 @@ fn main() {
                                         } else {
                                             match key_lower.as_str() {
                                                 "up" | "arrowup" => {
-                                                    if view.selected_index > 0 {
-                                                        view.selected_index -= 1;
-                                                        view.list_scroll_handle.scroll_to_item(view.selected_index, ScrollStrategy::Nearest);
-                                                    }
+                                                    // Use move_selection_up to properly skip section headers
+                                                    view.move_selection_up(ctx);
                                                 }
                                                 "down" | "arrowdown" => {
-                                                    let max_index = view.get_filtered_results_cached().len().saturating_sub(1);
-                                                    if view.selected_index < max_index {
-                                                        view.selected_index += 1;
-                                                        view.list_scroll_handle.scroll_to_item(view.selected_index, ScrollStrategy::Nearest);
-                                                    }
+                                                    // Use move_selection_down to properly skip section headers
+                                                    view.move_selection_down(ctx);
                                                 }
                                                 "enter" => {
                                                     logging::log("STDIN", "SimulateKey: Enter - execute selected");
