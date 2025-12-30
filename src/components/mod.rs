@@ -8,6 +8,9 @@
 //! - [`Button`] - Interactive button with variants (Primary, Ghost, Icon)
 //! - [`Toast`] - Toast notification with variants (Success, Warning, Error, Info)
 //! - [`Scrollbar`] - Minimal native-style scrollbar for overlay on lists
+//! - [`FormTextField`] - Text input for text/password/email/number types
+//! - [`FormTextArea`] - Multi-line text input
+//! - [`FormCheckbox`] - Checkbox with label
 //!
 //! # Usage
 //!
@@ -28,6 +31,16 @@
 //!     .variant(ToastVariant::Error)
 //!     .details("Stack trace here...")
 //!     .dismissible(true);
+//!
+//! // Form field example
+//! use crate::components::{FormTextField, FormFieldColors};
+//! use crate::protocol::Field;
+//!
+//! let field = Field::new("username".to_string())
+//!     .with_label("Username".to_string())
+//!     .with_placeholder("Enter username".to_string());
+//! let colors = FormFieldColors::from_theme(&theme);
+//! let text_field = FormTextField::new(field, colors, cx);
 //! ```
 //!
 //! # Design Patterns
@@ -39,11 +52,14 @@
 //! - **Theme integration**: Use `from_theme()` or `from_design()` for colors
 
 pub mod button;
+pub mod form_fields;
 pub mod scrollbar;
 pub mod toast;
 
 // Re-export commonly used types
 pub use button::{Button, ButtonColors, ButtonVariant};
+#[allow(unused_imports)]
+pub use form_fields::{FormCheckbox, FormFieldColors, FormFieldState, FormTextArea, FormTextField};
 #[allow(unused_imports)]
 pub use scrollbar::{Scrollbar, ScrollbarColors, SCROLLBAR_WIDTH, MIN_THUMB_HEIGHT, SCROLLBAR_PADDING};
 // These re-exports form the public API - allow unused since not all are used in every crate

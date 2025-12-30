@@ -62,6 +62,9 @@ mod frecency;
 // Scriptlet parsing and variable substitution
 mod scriptlets;
 
+// HTML form parsing for form() prompt
+mod form_parser;
+
 // Centralized template variable substitution system
 mod template_variables;
 
@@ -88,7 +91,7 @@ use frecency::FrecencyStore;
 use scripts::get_grouped_results;
 use error::ErrorSeverity;
 use designs::{DesignVariant, render_design_item, get_tokens};
-use components::{Button, ButtonColors, ButtonVariant, Scrollbar, ScrollbarColors};
+use components::{Button, ButtonColors, ButtonVariant, Scrollbar, ScrollbarColors, FormTextField, FormTextArea, FormCheckbox, FormFieldColors};
 
 use std::sync::{Arc, Mutex, mpsc};
 use protocol::{Message, Choice};
@@ -107,6 +110,54 @@ fn get_global_mouse_position() -> Option<(f64, f64)> {
     let event = CGEvent::new(source).ok()?;
     let location = event.location();
     Some((location.x, location.y))
+}
+
+/// Open a path (file or folder) with the system default application.
+/// On macOS: uses `open` command
+/// On Linux: uses `xdg-open` command
+/// On Windows: uses `cmd /C start` command
+/// 
+/// This can be used to open files, folders, URLs, or any path that the 
+/// system knows how to handle.
+#[allow(dead_code)]
+fn open_path_with_system_default(path: &str) {
+    logging::log("UI", &format!("Opening path with system default: {}", path));
+    let path_owned = path.to_string();
+    
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        {
+            match std::process::Command::new("open")
+                .arg(&path_owned)
+                .spawn()
+            {
+                Ok(_) => logging::log("UI", &format!("Successfully opened: {}", path_owned)),
+                Err(e) => logging::log("ERROR", &format!("Failed to open '{}': {}", path_owned, e)),
+            }
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            match std::process::Command::new("xdg-open")
+                .arg(&path_owned)
+                .spawn()
+            {
+                Ok(_) => logging::log("UI", &format!("Successfully opened: {}", path_owned)),
+                Err(e) => logging::log("ERROR", &format!("Failed to open '{}': {}", path_owned, e)),
+            }
+        }
+        
+        #[cfg(target_os = "windows")]
+        {
+            match std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path_owned])
+                .spawn()
+            {
+                Ok(_) => logging::log("UI", &format!("Successfully opened: {}", path_owned)),
+                Err(e) => logging::log("ERROR", &format!("Failed to open '{}': {}", path_owned, e)),
+            }
+        }
+    });
 }
 
 /// Represents a display's bounds in macOS global coordinate space
@@ -479,6 +530,167 @@ pub fn is_shutting_down() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
+/// Enum to hold different types of form field entities
+#[derive(Clone)]
+pub enum FormFieldEntity {
+    TextField(Entity<FormTextField>),
+    TextArea(Entity<FormTextArea>),
+    Checkbox(Entity<FormCheckbox>),
+}
+
+/// Form prompt state - holds the parsed form fields and their entities
+pub struct FormPromptState {
+    /// Prompt ID for response
+    pub id: String,
+    /// Original HTML for reference
+    #[allow(dead_code)]
+    pub html: String,
+    /// Parsed field definitions and their corresponding entities
+    pub fields: Vec<(protocol::Field, FormFieldEntity)>,
+    /// Colors for form fields
+    pub colors: FormFieldColors,
+    /// Currently focused field index (for Tab navigation)
+    pub focused_index: usize,
+    /// Focus handle for this form
+    pub focus_handle: FocusHandle,
+}
+
+impl FormPromptState {
+    /// Create a new form prompt state from HTML
+    pub fn new(id: String, html: String, colors: FormFieldColors, cx: &mut App) -> Self {
+        let parsed_fields = form_parser::parse_form_html(&html);
+        
+        logging::log("FORM", &format!("Parsed {} form fields from HTML", parsed_fields.len()));
+        
+        let fields: Vec<(protocol::Field, FormFieldEntity)> = parsed_fields
+            .into_iter()
+            .map(|field| {
+                let field_type = field.field_type.clone().unwrap_or_else(|| "text".to_string());
+                logging::log("FORM", &format!("Creating field: {} (type: {})", field.name, field_type));
+                
+                let entity = match field_type.as_str() {
+                    "checkbox" => {
+                        let checkbox = FormCheckbox::new(field.clone(), colors, cx);
+                        FormFieldEntity::Checkbox(cx.new(|_| checkbox))
+                    }
+                    "textarea" => {
+                        let textarea = FormTextArea::new(field.clone(), colors, 4, cx);
+                        FormFieldEntity::TextArea(cx.new(|_| textarea))
+                    }
+                    _ => {
+                        // text, password, email, number all use TextField
+                        let textfield = FormTextField::new(field.clone(), colors, cx);
+                        FormFieldEntity::TextField(cx.new(|_| textfield))
+                    }
+                };
+                
+                (field, entity)
+            })
+            .collect();
+        
+        Self {
+            id,
+            html,
+            fields,
+            colors,
+            focused_index: 0,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// Get all field values as a JSON object string
+    pub fn collect_values(&self, cx: &App) -> String {
+        let mut values = serde_json::Map::new();
+        
+        for (field_def, entity) in &self.fields {
+            let value = match entity {
+                FormFieldEntity::TextField(e) => {
+                    e.read(cx).value().to_string()
+                }
+                FormFieldEntity::TextArea(e) => {
+                    e.read(cx).value().to_string()
+                }
+                FormFieldEntity::Checkbox(e) => {
+                    if e.read(cx).is_checked() {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    }
+                }
+            };
+            values.insert(field_def.name.clone(), serde_json::Value::String(value));
+        }
+        
+        serde_json::to_string(&values).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Focus the next field (for Tab navigation)
+    pub fn focus_next(&mut self, cx: &mut Context<Self>) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.focused_index = (self.focused_index + 1) % self.fields.len();
+        cx.notify();
+    }
+
+    /// Focus the previous field (for Shift+Tab navigation)
+    pub fn focus_previous(&mut self, cx: &mut Context<Self>) {
+        if self.fields.is_empty() {
+            return;
+        }
+        if self.focused_index == 0 {
+            self.focused_index = self.fields.len() - 1;
+        } else {
+            self.focused_index -= 1;
+        }
+        cx.notify();
+    }
+
+    /// Get the focus handle for the currently focused field
+    pub fn current_focus_handle(&self, cx: &App) -> Option<FocusHandle> {
+        self.fields.get(self.focused_index).map(|(_, entity)| {
+            match entity {
+                FormFieldEntity::TextField(e) => e.read(cx).focus_handle(cx),
+                FormFieldEntity::TextArea(e) => e.read(cx).focus_handle(cx),
+                FormFieldEntity::Checkbox(e) => e.read(cx).focus_handle(cx),
+            }
+        })
+    }
+}
+
+impl Render for FormPromptState {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        
+        // Build the form fields container
+        let mut container = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .w_full();
+        
+        for (_field_def, entity) in &self.fields {
+            container = match entity {
+                FormFieldEntity::TextField(e) => container.child(e.clone()),
+                FormFieldEntity::TextArea(e) => container.child(e.clone()),
+                FormFieldEntity::Checkbox(e) => container.child(e.clone()),
+            };
+        }
+        
+        // If no fields, show an error message
+        if self.fields.is_empty() {
+            container = container.child(
+                div()
+                    .p(px(16.))
+                    .text_color(rgb(colors.label))
+                    .child("No form fields found in HTML")
+            );
+        }
+        
+        container
+    }
+}
+
 /// Application state - what view are we currently showing
 #[derive(Debug, Clone)]
 enum AppView {
@@ -501,8 +713,9 @@ enum AppView {
     },
     /// Showing a form prompt from a script (HTML form with submit button)
     FormPrompt {
+        #[allow(dead_code)]
         id: String,
-        html: String,
+        entity: Entity<FormPromptState>,
     },
     /// Showing a terminal prompt from a script
     TermPrompt {
@@ -920,6 +1133,12 @@ struct ScriptListApp {
     // Shared state: whether path actions dialog is currently showing
     // Used by PathPrompt to implement toggle behavior for Cmd+K
     path_actions_showing: Arc<Mutex<bool>>,
+    // Shared state: current search text in path actions dialog
+    // Used by PathPrompt to display search in header (like main menu does)
+    path_actions_search_text: Arc<Mutex<String>>,
+    // Pending path action result - when set, execute this action on the stored path
+    // Tuple of (action_id, path_info) to handle the action
+    pending_path_action_result: Arc<Mutex<Option<(String, PathInfo)>>>,
 }
 
 impl ScriptListApp {
@@ -1092,6 +1311,10 @@ impl ScriptListApp {
             close_path_actions: Arc::new(Mutex::new(false)),
             // Shared state: path actions dialog visibility (for toggle behavior)
             path_actions_showing: Arc::new(Mutex::new(false)),
+            // Shared state: path actions search text (for header display)
+            path_actions_search_text: Arc::new(Mutex::new(String::new())),
+            // Pending path action result - action_id + path_info to execute
+            pending_path_action_result: Arc::new(Mutex::new(None)),
         }
     }
     
@@ -1879,6 +2102,253 @@ impl ScriptListApp {
                 Err(e) => logging::log("ERROR", &format!("Failed to spawn editor '{}': {}", editor, e)),
             }
         });
+    }
+    
+    /// Execute a path action from the actions dialog
+    /// Handles actions like copy_path, open_in_finder, open_in_editor, etc.
+    fn execute_path_action(
+        &mut self, 
+        action_id: &str, 
+        path_info: &PathInfo, 
+        path_prompt_entity: &Entity<PathPrompt>,
+        cx: &mut Context<Self>
+    ) {
+        logging::log("UI", &format!(
+            "Executing path action '{}' for: {} (is_dir={})", 
+            action_id, path_info.path, path_info.is_dir
+        ));
+        
+        match action_id {
+            "select_file" | "open_directory" => {
+                // For select/open, trigger submission through the path prompt
+                // We need to trigger the submit callback with this path
+                path_prompt_entity.update(cx, |prompt, cx| {
+                    // Find the index of this path in filtered_entries and submit it
+                    if let Some(idx) = prompt.filtered_entries.iter().position(|e| e.path == path_info.path) {
+                        prompt.selected_index = idx;
+                    }
+                    // For directories, navigate into them; for files, submit
+                    if path_info.is_dir && action_id == "open_directory" {
+                        prompt.navigate_to(&path_info.path, cx);
+                    } else {
+                        // Submit the selected path
+                        let id = prompt.id.clone();
+                        let path = path_info.path.clone();
+                        (prompt.on_submit)(id, Some(path));
+                    }
+                });
+            }
+            "copy_path" => {
+                // Copy full path to clipboard
+                #[cfg(target_os = "macos")]
+                {
+                    use std::process::{Command, Stdio};
+                    use std::io::Write;
+                    
+                    match Command::new("pbcopy")
+                        .stdin(Stdio::piped())
+                        .spawn()
+                    {
+                        Ok(mut child) => {
+                            if let Some(ref mut stdin) = child.stdin {
+                                if stdin.write_all(path_info.path.as_bytes()).is_ok() {
+                                    let _ = child.wait();
+                                    logging::log("UI", &format!("Copied path to clipboard: {}", path_info.path));
+                                    self.last_output = Some(SharedString::from(format!("Copied: {}", path_info.path)));
+                                } else {
+                                    logging::log("ERROR", "Failed to write to pbcopy stdin");
+                                    self.last_output = Some(SharedString::from("Failed to copy path"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            logging::log("ERROR", &format!("Failed to spawn pbcopy: {}", e));
+                            self.last_output = Some(SharedString::from("Failed to copy path"));
+                        }
+                    }
+                }
+                
+                #[cfg(not(target_os = "macos"))]
+                {
+                    use arboard::Clipboard;
+                    match Clipboard::new() {
+                        Ok(mut clipboard) => {
+                            match clipboard.set_text(&path_info.path) {
+                                Ok(_) => {
+                                    logging::log("UI", &format!("Copied path to clipboard: {}", path_info.path));
+                                    self.last_output = Some(SharedString::from(format!("Copied: {}", path_info.path)));
+                                }
+                                Err(e) => {
+                                    logging::log("ERROR", &format!("Failed to copy path: {}", e));
+                                    self.last_output = Some(SharedString::from("Failed to copy path"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            logging::log("ERROR", &format!("Failed to access clipboard: {}", e));
+                            self.last_output = Some(SharedString::from("Failed to access clipboard"));
+                        }
+                    }
+                }
+            }
+            "copy_filename" => {
+                // Copy just the filename to clipboard
+                #[cfg(target_os = "macos")]
+                {
+                    use std::process::{Command, Stdio};
+                    use std::io::Write;
+                    
+                    match Command::new("pbcopy")
+                        .stdin(Stdio::piped())
+                        .spawn()
+                    {
+                        Ok(mut child) => {
+                            if let Some(ref mut stdin) = child.stdin {
+                                if stdin.write_all(path_info.name.as_bytes()).is_ok() {
+                                    let _ = child.wait();
+                                    logging::log("UI", &format!("Copied filename to clipboard: {}", path_info.name));
+                                    self.last_output = Some(SharedString::from(format!("Copied: {}", path_info.name)));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            logging::log("ERROR", &format!("Failed to spawn pbcopy: {}", e));
+                        }
+                    }
+                }
+            }
+            "open_in_finder" => {
+                // Reveal in Finder (macOS)
+                #[cfg(target_os = "macos")]
+                {
+                    use std::process::Command;
+                    let path_to_reveal = if path_info.is_dir {
+                        path_info.path.clone()
+                    } else {
+                        // For files, reveal the containing folder with the file selected
+                        path_info.path.clone()
+                    };
+                    
+                    match Command::new("open")
+                        .args(["-R", &path_to_reveal])
+                        .spawn()
+                    {
+                        Ok(_) => {
+                            logging::log("UI", &format!("Revealed in Finder: {}", path_info.path));
+                        }
+                        Err(e) => {
+                            logging::log("ERROR", &format!("Failed to reveal in Finder: {}", e));
+                            self.last_output = Some(SharedString::from("Failed to reveal in Finder"));
+                        }
+                    }
+                }
+            }
+            "open_in_editor" => {
+                // Open in configured editor
+                let editor = self.config.get_editor();
+                let path_str = path_info.path.clone();
+                logging::log("UI", &format!("Opening in editor '{}': {}", editor, path_str));
+                
+                std::thread::spawn(move || {
+                    use std::process::Command;
+                    match Command::new(&editor)
+                        .arg(&path_str)
+                        .spawn()
+                    {
+                        Ok(_) => logging::log("UI", &format!("Opened in editor: {}", path_str)),
+                        Err(e) => logging::log("ERROR", &format!("Failed to open in editor: {}", e)),
+                    }
+                });
+            }
+            "open_in_terminal" => {
+                // Open terminal at this location
+                #[cfg(target_os = "macos")]
+                {
+                    use std::process::Command;
+                    // Get the directory (if file, use parent directory)
+                    let dir_path = if path_info.is_dir {
+                        path_info.path.clone()
+                    } else {
+                        std::path::Path::new(&path_info.path)
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path_info.path.clone())
+                    };
+                    
+                    // Try iTerm first, fall back to Terminal.app
+                    let script = format!(
+                        r#"tell application "Terminal"
+                            do script "cd '{}'"
+                            activate
+                        end tell"#,
+                        dir_path
+                    );
+                    
+                    match Command::new("osascript")
+                        .args(["-e", &script])
+                        .spawn()
+                    {
+                        Ok(_) => {
+                            logging::log("UI", &format!("Opened terminal at: {}", dir_path));
+                        }
+                        Err(e) => {
+                            logging::log("ERROR", &format!("Failed to open terminal: {}", e));
+                            self.last_output = Some(SharedString::from("Failed to open terminal"));
+                        }
+                    }
+                }
+            }
+            "move_to_trash" => {
+                // Move to trash (macOS)
+                #[cfg(target_os = "macos")]
+                {
+                    use std::process::Command;
+                    let path_str = path_info.path.clone();
+                    let name = path_info.name.clone();
+                    
+                    // Use AppleScript to move to trash (preserves undo capability)
+                    let script = format!(
+                        r#"tell application "Finder"
+                            delete POSIX file "{}"
+                        end tell"#,
+                        path_str
+                    );
+                    
+                    match Command::new("osascript")
+                        .args(["-e", &script])
+                        .spawn()
+                    {
+                        Ok(mut child) => {
+                            // Wait for completion and check result
+                            match child.wait() {
+                                Ok(status) if status.success() => {
+                                    logging::log("UI", &format!("Moved to trash: {}", path_str));
+                                    self.last_output = Some(SharedString::from(format!("Moved to Trash: {}", name)));
+                                    // Refresh the path prompt to show the file is gone
+                                    path_prompt_entity.update(cx, |prompt, cx| {
+                                        let current = prompt.current_path.clone();
+                                        prompt.navigate_to(&current, cx);
+                                    });
+                                }
+                                _ => {
+                                    logging::log("ERROR", &format!("Failed to move to trash: {}", path_str));
+                                    self.last_output = Some(SharedString::from("Failed to move to Trash"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            logging::log("ERROR", &format!("Failed to spawn trash command: {}", e));
+                            self.last_output = Some(SharedString::from("Failed to move to Trash"));
+                        }
+                    }
+                }
+            }
+            _ => {
+                logging::log("UI", &format!("Unknown path action: {}", action_id));
+            }
+        }
+        
+        cx.notify();
     }
     
     /// Execute a script interactively (for scripts that use arg/div prompts)
@@ -2960,9 +3430,25 @@ impl ScriptListApp {
             }
             PromptMessage::ShowForm { id, html } => {
                 logging::log("UI", &format!("Showing form prompt: {}", id));
-                self.current_view = AppView::FormPrompt { id, html };
-                self.focused_input = FocusedInput::None; // FormPrompt has no text input (submit button instead)
-                defer_resize_to_view(ViewType::DivPrompt, 0, cx); // Use DivPrompt size for now
+                
+                // Create form field colors from theme
+                let colors = FormFieldColors::from_theme(&self.theme);
+                
+                // Create FormPromptState entity with parsed fields
+                let form_state = FormPromptState::new(id.clone(), html, colors, cx);
+                let field_count = form_state.fields.len();
+                let entity = cx.new(|_| form_state);
+                
+                self.current_view = AppView::FormPrompt { id, entity };
+                self.focused_input = FocusedInput::None; // FormPrompt has its own focus handling
+                
+                // Resize based on field count (more fields = taller window)
+                let view_type = if field_count > 0 {
+                    ViewType::ArgPromptWithChoices
+                } else {
+                    ViewType::DivPrompt
+                };
+                defer_resize_to_view(view_type, field_count, cx);
                 cx.notify();
             }
             PromptMessage::ShowTerm { id, command } => {
@@ -3543,8 +4029,9 @@ impl ScriptListApp {
                         }
                     });
                 
-                // Clone the path_actions_showing Arc for toggle behavior
+                // Clone the path_actions_showing and search_text Arcs for header display
                 let path_actions_showing = self.path_actions_showing.clone();
+                let path_actions_search_text = self.path_actions_search_text.clone();
                 
                 let focus_handle = cx.focus_handle();
                 let path_prompt = PathPrompt::new(
@@ -3557,7 +4044,8 @@ impl ScriptListApp {
                 )
                 .with_show_actions(show_actions_callback)
                 .with_close_actions(close_actions_callback)
-                .with_actions_showing(path_actions_showing);
+                .with_actions_showing(path_actions_showing)
+                .with_actions_search_text(path_actions_search_text);
                 
                 let entity = cx.new(|_| path_prompt);
                 self.current_view = AppView::PathPrompt { id, entity, focus_handle };
@@ -4049,7 +4537,7 @@ impl Render for ScriptListApp {
             AppView::ActionsDialog => self.render_actions_dialog(cx),
             AppView::ArgPrompt { id, placeholder, choices } => self.render_arg_prompt(id, placeholder, choices, cx),
             AppView::DivPrompt { id, html, tailwind } => self.render_div_prompt(id, html, tailwind, cx),
-            AppView::FormPrompt { id, html } => self.render_form_prompt(id, html, cx),
+            AppView::FormPrompt { entity, .. } => self.render_form_prompt(entity, cx),
             AppView::TermPrompt { entity, .. } => self.render_term_prompt(entity, cx),
             AppView::EditorPrompt { entity, .. } => self.render_editor_prompt(entity, cx),
             AppView::SelectPrompt { entity, .. } => self.render_select_prompt(entity, cx),
@@ -5994,7 +6482,7 @@ impl ScriptListApp {
             .into_any_element()
     }
     
-    fn render_form_prompt(&mut self, id: String, html: String, cx: &mut Context<Self>) -> AnyElement {
+    fn render_form_prompt(&mut self, entity: Entity<FormPromptState>, cx: &mut Context<Self>) -> AnyElement {
         // Use design tokens for GLOBAL theming
         let tokens = get_tokens(self.current_design);
         let design_colors = tokens.colors();
@@ -6002,25 +6490,47 @@ impl ScriptListApp {
         let design_typography = tokens.typography();
         let design_visual = tokens.visual();
         
-        // Strip HTML tags for plain text display (same as DivPrompt for now)
-        let display_text = strip_html_tags(&html);
+        // Get prompt ID and field count from entity
+        let prompt_id = entity.read(cx).id.clone();
+        let field_count = entity.read(cx).fields.len();
         
-        let prompt_id = id.clone();
+        // Clone entity for closures
+        let entity_for_submit = entity.clone();
+        let entity_for_tab = entity.clone();
+        let entity_for_shift_tab = entity.clone();
+        
+        let prompt_id_for_key = prompt_id.clone();
         let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
             let key_str = event.keystroke.key.to_lowercase();
-            logging::log("KEY", &format!("FormPrompt key: '{}'", key_str));
+            let has_shift = event.keystroke.modifiers.shift;
+            
+            logging::log("KEY", &format!("FormPrompt key: '{}' (shift: {})", key_str, has_shift));
             
             match key_str.as_str() {
                 "enter" => {
-                    // Enter submits the form
+                    // Enter submits the form - collect all field values
                     logging::log("KEY", "Enter in FormPrompt - submitting form");
-                    this.submit_prompt_response(prompt_id.clone(), Some("submitted".to_string()), cx);
+                    let values = entity_for_submit.read(cx).collect_values(cx);
+                    logging::log("FORM", &format!("Form values: {}", values));
+                    this.submit_prompt_response(prompt_id_for_key.clone(), Some(values), cx);
                 }
                 "escape" => {
                     // ESC cancels the script completely
                     logging::log("KEY", "ESC in FormPrompt - canceling script");
-                    this.submit_prompt_response(prompt_id.clone(), None, cx);
+                    this.submit_prompt_response(prompt_id_for_key.clone(), None, cx);
                     this.cancel_script_execution(cx);
+                }
+                "tab" => {
+                    // Tab navigation between fields
+                    if has_shift {
+                        entity_for_shift_tab.update(cx, |form, cx| {
+                            form.focus_previous(cx);
+                        });
+                    } else {
+                        entity_for_tab.update(cx, |form, cx| {
+                            form.focus_next(cx);
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -6032,9 +6542,14 @@ impl ScriptListApp {
         let bg_with_alpha = self.hex_to_rgba_with_opacity(bg_hex, opacity.main);
         let box_shadows = self.create_box_shadows();
         
-        // Use explicit height from layout constants instead of h_full()
-        // FormPrompt uses STANDARD_HEIGHT (500px) to match main window
-        let content_height = window_resize::layout::STANDARD_HEIGHT;
+        // Dynamic height based on field count
+        // Base height (150px) + per-field height (60px per field)
+        // Minimum of calculated height and MAX_HEIGHT (700px)
+        let base_height = 150.0;
+        let field_height = 60.0;
+        let calculated_height = base_height + (field_count as f32 * field_height);
+        let max_height = 700.0; // Same as window_resize::layout::MAX_HEIGHT
+        let content_height = px(calculated_height.min(max_height));
         
         // Button colors from theme
         let button_colors = ButtonColors::from_theme(&self.theme);
@@ -6053,16 +6568,16 @@ impl ScriptListApp {
             .key_context("form_prompt")
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
-            // Content area
+            // Content area with form fields
             .child(
                 div()
                     .flex_1()
                     .w_full()
-                    .min_h(px(0.))  // Critical: allows flex children to size properly
-                    .overflow_hidden()
+                    .min_h(px(0.))
+                    .overflow_y_hidden()  // Clip content at container boundary
                     .p(px(design_spacing.padding_xl))
-                    .text_lg()
-                    .child(display_text)
+                    // Render the form entity (contains all fields)
+                    .child(entity.clone())
             )
             // Footer with Submit button
             .child(
@@ -6081,12 +6596,13 @@ impl ScriptListApp {
                         div()
                             .text_xs()
                             .text_color(rgb(design_colors.text_muted))
-                            .child("⏎ submit • Esc cancel")
+                            .child("Tab navigate • ⏎ submit • Esc cancel")
                     )
-                    // Submit button
+                    // Submit button (visual only - use Enter key to submit)
                     .child(
                         Button::new("Submit", button_colors)
                             .variant(ButtonVariant::Primary)
+                            .shortcut("↵")
                     )
             )
             .into_any_element()
@@ -6216,16 +6732,33 @@ impl ScriptListApp {
             }
         }
         
+        // Check for pending path action result and execute it
+        // Extract data first, then drop the lock, then execute
+        let pending_action = self.pending_path_action_result.lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        
+        if let Some((action_id, path_info)) = pending_action {
+            self.execute_path_action(&action_id, &path_info, &entity, cx);
+        }
+        
         // Check for pending path action and create ActionsDialog if needed
         let actions_dialog = if let Ok(mut guard) = self.pending_path_action.lock() {
             if let Some(path_info) = guard.take() {
                 // Create ActionsDialog for this path
                 let theme_arc = std::sync::Arc::new(self.theme.clone());
-                let path_for_action = path_info.path.clone();
                 let close_signal = self.close_path_actions.clone();
+                let action_result_signal = self.pending_path_action_result.clone();
+                let path_info_for_callback = path_info.clone();
                 let action_callback: std::sync::Arc<dyn Fn(String) + Send + Sync> = 
                     std::sync::Arc::new(move |action_id| {
-                        logging::log("UI", &format!("Path action selected: {} for path: {}", action_id, path_for_action));
+                        logging::log("UI", &format!("Path action selected: {} for path: {}", action_id, path_info_for_callback.path));
+                        // Store the action result for execution
+                        if action_id != "__cancel__" {
+                            if let Ok(mut guard) = action_result_signal.lock() {
+                                *guard = Some((action_id.clone(), path_info_for_callback.clone()));
+                            }
+                        }
                         // Signal to close dialog on cancel or action selection
                         if let Ok(mut guard) = close_signal.lock() {
                             *guard = true;
@@ -6233,12 +6766,15 @@ impl ScriptListApp {
                     });
                 let dialog = cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
-                    ActionsDialog::with_path(
+                    let mut dialog = ActionsDialog::with_path(
                         focus_handle,
                         action_callback,
                         &path_info,
                         theme_arc,
-                    )
+                    );
+                    // Hide search in the dialog - we show it in the header instead
+                    dialog.set_hide_search(true);
+                    dialog
                 });
                 self.actions_dialog = Some(dialog.clone());
                 self.show_actions_popup = true;
@@ -6256,7 +6792,117 @@ impl ScriptListApp {
             None
         };
         
+        // Sync the actions search text from the dialog to the shared state
+        // This allows PathPrompt to display the search text in its header
+        if let Some(ref dialog) = actions_dialog {
+            let search_text = dialog.read(cx).search_text.clone();
+            if let Ok(mut guard) = self.path_actions_search_text.lock() {
+                *guard = search_text;
+            }
+        } else {
+            // Clear search text when dialog is not showing
+            if let Ok(mut guard) = self.path_actions_search_text.lock() {
+                guard.clear();
+            }
+        }
+        
+        // Key handler for when actions dialog is showing
+        // This intercepts keys and routes them to the dialog (like main menu does)
+        let path_entity = entity.clone();
+        let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>| {
+            let key_str = event.keystroke.key.to_lowercase();
+            let has_cmd = event.keystroke.modifiers.platform;
+            
+            // Cmd+K toggles actions from anywhere
+            if has_cmd && key_str == "k" {
+                // Toggle the actions dialog
+                if this.show_actions_popup {
+                    // Close actions
+                    this.show_actions_popup = false;
+                    this.actions_dialog = None;
+                    if let Ok(mut guard) = this.path_actions_showing.lock() {
+                        *guard = false;
+                    }
+                    cx.notify();
+                } else {
+                    // Open actions - trigger the callback in PathPrompt
+                    path_entity.update(cx, |prompt, cx| {
+                        prompt.toggle_actions(cx);
+                    });
+                }
+                return;
+            }
+            
+            // If actions popup is open, route keyboard events to it
+            if this.show_actions_popup {
+                if let Some(ref dialog) = this.actions_dialog {
+                    match key_str.as_str() {
+                        "up" | "arrowup" => {
+                            dialog.update(cx, |d, cx| d.move_up(cx));
+                        }
+                        "down" | "arrowdown" => {
+                            dialog.update(cx, |d, cx| d.move_down(cx));
+                        }
+                        "enter" => {
+                            // Get the selected action and execute it
+                            let action_id = dialog.read(cx).get_selected_action_id();
+                            if let Some(action_id) = action_id {
+                                logging::log("ACTIONS", &format!("Path action selected via Enter: {}", action_id));
+                                
+                                // Get path info from PathPrompt
+                                let path_info = path_entity.read(cx).get_selected_path_info();
+                                
+                                // Close dialog
+                                this.show_actions_popup = false;
+                                this.actions_dialog = None;
+                                if let Ok(mut guard) = this.path_actions_showing.lock() {
+                                    *guard = false;
+                                }
+                                
+                                // Focus back to PathPrompt
+                                if let AppView::PathPrompt { focus_handle, .. } = &this.current_view {
+                                    window.focus(focus_handle, cx);
+                                }
+                                
+                                // Execute the action if we have path info
+                                if let Some(info) = path_info {
+                                    this.execute_path_action(&action_id, &info, &path_entity, cx);
+                                }
+                            }
+                        }
+                        "escape" => {
+                            this.show_actions_popup = false;
+                            this.actions_dialog = None;
+                            if let Ok(mut guard) = this.path_actions_showing.lock() {
+                                *guard = false;
+                            }
+                            // Focus back to PathPrompt
+                            if let AppView::PathPrompt { focus_handle, .. } = &this.current_view {
+                                window.focus(focus_handle, cx);
+                            }
+                            cx.notify();
+                        }
+                        "backspace" => {
+                            dialog.update(cx, |d, cx| d.handle_backspace(cx));
+                        }
+                        _ => {
+                            // Route character input to the dialog for search
+                            if let Some(ref key_char) = event.keystroke.key_char {
+                                if let Some(ch) = key_char.chars().next() {
+                                    if !ch.is_control() {
+                                        dialog.update(cx, |d, cx| d.handle_char(ch, cx));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // If actions not showing, let PathPrompt handle the keys via its own handler
+        });
+        
         // PathPrompt entity has its own track_focus and on_key_down in its render method.
+        // We add an outer key handler to intercept events when actions are showing.
         div()
             .relative()
             .flex()
@@ -6267,6 +6913,8 @@ impl ScriptListApp {
             .h_full()
             .overflow_hidden()
             .rounded(px(design_visual.radius_lg))
+            .key_context("path_prompt_container")
+            .on_key_down(handle_key)
             .child(div().size_full().child(entity))
             // Actions dialog overlays on top (upper-right corner, below the header bar)
             .when_some(actions_dialog, |d, dialog| {

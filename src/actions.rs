@@ -556,27 +556,9 @@ impl Render for ActionsDialog {
         let spacing = tokens.spacing();
         let visual = tokens.visual();
         
-        let handle_key = cx.listener(move |this: &mut Self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>| {
-            let key_str = event.keystroke.key.to_lowercase();
-            
-            match key_str.as_str() {
-                "up" | "arrowup" => this.move_up(cx),
-                "down" | "arrowdown" => this.move_down(cx),
-                "enter" => this.submit_selected(),
-                "escape" => this.submit_cancel(),
-                "backspace" => this.handle_backspace(cx),
-                _ => {
-                    // Try to capture printable characters
-                    if let Some(ref key_char) = event.keystroke.key_char {
-                        if let Some(ch) = key_char.chars().next() {
-                            if !ch.is_control() {
-                                this.handle_char(ch, cx);
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        // NOTE: Key handling is done by the parent (ScriptListApp in main.rs)
+        // which routes all keyboard events to this dialog's methods.
+        // We do NOT attach our own on_key_down handler to avoid double-processing.
 
         // Render search input - compact version
         let search_display = if self.search_text.is_empty() {
@@ -958,7 +940,7 @@ impl Render for ActionsDialog {
             .text_color(container_text)
             .key_context("actions_dialog")
             .track_focus(&self.focus_handle)
-            .on_key_down(handle_key)
+            // NOTE: No on_key_down here - parent handles all keyboard input
             .child(actions_container)
             .when(!self.hide_search, |d| d.child(input_container))
     }

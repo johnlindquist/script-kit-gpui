@@ -48,6 +48,9 @@ pub mod process_manager;
 // Scriptlet parsing and variable substitution
 pub mod scriptlets;
 
+// HTML form parsing for form() prompt
+pub mod form_parser;
+
 // Centralized template variable substitution system
 // Used by expand_manager, template prompts, and future template features
 pub mod template_variables;
