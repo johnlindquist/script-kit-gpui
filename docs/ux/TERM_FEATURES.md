@@ -48,8 +48,8 @@ This document provides a comprehensive audit of the terminal prompt implementati
 | Tab | Complete | Tab character input |
 | Escape | Complete | Escape sequence trigger |
 | Paste (Cmd+V) | Complete | **Recently implemented** |
-| Copy (Cmd+C) | Not Started | Requires selection first |
-| Bracketed paste mode | Not Started | Security feature for paste |
+| Copy (Cmd+C) | Complete | **Recently implemented** - Copies selection |
+| Bracketed paste mode | Complete | **Recently implemented** - Wraps paste in escape sequences |
 
 ### 1.3 Display & Rendering
 
@@ -68,20 +68,20 @@ This document provides a comprehensive audit of the terminal prompt implementati
 | Feature | Status | Notes |
 |---------|--------|-------|
 | 10,000 line buffer | Backend Only | Alacritty stores it, UI doesn't expose |
-| Scroll with mouse wheel | Not Started | Mouse events not wired |
-| Shift+PageUp/Down | Not Started | Keyboard scrollback nav |
+| Scroll with mouse wheel | Complete | **Recently implemented** - on_scroll_wheel handler |
+| Shift+PageUp/Down | Complete | **Recently implemented** - Keyboard scrollback nav |
 | Scroll position indicator | Not Started | Visual scrollbar or position |
 
 ### 1.5 Selection & Copy
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Mouse text selection | Not Started | Click-drag selection |
+| Mouse text selection | Complete | **Recently implemented** - Click-drag selection |
 | Shift+Arrow selection | Not Started | Keyboard selection |
 | Double-click word select | Not Started | Word boundary detection |
 | Triple-click line select | Not Started | Full line selection |
-| Selection highlighting | Partial | Colors defined in theme_adapter.rs, not rendered |
-| Copy selected text | Not Started | Requires selection first |
+| Selection highlighting | Complete | **Recently implemented** - Accent color highlighting |
+| Copy selected text | Complete | **Recently implemented** - Cmd+C with selection |
 
 ### 1.6 Advanced Features
 
@@ -407,3 +407,5 @@ process.exit(0);
 | 2024-12-30 | Initial audit and roadmap creation |
 | 2024-12-30 | Documented paste support (Cmd+V) implementation |
 | 2024-12-30 | Documented visual bell implementation |
+| 2024-12-30 | Implemented P0 (terminal title), P2 (scrollback nav), P3 (text selection + copy) |
+| 2024-12-30 | Implemented P4 (bracketed paste mode), P5a (mouse wheel scrolling) |

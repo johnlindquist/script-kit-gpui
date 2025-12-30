@@ -606,8 +606,17 @@ impl Render for TermPrompt {
                     use arboard::Clipboard;
                     if let Ok(mut clipboard) = Clipboard::new() {
                         if let Ok(text) = clipboard.get_text() {
-                            debug!(text_len = text.len(), "Pasting clipboard text to terminal");
-                            if let Err(e) = this.terminal.input(text.as_bytes()) {
+                            // Check if bracketed paste mode is enabled
+                            // When enabled, wrap paste in escape sequences so apps know it's pasted
+                            let paste_data = if this.terminal.is_bracketed_paste_mode() {
+                                debug!(text_len = text.len(), "Pasting with bracketed paste mode");
+                                format!("\x1b[200~{}\x1b[201~", text)
+                            } else {
+                                debug!(text_len = text.len(), "Pasting clipboard text to terminal");
+                                text
+                            };
+                            
+                            if let Err(e) = this.terminal.input(paste_data.as_bytes()) {
                                 if !this.exited {
                                     warn!(error = %e, "Failed to paste clipboard to terminal");
                                 }

@@ -54,7 +54,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Direction, Line, Point as AlacPoint};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags as AlacrittyFlags;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use anyhow::{Context, Result};
 use bitflags::bitflags;
 use tracing::{debug, info, instrument, trace, warn};
@@ -845,6 +845,20 @@ impl TerminalHandle {
     pub fn has_selection(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.term.selection.is_some()
+    }
+
+    /// Check if bracketed paste mode is enabled.
+    ///
+    /// When bracketed paste mode is enabled, pasted text should be wrapped
+    /// in escape sequences (`\x1b[200~` before and `\x1b[201~` after) so
+    /// the shell/application knows the content is pasted rather than typed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the terminal is in bracketed paste mode.
+    pub fn is_bracketed_paste_mode(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     /// Updates the theme adapter for focus state.
