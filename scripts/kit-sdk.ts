@@ -4060,6 +4060,15 @@ globalThis._getScriptOutput = function _getScriptOutput(): Record<string, unknow
   return scriptOutputData;
 };
 
+/**
+ * Reset input/output state (for testing).
+ * @internal
+ */
+globalThis._resetScriptIO = function _resetScriptIO(): void {
+  scriptInputData = null;
+  scriptOutputData = {};
+};
+
 // =============================================================================
 // Global Type Declarations
 // =============================================================================
@@ -4079,6 +4088,8 @@ declare global {
   function _setScriptInput(data: Record<string, unknown>): void;
   /** @internal */
   function _getScriptOutput(): Record<string, unknown>;
+  /** @internal */
+  function _resetScriptIO(): void;
 
   // Core prompt functions
   function arg(placeholderOrConfig?: string | ArgConfig, choices?: ChoicesInput): Promise<string>;

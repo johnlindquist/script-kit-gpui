@@ -365,9 +365,14 @@ fn handle_rpc_request(
 
     debug!("RPC request body: {}", body_str);
 
-    // Parse and handle request
+    // Load scripts and scriptlets for context-aware responses
+    // This allows resources/read and tools/list to return actual data
+    let scripts = crate::scripts::read_scripts();
+    let scriptlets = crate::scripts::load_scriptlets();
+
+    // Parse and handle request with full context
     let response = match mcp_protocol::parse_request(&body_str) {
-        Ok(request) => mcp_protocol::handle_request(request),
+        Ok(request) => mcp_protocol::handle_request_with_context(request, &scripts, &scriptlets, None),
         Err(error_response) => error_response,
     };
 
