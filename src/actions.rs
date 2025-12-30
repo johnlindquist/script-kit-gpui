@@ -937,61 +937,56 @@ impl Render for ActionsDialog {
                                     // So we must explicitly round children that touch the container's corners
                                     let corner_radius = POPUP_CORNER_RADIUS;
 
-                                    // Build the action item with left accent bar for selected state
-                                    // For the first item, we need to inset the content so the accent bar
-                                    // doesn't escape the rounded corners. The container has 12px radius,
-                                    // so we add top padding to push content below the curve.
-                                    let mut action_item = div()
-                                        .id(idx)
-                                        .w_full()
-                                        .h(px(ACTION_ITEM_HEIGHT)) // Fixed height for uniform_list
-                                        // Match main list: subtle selection bg, transparent when not selected
-                                        .bg(if is_selected {
-                                            selected_bg
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        // Add top border for category separator
-                                        .when(is_category_start, |d| {
-                                            d.border_t_1().border_color(separator_color)
-                                        })
-                                        .hover(|s| s.bg(hover_bg))
-                                        .cursor_pointer()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center();
-
-                                    // Left accent bar - only visible when selected
-                                    // Get accent color for the left bar
+                                    // Left accent color - used as border color when selected
+                                    // Using a LEFT BORDER instead of a child div because:
+                                    // 1. GPUI clamps corner radii to ≤ half the shortest side
+                                    // 2. A 3px-wide child with 12px radius gets clamped to ~1.5px (invisible)
+                                    // 3. A border on the row follows the row's rounded corners naturally
                                     let accent_color = if design_variant == DesignVariant::Default {
                                         rgb(this.theme.colors.accent.selected)
                                     } else {
                                         rgb(item_colors.accent)
                                     };
 
-                                    // Accent bar - for first item, add top margin to avoid the rounded corner
-                                    // The container has 12px corner radius, so we push the accent bar down
-                                    // by that amount on the first item to keep it inside the rounded area
-                                    let accent_bar = div()
-                                        .w(px(ACCENT_BAR_WIDTH))
-                                        .when(is_first_item, |d| {
-                                            // Push down from top by corner radius amount
-                                            d.h(px(ACTION_ITEM_HEIGHT - corner_radius)).mt(px(corner_radius))
-                                        })
-                                        .when(!is_first_item, |d| d.h_full())
-                                        .when(is_last_item && this.hide_search, |d| {
-                                            // For last item, reduce height from bottom
-                                            d.h(px(ACTION_ITEM_HEIGHT - corner_radius)).mb(px(corner_radius))
-                                        })
+                                    // Build the action item - use left border for accent indicator
+                                    // Border is always reserved (for consistent layout), just toggle color
+                                    let mut action_item = div()
+                                        .id(idx)
+                                        .w_full()
+                                        .h(px(ACTION_ITEM_HEIGHT)) // Fixed height for uniform_list
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        // Match main list: subtle selection bg, transparent when not selected
                                         .bg(if is_selected {
+                                            selected_bg
+                                        } else {
+                                            rgba(0x00000000)
+                                        })
+                                        .hover(|s| s.bg(hover_bg))
+                                        .cursor_pointer()
+                                        // LEFT BORDER as accent indicator - follows rounded corners!
+                                        .border_l(px(ACCENT_BAR_WIDTH))
+                                        .border_color(if is_selected {
                                             accent_color
                                         } else {
                                             rgba(0x00000000)
                                         });
 
-                                    action_item = action_item.child(accent_bar);
+                                    // Round first/last items to match container's 12px corners
+                                    if is_first_item {
+                                        action_item = action_item.rounded_t(px(corner_radius));
+                                    }
+                                    if is_last_item && this.hide_search {
+                                        action_item = action_item.rounded_b(px(corner_radius));
+                                    }
 
-                                    // Content container with proper padding (after accent bar)
+                                    // Add top border for category separator (non-first items only)
+                                    if is_category_start {
+                                        action_item = action_item.border_t_1().border_color(separator_color);
+                                    }
+
+                                    // Content container with proper padding
                                     let content = div()
                                         .flex_1()
                                         .px(px(item_spacing.item_padding_x))
