@@ -365,6 +365,7 @@ impl PromptHeader {
 
         if let Some(callback) = on_primary {
             primary_btn = primary_btn.on_click(Box::new(move |event, window, cx| {
+                tracing::debug!("Primary button callback invoked");
                 callback(event, window, cx);
             }));
         }
@@ -385,6 +386,7 @@ impl PromptHeader {
 
             if let Some(callback) = on_actions {
                 actions_btn = actions_btn.on_click(Box::new(move |event, window, cx| {
+                    tracing::debug!("Actions button callback invoked");
                     callback(event, window, cx);
                 }));
             }

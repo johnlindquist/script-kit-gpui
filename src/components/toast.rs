@@ -368,9 +368,13 @@ impl RenderOnce for Toast {
                     .font_weight(FontWeight::MEDIUM)
                     .cursor_pointer()
                     .hover(|s| s.bg(rgba((colors.action_background << 8) | 0xC0)))
-                    .child(action.label)
-                    .on_click(move |event, window, cx| {
-                        (callback)(event, window, cx);
+                    .child(action.label.clone())
+                    .on_click({
+                        let label = action.label.clone();
+                        move |event, window, cx| {
+                            tracing::debug!(action = %label, "Toast action button clicked");
+                            (callback)(event, window, cx);
+                        }
                     });
 
                 actions_row = actions_row.child(action_btn);
@@ -415,6 +419,7 @@ impl RenderOnce for Toast {
                     .hover(|s| s.bg(rgba(0xffffff10)).text_color(rgb(colors.text)))
                     .child("×")
                     .on_click(move |_event, window, cx| {
+                        tracing::debug!("Toast dismiss button clicked");
                         if let Some(ref callback) = dismiss_callback {
                             callback(window, cx);
                         }

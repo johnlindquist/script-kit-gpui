@@ -469,6 +469,12 @@ interface NotifyMessage {
   body?: string;
 }
 
+interface HudMessage {
+  type: 'hud';
+  text: string;
+  duration_ms?: number;
+}
+
 interface SetStatusMessage {
   type: 'setStatus';
   status: 'busy' | 'idle' | 'error';
@@ -1026,6 +1032,21 @@ declare global {
   function notify(options: string | NotifyOptions): Promise<void>;
   
   /**
+   * Show a brief HUD notification at bottom-center of screen.
+   * Fire-and-forget - no response needed.
+   * 
+   * @param message - Text to display (supports emoji)
+   * @param options - Optional duration configuration
+   * @param options.duration - Display duration in milliseconds (default: 2000)
+   * 
+   * @example
+   * hud('Copied!')                           // Simple confirmation
+   * hud('Saved! 💾')                         // With emoji  
+   * hud('Alias blocked: ...', { duration: 4000 })  // Longer duration
+   */
+  function hud(message: string, options?: { duration?: number }): void;
+  
+  /**
    * Set application status
    * @param options - Status options with status and message
    */
@@ -1571,6 +1592,10 @@ globalThis.arg = async function arg(
 
   return new Promise((resolve) => {
     pending.set(id, async (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       const value = msg.value ?? '';
       
       // Call onSubmit callback if provided
@@ -1640,6 +1665,10 @@ globalThis.editor = async function editor(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       resolve(msg.value ?? '');
     });
 
@@ -1669,6 +1698,10 @@ globalThis.mini = async function mini(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       resolve(msg.value ?? '');
     });
 
@@ -1698,6 +1731,10 @@ globalThis.micro = async function micro(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       resolve(msg.value ?? '');
     });
 
@@ -1727,6 +1764,10 @@ globalThis.select = async function select(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       // Value comes back as JSON array or empty
       const value = msg.value ?? '[]';
       try {
@@ -1763,6 +1804,10 @@ globalThis.fields = async function fields(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       // Value comes back as JSON array of field values
       const value = msg.value ?? '[]';
       try {
@@ -1790,6 +1835,10 @@ globalThis.form = async function form(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       // Value comes back as JSON object with field names as keys
       const value = msg.value ?? '{}';
       try {
@@ -1817,6 +1866,10 @@ globalThis.path = async function path(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       resolve(msg.value ?? '');
     });
 
@@ -1838,6 +1891,10 @@ globalThis.hotkey = async function hotkey(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       // Value comes back as JSON with hotkey info
       const value = msg.value ?? '{}';
       try {
@@ -1879,6 +1936,10 @@ globalThis.drop = async function drop(): Promise<FileInfo[]> {
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       // Value comes back as JSON array of file info
       const value = msg.value ?? '[]';
       try {
@@ -1913,6 +1974,10 @@ globalThis.template = async function template(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       resolve(msg.value ?? '');
     });
 
@@ -1948,6 +2013,10 @@ globalThis.env = async function env(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       const value = msg.value ?? '';
       process.env[key] = value;
       resolve(value);
@@ -1987,6 +2056,19 @@ globalThis.notify = async function notify(options: string | NotifyOptions): Prom
     ? { type: 'notify', body: options }
     : { type: 'notify', title: options.title, body: options.body };
   send(message);
+};
+
+/**
+ * Show a brief HUD notification at bottom-center of screen.
+ * Fire-and-forget - no response needed.
+ */
+globalThis.hud = function hud(message: string, options?: { duration?: number }): void {
+  const hudMessage: HudMessage = {
+    type: 'hud',
+    text: message,
+    duration_ms: options?.duration,
+  };
+  send(hudMessage);
 };
 
 globalThis.setStatus = async function setStatus(options: StatusOptions): Promise<void> {
@@ -2276,6 +2358,10 @@ const chatFn = async function chat(options?: ChatOptions): Promise<string> {
   // Wait for user submission
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       const value = msg.value ?? '';
       
       // Call onSubmit if provided
@@ -2461,6 +2547,10 @@ globalThis.term = async function term(command?: string): Promise<string> {
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       resolve(msg.value ?? '');
     });
 
@@ -2558,6 +2648,10 @@ globalThis.find = async function find(
 
   return new Promise((resolve) => {
     pending.set(id, (msg: SubmitMessage) => {
+      // If user pressed Escape (value is null), exit the script
+      if (msg.value === null) {
+        process.exit(0);
+      }
       resolve(msg.value ?? '');
     });
 

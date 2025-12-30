@@ -168,6 +168,7 @@ impl RenderOnce for Button {
         let variant = self.variant;
         let disabled = self.disabled;
         let on_click_callback = self.on_click;
+        let label_for_log = self.label.clone();
 
         // Calculate colors based on variant
         // Hover uses white at ~15% alpha - universal "lift" effect that works on any dark bg
@@ -241,6 +242,7 @@ impl RenderOnce for Button {
         if let Some(callback) = on_click_callback {
             if !disabled {
                 button = button.on_click(move |event, window, cx| {
+                    tracing::debug!(button = %label_for_log, "Button clicked");
                     callback(event, window, cx);
                 });
             }

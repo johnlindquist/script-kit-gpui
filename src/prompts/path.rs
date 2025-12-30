@@ -602,6 +602,7 @@ impl Render for PathPrompt {
 
         let header = PromptHeader::new(header_config, header_colors)
             .on_primary_click(Box::new(move |_, _window, cx| {
+                logging::log("CLICK", "PathPrompt primary button (Select) clicked");
                 if let Some(prompt) = handle_select.upgrade() {
                     prompt.update(cx, |this, cx| {
                         this.submit_selected(cx);
@@ -609,6 +610,7 @@ impl Render for PathPrompt {
                 }
             }))
             .on_actions_click(Box::new(move |_, _window, cx| {
+                logging::log("CLICK", "PathPrompt actions button clicked");
                 if let Some(prompt) = handle_actions.upgrade() {
                     prompt.update(cx, |this, cx| {
                         this.toggle_actions(cx);

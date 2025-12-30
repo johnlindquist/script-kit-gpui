@@ -531,6 +531,18 @@ impl ActionsDialog {
         (self.on_select)("__cancel__".to_string());
     }
 
+    /// Dismiss the dialog when user clicks outside its bounds.
+    /// This is a public method called from the parent container's click-outside handler.
+    /// Logs the event and triggers the cancel callback.
+    pub fn dismiss_on_click_outside(&mut self) {
+        tracing::info!(
+            target: "script_kit::actions",
+            "ActionsDialog dismiss-on-click-outside triggered"
+        );
+        logging::log("ACTIONS", "Actions dialog dismissed (click outside)");
+        self.submit_cancel();
+    }
+
     /// Create box shadow for the overlay popup
     fn create_popup_shadow() -> Vec<BoxShadow> {
         vec![
