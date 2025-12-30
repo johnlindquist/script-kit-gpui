@@ -602,32 +602,33 @@ impl RenderOnce for ListItem {
             ElementId::NamedInteger("list-item".into(), element_idx as u64)
         };
 
-        // Build accent bar element (only visible when selected and enabled)
-        let accent_bar = if self.show_accent_bar {
-            let accent_color = rgb(colors.accent_selected);
-            div()
-                .w(px(ACCENT_BAR_WIDTH))
-                .h_full()
-                .flex_shrink_0()
-                .bg(if self.selected {
-                    accent_color
-                } else {
-                    rgba(0x00000000)
-                })
-        } else {
-            div().w(px(0.)).h(px(0.)) // No space if accent bar disabled
-        };
+        // Accent bar: Use LEFT BORDER instead of child div because:
+        // 1. GPUI clamps corner radii to ≤ half the shortest side
+        // 2. A 3px-wide child with 12px radius gets clamped to ~1.5px (invisible)
+        // 3. A border on the container follows rounded corners naturally
+        let accent_color = rgb(colors.accent_selected);
 
         // Base container with ID for stateful interactivity
-        // Right padding only - accent bar should be flush with left edge
+        // Use left border for accent indicator - always reserve space, toggle color
         let mut container = div()
             .w_full()
             .h(px(LIST_ITEM_HEIGHT))
-            .pr(px(4.)) // Right padding only (accent bar flush with left edge)
+            .pr(px(4.)) // Right padding only
             .flex()
             .flex_row()
             .items_center()
             .id(element_id);
+
+        // Apply accent bar as left border (only when enabled)
+        if self.show_accent_bar {
+            container = container
+                .border_l(px(ACCENT_BAR_WIDTH))
+                .border_color(if self.selected {
+                    accent_color
+                } else {
+                    rgba(0x00000000)
+                });
+        }
 
         // Add hover handler if we have both index and callback
         if let (Some(idx), Some(callback)) = (index, on_hover_callback) {
@@ -646,8 +647,8 @@ impl RenderOnce for ListItem {
             });
         }
 
-        // Add accent bar first (on left), then content
-        container.child(accent_bar).child(inner_content)
+        // Add content (no separate accent bar child needed)
+        container.child(inner_content)
     }
 }
 
