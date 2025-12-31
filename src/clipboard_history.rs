@@ -589,8 +589,13 @@ fn clipboard_monitor_loop(stop_flag: Arc<AtomicBool>) -> Result<()> {
 
                 if is_new {
                     debug!(text_len = text.len(), "New text detected in clipboard");
-                    if let Err(e) = add_entry(&text, ContentType::Text) {
-                        warn!(error = %e, "Failed to add text entry to history");
+                    match add_entry(&text, ContentType::Text) {
+                        Ok(entry_id) => {
+                            debug!(entry_id = %entry_id, "Added text entry to history");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to add text entry to history");
+                        }
                     }
                     last_text = Some(text);
                 }
@@ -616,22 +621,21 @@ fn clipboard_monitor_loop(stop_flag: Arc<AtomicBool>) -> Result<()> {
 
                 // Encode image as base64 PNG
                 if let Ok(base64_content) = encode_image_as_base64(&image_data) {
-                    // Add entry first to get the ID
-                    if let Err(e) = add_entry(&base64_content, ContentType::Image) {
-                        warn!(error = %e, "Failed to add image entry to history");
-                    } else {
-                        // Pre-decode the image immediately so it's ready for display
-                        // This runs in the background monitor thread, not during render
-                        if let Some(render_image) = decode_to_render_image(&base64_content) {
-                            // Get the entry ID from the cache (it was just added)
-                            if let Ok(cache) = get_entry_cache().lock() {
-                                if let Some(entry) = cache.first() {
-                                    if entry.content_type == ContentType::Image {
-                                        cache_image(&entry.id, render_image);
-                                        debug!(id = %entry.id, "Pre-cached new image during monitoring");
-                                    }
-                                }
+                    // Add entry and get the ID back for correct caching
+                    match add_entry(&base64_content, ContentType::Image) {
+                        Ok(entry_id) => {
+                            // Pre-decode the image immediately so it's ready for display
+                            // This runs in the background monitor thread, not during render
+                            // CRITICAL: Use the returned entry_id, NOT cache.first()
+                            // cache.first() returns by sort order (pinned DESC, timestamp DESC)
+                            // which may be a DIFFERENT entry (e.g., a pinned image)
+                            if let Some(render_image) = decode_to_render_image(&base64_content) {
+                                cache_image(&entry_id, render_image);
+                                debug!(entry_id = %entry_id, "Pre-cached new image during monitoring");
                             }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to add image entry to history");
                         }
                     }
                 }
@@ -677,7 +681,10 @@ fn encode_image_as_base64(image: &arboard::ImageData) -> Result<String> {
 }
 
 /// Add a new entry to clipboard history
-fn add_entry(content: &str, content_type: ContentType) -> Result<()> {
+///
+/// Returns the ID of the entry (either existing or newly created).
+/// This allows callers to use the correct ID for caching (e.g., images).
+fn add_entry(content: &str, content_type: ContentType) -> Result<String> {
     let conn = get_connection()?;
     let conn = conn
         .lock()
@@ -699,20 +706,20 @@ fn add_entry(content: &str, content_type: ContentType) -> Result<()> {
         // Update timestamp of existing entry instead of creating duplicate
         conn.execute(
             "UPDATE history SET timestamp = ? WHERE id = ?",
-            params![timestamp, existing_id],
+            params![timestamp, &existing_id],
         )
         .context("Failed to update existing entry timestamp")?;
         debug!(id = %existing_id, "Updated existing clipboard entry timestamp");
         // Refresh cache to reflect updated ordering
         drop(conn);
         refresh_entry_cache();
-        return Ok(());
+        return Ok(existing_id);
     }
 
     // Insert new entry
     conn.execute(
         "INSERT INTO history (id, content, content_type, timestamp, pinned, ocr_text) VALUES (?1, ?2, ?3, ?4, 0, NULL)",
-        params![id, content, content_type.as_str(), timestamp],
+        params![&id, content, content_type.as_str(), timestamp],
     )
     .context("Failed to insert clipboard entry")?;
 
@@ -726,7 +733,7 @@ fn add_entry(content: &str, content_type: ContentType) -> Result<()> {
     // Refresh the entry cache so it includes the new entry
     refresh_entry_cache();
 
-    Ok(())
+    Ok(id)
 }
 
 /// Get paginated clipboard history entries
@@ -1318,5 +1325,17 @@ mod tests {
         // Store false
         flag.store(false, Ordering::Relaxed);
         assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_add_entry_returns_id() {
+        // Verify add_entry returns the correct signature (Result<String>)
+        // This is a compile-time check - validates the function signature change
+        fn assert_returns_result_string<F>(_: F)
+        where
+            F: Fn(&str, ContentType) -> Result<String>,
+        {
+        }
+        assert_returns_result_string(add_entry);
     }
 }
