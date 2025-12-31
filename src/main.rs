@@ -8634,6 +8634,7 @@ impl ScriptListApp {
             .h(content_height)
             .overflow_hidden()
             .rounded(px(design_visual.radius_lg))
+            .track_focus(&self.focus_handle) // Required to receive key events
             .on_key_down(handle_key)
             // CLS-FREE ACTIONS AREA: Matches main menu and ArgPrompt pattern
             .when(has_actions, |d| {
