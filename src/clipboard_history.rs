@@ -382,6 +382,12 @@ fn get_connection() -> Result<Arc<Mutex<Connection>>> {
         .context("Failed to enable WAL mode")?;
     debug!("Enabled WAL mode for clipboard history database");
 
+    // Enable incremental vacuum for disk space recovery after large blob deletes
+    // NOTE: For existing databases, run VACUUM; once manually to enable
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .context("Failed to enable incremental auto_vacuum")?;
+    debug!("Enabled incremental auto_vacuum for clipboard history database");
+
     // Create the table if it doesn't exist
     conn.execute(
         "CREATE TABLE IF NOT EXISTS history (
@@ -531,6 +537,7 @@ pub fn init_clipboard_history() -> Result<()> {
 /// Background loop that periodically prunes old entries
 fn background_prune_loop(stop_flag: Arc<AtomicBool>) {
     let prune_interval = Duration::from_secs(PRUNE_INTERVAL_SECS);
+    let mut prune_count: u32 = 0;
 
     loop {
         // Sleep first (initial prune already happened during init)
@@ -550,9 +557,37 @@ fn background_prune_loop(stop_flag: Arc<AtomicBool>) {
                     // Refresh cache after pruning
                     refresh_entry_cache();
                 }
+
+                // Reclaim disk space incrementally after successful prune
+                // This is non-blocking and reclaims up to 100 pages per cycle
+                if let Ok(conn) = get_connection() {
+                    if let Ok(conn) = conn.lock() {
+                        if let Err(e) = conn.execute_batch("PRAGMA incremental_vacuum(100);") {
+                            warn!(error = %e, "Incremental vacuum failed");
+                        } else {
+                            debug!("Incremental vacuum completed");
+                        }
+                    }
+                }
             }
             Err(e) => {
                 warn!(error = %e, "Background pruning failed");
+            }
+        }
+
+        prune_count += 1;
+
+        // Checkpoint WAL every 10 prune cycles to bound WAL file growth
+        // PASSIVE mode doesn't block writers, safe for background use
+        if prune_count.is_multiple_of(10) {
+            if let Ok(conn) = get_connection() {
+                if let Ok(conn) = conn.lock() {
+                    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+                        warn!(error = %e, "WAL checkpoint failed");
+                    } else {
+                        debug!(cycle = prune_count, "WAL checkpoint completed");
+                    }
+                }
             }
         }
     }
