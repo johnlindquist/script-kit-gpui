@@ -70,6 +70,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.0", features = ["v4"] }
 base64 = "0.22"
 lru = "0.12"  # LRU cache for clipboard image eviction
+sha2 = "0.10"  # SHA-256 for content hash dedup
 
 # Image decoding for app icons
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -33,6 +33,7 @@ use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use gpui::RenderImage;
 use lru::LruCache;
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -58,6 +59,13 @@ const MAX_CACHED_ENTRIES: usize = 500;
 
 /// Polling interval for clipboard changes
 const POLL_INTERVAL_MS: u64 = 500;
+
+/// Compute SHA-256 hash of content for fast dedup lookups
+fn compute_content_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// Content types for clipboard entries
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +387,7 @@ fn get_connection() -> Result<Arc<Mutex<Connection>>> {
         "CREATE TABLE IF NOT EXISTS history (
             id TEXT PRIMARY KEY,
             content TEXT NOT NULL,
+            content_hash TEXT,
             content_type TEXT NOT NULL DEFAULT 'text',
             timestamp INTEGER NOT NULL,
             pinned INTEGER DEFAULT 0,
@@ -404,6 +413,22 @@ fn get_connection() -> Result<Arc<Mutex<Connection>>> {
         info!("Migrated clipboard history: added ocr_text column");
     }
 
+    // Migration: Add content_hash column if it doesn't exist (for O(1) dedup)
+    let has_hash_column: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('history') WHERE name='content_hash'",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+
+    if !has_hash_column {
+        conn.execute("ALTER TABLE history ADD COLUMN content_hash TEXT", [])
+            .context("Failed to add content_hash column")?;
+        info!("Migrated clipboard history: added content_hash column");
+    }
+
     // Create index for faster queries
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON history(timestamp DESC)",
@@ -417,6 +442,14 @@ fn get_connection() -> Result<Arc<Mutex<Connection>>> {
         [],
     )
     .context("Failed to create pinned+timestamp index")?;
+
+    // Create unique index for O(1) dedup lookups by content_hash
+    // Note: Not UNIQUE because existing rows may have NULL content_hash
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dedup ON history(content_type, content_hash)",
+        [],
+    )
+    .context("Failed to create dedup index")?;
 
     let conn = Arc::new(Mutex::new(conn));
 
@@ -718,14 +751,14 @@ fn add_entry(content: &str, content_type: ContentType) -> Result<String> {
         .lock()
         .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
 
-    let id = Uuid::new_v4().to_string();
     let timestamp = chrono::Utc::now().timestamp();
+    let content_hash = compute_content_hash(content);
 
-    // Check if this exact content already exists (dedup)
+    // Check if entry with same hash exists (O(1) dedup via index)
     let existing: Option<String> = conn
         .query_row(
-            "SELECT id FROM history WHERE content = ? AND content_type = ?",
-            params![content, content_type.as_str()],
+            "SELECT id FROM history WHERE content_type = ? AND content_hash = ?",
+            params![content_type.as_str(), &content_hash],
             |row| row.get(0),
         )
         .ok();
@@ -744,10 +777,11 @@ fn add_entry(content: &str, content_type: ContentType) -> Result<String> {
         return Ok(existing_id);
     }
 
-    // Insert new entry
+    // Insert new entry with content_hash
+    let id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO history (id, content, content_type, timestamp, pinned, ocr_text) VALUES (?1, ?2, ?3, ?4, 0, NULL)",
-        params![&id, content, content_type.as_str(), timestamp],
+        "INSERT INTO history (id, content, content_hash, content_type, timestamp, pinned, ocr_text) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL)",
+        params![&id, content, &content_hash, content_type.as_str(), timestamp],
     )
     .context("Failed to insert clipboard entry")?;
 
@@ -1518,5 +1552,33 @@ mod tests {
         {
         }
         assert_returns_result_string(add_entry);
+    }
+
+    #[test]
+    fn test_compute_content_hash_deterministic() {
+        // Same content should produce same hash
+        let content = "Hello, World!";
+        let hash1 = compute_content_hash(content);
+        let hash2 = compute_content_hash(content);
+        assert_eq!(hash1, hash2, "Hash should be deterministic");
+    }
+
+    #[test]
+    fn test_compute_content_hash_different_content() {
+        // Different content should produce different hashes
+        let hash1 = compute_content_hash("Hello");
+        let hash2 = compute_content_hash("World");
+        assert_ne!(hash1, hash2, "Different content should have different hashes");
+    }
+
+    #[test]
+    fn test_compute_content_hash_format() {
+        // Hash should be lowercase hex, 64 chars (SHA-256 = 256 bits = 32 bytes = 64 hex chars)
+        let hash = compute_content_hash("test");
+        assert_eq!(hash.len(), 64, "SHA-256 hash should be 64 hex chars");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "Hash should be lowercase hex"
+        );
     }
 }
