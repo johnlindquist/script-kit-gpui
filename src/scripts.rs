@@ -818,6 +818,84 @@ pub fn read_scripts() -> Vec<Script> {
     scripts
 }
 
+// ============================================
+// ASCII CASE-FOLDING HELPERS (Performance-optimized)
+// ============================================
+// These functions avoid heap allocations by doing case-insensitive
+// comparisons byte-by-byte instead of calling to_lowercase().
+
+/// Check if haystack contains needle using ASCII case-insensitive matching.
+/// `needle_lower` must already be lowercase.
+/// Returns true if needle is found anywhere in haystack.
+/// No allocation - O(n*m) worst case but typically much faster.
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle_lower: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle_lower.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    'outer: for i in 0..=(h.len() - n.len()) {
+        for j in 0..n.len() {
+            if h[i + j].to_ascii_lowercase() != n[j] {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Find the position of needle in haystack using ASCII case-insensitive matching.
+/// `needle_lower` must already be lowercase.
+/// Returns Some(position) if found, None otherwise.
+/// No allocation - O(n*m) worst case.
+#[inline]
+fn find_ignore_ascii_case(haystack: &str, needle_lower: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle_lower.as_bytes();
+    if n.is_empty() {
+        return Some(0);
+    }
+    if n.len() > h.len() {
+        return None;
+    }
+    'outer: for i in 0..=(h.len() - n.len()) {
+        for j in 0..n.len() {
+            if h[i + j].to_ascii_lowercase() != n[j] {
+                continue 'outer;
+            }
+        }
+        return Some(i);
+    }
+    None
+}
+
+/// Perform fuzzy matching without allocating a lowercase copy of haystack.
+/// `pattern_lower` must already be lowercase.
+/// Returns (matched, indices) where matched is true if all pattern chars found in order.
+/// The indices are positions in the original haystack.
+#[inline]
+fn fuzzy_match_with_indices_ascii(haystack: &str, pattern_lower: &str) -> (bool, Vec<usize>) {
+    let mut indices = Vec::new();
+    let mut pattern_chars = pattern_lower.chars().peekable();
+
+    for (idx, ch) in haystack.chars().enumerate() {
+        if let Some(&p) = pattern_chars.peek() {
+            if ch.to_ascii_lowercase() == p {
+                indices.push(idx);
+                pattern_chars.next();
+            }
+        }
+    }
+
+    let matched = pattern_chars.peek().is_none();
+    (matched, if matched { indices } else { Vec::new() })
+}
+
 /// Check if a pattern is a fuzzy match for haystack (characters appear in order)
 fn is_fuzzy_match(haystack: &str, pattern: &str) -> bool {
     let mut pattern_chars = pattern.chars().peekable();
@@ -848,6 +926,110 @@ fn fuzzy_match_with_indices(haystack: &str, pattern: &str) -> (bool, Vec<usize>)
 
     let matched = pattern_chars.peek().is_none();
     (matched, if matched { indices } else { Vec::new() })
+}
+
+/// Compute match indices for a search result on-demand (lazy evaluation)
+/// 
+/// This function is called by the UI layer only for visible rows, avoiding
+/// the cost of computing indices for all results during the scoring phase.
+/// 
+/// # Arguments
+/// * `result` - The search result to compute indices for
+/// * `query` - The original search query (will be lowercased internally)
+/// 
+/// # Returns
+/// MatchIndices containing the character positions that match the query
+pub fn compute_match_indices_for_result(result: &SearchResult, query: &str) -> MatchIndices {
+    if query.is_empty() {
+        return MatchIndices::default();
+    }
+
+    let query_lower = query.to_lowercase();
+
+    match result {
+        SearchResult::Script(sm) => {
+            let mut indices = MatchIndices::default();
+            
+            // Try name first
+            let (name_matched, name_indices) =
+                fuzzy_match_with_indices_ascii(&sm.script.name, &query_lower);
+            if name_matched {
+                indices.name_indices = name_indices;
+                return indices;
+            }
+            
+            // Fall back to filename
+            let (filename_matched, filename_indices) =
+                fuzzy_match_with_indices_ascii(&sm.filename, &query_lower);
+            if filename_matched {
+                indices.filename_indices = filename_indices;
+            }
+            
+            indices
+        }
+        SearchResult::Scriptlet(sm) => {
+            let mut indices = MatchIndices::default();
+            
+            // Try name first
+            let (name_matched, name_indices) =
+                fuzzy_match_with_indices_ascii(&sm.scriptlet.name, &query_lower);
+            if name_matched {
+                indices.name_indices = name_indices;
+                return indices;
+            }
+            
+            // Fall back to file path
+            if let Some(ref fp) = sm.display_file_path {
+                let (fp_matched, fp_indices) = fuzzy_match_with_indices_ascii(fp, &query_lower);
+                if fp_matched {
+                    indices.filename_indices = fp_indices;
+                }
+            }
+            
+            indices
+        }
+        SearchResult::BuiltIn(bm) => {
+            let mut indices = MatchIndices::default();
+            
+            let (name_matched, name_indices) =
+                fuzzy_match_with_indices_ascii(&bm.entry.name, &query_lower);
+            if name_matched {
+                indices.name_indices = name_indices;
+            }
+            
+            indices
+        }
+        SearchResult::App(am) => {
+            let mut indices = MatchIndices::default();
+            
+            let (name_matched, name_indices) =
+                fuzzy_match_with_indices_ascii(&am.app.name, &query_lower);
+            if name_matched {
+                indices.name_indices = name_indices;
+            }
+            
+            indices
+        }
+        SearchResult::Window(wm) => {
+            let mut indices = MatchIndices::default();
+            
+            // Try app name first, then title
+            let (app_matched, app_indices) =
+                fuzzy_match_with_indices_ascii(&wm.window.app, &query_lower);
+            if app_matched {
+                indices.name_indices = app_indices;
+                return indices;
+            }
+            
+            let (title_matched, title_indices) =
+                fuzzy_match_with_indices_ascii(&wm.window.title, &query_lower);
+            if title_matched {
+                indices.filename_indices = title_indices;
+            }
+            
+            indices
+        }
+    }
 }
 
 /// Extract filename from a path for display
@@ -907,53 +1089,47 @@ pub fn fuzzy_search_scripts(scripts: &[Script], query: &str) -> Vec<ScriptMatch>
 
     for script in scripts {
         let mut score = 0i32;
-        let mut match_indices = MatchIndices::default();
+        // Lazy match indices - don't compute during scoring, will be computed on-demand
+        let match_indices = MatchIndices::default();
 
-        let name_lower = script.name.to_lowercase();
         let filename = extract_filename(&script.path);
-        let filename_lower = filename.to_lowercase();
 
-        // Score by name match - highest priority
-        if let Some(pos) = name_lower.find(&query_lower) {
+        // Score by name match - highest priority (no allocation)
+        if let Some(pos) = find_ignore_ascii_case(&script.name, &query_lower) {
             // Bonus for exact substring match at start of name
             score += if pos == 0 { 100 } else { 75 };
         }
 
-        // Fuzzy character matching in name (characters in order)
-        let (name_fuzzy_matched, name_indices) =
-            fuzzy_match_with_indices(&name_lower, &query_lower);
+        // Fuzzy character matching in name (characters in order, no allocation for haystack)
+        let (name_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(&script.name, &query_lower);
         if name_fuzzy_matched {
             score += 50;
-            match_indices.name_indices = name_indices;
+            // Note: indices computed lazily via compute_match_indices_for_result()
         }
 
         // Score by filename match - high priority (allows searching by ".ts", ".js", etc.)
-        if let Some(pos) = filename_lower.find(&query_lower) {
+        if let Some(pos) = find_ignore_ascii_case(&filename, &query_lower) {
             // Bonus for exact substring match at start of filename
             score += if pos == 0 { 60 } else { 45 };
         }
 
-        // Fuzzy character matching in filename
-        let (filename_fuzzy_matched, filename_indices) =
-            fuzzy_match_with_indices(&filename_lower, &query_lower);
+        // Fuzzy character matching in filename (no allocation for haystack)
+        let (filename_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(&filename, &query_lower);
         if filename_fuzzy_matched {
             score += 35;
-            // Only set filename indices if name didn't match (prefer name match for highlighting)
-            if match_indices.name_indices.is_empty() {
-                match_indices.filename_indices = filename_indices;
-            }
+            // Note: indices computed lazily via compute_match_indices_for_result()
         }
 
-        // Score by description match - medium priority
+        // Score by description match - medium priority (no allocation)
         if let Some(ref desc) = script.description {
-            if desc.to_lowercase().contains(&query_lower) {
+            if contains_ignore_ascii_case(desc, &query_lower) {
                 score += 25;
             }
         }
 
-        // Score by path match - lower priority
-        let path_str = script.path.to_string_lossy().to_lowercase();
-        if path_str.contains(&query_lower) {
+        // Score by path match - lower priority (no allocation for lowercase)
+        let path_str = script.path.to_string_lossy();
+        if contains_ignore_ascii_case(&path_str, &query_lower) {
             score += 10;
         }
 
@@ -1002,62 +1178,59 @@ pub fn fuzzy_search_scriptlets(scriptlets: &[Scriptlet], query: &str) -> Vec<Scr
 
     for scriptlet in scriptlets {
         let mut score = 0i32;
-        let mut match_indices = MatchIndices::default();
+        // Lazy match indices - don't compute during scoring
+        let match_indices = MatchIndices::default();
 
-        let name_lower = scriptlet.name.to_lowercase();
         let display_file_path = extract_scriptlet_display_path(&scriptlet.file_path);
-        let file_path_lower = display_file_path
-            .as_ref()
-            .map(|fp| fp.to_lowercase())
-            .unwrap_or_default();
 
-        // Score by name match - highest priority
-        if let Some(pos) = name_lower.find(&query_lower) {
+        // Score by name match - highest priority (no allocation)
+        if let Some(pos) = find_ignore_ascii_case(&scriptlet.name, &query_lower) {
             // Bonus for exact substring match at start of name
             score += if pos == 0 { 100 } else { 75 };
         }
 
-        // Fuzzy character matching in name (characters in order)
-        let (name_fuzzy_matched, name_indices) =
-            fuzzy_match_with_indices(&name_lower, &query_lower);
+        // Fuzzy character matching in name (characters in order, no allocation for haystack)
+        let (name_fuzzy_matched, _) =
+            fuzzy_match_with_indices_ascii(&scriptlet.name, &query_lower);
         if name_fuzzy_matched {
             score += 50;
-            match_indices.name_indices = name_indices;
+            // Note: indices computed lazily via compute_match_indices_for_result()
         }
 
         // Score by file_path match - high priority (allows searching by ".md", anchor names)
-        if !file_path_lower.is_empty() {
-            if let Some(pos) = file_path_lower.find(&query_lower) {
+        if let Some(ref fp) = display_file_path {
+            if let Some(pos) = find_ignore_ascii_case(fp, &query_lower) {
                 // Bonus for exact substring match at start of file_path
                 score += if pos == 0 { 60 } else { 45 };
             }
 
-            // Fuzzy character matching in file_path
-            let (file_path_fuzzy_matched, file_path_indices) =
-                fuzzy_match_with_indices(&file_path_lower, &query_lower);
+            // Fuzzy character matching in file_path (no allocation for haystack)
+            let (file_path_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(fp, &query_lower);
             if file_path_fuzzy_matched {
                 score += 35;
-                // Only set file_path indices if name didn't match (prefer name match for highlighting)
-                if match_indices.name_indices.is_empty() {
-                    match_indices.filename_indices = file_path_indices;
-                }
+                // Note: indices computed lazily via compute_match_indices_for_result()
             }
         }
 
-        // Score by description match - medium priority
+        // Score by description match - medium priority (no allocation)
         if let Some(ref desc) = scriptlet.description {
-            if desc.to_lowercase().contains(&query_lower) {
+            if contains_ignore_ascii_case(desc, &query_lower) {
                 score += 25;
             }
         }
 
-        // Score by code content match - lower priority
-        if scriptlet.code.to_lowercase().contains(&query_lower) {
+        // CRITICAL OPTIMIZATION: Only search code when query is long enough (>=4 chars)
+        // and no other matches were found. Code search is the biggest performance hit
+        // because scriptlet.code can be very large.
+        if query_lower.len() >= 4
+            && score == 0
+            && contains_ignore_ascii_case(&scriptlet.code, &query_lower)
+        {
             score += 5;
         }
 
-        // Bonus for tool type match
-        if scriptlet.tool.to_lowercase().contains(&query_lower) {
+        // Bonus for tool type match (no allocation)
+        if contains_ignore_ascii_case(&scriptlet.tool, &query_lower) {
             score += 10;
         }
 
@@ -1100,35 +1273,36 @@ pub fn fuzzy_search_builtins(entries: &[BuiltInEntry], query: &str) -> Vec<Built
 
     for entry in entries {
         let mut score = 0i32;
-        let name_lower = entry.name.to_lowercase();
 
-        // Score by name match - highest priority
-        if let Some(pos) = name_lower.find(&query_lower) {
+        // Score by name match - highest priority (no allocation)
+        if let Some(pos) = find_ignore_ascii_case(&entry.name, &query_lower) {
             // Bonus for exact substring match at start of name
             score += if pos == 0 { 100 } else { 75 };
         }
 
-        // Fuzzy character matching in name (characters in order)
-        if is_fuzzy_match(&name_lower, &query_lower) {
+        // Fuzzy character matching in name (characters in order, no allocation for haystack)
+        let (name_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(&entry.name, &query_lower);
+        if name_fuzzy_matched {
             score += 50;
         }
 
-        // Score by description match - medium priority
-        if entry.description.to_lowercase().contains(&query_lower) {
+        // Score by description match - medium priority (no allocation)
+        if contains_ignore_ascii_case(&entry.description, &query_lower) {
             score += 25;
         }
 
         // Score by keyword match - high priority (keywords are designed for matching)
         for keyword in &entry.keywords {
-            if keyword.to_lowercase().contains(&query_lower) {
+            if contains_ignore_ascii_case(keyword, &query_lower) {
                 score += 75; // Keywords are specifically meant for matching
                 break; // Only count once even if multiple keywords match
             }
         }
 
-        // Fuzzy match on keywords
+        // Fuzzy match on keywords (no allocation for haystack)
         for keyword in &entry.keywords {
-            if is_fuzzy_match(&keyword.to_lowercase(), &query_lower) {
+            let (keyword_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(keyword, &query_lower);
+            if keyword_fuzzy_matched {
                 score += 30;
                 break; // Only count once
             }
@@ -1171,29 +1345,29 @@ pub fn fuzzy_search_apps(apps: &[crate::app_launcher::AppInfo], query: &str) -> 
 
     for app in apps {
         let mut score = 0i32;
-        let name_lower = app.name.to_lowercase();
 
-        // Score by name match - highest priority
-        if let Some(pos) = name_lower.find(&query_lower) {
+        // Score by name match - highest priority (no allocation)
+        if let Some(pos) = find_ignore_ascii_case(&app.name, &query_lower) {
             // Bonus for exact substring match at start of name
             score += if pos == 0 { 100 } else { 75 };
         }
 
-        // Fuzzy character matching in name (characters in order)
-        if is_fuzzy_match(&name_lower, &query_lower) {
+        // Fuzzy character matching in name (characters in order, no allocation for haystack)
+        let (name_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(&app.name, &query_lower);
+        if name_fuzzy_matched {
             score += 50;
         }
 
-        // Score by bundle_id match - lower priority
+        // Score by bundle_id match - lower priority (no allocation)
         if let Some(ref bundle_id) = app.bundle_id {
-            if bundle_id.to_lowercase().contains(&query_lower) {
+            if contains_ignore_ascii_case(bundle_id, &query_lower) {
                 score += 15;
             }
         }
 
-        // Score by path match - lowest priority
-        let path_str = app.path.to_string_lossy().to_lowercase();
-        if path_str.contains(&query_lower) {
+        // Score by path match - lowest priority (no allocation for lowercase)
+        let path_str = app.path.to_string_lossy();
+        if contains_ignore_ascii_case(&path_str, &query_lower) {
             score += 5;
         }
 
@@ -1250,28 +1424,28 @@ pub fn fuzzy_search_windows(
 
     for window in windows {
         let mut score = 0i32;
-        let app_lower = window.app.to_lowercase();
-        let title_lower = window.title.to_lowercase();
 
-        // Score by app name match - highest priority
-        if let Some(pos) = app_lower.find(&query_lower) {
+        // Score by app name match - highest priority (no allocation)
+        if let Some(pos) = find_ignore_ascii_case(&window.app, &query_lower) {
             // Bonus for exact substring match at start of app name
             score += if pos == 0 { 100 } else { 75 };
         }
 
-        // Score by window title match - high priority
-        if let Some(pos) = title_lower.find(&query_lower) {
+        // Score by window title match - high priority (no allocation)
+        if let Some(pos) = find_ignore_ascii_case(&window.title, &query_lower) {
             // Bonus for exact substring match at start of title
             score += if pos == 0 { 90 } else { 65 };
         }
 
-        // Fuzzy character matching in app name (characters in order)
-        if is_fuzzy_match(&app_lower, &query_lower) {
+        // Fuzzy character matching in app name (characters in order, no allocation for haystack)
+        let (app_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(&window.app, &query_lower);
+        if app_fuzzy_matched {
             score += 50;
         }
 
-        // Fuzzy character matching in window title
-        if is_fuzzy_match(&title_lower, &query_lower) {
+        // Fuzzy character matching in window title (no allocation for haystack)
+        let (title_fuzzy_matched, _) = fuzzy_match_with_indices_ascii(&window.title, &query_lower);
+        if title_fuzzy_matched {
             score += 40;
         }
 
@@ -5088,9 +5262,11 @@ code here
 
         let results = fuzzy_search_scripts(&scripts, "opf");
         assert_eq!(results.len(), 1);
+        // Match indices are now computed lazily - verify using compute_match_indices_for_result
+        let indices = compute_match_indices_for_result(&SearchResult::Script(results[0].clone()), "opf");
         // "opf" matches indices 0, 1, 4 in "openfile"
         assert_eq!(
-            results[0].match_indices.name_indices,
+            indices.name_indices,
             vec![0, 1, 4],
             "Should return correct match indices for name"
         );
@@ -5111,9 +5287,11 @@ code here
 
         let results = fuzzy_search_scripts(&scripts, "mts");
         assert_eq!(results.len(), 1);
+        // Match indices are now computed lazily - verify using compute_match_indices_for_result
+        let indices = compute_match_indices_for_result(&SearchResult::Script(results[0].clone()), "mts");
         // "mts" matches indices in "my-test.ts": m=0, t=3, s=5
         assert_eq!(
-            results[0].match_indices.filename_indices,
+            indices.filename_indices,
             vec![0, 3, 5],
             "Should return correct match indices for filename when name doesn't match"
         );
@@ -5230,9 +5408,11 @@ code here
 
         let results = fuzzy_search_scriptlets(&scriptlets, "url");
         assert_eq!(results.len(), 1);
+        // Match indices are now computed lazily - verify using compute_match_indices_for_result
+        let indices = compute_match_indices_for_result(&SearchResult::Scriptlet(results[0].clone()), "url");
         // "url" matches in "urls.md#test" at indices 0, 1, 2
         assert_eq!(
-            results[0].match_indices.filename_indices,
+            indices.filename_indices,
             vec![0, 1, 2],
             "Should return correct match indices for file_path"
         );
@@ -5679,5 +5859,180 @@ const { query } = await input();
             search_filter_duration.as_secs_f64() * 10.0,
             max_per_call_ms
         );
+    }
+
+    // ============================================
+    // ASCII CASE-FOLDING HELPER TESTS
+    // ============================================
+
+    #[test]
+    fn test_contains_ignore_ascii_case_basic() {
+        // Note: needle_lower must already be lowercase
+        assert!(contains_ignore_ascii_case("OpenFile", "open"));
+        assert!(contains_ignore_ascii_case("OPENFILE", "open"));
+        assert!(contains_ignore_ascii_case("openfile", "open"));
+        assert!(contains_ignore_ascii_case("MyOpenFile", "open"));
+    }
+
+    #[test]
+    fn test_contains_ignore_ascii_case_not_found() {
+        assert!(!contains_ignore_ascii_case("OpenFile", "save"));
+        assert!(!contains_ignore_ascii_case("test", "testing"));
+    }
+
+    #[test]
+    fn test_contains_ignore_ascii_case_empty_needle() {
+        assert!(contains_ignore_ascii_case("OpenFile", ""));
+        assert!(contains_ignore_ascii_case("", ""));
+    }
+
+    #[test]
+    fn test_contains_ignore_ascii_case_needle_longer() {
+        assert!(!contains_ignore_ascii_case("ab", "abc"));
+    }
+
+    #[test]
+    fn test_find_ignore_ascii_case_at_start() {
+        assert_eq!(find_ignore_ascii_case("OpenFile", "open"), Some(0));
+        assert_eq!(find_ignore_ascii_case("OPENFILE", "open"), Some(0));
+    }
+
+    #[test]
+    fn test_find_ignore_ascii_case_in_middle() {
+        assert_eq!(find_ignore_ascii_case("MyOpenFile", "open"), Some(2));
+    }
+
+    #[test]
+    fn test_find_ignore_ascii_case_not_found() {
+        assert_eq!(find_ignore_ascii_case("OpenFile", "save"), None);
+    }
+
+    #[test]
+    fn test_find_ignore_ascii_case_empty_needle() {
+        assert_eq!(find_ignore_ascii_case("OpenFile", ""), Some(0));
+    }
+
+    #[test]
+    fn test_fuzzy_match_with_indices_ascii_basic() {
+        let (matched, indices) = fuzzy_match_with_indices_ascii("OpenFile", "of");
+        assert!(matched);
+        assert_eq!(indices, vec![0, 4]); // 'O' at 0, 'F' at 4
+    }
+
+    #[test]
+    fn test_fuzzy_match_with_indices_ascii_case_insensitive() {
+        // Note: pattern_lower must already be lowercase
+        let (matched, indices) = fuzzy_match_with_indices_ascii("OpenFile", "of");
+        assert!(matched);
+        assert_eq!(indices, vec![0, 4]);
+    }
+
+    #[test]
+    fn test_fuzzy_match_with_indices_ascii_no_match() {
+        let (matched, indices) = fuzzy_match_with_indices_ascii("test", "xyz");
+        assert!(!matched);
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_match_with_indices_ascii_empty_pattern() {
+        let (matched, indices) = fuzzy_match_with_indices_ascii("test", "");
+        assert!(matched);
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn test_compute_match_indices_for_script_result() {
+        let script_match = ScriptMatch {
+            script: Script {
+                name: "OpenFile".to_string(),
+                path: PathBuf::from("/openfile.ts"),
+                extension: "ts".to_string(),
+                icon: None,
+                description: None,
+                alias: None,
+                shortcut: None,
+                ..Default::default()
+            },
+            score: 100,
+            filename: "openfile.ts".to_string(),
+            match_indices: MatchIndices::default(),
+        };
+        let result = SearchResult::Script(script_match);
+
+        let indices = compute_match_indices_for_result(&result, "of");
+        assert!(!indices.name_indices.is_empty());
+        assert_eq!(indices.name_indices, vec![0, 4]); // 'O' at 0, 'F' at 4
+    }
+
+    #[test]
+    fn test_compute_match_indices_for_scriptlet_result() {
+        let scriptlet_match = ScriptletMatch {
+            scriptlet: test_scriptlet("Copy Text", "ts", "copy()"),
+            score: 100,
+            display_file_path: Some("copy.md#copy-text".to_string()),
+            match_indices: MatchIndices::default(),
+        };
+        let result = SearchResult::Scriptlet(scriptlet_match);
+
+        let indices = compute_match_indices_for_result(&result, "ct");
+        assert!(!indices.name_indices.is_empty());
+        assert_eq!(indices.name_indices, vec![0, 5]); // 'C' at 0, 'T' at 5
+    }
+
+    #[test]
+    fn test_compute_match_indices_empty_query() {
+        let script_match = ScriptMatch {
+            script: Script {
+                name: "Test".to_string(),
+                path: PathBuf::from("/test.ts"),
+                extension: "ts".to_string(),
+                icon: None,
+                description: None,
+                alias: None,
+                shortcut: None,
+                ..Default::default()
+            },
+            score: 0,
+            filename: "test.ts".to_string(),
+            match_indices: MatchIndices::default(),
+        };
+        let result = SearchResult::Script(script_match);
+
+        let indices = compute_match_indices_for_result(&result, "");
+        assert!(indices.name_indices.is_empty());
+        assert!(indices.filename_indices.is_empty());
+    }
+
+    #[test]
+    fn test_scriptlet_code_search_gated_by_length() {
+        // Code search only happens when query >= 4 chars and score == 0
+        // Use a name that doesn't contain any of the search characters
+        let scriptlets = vec![test_scriptlet("Utility", "ts", "contains_xyz_function()")];
+
+        // Short query - should NOT search code (even if it would match)
+        let results = fuzzy_search_scriptlets(&scriptlets, "xyz");
+        assert!(results.is_empty()); // No match because "xyz" only in code, and query < 4 chars
+
+        // Long query >= 4 chars should search code when name doesn't match
+        let results = fuzzy_search_scriptlets(&scriptlets, "xyz_f");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].score, 5); // Only code match score
+    }
+
+    #[test]
+    fn test_scriptlet_code_search_skipped_when_name_matches() {
+        // If name matches, code search is skipped (score > 0)
+        let scriptlets = vec![test_scriptlet(
+            "special_snippet",
+            "ts",
+            "unrelated_code()",
+        )];
+
+        // Should match on name, not search code
+        let results = fuzzy_search_scriptlets(&scriptlets, "special");
+        assert_eq!(results.len(), 1);
+        // Score should be from name match, not code match
+        assert!(results[0].score > 5);
     }
 }

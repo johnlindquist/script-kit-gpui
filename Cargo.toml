@@ -111,6 +111,10 @@ default = ["ocr"]
 system-tests = []
 # OCR support using macOS Vision framework (enabled by default on macOS)
 ocr = []
+# Performance instrumentation (disabled by default to reduce hot-path overhead)
+# Enables key event timing, scroll timing, and rate logging
+# Run with: cargo build --features perf
+perf = []
 
 [dev-dependencies]
 tempfile = "3"

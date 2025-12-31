@@ -15,7 +15,7 @@ use objc::{msg_send, sel, sel_impl};
 
 use gpui::{px, Context, Pixels, Render, Timer};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::logging;
 use crate::window_manager;
@@ -63,7 +63,7 @@ pub enum ViewType {
 pub fn height_for_view(view_type: ViewType, _item_count: usize) -> Pixels {
     use layout::*;
 
-    let height = match view_type {
+    match view_type {
         // Views with preview panel - FIXED height, no dynamic resizing
         // DivPrompt also uses standard height to match main window
         ViewType::ScriptList | ViewType::ArgPromptWithChoices | ViewType::DivPrompt => {
@@ -73,21 +73,7 @@ pub fn height_for_view(view_type: ViewType, _item_count: usize) -> Pixels {
         ViewType::ArgPromptNoChoices => MIN_HEIGHT,
         // Full content views (editor, terminal) - max height
         ViewType::EditorPrompt | ViewType::TermPrompt => MAX_HEIGHT,
-    };
-
-    // Log to both legacy and structured logging
-    let height_px = f32::from(height);
-    info!(
-        view_type = ?view_type,
-        height_px = height_px,
-        "height_for_view calculated"
-    );
-    logging::log(
-        "RESIZE",
-        &format!("height_for_view({:?}) = {:.0}", view_type, height_px),
-    );
-
-    height
+    }
 }
 
 /// Calculate the initial window height for app startup
@@ -174,19 +160,11 @@ pub fn resize_first_window_to_height(target_height: Pixels) {
         // Skip if height is already correct (within 1px tolerance)
         let current_height = current_frame.size.height;
         if (current_height - height_f64).abs() < 1.0 {
-            info!(
-                current_height = current_height,
-                target_height = height_f64,
-                "Skip resize - already at target height"
-            );
-            logging::log(
-                "RESIZE",
-                &format!("Skip resize - already at height {:.0}", height_f64),
-            );
             return;
         }
 
-        info!(
+        // Log actual resizes at debug level (these are rare events, not hot-path)
+        debug!(
             from_height = current_height,
             to_height = height_f64,
             "Resizing window"

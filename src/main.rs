@@ -1640,9 +1640,17 @@ struct ScriptListApp {
     filter_cache_key: String,
     // P1: Cache for get_grouped_results() - invalidate on filter_text change only
     // This avoids recomputing grouped results 9+ times per keystroke
-    cached_grouped_items: Vec<GroupedListItem>,
-    cached_grouped_flat_results: Vec<scripts::SearchResult>,
+    // P1-Arc: Use Arc<[T]> for cheap clone in render closures
+    cached_grouped_items: Arc<[GroupedListItem]>,
+    cached_grouped_flat_results: Arc<[scripts::SearchResult]>,
     grouped_cache_key: String,
+    // P3: Two-stage filter - display vs search separation with coalescing
+    /// What the search cache is built from (may lag behind filter_text during rapid typing)
+    computed_filter_text: String,
+    /// Generation counter for coalescing filter updates
+    filter_compute_generation: u64,
+    /// Whether a filter compute task is currently running
+    filter_compute_task_running: bool,
     // Scroll stabilization: track last scrolled-to index to avoid redundant scroll_to_item calls
     last_scrolled_index: Option<usize>,
     // Preview cache: avoid re-reading file and re-highlighting on every render
@@ -1987,10 +1995,14 @@ impl ScriptListApp {
             // P1: Initialize filter cache
             cached_filtered_results: Vec::new(),
             filter_cache_key: String::from("\0_UNINITIALIZED_\0"), // Sentinel value to force initial compute
-            // P1: Initialize grouped results cache
-            cached_grouped_items: Vec::new(),
-            cached_grouped_flat_results: Vec::new(),
+            // P1: Initialize grouped results cache (Arc for cheap clone)
+            cached_grouped_items: Arc::from([]),
+            cached_grouped_flat_results: Arc::from([]),
             grouped_cache_key: String::from("\0_UNINITIALIZED_\0"), // Sentinel value to force initial compute
+            // P3: Two-stage filter coalescing
+            computed_filter_text: String::new(),
+            filter_compute_generation: 0,
+            filter_compute_task_running: false,
             // Scroll stabilization: start with no last scrolled index
             last_scrolled_index: None,
             // Preview cache: start empty, will populate on first render
@@ -2233,23 +2245,23 @@ impl ScriptListApp {
     /// P1: Get grouped results with caching - avoids recomputing 9+ times per keystroke
     /// 
     /// This is the ONLY place that should call scripts::get_grouped_results().
-    /// The cache is invalidated when filter_text changes.
+    /// P3: Cache is keyed off computed_filter_text (not filter_text) for two-stage filtering.
     /// 
-    /// Returns references to cached (grouped_items, flat_results).
-    fn get_grouped_results_cached(&mut self) -> (&Vec<GroupedListItem>, &Vec<scripts::SearchResult>) {
-        // Check if cache is valid
-        if self.filter_text == self.grouped_cache_key {
+    /// P1-Arc: Returns Arc clones for cheap sharing with render closures.
+    fn get_grouped_results_cached(&mut self) -> (Arc<[GroupedListItem]>, Arc<[scripts::SearchResult]>) {
+        // P3: Key off computed_filter_text for two-stage filtering
+        if self.computed_filter_text == self.grouped_cache_key {
             logging::log_debug(
                 "CACHE",
-                &format!("Grouped cache HIT for '{}'", self.filter_text),
+                &format!("Grouped cache HIT for '{}'", self.computed_filter_text),
             );
-            return (&self.cached_grouped_items, &self.cached_grouped_flat_results);
+            return (self.cached_grouped_items.clone(), self.cached_grouped_flat_results.clone());
         }
 
         // Cache miss - need to recompute
         logging::log_debug(
             "CACHE",
-            &format!("Grouped cache MISS - recomputing for '{}'", self.filter_text),
+            &format!("Grouped cache MISS - recomputing for '{}'", self.computed_filter_text),
         );
 
         let start = std::time::Instant::now();
@@ -2259,34 +2271,36 @@ impl ScriptListApp {
             &self.builtin_entries,
             &self.apps,
             &self.frecency_store,
-            &self.filter_text,
+            &self.computed_filter_text,
         );
         let elapsed = start.elapsed();
 
-        // Update cache
-        self.cached_grouped_items = grouped_items;
-        self.cached_grouped_flat_results = flat_results;
-        self.grouped_cache_key = self.filter_text.clone();
+        // P1-Arc: Convert to Arc<[T]> for cheap clone
+        self.cached_grouped_items = grouped_items.into();
+        self.cached_grouped_flat_results = flat_results.into();
+        self.grouped_cache_key = self.computed_filter_text.clone();
 
-        if !self.filter_text.is_empty() {
+        if !self.computed_filter_text.is_empty() {
             logging::log_debug(
                 "CACHE",
                 &format!(
                     "Grouped results computed in {:.2}ms for '{}' ({} items)",
                     elapsed.as_secs_f64() * 1000.0,
-                    self.filter_text,
+                    self.computed_filter_text,
                     self.cached_grouped_items.len()
                 ),
             );
         }
 
-        (&self.cached_grouped_items, &self.cached_grouped_flat_results)
+        (self.cached_grouped_items.clone(), self.cached_grouped_flat_results.clone())
     }
 
     /// P1: Invalidate grouped results cache (call when scripts/scriptlets/apps change)
     fn invalidate_grouped_cache(&mut self) {
         logging::log_debug("CACHE", "Grouped cache INVALIDATED");
         self.grouped_cache_key = String::from("\0_INVALIDATED_\0");
+        // Also reset computed_filter_text to force recompute
+        self.computed_filter_text = String::from("\0_INVALIDATED_\0");
     }
 
     /// Get the currently selected search result, correctly mapping from grouped index.
@@ -2695,6 +2709,7 @@ impl ScriptListApp {
         clear: bool,
         cx: &mut Context<Self>,
     ) {
+        // P3: Stage 1 - Update filter_text immediately (displayed in input)
         if clear {
             self.filter_text.clear();
             self.selected_index = 0;
@@ -2702,6 +2717,8 @@ impl ScriptListApp {
             // Use main_list_state for variable-height list (not the legacy list_scroll_handle)
             self.main_list_state.scroll_to_reveal_item(0);
             self.last_scrolled_index = Some(0);
+            // P3: Clear also immediately updates computed text (no coalescing needed)
+            self.computed_filter_text.clear();
         } else if backspace && !self.filter_text.is_empty() {
             self.filter_text.pop();
             self.selected_index = 0;
@@ -2718,10 +2735,41 @@ impl ScriptListApp {
             self.last_scrolled_index = Some(0);
         }
 
-        // Trigger window resize based on new filter results
-        self.update_window_size();
-
+        // P3: Notify immediately so input field updates (responsive typing)
         cx.notify();
+
+        // P3: Stage 2 - Coalesce expensive search work with 16ms delay
+        // This prevents multiple search computations during rapid typing
+        self.filter_compute_generation = self.filter_compute_generation.wrapping_add(1);
+        let current_generation = self.filter_compute_generation;
+        let filter_snapshot = self.filter_text.clone();
+
+        // Only spawn a new task if one isn't already running
+        if !self.filter_compute_task_running {
+            self.filter_compute_task_running = true;
+            cx.spawn(async move |this, cx| {
+                // Wait 16ms for coalescing window (one frame at 60fps)
+                Timer::after(std::time::Duration::from_millis(16)).await;
+                
+                let _ = cx.update(|cx| {
+                    this.update(cx, |app, cx| {
+                        app.filter_compute_task_running = false;
+                        
+                        // Only update if generation still matches (no newer input)
+                        if app.filter_compute_generation == current_generation {
+                            // Sync computed_filter_text with filter_text snapshot
+                            if app.computed_filter_text != filter_snapshot {
+                                app.computed_filter_text = filter_snapshot;
+                                // This will trigger cache recompute on next get_grouped_results_cached()
+                                app.update_window_size();
+                                cx.notify();
+                            }
+                        }
+                        // If generation changed, a newer task will handle the update
+                    })
+                });
+            }).detach();
+        }
     }
 
     fn toggle_logs(&mut self, cx: &mut Context<Self>) {
@@ -6971,15 +7019,22 @@ impl ScriptListApp {
             .overflow_y_hidden()
             .font_family(font_family);
 
+        // P4: Compute match indices lazily for visible preview (only one result at a time)
+        let computed_filter = self.computed_filter_text.clone();
+        
         match selected_result {
             Some(ref result) => {
+                // P4: Lazy match indices computation for preview panel
+                let match_indices = scripts::compute_match_indices_for_result(result, &computed_filter);
+                
                 match result {
                     scripts::SearchResult::Script(script_match) => {
                         let script = &script_match.script;
 
                         // Source indicator with match highlighting (e.g., "script: foo.ts")
                         let filename = &script_match.filename;
-                        let filename_indices = &script_match.match_indices.filename_indices;
+                        // P4: Use lazily computed indices instead of stored (empty) ones
+                        let filename_indices = &match_indices.filename_indices;
 
                         // Render filename with highlighted matched characters
                         let path_segments =
@@ -7109,7 +7164,8 @@ impl ScriptListApp {
 
                         // Source indicator with match highlighting (e.g., "scriptlet: foo.md")
                         if let Some(ref display_file_path) = scriptlet_match.display_file_path {
-                            let filename_indices = &scriptlet_match.match_indices.filename_indices;
+                            // P4: Use lazily computed indices instead of stored (empty) ones
+                            let filename_indices = &match_indices.filename_indices;
 
                             // Render filename with highlighted matched characters
                             let path_segments = render_path_with_highlights(
@@ -9078,15 +9134,18 @@ impl ScriptListApp {
                             }
                             "enter" => {
                                 let action_id = dialog.read(cx).get_selected_action_id();
+                                let should_close = dialog.read(cx).selected_action_should_close();
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("DivPrompt executing action: {}", action_id),
+                                        &format!("DivPrompt executing action: {} (close={})", action_id, should_close),
                                     );
-                                    this.show_actions_popup = false;
-                                    this.actions_dialog = None;
-                                    this.focused_input = FocusedInput::None;
-                                    window.focus(&this.focus_handle, cx);
+                                    if should_close {
+                                        this.show_actions_popup = false;
+                                        this.actions_dialog = None;
+                                        this.focused_input = FocusedInput::None;
+                                        window.focus(&this.focus_handle, cx);
+                                    }
                                     this.trigger_action_by_name(&action_id, cx);
                                 }
                             }
@@ -9280,15 +9339,18 @@ impl ScriptListApp {
                             }
                             "enter" => {
                                 let action_id = dialog.read(cx).get_selected_action_id();
+                                let should_close = dialog.read(cx).selected_action_should_close();
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("FormPrompt executing action: {}", action_id),
+                                        &format!("FormPrompt executing action: {} (close={})", action_id, should_close),
                                     );
-                                    this.show_actions_popup = false;
-                                    this.actions_dialog = None;
-                                    this.focused_input = FocusedInput::None;
-                                    window.focus(&this.focus_handle, cx);
+                                    if should_close {
+                                        this.show_actions_popup = false;
+                                        this.actions_dialog = None;
+                                        this.focused_input = FocusedInput::None;
+                                        window.focus(&this.focus_handle, cx);
+                                    }
                                     this.trigger_action_by_name(&action_id, cx);
                                 }
                                 return;
@@ -9550,15 +9612,18 @@ impl ScriptListApp {
                             }
                             "enter" => {
                                 let action_id = dialog.read(cx).get_selected_action_id();
+                                let should_close = dialog.read(cx).selected_action_should_close();
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("TermPrompt executing action: {}", action_id),
+                                        &format!("TermPrompt executing action: {} (close={})", action_id, should_close),
                                     );
-                                    this.show_actions_popup = false;
-                                    this.actions_dialog = None;
-                                    this.focused_input = FocusedInput::None;
-                                    window.focus(&this.focus_handle, cx);
+                                    if should_close {
+                                        this.show_actions_popup = false;
+                                        this.actions_dialog = None;
+                                        this.focused_input = FocusedInput::None;
+                                        window.focus(&this.focus_handle, cx);
+                                    }
                                     this.trigger_action_by_name(&action_id, cx);
                                 }
                                 return;
@@ -9738,15 +9803,18 @@ impl ScriptListApp {
                             }
                             "enter" => {
                                 let action_id = dialog.read(cx).get_selected_action_id();
+                                let should_close = dialog.read(cx).selected_action_should_close();
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("EditorPrompt executing action: {}", action_id),
+                                        &format!("EditorPrompt executing action: {} (close={})", action_id, should_close),
                                     );
-                                    this.show_actions_popup = false;
-                                    this.actions_dialog = None;
-                                    this.focused_input = FocusedInput::None;
-                                    window.focus(&this.focus_handle, cx);
+                                    if should_close {
+                                        this.show_actions_popup = false;
+                                        this.actions_dialog = None;
+                                        this.focused_input = FocusedInput::None;
+                                        window.focus(&this.focus_handle, cx);
+                                    }
                                     this.trigger_action_by_name(&action_id, cx);
                                 }
                                 return;
@@ -10062,27 +10130,30 @@ impl ScriptListApp {
                             "enter" => {
                                 // Get the selected action and execute it
                                 let action_id = dialog.read(cx).get_selected_action_id();
+                                let should_close = dialog.read(cx).selected_action_should_close();
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("Path action selected via Enter: {}", action_id),
+                                        &format!("Path action selected via Enter: {} (close={})", action_id, should_close),
                                     );
 
                                     // Get path info from PathPrompt
                                     let path_info = path_entity.read(cx).get_selected_path_info();
 
-                                    // Close dialog
-                                    this.show_actions_popup = false;
-                                    this.actions_dialog = None;
-                                    if let Ok(mut guard) = this.path_actions_showing.lock() {
-                                        *guard = false;
-                                    }
+                                    // Close dialog if action says so (built-in path actions always close)
+                                    if should_close {
+                                        this.show_actions_popup = false;
+                                        this.actions_dialog = None;
+                                        if let Ok(mut guard) = this.path_actions_showing.lock() {
+                                            *guard = false;
+                                        }
 
-                                    // Focus back to PathPrompt
-                                    if let AppView::PathPrompt { focus_handle, .. } =
-                                        &this.current_view
-                                    {
-                                        window.focus(focus_handle, cx);
+                                        // Focus back to PathPrompt
+                                        if let AppView::PathPrompt { focus_handle, .. } =
+                                            &this.current_view
+                                        {
+                                            window.focus(focus_handle, cx);
+                                        }
                                     }
 
                                     // Execute the action if we have path info
@@ -13845,12 +13916,15 @@ fn main() {
                                                     "enter" => {
                                                         logging::log("STDIN", "SimulateKey: Enter in actions dialog");
                                                         let action_id = dialog.read(ctx).get_selected_action_id();
+                                                        let should_close = dialog.read(ctx).selected_action_should_close();
                                                         if let Some(action_id) = action_id {
-                                                            logging::log("ACTIONS", &format!("SimulateKey: Executing action: {}", action_id));
-                                                            view.show_actions_popup = false;
-                                                            view.actions_dialog = None;
-                                                            view.focused_input = FocusedInput::ArgPrompt;
-                                                            window.focus(&view.focus_handle, ctx);
+                                                            logging::log("ACTIONS", &format!("SimulateKey: Executing action: {} (close={})", action_id, should_close));
+                                                            if should_close {
+                                                                view.show_actions_popup = false;
+                                                                view.actions_dialog = None;
+                                                                view.focused_input = FocusedInput::ArgPrompt;
+                                                                window.focus(&view.focus_handle, ctx);
+                                                            }
                                                             view.trigger_action_by_name(&action_id, ctx);
                                                         }
                                                     }

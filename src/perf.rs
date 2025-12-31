@@ -374,6 +374,7 @@ pub fn get_perf_tracker() -> &'static Mutex<PerfTracker> {
 // =============================================================================
 
 /// Start timing a key event, returns start instant
+#[cfg(feature = "perf")]
 pub fn start_key_event() -> Instant {
     if let Ok(mut tracker) = get_perf_tracker().lock() {
         tracker.key_events.start_event()
@@ -382,12 +383,25 @@ pub fn start_key_event() -> Instant {
     }
 }
 
+/// No-op stub when perf feature is disabled
+#[cfg(not(feature = "perf"))]
+#[inline]
+pub fn start_key_event() -> Instant {
+    Instant::now()
+}
+
 /// End timing a key event
+#[cfg(feature = "perf")]
 pub fn end_key_event(start: Instant) {
     if let Ok(mut tracker) = get_perf_tracker().lock() {
         tracker.key_events.end_event(start);
     }
 }
+
+/// No-op stub when perf feature is disabled
+#[cfg(not(feature = "perf"))]
+#[inline]
+pub fn end_key_event(_start: Instant) {}
 
 /// Start timing a scroll operation
 pub fn start_scroll() -> Instant {
@@ -417,6 +431,7 @@ pub fn mark_frame() -> Option<Duration> {
 }
 
 /// Log current key event rate (useful for detecting fast repeat)
+#[cfg(feature = "perf")]
 pub fn log_key_rate() {
     if let Ok(tracker) = get_perf_tracker().lock() {
         let rate = tracker.key_events.events_per_second();
@@ -429,6 +444,11 @@ pub fn log_key_rate() {
         }
     }
 }
+
+/// No-op stub when perf feature is disabled
+#[cfg(not(feature = "perf"))]
+#[inline]
+pub fn log_key_rate() {}
 
 /// Log all performance stats
 pub fn log_perf_summary() {
