@@ -287,7 +287,6 @@ pub fn get_cached_entries(limit: usize) -> Vec<ClipboardEntry> {
 }
 
 /// Invalidate the entry cache (called when entries change)
-#[allow(dead_code)]
 fn invalidate_entry_cache() {
     if let Ok(mut cache) = get_entry_cache().lock() {
         cache.clear();
@@ -304,6 +303,27 @@ fn refresh_entry_cache() {
     if let Some(updated) = CACHE_UPDATED.get() {
         if let Ok(mut ts) = updated.lock() {
             *ts = chrono::Utc::now().timestamp();
+        }
+    }
+}
+
+/// Evict a single entry from the image cache
+fn evict_image_cache(id: &str) {
+    if let Some(cache) = IMAGE_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.pop(id);
+            debug!(id = %id, "Evicted image from cache");
+        }
+    }
+}
+
+/// Clear all caches (entry + image)
+fn clear_all_caches() {
+    invalidate_entry_cache();
+    if let Some(cache) = IMAGE_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.clear();
+            debug!("Cleared image cache");
         }
     }
 }
@@ -868,6 +888,11 @@ pub fn pin_entry(id: &str) -> Result<()> {
     }
 
     info!(id = %id, "Pinned clipboard entry");
+
+    // Drop lock before refreshing cache
+    drop(conn);
+    refresh_entry_cache();
+
     Ok(())
 }
 
@@ -893,6 +918,11 @@ pub fn unpin_entry(id: &str) -> Result<()> {
     }
 
     info!(id = %id, "Unpinned clipboard entry");
+
+    // Drop lock before refreshing cache
+    drop(conn);
+    refresh_entry_cache();
+
     Ok(())
 }
 
@@ -918,6 +948,14 @@ pub fn remove_entry(id: &str) -> Result<()> {
     }
 
     info!(id = %id, "Removed clipboard entry");
+
+    // Drop lock before cache operations
+    drop(conn);
+
+    // Evict from image cache and refresh entry cache
+    evict_image_cache(id);
+    refresh_entry_cache();
+
     Ok(())
 }
 
@@ -937,6 +975,13 @@ pub fn clear_history() -> Result<()> {
         .context("Failed to clear history")?;
 
     info!("Cleared all clipboard history");
+
+    // Drop lock before cache operations
+    drop(conn);
+
+    // Clear both entry and image caches
+    clear_all_caches();
+
     Ok(())
 }
 
@@ -1065,6 +1110,11 @@ pub fn copy_entry_to_clipboard(id: &str) -> Result<()> {
     )?;
 
     info!(id = %id, "Copied entry to clipboard");
+
+    // Drop lock before refreshing cache
+    drop(conn);
+    refresh_entry_cache();
+
     Ok(())
 }
 
