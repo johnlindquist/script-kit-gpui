@@ -487,6 +487,70 @@ impl Drop for TimingGuard {
 }
 
 // =============================================================================
+// RAII PERF GUARDS (makes it hard to "forget" to end timers)
+// =============================================================================
+
+/// RAII guard that records key-event timing into KeyEventTracker
+/// and logs slow key handlers via TimingGuard.
+pub struct KeyEventPerfGuard {
+    start: Instant,
+    _timing: TimingGuard,
+}
+
+impl Default for KeyEventPerfGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeyEventPerfGuard {
+    #[inline]
+    pub fn new() -> Self {
+        let start = start_key_event();
+        Self {
+            start,
+            _timing: TimingGuard::key_event(),
+        }
+    }
+}
+
+impl Drop for KeyEventPerfGuard {
+    fn drop(&mut self) {
+        end_key_event(self.start);
+        // Optional but useful: warns when key repeat is very high.
+        log_key_rate();
+    }
+}
+
+/// RAII guard that records scroll timing into ScrollTimer
+/// and logs slow scroll operations via TimingGuard.
+pub struct ScrollPerfGuard {
+    _timing: TimingGuard,
+}
+
+impl Default for ScrollPerfGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScrollPerfGuard {
+    #[inline]
+    pub fn new() -> Self {
+        start_scroll();
+        Self {
+            _timing: TimingGuard::scroll(),
+        }
+    }
+}
+
+impl Drop for ScrollPerfGuard {
+    fn drop(&mut self) {
+        let _ = end_scroll();
+    }
+}
+
+// =============================================================================
 // TESTS
 // =============================================================================
 

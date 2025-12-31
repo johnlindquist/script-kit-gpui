@@ -111,7 +111,7 @@ mod mcp_streaming;
 use crate::components::toast::{Toast, ToastAction, ToastColors};
 use crate::toast_manager::ToastManager;
 use editor::EditorPrompt;
-use prompts::{DropPrompt, EnvPrompt, PathInfo, PathPrompt, SelectPrompt, TemplatePrompt};
+use prompts::{DivPrompt, DropPrompt, EnvPrompt, PathInfo, PathPrompt, SelectPrompt, TemplatePrompt};
 use tray::{TrayManager, TrayMenuAction};
 use window_resize::{
     defer_resize_to_view, height_for_view, initial_window_height, reset_resize_debounce,
@@ -129,10 +129,10 @@ use list_item::{
     SECTION_HEADER_HEIGHT,
 };
 use scripts::get_grouped_results;
-use utils::strip_html_tags;
+// strip_html_tags removed - DivPrompt now renders HTML properly
 
 use actions::{ActionsDialog, ScriptInfo};
-use panel::{CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y, DEFAULT_PLACEHOLDER};
+use panel::{CURSOR_GAP_X, CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y, CURSOR_WIDTH, DEFAULT_PLACEHOLDER};
 use parking_lot::Mutex as ParkingMutex;
 use protocol::{Choice, Message, ProtocolAction};
 use std::sync::{mpsc, Arc, Mutex};
@@ -1120,10 +1120,9 @@ enum AppView {
     },
     /// Showing a div prompt from a script
     DivPrompt {
+        #[allow(dead_code)]
         id: String,
-        html: String,
-        tailwind: Option<String>,
-        actions: Option<Vec<ProtocolAction>>,
+        entity: Entity<DivPrompt>,
     },
     /// Showing a form prompt from a script (HTML form with submit button)
     FormPrompt {
@@ -1665,6 +1664,19 @@ struct ScriptListApp {
     sdk_actions: Option<Vec<protocol::ProtocolAction>>,
     /// SDK action shortcuts: normalized_shortcut -> action_name (for O(1) lookup)
     action_shortcuts: std::collections::HashMap<String, String>,
+    // Navigation coalescing for rapid arrow key events (20ms window)
+    nav_coalescer: NavCoalescer,
+    // Scroll stabilization: track last scrolled-to index for each scroll handle
+    #[allow(dead_code)]
+    last_scrolled_main: Option<usize>,
+    #[allow(dead_code)]
+    last_scrolled_arg: Option<usize>,
+    #[allow(dead_code)]
+    last_scrolled_clipboard: Option<usize>,
+    #[allow(dead_code)]
+    last_scrolled_window: Option<usize>,
+    #[allow(dead_code)]
+    last_scrolled_design_gallery: Option<usize>,
 }
 
 /// Result of alias matching - either a Script or Scriptlet
@@ -1673,6 +1685,110 @@ struct ScriptListApp {
 enum AliasMatch {
     Script(scripts::Script),
     Scriptlet(scripts::Scriptlet),
+}
+
+// =============================================================================
+// NAVIGATION COALESCING FOR ARROW KEY EVENTS
+// =============================================================================
+
+/// Direction of navigation (up/down arrow keys)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NavDirection {
+    Up,
+    Down,
+}
+
+/// Result of recording a navigation event
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NavRecord {
+    /// First event - apply immediately (move by 1)
+    ApplyImmediate,
+    /// Same direction - coalesce (buffer additional movement)
+    Coalesced,
+    /// Direction changed - flush old delta, then apply new direction
+    FlushOld { dir: NavDirection, delta: i32 },
+}
+
+/// Coalesces rapid arrow key events to prevent UI lag during fast keyboard repeat.
+///
+/// The coalescing window is 20ms - events within this window are batched together
+/// and applied as a single larger movement at the next flush.
+#[derive(Debug)]
+struct NavCoalescer {
+    /// Current pending direction (None if no pending movement)
+    pending_dir: Option<NavDirection>,
+    /// Accumulated delta for pending direction (# of additional moves beyond first)
+    pending_delta: i32,
+    /// Timestamp of last navigation event (for determining flush eligibility)
+    last_event: std::time::Instant,
+    /// Whether the background flush task is currently running
+    flush_task_running: bool,
+}
+
+impl NavCoalescer {
+    /// Coalescing window: 20ms between events triggers batching
+    const WINDOW: std::time::Duration = std::time::Duration::from_millis(20);
+
+    fn new() -> Self {
+        Self {
+            pending_dir: None,
+            pending_delta: 0,
+            last_event: std::time::Instant::now(),
+            flush_task_running: false,
+        }
+    }
+
+    /// Record a navigation event. Returns how to handle it:
+    /// - ApplyImmediate: First event, move by 1 now
+    /// - Coalesced: Same direction, buffered for later flush
+    /// - FlushOld: Direction changed, flush old delta then move by 1
+    fn record(&mut self, dir: NavDirection) -> NavRecord {
+        self.last_event = std::time::Instant::now();
+        match self.pending_dir {
+            None => {
+                // First event - start tracking this direction
+                self.pending_dir = Some(dir);
+                self.pending_delta = 0;
+                NavRecord::ApplyImmediate
+            }
+            Some(existing) if existing == dir => {
+                // Same direction - coalesce
+                self.pending_delta += 1;
+                NavRecord::Coalesced
+            }
+            Some(_) => {
+                // Direction changed - flush old, start new
+                let old_dir = self.pending_dir.unwrap();
+                let old_delta = self.pending_delta;
+                self.pending_dir = Some(dir);
+                self.pending_delta = 0;
+                NavRecord::FlushOld { dir: old_dir, delta: old_delta }
+            }
+        }
+    }
+
+    /// Flush any pending navigation delta. Returns (direction, delta) if there's pending movement.
+    fn flush_pending(&mut self) -> Option<(NavDirection, i32)> {
+        let dir = self.pending_dir?;
+        if self.pending_delta == 0 {
+            return None;
+        }
+        let delta = self.pending_delta;
+        self.pending_delta = 0;
+        Some((dir, delta))
+    }
+
+    /// Reset the coalescer state (call after navigation completes or on view change)
+    fn reset(&mut self) {
+        self.pending_dir = None;
+        self.pending_delta = 0;
+    }
+}
+
+impl Default for NavCoalescer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ScriptListApp {
@@ -1882,6 +1998,14 @@ impl ScriptListApp {
             // SDK actions - starts empty, populated by setActions() from scripts
             sdk_actions: None,
             action_shortcuts: std::collections::HashMap::new(),
+            // Navigation coalescing for rapid arrow key events
+            nav_coalescer: NavCoalescer::new(),
+            // Scroll stabilization: track last scrolled index for each handle
+            last_scrolled_main: None,
+            last_scrolled_arg: None,
+            last_scrolled_clipboard: None,
+            last_scrolled_window: None,
+            last_scrolled_design_gallery: None,
         };
 
         // Build initial alias/shortcut registries (conflicts logged, not shown via HUD on startup)
@@ -2320,6 +2444,9 @@ impl ScriptListApp {
             return;
         }
 
+        // Use perf guard for scroll timing
+        let _scroll_perf = crate::perf::ScrollPerfGuard::new();
+
         // Perform the scroll using ListState for variable-height list
         // This scrolls the actual list() component used in render_script_list
         self.main_list_state.scroll_to_reveal_item(target);
@@ -2354,6 +2481,70 @@ impl ScriptListApp {
         .detach();
 
         cx.notify();
+    }
+
+    /// Apply a coalesced navigation delta in the given direction
+    fn apply_nav_delta(&mut self, dir: NavDirection, delta: i32, cx: &mut Context<Self>) {
+        let signed = match dir {
+            NavDirection::Up => -delta,
+            NavDirection::Down => delta,
+        };
+        self.move_selection_by(signed, cx);
+    }
+
+    /// Move selection by a signed delta (positive = down, negative = up)
+    /// Used by NavCoalescer for batched movements
+    fn move_selection_by(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let len = self.get_filtered_results_cached().len();
+        if len == 0 {
+            self.selected_index = 0;
+            return;
+        }
+        let new_index = (self.selected_index as i32 + delta).clamp(0, (len as i32) - 1) as usize;
+        if new_index != self.selected_index {
+            self.selected_index = new_index;
+            self.scroll_to_selected_if_needed("coalesced_nav");
+            self.trigger_scroll_activity(cx);
+            cx.notify();
+        }
+    }
+
+    /// Ensure the navigation flush task is running. Spawns a background task
+    /// that periodically flushes pending navigation deltas.
+    fn ensure_nav_flush_task(&mut self, cx: &mut Context<Self>) {
+        if self.nav_coalescer.flush_task_running {
+            return;
+        }
+        self.nav_coalescer.flush_task_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(NavCoalescer::WINDOW).await;
+                let keep_running = cx.update(|cx| {
+                    this.update(cx, |this, cx| {
+                        // Flush any pending navigation delta
+                        if let Some((dir, delta)) = this.nav_coalescer.flush_pending() {
+                            this.apply_nav_delta(dir, delta, cx);
+                        }
+                        // Check if we should keep running
+                        let now = std::time::Instant::now();
+                        let recently_active =
+                            now.duration_since(this.nav_coalescer.last_event) < NavCoalescer::WINDOW;
+                        if !recently_active && this.nav_coalescer.pending_delta == 0 {
+                            // No recent activity and no pending delta - stop the task
+                            this.nav_coalescer.flush_task_running = false;
+                            this.nav_coalescer.reset();
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                }).unwrap_or(Ok(false)).unwrap_or(false);
+                if !keep_running {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn execute_selected(&mut self, cx: &mut Context<Self>) {
@@ -4965,8 +5156,38 @@ impl ScriptListApp {
             PromptMessage::ShowDiv { id, html, tailwind, actions } => {
                 logging::log("UI", &format!("Showing div prompt: {}", id));
                 // Store SDK actions for the actions panel (Cmd+K)
-                self.sdk_actions = actions.clone();
-                self.current_view = AppView::DivPrompt { id, html, tailwind, actions };
+                self.sdk_actions = actions;
+
+                // Create submit callback for div prompt
+                let response_sender = self.response_sender.clone();
+                let submit_callback: std::sync::Arc<dyn Fn(String, Option<String>) + Send + Sync> =
+                    std::sync::Arc::new(move |id, value| {
+                        if let Some(ref sender) = response_sender {
+                            let response = Message::Submit { id, value };
+                            if let Err(e) = sender.send(response) {
+                                logging::log(
+                                    "UI",
+                                    &format!("Failed to send div response: {}", e),
+                                );
+                            }
+                        }
+                    });
+
+                // Create focus handle for div prompt
+                let div_focus_handle = cx.focus_handle();
+
+                // Create DivPrompt entity with proper HTML rendering
+                let div_prompt = DivPrompt::new(
+                    id.clone(),
+                    html,
+                    tailwind,
+                    div_focus_handle,
+                    submit_callback,
+                    std::sync::Arc::new(self.theme.clone()),
+                );
+
+                let entity = cx.new(|_| div_prompt);
+                self.current_view = AppView::DivPrompt { id, entity };
                 self.focused_input = FocusedInput::None; // DivPrompt has no text input
                 defer_resize_to_view(ViewType::DivPrompt, 0, cx);
                 cx.notify();
@@ -6502,12 +6723,7 @@ impl Render for ScriptListApp {
                 choices,
                 actions,
             } => self.render_arg_prompt(id, placeholder, choices, actions, cx),
-            AppView::DivPrompt {
-                id,
-                html,
-                tailwind,
-                actions,
-            } => self.render_div_prompt(id, html, tailwind, actions, cx),
+            AppView::DivPrompt { entity, .. } => self.render_div_prompt(entity, cx),
             AppView::FormPrompt { entity, .. } => self.render_form_prompt(entity, cx),
             AppView::TermPrompt { entity, .. } => self.render_term_prompt(entity, cx),
             AppView::EditorPrompt { entity, .. } => self.render_editor_prompt(entity, cx),
@@ -7763,8 +7979,34 @@ impl ScriptListApp {
                 }
 
                 match key_str.as_str() {
-                    "up" | "arrowup" => this.move_selection_up(cx),
-                    "down" | "arrowdown" => this.move_selection_down(cx),
+                    "up" | "arrowup" => {
+                        let _key_perf = crate::perf::KeyEventPerfGuard::new();
+                        match this.nav_coalescer.record(NavDirection::Up) {
+                            NavRecord::ApplyImmediate => this.move_selection_up(cx),
+                            NavRecord::Coalesced => {}
+                            NavRecord::FlushOld { dir, delta } => {
+                                if delta != 0 {
+                                    this.apply_nav_delta(dir, delta, cx);
+                                }
+                                this.move_selection_up(cx);
+                            }
+                        }
+                        this.ensure_nav_flush_task(cx);
+                    }
+                    "down" | "arrowdown" => {
+                        let _key_perf = crate::perf::KeyEventPerfGuard::new();
+                        match this.nav_coalescer.record(NavDirection::Down) {
+                            NavRecord::ApplyImmediate => this.move_selection_down(cx),
+                            NavRecord::Coalesced => {}
+                            NavRecord::FlushOld { dir, delta } => {
+                                if delta != 0 {
+                                    this.apply_nav_delta(dir, delta, cx);
+                                }
+                                this.move_selection_down(cx);
+                            }
+                        }
+                        this.ensure_nav_flush_task(cx);
+                    }
                     "enter" => this.execute_selected(cx),
                     "escape" => {
                         if !this.filter_text.is_empty() {
@@ -7938,14 +8180,18 @@ impl ScriptListApp {
                             })
                             // When empty: cursor FIRST (at left), then placeholder
                             // When typing: text, then cursor at end
-                            // ALWAYS render cursor div to prevent layout shift, but only show bg when focused + visible
+                            //
+                            // ALIGNMENT FIX: The left cursor (when empty) takes up space
+                            // (CURSOR_WIDTH + CURSOR_GAP_X). We apply a negative margin to the
+                            // placeholder text to pull it back by that amount, so placeholder
+                            // and typed text share the same starting x-position.
                             .when(filter_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .mr(px(design_spacing.padding_xs))
+                                        .mr(px(CURSOR_GAP_X))
                                         .when(
                                             self.focused_input == FocusedInput::MainFilter
                                                 && self.cursor_visible,
@@ -7953,14 +8199,22 @@ impl ScriptListApp {
                                         ),
                                 )
                             })
-                            .child(filter_display)
+                            // Display text - with negative margin for placeholder alignment
+                            .when(filter_is_empty, |d| {
+                                d.child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .child(filter_display.clone()),
+                                )
+                            })
+                            .when(!filter_is_empty, |d| d.child(filter_display.clone()))
                             .when(!filter_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .ml(px(design_visual.border_normal))
+                                        .ml(px(CURSOR_GAP_X))
                                         .when(
                                             self.focused_input == FocusedInput::MainFilter
                                                 && self.cursor_visible,
@@ -8565,14 +8819,17 @@ impl ScriptListApp {
                             })
                             // When empty: cursor FIRST (at left), then placeholder
                             // When typing: text, then cursor at end
-                            // ALWAYS render cursor div to prevent layout shift, but only show bg when focused + visible
+                            //
+                            // ALIGNMENT FIX: The left cursor (when empty) takes up space
+                            // (CURSOR_WIDTH + CURSOR_GAP_X). We apply a negative margin to the
+                            // placeholder text to pull it back by that amount.
                             .when(input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .mr(px(design_spacing.padding_xs))
+                                        .mr(px(CURSOR_GAP_X))
                                         .when(
                                             self.focused_input == FocusedInput::ArgPrompt
                                                 && self.cursor_visible,
@@ -8580,14 +8837,22 @@ impl ScriptListApp {
                                         ),
                                 )
                             })
-                            .child(input_display)
+                            // Display text - with negative margin for placeholder alignment
+                            .when(input_is_empty, |d| {
+                                d.child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .child(input_display.clone()),
+                                )
+                            })
+                            .when(!input_is_empty, |d| d.child(input_display.clone()))
                             .when(!input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .ml(px(design_visual.border_normal))
+                                        .ml(px(CURSOR_GAP_X))
                                         .when(
                                             self.focused_input == FocusedInput::ArgPrompt
                                                 && self.cursor_visible,
@@ -8686,25 +8951,19 @@ impl ScriptListApp {
 
     fn render_div_prompt(
         &mut self,
-        id: String,
-        html: String,
-        _tailwind: Option<String>,
-        actions: Option<Vec<ProtocolAction>>,
+        entity: Entity<DivPrompt>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let has_actions = actions.is_some() && !actions.as_ref().unwrap().is_empty();
+        let has_actions = self.sdk_actions.is_some()
+            && !self.sdk_actions.as_ref().unwrap().is_empty();
 
         // Use design tokens for GLOBAL theming
         let tokens = get_tokens(self.current_design);
         let design_colors = tokens.colors();
         let design_spacing = tokens.spacing();
-        let design_typography = tokens.typography();
         let design_visual = tokens.visual();
 
-        // Strip HTML tags for plain text display
-        let display_text = strip_html_tags(&html);
-
-        let prompt_id = id.clone();
+        // Key handler for Cmd+K actions toggle (at parent level to intercept before DivPrompt)
         let has_actions_for_handler = has_actions;
         let handle_key = cx.listener(
             move |this: &mut Self,
@@ -8713,7 +8972,6 @@ impl ScriptListApp {
                   cx: &mut Context<Self>| {
                 let key_str = event.keystroke.key.to_lowercase();
                 let has_cmd = event.keystroke.modifiers.platform;
-                logging::log("KEY", &format!("DivPrompt key: '{}' cmd={}", key_str, has_cmd));
 
                 // Check for Cmd+K to toggle actions popup (if actions are available)
                 if has_cmd && key_str == "k" && has_actions_for_handler {
@@ -8728,11 +8986,9 @@ impl ScriptListApp {
                         match key_str.as_str() {
                             "up" | "arrowup" => {
                                 dialog.update(cx, |d, cx| d.move_up(cx));
-                                return;
                             }
                             "down" | "arrowdown" => {
                                 dialog.update(cx, |d, cx| d.move_down(cx));
-                                return;
                             }
                             "enter" => {
                                 let action_id = dialog.read(cx).get_selected_action_id();
@@ -8747,7 +9003,6 @@ impl ScriptListApp {
                                     window.focus(&this.focus_handle, cx);
                                     this.trigger_action_by_name(&action_id, cx);
                                 }
-                                return;
                             }
                             "escape" => {
                                 this.show_actions_popup = false;
@@ -8755,11 +9010,9 @@ impl ScriptListApp {
                                 this.focused_input = FocusedInput::None;
                                 window.focus(&this.focus_handle, cx);
                                 cx.notify();
-                                return;
                             }
                             "backspace" => {
                                 dialog.update(cx, |d, cx| d.handle_backspace(cx));
-                                return;
                             }
                             _ => {
                                 if let Some(ref key_char) = event.keystroke.key_char {
@@ -8769,34 +9022,12 @@ impl ScriptListApp {
                                         }
                                     }
                                 }
-                                return;
                             }
                         }
                     }
                 }
 
-                // Check for SDK action shortcuts (only when actions popup is NOT open)
-                let shortcut_key = Self::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
-                if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
-                    logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
-                    this.trigger_action_by_name(&action_name, cx);
-                    return;
-                }
-
-                match key_str.as_str() {
-                    "enter" => {
-                        // Enter continues the script (sends response)
-                        logging::log("KEY", "Enter in DivPrompt - continuing script");
-                        this.submit_prompt_response(prompt_id.clone(), None, cx);
-                    }
-                    "escape" => {
-                        // ESC cancels the script completely
-                        logging::log("KEY", "ESC in DivPrompt - canceling script");
-                        this.submit_prompt_response(prompt_id.clone(), None, cx);
-                        this.cancel_script_execution(cx);
-                    }
-                    _ => {}
-                }
+                // SDK action shortcuts are handled by DivPrompt's own key handler
             },
         );
 
@@ -8806,8 +9037,7 @@ impl ScriptListApp {
         let bg_with_alpha = self.hex_to_rgba_with_opacity(bg_hex, opacity.main);
         let box_shadows = self.create_box_shadows();
 
-        // Use explicit height from layout constants instead of h_full()
-        // DivPrompt uses STANDARD_HEIGHT (500px) to match main window
+        // Use explicit height from layout constants
         let content_height = window_resize::layout::STANDARD_HEIGHT;
 
         div()
@@ -8820,10 +9050,6 @@ impl ScriptListApp {
             .h(content_height)
             .overflow_hidden()
             .rounded(px(design_visual.radius_lg))
-            .text_color(rgb(design_colors.text_primary))
-            .font_family(design_typography.font_family)
-            .key_context("div_prompt")
-            .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
             // Header with optional Actions button
             .when(has_actions, |d| {
@@ -8852,16 +9078,14 @@ impl ScriptListApp {
                         }),
                 )
             })
-            // Content area
+            // Content area - render the DivPrompt entity which handles HTML parsing and rendering
             .child(
                 div()
                     .flex_1()
                     .w_full()
                     .min_h(px(0.)) // Critical: allows flex children to size properly
                     .overflow_hidden()
-                    .p(px(design_spacing.padding_xl))
-                    .text_lg()
-                    .child(display_text),
+                    .child(entity.clone()),
             )
             // Actions dialog overlay (when Cmd+K is pressed with SDK actions)
             .when_some(
@@ -10346,6 +10570,7 @@ impl ScriptListApp {
                     .items_center()
                     .gap_3()
                     // Search input with blinking cursor
+                    // ALIGNMENT FIX: Uses canonical cursor constants and negative margin for placeholder
                     .child(
                         div()
                             .flex_1()
@@ -10361,21 +10586,28 @@ impl ScriptListApp {
                             .when(input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .mr(px(design_spacing.padding_xs))
+                                        .mr(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             })
-                            .child(input_display)
+                            .when(input_is_empty, |d| {
+                                d.child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .child(input_display.clone()),
+                                )
+                            })
+                            .when(!input_is_empty, |d| d.child(input_display.clone()))
                             .when(!input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .ml(px(design_visual.border_normal))
+                                        .ml(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             }),
@@ -10892,6 +11124,7 @@ impl ScriptListApp {
                             .child("🚀 Apps"),
                     )
                     // Search input with blinking cursor
+                    // ALIGNMENT FIX: Uses canonical cursor constants and negative margin for placeholder
                     .child(
                         div()
                             .flex_1()
@@ -10907,21 +11140,28 @@ impl ScriptListApp {
                             .when(input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .mr(px(design_spacing.padding_xs))
+                                        .mr(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             })
-                            .child(input_display)
+                            .when(input_is_empty, |d| {
+                                d.child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .child(input_display.clone()),
+                                )
+                            })
+                            .when(!input_is_empty, |d| d.child(input_display.clone()))
                             .when(!input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .ml(px(design_visual.border_normal))
+                                        .ml(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             }),
@@ -11240,6 +11480,7 @@ impl ScriptListApp {
                             .child("🪟 Windows"),
                     )
                     // Search input with blinking cursor
+                    // ALIGNMENT FIX: Uses canonical cursor constants and negative margin for placeholder
                     .child(
                         div()
                             .flex_1()
@@ -11255,21 +11496,28 @@ impl ScriptListApp {
                             .when(input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .mr(px(design_spacing.padding_xs))
+                                        .mr(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             })
-                            .child(input_display)
+                            .when(input_is_empty, |d| {
+                                d.child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .child(input_display.clone()),
+                                )
+                            })
+                            .when(!input_is_empty, |d| d.child(input_display.clone()))
                             .when(!input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .ml(px(design_visual.border_normal))
+                                        .ml(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             }),
@@ -11922,6 +12170,7 @@ impl ScriptListApp {
                     // Gallery icon
                     .child(div().text_xl().child("🎨"))
                     // Search input with blinking cursor
+                    // ALIGNMENT FIX: Uses canonical cursor constants and negative margin for placeholder
                     .child(
                         div()
                             .flex_1()
@@ -11937,21 +12186,28 @@ impl ScriptListApp {
                             .when(input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .mr(px(design_spacing.padding_xs))
+                                        .mr(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             })
-                            .child(input_display)
+                            .when(input_is_empty, |d| {
+                                d.child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .child(input_display.clone()),
+                                )
+                            })
+                            .when(!input_is_empty, |d| d.child(input_display.clone()))
                             .when(!input_is_empty, |d| {
                                 d.child(
                                     div()
-                                        .w(px(design_visual.border_normal))
+                                        .w(px(CURSOR_WIDTH))
                                         .h(px(CURSOR_HEIGHT_LG))
                                         .my(px(CURSOR_MARGIN_Y))
-                                        .ml(px(design_visual.border_normal))
+                                        .ml(px(CURSOR_GAP_X))
                                         .when(self.cursor_visible, |d| d.bg(rgb(text_primary))),
                                 )
                             }),

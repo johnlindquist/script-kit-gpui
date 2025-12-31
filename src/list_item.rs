@@ -22,9 +22,11 @@ pub enum IconKind {
     Svg(String),
 }
 
-/// Fixed height for list items (same as main script list)
-/// Height must accommodate: name (18px line-height) + description (14px line-height) + padding (12px)
-/// Total content height: 18 + 14 + 12 = 44px minimum, using 48px for comfortable spacing
+/// Fixed height for list items used in uniform-height virtualized lists.
+///
+/// IMPORTANT: When using GPUI `uniform_list`, the item closure must render
+/// at exactly this height (including padding). If you change visuals, keep the
+/// total height stable or update this constant everywhere it is used.
 pub const LIST_ITEM_HEIGHT: f32 = 48.0;
 
 /// Fixed height for section headers (RECENT, MAIN, etc.)
@@ -32,15 +34,9 @@ pub const LIST_ITEM_HEIGHT: f32 = 48.0;
 /// Using 24px for comfortable spacing while maintaining visual compactness.
 ///
 /// ## Performance Note (uniform_list vs list)
-/// The main menu uses GPUI's `list()` component (not `uniform_list`) to support variable heights:
-/// - Section headers: 24px (SECTION_HEADER_HEIGHT)
-/// - Regular items: 48px (LIST_ITEM_HEIGHT)
-///
-/// Performance comparison:
-/// - `uniform_list`: O(1) scroll position calculation (all items same height)
-/// - `list()`: O(log n) scroll position via SumTree (supports variable heights)
-///
-/// For typical menu sizes (< 1000 items), the performance difference is negligible.
+/// - Use `uniform_list` when every row has the same fixed height (fast O(1) scroll math).
+/// - Use `list()` when you need variable heights (e.g., headers + items); it uses a SumTree
+///   and scroll math is O(log n).
 pub const SECTION_HEADER_HEIGHT: f32 = 24.0;
 
 /// Enum for grouped list items - supports both regular items and section headers
@@ -780,5 +776,5 @@ pub fn render_section_header(label: &str, colors: ListItemColors) -> impl IntoEl
 }
 
 // Note: Tests omitted for this module due to GPUI macro recursion limit issues.
-// The LIST_ITEM_HEIGHT constant is 52.0 and the component is integration-tested
+// The LIST_ITEM_HEIGHT constant is 48.0 and the component is integration-tested
 // via the main application's script list and arg prompt rendering.
