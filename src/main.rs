@@ -1622,6 +1622,11 @@ struct ScriptListApp {
     // P1: Cache for filtered_results() - invalidate on filter_text change only
     cached_filtered_results: Vec<scripts::SearchResult>,
     filter_cache_key: String,
+    // P1: Cache for get_grouped_results() - invalidate on filter_text change only
+    // This avoids recomputing grouped results 9+ times per keystroke
+    cached_grouped_items: Vec<GroupedListItem>,
+    cached_grouped_flat_results: Vec<scripts::SearchResult>,
+    grouped_cache_key: String,
     // Scroll stabilization: track last scrolled-to index to avoid redundant scroll_to_item calls
     last_scrolled_index: Option<usize>,
     // Preview cache: avoid re-reading file and re-highlighting on every render
@@ -1876,8 +1881,9 @@ impl ScriptListApp {
                             let _ = cx.update(|cx| {
                                 this.update(cx, |app, cx| {
                                     app.apps = apps;
-                                    // Invalidate filter cache since apps changed
+                                    // Invalidate caches since apps changed
                                     app.filter_cache_key = String::from("\0_APPS_LOADED_\0");
+                                    app.grouped_cache_key = String::from("\0_APPS_LOADED_\0");
                                     logging::log(
                                         "APP",
                                         &format!(
@@ -1965,6 +1971,10 @@ impl ScriptListApp {
             // P1: Initialize filter cache
             cached_filtered_results: Vec::new(),
             filter_cache_key: String::from("\0_UNINITIALIZED_\0"), // Sentinel value to force initial compute
+            // P1: Initialize grouped results cache
+            cached_grouped_items: Vec::new(),
+            cached_grouped_flat_results: Vec::new(),
+            grouped_cache_key: String::from("\0_UNINITIALIZED_\0"), // Sentinel value to force initial compute
             // Scroll stabilization: start with no last scrolled index
             last_scrolled_index: None,
             // Preview cache: start empty, will populate on first render
@@ -2092,6 +2102,7 @@ impl ScriptListApp {
         self.main_list_state.scroll_to_reveal_item(0);
         self.last_scrolled_index = Some(0);
         self.invalidate_filter_cache();
+        self.invalidate_grouped_cache();
 
         // Rebuild alias/shortcut registries and show HUD for any conflicts
         let conflicts = self.rebuild_registries();
@@ -2203,6 +2214,65 @@ impl ScriptListApp {
         self.filter_cache_key = String::from("\0_INVALIDATED_\0");
     }
 
+    /// P1: Get grouped results with caching - avoids recomputing 9+ times per keystroke
+    /// 
+    /// This is the ONLY place that should call scripts::get_grouped_results().
+    /// The cache is invalidated when filter_text changes.
+    /// 
+    /// Returns references to cached (grouped_items, flat_results).
+    fn get_grouped_results_cached(&mut self) -> (&Vec<GroupedListItem>, &Vec<scripts::SearchResult>) {
+        // Check if cache is valid
+        if self.filter_text == self.grouped_cache_key {
+            logging::log_debug(
+                "CACHE",
+                &format!("Grouped cache HIT for '{}'", self.filter_text),
+            );
+            return (&self.cached_grouped_items, &self.cached_grouped_flat_results);
+        }
+
+        // Cache miss - need to recompute
+        logging::log_debug(
+            "CACHE",
+            &format!("Grouped cache MISS - recomputing for '{}'", self.filter_text),
+        );
+
+        let start = std::time::Instant::now();
+        let (grouped_items, flat_results) = get_grouped_results(
+            &self.scripts,
+            &self.scriptlets,
+            &self.builtin_entries,
+            &self.apps,
+            &self.frecency_store,
+            &self.filter_text,
+        );
+        let elapsed = start.elapsed();
+
+        // Update cache
+        self.cached_grouped_items = grouped_items;
+        self.cached_grouped_flat_results = flat_results;
+        self.grouped_cache_key = self.filter_text.clone();
+
+        if !self.filter_text.is_empty() {
+            logging::log_debug(
+                "CACHE",
+                &format!(
+                    "Grouped results computed in {:.2}ms for '{}' ({} items)",
+                    elapsed.as_secs_f64() * 1000.0,
+                    self.filter_text,
+                    self.cached_grouped_items.len()
+                ),
+            );
+        }
+
+        (&self.cached_grouped_items, &self.cached_grouped_flat_results)
+    }
+
+    /// P1: Invalidate grouped results cache (call when scripts/scriptlets/apps change)
+    fn invalidate_grouped_cache(&mut self) {
+        logging::log_debug("CACHE", "Grouped cache INVALIDATED");
+        self.grouped_cache_key = String::from("\0_INVALIDATED_\0");
+    }
+
     /// Get the currently selected search result, correctly mapping from grouped index.
     ///
     /// This function handles the mapping from `selected_index` (which is the visual
@@ -2213,17 +2283,11 @@ impl ScriptListApp {
     /// - The selected index points to a section header (headers aren't selectable)
     /// - The selected index is out of bounds
     /// - No results exist
-    fn get_selected_result(&self) -> Option<scripts::SearchResult> {
-        let (grouped_items, flat_results) = get_grouped_results(
-            &self.scripts,
-            &self.scriptlets,
-            &self.builtin_entries,
-            &self.apps,
-            &self.frecency_store,
-            &self.filter_text,
-        );
+    fn get_selected_result(&mut self) -> Option<scripts::SearchResult> {
+        let selected_index = self.selected_index;
+        let (grouped_items, flat_results) = self.get_grouped_results_cached();
 
-        match grouped_items.get(self.selected_index) {
+        match grouped_items.get(selected_index) {
             Some(GroupedListItem::Item(idx)) => flat_results.get(*idx).cloned(),
             _ => None,
         }
@@ -2332,15 +2396,10 @@ impl ScriptListApp {
     }
 
     fn move_selection_up(&mut self, cx: &mut Context<Self>) {
-        // Get grouped results to check for section headers
-        let (grouped_items, _) = get_grouped_results(
-            &self.scripts,
-            &self.scriptlets,
-            &self.builtin_entries,
-            &self.apps,
-            &self.frecency_store,
-            &self.filter_text,
-        );
+        // Get grouped results to check for section headers (cached)
+        let (grouped_items, _) = self.get_grouped_results_cached();
+        // Clone to avoid borrow issues with self mutation below
+        let grouped_items = grouped_items.clone();
 
         // Find the first selectable (non-header) item index
         let first_selectable = grouped_items
@@ -2381,15 +2440,10 @@ impl ScriptListApp {
     }
 
     fn move_selection_down(&mut self, cx: &mut Context<Self>) {
-        // Get grouped results to check for section headers
-        let (grouped_items, _) = get_grouped_results(
-            &self.scripts,
-            &self.scriptlets,
-            &self.builtin_entries,
-            &self.apps,
-            &self.frecency_store,
-            &self.filter_text,
-        );
+        // Get grouped results to check for section headers (cached)
+        let (grouped_items, _) = self.get_grouped_results_cached();
+        // Clone to avoid borrow issues with self mutation below
+        let grouped_items = grouped_items.clone();
 
         let item_count = grouped_items.len();
 
@@ -2548,15 +2602,11 @@ impl ScriptListApp {
     }
 
     fn execute_selected(&mut self, cx: &mut Context<Self>) {
-        // Get grouped results to map from selected_index to actual result
-        let (grouped_items, flat_results) = get_grouped_results(
-            &self.scripts,
-            &self.scriptlets,
-            &self.builtin_entries,
-            &self.apps,
-            &self.frecency_store,
-            &self.filter_text,
-        );
+        // Get grouped results to map from selected_index to actual result (cached)
+        let (grouped_items, flat_results) = self.get_grouped_results_cached();
+        // Clone to avoid borrow issues with self mutation below
+        let grouped_items = grouped_items.clone();
+        let flat_results = flat_results.clone();
 
         // Get the grouped item at selected_index and extract the result index
         let result_idx = match grouped_items.get(self.selected_index) {
@@ -2668,18 +2718,11 @@ impl ScriptListApp {
     /// - Script list: resize based on filtered results (including section headers)
     /// - Arg prompt: resize based on filtered choices
     /// - Div/Editor/Term: use full height
-    fn update_window_size(&self) {
+    fn update_window_size(&mut self) {
         let (view_type, item_count) = match &self.current_view {
             AppView::ScriptList => {
-                // Get grouped results which includes section headers
-                let (grouped_items, _) = get_grouped_results(
-                    &self.scripts,
-                    &self.scriptlets,
-                    &self.builtin_entries,
-                    &self.apps,
-                    &self.frecency_store,
-                    &self.filter_text,
-                );
+                // Get grouped results which includes section headers (cached)
+                let (grouped_items, _) = self.get_grouped_results_cached();
                 let count = grouped_items.len();
                 (ViewType::ScriptList, count)
             }
@@ -6840,18 +6883,15 @@ impl ScriptListApp {
 
     /// Render the preview panel showing details of the selected script/scriptlet
     fn render_preview_panel(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
-        // Get grouped results to map from selected_index to actual result
-        let (grouped_items, flat_results) = get_grouped_results(
-            &self.scripts,
-            &self.scriptlets,
-            &self.builtin_entries,
-            &self.apps,
-            &self.frecency_store,
-            &self.filter_text,
-        );
+        // Get grouped results to map from selected_index to actual result (cached)
+        // Clone to avoid borrow issues with self.selected_index access
+        let selected_index = self.selected_index;
+        let (grouped_items, flat_results) = self.get_grouped_results_cached();
+        let grouped_items = grouped_items.clone();
+        let flat_results = flat_results.clone();
 
         // Get the result index from the grouped item
-        let selected_result = match grouped_items.get(self.selected_index) {
+        let selected_result = match grouped_items.get(selected_index) {
             Some(GroupedListItem::Item(idx)) => flat_results.get(*idx).cloned(),
             _ => None,
         };
@@ -7491,16 +7531,12 @@ impl ScriptListApp {
     }
 
     /// Get the ScriptInfo for the currently focused/selected script
-    fn get_focused_script_info(&self) -> Option<ScriptInfo> {
-        // Get grouped results to map from selected_index to actual result
-        let (grouped_items, flat_results) = get_grouped_results(
-            &self.scripts,
-            &self.scriptlets,
-            &self.builtin_entries,
-            &self.apps,
-            &self.frecency_store,
-            &self.filter_text,
-        );
+    fn get_focused_script_info(&mut self) -> Option<ScriptInfo> {
+        // Get grouped results to map from selected_index to actual result (cached)
+        let (grouped_items, flat_results) = self.get_grouped_results_cached();
+        // Clone to avoid borrow issues
+        let grouped_items = grouped_items.clone();
+        let flat_results = flat_results.clone();
 
         // Get the result index from the grouped item
         let result_idx = match grouped_items.get(self.selected_index) {
@@ -7553,6 +7589,15 @@ impl ScriptListApp {
     }
 
     fn render_script_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        // Get grouped or flat results based on filter state (cached) - MUST come first
+        // to avoid borrow conflicts with theme access below
+        // When filter is empty, use frecency-grouped results with RECENT/MAIN sections
+        // When filtering, use flat fuzzy search results
+        let (grouped_items, flat_results) = self.get_grouped_results_cached();
+        // Clone for use in closures and to avoid borrow issues
+        let grouped_items = grouped_items.clone();
+        let flat_results = flat_results.clone();
+
         // Get design tokens for current design variant
         let tokens = get_tokens(self.current_design);
         let design_colors = tokens.colors();
@@ -7568,18 +7613,6 @@ impl ScriptListApp {
         // P4: Pre-compute theme values using ListItemColors
         let _list_colors = ListItemColors::from_theme(theme);
         logging::log_debug("PERF", "P4: Using ListItemColors for render closure");
-
-        // Get grouped or flat results based on filter state
-        // When filter is empty, use frecency-grouped results with RECENT/MAIN sections
-        // When filtering, use flat fuzzy search results
-        let (grouped_items, flat_results) = get_grouped_results(
-            &self.scripts,
-            &self.scriptlets,
-            &self.builtin_entries,
-            &self.apps,
-            &self.frecency_store,
-            &self.filter_text,
-        );
 
         let item_count = grouped_items.len();
         let _total_len = self.scripts.len() + self.scriptlets.len();
