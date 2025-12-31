@@ -9957,9 +9957,11 @@ impl ScriptListApp {
                                         }
                                     }
                                     clipboard_history::ContentType::Text => {
+                                        // Replace newlines with spaces to prevent multi-line list items
+                                        let sanitized = entry.content.replace(['\n', '\r'], " ");
                                         let truncated: String =
-                                            entry.content.chars().take(50).collect();
-                                        if entry.content.len() > 50 {
+                                            sanitized.chars().take(50).collect();
+                                        if sanitized.len() > 50 {
                                             format!("{}...", truncated)
                                         } else {
                                             truncated

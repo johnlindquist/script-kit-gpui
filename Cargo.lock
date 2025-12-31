@@ -6003,6 +6003,7 @@ dependencies = [
  "macos-accessibility-client",
  "notify",
  "objc",
+ "open",
  "parking_lot",
  "portable-pty",
  "regex",

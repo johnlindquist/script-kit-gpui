@@ -45,25 +45,25 @@ impl ContainerOptions {
     /// Parse container background to GPUI color
     pub fn parse_background(&self) -> Option<Hsla> {
         let bg = self.background.as_ref()?;
-        
+
         // Handle "transparent"
         if bg == "transparent" {
             return Some(Hsla::transparent_black());
         }
-        
+
         // Handle hex colors: #RGB, #RRGGBB, #RRGGBBAA
         if bg.starts_with('#') {
             return parse_hex_color(bg);
         }
-        
+
         // Handle Tailwind color names (e.g., "blue-500", "gray-900")
         if let Some(color) = parse_color(bg) {
             return Some(rgb_to_hsla(color, self.opacity));
         }
-        
+
         None
     }
-    
+
     /// Get padding value
     pub fn get_padding(&self, default: f32) -> f32 {
         match &self.padding {
@@ -77,21 +77,31 @@ impl ContainerOptions {
 /// Parse hex color string to GPUI Hsla
 fn parse_hex_color(hex: &str) -> Option<Hsla> {
     let hex = hex.trim_start_matches('#');
-    
+
     match hex.len() {
         // #RGB -> #RRGGBB
         3 => {
             let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
             let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
             let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-            Some(Hsla::from(gpui::Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }))
+            Some(Hsla::from(gpui::Rgba {
+                r: r as f32 / 255.0,
+                g: g as f32 / 255.0,
+                b: b as f32 / 255.0,
+                a: 1.0,
+            }))
         }
         // #RRGGBB
         6 => {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
             let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some(Hsla::from(gpui::Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }))
+            Some(Hsla::from(gpui::Rgba {
+                r: r as f32 / 255.0,
+                g: g as f32 / 255.0,
+                b: b as f32 / 255.0,
+                a: 1.0,
+            }))
         }
         // #RRGGBBAA
         8 => {
@@ -99,7 +109,12 @@ fn parse_hex_color(hex: &str) -> Option<Hsla> {
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
             let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
             let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-            Some(Hsla::from(gpui::Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 }))
+            Some(Hsla::from(gpui::Rgba {
+                r: r as f32 / 255.0,
+                g: g as f32 / 255.0,
+                b: b as f32 / 255.0,
+                a: a as f32 / 255.0,
+            }))
         }
         _ => None,
     }
@@ -210,10 +225,38 @@ impl DivPrompt {
     fn submit(&mut self) {
         (self.on_submit)(self.id.clone(), None);
     }
+
+    /// Submit with a specific value (for submit:value links)
+    fn submit_with_value(&mut self, value: String) {
+        logging::log("DIV", &format!("Submit with value: {}", value));
+        (self.on_submit)(self.id.clone(), Some(value));
+    }
+
+    /// Handle link click based on href pattern
+    pub fn handle_link_click(&mut self, href: &str) {
+        logging::log("DIV", &format!("Link clicked: {}", href));
+
+        if let Some(value) = href.strip_prefix("submit:") {
+            self.submit_with_value(value.to_string());
+        } else if href.starts_with("http://") || href.starts_with("https://") {
+            if let Err(e) = open::that(href) {
+                logging::log("DIV", &format!("Failed to open URL {}: {}", href, e));
+            }
+        } else if href.starts_with("file://") {
+            if let Err(e) = open::that(href) {
+                logging::log("DIV", &format!("Failed to open file {}: {}", href, e));
+            }
+        } else {
+            logging::log("DIV", &format!("Unknown link protocol: {}", href));
+        }
+    }
 }
 
+/// Callback type for link clicks - needs App context to update entity
+type LinkClickCallback = Arc<dyn Fn(&str, &mut gpui::App) + Send + Sync>;
+
 /// Style context for rendering HTML elements
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RenderContext {
     /// Primary text color
     text_primary: u32,
@@ -229,6 +272,8 @@ struct RenderContext {
     quote_border: u32,
     /// HR color
     hr_color: u32,
+    /// Optional link click callback
+    on_link_click: Option<LinkClickCallback>,
 }
 
 impl RenderContext {
@@ -241,7 +286,13 @@ impl RenderContext {
             code_bg: colors.background.search_box,
             quote_border: colors.ui.border,
             hr_color: colors.ui.border,
+            on_link_click: None,
         }
+    }
+
+    fn with_link_callback(mut self, callback: LinkClickCallback) -> Self {
+        self.on_link_click = Some(callback);
+        self
     }
 }
 
@@ -250,7 +301,7 @@ fn render_elements(elements: &[HtmlElement], ctx: RenderContext) -> Div {
     let mut container = div().flex().flex_col().gap_2().w_full();
 
     for element in elements {
-        container = container.child(render_element(element, ctx));
+        container = container.child(render_element(element, ctx.clone()));
     }
 
     container
@@ -428,10 +479,26 @@ fn render_element(element: &HtmlElement, ctx: RenderContext) -> Div {
 
         HtmlElement::HorizontalRule => div().w_full().h(px(1.0)).my(px(12.0)).bg(rgb(ctx.hr_color)),
 
-        HtmlElement::Link { children, .. } => {
-            // Links are styled but not clickable (as per requirements)
+        HtmlElement::Link { href, children } => {
+            // Links are styled and clickable
             let text_content = collect_text(children);
-            div().text_color(rgb(ctx.accent_color)).child(text_content)
+            let mut link_div = div()
+                .text_color(rgb(ctx.accent_color))
+                .cursor_pointer()
+                .child(text_content);
+
+            if let Some(ref callback) = ctx.on_link_click {
+                let cb = callback.clone();
+                let href_for_click = href.clone();
+                link_div = link_div.on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |_event, _window, cx: &mut gpui::App| {
+                        cb(&href_for_click, cx);
+                    },
+                );
+            }
+
+            link_div
         }
 
         HtmlElement::LineBreak => {
@@ -439,7 +506,7 @@ fn render_element(element: &HtmlElement, ctx: RenderContext) -> Div {
         }
 
         HtmlElement::Div { classes, children } => {
-            let base = render_elements(children, ctx);
+            let base = render_elements(children, ctx.clone());
             if let Some(class_str) = classes {
                 apply_tailwind_styles(base, class_str)
             } else {
@@ -448,7 +515,7 @@ fn render_element(element: &HtmlElement, ctx: RenderContext) -> Div {
         }
 
         HtmlElement::Span { classes, children } => {
-            let base = render_elements(children, ctx);
+            let base = render_elements(children, ctx.clone());
             if let Some(class_str) = classes {
                 apply_tailwind_styles(base, class_str)
             } else {
@@ -658,19 +725,33 @@ fn render_inline(element: &HtmlElement, ctx: RenderContext) -> Div {
     match element {
         HtmlElement::Text(text) => div().child(text.clone()),
 
-        HtmlElement::Bold(children) => div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .font_weight(FontWeight::BOLD)
-            .children(children.iter().map(|c| render_inline(c, ctx))),
+        HtmlElement::Bold(children) => {
+            let ctx_clone = ctx.clone();
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .font_weight(FontWeight::BOLD)
+                .children(
+                    children
+                        .iter()
+                        .map(move |c| render_inline(c, ctx_clone.clone())),
+                )
+        }
 
-        HtmlElement::Italic(children) => div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .text_color(rgb(ctx.text_tertiary))
-            .children(children.iter().map(|c| render_inline(c, ctx))),
+        HtmlElement::Italic(children) => {
+            let ctx_clone = ctx.clone();
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .text_color(rgb(ctx.text_tertiary))
+                .children(
+                    children
+                        .iter()
+                        .map(move |c| render_inline(c, ctx_clone.clone())),
+                )
+        }
 
         HtmlElement::InlineCode(code) => div()
             .px(px(4.0))
@@ -682,12 +763,19 @@ fn render_inline(element: &HtmlElement, ctx: RenderContext) -> Div {
             .text_color(rgb(ctx.accent_color))
             .child(code.clone()),
 
-        HtmlElement::Link { children, .. } => div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .text_color(rgb(ctx.accent_color))
-            .children(children.iter().map(|c| render_inline(c, ctx))),
+        HtmlElement::Link { children, .. } => {
+            let ctx_clone = ctx.clone();
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .text_color(rgb(ctx.accent_color))
+                .children(
+                    children
+                        .iter()
+                        .map(move |c| render_inline(c, ctx_clone.clone())),
+                )
+        }
 
         HtmlElement::LineBreak => div().h(px(14.0)),
 
@@ -697,25 +785,31 @@ fn render_inline(element: &HtmlElement, ctx: RenderContext) -> Div {
         | HtmlElement::ListItem(children)
         | HtmlElement::Blockquote(children)
         | HtmlElement::Div { children, .. }
-        | HtmlElement::Span { children, .. } => div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .children(children.iter().map(|c| render_inline(c, ctx))),
+        | HtmlElement::Span { children, .. } => {
+            let ctx_clone = ctx.clone();
+            div().flex().flex_row().items_baseline().children(
+                children
+                    .iter()
+                    .map(move |c| render_inline(c, ctx_clone.clone())),
+            )
+        }
 
         HtmlElement::UnorderedList(items) | HtmlElement::OrderedList(items) => {
             // Flatten list items inline
+            let ctx_clone = ctx.clone();
             div()
                 .flex()
                 .flex_row()
                 .items_baseline()
-                .children(items.iter().filter_map(|item| {
+                .children(items.iter().filter_map(move |item| {
                     if let HtmlElement::ListItem(children) = item {
+                        let ctx_inner = ctx_clone.clone();
                         Some(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .children(children.iter().map(|c| render_inline(c, ctx))),
+                            div().flex().flex_row().children(
+                                children
+                                    .iter()
+                                    .map(move |c| render_inline(c, ctx_inner.clone())),
+                            ),
                         )
                     } else {
                         None
@@ -766,9 +860,36 @@ impl Render for DivPrompt {
         // Parse HTML into elements
         let elements = parse_html(&self.html);
 
-        // Create render context from theme
+        // Create link click callback using a weak entity handle
+        // This allows us to call back into the DivPrompt to handle submit:value links
+        let weak_handle = cx.entity().downgrade();
+        let on_link_click: LinkClickCallback = Arc::new(move |href: &str, cx: &mut gpui::App| {
+            logging::log("DIV", &format!("Link clicked: {}", href));
+
+            if let Some(value) = href.strip_prefix("submit:") {
+                // submit:value links - need entity context to call on_submit
+                let value_owned = value.to_string();
+                if let Some(entity) = weak_handle.upgrade() {
+                    entity.update(cx, |this, _cx| {
+                        this.submit_with_value(value_owned);
+                    });
+                }
+            } else if href.starts_with("http://") || href.starts_with("https://") {
+                if let Err(e) = open::that(href) {
+                    logging::log("DIV", &format!("Failed to open URL {}: {}", href, e));
+                }
+            } else if href.starts_with("file://") {
+                if let Err(e) = open::that(href) {
+                    logging::log("DIV", &format!("Failed to open file {}: {}", href, e));
+                }
+            } else {
+                logging::log("DIV", &format!("Unknown link protocol: {}", href));
+            }
+        });
+
+        // Create render context from theme with link callback
         let render_ctx = if self.design_variant == DesignVariant::Default {
-            RenderContext::from_theme(&self.theme.colors)
+            RenderContext::from_theme(&self.theme.colors).with_link_callback(on_link_click)
         } else {
             RenderContext {
                 text_primary: colors.text_primary,
@@ -778,6 +899,7 @@ impl Render for DivPrompt {
                 code_bg: colors.background_tertiary, // Use background_tertiary for code bg
                 quote_border: colors.border,
                 hr_color: colors.border,
+                on_link_click: Some(on_link_click),
             }
         };
 
@@ -817,12 +939,11 @@ impl Render for DivPrompt {
         };
 
         // Build the content container with optional containerClasses
-        // Apply containerClasses first (before .id() which makes it Stateful)
+        // Apply containerClasses first (before .id() which makes it Stateful for overflow_y_scroll)
         let content_base = div()
             .flex_1() // Grow to fill available space to bottom
             .min_h(px(0.)) // Allow shrinking
             .w_full()
-            .overflow_y_hidden() // Clip content at container boundary
             .child(styled_content);
 
         let content_styled = if let Some(ref classes) = self.container_options.container_classes {
@@ -831,8 +952,11 @@ impl Render for DivPrompt {
             content_base
         };
 
-        // Add ID after styling
-        let content_container = content_styled.id(gpui::ElementId::Name(panel_semantic_id.into()));
+        // Add ID to make it Stateful, then enable vertical scrolling
+        // overflow_y_scroll requires StatefulInteractiveElement trait (needs .id() first)
+        let content_container = content_styled
+            .id(gpui::ElementId::Name(panel_semantic_id.into()))
+            .overflow_y_scroll();
 
         // Main container - fills entire window height with no bottom gap
         div()

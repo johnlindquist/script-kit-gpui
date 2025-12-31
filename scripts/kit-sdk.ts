@@ -1537,7 +1537,7 @@ let messageId = 0;
 const nextId = (): string => String(++messageId);
 
 // Generic pending map that can handle any response type
-const pending = new Map<string, (msg: ResponseMessage) => void>();
+const pending = new Map<string, (value?: any) => void>();
 
 // =============================================================================
 // Actions API - Global state for action handlers
@@ -1626,7 +1626,12 @@ process.stdin.on('data', (chunk: string) => {
           const resolver = pending.get(id);
           if (resolver) {
             pending.delete(id);
-            resolver(msg);
+            // For submit messages, pass the value directly
+            if (msg.type === 'submit') {
+              resolver((msg as SubmitMessage).value ?? undefined);
+            } else {
+              resolver(msg);
+            }
           }
         }
         
@@ -1717,7 +1722,7 @@ declare global {
    *   { name: "Copy", shortcut: "cmd+c", onAction: () => clipboard.writeText("Hello") }
    * ]);
    */
-  function div(html?: string | DivConfig, actions?: Action[]): Promise<void>;
+  function div(html?: string | DivConfig, actions?: Action[]): Promise<string | void>;
   
   /**
    * Convert Markdown to HTML
@@ -2517,7 +2522,7 @@ globalThis.arg = async function arg(
 globalThis.div = async function div(
   htmlOrConfig?: string | DivConfig,
   actionsInput?: Action[]
-): Promise<void> {
+): Promise<string | void> {
   const id = nextId();
   
   // Parse arguments - support both string and config object
@@ -2571,8 +2576,8 @@ globalThis.div = async function div(
   }
   
   return new Promise((resolve) => {
-    pending.set(id, () => {
-      resolve();
+    pending.set(id, (value?: any) => {
+      resolve(value);
     });
     
     const message: DivMessage = {

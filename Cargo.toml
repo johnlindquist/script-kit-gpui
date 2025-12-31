@@ -92,6 +92,9 @@ sysinfo = "0.33"
 # Non-poisoning mutex (doesn't require .unwrap() on lock)
 parking_lot = "0.12"
 
+# Open URLs and files with system default handler
+open = "5"
+
 # Storybook infrastructure (compile-time story registration + CLI)
 inventory = "0.3"  # Compile-time story registration (same pattern as Zed)
 clap = { version = "4", features = ["derive"] }  # CLI argument parsing
