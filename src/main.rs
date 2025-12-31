@@ -1,9 +1,5 @@
 #![allow(unexpected_cfgs)]
 
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
 use gpui::{
     div, hsla, list, point, prelude::*, px, rgb, rgba, size, svg, uniform_list, AnyElement, App,
     Application, Bounds, BoxShadow, Context, ElementId, Entity, FocusHandle, Focusable,
@@ -11,8 +7,7 @@ use gpui::{
     Timer, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowOptions,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod process_manager;
 use cocoa::appkit::NSApp;
@@ -31,6 +26,10 @@ mod designs;
 mod editor;
 mod error;
 mod executor;
+mod form_prompt;
+mod filter_coalescer;
+mod hotkey_pollers;
+mod hotkeys;
 mod list_item;
 mod logging;
 mod panel;
@@ -49,6 +48,8 @@ mod utils;
 mod watcher;
 mod window_manager;
 mod window_resize;
+mod navigation;
+mod shortcuts;
 
 // Phase 1 system API modules
 mod clipboard_history;
@@ -109,6 +110,10 @@ mod mcp_server;
 mod mcp_streaming;
 
 use crate::components::toast::{Toast, ToastAction, ToastColors};
+use crate::filter_coalescer::FilterCoalescer;
+use crate::form_prompt::FormPromptState;
+use crate::hotkey_pollers::start_hotkey_event_handler;
+use crate::navigation::{NavCoalescer, NavDirection, NavRecord};
 use crate::toast_manager::ToastManager;
 use editor::EditorPrompt;
 use prompts::{
@@ -121,10 +126,7 @@ use window_resize::{
     resize_first_window_to_height, ViewType,
 };
 
-use components::{
-    Button, ButtonColors, ButtonVariant, FormCheckbox, FormFieldColors, FormTextArea,
-    FormTextField, Scrollbar, ScrollbarColors,
-};
+use components::{Button, ButtonColors, ButtonVariant, FormFieldColors, Scrollbar, ScrollbarColors};
 use designs::{get_tokens, render_design_item, DesignVariant};
 use frecency::FrecencyStore;
 use list_item::{
@@ -601,166 +603,6 @@ fn calculate_eye_line_bounds_on_mouse_display(
 }
 
 // Global state for hotkey signaling between threads
-// HOTKEY_CHANNEL: Event-driven async_channel for hotkey events (replaces AtomicBool polling)
-static HOTKEY_CHANNEL: OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
-    OnceLock::new();
-
-/// Get the hotkey channel, initializing it on first access
-fn hotkey_channel() -> &'static (async_channel::Sender<()>, async_channel::Receiver<()>) {
-    HOTKEY_CHANNEL.get_or_init(|| async_channel::bounded(10))
-}
-
-// SCRIPT_HOTKEY_CHANNEL: Channel for script shortcut events (sends script path)
-static SCRIPT_HOTKEY_CHANNEL: OnceLock<(
-    async_channel::Sender<String>,
-    async_channel::Receiver<String>,
-)> = OnceLock::new();
-
-/// Get the script hotkey channel, initializing it on first access
-fn script_hotkey_channel() -> &'static (
-    async_channel::Sender<String>,
-    async_channel::Receiver<String>,
-) {
-    SCRIPT_HOTKEY_CHANNEL.get_or_init(|| async_channel::bounded(10))
-}
-
-/// Parse a shortcut string into (Modifiers, Code).
-///
-/// Supports flexible formats:
-/// - Space-separated: "opt i", "cmd shift k"
-/// - Plus-separated: "cmd+shift+k", "ctrl+alt+delete"
-/// - Mixed: "cmd + shift + k"
-/// - Various modifier names: cmd/command/meta/⌘, ctrl/control/^, alt/opt/option/⌥, shift/⇧
-///
-/// Returns None if the shortcut string is invalid.
-fn parse_shortcut(shortcut: &str) -> Option<(Modifiers, Code)> {
-    // Normalize the shortcut: replace + with space, collapse whitespace
-    let normalized = shortcut
-        .replace('+', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let parts: Vec<&str> = normalized.split_whitespace().collect();
-    if parts.is_empty() {
-        return None;
-    }
-
-    let mut modifiers = Modifiers::empty();
-    let mut key_part: Option<&str> = None;
-
-    for part in &parts {
-        let part_lower = part.to_lowercase();
-        match part_lower.as_str() {
-            // Meta/Command key - many variations
-            "cmd" | "command" | "meta" | "super" | "win" | "⌘" => modifiers |= Modifiers::META,
-            // Control key
-            "ctrl" | "control" | "ctl" | "^" => modifiers |= Modifiers::CONTROL,
-            // Alt/Option key
-            "alt" | "opt" | "option" | "⌥" => modifiers |= Modifiers::ALT,
-            // Shift key
-            "shift" | "shft" | "⇧" => modifiers |= Modifiers::SHIFT,
-            // If not a modifier, it's the key
-            _ => key_part = Some(part),
-        }
-    }
-
-    let key = key_part?;
-    let key_lower = key.to_lowercase();
-
-    let code = match key_lower.as_str() {
-        // Letters
-        "a" => Code::KeyA,
-        "b" => Code::KeyB,
-        "c" => Code::KeyC,
-        "d" => Code::KeyD,
-        "e" => Code::KeyE,
-        "f" => Code::KeyF,
-        "g" => Code::KeyG,
-        "h" => Code::KeyH,
-        "i" => Code::KeyI,
-        "j" => Code::KeyJ,
-        "k" => Code::KeyK,
-        "l" => Code::KeyL,
-        "m" => Code::KeyM,
-        "n" => Code::KeyN,
-        "o" => Code::KeyO,
-        "p" => Code::KeyP,
-        "q" => Code::KeyQ,
-        "r" => Code::KeyR,
-        "s" => Code::KeyS,
-        "t" => Code::KeyT,
-        "u" => Code::KeyU,
-        "v" => Code::KeyV,
-        "w" => Code::KeyW,
-        "x" => Code::KeyX,
-        "y" => Code::KeyY,
-        "z" => Code::KeyZ,
-        // Numbers
-        "0" => Code::Digit0,
-        "1" => Code::Digit1,
-        "2" => Code::Digit2,
-        "3" => Code::Digit3,
-        "4" => Code::Digit4,
-        "5" => Code::Digit5,
-        "6" => Code::Digit6,
-        "7" => Code::Digit7,
-        "8" => Code::Digit8,
-        "9" => Code::Digit9,
-        // Function keys
-        "f1" => Code::F1,
-        "f2" => Code::F2,
-        "f3" => Code::F3,
-        "f4" => Code::F4,
-        "f5" => Code::F5,
-        "f6" => Code::F6,
-        "f7" => Code::F7,
-        "f8" => Code::F8,
-        "f9" => Code::F9,
-        "f10" => Code::F10,
-        "f11" => Code::F11,
-        "f12" => Code::F12,
-        // Special keys
-        "space" => Code::Space,
-        "enter" | "return" => Code::Enter,
-        "tab" => Code::Tab,
-        "escape" | "esc" => Code::Escape,
-        "backspace" | "back" => Code::Backspace,
-        "delete" | "del" => Code::Delete,
-        ";" | "semicolon" => Code::Semicolon,
-        "'" | "quote" | "apostrophe" => Code::Quote,
-        "," | "comma" => Code::Comma,
-        "." | "period" | "dot" => Code::Period,
-        "/" | "slash" | "forwardslash" => Code::Slash,
-        "\\" | "backslash" => Code::Backslash,
-        "[" | "bracketleft" | "leftbracket" => Code::BracketLeft,
-        "]" | "bracketright" | "rightbracket" => Code::BracketRight,
-        "-" | "minus" | "dash" | "hyphen" => Code::Minus,
-        "=" | "equal" | "equals" => Code::Equal,
-        "`" | "backquote" | "backtick" | "grave" => Code::Backquote,
-        // Arrow keys
-        "up" | "arrowup" | "uparrow" => Code::ArrowUp,
-        "down" | "arrowdown" | "downarrow" => Code::ArrowDown,
-        "left" | "arrowleft" | "leftarrow" => Code::ArrowLeft,
-        "right" | "arrowright" | "rightarrow" => Code::ArrowRight,
-        // Home/End/PageUp/PageDown
-        "home" => Code::Home,
-        "end" => Code::End,
-        "pageup" | "pgup" => Code::PageUp,
-        "pagedown" | "pgdn" | "pgdown" => Code::PageDown,
-        _ => {
-            logging::log(
-                "SHORTCUT",
-                &format!("Unknown key in shortcut '{}': '{}'", shortcut, key),
-            );
-            return None;
-        }
-    };
-
-    Some((modifiers, code))
-}
-
-static HOTKEY_TRIGGER_COUNT: AtomicU64 = AtomicU64::new(0);
 static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false); // Track window visibility for toggle (starts hidden)
 static NEEDS_RESET: AtomicBool = AtomicBool::new(false); // Track if window needs reset to script list on next show
 static PANEL_CONFIGURED: AtomicBool = AtomicBool::new(false); // Track if floating panel has been configured (one-time setup on first show)
@@ -770,340 +612,6 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false); // Track if shut
 #[allow(dead_code)]
 pub fn is_shutting_down() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
-}
-
-/// Enum to hold different types of form field entities
-#[derive(Clone)]
-pub enum FormFieldEntity {
-    TextField(Entity<FormTextField>),
-    TextArea(Entity<FormTextArea>),
-    Checkbox(Entity<FormCheckbox>),
-}
-
-/// Form prompt state - holds the parsed form fields and their entities
-pub struct FormPromptState {
-    /// Prompt ID for response
-    pub id: String,
-    /// Original HTML for reference
-    #[allow(dead_code)]
-    pub html: String,
-    /// Parsed field definitions and their corresponding entities
-    pub fields: Vec<(protocol::Field, FormFieldEntity)>,
-    /// Colors for form fields
-    pub colors: FormFieldColors,
-    /// Currently focused field index (for Tab navigation)
-    pub focused_index: usize,
-    /// Focus handle for this form
-    pub focus_handle: FocusHandle,
-    /// Whether we've done initial focus
-    pub did_initial_focus: bool,
-}
-
-impl FormPromptState {
-    /// Create a new form prompt state from HTML
-    pub fn new(id: String, html: String, colors: FormFieldColors, cx: &mut App) -> Self {
-        let parsed_fields = form_parser::parse_form_html(&html);
-
-        logging::log(
-            "FORM",
-            &format!("Parsed {} form fields from HTML", parsed_fields.len()),
-        );
-
-        let fields: Vec<(protocol::Field, FormFieldEntity)> = parsed_fields
-            .into_iter()
-            .map(|field| {
-                let field_type = field
-                    .field_type
-                    .clone()
-                    .unwrap_or_else(|| "text".to_string());
-                logging::log(
-                    "FORM",
-                    &format!("Creating field: {} (type: {})", field.name, field_type),
-                );
-
-                let entity = match field_type.as_str() {
-                    "checkbox" => {
-                        let checkbox = FormCheckbox::new(field.clone(), colors, cx);
-                        FormFieldEntity::Checkbox(cx.new(|_| checkbox))
-                    }
-                    "textarea" => {
-                        let textarea = FormTextArea::new(field.clone(), colors, 4, cx);
-                        FormFieldEntity::TextArea(cx.new(|_| textarea))
-                    }
-                    _ => {
-                        // text, password, email, number all use TextField
-                        let textfield = FormTextField::new(field.clone(), colors, cx);
-                        FormFieldEntity::TextField(cx.new(|_| textfield))
-                    }
-                };
-
-                (field, entity)
-            })
-            .collect();
-
-        Self {
-            id,
-            html,
-            fields,
-            colors,
-            focused_index: 0,
-            focus_handle: cx.focus_handle(),
-            did_initial_focus: false,
-        }
-    }
-
-    /// Get all field values as a JSON object string
-    pub fn collect_values(&self, cx: &App) -> String {
-        let mut values = serde_json::Map::new();
-
-        for (field_def, entity) in &self.fields {
-            let value = match entity {
-                FormFieldEntity::TextField(e) => e.read(cx).value().to_string(),
-                FormFieldEntity::TextArea(e) => e.read(cx).value().to_string(),
-                FormFieldEntity::Checkbox(e) => {
-                    if e.read(cx).is_checked() {
-                        "true".to_string()
-                    } else {
-                        "false".to_string()
-                    }
-                }
-            };
-            values.insert(field_def.name.clone(), serde_json::Value::String(value));
-        }
-
-        serde_json::to_string(&values).unwrap_or_else(|_| "{}".to_string())
-    }
-
-    /// Focus the next field (for Tab navigation)
-    pub fn focus_next(&mut self, cx: &mut Context<Self>) {
-        if self.fields.is_empty() {
-            return;
-        }
-        self.focused_index = (self.focused_index + 1) % self.fields.len();
-        cx.notify();
-    }
-
-    /// Focus the previous field (for Shift+Tab navigation)
-    pub fn focus_previous(&mut self, cx: &mut Context<Self>) {
-        if self.fields.is_empty() {
-            return;
-        }
-        if self.focused_index == 0 {
-            self.focused_index = self.fields.len() - 1;
-        } else {
-            self.focused_index -= 1;
-        }
-        cx.notify();
-    }
-
-    /// Get the focus handle for the currently focused field
-    pub fn current_focus_handle(&self, cx: &App) -> Option<FocusHandle> {
-        self.fields
-            .get(self.focused_index)
-            .map(|(_, entity)| match entity {
-                FormFieldEntity::TextField(e) => e.read(cx).focus_handle(cx),
-                FormFieldEntity::TextArea(e) => e.read(cx).focus_handle(cx),
-                FormFieldEntity::Checkbox(e) => e.read(cx).focus_handle(cx),
-            })
-    }
-
-    /// Handle keyboard input by forwarding to the currently focused field
-    pub fn handle_key_input(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
-        if let Some((_, entity)) = self.fields.get(self.focused_index) {
-            let key = event.keystroke.key.as_str();
-
-            match entity {
-                FormFieldEntity::TextField(e) => {
-                    e.update(cx, |field, cx| {
-                        // Handle special keys
-                        match key {
-                            "backspace" => {
-                                if field.cursor_position > 0 {
-                                    field.cursor_position -= 1;
-                                    field.value.remove(field.cursor_position);
-                                    field.state.set_value(field.value.clone());
-                                    cx.notify();
-                                }
-                            }
-                            "delete" => {
-                                if field.cursor_position < field.value.len() {
-                                    field.value.remove(field.cursor_position);
-                                    field.state.set_value(field.value.clone());
-                                    cx.notify();
-                                }
-                            }
-                            "left" | "arrowleft" => {
-                                if field.cursor_position > 0 {
-                                    field.cursor_position -= 1;
-                                    cx.notify();
-                                }
-                            }
-                            "right" | "arrowright" => {
-                                if field.cursor_position < field.value.len() {
-                                    field.cursor_position += 1;
-                                    cx.notify();
-                                }
-                            }
-                            "home" => {
-                                field.cursor_position = 0;
-                                cx.notify();
-                            }
-                            "end" => {
-                                field.cursor_position = field.value.len();
-                                cx.notify();
-                            }
-                            _ => {
-                                // Handle printable character input
-                                if let Some(ref key_char) = event.keystroke.key_char {
-                                    if let Some(ch) = key_char.chars().next() {
-                                        if !ch.is_control() {
-                                            field.value.insert(field.cursor_position, ch);
-                                            field.cursor_position += ch.len_utf8();
-                                            field.state.set_value(field.value.clone());
-                                            cx.notify();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-                FormFieldEntity::TextArea(e) => {
-                    e.update(cx, |field, cx| {
-                        // Handle special keys
-                        match key {
-                            "backspace" => {
-                                if field.cursor_position > 0 {
-                                    field.cursor_position -= 1;
-                                    field.value.remove(field.cursor_position);
-                                    field.state.set_value(field.value.clone());
-                                    cx.notify();
-                                }
-                            }
-                            "delete" => {
-                                if field.cursor_position < field.value.len() {
-                                    field.value.remove(field.cursor_position);
-                                    field.state.set_value(field.value.clone());
-                                    cx.notify();
-                                }
-                            }
-                            "left" | "arrowleft" => {
-                                if field.cursor_position > 0 {
-                                    field.cursor_position -= 1;
-                                    cx.notify();
-                                }
-                            }
-                            "right" | "arrowright" => {
-                                if field.cursor_position < field.value.len() {
-                                    field.cursor_position += 1;
-                                    cx.notify();
-                                }
-                            }
-                            "home" => {
-                                field.cursor_position = 0;
-                                cx.notify();
-                            }
-                            "end" => {
-                                field.cursor_position = field.value.len();
-                                cx.notify();
-                            }
-                            _ => {
-                                // Handle printable character input
-                                if let Some(ref key_char) = event.keystroke.key_char {
-                                    if let Some(ch) = key_char.chars().next() {
-                                        if !ch.is_control() {
-                                            field.value.insert(field.cursor_position, ch);
-                                            field.cursor_position += ch.len_utf8();
-                                            field.state.set_value(field.value.clone());
-                                            cx.notify();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-                FormFieldEntity::Checkbox(e) => {
-                    // Space toggles checkbox
-                    if key == "space" || key == " " {
-                        e.update(cx, |checkbox, cx| {
-                            checkbox.toggle(cx);
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl Render for FormPromptState {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = self.colors;
-
-        // Focus the first field on initial render
-        if !self.did_initial_focus && !self.fields.is_empty() {
-            self.did_initial_focus = true;
-            if let Some(focus_handle) = self.current_focus_handle(cx) {
-                focus_handle.focus(window, cx);
-                let is_focused = focus_handle.is_focused(window);
-                logging::log(
-                    "FORM",
-                    &format!(
-                        "Initial focus set on first field (is_focused={})",
-                        is_focused
-                    ),
-                );
-            }
-        }
-
-        // Build the form fields container
-        let mut container = div().flex().flex_col().gap(px(16.)).w_full();
-
-        for (_field_def, entity) in &self.fields {
-            container = match entity {
-                FormFieldEntity::TextField(e) => container.child(e.clone()),
-                FormFieldEntity::TextArea(e) => container.child(e.clone()),
-                FormFieldEntity::Checkbox(e) => container.child(e.clone()),
-            };
-        }
-
-        // If no fields, show an error message
-        if self.fields.is_empty() {
-            container = container.child(
-                div()
-                    .p(px(16.))
-                    .text_color(rgb(colors.label))
-                    .child("No form fields found in HTML"),
-            );
-        }
-
-        container
-    }
-}
-
-/// Delegated Focusable implementation for FormPromptState
-///
-/// This implements the "delegated focus" pattern from Zed's BufferSearchBar:
-/// Instead of returning our own focus_handle, we return the focused field's handle.
-/// This prevents the parent container from "stealing" focus from child fields during re-renders.
-///
-/// When GPUI asks "what should be focused?", we answer with the currently focused
-/// text field's handle, so focus stays on the actual input field, not the form container.
-impl Focusable for FormPromptState {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        // Return the focused field's handle, not our own
-        // This delegates focus management to the child field, preventing focus stealing
-        if let Some((_, entity)) = self.fields.get(self.focused_index) {
-            match entity {
-                FormFieldEntity::TextField(e) => e.read(cx).get_focus_handle(),
-                FormFieldEntity::TextArea(e) => e.read(cx).get_focus_handle(),
-                FormFieldEntity::Checkbox(e) => e.read(cx).focus_handle(cx),
-            }
-        } else {
-            // Fallback to our own handle if no fields exist
-            self.focus_handle.clone()
-        }
-    }
 }
 
 /// Application state - what view are we currently showing
@@ -1406,184 +914,6 @@ fn start_stdin_listener() -> async_channel::Receiver<ExternalCommand> {
     rx
 }
 
-/// A simple model that listens for hotkey triggers via async_channel (event-driven)
-struct HotkeyPoller {
-    window: WindowHandle<ScriptListApp>,
-}
-
-impl HotkeyPoller {
-    fn new(window: WindowHandle<ScriptListApp>) -> Self {
-        Self { window }
-    }
-
-    fn start_listening(&self, cx: &mut Context<Self>) {
-        let window = self.window;
-        // Event-driven: recv().await yields immediately when hotkey is pressed
-        // No polling - replaces 100ms Timer::after loop
-        cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
-            logging::log("HOTKEY", "Hotkey listener started (event-driven via async_channel)");
-
-            while let Ok(()) = hotkey_channel().1.recv().await {
-                logging::log("VISIBILITY", "");
-                logging::log("VISIBILITY", "╔════════════════════════════════════════════════════════════╗");
-                logging::log("VISIBILITY", "║  HOTKEY TRIGGERED - TOGGLE WINDOW                          ║");
-                logging::log("VISIBILITY", "╚════════════════════════════════════════════════════════════╝");
-
-                // Check current visibility state for toggle behavior
-                let is_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
-                let needs_reset = NEEDS_RESET.load(Ordering::SeqCst);
-                logging::log("VISIBILITY", &format!("State check: WINDOW_VISIBLE={}, NEEDS_RESET={}", is_visible, needs_reset));
-
-                if is_visible {
-                    logging::log("VISIBILITY", "Decision: HIDE (window is currently visible)");
-                    // Update visibility state FIRST to prevent race conditions
-                    // Even though the hide is async, we mark it as hidden immediately
-                    WINDOW_VISIBLE.store(false, Ordering::SeqCst);
-                    logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
-
-                    // Window is visible - check if in prompt mode
-                    let window_clone = window;
-
-                    // First check if we're in a prompt - if so, cancel and hide
-                    let _ = cx.update(move |cx: &mut App| {
-                        let _ = window_clone.update(cx, |view: &mut ScriptListApp, _win: &mut Window, ctx: &mut Context<ScriptListApp>| {
-                            if view.is_in_prompt() {
-                                logging::log("HOTKEY", "In prompt mode - canceling script before hiding");
-                                view.cancel_script_execution(ctx);
-                            }
-                            // Reset UI state before hiding (clears selection, scroll position, filter)
-                            logging::log("HOTKEY", "Resetting to script list before hiding");
-                            view.reset_to_script_list(ctx);
-                        });
-
-                        // Always hide the window when hotkey pressed while visible
-                        logging::log("HOTKEY", "Hiding window (toggle: visible -> hidden)");
-                        // PERF: Measure window hide latency
-                        let hide_start = std::time::Instant::now();
-                        cx.hide();
-                        let hide_elapsed = hide_start.elapsed();
-                        logging::log("PERF", &format!(
-                            "Window hide took {:.2}ms",
-                            hide_elapsed.as_secs_f64() * 1000.0
-                        ));
-                        logging::log("HOTKEY", "Window hidden via cx.hide()");
-                    });
-                } else {
-                    logging::log("VISIBILITY", "Decision: SHOW (window is currently hidden)");
-                    // Update visibility state FIRST to prevent race conditions
-                    WINDOW_VISIBLE.store(true, Ordering::SeqCst);
-                    logging::log("VISIBILITY", "WINDOW_VISIBLE set to: true");
-
-                    let window_clone = window;
-                    let _ = cx.update(move |cx: &mut App| {
-                        // Step 0: CRITICAL - Set MoveToActiveSpace BEFORE any activation
-                        // This MUST happen before move_first_window_to_bounds, cx.activate(),
-                        // or win.activate_window() to prevent macOS from switching spaces
-                        ensure_move_to_active_space();
-
-                        // Step 1: Calculate new bounds on display with mouse, at eye-line height
-                        let window_size = size(px(750.), initial_window_height());
-                        let new_bounds = calculate_eye_line_bounds_on_mouse_display(window_size, cx);
-
-                        logging::log("HOTKEY", &format!(
-                            "Calculated bounds: origin=({:.0}, {:.0}) size={:.0}x{:.0}",
-                            f64::from(new_bounds.origin.x),
-                            f64::from(new_bounds.origin.y),
-                            f64::from(new_bounds.size.width),
-                            f64::from(new_bounds.size.height)
-                        ));
-
-                        // Step 2: Move window (position only, no activation)
-                        // Note: makeKeyAndOrderFront was removed - ordering happens via GPUI below
-                        move_first_window_to_bounds(&new_bounds);
-                        logging::log("HOTKEY", "Window repositioned to mouse display");
-
-                        // Step 3: NOW activate the app (makes window visible at new position)
-                        cx.activate(true);
-                        logging::log("HOTKEY", "App activated (window now visible)");
-
-                        // Step 3.5: Configure as floating panel on first show only
-                        if !PANEL_CONFIGURED.swap(true, Ordering::SeqCst) {
-                            configure_as_floating_panel();
-                            logging::log("HOTKEY", "Configured window as floating panel (first show)");
-                        }
-
-                        // Step 4: Activate the specific window and focus it
-                        let _ = window_clone.update(cx, |view: &mut ScriptListApp, win: &mut Window, cx: &mut Context<ScriptListApp>| {
-                            win.activate_window();
-                            let focus_handle = view.focus_handle(cx);
-                            win.focus(&focus_handle, cx);
-                            logging::log("HOTKEY", "Window activated and focused");
-
-                            // Step 5: Check if we need to reset to script list (after script completion)
-                            // Reset debounce timer to allow immediate resize after window move
-                            reset_resize_debounce();
-
-                            if NEEDS_RESET.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                                logging::log("VISIBILITY", "NEEDS_RESET was true - clearing and resetting to script list");
-                                view.reset_to_script_list(cx);
-                            } else {
-                                // Even without reset, ensure window is properly sized for current content
-                                view.update_window_size();
-                            }
-                        });
-
-                        logging::log("VISIBILITY", "Window show sequence complete");
-                    });
-                }
-
-                let final_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
-                let final_reset = NEEDS_RESET.load(Ordering::SeqCst);
-                logging::log("VISIBILITY", &format!("Final state: WINDOW_VISIBLE={}, NEEDS_RESET={}", final_visible, final_reset));
-                logging::log("VISIBILITY", "═══════════════════════════════════════════════════════════════");
-            }
-
-            logging::log("HOTKEY", "Hotkey listener exiting (channel closed)");
-        }).detach();
-    }
-}
-
-/// A model that listens for script hotkey triggers via async_channel
-struct ScriptHotkeyPoller {
-    window: WindowHandle<ScriptListApp>,
-}
-
-impl ScriptHotkeyPoller {
-    fn new(window: WindowHandle<ScriptListApp>) -> Self {
-        Self { window }
-    }
-
-    fn start_listening(&self, cx: &mut Context<Self>) {
-        let window = self.window;
-        cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
-            logging::log("HOTKEY", "Script hotkey listener started");
-
-            while let Ok(script_path) = script_hotkey_channel().1.recv().await {
-                logging::log(
-                    "HOTKEY",
-                    &format!("Script shortcut received: {}", script_path),
-                );
-
-                let path_clone = script_path.clone();
-                let _ = cx.update(move |cx: &mut App| {
-                    let _ = window.update(
-                        cx,
-                        |view: &mut ScriptListApp,
-                         _win: &mut Window,
-                         ctx: &mut Context<ScriptListApp>| {
-                            // Find and execute the script by path
-                            view.execute_script_by_path(&path_clone, ctx);
-                        },
-                    );
-                });
-            }
-
-            logging::log("HOTKEY", "Script hotkey listener exiting");
-        })
-        .detach();
-    }
-}
-
 struct ScriptListApp {
     scripts: Vec<scripts::Script>,
     scriptlets: Vec<scripts::Scriptlet>,
@@ -1647,10 +977,8 @@ struct ScriptListApp {
     // P3: Two-stage filter - display vs search separation with coalescing
     /// What the search cache is built from (may lag behind filter_text during rapid typing)
     computed_filter_text: String,
-    /// Generation counter for coalescing filter updates
-    filter_compute_generation: u64,
-    /// Whether a filter compute task is currently running
-    filter_compute_task_running: bool,
+    /// Coalesces filter updates and keeps only the latest value per tick
+    filter_coalescer: FilterCoalescer,
     // Scroll stabilization: track last scrolled-to index to avoid redundant scroll_to_item calls
     last_scrolled_index: Option<usize>,
     // Preview cache: avoid re-reading file and re-highlighting on every render
@@ -1714,110 +1042,6 @@ struct ScriptListApp {
 enum AliasMatch {
     Script(scripts::Script),
     Scriptlet(scripts::Scriptlet),
-}
-
-// =============================================================================
-// NAVIGATION COALESCING FOR ARROW KEY EVENTS
-// =============================================================================
-
-/// Direction of navigation (up/down arrow keys)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NavDirection {
-    Up,
-    Down,
-}
-
-/// Result of recording a navigation event
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NavRecord {
-    /// First event - apply immediately (move by 1)
-    ApplyImmediate,
-    /// Same direction - coalesce (buffer additional movement)
-    Coalesced,
-    /// Direction changed - flush old delta, then apply new direction
-    FlushOld { dir: NavDirection, delta: i32 },
-}
-
-/// Coalesces rapid arrow key events to prevent UI lag during fast keyboard repeat.
-///
-/// The coalescing window is 20ms - events within this window are batched together
-/// and applied as a single larger movement at the next flush.
-#[derive(Debug)]
-struct NavCoalescer {
-    /// Current pending direction (None if no pending movement)
-    pending_dir: Option<NavDirection>,
-    /// Accumulated delta for pending direction (# of additional moves beyond first)
-    pending_delta: i32,
-    /// Timestamp of last navigation event (for determining flush eligibility)
-    last_event: std::time::Instant,
-    /// Whether the background flush task is currently running
-    flush_task_running: bool,
-}
-
-impl NavCoalescer {
-    /// Coalescing window: 20ms between events triggers batching
-    const WINDOW: std::time::Duration = std::time::Duration::from_millis(20);
-
-    fn new() -> Self {
-        Self {
-            pending_dir: None,
-            pending_delta: 0,
-            last_event: std::time::Instant::now(),
-            flush_task_running: false,
-        }
-    }
-
-    /// Record a navigation event. Returns how to handle it:
-    /// - ApplyImmediate: First event, move by 1 now
-    /// - Coalesced: Same direction, buffered for later flush
-    /// - FlushOld: Direction changed, flush old delta then move by 1
-    fn record(&mut self, dir: NavDirection) -> NavRecord {
-        self.last_event = std::time::Instant::now();
-        match self.pending_dir {
-            None => {
-                // First event - start tracking this direction
-                self.pending_dir = Some(dir);
-                self.pending_delta = 0;
-                NavRecord::ApplyImmediate
-            }
-            Some(existing) if existing == dir => {
-                // Same direction - coalesce
-                self.pending_delta += 1;
-                NavRecord::Coalesced
-            }
-            Some(_) => {
-                // Direction changed - flush old, start new
-                let old_dir = self.pending_dir.unwrap();
-                let old_delta = self.pending_delta;
-                self.pending_dir = Some(dir);
-                self.pending_delta = 0;
-                NavRecord::FlushOld { dir: old_dir, delta: old_delta }
-            }
-        }
-    }
-
-    /// Flush any pending navigation delta. Returns (direction, delta) if there's pending movement.
-    fn flush_pending(&mut self) -> Option<(NavDirection, i32)> {
-        let dir = self.pending_dir?;
-        if self.pending_delta == 0 {
-            return None;
-        }
-        let delta = self.pending_delta;
-        self.pending_delta = 0;
-        Some((dir, delta))
-    }
-
-    /// Reset the coalescer state (call after navigation completes or on view change)
-    fn reset(&mut self) {
-        self.pending_dir = None;
-        self.pending_delta = 0;
-    }
-}
-
-impl Default for NavCoalescer {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ScriptListApp {
@@ -2001,8 +1225,7 @@ impl ScriptListApp {
             grouped_cache_key: String::from("\0_UNINITIALIZED_\0"), // Sentinel value to force initial compute
             // P3: Two-stage filter coalescing
             computed_filter_text: String::new(),
-            filter_compute_generation: 0,
-            filter_compute_task_running: false,
+            filter_coalescer: FilterCoalescer::new(),
             // Scroll stabilization: start with no last scrolled index
             last_scrolled_index: None,
             // Preview cache: start empty, will populate on first render
@@ -2739,36 +1962,26 @@ impl ScriptListApp {
         cx.notify();
 
         // P3: Stage 2 - Coalesce expensive search work with 16ms delay
-        // This prevents multiple search computations during rapid typing
-        self.filter_compute_generation = self.filter_compute_generation.wrapping_add(1);
-        let current_generation = self.filter_compute_generation;
-        let filter_snapshot = self.filter_text.clone();
-
-        // Only spawn a new task if one isn't already running
-        if !self.filter_compute_task_running {
-            self.filter_compute_task_running = true;
+        // Keep only the latest filter text while a timer is pending.
+        if self.filter_coalescer.queue(self.filter_text.clone()) {
             cx.spawn(async move |this, cx| {
                 // Wait 16ms for coalescing window (one frame at 60fps)
                 Timer::after(std::time::Duration::from_millis(16)).await;
-                
+
                 let _ = cx.update(|cx| {
                     this.update(cx, |app, cx| {
-                        app.filter_compute_task_running = false;
-                        
-                        // Only update if generation still matches (no newer input)
-                        if app.filter_compute_generation == current_generation {
-                            // Sync computed_filter_text with filter_text snapshot
-                            if app.computed_filter_text != filter_snapshot {
-                                app.computed_filter_text = filter_snapshot;
+                        if let Some(latest) = app.filter_coalescer.take_latest() {
+                            if app.computed_filter_text != latest {
+                                app.computed_filter_text = latest;
                                 // This will trigger cache recompute on next get_grouped_results_cached()
                                 app.update_window_size();
                                 cx.notify();
                             }
                         }
-                        // If generation changed, a newer task will handle the update
                     })
                 });
-            }).detach();
+            })
+            .detach();
         }
     }
 
@@ -3292,70 +2505,6 @@ impl ScriptListApp {
         }
 
         cx.notify();
-    }
-
-    /// Normalize a shortcut string for consistent comparison
-    /// Converts "cmd+shift+c" and "Cmd+Shift+C" to "cmd+shift+c"
-    fn normalize_shortcut(shortcut: &str) -> String {
-        let mut parts: Vec<&str> = shortcut.split('+').collect();
-
-        // Separate modifiers from key
-        let mut modifiers: Vec<&str> = Vec::new();
-        let mut key: Option<&str> = None;
-
-        for part in parts.drain(..) {
-            let lower = part.trim().to_lowercase();
-            match lower.as_str() {
-                "cmd" | "command" | "meta" | "super" => modifiers.push("cmd"),
-                "ctrl" | "control" => modifiers.push("ctrl"),
-                "alt" | "option" | "opt" => modifiers.push("alt"),
-                "shift" => modifiers.push("shift"),
-                _ => key = Some(part.trim()),
-            }
-        }
-
-        // Sort modifiers for consistent ordering
-        modifiers.sort();
-
-        // Rebuild with sorted modifiers + key
-        let mut result = modifiers.join("+");
-        if let Some(k) = key {
-            if !result.is_empty() {
-                result.push('+');
-            }
-            result.push_str(&k.to_lowercase());
-        }
-
-        result
-    }
-
-    /// Convert a GPUI keystroke to a normalized shortcut string
-    fn keystroke_to_shortcut(key: &str, modifiers: &gpui::Modifiers) -> String {
-        let mut parts: Vec<&str> = Vec::new();
-
-        // Add modifiers in sorted order
-        if modifiers.alt {
-            parts.push("alt");
-        }
-        if modifiers.platform {
-            parts.push("cmd");
-        }
-        if modifiers.control {
-            parts.push("ctrl");
-        }
-        if modifiers.shift {
-            parts.push("shift");
-        }
-
-        // Add the key
-        let key_lower = key.to_lowercase();
-        let mut result = parts.join("+");
-        if !result.is_empty() {
-            result.push('+');
-        }
-        result.push_str(&key_lower);
-
-        result
     }
 
     /// Trigger an SDK action by name
@@ -5233,7 +4382,7 @@ impl ScriptListApp {
                     for action in action_list {
                         if let Some(shortcut) = &action.shortcut {
                             self.action_shortcuts
-                                .insert(Self::normalize_shortcut(shortcut), action.name.clone());
+                                .insert(shortcuts::normalize_shortcut(shortcut), action.name.clone());
                         }
                     }
                 } else {
@@ -6334,7 +5483,7 @@ impl ScriptListApp {
                 self.action_shortcuts.clear();
                 for action in &actions {
                     if let Some(ref shortcut) = action.shortcut {
-                        let normalized = Self::normalize_shortcut(shortcut);
+                        let normalized = shortcuts::normalize_shortcut(shortcut);
                         logging::log(
                             "ACTIONS",
                             &format!(
@@ -6599,6 +5748,8 @@ impl ScriptListApp {
 
         // Clear filter and selection state for fresh menu
         self.filter_text.clear();
+        self.computed_filter_text.clear();
+        self.filter_coalescer.reset();
         self.selected_index = 0;
         self.last_scrolled_index = None;
         // Use main_list_state for variable-height list (not the legacy list_scroll_handle)
@@ -7984,7 +7135,7 @@ impl ScriptListApp {
                 // This allows scripts to override default shortcuts via setActions()
                 if !this.action_shortcuts.is_empty() {
                     let key_combo =
-                        Self::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
+                        shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                     if let Some(action_name) = this.action_shortcuts.get(&key_combo).cloned() {
                         logging::log(
                             "ACTIONS",
@@ -8760,7 +7911,8 @@ impl ScriptListApp {
                 }
 
                 // Check for SDK action shortcuts (only when actions popup is NOT open)
-                let shortcut_key = Self::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
+                let shortcut_key =
+                    shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
                     logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
                     this.trigger_action_by_name(&action_name, cx);
@@ -8857,6 +8009,7 @@ impl ScriptListApp {
         let arg_selected_index = self.arg_selected_index;
         let filtered_choices = self.get_filtered_arg_choices_owned();
         let filtered_choices_len = filtered_choices.len();
+        let has_arg_choices = matches!(self.current_view, AppView::ArgPrompt { ref choices, .. } if !choices.is_empty());
         logging::log_debug(
             "UI",
             &format!(
@@ -8867,14 +8020,16 @@ impl ScriptListApp {
 
         // P0: Build virtualized choice list using uniform_list
         let list_element: AnyElement = if filtered_choices_len == 0 {
-            div()
+            let mut empty_state = div()
                 .w_full()
                 .py(px(design_spacing.padding_xl))
                 .text_center()
                 .text_color(rgb(design_colors.text_muted))
-                .font_family(design_typography.font_family)
-                .child("No choices match your filter")
-                .into_any_element()
+                .font_family(design_typography.font_family);
+            if has_arg_choices {
+                empty_state = empty_state.child("No choices match your filter");
+            }
+            empty_state.into_any_element()
         } else {
             // P0: Use uniform_list for virtualized scrolling of arg choices
             // Now uses shared ListItem component for consistent design with script list
@@ -9382,7 +8537,8 @@ impl ScriptListApp {
                 }
 
                 // Check for SDK action shortcuts
-                let shortcut_key = Self::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
+                let shortcut_key =
+                    shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
                     logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
                     this.trigger_action_by_name(&action_name, cx);
@@ -9655,7 +8811,8 @@ impl ScriptListApp {
                 }
 
                 // Check for SDK action shortcuts
-                let shortcut_key = Self::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
+                let shortcut_key =
+                    shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
                     logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
                     this.trigger_action_by_name(&action_name, cx);
@@ -9846,7 +9003,8 @@ impl ScriptListApp {
                 }
 
                 // Check for SDK action shortcuts
-                let shortcut_key = Self::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
+                let shortcut_key =
+                    shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
                     logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
                     this.trigger_action_by_name(&action_name, cx);
@@ -12911,259 +12069,6 @@ fn render_group_header_item(
         .into_any_element()
 }
 
-fn start_hotkey_listener(config: config::Config) {
-    std::thread::spawn(move || {
-        let manager = match GlobalHotKeyManager::new() {
-            Ok(m) => m,
-            Err(e) => {
-                logging::log("HOTKEY", &format!("Failed to create hotkey manager: {}", e));
-                return;
-            }
-        };
-
-        // Convert config hotkey to global_hotkey::Code
-        let code = match config.hotkey.key.as_str() {
-            "Semicolon" => Code::Semicolon,
-            "KeyK" => Code::KeyK,
-            "KeyP" => Code::KeyP,
-            "Space" => Code::Space,
-            "Enter" => Code::Enter,
-            "Digit0" => Code::Digit0,
-            "Digit1" => Code::Digit1,
-            "Digit2" => Code::Digit2,
-            "Digit3" => Code::Digit3,
-            "Digit4" => Code::Digit4,
-            "Digit5" => Code::Digit5,
-            "Digit6" => Code::Digit6,
-            "Digit7" => Code::Digit7,
-            "Digit8" => Code::Digit8,
-            "Digit9" => Code::Digit9,
-            "KeyA" => Code::KeyA,
-            "KeyB" => Code::KeyB,
-            "KeyC" => Code::KeyC,
-            "KeyD" => Code::KeyD,
-            "KeyE" => Code::KeyE,
-            "KeyF" => Code::KeyF,
-            "KeyG" => Code::KeyG,
-            "KeyH" => Code::KeyH,
-            "KeyI" => Code::KeyI,
-            "KeyJ" => Code::KeyJ,
-            "KeyL" => Code::KeyL,
-            "KeyM" => Code::KeyM,
-            "KeyN" => Code::KeyN,
-            "KeyO" => Code::KeyO,
-            "KeyQ" => Code::KeyQ,
-            "KeyR" => Code::KeyR,
-            "KeyS" => Code::KeyS,
-            "KeyT" => Code::KeyT,
-            "KeyU" => Code::KeyU,
-            "KeyV" => Code::KeyV,
-            "KeyW" => Code::KeyW,
-            "KeyX" => Code::KeyX,
-            "KeyY" => Code::KeyY,
-            "KeyZ" => Code::KeyZ,
-            // Function keys
-            "F1" => Code::F1,
-            "F2" => Code::F2,
-            "F3" => Code::F3,
-            "F4" => Code::F4,
-            "F5" => Code::F5,
-            "F6" => Code::F6,
-            "F7" => Code::F7,
-            "F8" => Code::F8,
-            "F9" => Code::F9,
-            "F10" => Code::F10,
-            "F11" => Code::F11,
-            "F12" => Code::F12,
-            other => {
-                logging::log("HOTKEY", &format!(
-                    "Unknown key code: '{}'. Valid keys: KeyA-KeyZ, Digit0-Digit9, F1-F12, Space, Enter, Semicolon. Falling back to Semicolon",
-                    other
-                ));
-                Code::Semicolon
-            }
-        };
-
-        // Convert modifiers from config strings to Modifiers flags
-        let mut modifiers = Modifiers::empty();
-        for modifier in &config.hotkey.modifiers {
-            match modifier.as_str() {
-                "meta" => modifiers |= Modifiers::META,
-                "ctrl" => modifiers |= Modifiers::CONTROL,
-                "alt" => modifiers |= Modifiers::ALT,
-                "shift" => modifiers |= Modifiers::SHIFT,
-                other => {
-                    logging::log("HOTKEY", &format!("Unknown modifier: {}", other));
-                }
-            }
-        }
-
-        let hotkey = HotKey::new(Some(modifiers), code);
-        let main_hotkey_id = hotkey.id();
-
-        let hotkey_display = format!(
-            "{}{}",
-            config.hotkey.modifiers.join("+"),
-            if config.hotkey.modifiers.is_empty() {
-                String::new()
-            } else {
-                "+".to_string()
-            }
-        ) + &config.hotkey.key;
-
-        if let Err(e) = manager.register(hotkey) {
-            logging::log(
-                "HOTKEY",
-                &format!("Failed to register {}: {}", hotkey_display, e),
-            );
-            return;
-        }
-
-        logging::log(
-            "HOTKEY",
-            &format!(
-                "Registered global hotkey {} (id: {})",
-                hotkey_display, main_hotkey_id
-            ),
-        );
-
-        // Register script shortcuts
-        // Map from hotkey ID to script path
-        let mut script_hotkey_map: std::collections::HashMap<u32, String> =
-            std::collections::HashMap::new();
-
-        // Load scripts with shortcuts
-        let all_scripts = scripts::read_scripts();
-        for script in &all_scripts {
-            if let Some(ref shortcut) = script.shortcut {
-                if let Some((mods, key_code)) = parse_shortcut(shortcut) {
-                    let script_hotkey = HotKey::new(Some(mods), key_code);
-                    let script_hotkey_id = script_hotkey.id();
-
-                    match manager.register(script_hotkey) {
-                        Ok(()) => {
-                            script_hotkey_map.insert(
-                                script_hotkey_id,
-                                script.path.to_string_lossy().to_string(),
-                            );
-                            logging::log(
-                                "HOTKEY",
-                                &format!(
-                                    "Registered script shortcut '{}' for {} (id: {})",
-                                    shortcut, script.name, script_hotkey_id
-                                ),
-                            );
-                        }
-                        Err(e) => {
-                            logging::log(
-                                "HOTKEY",
-                                &format!(
-                                    "Failed to register shortcut '{}' for {}: {}",
-                                    shortcut, script.name, e
-                                ),
-                            );
-                        }
-                    }
-                } else {
-                    logging::log(
-                        "HOTKEY",
-                        &format!(
-                            "Failed to parse shortcut '{}' for script {}",
-                            shortcut, script.name
-                        ),
-                    );
-                }
-            }
-        }
-
-        // Load scriptlets with shortcuts
-        let all_scriptlets = scripts::load_scriptlets();
-        for scriptlet in &all_scriptlets {
-            if let Some(ref shortcut) = scriptlet.shortcut {
-                if let Some((mods, key_code)) = parse_shortcut(shortcut) {
-                    let scriptlet_hotkey = HotKey::new(Some(mods), key_code);
-                    let scriptlet_hotkey_id = scriptlet_hotkey.id();
-
-                    // Use file_path as the identifier (already includes #command)
-                    let scriptlet_path = scriptlet
-                        .file_path
-                        .clone()
-                        .unwrap_or_else(|| scriptlet.name.clone());
-
-                    match manager.register(scriptlet_hotkey) {
-                        Ok(()) => {
-                            script_hotkey_map.insert(scriptlet_hotkey_id, scriptlet_path.clone());
-                            logging::log(
-                                "HOTKEY",
-                                &format!(
-                                    "Registered scriptlet shortcut '{}' for {} (id: {})",
-                                    shortcut, scriptlet.name, scriptlet_hotkey_id
-                                ),
-                            );
-                        }
-                        Err(e) => {
-                            logging::log(
-                                "HOTKEY",
-                                &format!(
-                                    "Failed to register shortcut '{}' for {}: {}",
-                                    shortcut, scriptlet.name, e
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        logging::log(
-            "HOTKEY",
-            &format!(
-                "Registered {} script/scriptlet shortcuts",
-                script_hotkey_map.len()
-            ),
-        );
-
-        let receiver = GlobalHotKeyEvent::receiver();
-
-        loop {
-            if let Ok(event) = receiver.recv() {
-                // Only respond to key PRESS, not release
-                if event.state != HotKeyState::Pressed {
-                    continue;
-                }
-
-                // Check if it's the main app hotkey
-                if event.id == main_hotkey_id {
-                    let count = HOTKEY_TRIGGER_COUNT.fetch_add(1, Ordering::SeqCst);
-                    // Send via async_channel for immediate event-driven handling
-                    if hotkey_channel().0.send_blocking(()).is_err() {
-                        logging::log("HOTKEY", "Hotkey channel closed, cannot send");
-                    }
-                    logging::log(
-                        "HOTKEY",
-                        &format!("{} pressed (trigger #{})", hotkey_display, count + 1),
-                    );
-                }
-                // Check if it's a script shortcut
-                else if let Some(script_path) = script_hotkey_map.get(&event.id) {
-                    logging::log(
-                        "HOTKEY",
-                        &format!("Script shortcut triggered: {}", script_path),
-                    );
-                    // Send the script path to be executed
-                    if script_hotkey_channel()
-                        .0
-                        .send_blocking(script_path.clone())
-                        .is_err()
-                    {
-                        logging::log("HOTKEY", "Script hotkey channel closed, cannot send");
-                    }
-                }
-            }
-        }
-    });
-}
-
 /// Ensure the window has MoveToActiveSpace collection behavior.
 /// MUST be called BEFORE any window activation/ordering.
 /// This makes the window move to the current space rather than forcing a space switch.
@@ -13242,20 +12147,6 @@ fn configure_as_floating_panel() {
 
 #[cfg(not(target_os = "macos"))]
 fn configure_as_floating_panel() {}
-
-fn start_hotkey_event_handler(cx: &mut App, window: WindowHandle<ScriptListApp>) {
-    // Start main hotkey listener (for app show/hide toggle)
-    let handler = cx.new(|_| HotkeyPoller::new(window));
-    handler.update(cx, |p, cx| {
-        p.start_listening(cx);
-    });
-
-    // Start script hotkey listener (for direct script execution via shortcuts)
-    let script_handler = cx.new(|_| ScriptHotkeyPoller::new(window));
-    script_handler.update(cx, |p, cx| {
-        p.start_listening(cx);
-    });
-}
 
 fn main() {
     logging::init();
@@ -13429,7 +12320,7 @@ fn main() {
         }
     };
 
-    start_hotkey_listener(loaded_config);
+    hotkeys::start_hotkey_listener(loaded_config);
 
     let (mut appearance_watcher, appearance_rx) = watcher::AppearanceWatcher::new();
     if let Err(e) = appearance_watcher.start() {
@@ -13784,6 +12675,8 @@ fn main() {
                             ExternalCommand::SetFilter { ref text } => {
                                 logging::log("STDIN", &format!("Setting filter to: '{}'", text));
                                 view.filter_text = text.clone();
+                                view.computed_filter_text = text.clone();
+                                view.filter_coalescer.reset();
                                 let _ = view.get_filtered_results_cached(); // Update cache
                                 view.selected_index = 0;
                                 view.update_window_size();
@@ -13857,9 +12750,7 @@ fn main() {
                                                 "escape" => {
                                                     logging::log("STDIN", "SimulateKey: Escape - clear filter or hide");
                                                     if !view.filter_text.is_empty() {
-                                                        view.filter_text.clear();
-                                                        let _ = view.get_filtered_results_cached();
-                                                        view.selected_index = 0;
+                                                        view.update_filter(None, false, true, ctx);
                                                     } else {
                                                         WINDOW_VISIBLE.store(false, Ordering::SeqCst);
                                                         ctx.hide();
