@@ -36,6 +36,7 @@ use rusqlite::{params, Connection};
 use smallvec::SmallVec;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -209,8 +210,11 @@ pub struct ClipboardEntry {
 /// Global database connection (thread-safe)
 static DB_CONNECTION: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 
-/// Flag to stop the monitoring thread
-static STOP_MONITORING: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+/// Flag to stop the monitoring thread (AtomicBool for lock-free polling)
+static STOP_MONITORING: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Guard to ensure init_clipboard_history() is only called once
+static INIT_GUARD: OnceLock<()> = OnceLock::new();
 
 /// Configured retention days (loaded from config, defaults to DEFAULT_RETENTION_DAYS)
 static RETENTION_DAYS: OnceLock<u32> = OnceLock::new();
@@ -388,8 +392,12 @@ fn get_connection() -> Result<Arc<Mutex<Connection>>> {
 
     let conn = Arc::new(Mutex::new(conn));
 
-    // Try to set it globally (ignore if already set by another thread)
-    let _ = DB_CONNECTION.set(conn.clone());
+    // Try to set it globally. If another thread won the race, use their connection
+    // to ensure all threads share the same connection.
+    if DB_CONNECTION.set(conn.clone()).is_err() {
+        // Another thread won the race, use their connection
+        return Ok(DB_CONNECTION.get().unwrap().clone());
+    }
 
     Ok(conn)
 }
@@ -407,6 +415,12 @@ fn get_connection() -> Result<Arc<Mutex<Connection>>> {
 /// # Errors
 /// Returns error if database creation fails.
 pub fn init_clipboard_history() -> Result<()> {
+    // Ensure init is only called once (idempotency guard)
+    if INIT_GUARD.set(()).is_err() {
+        debug!("Clipboard history already initialized, skipping");
+        return Ok(());
+    }
+
     info!(
         retention_days = get_retention_days(),
         "Initializing clipboard history"
@@ -431,8 +445,8 @@ pub fn init_clipboard_history() -> Result<()> {
         prewarm_image_cache();
     });
 
-    // Initialize the stop flag
-    let stop_flag = Arc::new(Mutex::new(false));
+    // Initialize the stop flag (AtomicBool for lock-free polling)
+    let stop_flag = Arc::new(AtomicBool::new(false));
     let _ = STOP_MONITORING.set(stop_flag.clone());
 
     // Start the monitoring thread
@@ -454,19 +468,17 @@ pub fn init_clipboard_history() -> Result<()> {
 }
 
 /// Background loop that periodically prunes old entries
-fn background_prune_loop(stop_flag: Arc<Mutex<bool>>) {
+fn background_prune_loop(stop_flag: Arc<AtomicBool>) {
     let prune_interval = Duration::from_secs(PRUNE_INTERVAL_SECS);
 
     loop {
         // Sleep first (initial prune already happened during init)
         thread::sleep(prune_interval);
 
-        // Check if we should stop
-        if let Ok(stop) = stop_flag.lock() {
-            if *stop {
-                info!("Background prune thread stopping");
-                break;
-            }
+        // Check if we should stop (lock-free with AtomicBool)
+        if stop_flag.load(Ordering::Relaxed) {
+            info!("Background prune thread stopping");
+            break;
         }
 
         // Prune old entries
@@ -541,15 +553,13 @@ fn prewarm_image_cache() {
 #[allow(dead_code)]
 pub fn stop_clipboard_monitoring() {
     if let Some(stop_flag) = STOP_MONITORING.get() {
-        if let Ok(mut flag) = stop_flag.lock() {
-            *flag = true;
-            info!("Clipboard monitoring stopped");
-        }
+        stop_flag.store(true, Ordering::Relaxed);
+        info!("Clipboard monitoring stopped");
     }
 }
 
 /// Background loop that monitors clipboard changes
-fn clipboard_monitor_loop(stop_flag: Arc<Mutex<bool>>) -> Result<()> {
+fn clipboard_monitor_loop(stop_flag: Arc<AtomicBool>) -> Result<()> {
     let mut clipboard = Clipboard::new().context("Failed to create clipboard instance")?;
     let mut last_text: Option<String> = None;
     let mut last_image_hash: Option<u64> = None;
@@ -561,12 +571,10 @@ fn clipboard_monitor_loop(stop_flag: Arc<Mutex<bool>>) -> Result<()> {
     );
 
     loop {
-        // Check if we should stop
-        if let Ok(stop) = stop_flag.lock() {
-            if *stop {
-                info!("Clipboard monitor stopping");
-                break;
-            }
+        // Check if we should stop (lock-free with AtomicBool)
+        if stop_flag.load(Ordering::Relaxed) {
+            info!("Clipboard monitor stopping");
+            break;
         }
 
         let start = Instant::now();
@@ -1278,5 +1286,37 @@ mod tests {
     fn test_retention_days_default() {
         // Default should be 30 days
         assert_eq!(DEFAULT_RETENTION_DAYS, 30);
+    }
+
+    #[test]
+    fn test_init_guard_exists() {
+        // Verify INIT_GUARD static is properly defined
+        // This is a compile-time check - if it compiles, the guard exists
+        let _guard: &OnceLock<()> = &INIT_GUARD;
+    }
+
+    #[test]
+    fn test_stop_monitoring_is_atomic() {
+        // Verify STOP_MONITORING uses AtomicBool, not Mutex<bool>
+        // This is a compile-time check - if it compiles, it's AtomicBool
+        fn assert_atomic_bool(_: &OnceLock<Arc<AtomicBool>>) {}
+        assert_atomic_bool(&STOP_MONITORING);
+    }
+
+    #[test]
+    fn test_atomic_bool_operations() {
+        // Test AtomicBool operations work correctly
+        let flag = Arc::new(AtomicBool::new(false));
+        
+        // Initial state
+        assert!(!flag.load(Ordering::Relaxed));
+        
+        // Store true
+        flag.store(true, Ordering::Relaxed);
+        assert!(flag.load(Ordering::Relaxed));
+        
+        // Store false
+        flag.store(false, Ordering::Relaxed);
+        assert!(!flag.load(Ordering::Relaxed));
     }
 }
