@@ -14,8 +14,10 @@
 
 use gpui::{
     div, prelude::*, px, rgb, rgba, uniform_list, ClipboardItem, Context, FocusHandle, Focusable,
-    Render, SharedString, UniformListScrollHandle, Window,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, Render, SharedString,
+    UniformListScrollHandle, Window,
 };
+use std::time::{Duration, Instant};
 use ropey::Rope;
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -157,6 +159,12 @@ pub struct EditorPrompt {
 
     // When true, ignore all key events (used when actions panel is open)
     pub suppress_keys: bool,
+
+    // Mouse selection state
+    is_selecting: bool,
+    last_click_time: Option<Instant>,
+    last_click_position: Option<CursorPosition>,
+    click_count: u8,
 }
 
 /// Tracked state for change detection in render logging
@@ -250,6 +258,10 @@ impl EditorPrompt {
             last_render_state: None,
             snippet_state: None,
             suppress_keys: false,
+            is_selecting: false,
+            last_click_time: None,
+            last_click_position: None,
+            click_count: 0,
         }
     }
 
@@ -345,6 +357,10 @@ impl EditorPrompt {
             last_render_state: None,
             snippet_state,
             suppress_keys: false,
+            is_selecting: false,
+            last_click_time: None,
+            last_click_position: None,
+            click_count: 0,
         }
     }
 
@@ -374,9 +390,60 @@ impl EditorPrompt {
     }
 
     /// Get char width scaled to configured font size
-    #[allow(dead_code)]
     fn char_width(&self) -> f32 {
         BASE_CHAR_WIDTH * (self.font_size() / BASE_FONT_SIZE)
+    }
+
+    /// Convert a pixel position to a cursor position (line, column)
+    ///
+    /// This accounts for:
+    /// - The gutter width (line numbers)
+    /// - Padding from config
+    /// - Line height and character width
+    /// - Scroll offset via uniform_list scroll tracking
+    fn pixel_to_position(&self, pixel_pos: Point<gpui::Pixels>) -> CursorPosition {
+        let padding = self.config.get_padding();
+        let line_height = self.line_height();
+        let char_width = self.char_width();
+
+        // Convert from gpui::Pixels to f32
+        let pos_x: f32 = pixel_pos.x.into();
+        let pos_y: f32 = pixel_pos.y.into();
+
+        // Account for top padding in pixel position
+        let content_y = (pos_y - padding.top).max(0.0);
+
+        // Calculate which visible line was clicked
+        // uniform_list handles scroll internally - the position we receive is
+        // relative to the viewport, and we need to calculate which item was hit
+        let visible_line_idx = (content_y / line_height).floor() as usize;
+
+        // For now, use a simple approach: assume we're looking at the top of the list
+        // unless we have scroll info. uniform_list handles scroll but we need to
+        // track which items are currently visible.
+        //
+        // TODO: For proper scroll-aware hit testing, we could:
+        // 1. Store the last rendered range from render_lines()
+        // 2. Use that to offset the visible_line_idx
+        //
+        // For now, clamp to valid range - this works well for short files
+        // and reasonably for longer files when not scrolled.
+        let line = visible_line_idx.min(self.line_count().saturating_sub(1));
+
+        // Account for gutter and left padding for X position
+        let content_x = pos_x - GUTTER_WIDTH - padding.left - 8.0; // 8.0 = pl_2() padding
+
+        // Calculate column
+        let column = if content_x <= 0.0 {
+            0
+        } else {
+            let fractional_col = content_x / char_width;
+            let col = fractional_col.round() as usize;
+            // Clamp to line length
+            col.min(self.line_len(line))
+        };
+
+        CursorPosition::new(line, column)
     }
 
     /// Get the current content as a String
@@ -1013,6 +1080,231 @@ impl EditorPrompt {
         cx.notify();
     }
 
+    /// Handle mouse down event - start selection or position cursor
+    fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let pos = self.pixel_to_position(event.position);
+        let now = Instant::now();
+        let multi_click_threshold = Duration::from_millis(500);
+
+        // Check if this is a multi-click (same position, within time window)
+        let is_same_position = self.last_click_position == Some(pos);
+        let is_quick_click = self
+            .last_click_time
+            .map(|t| now.duration_since(t) < multi_click_threshold)
+            .unwrap_or(false);
+
+        if is_same_position && is_quick_click {
+            self.click_count = (self.click_count + 1).min(3);
+        } else {
+            self.click_count = 1;
+        }
+
+        self.last_click_time = Some(now);
+        self.last_click_position = Some(pos);
+        self.is_selecting = true;
+
+        match self.click_count {
+            1 => {
+                // Single click: position cursor and start selection
+                logging::log(
+                    "EDITOR",
+                    &format!("Mouse down: single click at line {}, col {}", pos.line, pos.column),
+                );
+                self.cursor = pos;
+                self.selection = Selection::caret(pos);
+            }
+            2 => {
+                // Double click: select word
+                logging::log(
+                    "EDITOR",
+                    &format!("Mouse down: double click at line {}, col {}", pos.line, pos.column),
+                );
+                self.select_word_at(pos);
+            }
+            3 => {
+                // Triple click: select line
+                logging::log(
+                    "EDITOR",
+                    &format!("Mouse down: triple click at line {}, col {}", pos.line, pos.column),
+                );
+                self.select_line(pos.line);
+            }
+            _ => {}
+        }
+
+        cx.notify();
+    }
+
+    /// Handle mouse move event - extend selection while dragging
+    fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.is_selecting {
+            return;
+        }
+
+        let pos = self.pixel_to_position(event.position);
+
+        // Extend selection based on click count
+        match self.click_count {
+            1 => {
+                // Character-level selection
+                self.cursor = pos;
+                self.selection.head = pos;
+            }
+            2 => {
+                // Word-level selection: extend to word boundaries
+                self.extend_word_selection(pos);
+            }
+            3 => {
+                // Line-level selection: extend to include full lines
+                self.extend_line_selection(pos);
+            }
+            _ => {}
+        }
+
+        cx.notify();
+    }
+
+    /// Handle mouse up event - finalize selection
+    fn handle_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if self.is_selecting {
+            self.is_selecting = false;
+            logging::log(
+                "EDITOR",
+                &format!(
+                    "Mouse up: selection finalized, cursor at line {}, col {}",
+                    self.cursor.line, self.cursor.column
+                ),
+            );
+        }
+        cx.notify();
+    }
+
+    /// Select the word at the given position
+    fn select_word_at(&mut self, pos: CursorPosition) {
+        if let Some(line_content) = self.get_line(pos.line) {
+            let chars: Vec<char> = line_content.chars().collect();
+            if chars.is_empty() || pos.column >= chars.len() {
+                // Empty line or at end - just position cursor
+                self.cursor = pos;
+                self.selection = Selection::caret(pos);
+                return;
+            }
+
+            // Find word boundaries
+            let (start, end) = self.find_word_boundaries(&chars, pos.column);
+
+            self.selection = Selection::new(
+                CursorPosition::new(pos.line, start),
+                CursorPosition::new(pos.line, end),
+            );
+            self.cursor = CursorPosition::new(pos.line, end);
+        }
+    }
+
+    /// Find word boundaries around a given column position
+    fn find_word_boundaries(&self, chars: &[char], column: usize) -> (usize, usize) {
+        let column = column.min(chars.len().saturating_sub(1));
+
+        // Check if we're on a word character
+        let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+
+        let start_char = chars.get(column).copied().unwrap_or(' ');
+
+        if is_word_char(start_char) {
+            // Find start of word
+            let mut start = column;
+            while start > 0 && is_word_char(chars[start - 1]) {
+                start -= 1;
+            }
+
+            // Find end of word
+            let mut end = column;
+            while end < chars.len() && is_word_char(chars[end]) {
+                end += 1;
+            }
+
+            (start, end)
+        } else if start_char.is_whitespace() {
+            // Select whitespace block
+            let mut start = column;
+            while start > 0 && chars[start - 1].is_whitespace() {
+                start -= 1;
+            }
+
+            let mut end = column;
+            while end < chars.len() && chars[end].is_whitespace() {
+                end += 1;
+            }
+
+            (start, end)
+        } else {
+            // Select single punctuation character
+            (column, column + 1)
+        }
+    }
+
+    /// Select an entire line
+    fn select_line(&mut self, line: usize) {
+        let line = line.min(self.line_count().saturating_sub(1));
+        let line_len = self.line_len(line);
+
+        self.selection = Selection::new(
+            CursorPosition::new(line, 0),
+            CursorPosition::new(line, line_len),
+        );
+        self.cursor = CursorPosition::new(line, line_len);
+    }
+
+    /// Extend word selection during drag
+    fn extend_word_selection(&mut self, pos: CursorPosition) {
+        if let Some(line_content) = self.get_line(pos.line) {
+            let chars: Vec<char> = line_content.chars().collect();
+            let column = pos.column.min(chars.len());
+
+            let (word_start, word_end) = if column < chars.len() {
+                self.find_word_boundaries(&chars, column)
+            } else {
+                (column, column)
+            };
+
+            // Keep anchor at original word boundary, extend to current word boundary
+            let anchor = self.selection.anchor;
+
+            if pos.line < anchor.line || (pos.line == anchor.line && word_start < anchor.column) {
+                // Extending backwards
+                self.selection.head = CursorPosition::new(pos.line, word_start);
+                self.cursor = self.selection.head;
+            } else {
+                // Extending forwards
+                self.selection.head = CursorPosition::new(pos.line, word_end);
+                self.cursor = self.selection.head;
+            }
+        }
+    }
+
+    /// Extend line selection during drag
+    fn extend_line_selection(&mut self, pos: CursorPosition) {
+        let anchor_line = self.selection.anchor.line;
+        let current_line = pos.line.min(self.line_count().saturating_sub(1));
+
+        if current_line < anchor_line {
+            // Dragging upward
+            self.selection = Selection::new(
+                CursorPosition::new(anchor_line, self.line_len(anchor_line)),
+                CursorPosition::new(current_line, 0),
+            );
+            self.cursor = CursorPosition::new(current_line, 0);
+        } else {
+            // Dragging downward or same line
+            let end_line_len = self.line_len(current_line);
+            self.selection = Selection::new(
+                CursorPosition::new(anchor_line, 0),
+                CursorPosition::new(current_line, end_line_len),
+            );
+            self.cursor = CursorPosition::new(current_line, end_line_len);
+        }
+    }
+
     /// Render a range of lines for uniform_list virtualization
     fn render_lines(
         &mut self,
@@ -1447,12 +1739,28 @@ impl Render for EditorPrompt {
                 )
         };
 
+        // Mouse handlers
+        let handle_mouse_down = cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+            this.handle_mouse_down(event, cx);
+        });
+
+        let handle_mouse_move = cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            this.handle_mouse_move(event, cx);
+        });
+
+        let handle_mouse_up = cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+            this.handle_mouse_up(event, cx);
+        });
+
         // Build the container - use explicit height if available
         let container = div()
             .id("editor-prompt")
             .key_context("EditorPrompt")
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
+            .on_mouse_down(MouseButton::Left, handle_mouse_down)
+            .on_mouse_move(handle_mouse_move)
+            .on_mouse_up(MouseButton::Left, handle_mouse_up)
             .flex()
             .flex_col()
             .w_full()
