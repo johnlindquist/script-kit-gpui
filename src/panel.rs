@@ -139,6 +139,12 @@ impl PlaceholderConfig {
 /// visual consistency across all input fields.
 pub const CURSOR_WIDTH: f32 = 2.0;
 
+/// Horizontal gap between the cursor and adjacent text/placeholder, in pixels.
+///
+/// Keep this identical in empty and non-empty states to avoid horizontal shifting
+/// when switching between placeholder and typed text.
+pub const CURSOR_GAP_X: f32 = 2.0;
+
 /// Cursor height for large text (.text_lg() / 18px font)
 ///
 /// This value is calculated to align properly with GPUI's .text_lg() text rendering:

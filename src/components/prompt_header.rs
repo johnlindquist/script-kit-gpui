@@ -23,14 +23,8 @@ use std::rc::Rc;
 
 use crate::components::{Button, ButtonColors, ButtonVariant};
 use crate::designs::DesignColors;
+use crate::panel::{CURSOR_GAP_X, CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y, CURSOR_WIDTH};
 use crate::theme::Theme;
-
-/// Height of the cursor in the main filter input
-const CURSOR_HEIGHT_LG: f32 = 20.0;
-/// Vertical margin for cursor
-const CURSOR_MARGIN_Y: f32 = 2.0;
-/// Cursor width
-const CURSOR_WIDTH: f32 = 2.0;
 
 /// Pre-computed colors for PromptHeader rendering
 ///
@@ -299,6 +293,11 @@ impl PromptHeader {
         // Cursor position:
         // - When empty: cursor LEFT (before placeholder)
         // - When typing: cursor RIGHT (after text)
+        //
+        // ALIGNMENT FIX: The left cursor (when empty) takes up space (CURSOR_WIDTH + CURSOR_GAP_X).
+        // We apply a negative margin to the placeholder text to pull it back by that amount,
+        // so placeholder and typed text share the same starting x-position. This eliminates
+        // the "jump" when typing begins.
 
         // Left cursor (when empty)
         // Use conditional background instead of .when() to avoid type inference issues
@@ -313,13 +312,22 @@ impl PromptHeader {
                     .w(px(CURSOR_WIDTH))
                     .h(px(CURSOR_HEIGHT_LG))
                     .my(px(CURSOR_MARGIN_Y))
-                    .mr(px(4.))
+                    .mr(px(CURSOR_GAP_X))
                     .bg(cursor_bg),
             );
         }
 
-        // Display text
-        input = input.child(display_text);
+        // Display text - with negative margin for placeholder alignment
+        if filter_is_empty {
+            // Placeholder: pull back by cursor space to align with typed text position
+            input = input.child(
+                div()
+                    .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                    .child(display_text),
+            );
+        } else {
+            input = input.child(display_text);
+        }
 
         // Right cursor (when not empty)
         if !filter_is_empty {
@@ -333,7 +341,7 @@ impl PromptHeader {
                     .w(px(CURSOR_WIDTH))
                     .h(px(CURSOR_HEIGHT_LG))
                     .my(px(CURSOR_MARGIN_Y))
-                    .ml(px(2.))
+                    .ml(px(CURSOR_GAP_X))
                     .bg(cursor_bg),
             );
         }

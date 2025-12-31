@@ -5578,4 +5578,105 @@ const { query } = await input();
         // Script metadata populated
         assert_eq!(script_meta.name, Some("Full Featured Script".to_string()));
     }
+
+    /// Performance benchmark for get_grouped_results
+    /// This test verifies that repeated calls with the same filter don't regress performance.
+    /// It creates realistic data (100 scripts, 50 scriptlets, 20 builtins, 30 apps)
+    /// and measures the time for 100 repeated calls.
+    #[test]
+    fn bench_get_grouped_results_repeated_calls() {
+        use std::time::Instant;
+
+        // Create realistic test data
+        let scripts: Vec<Script> = (0..100)
+            .map(|i| Script {
+                name: format!("script-{:03}", i),
+                path: PathBuf::from(format!("/test/scripts/script-{:03}.ts", i)),
+                extension: "ts".to_string(),
+                description: Some(format!("Description for script {}", i)),
+                ..Default::default()
+            })
+            .collect();
+
+        let scriptlets: Vec<Scriptlet> = (0..50)
+            .map(|i| Scriptlet {
+                name: format!("snippet-{:02}", i),
+                file_path: Some(format!("/test/scriptlets/snippet-{:02}.md", i)),
+                tool: "ts".to_string(),
+                code: format!("console.log('snippet {}')", i),
+                description: Some(format!("Snippet {} description", i)),
+                shortcut: None,
+                expand: None,
+                group: None,
+                command: None,
+                alias: None,
+            })
+            .collect();
+
+        let builtins: Vec<crate::builtins::BuiltInEntry> = (0..20)
+            .map(|i| crate::builtins::BuiltInEntry {
+                id: format!("builtin-{:02}", i),
+                name: format!("builtin-{:02}", i),
+                description: format!("Built-in {} description", i),
+                keywords: vec![format!("keyword{}", i)],
+                feature: crate::builtins::BuiltInFeature::ClipboardHistory,
+            })
+            .collect();
+
+        let apps: Vec<crate::app_launcher::AppInfo> = (0..30)
+            .map(|i| crate::app_launcher::AppInfo {
+                name: format!("App {:02}", i),
+                path: PathBuf::from(format!("/Applications/App{:02}.app", i)),
+                bundle_id: Some(format!("com.test.app{:02}", i)),
+                icon: None,
+            })
+            .collect();
+
+        let frecency_store = crate::frecency::FrecencyStore::new();
+
+        // Warm up
+        let _ = get_grouped_results(&scripts, &scriptlets, &builtins, &apps, &frecency_store, "");
+
+        // Benchmark: 100 calls with empty filter (grouped mode)
+        let start = Instant::now();
+        for _ in 0..100 {
+            let _ = get_grouped_results(&scripts, &scriptlets, &builtins, &apps, &frecency_store, "");
+        }
+        let empty_filter_duration = start.elapsed();
+
+        // Benchmark: 100 calls with filter (search mode)
+        let start = Instant::now();
+        for _ in 0..100 {
+            let _ = get_grouped_results(&scripts, &scriptlets, &builtins, &apps, &frecency_store, "scr");
+        }
+        let search_filter_duration = start.elapsed();
+
+        // Log results (visible with cargo test -- --nocapture)
+        println!("\n=== get_grouped_results Performance Benchmark ===");
+        println!("Data: {} scripts, {} scriptlets, {} builtins, {} apps", 
+            scripts.len(), scriptlets.len(), builtins.len(), apps.len());
+        println!("Empty filter (100 calls): {:?} ({:.2}ms per call)", 
+            empty_filter_duration, 
+            empty_filter_duration.as_secs_f64() * 10.0);
+        println!("Search filter 'scr' (100 calls): {:?} ({:.2}ms per call)", 
+            search_filter_duration,
+            search_filter_duration.as_secs_f64() * 10.0);
+        println!("===============================================\n");
+
+        // Performance assertions - each call should be under 5ms
+        // (with caching, repeated calls should be nearly instant)
+        let max_per_call_ms = 5.0;
+        assert!(
+            empty_filter_duration.as_secs_f64() * 10.0 < max_per_call_ms,
+            "Empty filter calls too slow: {:.2}ms per call (max: {}ms)",
+            empty_filter_duration.as_secs_f64() * 10.0,
+            max_per_call_ms
+        );
+        assert!(
+            search_filter_duration.as_secs_f64() * 10.0 < max_per_call_ms,
+            "Search filter calls too slow: {:.2}ms per call (max: {}ms)",
+            search_filter_duration.as_secs_f64() * 10.0,
+            max_per_call_ms
+        );
+    }
 }

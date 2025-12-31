@@ -207,7 +207,7 @@ const screenshot = await captureScreenshot();
 console.error(`Screenshot: ${screenshot.width}x${screenshot.height}`);
 
 // Save to ./.test-screenshots/
-const screenshotDir = join(process.cwd(), 'test-screenshots');
+const screenshotDir = join(process.cwd(), '.test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 
 const filename = `test-my-layout-${Date.now()}.png`;
@@ -257,7 +257,7 @@ await new Promise(resolve => setTimeout(resolve, 1000));
 
 // Capture and save screenshot
 const screenshot = await captureScreenshot();
-const screenshotDir = join(process.cwd(), 'test-screenshots');
+const screenshotDir = join(process.cwd(), '.test-screenshots');
 mkdirSync(screenshotDir, { recursive: true });
 const filepath = join(screenshotDir, `editor-height-${Date.now()}.png`);
 writeFileSync(filepath, Buffer.from(screenshot.data, 'base64'));

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::designs::{get_tokens, DesignVariant};
 use crate::logging;
 use crate::theme;
-use crate::utils::{parse_html, HtmlElement};
+use crate::utils::{parse_html, HtmlElement, TailwindStyles};
 
 use super::SubmitCallback;
 
@@ -316,8 +316,177 @@ fn render_element(element: &HtmlElement, ctx: RenderContext) -> Div {
             div().h(px(8.0)) // Line break spacing
         }
 
-        HtmlElement::Div(children) | HtmlElement::Span(children) => render_elements(children, ctx),
+        HtmlElement::Div { classes, children } => {
+            let base = render_elements(children, ctx);
+            if let Some(class_str) = classes {
+                apply_tailwind_styles(base, class_str)
+            } else {
+                base
+            }
+        }
+
+        HtmlElement::Span { classes, children } => {
+            let base = render_elements(children, ctx);
+            if let Some(class_str) = classes {
+                apply_tailwind_styles(base, class_str)
+            } else {
+                base
+            }
+        }
     }
+}
+
+/// Apply Tailwind styles to a div based on a class string
+fn apply_tailwind_styles(mut element: Div, class_string: &str) -> Div {
+    let styles = TailwindStyles::parse(class_string);
+
+    // Layout
+    if styles.flex {
+        element = element.flex();
+    }
+    if styles.flex_col {
+        element = element.flex_col();
+    }
+    if styles.flex_row {
+        element = element.flex_row();
+    }
+    if styles.flex_1 {
+        element = element.flex_1();
+    }
+    if styles.items_center {
+        element = element.items_center();
+    }
+    if styles.items_start {
+        element = element.items_start();
+    }
+    if styles.items_end {
+        element = element.items_end();
+    }
+    if styles.justify_center {
+        element = element.justify_center();
+    }
+    if styles.justify_between {
+        element = element.justify_between();
+    }
+    if styles.justify_start {
+        element = element.justify_start();
+    }
+    if styles.justify_end {
+        element = element.justify_end();
+    }
+
+    // Sizing
+    if styles.w_full {
+        element = element.w_full();
+    }
+    if styles.h_full {
+        element = element.h_full();
+    }
+    if styles.min_w_0 {
+        element = element.min_w(px(0.));
+    }
+    if styles.min_h_0 {
+        element = element.min_h(px(0.));
+    }
+
+    // Spacing - padding
+    if let Some(p) = styles.padding {
+        element = element.p(px(p));
+    }
+    if let Some(px_val) = styles.padding_x {
+        element = element.px(px(px_val));
+    }
+    if let Some(py_val) = styles.padding_y {
+        element = element.py(px(py_val));
+    }
+    if let Some(pt) = styles.padding_top {
+        element = element.pt(px(pt));
+    }
+    if let Some(pb) = styles.padding_bottom {
+        element = element.pb(px(pb));
+    }
+    if let Some(pl) = styles.padding_left {
+        element = element.pl(px(pl));
+    }
+    if let Some(pr) = styles.padding_right {
+        element = element.pr(px(pr));
+    }
+
+    // Spacing - margin
+    if let Some(m) = styles.margin {
+        element = element.m(px(m));
+    }
+    if let Some(mx_val) = styles.margin_x {
+        element = element.mx(px(mx_val));
+    }
+    if let Some(my_val) = styles.margin_y {
+        element = element.my(px(my_val));
+    }
+    if let Some(mt) = styles.margin_top {
+        element = element.mt(px(mt));
+    }
+    if let Some(mb) = styles.margin_bottom {
+        element = element.mb(px(mb));
+    }
+    if let Some(ml) = styles.margin_left {
+        element = element.ml(px(ml));
+    }
+    if let Some(mr) = styles.margin_right {
+        element = element.mr(px(mr));
+    }
+
+    // Gap
+    if let Some(gap_val) = styles.gap {
+        element = element.gap(px(gap_val));
+    }
+
+    // Colors
+    if let Some(color) = styles.bg_color {
+        element = element.bg(rgb(color));
+    }
+    if let Some(color) = styles.text_color {
+        element = element.text_color(rgb(color));
+    }
+    if let Some(color) = styles.border_color {
+        element = element.border_color(rgb(color));
+    }
+
+    // Typography
+    if let Some(size) = styles.font_size {
+        element = element.text_size(px(size));
+    }
+    if styles.font_bold {
+        element = element.font_weight(FontWeight::BOLD);
+    }
+    if styles.font_medium {
+        element = element.font_weight(FontWeight::MEDIUM);
+    }
+    if styles.font_normal {
+        element = element.font_weight(FontWeight::NORMAL);
+    }
+
+    // Border radius
+    if let Some(r) = styles.rounded {
+        element = element.rounded(px(r));
+    }
+
+    // Border
+    if styles.border {
+        element = element.border_1();
+    }
+    if let Some(width) = styles.border_width {
+        if width == 0.0 {
+            // No border
+        } else if width == 2.0 {
+            element = element.border_2();
+        } else if width == 4.0 {
+            element = element.border_4();
+        } else if width == 8.0 {
+            element = element.border_8();
+        }
+    }
+
+    element
 }
 
 /// Collect all text content from HTML elements into a single string
@@ -340,8 +509,8 @@ fn collect_text(elements: &[HtmlElement]) -> String {
             | HtmlElement::Paragraph(children)
             | HtmlElement::ListItem(children)
             | HtmlElement::Blockquote(children)
-            | HtmlElement::Div(children)
-            | HtmlElement::Span(children) => {
+            | HtmlElement::Div { children, .. }
+            | HtmlElement::Span { children, .. } => {
                 result.push_str(&collect_text(children));
             }
             HtmlElement::UnorderedList(items) | HtmlElement::OrderedList(items) => {
@@ -405,8 +574,8 @@ fn render_inline(element: &HtmlElement, ctx: RenderContext) -> Div {
         | HtmlElement::Paragraph(children)
         | HtmlElement::ListItem(children)
         | HtmlElement::Blockquote(children)
-        | HtmlElement::Div(children)
-        | HtmlElement::Span(children) => div()
+        | HtmlElement::Div { children, .. }
+        | HtmlElement::Span { children, .. } => div()
             .flex()
             .flex_row()
             .items_baseline()
@@ -500,6 +669,16 @@ impl Render for DivPrompt {
         // Generate semantic IDs for div prompt elements
         let panel_semantic_id = format!("panel:content-{}", self.id);
 
+        // Render the HTML elements with any inline Tailwind classes
+        let content = render_elements(&elements, render_ctx);
+
+        // Apply root tailwind classes if provided
+        let styled_content = if let Some(tw) = &self.tailwind {
+            apply_tailwind_styles(content, tw)
+        } else {
+            content
+        };
+
         // Main container - fills entire window height with no bottom gap
         // Content area uses flex_1 to fill all remaining space
         div()
@@ -521,7 +700,7 @@ impl Render for DivPrompt {
                     .min_h(px(0.)) // Allow shrinking
                     .w_full()
                     .overflow_y_hidden() // Clip content at container boundary
-                    .child(render_elements(&elements, render_ctx)),
+                    .child(styled_content),
             )
         // Footer removed - content now extends to bottom of container
     }
