@@ -35,6 +35,18 @@ pub(crate) fn script_hotkey_channel() -> &'static (
     SCRIPT_HOTKEY_CHANNEL.get_or_init(|| async_channel::bounded(10))
 }
 
+// NOTES_HOTKEY_CHANNEL: Channel for notes hotkey events
+#[allow(dead_code)]
+static NOTES_HOTKEY_CHANNEL: OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
+    OnceLock::new();
+
+/// Get the notes hotkey channel, initializing it on first access.
+#[allow(dead_code)]
+pub(crate) fn notes_hotkey_channel(
+) -> &'static (async_channel::Sender<()>, async_channel::Receiver<()>) {
+    NOTES_HOTKEY_CHANNEL.get_or_init(|| async_channel::bounded(10))
+}
+
 #[allow(dead_code)]
 static HOTKEY_TRIGGER_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -158,6 +170,55 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
             ),
         );
 
+        // Register notes hotkey (Cmd+Shift+N by default)
+        let notes_config = config.get_notes_hotkey();
+        let notes_code = match notes_config.key.as_str() {
+            "KeyN" => Code::KeyN,
+            "KeyM" => Code::KeyM,
+            "KeyO" => Code::KeyO,
+            "KeyP" => Code::KeyP,
+            _ => Code::KeyN, // Default to N
+        };
+
+        let mut notes_modifiers = Modifiers::empty();
+        for modifier in &notes_config.modifiers {
+            match modifier.as_str() {
+                "meta" => notes_modifiers |= Modifiers::META,
+                "ctrl" => notes_modifiers |= Modifiers::CONTROL,
+                "alt" => notes_modifiers |= Modifiers::ALT,
+                "shift" => notes_modifiers |= Modifiers::SHIFT,
+                _ => {}
+            }
+        }
+
+        let notes_hotkey = HotKey::new(Some(notes_modifiers), notes_code);
+        let notes_hotkey_id = notes_hotkey.id();
+
+        let notes_display = format!(
+            "{}{}",
+            notes_config.modifiers.join("+"),
+            if notes_config.modifiers.is_empty() {
+                String::new()
+            } else {
+                "+".to_string()
+            }
+        ) + &notes_config.key;
+
+        if let Err(e) = manager.register(notes_hotkey) {
+            logging::log(
+                "HOTKEY",
+                &format!("Failed to register notes hotkey {}: {}", notes_display, e),
+            );
+        } else {
+            logging::log(
+                "HOTKEY",
+                &format!(
+                    "Registered notes hotkey {} (id: {})",
+                    notes_display, notes_hotkey_id
+                ),
+            );
+        }
+
         // Register script shortcuts
         // Map from hotkey ID to script path
         let mut script_hotkey_map: std::collections::HashMap<u32, String> =
@@ -274,6 +335,13 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
                         "HOTKEY",
                         &format!("{} pressed (trigger #{})", hotkey_display, count + 1),
                     );
+                }
+                // Check if it's the notes hotkey
+                else if event.id == notes_hotkey_id {
+                    logging::log("HOTKEY", &format!("{} pressed (notes)", notes_display));
+                    if notes_hotkey_channel().0.send_blocking(()).is_err() {
+                        logging::log("HOTKEY", "Notes hotkey channel closed, cannot send");
+                    }
                 }
                 // Check if it's a script shortcut
                 else if let Some(script_path) = script_hotkey_map.get(&event.id) {

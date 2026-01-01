@@ -209,12 +209,29 @@ pub struct Config {
     /// Frecency configuration for recent items ranking
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frecency: Option<FrecencyConfig>,
+    /// Hotkey for opening Notes window (default: Cmd+Shift+N)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "notesHotkey"
+    )]
+    pub notes_hotkey: Option<HotkeyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotkeyConfig {
     pub modifiers: Vec<String>,
     pub key: String,
+}
+
+impl HotkeyConfig {
+    /// Create a default notes hotkey (Cmd+Shift+N)
+    pub fn default_notes_hotkey() -> Self {
+        HotkeyConfig {
+            modifiers: vec!["meta".to_string(), "shift".to_string()],
+            key: "KeyN".to_string(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -234,6 +251,7 @@ impl Default for Config {
             process_limits: None,     // Will use ProcessLimits::default() via getter
             clipboard_history_max_text_length: None, // Will use default via getter
             frecency: None,           // Will use FrecencyConfig::default() via getter
+            notes_hotkey: None,       // Will use HotkeyConfig::default_notes_hotkey() via getter
         }
     }
 }
@@ -296,6 +314,14 @@ impl Config {
     /// Returns the frecency configuration, or defaults if not configured
     pub fn get_frecency(&self) -> FrecencyConfig {
         self.frecency.clone().unwrap_or_default()
+    }
+
+    /// Returns the notes hotkey configuration, or default (Cmd+Shift+N) if not configured
+    #[allow(dead_code)]
+    pub fn get_notes_hotkey(&self) -> HotkeyConfig {
+        self.notes_hotkey
+            .clone()
+            .unwrap_or_else(HotkeyConfig::default_notes_hotkey)
     }
 }
 
@@ -439,6 +465,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -478,6 +505,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
         assert_eq!(config.bun_path, Some("/custom/path/bun".to_string()));
     }
@@ -499,6 +527,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
         assert_eq!(config.bun_path, None);
     }
@@ -520,6 +549,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -546,6 +576,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -639,6 +670,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         assert_eq!(config.hotkey.modifiers.len(), 0);
@@ -666,6 +698,7 @@ mod tests {
                 process_limits: None,
                 clipboard_history_max_text_length: None,
                 frecency: None,
+                notes_hotkey: None,
             };
 
             let json = serde_json::to_string(&config).unwrap();
@@ -692,6 +725,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -718,6 +752,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -745,6 +780,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         // Config editor takes precedence
@@ -774,6 +810,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         // Should fall back to EDITOR env var
@@ -809,6 +846,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         // Should fall back to "code" default
@@ -844,6 +882,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         // Config editor should win
@@ -948,6 +987,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let padding = config.get_padding();
@@ -979,6 +1019,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         assert_eq!(config.get_editor_font_size(), 16.0);
@@ -1007,6 +1048,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         assert_eq!(config.get_terminal_font_size(), 12.0);
@@ -1035,6 +1077,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         assert_eq!(config.get_ui_scale(), 1.5);
@@ -1124,6 +1167,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1221,6 +1265,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let builtins = config.get_builtins();
@@ -1310,6 +1355,7 @@ mod tests {
             process_limits: None,
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1450,6 +1496,7 @@ mod tests {
             }),
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let limits = config.get_process_limits();
@@ -1545,6 +1592,7 @@ mod tests {
             process_limits: Some(ProcessLimits::default()),
             clipboard_history_max_text_length: None,
             frecency: None,
+            notes_hotkey: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();

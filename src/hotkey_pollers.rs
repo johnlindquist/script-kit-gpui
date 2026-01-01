@@ -1,6 +1,7 @@
 use gpui::{px, size, App, AppContext as _, AsyncApp, Context, Focusable, Window, WindowHandle};
 
 use crate::hotkeys;
+use crate::notes;
 use crate::platform::{calculate_eye_line_bounds_on_mouse_display, move_first_window_to_bounds};
 use crate::window_resize::{initial_window_height, reset_resize_debounce};
 use crate::{logging, platform, ScriptListApp, NEEDS_RESET, PANEL_CONFIGURED, WINDOW_VISIBLE};
@@ -218,6 +219,34 @@ impl ScriptHotkeyPoller {
     }
 }
 
+/// A model that listens for notes hotkey triggers via async_channel.
+pub struct NotesHotkeyPoller;
+
+impl NotesHotkeyPoller {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn start_listening(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |_this, cx: &mut AsyncApp| {
+            logging::log("HOTKEY", "Notes hotkey listener started");
+
+            while let Ok(()) = hotkeys::notes_hotkey_channel().1.recv().await {
+                logging::log("HOTKEY", "Notes hotkey triggered - opening notes window");
+
+                let _ = cx.update(move |cx: &mut App| {
+                    if let Err(e) = notes::open_notes_window(cx) {
+                        logging::log("HOTKEY", &format!("Failed to open notes window: {}", e));
+                    }
+                });
+            }
+
+            logging::log("HOTKEY", "Notes hotkey listener exiting");
+        })
+        .detach();
+    }
+}
+
 pub(crate) fn start_hotkey_event_handler(cx: &mut App, window: WindowHandle<ScriptListApp>) {
     // Start main hotkey listener (for app show/hide toggle)
     let handler = cx.new(|_| HotkeyPoller::new(window));
@@ -228,6 +257,12 @@ pub(crate) fn start_hotkey_event_handler(cx: &mut App, window: WindowHandle<Scri
     // Start script hotkey listener (for direct script execution via shortcuts)
     let script_handler = cx.new(|_| ScriptHotkeyPoller::new(window));
     script_handler.update(cx, |p, cx| {
+        p.start_listening(cx);
+    });
+
+    // Start notes hotkey listener (for opening notes window)
+    let notes_handler = cx.new(|_| NotesHotkeyPoller::new());
+    notes_handler.update(cx, |p, cx| {
         p.start_listening(cx);
     });
 }
