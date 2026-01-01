@@ -721,6 +721,8 @@ impl ScriptListApp {
                                 rgb(text_primary)
                             })
                             // When empty: show cursor (always reserve space) + placeholder
+                            // ALIGNMENT: cursor takes CURSOR_WIDTH + CURSOR_GAP_X space, so we
+                            // apply negative margin to placeholder to align it with typed text
                             .when(filter_is_empty, |d: gpui::Div| {
                                 let is_cursor_visible = self.focused_input == FocusedInput::MainFilter
                                     && self.cursor_visible;
@@ -733,7 +735,12 @@ impl ScriptListApp {
                                         .mr(px(CURSOR_GAP_X))
                                         .when(is_cursor_visible, |d: gpui::Div| d.bg(rgb(text_primary))),
                                 )
-                                .child(div().text_color(rgb(text_muted)).child(DEFAULT_PLACEHOLDER))
+                                .child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .text_color(rgb(text_muted))
+                                        .child(DEFAULT_PLACEHOLDER)
+                                )
                             })
                             // When has text: show text with cursor/selection via helper
                             .when(!filter_is_empty, |d: gpui::Div| {

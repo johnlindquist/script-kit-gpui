@@ -397,6 +397,8 @@ impl ScriptListApp {
                                     == FocusedInput::ArgPrompt
                                     && self.cursor_visible;
                                 // Always render cursor div to reserve space, only show bg when visible
+                                // ALIGNMENT: cursor takes CURSOR_WIDTH + CURSOR_GAP_X space, so we
+                                // apply negative margin to placeholder to align it with typed text
                                 d.child(
                                     div()
                                         .w(px(CURSOR_WIDTH))
@@ -407,7 +409,12 @@ impl ScriptListApp {
                                             d.bg(rgb(text_primary))
                                         }),
                                 )
-                                .child(div().text_color(rgb(text_muted)).child(placeholder.clone()))
+                                .child(
+                                    div()
+                                        .ml(px(-(CURSOR_WIDTH + CURSOR_GAP_X)))
+                                        .text_color(rgb(text_muted))
+                                        .child(placeholder.clone()),
+                                )
                             })
                             // When has text: show text with cursor/selection via helper
                             .when(!input_is_empty, |d: gpui::Div| {
