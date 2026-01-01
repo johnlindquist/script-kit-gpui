@@ -75,6 +75,9 @@ pub struct NotesApp {
     /// Whether the titlebar is being hovered (for showing/hiding icons)
     titlebar_hovered: bool,
 
+    /// Whether the entire window is being hovered (for traffic lights)
+    window_hovered: bool,
+
     /// Last known content line count for auto-resize
     last_line_count: usize,
 
@@ -158,6 +161,7 @@ impl NotesApp {
             search_state,
             search_query: String::new(),
             titlebar_hovered: false,
+            window_hovered: false,
             last_line_count: initial_line_count,
             focus_handle,
             _subscriptions: vec![editor_sub, search_sub],
@@ -195,25 +199,24 @@ impl NotesApp {
     }
 
     /// Update window height based on content line count
+    /// Raycast-style: window grows from compact size as content increases
     fn update_window_height(
         &self,
         window: &mut Window,
         line_count: usize,
         _cx: &mut Context<Self>,
     ) {
-        // Constants for layout calculation
-        const TITLEBAR_HEIGHT: f32 = 36.0;
-        const TOOLBAR_HEIGHT: f32 = 40.0; // Approximate toolbar height
-        const FOOTER_HEIGHT: f32 = 28.0;
-        const PADDING: f32 = 24.0; // Top + bottom padding
-        const LINE_HEIGHT: f32 = 22.0; // Approximate line height
-        const MIN_HEIGHT: f32 = 200.0;
-        const MAX_HEIGHT: f32 = 800.0;
+        // Constants for layout calculation - adjusted for compact sticky-note style
+        const TITLEBAR_HEIGHT: f32 = 32.0;
+        const FOOTER_HEIGHT: f32 = 24.0;
+        const PADDING: f32 = 24.0; // Top + bottom padding in editor area
+        const LINE_HEIGHT: f32 = 20.0; // Approximate line height
+        const MIN_HEIGHT: f32 = 150.0; // Minimum sticky-note size
+        const MAX_HEIGHT: f32 = 600.0; // Don't grow too large
 
         // Calculate desired height
         let content_height = (line_count as f32) * LINE_HEIGHT;
-        let total_height =
-            TITLEBAR_HEIGHT + TOOLBAR_HEIGHT + content_height + FOOTER_HEIGHT + PADDING;
+        let total_height = TITLEBAR_HEIGHT + content_height + FOOTER_HEIGHT + PADDING;
         let clamped_height = total_height.clamp(MIN_HEIGHT, MAX_HEIGHT);
 
         // Get current bounds and update height
@@ -705,33 +708,37 @@ impl NotesApp {
                 }
             });
 
-        // Build titlebar with hover tracking for Raycast-style icon reveal
+        // Raycast-style: titlebar only visible on hover, no distinct background
+        // Title shown left-aligned, action icons appear on hover
+        let window_hovered = self.window_hovered;
+
         let titlebar = div()
             .id("notes-titlebar")
             .flex()
             .items_center()
             .justify_between()
-            .h(px(36.))
+            .h(px(32.))
             .px_3()
-            .bg(cx.theme().title_bar)
-            .border_b_1()
-            .border_color(cx.theme().border)
+            // No background - blends with window
+            .bg(cx.theme().background)
+            // Only show titlebar elements when window is hovered
             .on_hover(cx.listener(|this, hovered, _, cx| {
                 this.titlebar_hovered = *hovered;
                 cx.notify();
             }))
             .child(
-                // Note title (truncated)
+                // Note title (truncated) - only visible when hovered
                 div()
                     .flex_1()
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_sm()
                     .text_color(cx.theme().foreground)
+                    .when(!window_hovered, |d| d.opacity(0.)) // Hide when not hovered
                     .child(title),
             )
-            // Conditionally show icons based on state
-            .children(if show_icons && has_selection && !is_trash {
+            // Conditionally show icons based on state - only when window is hovered
+            .children(if window_hovered && has_selection && !is_trash {
                 // Hover-reveal icons for edit mode: ⌘, copy, +, delete
                 Some(
                     div()
@@ -820,16 +827,17 @@ impl NotesApp {
                 None
             });
 
-        // Build character count footer
+        // Build character count footer - only visible on hover
         let footer = div()
             .flex()
             .items_center()
             .justify_between()
-            .h(px(28.))
+            .h(px(24.))
             .px_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().title_bar)
+            // No border, same background as window
+            .bg(cx.theme().background)
+            // Hide when window not hovered
+            .when(!window_hovered, |d| d.opacity(0.))
             .child(
                 // Type indicator (T for text)
                 div()
@@ -849,21 +857,27 @@ impl NotesApp {
                     )),
             );
 
-        // Build main editor layout
+        // Build main editor layout - Raycast style: clean, no visible input borders
         div()
             .flex_1()
             .flex()
             .flex_col()
             .h_full()
+            .bg(cx.theme().background) // Unified background
             .child(titlebar)
-            .when(!is_trash && has_selection, |d| {
+            // Toolbar hidden by default - only show on hover
+            .when(!is_trash && has_selection && show_icons, |d| {
                 d.child(self.render_toolbar(cx))
             })
             .child(
                 div()
                     .flex_1()
                     .p_3()
-                    .child(Input::new(&self.editor_state).h_full()),
+                    .bg(cx.theme().background) // Same background - no visible input box
+                    // Use a styled input that blends with background
+                    .child(
+                        Input::new(&self.editor_state).h_full().appearance(false), // No input styling - blends with background
+                    ),
             )
             .when(has_selection && !is_trash, |d| d.child(footer))
     }
@@ -1067,7 +1081,9 @@ impl Render for NotesApp {
         let show_browse = self.show_browse_panel;
 
         // Raycast-style single-note view: no sidebar, editor fills full width
+        // Track window hover for traffic lights visibility
         div()
+            .id("notes-window-root")
             .flex()
             .flex_col()
             .size_full()
@@ -1075,6 +1091,11 @@ impl Render for NotesApp {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .track_focus(&self.focus_handle)
+            // Track window hover for showing/hiding chrome
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                this.window_hovered = *hovered;
+                cx.notify();
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Handle keyboard shortcuts
                 let key = event.keystroke.key.as_str();
@@ -1278,16 +1299,20 @@ pub fn open_notes_window(cx: &mut App) -> Result<()> {
     // Create new window
     info!("Opening new notes window");
 
+    // Raycast-style: Small sticky-note sized window
     let window_options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(gpui::Bounds::centered(
             None,
-            size(px(900.), px(700.)),
+            size(px(350.), px(280.)), // Sticky note size
             cx,
         ))),
         titlebar: Some(gpui::TitlebarOptions {
-            title: Some("Script Kit Notes".into()),
+            title: Some("Notes".into()),
             appears_transparent: true,
-            ..Default::default()
+            traffic_light_position: Some(gpui::Point {
+                x: px(8.),
+                y: px(8.),
+            }),
         }),
         focus: true,
         show: true,
