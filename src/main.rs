@@ -551,6 +551,9 @@ include!("app_impl.rs");
 // Script execution logic (execute_interactive) extracted
 include!("execute_script.rs");
 
+// Prompt message handling (handle_prompt_message) extracted
+include!("prompt_handler.rs");
+
 impl Focusable for ScriptListApp {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
