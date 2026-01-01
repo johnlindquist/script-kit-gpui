@@ -670,6 +670,9 @@ include!("app_render.rs");
 // Builtin view render methods (clipboard, app launcher, window switcher)
 include!("render_builtins.rs");
 
+// Prompt render methods (arg, div, form, term, editor, etc.)
+include!("render_prompts.rs");
+
 fn main() {
     logging::init();
 
