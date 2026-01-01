@@ -16,8 +16,7 @@ use process_manager::PROCESS_MANAGER;
 
 // Platform utilities - mouse position, display info, window movement, screenshots
 use platform::{
-    calculate_eye_line_bounds_on_mouse_display, capture_app_screenshot,
-    move_first_window_to_bounds,
+    calculate_eye_line_bounds_on_mouse_display, capture_app_screenshot, move_first_window_to_bounds,
 };
 #[macro_use]
 extern crate objc;
@@ -46,6 +45,7 @@ mod scripts;
 mod selected_text;
 mod setup;
 mod shortcuts;
+mod stdin_commands;
 mod syntax;
 mod term_prompt;
 mod terminal;
