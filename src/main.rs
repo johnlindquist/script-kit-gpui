@@ -553,6 +553,9 @@ include!("execute_script.rs");
 // Prompt message handling (handle_prompt_message) extracted
 include!("prompt_handler.rs");
 
+// App navigation methods (selection movement, scrolling)
+include!("app_navigation.rs");
+
 impl Focusable for ScriptListApp {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
