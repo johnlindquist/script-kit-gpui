@@ -150,3 +150,23 @@ pub mod login_item;
 // and easing functions (ease_out_quad, ease_in_quad, etc.)
 // Used for smooth hover effects, toast animations, and other UI transitions
 pub mod transitions;
+
+// Shared window visibility state
+// Used to track main window visibility across the app
+// Notes/AI windows use this to decide whether to hide the app after closing
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global state tracking whether the main window is visible
+/// - Used by hotkey toggle to show/hide main window
+/// - Used by Notes/AI to prevent main window from appearing when they close
+pub static MAIN_WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+/// Check if the main window is currently visible
+pub fn is_main_window_visible() -> bool {
+    MAIN_WINDOW_VISIBLE.load(Ordering::SeqCst)
+}
+
+/// Set the main window visibility state
+pub fn set_main_window_visible(visible: bool) {
+    MAIN_WINDOW_VISIBLE.store(visible, Ordering::SeqCst);
+}

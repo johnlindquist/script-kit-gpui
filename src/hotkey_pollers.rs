@@ -5,7 +5,7 @@ use crate::hotkeys;
 use crate::notes;
 use crate::platform::{calculate_eye_line_bounds_on_mouse_display, move_first_window_to_bounds};
 use crate::window_resize::{initial_window_height, reset_resize_debounce};
-use crate::{logging, platform, ScriptListApp, NEEDS_RESET, PANEL_CONFIGURED, WINDOW_VISIBLE};
+use crate::{logging, platform, ScriptListApp, NEEDS_RESET, PANEL_CONFIGURED};
 
 /// A simple model that listens for hotkey triggers via async_channel (event-driven).
 #[allow(dead_code)]
@@ -32,7 +32,7 @@ impl HotkeyPoller {
                 logging::log("VISIBILITY", "╚════════════════════════════════════════════════════════════╝");
 
                 // Check current visibility state for toggle behavior
-                let is_visible = WINDOW_VISIBLE.load(std::sync::atomic::Ordering::SeqCst);
+                let is_visible = script_kit_gpui::is_main_window_visible();
                 let needs_reset = NEEDS_RESET.load(std::sync::atomic::Ordering::SeqCst);
                 logging::log(
                     "VISIBILITY",
@@ -46,7 +46,7 @@ impl HotkeyPoller {
                     logging::log("VISIBILITY", "Decision: HIDE (window is currently visible)");
                     // Update visibility state FIRST to prevent race conditions
                     // Even though the hide is async, we mark it as hidden immediately
-                    WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::SeqCst);
+                    script_kit_gpui::set_main_window_visible(false);
                     logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
 
                     // Window is visible - check if in prompt mode
@@ -87,7 +87,7 @@ impl HotkeyPoller {
                 } else {
                     logging::log("VISIBILITY", "Decision: SHOW (window is currently hidden)");
                     // Update visibility state FIRST to prevent race conditions
-                    WINDOW_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
+                    script_kit_gpui::set_main_window_visible(true);
                     logging::log("VISIBILITY", "WINDOW_VISIBLE set to: true");
 
                     let window_clone = window;
@@ -165,7 +165,7 @@ impl HotkeyPoller {
                     });
                 }
 
-                let final_visible = WINDOW_VISIBLE.load(std::sync::atomic::Ordering::SeqCst);
+                let final_visible = script_kit_gpui::is_main_window_visible();
                 let final_reset = NEEDS_RESET.load(std::sync::atomic::Ordering::SeqCst);
                 logging::log(
                     "VISIBILITY",

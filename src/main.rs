@@ -178,8 +178,18 @@ use stdin_commands::{start_stdin_listener, ExternalCommand};
 use utils::render_path_with_highlights;
 
 // Global state for hotkey signaling between threads
-static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false); // Track window visibility for toggle (starts hidden)
+static MAIN_WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false); // Track window visibility for toggle (starts hidden)
 static NEEDS_RESET: AtomicBool = AtomicBool::new(false); // Track if window needs reset to script list on next show
+
+/// Check if the main window is currently visible
+pub fn is_main_window_visible() -> bool {
+    MAIN_WINDOW_VISIBLE.load(Ordering::SeqCst)
+}
+
+/// Set the main window visibility state  
+pub fn set_main_window_visible(visible: bool) {
+    MAIN_WINDOW_VISIBLE.store(visible, Ordering::SeqCst);
+}
 static PANEL_CONFIGURED: AtomicBool = AtomicBool::new(false); // Track if floating panel has been configured (one-time setup on first show)
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false); // Track if shutdown signal received (prevents new script spawns)
 
@@ -692,7 +702,7 @@ impl Render for ScriptListApp {
         if self.was_window_focused && !is_app_active {
             // Window just lost focus (user clicked on another app)
             // Only auto-dismiss if we're in a dismissable view AND window is visible
-            if self.is_dismissable_view() && WINDOW_VISIBLE.load(Ordering::SeqCst) {
+            if self.is_dismissable_view() && script_kit_gpui::is_main_window_visible() {
                 logging::log(
                     "FOCUS",
                     "Window lost focus while in dismissable view - closing",
@@ -1041,6 +1051,8 @@ fn main() {
                 titlebar: None,
                 is_movable: true,
                 window_background: WindowBackgroundAppearance::Blurred,
+                show: false, // Start hidden - only show on hotkey press
+                focus: false, // Don't focus on creation
                 ..Default::default()
             },
             |window, cx| {
@@ -1090,7 +1102,7 @@ fn main() {
                 logging::log("VISIBILITY", "║  HOTKEY TRIGGERED - TOGGLE WINDOW                          ║");
                 logging::log("VISIBILITY", "╚════════════════════════════════════════════════════════════╝");
 
-                let is_visible = WINDOW_VISIBLE.load(std::sync::atomic::Ordering::SeqCst);
+                let is_visible = script_kit_gpui::is_main_window_visible();
                 logging::log("VISIBILITY", &format!("State: WINDOW_VISIBLE={}", is_visible));
 
                 let app_entity_inner = app_entity_for_hotkey.clone();
@@ -1098,7 +1110,7 @@ fn main() {
 
                 if is_visible {
                     logging::log("VISIBILITY", "Decision: HIDE");
-                    WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::SeqCst);
+                    script_kit_gpui::set_main_window_visible(false);
 
                     let _ = cx.update(move |cx: &mut gpui::App| {
                         // Cancel any active prompt and reset UI
@@ -1109,12 +1121,13 @@ fn main() {
                             }
                             view.reset_to_script_list(ctx);
                         });
+                        // Hide the app (GPUI doesn't support per-window hide)
                         cx.hide();
-                        logging::log("HOTKEY", "Window hidden");
+                        logging::log("HOTKEY", "App hidden");
                     });
                 } else {
                     logging::log("VISIBILITY", "Decision: SHOW");
-                    WINDOW_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
+                    script_kit_gpui::set_main_window_visible(true);
 
                     let _ = cx.update(move |cx: &mut gpui::App| {
                         // Position window on mouse display at eye-line
@@ -1422,7 +1435,7 @@ fn main() {
                             ExternalCommand::Run { ref path } => {
                                 logging::log("STDIN", &format!("Executing script: {}", path));
                                 // Show and focus window first
-                                WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+                                script_kit_gpui::set_main_window_visible(true);
                                 ctx.activate(true);
                                 window.activate_window();
                                 let focus_handle = view.focus_handle(ctx);
@@ -1433,15 +1446,15 @@ fn main() {
                             }
                             ExternalCommand::Show => {
                                 logging::log("STDIN", "Showing window");
-                                WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+                                script_kit_gpui::set_main_window_visible(true);
                                 ctx.activate(true);
                                 window.activate_window();
                                 let focus_handle = view.focus_handle(ctx);
                                 window.focus(&focus_handle, ctx);
                             }
                             ExternalCommand::Hide => {
-                                logging::log("STDIN", "Hiding window");
-                                WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                                logging::log("STDIN", "Hiding main window");
+                                script_kit_gpui::set_main_window_visible(false);
                                 ctx.hide();
                             }
                             ExternalCommand::SetFilter { ref text } => {
@@ -1524,7 +1537,7 @@ fn main() {
                                                     if !view.filter_input.is_empty() {
                                                         view.update_filter(None, false, true, ctx);
                                                     } else {
-                                                        WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                                                        script_kit_gpui::set_main_window_visible(false);
                                                         ctx.hide();
                                                     }
                                                 }
@@ -1721,7 +1734,7 @@ fn main() {
                                 let app_entity_inner = app_entity_for_tray.clone();
                                 let _ = cx.update(|cx| {
                                     // Show and focus window (same logic as hotkey handler)
-                                    WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+                                    script_kit_gpui::set_main_window_visible(true);
 
                                     // Calculate new bounds on display with mouse
                                     let window_size = size(px(750.), initial_window_height());

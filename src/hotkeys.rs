@@ -513,12 +513,30 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
 
         let receiver = GlobalHotKeyEvent::receiver();
 
+        // Log all registered hotkey IDs for debugging
+        logging::log(
+            "HOTKEY",
+            &format!(
+                "Hotkey ID map: main={}, notes={}, ai={}",
+                main_hotkey_id, notes_hotkey_id, ai_hotkey_id
+            ),
+        );
+
         loop {
             if let Ok(event) = receiver.recv() {
                 // Only respond to key PRESS, not release
                 if event.state != HotKeyState::Pressed {
                     continue;
                 }
+
+                // Log EVERY hotkey event with its ID for debugging
+                logging::log(
+                    "HOTKEY",
+                    &format!(
+                        "Received event id={} (main={}, notes={}, ai={})",
+                        event.id, main_hotkey_id, notes_hotkey_id, ai_hotkey_id
+                    ),
+                );
 
                 // Check if it's the main app hotkey
                 if event.id == main_hotkey_id {

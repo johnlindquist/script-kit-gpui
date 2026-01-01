@@ -289,14 +289,14 @@ impl ScriptListApp {
             }
             PromptMessage::ScriptExit => {
                 logging::log("VISIBILITY", "=== ScriptExit message received ===");
-                let was_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                let was_visible = script_kit_gpui::is_main_window_visible();
                 logging::log(
                     "VISIBILITY",
                     &format!("WINDOW_VISIBLE was: {}", was_visible),
                 );
 
                 // CRITICAL: Update visibility state so hotkey toggle works correctly
-                WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                script_kit_gpui::set_main_window_visible(false);
                 logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
 
                 // Set flag so next hotkey show will reset to script list
@@ -315,14 +315,14 @@ impl ScriptListApp {
             }
             PromptMessage::HideWindow => {
                 logging::log("VISIBILITY", "=== HideWindow message received ===");
-                let was_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                let was_visible = script_kit_gpui::is_main_window_visible();
                 logging::log(
                     "VISIBILITY",
                     &format!("WINDOW_VISIBLE was: {}", was_visible),
                 );
 
                 // CRITICAL: Update visibility state so hotkey toggle works correctly
-                WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                script_kit_gpui::set_main_window_visible(false);
                 logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
 
                 // Set flag so next hotkey show will reset to script list
@@ -786,7 +786,7 @@ impl ScriptListApp {
 
                 // Focus state: we use focused_input as a proxy since we don't have Window access here.
                 // When window is visible and we're tracking an input, we're focused.
-                let window_visible = WINDOW_VISIBLE.load(Ordering::SeqCst);
+                let window_visible = script_kit_gpui::is_main_window_visible();
                 let is_focused = window_visible && self.focused_input != FocusedInput::None;
 
                 // Create the response

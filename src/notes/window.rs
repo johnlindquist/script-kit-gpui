@@ -81,6 +81,10 @@ pub struct NotesApp {
     /// Last known content line count for auto-resize
     last_line_count: usize,
 
+    /// Initial window height - used as minimum for auto-resize
+    /// The window should never shrink below this unless user manually resizes
+    initial_height: f32,
+
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
 
@@ -150,7 +154,14 @@ impl NotesApp {
             }
         });
 
-        info!(note_count = notes.len(), "Notes app initialized");
+        // Get initial window height to use as minimum
+        let initial_height: f32 = window.bounds().size.height.into();
+
+        info!(
+            note_count = notes.len(),
+            initial_height = initial_height,
+            "Notes app initialized"
+        );
 
         Self {
             notes,
@@ -163,6 +174,7 @@ impl NotesApp {
             titlebar_hovered: false,
             window_hovered: false,
             last_line_count: initial_line_count,
+            initial_height,
             focus_handle,
             _subscriptions: vec![editor_sub, search_sub],
             show_actions_panel: false,
@@ -200,6 +212,7 @@ impl NotesApp {
 
     /// Update window height based on content line count
     /// Raycast-style: window grows from compact size as content increases
+    /// IMPORTANT: Window never shrinks below initial_height (the height at window creation)
     fn update_window_height(
         &self,
         window: &mut Window,
@@ -211,27 +224,34 @@ impl NotesApp {
         const FOOTER_HEIGHT: f32 = 24.0;
         const PADDING: f32 = 24.0; // Top + bottom padding in editor area
         const LINE_HEIGHT: f32 = 20.0; // Approximate line height
-        const MIN_HEIGHT: f32 = 150.0; // Minimum sticky-note size
         const MAX_HEIGHT: f32 = 600.0; // Don't grow too large
+
+        // Use initial_height as minimum - never shrink below starting size
+        let min_height = self.initial_height;
 
         // Calculate desired height
         let content_height = (line_count as f32) * LINE_HEIGHT;
         let total_height = TITLEBAR_HEIGHT + content_height + FOOTER_HEIGHT + PADDING;
-        let clamped_height = total_height.clamp(MIN_HEIGHT, MAX_HEIGHT);
+        let clamped_height = total_height.clamp(min_height, MAX_HEIGHT);
 
         // Get current bounds and update height
         let current_bounds = window.bounds();
-        let old_height = current_bounds.size.height;
-        let new_size = size(current_bounds.size.width, px(clamped_height));
+        let old_height: f32 = current_bounds.size.height.into();
 
-        debug!(
-            old_height = %old_height,
-            new_height = %clamped_height,
-            line_count = line_count,
-            "Auto-resize: updating window height"
-        );
+        // Only resize if we need to grow (never shrink below initial)
+        if clamped_height > old_height {
+            let new_size = size(current_bounds.size.width, px(clamped_height));
 
-        window.resize(new_size);
+            debug!(
+                old_height = old_height,
+                new_height = clamped_height,
+                min_height = min_height,
+                line_count = line_count,
+                "Auto-resize: growing window height"
+            );
+
+            window.resize(new_size);
+        }
     }
 
     /// Handle search query changes
@@ -1279,8 +1299,54 @@ fn ensure_theme_initialized(cx: &mut App) {
     info!("Notes window theme synchronized with Script Kit");
 }
 
-/// Open the notes window (or focus it if already open)
+/// Calculate window bounds positioned in the top-right corner of the display containing the mouse.
+fn calculate_top_right_bounds(width: f32, height: f32, padding: f32) -> gpui::Bounds<gpui::Pixels> {
+    use crate::platform::{get_global_mouse_position, get_macos_displays};
+
+    let displays = get_macos_displays();
+
+    // Find display containing mouse
+    let target_display = if let Some((mouse_x, mouse_y)) = get_global_mouse_position() {
+        displays
+            .iter()
+            .find(|display| {
+                mouse_x >= display.origin_x
+                    && mouse_x < display.origin_x + display.width
+                    && mouse_y >= display.origin_y
+                    && mouse_y < display.origin_y + display.height
+            })
+            .cloned()
+    } else {
+        None
+    };
+
+    // Use found display or fall back to primary
+    let display = target_display.or_else(|| displays.first().cloned());
+
+    if let Some(display) = display {
+        // Position in top-right corner with padding
+        let x = display.origin_x + display.width - width as f64 - padding as f64;
+        let y = display.origin_y + padding as f64;
+
+        gpui::Bounds::new(
+            gpui::Point::new(px(x as f32), px(y as f32)),
+            gpui::Size::new(px(width), px(height)),
+        )
+    } else {
+        // Fallback to centered on primary
+        gpui::Bounds::new(
+            gpui::Point::new(px(100.0), px(100.0)),
+            gpui::Size::new(px(width), px(height)),
+        )
+    }
+}
+
+/// Toggle the notes window (open if closed, close if open)
 pub fn open_notes_window(cx: &mut App) -> Result<()> {
+    use crate::logging;
+
+    logging::log("PANEL", "open_notes_window called - checking toggle state");
+
     // Ensure gpui-component theme is initialized before opening window
     ensure_theme_initialized(cx);
 
@@ -1289,23 +1355,55 @@ pub fn open_notes_window(cx: &mut App) -> Result<()> {
 
     // Check if window already exists and is valid
     if let Some(ref handle) = *guard {
-        // Try to focus the existing window
-        if handle.update(cx, |_, _, cx| cx.notify()).is_ok() {
-            info!("Focusing existing notes window");
+        // Window exists - check if it's valid and close it (toggle OFF)
+        if handle
+            .update(cx, |_, window, _cx| {
+                window.remove_window();
+            })
+            .is_ok()
+        {
+            logging::log("PANEL", "Notes window was open - closing (toggle OFF)");
+            *guard = None;
+
+            // After closing Notes, hide the app if main window isn't supposed to be visible
+            // This prevents macOS from bringing the main window forward
+            if !crate::is_main_window_visible() {
+                logging::log(
+                    "PANEL",
+                    "Main window not visible - hiding app to prevent focus",
+                );
+                cx.hide();
+            }
+
             return Ok(());
         }
+        // Window handle was invalid, fall through to create new window
+        logging::log("PANEL", "Notes window handle was invalid - creating new");
     }
 
-    // Create new window
+    // If main window is visible, close it (Notes takes focus)
+    if crate::is_main_window_visible() {
+        logging::log(
+            "PANEL",
+            "Main window was visible - hiding it since Notes is opening",
+        );
+        crate::set_main_window_visible(false);
+        cx.hide();
+    }
+
+    // Create new window (toggle ON)
+    logging::log("PANEL", "Notes window not open - creating new (toggle ON)");
     info!("Opening new notes window");
 
-    // Raycast-style: Small sticky-note sized window
+    // Calculate position: top-right corner of the display containing the mouse
+    let window_width = 350.0_f32;
+    let window_height = 280.0_f32;
+    let padding = 20.0_f32; // Padding from screen edges
+
+    let bounds = calculate_top_right_bounds(window_width, window_height, padding);
+
     let window_options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(gpui::Bounds::centered(
-            None,
-            size(px(350.), px(280.)), // Sticky note size
-            cx,
-        ))),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("Notes".into()),
             appears_transparent: true,
@@ -1320,15 +1418,42 @@ pub fn open_notes_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
 
+    // Store the NotesApp entity so we can focus it after window creation
+    let notes_app_holder: std::sync::Arc<std::sync::Mutex<Option<Entity<NotesApp>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let notes_app_for_closure = notes_app_holder.clone();
+
     let handle = cx.open_window(window_options, |window, cx| {
         let view = cx.new(|cx| NotesApp::new(window, cx));
+        *notes_app_for_closure.lock().unwrap() = Some(view.clone());
         cx.new(|cx| Root::new(view, window, cx))
     })?;
+
+    // CRITICAL: Activate the app FIRST before focusing the window
+    // This brings the app to the foreground on macOS, which is required
+    // for the window to receive keyboard focus when the app wasn't already active
+    cx.activate(true);
+
+    // Focus the editor input in the Notes window
+    if let Some(notes_app) = notes_app_holder.lock().unwrap().clone() {
+        let _ = handle.update(cx, |_root, window, cx| {
+            window.activate_window();
+
+            // Focus the NotesApp's editor input
+            notes_app.update(cx, |app, cx| {
+                // Call the InputState's focus method which handles both focus handle and internal state
+                app.editor_state.update(cx, |state, inner_cx| {
+                    state.focus(window, inner_cx);
+                });
+
+                cx.notify();
+            });
+        });
+    }
 
     *guard = Some(handle);
 
     // Configure as floating panel (always on top) after window is created
-    // The window should now be the key window since we just created and focused it
     configure_notes_as_floating_panel();
 
     Ok(())
@@ -1365,33 +1490,50 @@ pub fn close_notes_window(cx: &mut App) {
 #[cfg(target_os = "macos")]
 fn configure_notes_as_floating_panel() {
     use crate::logging;
+    use std::ffi::CStr;
 
     unsafe {
         let app: id = NSApp();
-        let window: id = msg_send![app, keyWindow];
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
 
-        if window != nil {
-            // NSFloatingWindowLevel = 3
-            let floating_level: i32 = 3;
-            let _: () = msg_send![window, setLevel:floating_level];
+        for i in 0..count {
+            let window: id = msg_send![windows, objectAtIndex: i];
+            let title: id = msg_send![window, title];
 
-            // NSWindowCollectionBehaviorMoveToActiveSpace = 2
-            let collection_behavior: u64 = 2;
-            let _: () = msg_send![window, setCollectionBehavior:collection_behavior];
+            if title != nil {
+                let title_cstr: *const i8 = msg_send![title, UTF8String];
+                if !title_cstr.is_null() {
+                    let title_str = CStr::from_ptr(title_cstr).to_string_lossy();
 
-            // Disable window restoration
-            let _: () = msg_send![window, setRestorable:false];
+                    if title_str == "Notes" {
+                        // Found the Notes window - configure it
 
-            logging::log(
-                "PANEL",
-                "Notes window configured as floating panel (level=3, MoveToActiveSpace)",
-            );
-        } else {
-            logging::log(
-                "PANEL",
-                "Warning: Notes window not found as key window for floating panel config",
-            );
+                        // NSFloatingWindowLevel = 3
+                        let floating_level: i32 = 3;
+                        let _: () = msg_send![window, setLevel:floating_level];
+
+                        // NSWindowCollectionBehaviorMoveToActiveSpace = 2
+                        let collection_behavior: u64 = 2;
+                        let _: () = msg_send![window, setCollectionBehavior:collection_behavior];
+
+                        // Disable window restoration
+                        let _: () = msg_send![window, setRestorable:false];
+
+                        logging::log(
+                            "PANEL",
+                            "Notes window configured as floating panel (level=3, MoveToActiveSpace)",
+                        );
+                        return;
+                    }
+                }
+            }
         }
+
+        logging::log(
+            "PANEL",
+            "Warning: Notes window not found by title for floating panel config",
+        );
     }
 }
 

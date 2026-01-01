@@ -133,7 +133,7 @@ impl ScriptListApp {
                                 } else {
                                     logging::log("EXEC", "Entry copied to clipboard");
                                     // Hide window first
-                                    WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                                    script_kit_gpui::set_main_window_visible(false);
                                     cx.hide();
                                     NEEDS_RESET.store(true, Ordering::SeqCst);
 
@@ -764,7 +764,7 @@ impl ScriptListApp {
                                 } else {
                                     logging::log("EXEC", &format!("Launched: {}", app.name));
                                     // Hide window after launching
-                                    WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                                    script_kit_gpui::set_main_window_visible(false);
                                     cx.hide();
                                     NEEDS_RESET.store(true, Ordering::SeqCst);
                                 }
@@ -1088,7 +1088,7 @@ impl ScriptListApp {
                                         "EXEC",
                                         &format!("Focused window: {}", window_info.title),
                                     );
-                                    WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                                    script_kit_gpui::set_main_window_visible(false);
                                     cx.hide();
                                     NEEDS_RESET.store(true, Ordering::SeqCst);
                                 }

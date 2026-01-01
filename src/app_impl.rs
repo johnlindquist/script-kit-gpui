@@ -116,7 +116,7 @@ impl ScriptListApp {
                 let _ = cx.update(|cx| {
                     this.update(cx, |app, cx| {
                         // Skip cursor blink when window is hidden or no input is focused
-                        if !WINDOW_VISIBLE.load(Ordering::SeqCst)
+                        if !script_kit_gpui::is_main_window_visible()
                             || app.focused_input == FocusedInput::None
                         {
                             return;
@@ -1182,7 +1182,7 @@ impl ScriptListApp {
                         Ok(_) => {
                             logging::log("UI", &format!("Revealed in Finder: {}", path_info.path));
                             // Hide window and set reset flag after opening external app
-                            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                            script_kit_gpui::set_main_window_visible(false);
                             NEEDS_RESET.store(true, Ordering::SeqCst);
                             cx.hide();
                         }
@@ -1207,7 +1207,7 @@ impl ScriptListApp {
                     Ok(_) => {
                         logging::log("UI", &format!("Opened in editor: {}", path_str));
                         // Hide window and set reset flag after opening external app
-                        WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                        script_kit_gpui::set_main_window_visible(false);
                         NEEDS_RESET.store(true, Ordering::SeqCst);
                         cx.hide();
                     }
@@ -1245,7 +1245,7 @@ impl ScriptListApp {
                         Ok(_) => {
                             logging::log("UI", &format!("Opened terminal at: {}", dir_path));
                             // Hide window and set reset flag after opening external app
-                            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                            script_kit_gpui::set_main_window_visible(false);
                             NEEDS_RESET.store(true, Ordering::SeqCst);
                             cx.hide();
                         }
@@ -1424,7 +1424,7 @@ impl ScriptListApp {
                     }
 
                     // Hide window after successful execution
-                    WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                    script_kit_gpui::set_main_window_visible(false);
                     cx.hide();
                 } else {
                     // Execution failed (non-zero exit code)
@@ -1607,7 +1607,7 @@ impl ScriptListApp {
         logging::log("VISIBILITY", "=== Cmd+W: Close and reset window ===");
 
         // Update visibility state FIRST to prevent race conditions
-        WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::SeqCst);
+        script_kit_gpui::set_main_window_visible(false);
         logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
 
         // If in a prompt, cancel the script execution

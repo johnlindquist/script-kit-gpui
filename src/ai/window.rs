@@ -13,10 +13,13 @@
 use anyhow::Result;
 use chrono::{Datelike, NaiveDate, Utc};
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Context, Entity, FocusHandle, Focusable, Hsla,
+    div, prelude::*, px, rgb, size, svg, App, Context, Entity, FocusHandle, Focusable, Hsla,
     IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled, Subscription, Window,
     WindowBounds, WindowOptions,
 };
+
+// Import local IconName for SVG icons (has external_path() method)
+use crate::designs::icon_variations::IconName as LocalIconName;
 
 #[cfg(target_os = "macos")]
 use cocoa::appkit::NSApp;
@@ -26,7 +29,7 @@ use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     input::{Input, InputEvent, InputState},
     theme::{ActiveTheme, Theme as GpuiTheme, ThemeColor, ThemeMode},
-    IconName, Root, Sizable,
+    Icon, IconName, Root, Sizable,
 };
 #[cfg(target_os = "macos")]
 use objc::{msg_send, sel, sel_impl};
@@ -1023,15 +1026,61 @@ impl AiApp {
                 )
             });
 
-        // Build input area at bottom with model picker
+        // Build input area at bottom - Raycast-style layout:
+        // Row 1: [+ icon] [input field with magenta border]
+        // Row 2: [Model picker with spinner] ... [Submit ↵] | [Actions ⌘K]
+        
+        // Use theme accent color for input border (follows theme)
+        let input_border_color = cx.theme().accent;
+        
         let input_area = div()
             .flex()
             .flex_col()
             .w_full()
-            .border_t_1()
-            .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
-            // Model picker row
+            .px_3()
+            .pt_3()
+            .pb_2() // Reduced bottom padding
+            .gap_2()
+            // Input row with + icon and accent border
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    // Plus button on the left using SVG icon (properly centered)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(28.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(cx.theme().muted_foreground.opacity(0.4))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(cx.theme().muted.opacity(0.3)))
+                            .child(
+                                svg()
+                                    .external_path(LocalIconName::Plus.external_path())
+                                    .size(px(14.))
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    )
+                    // Input field with theme accent border
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(input_border_color)
+                            .overflow_hidden()
+                            .child(Input::new(&self.input_state).w_full()),
+                    ),
+            )
+            // Bottom row: Model picker left, actions right (reduced padding)
             .child(
                 div()
                     .flex()
@@ -1039,67 +1088,57 @@ impl AiApp {
                     .justify_between()
                     .w_full()
                     .overflow_hidden()
-                    .px_3()
-                    .py_1()
+                    // Left side: Model picker with potential spinner
                     .child(self.render_model_picker(cx))
+                    // Right side: Submit and Actions as text labels
                     .child(
-                        // Keyboard shortcut hint - use flex_shrink_0 to not shrink, text_nowrap to not wrap
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .flex_shrink_0()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .whitespace_nowrap()
-                            .child("⌘+Enter to send"),
-                    ),
-            )
-            // Input row
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .overflow_hidden()
-                    .px_3()
-                    .pb_3()
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.input_state).w_full()))
-                    .child({
-                        // Hardcode Script Kit's accent yellow color (#FBD024) directly
-                        // since theme mapping seems to have issues with gpui-component buttons
-                        // 0xFBD024 = rgb(251, 208, 36) - the signature Script Kit gold/yellow
-                        let accent_yellow: Hsla = rgb(0xFBD024).into();
-                        let black_fg = Hsla {
-                            h: 0.0,
-                            s: 0.0,
-                            l: 0.1, // Dark gray for text/icon visibility
-                            a: 1.0,
-                        };
-
-                        Button::new("submit")
-                            .custom(
-                                ButtonCustomVariant::new(cx)
-                                    .color(accent_yellow)
-                                    .foreground(black_fg)
-                                    .border(accent_yellow)
-                                    .hover(Hsla {
-                                        h: accent_yellow.h,
-                                        s: accent_yellow.s,
-                                        l: accent_yellow.l * 0.85, // Darker on hover
-                                        a: 1.0,
-                                    })
-                                    .active(Hsla {
-                                        h: accent_yellow.h,
-                                        s: accent_yellow.s,
-                                        l: accent_yellow.l * 0.75, // Even darker when active
-                                        a: 1.0,
-                                    })
+                            // Submit ↵ - clickable text
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .px_2()
+                                    .py(px(2.)) // Reduced vertical padding
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().muted.opacity(0.3)))
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.submit_message(window, cx);
+                                        }),
+                                    )
+                                    .child("Submit ↵"),
                             )
-                            .small()
-                            .icon(IconName::ArrowRight)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.submit_message(window, cx);
-                            }))
-                    }),
+                            // Divider
+                            .child(
+                                div()
+                                    .w(px(1.))
+                                    .h(px(16.))
+                                    .bg(cx.theme().border),
+                            )
+                            // Actions ⌘K - placeholder for future actions menu
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .px_2()
+                                    .py(px(2.)) // Reduced vertical padding to match Submit
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().muted.opacity(0.3)))
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Actions ⌘K"),
+                            ),
+                    ),
             );
 
         // Determine what to show in the content area
@@ -1293,8 +1332,12 @@ fn ensure_theme_initialized(cx: &mut App) {
     info!("AI window theme synchronized with Script Kit");
 }
 
-/// Open the AI window (or focus it if already open)
+/// Toggle the AI window (open if closed, close if open)
 pub fn open_ai_window(cx: &mut App) -> Result<()> {
+    use crate::logging;
+    
+    logging::log("PANEL", "open_ai_window called - checking toggle state");
+    
     // Ensure gpui-component theme is initialized before opening window
     ensure_theme_initialized(cx);
 
@@ -1303,14 +1346,28 @@ pub fn open_ai_window(cx: &mut App) -> Result<()> {
 
     // Check if window already exists and is valid
     if let Some(ref handle) = *guard {
-        // Try to focus the existing window
-        if handle.update(cx, |_, _, cx| cx.notify()).is_ok() {
-            info!("Focusing existing AI window");
+        // Window exists - check if it's valid and close it (toggle OFF)
+        if handle.update(cx, |_, window, _cx| {
+            window.remove_window();
+        }).is_ok() {
+            logging::log("PANEL", "AI window was open - closing (toggle OFF)");
+            *guard = None;
+            
+            // After closing AI, hide the app if main window isn't supposed to be visible
+            // This prevents macOS from bringing the main window forward
+            if !crate::is_main_window_visible() {
+                logging::log("PANEL", "Main window not visible - hiding app to prevent focus");
+                cx.hide();
+            }
+            
             return Ok(());
         }
+        // Window handle was invalid, fall through to create new window
+        logging::log("PANEL", "AI window handle was invalid - creating new");
     }
 
-    // Create new window
+    // Create new window (toggle ON)
+    logging::log("PANEL", "AI window not open - creating new (toggle ON)");
     info!("Opening new AI window");
 
     let window_options = WindowOptions {
@@ -1364,33 +1421,50 @@ pub fn close_ai_window(cx: &mut App) {
 #[cfg(target_os = "macos")]
 fn configure_ai_as_floating_panel() {
     use crate::logging;
+    use std::ffi::CStr;
 
     unsafe {
         let app: id = NSApp();
-        let window: id = msg_send![app, keyWindow];
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
 
-        if window != nil {
-            // NSFloatingWindowLevel = 3
-            let floating_level: i32 = 3;
-            let _: () = msg_send![window, setLevel:floating_level];
+        for i in 0..count {
+            let window: id = msg_send![windows, objectAtIndex: i];
+            let title: id = msg_send![window, title];
+            
+            if title != nil {
+                let title_cstr: *const i8 = msg_send![title, UTF8String];
+                if !title_cstr.is_null() {
+                    let title_str = CStr::from_ptr(title_cstr).to_string_lossy();
+                    
+                    if title_str == "Script Kit AI" {
+                        // Found the AI window - configure it
+                        
+                        // NSFloatingWindowLevel = 3
+                        let floating_level: i32 = 3;
+                        let _: () = msg_send![window, setLevel:floating_level];
 
-            // NSWindowCollectionBehaviorMoveToActiveSpace = 2
-            let collection_behavior: u64 = 2;
-            let _: () = msg_send![window, setCollectionBehavior:collection_behavior];
+                        // NSWindowCollectionBehaviorMoveToActiveSpace = 2
+                        let collection_behavior: u64 = 2;
+                        let _: () = msg_send![window, setCollectionBehavior:collection_behavior];
 
-            // Disable window restoration
-            let _: () = msg_send![window, setRestorable:false];
+                        // Disable window restoration
+                        let _: () = msg_send![window, setRestorable:false];
 
-            logging::log(
-                "PANEL",
-                "AI window configured as floating panel (level=3, MoveToActiveSpace)",
-            );
-        } else {
-            logging::log(
-                "PANEL",
-                "Warning: AI window not found as key window for floating panel config",
-            );
+                        logging::log(
+                            "PANEL",
+                            "AI window configured as floating panel (level=3, MoveToActiveSpace)",
+                        );
+                        return;
+                    }
+                }
+            }
         }
+
+        logging::log(
+            "PANEL",
+            "Warning: AI window not found by title for floating panel config",
+        );
     }
 }
 

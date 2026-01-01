@@ -57,7 +57,7 @@ impl ScriptListApp {
                         logging::log("EXEC", &format!("Launched app: {}", app_name));
                         // Hide window after launching app and set reset flag
                         // so filter_text is cleared when window is shown again
-                        WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                        script_kit_gpui::set_main_window_visible(false);
                         NEEDS_RESET.store(true, Ordering::SeqCst);
                         cx.hide();
                     }
@@ -123,7 +123,7 @@ impl ScriptListApp {
             logging::log("EXEC", &format!("Launched app: {}", app.name));
             // Hide window after launching app and set reset flag
             // so filter_text is cleared when window is shown again
-            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+            script_kit_gpui::set_main_window_visible(false);
             NEEDS_RESET.store(true, Ordering::SeqCst);
             cx.hide();
         }
@@ -154,7 +154,7 @@ impl ScriptListApp {
             logging::log("EXEC", &format!("Focused window: {}", window.title));
             // Hide Script Kit after focusing window and set reset flag
             // so filter_text is cleared when window is shown again
-            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+            script_kit_gpui::set_main_window_visible(false);
             NEEDS_RESET.store(true, Ordering::SeqCst);
             cx.hide();
         }
