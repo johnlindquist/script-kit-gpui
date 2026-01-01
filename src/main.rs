@@ -20,7 +20,8 @@ use process_manager::PROCESS_MANAGER;
 
 // Platform utilities - mouse position, display info, window movement, screenshots
 use platform::{
-    calculate_eye_line_bounds_on_mouse_display, capture_app_screenshot, move_first_window_to_bounds,
+    calculate_eye_line_bounds_on_mouse_display, capture_app_screenshot, capture_window_by_title,
+    move_first_window_to_bounds,
 };
 #[macro_use]
 extern crate objc;
@@ -1636,6 +1637,22 @@ fn main() {
                                 logging::log("STDIN", "Opening AI window via stdin command");
                                 if let Err(e) = ai::open_ai_window(ctx) {
                                     logging::log("STDIN", &format!("Failed to open AI window: {}", e));
+                                }
+                            }
+                            ExternalCommand::CaptureWindow { title, path } => {
+                                logging::log("STDIN", &format!("Capturing window with title '{}' to '{}'", title, path));
+                                match capture_window_by_title(&title, false) {
+                                    Ok((png_data, width, height)) => {
+                                        // Save to file
+                                        if let Err(e) = std::fs::write(&path, &png_data) {
+                                            logging::log("STDIN", &format!("Failed to write screenshot: {}", e));
+                                        } else {
+                                            logging::log("STDIN", &format!("Screenshot saved: {} ({}x{})", path, width, height));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        logging::log("STDIN", &format!("Failed to capture window: {}", e));
+                                    }
                                 }
                             }
                         }

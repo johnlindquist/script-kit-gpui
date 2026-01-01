@@ -58,6 +58,10 @@ pub enum ExternalCommand {
     OpenNotes,
     /// Open the AI Chat window (for testing)
     OpenAi,
+    /// Capture a screenshot of a window by title pattern and save to file (for testing)
+    /// title: Title pattern to match (e.g., "Script Kit AI" for the AI window)
+    /// path: File path to save the PNG screenshot
+    CaptureWindow { title: String, path: String },
 }
 
 /// Start a thread that listens on stdin for external JSONL commands.
@@ -239,5 +243,19 @@ mod tests {
         let json = r#"{"type": "openAi"}"#;
         let cmd: ExternalCommand = serde_json::from_str(json).unwrap();
         assert!(matches!(cmd, ExternalCommand::OpenAi));
+    }
+
+    #[test]
+    fn test_external_command_capture_window_deserialization() {
+        let json =
+            r#"{"type": "captureWindow", "title": "Script Kit AI", "path": "/tmp/screenshot.png"}"#;
+        let cmd: ExternalCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            ExternalCommand::CaptureWindow { title, path } => {
+                assert_eq!(title, "Script Kit AI");
+                assert_eq!(path, "/tmp/screenshot.png");
+            }
+            _ => panic!("Expected CaptureWindow command"),
+        }
     }
 }

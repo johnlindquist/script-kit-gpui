@@ -624,6 +624,92 @@ pub fn capture_app_screenshot(
     Err("Script Kit window not found".into())
 }
 
+/// Capture a screenshot of a window by its title pattern.
+///
+/// Similar to `capture_app_screenshot` but allows specifying which window to capture
+/// by matching the title. This is useful for secondary windows like the AI Chat window.
+///
+/// # Arguments
+/// * `title_pattern` - A string that the window title must contain
+/// * `hi_dpi` - If true, return full retina resolution (2x). If false, scale down to 1x.
+///
+/// # Returns
+/// A tuple of (png_data, width, height) on success.
+pub fn capture_window_by_title(
+    title_pattern: &str,
+    hi_dpi: bool,
+) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error + Send + Sync>> {
+    use image::codecs::png::PngEncoder;
+    use image::ImageEncoder;
+    use xcap::Window;
+
+    let windows = Window::all()?;
+
+    for window in windows {
+        let title = window.title().unwrap_or_else(|_| String::new());
+        let app_name = window.app_name().unwrap_or_else(|_| String::new());
+
+        // Match window by title pattern (must also be our app)
+        let is_our_app = app_name.contains("script-kit-gpui") || app_name == "Script Kit";
+        let title_matches = title.contains(title_pattern);
+        let is_minimized = window.is_minimized().unwrap_or(true);
+
+        if is_our_app && title_matches && !is_minimized {
+            tracing::debug!(
+                app_name = %app_name,
+                title = %title,
+                title_pattern = %title_pattern,
+                hi_dpi = hi_dpi,
+                "Found window matching title pattern for screenshot"
+            );
+
+            let image = window.capture_image()?;
+            let original_width = image.width();
+            let original_height = image.height();
+
+            // Scale down to 1x if not hi_dpi mode
+            let (final_image, width, height) = if hi_dpi {
+                (image, original_width, original_height)
+            } else {
+                let new_width = original_width / 2;
+                let new_height = original_height / 2;
+                let resized = image::imageops::resize(
+                    &image,
+                    new_width,
+                    new_height,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                tracing::debug!(
+                    original_width = original_width,
+                    original_height = original_height,
+                    new_width = new_width,
+                    new_height = new_height,
+                    "Scaled screenshot to 1x resolution"
+                );
+                (resized, new_width, new_height)
+            };
+
+            // Encode to PNG in memory
+            let mut png_data = Vec::new();
+            let encoder = PngEncoder::new(&mut png_data);
+            encoder.write_image(&final_image, width, height, image::ExtendedColorType::Rgba8)?;
+
+            tracing::debug!(
+                width = width,
+                height = height,
+                hi_dpi = hi_dpi,
+                file_size = png_data.len(),
+                title_pattern = %title_pattern,
+                "Screenshot captured for window by title"
+            );
+
+            return Ok((png_data, width, height));
+        }
+    }
+
+    Err(format!("Window with title containing '{}' not found", title_pattern).into())
+}
+
 // ============================================================================
 // Open Path with System Default
 // ============================================================================
