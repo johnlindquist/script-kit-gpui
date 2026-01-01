@@ -25,6 +25,11 @@ pub const DEFAULT_CLIPBOARD_HISTORY_MAX_TEXT_LENGTH: usize = 100_000;
 /// Default process limits
 pub const DEFAULT_HEALTH_CHECK_INTERVAL_MS: u64 = 5000;
 
+/// Default frecency settings
+pub const DEFAULT_FRECENCY_HALF_LIFE_DAYS: f64 = 7.0;
+pub const DEFAULT_FRECENCY_MAX_RECENT_ITEMS: usize = 10;
+pub const DEFAULT_FRECENCY_ENABLED: bool = true;
+
 /// Configuration for built-in features (clipboard history, app launcher, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +90,43 @@ impl Default for ProcessLimits {
             max_memory_mb: None,
             max_runtime_seconds: None,
             health_check_interval_ms: DEFAULT_HEALTH_CHECK_INTERVAL_MS,
+        }
+    }
+}
+
+/// Configuration for frecency scoring (recent items ranking)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrecencyConfig {
+    /// Whether frecency tracking is enabled (default: true)
+    #[serde(default = "default_frecency_enabled")]
+    pub enabled: bool,
+    /// Half-life in days for frecency decay (default: 7.0)
+    /// Lower values = more weight on recent items
+    /// Higher values = more weight on frequently used items
+    #[serde(default = "default_frecency_half_life_days")]
+    pub half_life_days: f64,
+    /// Maximum number of items to show in RECENT section (default: 10)
+    #[serde(default = "default_frecency_max_recent_items")]
+    pub max_recent_items: usize,
+}
+
+fn default_frecency_enabled() -> bool {
+    DEFAULT_FRECENCY_ENABLED
+}
+fn default_frecency_half_life_days() -> f64 {
+    DEFAULT_FRECENCY_HALF_LIFE_DAYS
+}
+fn default_frecency_max_recent_items() -> usize {
+    DEFAULT_FRECENCY_MAX_RECENT_ITEMS
+}
+
+impl Default for FrecencyConfig {
+    fn default() -> Self {
+        FrecencyConfig {
+            enabled: DEFAULT_FRECENCY_ENABLED,
+            half_life_days: DEFAULT_FRECENCY_HALF_LIFE_DAYS,
+            max_recent_items: DEFAULT_FRECENCY_MAX_RECENT_ITEMS,
         }
     }
 }
@@ -164,6 +206,9 @@ pub struct Config {
         rename = "clipboardHistoryMaxTextLength"
     )]
     pub clipboard_history_max_text_length: Option<usize>,
+    /// Frecency configuration for recent items ranking
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frecency: Option<FrecencyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +233,7 @@ impl Default for Config {
             built_ins: None,          // Will use BuiltInConfig::default() via getter
             process_limits: None,     // Will use ProcessLimits::default() via getter
             clipboard_history_max_text_length: None, // Will use default via getter
+            frecency: None,           // Will use FrecencyConfig::default() via getter
         }
     }
 }
@@ -245,6 +291,11 @@ impl Config {
     #[allow(dead_code)] // Will be used by process_manager module
     pub fn get_process_limits(&self) -> ProcessLimits {
         self.process_limits.clone().unwrap_or_default()
+    }
+
+    /// Returns the frecency configuration, or defaults if not configured
+    pub fn get_frecency(&self) -> FrecencyConfig {
+        self.frecency.clone().unwrap_or_default()
     }
 }
 
@@ -387,6 +438,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -425,6 +477,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
         assert_eq!(config.bun_path, Some("/custom/path/bun".to_string()));
     }
@@ -445,6 +498,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
         assert_eq!(config.bun_path, None);
     }
@@ -465,6 +519,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -490,6 +545,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -582,6 +638,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         assert_eq!(config.hotkey.modifiers.len(), 0);
@@ -608,6 +665,7 @@ mod tests {
                 built_ins: None,
                 process_limits: None,
                 clipboard_history_max_text_length: None,
+                frecency: None,
             };
 
             let json = serde_json::to_string(&config).unwrap();
@@ -633,6 +691,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -658,6 +717,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -684,6 +744,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         // Config editor takes precedence
@@ -712,6 +773,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         // Should fall back to EDITOR env var
@@ -746,6 +808,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         // Should fall back to "code" default
@@ -780,6 +843,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         // Config editor should win
@@ -883,6 +947,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let padding = config.get_padding();
@@ -913,6 +978,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         assert_eq!(config.get_editor_font_size(), 16.0);
@@ -940,6 +1006,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         assert_eq!(config.get_terminal_font_size(), 12.0);
@@ -967,6 +1034,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         assert_eq!(config.get_ui_scale(), 1.5);
@@ -1055,6 +1123,7 @@ mod tests {
             built_ins: None,
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1151,6 +1220,7 @@ mod tests {
             }),
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let builtins = config.get_builtins();
@@ -1239,6 +1309,7 @@ mod tests {
             built_ins: Some(BuiltInConfig::default()),
             process_limits: None,
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1378,6 +1449,7 @@ mod tests {
                 health_check_interval_ms: 3000,
             }),
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let limits = config.get_process_limits();
@@ -1472,6 +1544,7 @@ mod tests {
             built_ins: None,
             process_limits: Some(ProcessLimits::default()),
             clipboard_history_max_text_length: None,
+            frecency: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();

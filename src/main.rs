@@ -4,8 +4,8 @@ use gpui::{
     div, hsla, list, point, prelude::*, px, rgb, rgba, size, svg, uniform_list, AnyElement, App,
     Application, Bounds, BoxShadow, Context, ElementId, Entity, FocusHandle, Focusable,
     ListAlignment, ListSizingBehavior, ListState, Pixels, Render, ScrollStrategy, SharedString,
-    Timer, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowOptions,
+    Timer, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowOptions,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,21 +25,23 @@ mod designs;
 mod editor;
 mod error;
 mod executor;
-mod form_prompt;
 mod filter_coalescer;
+mod form_prompt;
 mod hotkey_pollers;
 mod hotkeys;
 mod list_item;
 mod logging;
+mod navigation;
 mod panel;
 mod perf;
 mod platform;
 mod prompts;
 mod protocol;
 mod scripts;
-mod setup;
 #[cfg(target_os = "macos")]
 mod selected_text;
+mod setup;
+mod shortcuts;
 mod syntax;
 mod term_prompt;
 mod terminal;
@@ -49,8 +51,6 @@ mod utils;
 mod watcher;
 mod window_manager;
 mod window_resize;
-mod navigation;
-mod shortcuts;
 
 // Phase 1 system API modules
 mod clipboard_history;
@@ -128,7 +128,9 @@ use window_resize::{
     resize_first_window_to_height, ViewType,
 };
 
-use components::{Button, ButtonColors, ButtonVariant, FormFieldColors, Scrollbar, ScrollbarColors};
+use components::{
+    Button, ButtonColors, ButtonVariant, FormFieldColors, Scrollbar, ScrollbarColors,
+};
 use designs::{get_tokens, render_design_item, DesignVariant};
 use frecency::FrecencyStore;
 use list_item::{
@@ -1073,7 +1075,8 @@ impl ScriptListApp {
         // Config is now passed in from main() to avoid duplicate load (~100-300ms savings)
 
         // Load frecency data for recently-used script tracking
-        let mut frecency_store = FrecencyStore::new();
+        let frecency_config = config.get_frecency();
+        let mut frecency_store = FrecencyStore::with_config(&frecency_config);
         frecency_store.load().ok(); // Ignore errors - starts fresh if file doesn't exist
 
         // Load built-in entries based on config
@@ -1483,28 +1486,37 @@ impl ScriptListApp {
     }
 
     /// P1: Get grouped results with caching - avoids recomputing 9+ times per keystroke
-    /// 
+    ///
     /// This is the ONLY place that should call scripts::get_grouped_results().
     /// P3: Cache is keyed off computed_filter_text (not filter_text) for two-stage filtering.
-    /// 
+    ///
     /// P1-Arc: Returns Arc clones for cheap sharing with render closures.
-    fn get_grouped_results_cached(&mut self) -> (Arc<[GroupedListItem]>, Arc<[scripts::SearchResult]>) {
+    fn get_grouped_results_cached(
+        &mut self,
+    ) -> (Arc<[GroupedListItem]>, Arc<[scripts::SearchResult]>) {
         // P3: Key off computed_filter_text for two-stage filtering
         if self.computed_filter_text == self.grouped_cache_key {
             logging::log_debug(
                 "CACHE",
                 &format!("Grouped cache HIT for '{}'", self.computed_filter_text),
             );
-            return (self.cached_grouped_items.clone(), self.cached_grouped_flat_results.clone());
+            return (
+                self.cached_grouped_items.clone(),
+                self.cached_grouped_flat_results.clone(),
+            );
         }
 
         // Cache miss - need to recompute
         logging::log_debug(
             "CACHE",
-            &format!("Grouped cache MISS - recomputing for '{}'", self.computed_filter_text),
+            &format!(
+                "Grouped cache MISS - recomputing for '{}'",
+                self.computed_filter_text
+            ),
         );
 
         let start = std::time::Instant::now();
+        let max_recent_items = self.config.get_frecency().max_recent_items;
         let (grouped_items, flat_results) = get_grouped_results(
             &self.scripts,
             &self.scriptlets,
@@ -1512,6 +1524,7 @@ impl ScriptListApp {
             &self.apps,
             &self.frecency_store,
             &self.computed_filter_text,
+            max_recent_items,
         );
         let elapsed = start.elapsed();
 
@@ -1532,7 +1545,10 @@ impl ScriptListApp {
             );
         }
 
-        (self.cached_grouped_items.clone(), self.cached_grouped_flat_results.clone())
+        (
+            self.cached_grouped_items.clone(),
+            self.cached_grouped_flat_results.clone(),
+        )
     }
 
     /// P1: Invalidate grouped results cache (call when scripts/scriptlets/apps change)
@@ -1843,26 +1859,29 @@ impl ScriptListApp {
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(NavCoalescer::WINDOW).await;
-                let keep_running = cx.update(|cx| {
-                    this.update(cx, |this, cx| {
-                        // Flush any pending navigation delta
-                        if let Some((dir, delta)) = this.nav_coalescer.flush_pending() {
-                            this.apply_nav_delta(dir, delta, cx);
-                        }
-                        // Check if we should keep running
-                        let now = std::time::Instant::now();
-                        let recently_active =
-                            now.duration_since(this.nav_coalescer.last_event) < NavCoalescer::WINDOW;
-                        if !recently_active && this.nav_coalescer.pending_delta == 0 {
-                            // No recent activity and no pending delta - stop the task
-                            this.nav_coalescer.flush_task_running = false;
-                            this.nav_coalescer.reset();
-                            false
-                        } else {
-                            true
-                        }
+                let keep_running = cx
+                    .update(|cx| {
+                        this.update(cx, |this, cx| {
+                            // Flush any pending navigation delta
+                            if let Some((dir, delta)) = this.nav_coalescer.flush_pending() {
+                                this.apply_nav_delta(dir, delta, cx);
+                            }
+                            // Check if we should keep running
+                            let now = std::time::Instant::now();
+                            let recently_active = now.duration_since(this.nav_coalescer.last_event)
+                                < NavCoalescer::WINDOW;
+                            if !recently_active && this.nav_coalescer.pending_delta == 0 {
+                                // No recent activity and no pending delta - stop the task
+                                this.nav_coalescer.flush_task_running = false;
+                                this.nav_coalescer.reset();
+                                false
+                            } else {
+                                true
+                            }
+                        })
                     })
-                }).unwrap_or(Ok(false)).unwrap_or(false);
+                    .unwrap_or(Ok(false))
+                    .unwrap_or(false);
                 if !keep_running {
                     break;
                 }
@@ -1903,6 +1922,7 @@ impl ScriptListApp {
                 };
                 self.frecency_store.record_use(&frecency_path);
                 self.frecency_store.save().ok(); // Best-effort save
+                self.invalidate_grouped_cache(); // Invalidate cache so next show reflects frecency
 
                 match result {
                     scripts::SearchResult::Script(script_match) => {
@@ -2216,7 +2236,7 @@ impl ScriptListApp {
                         let mut dialog = ActionsDialog::with_script(
                             focus_handle,
                             std::sync::Arc::new(|_action_id| {}), // Callback handled separately
-                            None, // No script info for arg prompts
+                            None,                                 // No script info for arg prompts
                             theme_arc,
                         );
                         // Set SDK actions to replace built-in actions
@@ -3127,7 +3147,9 @@ impl ScriptListApp {
                                             message_type
                                         )
                                     })
-                                    .unwrap_or_else(|| "Unknown message type from script".to_string()),
+                                    .unwrap_or_else(|| {
+                                        "Unknown message type from script".to_string()
+                                    }),
                                 _ => "Protocol message issue from script".to_string(),
                             };
 
@@ -3851,15 +3873,41 @@ impl ScriptListApp {
                                         choices,
                                         actions,
                                     }),
-                                    Message::Div { id, html, container_classes, actions, placeholder, hint, footer, container_bg, container_padding, opacity } => {
-                                        Some(PromptMessage::ShowDiv { id, html, container_classes, actions, placeholder, hint, footer, container_bg, container_padding, opacity })
-                                    }
+                                    Message::Div {
+                                        id,
+                                        html,
+                                        container_classes,
+                                        actions,
+                                        placeholder,
+                                        hint,
+                                        footer,
+                                        container_bg,
+                                        container_padding,
+                                        opacity,
+                                    } => Some(PromptMessage::ShowDiv {
+                                        id,
+                                        html,
+                                        container_classes,
+                                        actions,
+                                        placeholder,
+                                        hint,
+                                        footer,
+                                        container_bg,
+                                        container_padding,
+                                        opacity,
+                                    }),
                                     Message::Form { id, html, actions } => {
                                         Some(PromptMessage::ShowForm { id, html, actions })
                                     }
-                                    Message::Term { id, command, actions } => {
-                                        Some(PromptMessage::ShowTerm { id, command, actions })
-                                    }
+                                    Message::Term {
+                                        id,
+                                        command,
+                                        actions,
+                                    } => Some(PromptMessage::ShowTerm {
+                                        id,
+                                        command,
+                                        actions,
+                                    }),
                                     Message::Editor {
                                         id,
                                         content,
@@ -4511,8 +4559,10 @@ impl ScriptListApp {
                     self.action_shortcuts.clear();
                     for action in action_list {
                         if let Some(shortcut) = &action.shortcut {
-                            self.action_shortcuts
-                                .insert(shortcuts::normalize_shortcut(shortcut), action.name.clone());
+                            self.action_shortcuts.insert(
+                                shortcuts::normalize_shortcut(shortcut),
+                                action.name.clone(),
+                            );
                         }
                     }
                 } else {
@@ -4562,10 +4612,7 @@ impl ScriptListApp {
                         if let Some(ref sender) = response_sender {
                             let response = Message::Submit { id, value };
                             if let Err(e) = sender.send(response) {
-                                logging::log(
-                                    "UI",
-                                    &format!("Failed to send div response: {}", e),
-                                );
+                                logging::log("UI", &format!("Failed to send div response: {}", e));
                             }
                         }
                     });
@@ -4633,7 +4680,11 @@ impl ScriptListApp {
                 defer_resize_to_view(view_type, field_count, cx);
                 cx.notify();
             }
-            PromptMessage::ShowTerm { id, command, actions } => {
+            PromptMessage::ShowTerm {
+                id,
+                command,
+                actions,
+            } => {
                 logging::log(
                     "UI",
                     &format!("Showing term prompt: {} (command: {:?})", id, command),
@@ -6339,12 +6390,13 @@ impl ScriptListApp {
 
         // P4: Compute match indices lazily for visible preview (only one result at a time)
         let computed_filter = self.computed_filter_text.clone();
-        
+
         match selected_result {
             Some(ref result) => {
                 // P4: Lazy match indices computation for preview panel
-                let match_indices = scripts::compute_match_indices_for_result(result, &computed_filter);
-                
+                let match_indices =
+                    scripts::compute_match_indices_for_result(result, &computed_filter);
+
                 match result {
                     scripts::SearchResult::Script(script_match) => {
                         let script = &script_match.script;
@@ -7394,7 +7446,10 @@ impl ScriptListApp {
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("Executing action: {} (close={})", action_id, should_close),
+                                        &format!(
+                                            "Executing action: {} (close={})",
+                                            action_id, should_close
+                                        ),
                                     );
                                     // Only close if action has close: true (default)
                                     if should_close {
@@ -8009,7 +8064,10 @@ impl ScriptListApp {
                   cx: &mut Context<Self>| {
                 let key_str = event.keystroke.key.to_lowercase();
                 let has_cmd = event.keystroke.modifiers.platform;
-                logging::log("KEY", &format!("ArgPrompt key: '{}' cmd={}", key_str, has_cmd));
+                logging::log(
+                    "KEY",
+                    &format!("ArgPrompt key: '{}' cmd={}", key_str, has_cmd),
+                );
 
                 // Check for Cmd+K to toggle actions popup (if actions are available)
                 if has_cmd && key_str == "k" && has_actions_for_handler {
@@ -8037,7 +8095,10 @@ impl ScriptListApp {
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("ArgPrompt executing action: {} (close={})", action_id, should_close),
+                                        &format!(
+                                            "ArgPrompt executing action: {} (close={})",
+                                            action_id, should_close
+                                        ),
                                     );
                                     // Only close if action has close: true (default)
                                     if should_close {
@@ -8082,7 +8143,10 @@ impl ScriptListApp {
                 let shortcut_key =
                     shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
-                    logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
+                    logging::log(
+                        "KEY",
+                        &format!("SDK action shortcut matched: {}", action_name),
+                    );
                     this.trigger_action_by_name(&action_name, cx);
                     return;
                 }
@@ -8329,7 +8393,7 @@ impl ScriptListApp {
                         let button_colors = ButtonColors::from_theme(&self.theme);
                         let handle_actions = cx.entity().downgrade();
                         let show_actions = self.show_actions_popup;
-                        
+
                         // Get actions search text from the dialog
                         let search_text = self
                             .actions_dialog
@@ -8344,8 +8408,10 @@ impl ScriptListApp {
                         };
                         let accent_color = design_colors.accent;
                         let search_box_bg = self.theme.colors.background.search_box;
-                        let cursor_visible_for_search = self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
-                        
+                        let cursor_visible_for_search = self.focused_input
+                            == FocusedInput::ActionsSearch
+                            && self.cursor_visible;
+
                         d.child(
                             div()
                                 .relative()
@@ -8394,7 +8460,12 @@ impl ScriptListApp {
                                         .gap(px(8.))
                                         .when(!show_actions, |d| d.opacity(0.).invisible())
                                         // ⌘K indicator
-                                        .child(div().text_color(rgb(text_dimmed)).text_xs().child("⌘K"))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(text_dimmed))
+                                                .text_xs()
+                                                .child("⌘K"),
+                                        )
                                         // Search input display - compact style matching buttons
                                         .child(
                                             div()
@@ -8413,11 +8484,13 @@ impl ScriptListApp {
                                                 .px(px(8.))
                                                 .rounded(px(4.))
                                                 .bg(rgba(
-                                                    (search_box_bg << 8) | if search_is_empty { 0x40 } else { 0x80 },
+                                                    (search_box_bg << 8)
+                                                        | if search_is_empty { 0x40 } else { 0x80 },
                                                 ))
                                                 .border_1()
                                                 .border_color(rgba(
-                                                    (accent_color << 8) | if search_is_empty { 0x20 } else { 0x40 },
+                                                    (accent_color << 8)
+                                                        | if search_is_empty { 0x20 } else { 0x40 },
                                                 ))
                                                 .text_sm()
                                                 .text_color(if search_is_empty {
@@ -8433,7 +8506,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .mr(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 })
                                                 .child(search_display)
@@ -8445,7 +8520,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .ml(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 }),
                                         )
@@ -8495,14 +8572,22 @@ impl ScriptListApp {
                 },
                 |d, dialog| {
                     // Create click handler for backdrop to dismiss dialog
-                    let backdrop_click = cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
-                        logging::log("FOCUS", "Arg actions backdrop clicked - dismissing dialog");
-                        this.show_actions_popup = false;
-                        this.actions_dialog = None;
-                        this.focused_input = FocusedInput::ArgPrompt;
-                        window.focus(&this.focus_handle, cx);
-                        cx.notify();
-                    });
+                    let backdrop_click = cx.listener(
+                        |this: &mut Self,
+                         _event: &gpui::ClickEvent,
+                         window: &mut Window,
+                         cx: &mut Context<Self>| {
+                            logging::log(
+                                "FOCUS",
+                                "Arg actions backdrop clicked - dismissing dialog",
+                            );
+                            this.show_actions_popup = false;
+                            this.actions_dialog = None;
+                            this.focused_input = FocusedInput::ArgPrompt;
+                            window.focus(&this.focus_handle, cx);
+                            cx.notify();
+                        },
+                    );
 
                     d.child(
                         div()
@@ -8514,7 +8599,7 @@ impl ScriptListApp {
                                     .id("arg-actions-backdrop")
                                     .absolute()
                                     .inset_0()
-                                    .on_click(backdrop_click)
+                                    .on_click(backdrop_click),
                             )
                             // Dialog positioned at top-right
                             .child(
@@ -8535,8 +8620,8 @@ impl ScriptListApp {
         entity: Entity<DivPrompt>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let has_actions = self.sdk_actions.is_some()
-            && !self.sdk_actions.as_ref().unwrap().is_empty();
+        let has_actions =
+            self.sdk_actions.is_some() && !self.sdk_actions.as_ref().unwrap().is_empty();
 
         // Use design tokens for GLOBAL theming
         let tokens = get_tokens(self.current_design);
@@ -8577,7 +8662,10 @@ impl ScriptListApp {
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("DivPrompt executing action: {} (close={})", action_id, should_close),
+                                        &format!(
+                                            "DivPrompt executing action: {} (close={})",
+                                            action_id, should_close
+                                        ),
                                     );
                                     if should_close {
                                         this.show_actions_popup = false;
@@ -8641,7 +8729,7 @@ impl ScriptListApp {
                 let button_colors = ButtonColors::from_theme(&self.theme);
                 let handle_actions = cx.entity().downgrade();
                 let show_actions = self.show_actions_popup;
-                
+
                 // Get actions search text from the dialog
                 let search_text = self
                     .actions_dialog
@@ -8659,8 +8747,9 @@ impl ScriptListApp {
                 let text_muted = design_colors.text_muted;
                 let text_dimmed = design_colors.text_dimmed;
                 let search_box_bg = self.theme.colors.background.search_box;
-                let cursor_visible_for_search = self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
-                
+                let cursor_visible_for_search =
+                    self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
+
                 d.child(
                     div()
                         .w_full()
@@ -8717,7 +8806,12 @@ impl ScriptListApp {
                                         .justify_end()
                                         .gap(px(8.))
                                         .when(!show_actions, |d| d.opacity(0.).invisible())
-                                        .child(div().text_color(rgb(text_dimmed)).text_xs().child("⌘K"))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(text_dimmed))
+                                                .text_xs()
+                                                .child("⌘K"),
+                                        )
                                         .child(
                                             div()
                                                 .id("div-actions-search")
@@ -8735,11 +8829,13 @@ impl ScriptListApp {
                                                 .px(px(8.))
                                                 .rounded(px(4.))
                                                 .bg(rgba(
-                                                    (search_box_bg << 8) | if search_is_empty { 0x40 } else { 0x80 },
+                                                    (search_box_bg << 8)
+                                                        | if search_is_empty { 0x40 } else { 0x80 },
                                                 ))
                                                 .border_1()
                                                 .border_color(rgba(
-                                                    (accent_color << 8) | if search_is_empty { 0x20 } else { 0x40 },
+                                                    (accent_color << 8)
+                                                        | if search_is_empty { 0x20 } else { 0x40 },
                                                 ))
                                                 .text_sm()
                                                 .text_color(if search_is_empty {
@@ -8754,7 +8850,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .mr(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 })
                                                 .child(search_display)
@@ -8765,7 +8863,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .ml(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 }),
                                         )
@@ -8797,14 +8897,22 @@ impl ScriptListApp {
                     None
                 },
                 |d, dialog| {
-                    let backdrop_click = cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
-                        logging::log("FOCUS", "Div actions backdrop clicked - dismissing dialog");
-                        this.show_actions_popup = false;
-                        this.actions_dialog = None;
-                        this.focused_input = FocusedInput::None;
-                        window.focus(&this.focus_handle, cx);
-                        cx.notify();
-                    });
+                    let backdrop_click = cx.listener(
+                        |this: &mut Self,
+                         _event: &gpui::ClickEvent,
+                         window: &mut Window,
+                         cx: &mut Context<Self>| {
+                            logging::log(
+                                "FOCUS",
+                                "Div actions backdrop clicked - dismissing dialog",
+                            );
+                            this.show_actions_popup = false;
+                            this.actions_dialog = None;
+                            this.focused_input = FocusedInput::None;
+                            window.focus(&this.focus_handle, cx);
+                            cx.notify();
+                        },
+                    );
 
                     d.child(
                         div()
@@ -8815,15 +8923,9 @@ impl ScriptListApp {
                                     .id("div-actions-backdrop")
                                     .absolute()
                                     .inset_0()
-                                    .on_click(backdrop_click)
+                                    .on_click(backdrop_click),
                             )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(52.))
-                                    .right(px(8.))
-                                    .child(dialog),
-                            ),
+                            .child(div().absolute().top(px(52.)).right(px(8.)).child(dialog)),
                     )
                 },
             )
@@ -8835,8 +8937,8 @@ impl ScriptListApp {
         entity: Entity<FormPromptState>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let has_actions = self.sdk_actions.is_some()
-            && !self.sdk_actions.as_ref().unwrap().is_empty();
+        let has_actions =
+            self.sdk_actions.is_some() && !self.sdk_actions.as_ref().unwrap().is_empty();
 
         // Use design tokens for GLOBAL theming
         let tokens = get_tokens(self.current_design);
@@ -8900,7 +9002,10 @@ impl ScriptListApp {
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("FormPrompt executing action: {} (close={})", action_id, should_close),
+                                        &format!(
+                                            "FormPrompt executing action: {} (close={})",
+                                            action_id, should_close
+                                        ),
                                     );
                                     if should_close {
                                         this.show_actions_popup = false;
@@ -8942,7 +9047,10 @@ impl ScriptListApp {
                 let shortcut_key =
                     shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
-                    logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
+                    logging::log(
+                        "KEY",
+                        &format!("SDK action shortcut matched: {}", action_name),
+                    );
                     this.trigger_action_by_name(&action_name, cx);
                     return;
                 }
@@ -9050,7 +9158,7 @@ impl ScriptListApp {
                     .when(has_actions, |d| {
                         let handle_actions = cx.entity().downgrade();
                         let show_actions_state = self.show_actions_popup;
-                        
+
                         let search_text = self
                             .actions_dialog
                             .as_ref()
@@ -9067,8 +9175,10 @@ impl ScriptListApp {
                         let text_muted = design_colors.text_muted;
                         let text_dimmed = design_colors.text_dimmed;
                         let search_box_bg = self.theme.colors.background.search_box;
-                        let cursor_visible_for_search = self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
-                        
+                        let cursor_visible_for_search = self.focused_input
+                            == FocusedInput::ActionsSearch
+                            && self.cursor_visible;
+
                         d.child(
                             div()
                                 .relative()
@@ -9107,7 +9217,12 @@ impl ScriptListApp {
                                         .justify_end()
                                         .gap(px(8.))
                                         .when(!show_actions_state, |d| d.opacity(0.).invisible())
-                                        .child(div().text_color(rgb(text_dimmed)).text_xs().child("⌘K"))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(text_dimmed))
+                                                .text_xs()
+                                                .child("⌘K"),
+                                        )
                                         .child(
                                             div()
                                                 .id("form-actions-search")
@@ -9125,11 +9240,13 @@ impl ScriptListApp {
                                                 .px(px(8.))
                                                 .rounded(px(4.))
                                                 .bg(rgba(
-                                                    (search_box_bg << 8) | if search_is_empty { 0x40 } else { 0x80 },
+                                                    (search_box_bg << 8)
+                                                        | if search_is_empty { 0x40 } else { 0x80 },
                                                 ))
                                                 .border_1()
                                                 .border_color(rgba(
-                                                    (accent_color << 8) | if search_is_empty { 0x20 } else { 0x40 },
+                                                    (accent_color << 8)
+                                                        | if search_is_empty { 0x20 } else { 0x40 },
                                                 ))
                                                 .text_sm()
                                                 .text_color(if search_is_empty {
@@ -9144,7 +9261,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .mr(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 })
                                                 .child(search_display)
@@ -9155,7 +9274,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .ml(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 }),
                                         ),
@@ -9177,14 +9298,22 @@ impl ScriptListApp {
                     None
                 },
                 |d, dialog| {
-                    let backdrop_click = cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
-                        logging::log("FOCUS", "Form actions backdrop clicked - dismissing dialog");
-                        this.show_actions_popup = false;
-                        this.actions_dialog = None;
-                        this.focused_input = FocusedInput::None;
-                        window.focus(&this.focus_handle, cx);
-                        cx.notify();
-                    });
+                    let backdrop_click = cx.listener(
+                        |this: &mut Self,
+                         _event: &gpui::ClickEvent,
+                         window: &mut Window,
+                         cx: &mut Context<Self>| {
+                            logging::log(
+                                "FOCUS",
+                                "Form actions backdrop clicked - dismissing dialog",
+                            );
+                            this.show_actions_popup = false;
+                            this.actions_dialog = None;
+                            this.focused_input = FocusedInput::None;
+                            window.focus(&this.focus_handle, cx);
+                            cx.notify();
+                        },
+                    );
 
                     d.child(
                         div()
@@ -9195,15 +9324,9 @@ impl ScriptListApp {
                                     .id("form-actions-backdrop")
                                     .absolute()
                                     .inset_0()
-                                    .on_click(backdrop_click)
+                                    .on_click(backdrop_click),
                             )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(52.))
-                                    .right(px(8.))
-                                    .child(dialog),
-                            ),
+                            .child(div().absolute().top(px(52.)).right(px(8.)).child(dialog)),
                     )
                 },
             )
@@ -9215,8 +9338,8 @@ impl ScriptListApp {
         entity: Entity<term_prompt::TermPrompt>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let has_actions = self.sdk_actions.is_some()
-            && !self.sdk_actions.as_ref().unwrap().is_empty();
+        let has_actions =
+            self.sdk_actions.is_some() && !self.sdk_actions.as_ref().unwrap().is_empty();
 
         // Sync suppress_keys with actions popup state so terminal ignores keys when popup is open
         let show_actions = self.show_actions_popup;
@@ -9274,7 +9397,10 @@ impl ScriptListApp {
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("TermPrompt executing action: {} (close={})", action_id, should_close),
+                                        &format!(
+                                            "TermPrompt executing action: {} (close={})",
+                                            action_id, should_close
+                                        ),
                                     );
                                     if should_close {
                                         this.show_actions_popup = false;
@@ -9316,7 +9442,10 @@ impl ScriptListApp {
                 let shortcut_key =
                     shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
-                    logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
+                    logging::log(
+                        "KEY",
+                        &format!("SDK action shortcut matched: {}", action_name),
+                    );
                     this.trigger_action_by_name(&action_name, cx);
                 }
                 // Let other keys fall through to the terminal
@@ -9342,7 +9471,7 @@ impl ScriptListApp {
                 let button_colors = ButtonColors::from_theme(&self.theme);
                 let handle_actions = cx.entity().downgrade();
                 let show_actions_state = self.show_actions_popup;
-                
+
                 // Get actions search text from the dialog
                 let search_text = self
                     .actions_dialog
@@ -9360,8 +9489,9 @@ impl ScriptListApp {
                 let text_muted = design_colors.text_muted;
                 let text_dimmed = design_colors.text_dimmed;
                 let search_box_bg = self.theme.colors.background.search_box;
-                let cursor_visible_for_search = self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
-                
+                let cursor_visible_for_search =
+                    self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
+
                 d.child(
                     div()
                         .absolute()
@@ -9407,7 +9537,12 @@ impl ScriptListApp {
                                         .justify_end()
                                         .gap(px(8.))
                                         .when(!show_actions_state, |d| d.opacity(0.).invisible())
-                                        .child(div().text_color(rgb(text_dimmed)).text_xs().child("⌘K"))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(text_dimmed))
+                                                .text_xs()
+                                                .child("⌘K"),
+                                        )
                                         .child(
                                             div()
                                                 .id("term-actions-search")
@@ -9425,11 +9560,13 @@ impl ScriptListApp {
                                                 .px(px(8.))
                                                 .rounded(px(4.))
                                                 .bg(rgba(
-                                                    (search_box_bg << 8) | if search_is_empty { 0x40 } else { 0x80 },
+                                                    (search_box_bg << 8)
+                                                        | if search_is_empty { 0x40 } else { 0x80 },
                                                 ))
                                                 .border_1()
                                                 .border_color(rgba(
-                                                    (accent_color << 8) | if search_is_empty { 0x20 } else { 0x40 },
+                                                    (accent_color << 8)
+                                                        | if search_is_empty { 0x20 } else { 0x40 },
                                                 ))
                                                 .text_sm()
                                                 .text_color(if search_is_empty {
@@ -9444,7 +9581,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .mr(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 })
                                                 .child(search_display)
@@ -9455,7 +9594,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .ml(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 }),
                                         ),
@@ -9471,14 +9612,22 @@ impl ScriptListApp {
                     None
                 },
                 |d, dialog| {
-                    let backdrop_click = cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
-                        logging::log("FOCUS", "Term actions backdrop clicked - dismissing dialog");
-                        this.show_actions_popup = false;
-                        this.actions_dialog = None;
-                        this.focused_input = FocusedInput::None;
-                        window.focus(&this.focus_handle, cx);
-                        cx.notify();
-                    });
+                    let backdrop_click = cx.listener(
+                        |this: &mut Self,
+                         _event: &gpui::ClickEvent,
+                         window: &mut Window,
+                         cx: &mut Context<Self>| {
+                            logging::log(
+                                "FOCUS",
+                                "Term actions backdrop clicked - dismissing dialog",
+                            );
+                            this.show_actions_popup = false;
+                            this.actions_dialog = None;
+                            this.focused_input = FocusedInput::None;
+                            window.focus(&this.focus_handle, cx);
+                            cx.notify();
+                        },
+                    );
 
                     d.child(
                         div()
@@ -9489,15 +9638,9 @@ impl ScriptListApp {
                                     .id("term-actions-backdrop")
                                     .absolute()
                                     .inset_0()
-                                    .on_click(backdrop_click)
+                                    .on_click(backdrop_click),
                             )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(52.))
-                                    .right(px(8.))
-                                    .child(dialog),
-                            ),
+                            .child(div().absolute().top(px(52.)).right(px(8.)).child(dialog)),
                     )
                 },
             )
@@ -9509,8 +9652,8 @@ impl ScriptListApp {
         entity: Entity<EditorPrompt>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let has_actions = self.sdk_actions.is_some()
-            && !self.sdk_actions.as_ref().unwrap().is_empty();
+        let has_actions =
+            self.sdk_actions.is_some() && !self.sdk_actions.as_ref().unwrap().is_empty();
 
         // Sync suppress_keys with actions popup state so editor ignores keys when popup is open
         let show_actions = self.show_actions_popup;
@@ -9569,7 +9712,10 @@ impl ScriptListApp {
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("EditorPrompt executing action: {} (close={})", action_id, should_close),
+                                        &format!(
+                                            "EditorPrompt executing action: {} (close={})",
+                                            action_id, should_close
+                                        ),
                                     );
                                     if should_close {
                                         this.show_actions_popup = false;
@@ -9611,7 +9757,10 @@ impl ScriptListApp {
                 let shortcut_key =
                     shortcuts::keystroke_to_shortcut(&key_str, &event.keystroke.modifiers);
                 if let Some(action_name) = this.action_shortcuts.get(&shortcut_key).cloned() {
-                    logging::log("KEY", &format!("SDK action shortcut matched: {}", action_name));
+                    logging::log(
+                        "KEY",
+                        &format!("SDK action shortcut matched: {}", action_name),
+                    );
                     this.trigger_action_by_name(&action_name, cx);
                 }
                 // Let other keys fall through to the editor
@@ -9640,7 +9789,7 @@ impl ScriptListApp {
                 let button_colors = ButtonColors::from_theme(&self.theme);
                 let handle_actions = cx.entity().downgrade();
                 let show_actions_state = self.show_actions_popup;
-                
+
                 // Get actions search text from the dialog
                 let search_text = self
                     .actions_dialog
@@ -9658,8 +9807,9 @@ impl ScriptListApp {
                 let text_muted = design_colors.text_muted;
                 let text_dimmed = design_colors.text_dimmed;
                 let search_box_bg = self.theme.colors.background.search_box;
-                let cursor_visible_for_search = self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
-                
+                let cursor_visible_for_search =
+                    self.focused_input == FocusedInput::ActionsSearch && self.cursor_visible;
+
                 d.child(
                     div()
                         .absolute()
@@ -9705,7 +9855,12 @@ impl ScriptListApp {
                                         .justify_end()
                                         .gap(px(8.))
                                         .when(!show_actions_state, |d| d.opacity(0.).invisible())
-                                        .child(div().text_color(rgb(text_dimmed)).text_xs().child("⌘K"))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(text_dimmed))
+                                                .text_xs()
+                                                .child("⌘K"),
+                                        )
                                         .child(
                                             div()
                                                 .id("editor-actions-search")
@@ -9723,11 +9878,13 @@ impl ScriptListApp {
                                                 .px(px(8.))
                                                 .rounded(px(4.))
                                                 .bg(rgba(
-                                                    (search_box_bg << 8) | if search_is_empty { 0x40 } else { 0x80 },
+                                                    (search_box_bg << 8)
+                                                        | if search_is_empty { 0x40 } else { 0x80 },
                                                 ))
                                                 .border_1()
                                                 .border_color(rgba(
-                                                    (accent_color << 8) | if search_is_empty { 0x20 } else { 0x40 },
+                                                    (accent_color << 8)
+                                                        | if search_is_empty { 0x20 } else { 0x40 },
                                                 ))
                                                 .text_sm()
                                                 .text_color(if search_is_empty {
@@ -9742,7 +9899,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .mr(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 })
                                                 .child(search_display)
@@ -9753,7 +9912,9 @@ impl ScriptListApp {
                                                             .h(px(14.))
                                                             .ml(px(2.))
                                                             .rounded(px(1.))
-                                                            .when(cursor_visible_for_search, |d| d.bg(rgb(accent_color))),
+                                                            .when(cursor_visible_for_search, |d| {
+                                                                d.bg(rgb(accent_color))
+                                                            }),
                                                     )
                                                 }),
                                         ),
@@ -9769,14 +9930,22 @@ impl ScriptListApp {
                     None
                 },
                 |d, dialog| {
-                    let backdrop_click = cx.listener(|this: &mut Self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
-                        logging::log("FOCUS", "Editor actions backdrop clicked - dismissing dialog");
-                        this.show_actions_popup = false;
-                        this.actions_dialog = None;
-                        this.focused_input = FocusedInput::None;
-                        window.focus(&this.focus_handle, cx);
-                        cx.notify();
-                    });
+                    let backdrop_click = cx.listener(
+                        |this: &mut Self,
+                         _event: &gpui::ClickEvent,
+                         window: &mut Window,
+                         cx: &mut Context<Self>| {
+                            logging::log(
+                                "FOCUS",
+                                "Editor actions backdrop clicked - dismissing dialog",
+                            );
+                            this.show_actions_popup = false;
+                            this.actions_dialog = None;
+                            this.focused_input = FocusedInput::None;
+                            window.focus(&this.focus_handle, cx);
+                            cx.notify();
+                        },
+                    );
 
                     d.child(
                         div()
@@ -9787,15 +9956,9 @@ impl ScriptListApp {
                                     .id("editor-actions-backdrop")
                                     .absolute()
                                     .inset_0()
-                                    .on_click(backdrop_click)
+                                    .on_click(backdrop_click),
                             )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(52.))
-                                    .right(px(8.))
-                                    .child(dialog),
-                            ),
+                            .child(div().absolute().top(px(52.)).right(px(8.)).child(dialog)),
                     )
                 },
             )
@@ -10000,7 +10163,10 @@ impl ScriptListApp {
                                 if let Some(action_id) = action_id {
                                     logging::log(
                                         "ACTIONS",
-                                        &format!("Path action selected via Enter: {} (close={})", action_id, should_close),
+                                        &format!(
+                                            "Path action selected via Enter: {} (close={})",
+                                            action_id, should_close
+                                        ),
                                     );
 
                                     // Get path info from PathPrompt
@@ -13443,7 +13609,7 @@ fn main() {
                                     AppView::ArgPrompt { id, .. } => {
                                         // Arg prompt key handling via SimulateKey
                                         logging::log("STDIN", &format!("SimulateKey: Dispatching '{}' to ArgPrompt (actions_popup={})", key_lower, view.show_actions_popup));
-                                        
+
                                         // Check for Cmd+K to toggle actions popup
                                         if has_cmd && key_lower == "k" {
                                             logging::log("STDIN", "SimulateKey: Cmd+K - toggle arg actions");

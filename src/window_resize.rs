@@ -23,8 +23,8 @@ use crate::window_manager;
 
 /// Layout constants for height calculations
 pub mod layout {
-    use gpui::{px, Pixels};
     use crate::panel::{CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y};
+    use gpui::{px, Pixels};
 
     /// Input row vertical padding (matches default design spacing padding_md)
     pub const ARG_INPUT_PADDING_Y: f32 = 12.0;
@@ -35,8 +35,7 @@ pub mod layout {
     /// Input row text height (cursor height + margins)
     pub const ARG_INPUT_LINE_HEIGHT: f32 = CURSOR_HEIGHT_LG + (CURSOR_MARGIN_Y * 2.0);
     /// Total input-only height (header only, no list)
-    pub const ARG_HEADER_HEIGHT: f32 =
-        (ARG_INPUT_PADDING_Y * 2.0) + ARG_INPUT_LINE_HEIGHT;
+    pub const ARG_HEADER_HEIGHT: f32 = (ARG_INPUT_PADDING_Y * 2.0) + ARG_INPUT_LINE_HEIGHT;
 
     /// Minimum window height (input only) - for input-only prompts
     pub const MIN_HEIGHT: Pixels = px(ARG_HEADER_HEIGHT);
@@ -267,9 +266,8 @@ mod tests {
     #[test]
     fn test_arg_with_choices_dynamic_height() {
         // Arg with choices should size to items, clamped to STANDARD_HEIGHT
-        let base_height = layout::ARG_HEADER_HEIGHT
-            + layout::ARG_DIVIDER_HEIGHT
-            + layout::ARG_LIST_PADDING_Y;
+        let base_height =
+            layout::ARG_HEADER_HEIGHT + layout::ARG_DIVIDER_HEIGHT + layout::ARG_LIST_PADDING_Y;
         assert_eq!(
             height_for_view(ViewType::ArgPromptWithChoices, 1),
             px(base_height + LIST_ITEM_HEIGHT)

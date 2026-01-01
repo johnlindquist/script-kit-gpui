@@ -1405,7 +1405,12 @@ fn decode_png_to_render_image(content: &str) -> Option<Arc<RenderImage>> {
     // Create RenderImage with a single frame
     let render_image = RenderImage::new(SmallVec::from_elem(frame, 1));
 
-    debug!(width = img_width, height = img_height, format = "png", "Decoded clipboard image to RenderImage");
+    debug!(
+        width = img_width,
+        height = img_height,
+        format = "png",
+        "Decoded clipboard image to RenderImage"
+    );
     Some(Arc::new(render_image))
 }
 
@@ -1442,7 +1447,12 @@ fn decode_rgba_to_render_image(content: &str) -> Option<Arc<RenderImage>> {
     // Create RenderImage with a single frame
     let render_image = RenderImage::new(SmallVec::from_elem(frame, 1));
 
-    debug!(width, height, format = "rgba", "Decoded clipboard image to RenderImage");
+    debug!(
+        width,
+        height,
+        format = "rgba",
+        "Decoded clipboard image to RenderImage"
+    );
     Some(Arc::new(render_image))
 }
 
@@ -1525,7 +1535,7 @@ mod tests {
         let expected_filename = "clipboard-history.db";
         let kenv_dir = PathBuf::from(shellexpand::tilde("~/.kenv").as_ref());
         let expected_path = kenv_dir.join(expected_filename);
-        
+
         // Verify the path format is correct (without calling get_db_path which creates dirs)
         assert!(expected_path.to_string_lossy().contains(expected_filename));
         assert!(expected_path.to_string_lossy().contains(".kenv"));
@@ -1536,11 +1546,11 @@ mod tests {
         // Test that the override mechanism works
         let temp_path = PathBuf::from("/tmp/test-clipboard.db");
         set_test_db_path(Some(temp_path.clone()));
-        
+
         // Verify override is retrievable
         let retrieved = get_test_db_path();
         assert_eq!(retrieved, Some(temp_path));
-        
+
         // Clean up
         set_test_db_path(None);
     }
@@ -1571,7 +1581,10 @@ mod tests {
         };
 
         let encoded = encode_image_as_base64(&original).expect("Should encode");
-        assert!(encoded.starts_with("rgba:"), "Legacy format should have rgba: prefix");
+        assert!(
+            encoded.starts_with("rgba:"),
+            "Legacy format should have rgba: prefix"
+        );
         let decoded = decode_base64_image(&encoded).expect("Should decode");
 
         assert_eq!(original.width, decoded.width);
@@ -1592,7 +1605,10 @@ mod tests {
         };
 
         let encoded = encode_image_as_png(&original).expect("Should encode as PNG");
-        assert!(encoded.starts_with("png:"), "PNG format should have png: prefix");
+        assert!(
+            encoded.starts_with("png:"),
+            "PNG format should have png: prefix"
+        );
 
         let decoded = decode_base64_image(&encoded).expect("Should decode");
 
@@ -1672,7 +1688,7 @@ mod tests {
         // This is a Wednesday, well away from any DST boundaries
         let fixed_now = chrono::Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
         let same_day_timestamp = fixed_now.timestamp();
-        
+
         assert_eq!(
             classify_timestamp_with_now(same_day_timestamp, fixed_now),
             TimeGroup::Today
@@ -1688,7 +1704,7 @@ mod tests {
             .with_ymd_and_hms(2025, 1, 14, 12, 0, 0)
             .unwrap()
             .timestamp();
-        
+
         assert_eq!(
             classify_timestamp_with_now(yesterday_timestamp, fixed_now),
             TimeGroup::Yesterday
@@ -1704,7 +1720,7 @@ mod tests {
             .with_ymd_and_hms(2024, 10, 7, 12, 0, 0)
             .unwrap()
             .timestamp();
-        
+
         assert_eq!(
             classify_timestamp_with_now(old_timestamp, fixed_now),
             TimeGroup::Older
@@ -1721,7 +1737,7 @@ mod tests {
             .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
             .unwrap()
             .timestamp();
-        
+
         assert_eq!(
             classify_timestamp_with_now(this_week_timestamp, fixed_now),
             TimeGroup::ThisWeek
@@ -1739,7 +1755,7 @@ mod tests {
             .with_ymd_and_hms(2025, 1, 8, 12, 0, 0)
             .unwrap()
             .timestamp();
-        
+
         assert_eq!(
             classify_timestamp_with_now(last_week_timestamp, fixed_now),
             TimeGroup::LastWeek
@@ -1756,7 +1772,7 @@ mod tests {
             .with_ymd_and_hms(2025, 1, 2, 12, 0, 0)
             .unwrap()
             .timestamp();
-        
+
         assert_eq!(
             classify_timestamp_with_now(this_month_timestamp, fixed_now),
             TimeGroup::ThisMonth
@@ -1767,9 +1783,18 @@ mod tests {
     fn test_group_entries_by_time() {
         // Use fixed dates to avoid DST flakiness
         // Reference: Wed, Jan 15, 2025 at noon UTC
-        let today_ts = chrono::Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap().timestamp();
-        let yesterday_ts = chrono::Utc.with_ymd_and_hms(2025, 1, 14, 12, 0, 0).unwrap().timestamp();
-        let old_ts = chrono::Utc.with_ymd_and_hms(2024, 10, 7, 12, 0, 0).unwrap().timestamp(); // 100 days ago
+        let today_ts = chrono::Utc
+            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
+            .unwrap()
+            .timestamp();
+        let yesterday_ts = chrono::Utc
+            .with_ymd_and_hms(2025, 1, 14, 12, 0, 0)
+            .unwrap()
+            .timestamp();
+        let old_ts = chrono::Utc
+            .with_ymd_and_hms(2024, 10, 7, 12, 0, 0)
+            .unwrap()
+            .timestamp(); // 100 days ago
 
         let entries = vec![
             ClipboardEntry {
@@ -1844,14 +1869,14 @@ mod tests {
     fn test_atomic_bool_operations() {
         // Test AtomicBool operations work correctly
         let flag = Arc::new(AtomicBool::new(false));
-        
+
         // Initial state
         assert!(!flag.load(Ordering::Relaxed));
-        
+
         // Store true
         flag.store(true, Ordering::Relaxed);
         assert!(flag.load(Ordering::Relaxed));
-        
+
         // Store false
         flag.store(false, Ordering::Relaxed);
         assert!(!flag.load(Ordering::Relaxed));
@@ -1883,7 +1908,10 @@ mod tests {
         // Different content should produce different hashes
         let hash1 = compute_content_hash("Hello");
         let hash2 = compute_content_hash("World");
-        assert_ne!(hash1, hash2, "Different content should have different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different content should have different hashes"
+        );
     }
 
     #[test]
@@ -1892,7 +1920,8 @@ mod tests {
         let hash = compute_content_hash("test");
         assert_eq!(hash.len(), 64, "SHA-256 hash should be 64 hex chars");
         assert!(
-            hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "Hash should be lowercase hex"
         );
     }

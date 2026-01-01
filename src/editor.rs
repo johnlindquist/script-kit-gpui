@@ -17,11 +17,11 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, Render, ScrollStrategy,
     SharedString, UniformListScrollHandle, Window,
 };
-use std::time::{Duration, Instant};
 use ropey::Rope;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::logging;
@@ -323,7 +323,7 @@ impl EditorPrompt {
 
         // Normalize line endings in template before parsing
         let template = Self::normalize_line_endings(&template);
-        
+
         let snippet = ParsedSnippet::parse(&template);
         let content = snippet.text.clone();
 
@@ -1119,16 +1119,18 @@ impl EditorPrompt {
     /// Get the char index range for a span of lines (inclusive)
     /// Returns (start_char_idx, end_char_idx) where end is at end of end_line
     fn line_char_range_inclusive(&self, start_line: usize, end_line: usize) -> (usize, usize) {
-        let start_char = self.rope.line_to_char(start_line.min(self.line_count().saturating_sub(1)));
+        let start_char = self
+            .rope
+            .line_to_char(start_line.min(self.line_count().saturating_sub(1)));
         let end_line_clamped = end_line.min(self.line_count().saturating_sub(1));
-        
+
         // Get the char index at the start of the line after end_line (or end of doc)
         let end_char = if end_line_clamped + 1 < self.line_count() {
             self.rope.line_to_char(end_line_clamped + 1)
         } else {
             self.rope.len_chars()
         };
-        
+
         (start_char, end_char)
     }
 
@@ -1157,29 +1159,29 @@ impl EditorPrompt {
     /// Duplicate the selected lines (or current line if no selection)
     fn duplicate_selected_lines(&mut self) {
         self.save_undo_state();
-        
+
         let (start_line, end_line) = self.selected_line_range_inclusive();
-        
+
         // Get the text of all selected lines including newlines
         let (start_char, end_char) = self.line_char_range_inclusive(start_line, end_line);
         let lines_text = self.rope.slice(start_char..end_char).to_string();
-        
+
         // Ensure we have a trailing newline
         let to_insert = if lines_text.ends_with('\n') {
             lines_text
         } else {
             format!("{}\n", lines_text)
         };
-        
+
         // Insert at end of the last selected line
         self.rope.insert(end_char, &to_insert);
-        
+
         // Move cursor to the duplicated region
         let new_cursor_line = end_line + 1 + (end_line - start_line);
         let new_cursor_col = self.cursor.column.min(self.line_len(new_cursor_line));
         self.cursor = CursorPosition::new(new_cursor_line, new_cursor_col);
         self.selection = Selection::caret(self.cursor);
-        
+
         self.needs_rehighlight = true;
         logging::log(
             "EDITOR",
@@ -1190,26 +1192,26 @@ impl EditorPrompt {
     /// Toggle line comments for selected lines (or current line)
     fn toggle_line_comment(&mut self) {
         self.save_undo_state();
-        
+
         let (start_line, end_line) = self.selected_line_range_inclusive();
         let comment_token = self.line_comment_token();
         let comment_prefix = format!("{} ", comment_token);
-        
+
         // Check if all lines are commented (to determine toggle direction)
         let all_commented = (start_line..=end_line).all(|line_idx| {
             self.get_line(line_idx)
                 .map(|line| line.trim_start().starts_with(comment_token))
                 .unwrap_or(false)
         });
-        
+
         // Process lines from end to start to maintain correct indices
         for line_idx in (start_line..=end_line).rev() {
             let line_start_char = self.rope.line_to_char(line_idx);
-            
+
             if let Some(line_content) = self.get_line(line_idx) {
                 let trimmed = line_content.trim_start();
                 let leading_whitespace = line_content.len() - trimmed.len();
-                
+
                 if all_commented {
                     // Uncomment: remove comment prefix
                     if trimmed.starts_with(&comment_prefix) {
@@ -1230,13 +1232,17 @@ impl EditorPrompt {
                 }
             }
         }
-        
+
         self.needs_rehighlight = true;
         logging::log(
             "EDITOR",
             &format!(
                 "{} lines {}-{}",
-                if all_commented { "Uncommented" } else { "Commented" },
+                if all_commented {
+                    "Uncommented"
+                } else {
+                    "Commented"
+                },
                 start_line + 1,
                 end_line + 1
             ),
@@ -1246,25 +1252,25 @@ impl EditorPrompt {
     /// Indent selected lines by adding 4 spaces at the start of each line
     fn indent_selected_lines(&mut self) {
         self.save_undo_state();
-        
+
         let (start_line, end_line) = self.selected_line_range_inclusive();
         let indent = "    "; // 4 spaces
-        
+
         // Process lines from end to start to maintain correct indices
         for line_idx in (start_line..=end_line).rev() {
             let line_start_char = self.rope.line_to_char(line_idx);
             self.rope.insert(line_start_char, indent);
         }
-        
+
         // Update cursor column
         self.cursor.column += 4;
-        
+
         // Update selection to reflect indent
         if !self.selection.is_empty() {
             self.selection.anchor.column += 4;
             self.selection.head.column += 4;
         }
-        
+
         self.needs_rehighlight = true;
         logging::log(
             "EDITOR",
@@ -1275,21 +1281,21 @@ impl EditorPrompt {
     /// Outdent selected lines by removing up to 4 leading spaces or one tab
     fn outdent_selected_lines(&mut self) {
         self.save_undo_state();
-        
+
         let (start_line, end_line) = self.selected_line_range_inclusive();
         let mut total_removed_on_cursor_line = 0;
-        
+
         // Process lines from end to start to maintain correct indices
         for line_idx in (start_line..=end_line).rev() {
             let line_start_char = self.rope.line_to_char(line_idx);
-            
+
             if let Some(line_content) = self.get_line(line_idx) {
                 let chars: Vec<char> = line_content.chars().collect();
-                
+
                 // Count leading spaces/tabs to remove (up to 4 spaces or 1 tab)
                 let mut chars_to_remove = 0;
                 let mut spaces_counted = 0;
-                
+
                 for ch in &chars {
                     if *ch == '\t' && chars_to_remove == 0 {
                         // Remove one tab
@@ -1302,31 +1308,42 @@ impl EditorPrompt {
                         break;
                     }
                 }
-                
+
                 if chars_to_remove > 0 {
                     let remove_end = line_start_char + chars_to_remove;
                     self.rope.remove(line_start_char..remove_end);
-                    
+
                     if line_idx == self.cursor.line {
                         total_removed_on_cursor_line = chars_to_remove;
                     }
                 }
             }
         }
-        
+
         // Update cursor column (don't go negative)
-        self.cursor.column = self.cursor.column.saturating_sub(total_removed_on_cursor_line);
-        
+        self.cursor.column = self
+            .cursor
+            .column
+            .saturating_sub(total_removed_on_cursor_line);
+
         // Update selection columns
         if !self.selection.is_empty() {
             if self.selection.anchor.line >= start_line && self.selection.anchor.line <= end_line {
-                self.selection.anchor.column = self.selection.anchor.column.saturating_sub(total_removed_on_cursor_line);
+                self.selection.anchor.column = self
+                    .selection
+                    .anchor
+                    .column
+                    .saturating_sub(total_removed_on_cursor_line);
             }
             if self.selection.head.line >= start_line && self.selection.head.line <= end_line {
-                self.selection.head.column = self.selection.head.column.saturating_sub(total_removed_on_cursor_line);
+                self.selection.head.column = self
+                    .selection
+                    .head
+                    .column
+                    .saturating_sub(total_removed_on_cursor_line);
             }
         }
-        
+
         self.needs_rehighlight = true;
         logging::log(
             "EDITOR",
@@ -1640,7 +1657,10 @@ impl EditorPrompt {
 
         logging::log(
             "EDITOR",
-            &format!("Replaced all {} matches with '{}'", match_count, replacement),
+            &format!(
+                "Replaced all {} matches with '{}'",
+                match_count, replacement
+            ),
         );
 
         // Clear matches
@@ -1815,21 +1835,21 @@ impl EditorPrompt {
         if let Ok(user_line) = self.go_to_line_state.line_input.parse::<usize>() {
             // Convert 1-based user input to 0-based internal line
             let target_line = user_line.saturating_sub(1);
-            
+
             // Clamp to valid range: 0 to line_count()-1
             let max_line = self.line_count().saturating_sub(1);
             let clamped_line = target_line.min(max_line);
-            
+
             // Create cursor position at start of target line (column 0)
             let pos = CursorPosition::new(clamped_line, 0);
-            
+
             // Set cursor and clear selection
             self.set_caret(pos);
-            
+
             // Scroll to center the target line in view
             self.scroll_handle
                 .scroll_to_item(clamped_line, ScrollStrategy::Center);
-            
+
             logging::log(
                 "EDITOR",
                 &format!(
@@ -1847,7 +1867,7 @@ impl EditorPrompt {
                 ),
             );
         }
-        
+
         // Hide the dialog regardless of whether parse succeeded
         self.hide_go_to_line(cx);
     }
@@ -2151,7 +2171,10 @@ impl EditorPrompt {
                 // Single click: position cursor and start selection
                 logging::log(
                     "EDITOR",
-                    &format!("Mouse down: single click at line {}, col {}", pos.line, pos.column),
+                    &format!(
+                        "Mouse down: single click at line {}, col {}",
+                        pos.line, pos.column
+                    ),
                 );
                 self.cursor = pos;
                 self.selection = Selection::caret(pos);
@@ -2160,7 +2183,10 @@ impl EditorPrompt {
                 // Double click: select word
                 logging::log(
                     "EDITOR",
-                    &format!("Mouse down: double click at line {}, col {}", pos.line, pos.column),
+                    &format!(
+                        "Mouse down: double click at line {}, col {}",
+                        pos.line, pos.column
+                    ),
                 );
                 self.select_word_at(pos);
             }
@@ -2168,7 +2194,10 @@ impl EditorPrompt {
                 // Triple click: select line
                 logging::log(
                     "EDITOR",
-                    &format!("Mouse down: triple click at line {}, col {}", pos.line, pos.column),
+                    &format!(
+                        "Mouse down: triple click at line {}, col {}",
+                        pos.line, pos.column
+                    ),
                 );
                 self.select_line(pos.line);
             }
@@ -2610,7 +2639,7 @@ impl EditorPrompt {
 
         // Compute selection background color from theme (accent.selected with 25% opacity)
         let selection_bg = rgba((colors.accent.selected << 8) | 0x44);
-        
+
         // Helper to create a text element
         let make_text_element =
             |chars_slice: &[char], selected: bool, color: u32| -> gpui::AnyElement {
@@ -2673,7 +2702,11 @@ impl EditorPrompt {
                 _ => false,
             };
 
-            elements.push(make_text_element(&chars[start..end], is_selected, text_color));
+            elements.push(make_text_element(
+                &chars[start..end],
+                is_selected,
+                text_color,
+            ));
         }
 
         div()
@@ -2749,7 +2782,11 @@ impl EditorPrompt {
                 "No matches".to_string()
             }
         } else {
-            let current = self.find_state.current_match_idx.map(|i| i + 1).unwrap_or(0);
+            let current = self
+                .find_state
+                .current_match_idx
+                .map(|i| i + 1)
+                .unwrap_or(0);
             format!("{}/{}", current, self.find_state.matches.len())
         };
 
@@ -3252,10 +3289,7 @@ mod tests {
         // Test with "Hello World" content context
         // Simulate: user selects "World" (columns 6-11 on line 0)
         // Selection anchor at (0, 6), head at (0, 11)
-        let selection = Selection::new(
-            CursorPosition::new(0, 6),
-            CursorPosition::new(0, 11),
-        );
+        let selection = Selection::new(CursorPosition::new(0, 6), CursorPosition::new(0, 11));
 
         assert!(!selection.is_empty());
 
@@ -3271,10 +3305,7 @@ mod tests {
         // Test with "Hello World" content context
         // Simulate: user selects "Hello" (columns 0-5 on line 0)
         // Selection anchor at (0, 0), head at (0, 5)
-        let selection = Selection::new(
-            CursorPosition::new(0, 0),
-            CursorPosition::new(0, 5),
-        );
+        let selection = Selection::new(CursorPosition::new(0, 0), CursorPosition::new(0, 5));
 
         assert!(!selection.is_empty());
 
@@ -3289,10 +3320,7 @@ mod tests {
     fn test_selection_collapse_with_up_arrow() {
         // Test with "Line 1\nLine 2\nLine 3" content context
         // Simulate: user selects from (1, 0) to (2, 3) - spanning lines 2 and 3
-        let selection = Selection::new(
-            CursorPosition::new(1, 0),
-            CursorPosition::new(2, 3),
-        );
+        let selection = Selection::new(CursorPosition::new(1, 0), CursorPosition::new(2, 3));
 
         assert!(!selection.is_empty());
 
@@ -3306,10 +3334,7 @@ mod tests {
     fn test_selection_collapse_with_down_arrow() {
         // Test with "Line 1\nLine 2\nLine 3" content context
         // Simulate: user selects from (0, 2) to (1, 4) - spanning lines 1 and 2
-        let selection = Selection::new(
-            CursorPosition::new(0, 2),
-            CursorPosition::new(1, 4),
-        );
+        let selection = Selection::new(CursorPosition::new(0, 2), CursorPosition::new(1, 4));
 
         assert!(!selection.is_empty());
 
@@ -3442,7 +3467,7 @@ mod tests {
     fn test_char_to_cursor_static_unicode() {
         // Test char_to_cursor_static with Unicode content
         let rope = Rope::from_str("你好\nWorld");
-        
+
         // Char 0 is '你'
         let pos = EditorPrompt::char_to_cursor_static(&rope, 0);
         assert_eq!(pos.line, 0);
@@ -3469,7 +3494,7 @@ mod tests {
         // Test byte_to_cursor_static with Unicode content
         // "你好" = 6 bytes (3 per CJK char), then '\n' = 1 byte, then "World" = 5 bytes
         let rope = Rope::from_str("你好\nWorld");
-        
+
         // Byte 0-2 is '你'
         let pos = EditorPrompt::byte_to_cursor_static(&rope, 0);
         assert_eq!(pos.line, 0);
@@ -3560,7 +3585,7 @@ mod tests {
         // When cursor is on a single line with no selection, range should be that line
         let selection = Selection::caret(CursorPosition::new(3, 5));
         let (start, end) = selection.ordered();
-        
+
         // For a caret (no selection), start and end should be the same position
         assert_eq!(start.line, 3);
         assert_eq!(end.line, 3);
@@ -3569,12 +3594,9 @@ mod tests {
     #[test]
     fn test_selection_line_range_for_multi_line() {
         // Selection spanning lines 2-4
-        let selection = Selection::new(
-            CursorPosition::new(2, 0),
-            CursorPosition::new(4, 10),
-        );
+        let selection = Selection::new(CursorPosition::new(2, 0), CursorPosition::new(4, 10));
         let (start, end) = selection.ordered();
-        
+
         assert_eq!(start.line, 2);
         assert_eq!(end.line, 4);
     }
@@ -3583,11 +3605,11 @@ mod tests {
     fn test_selection_line_range_backwards() {
         // Backwards selection (head before anchor)
         let selection = Selection::new(
-            CursorPosition::new(5, 8),  // anchor
-            CursorPosition::new(2, 3),  // head (before anchor)
+            CursorPosition::new(5, 8), // anchor
+            CursorPosition::new(2, 3), // head (before anchor)
         );
         let (start, end) = selection.ordered();
-        
+
         // ordered() should normalize regardless of selection direction
         assert_eq!(start.line, 2);
         assert_eq!(end.line, 5);
@@ -3601,7 +3623,10 @@ mod tests {
         // Tab handler should check snippet_state first
         // This pattern should appear in the Tab handling code
         let tab_handler_check = source.contains("if self.snippet_state.is_some()");
-        assert!(tab_handler_check, "Tab handler should check snippet mode first");
+        assert!(
+            tab_handler_check,
+            "Tab handler should check snippet mode first"
+        );
     }
 
     #[test]
@@ -3624,10 +3649,16 @@ mod tests {
         // The Shift+Tab handler should call outdent regardless of selection
         // (outdent_selected_lines handles both single line and multi-line)
         let shift_tab_section = source.find(r#"("tab", false, true, false)"#);
-        assert!(shift_tab_section.is_some(), "Shift+Tab pattern should exist");
+        assert!(
+            shift_tab_section.is_some(),
+            "Shift+Tab pattern should exist"
+        );
 
         // Verify outdent is called in the else branch (non-snippet mode)
         let outdent_call = source.find("self.outdent_selected_lines()");
-        assert!(outdent_call.is_some(), "outdent_selected_lines should be called");
+        assert!(
+            outdent_call.is_some(),
+            "outdent_selected_lines should be called"
+        );
     }
 }

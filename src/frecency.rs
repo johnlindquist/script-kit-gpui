@@ -4,6 +4,7 @@
 //! frequency (how often) and recency (how recently) scripts are used.
 //! The scoring uses exponential decay with a configurable half-life.
 
+use crate::config::{FrecencyConfig, DEFAULT_FRECENCY_HALF_LIFE_DAYS};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,9 +12,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, instrument, warn};
 
-/// Half-life for frecency decay in days
-/// After this many days, the score contribution decays to half
-const HALF_LIFE_DAYS: f64 = 7.0;
+/// Re-export for tests that need the half-life constant
+#[allow(dead_code)]
+pub const HALF_LIFE_DAYS: f64 = DEFAULT_FRECENCY_HALF_LIFE_DAYS;
 
 /// Seconds in a day for timestamp calculations
 const SECONDS_PER_DAY: f64 = 86400.0;
@@ -50,7 +51,12 @@ impl FrecencyEntry {
 
     /// Recalculate the frecency score based on current time
     pub fn recalculate_score(&mut self) {
-        self.score = calculate_score(self.count, self.last_used);
+        self.score = calculate_score(self.count, self.last_used, DEFAULT_FRECENCY_HALF_LIFE_DAYS);
+    }
+
+    /// Recalculate the frecency score with a custom half-life
+    pub fn recalculate_score_with_half_life(&mut self, half_life_days: f64) {
+        self.score = calculate_score(self.count, self.last_used, half_life_days);
     }
 }
 
@@ -64,17 +70,20 @@ impl Default for FrecencyEntry {
 ///
 /// Formula: score = count * e^(-days_since_use / half_life_days)
 ///
-/// This means:
+/// This means (with default 7-day half-life):
 /// - After 7 days (half_life), the score is reduced to ~50%
 /// - After 14 days, the score is reduced to ~25%
 /// - After 21 days, the score is reduced to ~12.5%
-fn calculate_score(count: u32, last_used: u64) -> f64 {
+///
+/// With a shorter half-life (e.g., 1 day), recent items dominate.
+/// With a longer half-life (e.g., 30 days), frequently used items dominate.
+fn calculate_score(count: u32, last_used: u64, half_life_days: f64) -> f64 {
     let now = current_timestamp();
     let seconds_since_use = now.saturating_sub(last_used);
     let days_since_use = seconds_since_use as f64 / SECONDS_PER_DAY;
 
     // Exponential decay: count * e^(-days / half_life)
-    let decay_factor = (-days_since_use / HALF_LIFE_DAYS).exp();
+    let decay_factor = (-days_since_use / half_life_days).exp();
     count as f64 * decay_factor
 }
 
@@ -95,6 +104,8 @@ pub struct FrecencyStore {
     file_path: PathBuf,
     /// Whether there are unsaved changes
     dirty: bool,
+    /// Half-life in days for score decay (from config)
+    half_life_days: f64,
 }
 
 /// Raw data format for JSON serialization
@@ -111,6 +122,18 @@ impl FrecencyStore {
             entries: HashMap::new(),
             file_path,
             dirty: false,
+            half_life_days: DEFAULT_FRECENCY_HALF_LIFE_DAYS,
+        }
+    }
+
+    /// Create a FrecencyStore with config settings
+    pub fn with_config(config: &FrecencyConfig) -> Self {
+        let file_path = Self::default_path();
+        FrecencyStore {
+            entries: HashMap::new(),
+            file_path,
+            dirty: false,
+            half_life_days: config.half_life_days,
         }
     }
 
@@ -121,7 +144,26 @@ impl FrecencyStore {
             entries: HashMap::new(),
             file_path: path,
             dirty: false,
+            half_life_days: DEFAULT_FRECENCY_HALF_LIFE_DAYS,
         }
+    }
+
+    /// Update the half-life setting (e.g., after config reload)
+    #[allow(dead_code)]
+    pub fn set_half_life_days(&mut self, half_life_days: f64) {
+        if (self.half_life_days - half_life_days).abs() > 0.001 {
+            self.half_life_days = half_life_days;
+            // Recalculate all scores with new half-life
+            for entry in self.entries.values_mut() {
+                entry.recalculate_score_with_half_life(half_life_days);
+            }
+        }
+    }
+
+    /// Get the current half-life setting
+    #[allow(dead_code)]
+    pub fn half_life_days(&self) -> f64 {
+        self.half_life_days
     }
 
     /// Get the default frecency file path
@@ -150,8 +192,9 @@ impl FrecencyStore {
         self.entries = data.entries;
 
         // Recalculate all scores to account for time passed since last save
+        let half_life = self.half_life_days;
         for entry in self.entries.values_mut() {
-            entry.recalculate_score();
+            entry.recalculate_score_with_half_life(half_life);
         }
 
         info!(
@@ -338,7 +381,7 @@ mod tests {
     fn test_calculate_score_no_decay() {
         // Score right now should be close to count
         let now = current_timestamp();
-        let score = calculate_score(5, now);
+        let score = calculate_score(5, now, HALF_LIFE_DAYS);
 
         // Should be approximately 5 (allowing for tiny time difference)
         assert!((score - 5.0).abs() < 0.01);
@@ -351,7 +394,7 @@ mod tests {
 
         // One half-life ago (7 days)
         let one_half_life_ago = now - (HALF_LIFE_DAYS * SECONDS_PER_DAY) as u64;
-        let score = calculate_score(count, one_half_life_ago);
+        let score = calculate_score(count, one_half_life_ago, HALF_LIFE_DAYS);
 
         // Should be approximately count/2 (half due to decay)
         // e^(-7/7) = e^(-1) ≈ 0.368
@@ -366,7 +409,7 @@ mod tests {
 
         // 30 days ago (about 4+ half-lives)
         let thirty_days_ago = now - (30 * SECONDS_PER_DAY as u64);
-        let score = calculate_score(count, thirty_days_ago);
+        let score = calculate_score(count, thirty_days_ago, HALF_LIFE_DAYS);
 
         // Should be heavily decayed
         assert!(score < 2.0); // Much less than original 100

@@ -417,7 +417,9 @@ impl ParsedSnippet {
                 }
 
                 // Case 2: Range is entirely after the edit - shift by delta
-                if range_start > edit_end || (range_start == edit_end && tabstop_idx != current_tabstop_idx) {
+                if range_start > edit_end
+                    || (range_start == edit_end && tabstop_idx != current_tabstop_idx)
+                {
                     *range = (
                         (range_start as isize + delta) as usize,
                         (range_end as isize + delta) as usize,

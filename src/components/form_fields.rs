@@ -37,6 +37,46 @@ use std::sync::{Arc, Mutex};
 
 use crate::protocol::Field;
 
+// --- Text indexing helpers (char-indexed cursor/selection) --------------------
+
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// Convert a character index (0..=char_len) into a byte index (0..=s.len()).
+/// If char_idx is past the end, returns s.len().
+fn byte_idx_from_char_idx(s: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or_else(|| s.len())
+}
+
+/// Remove a char range [start_char, end_char) from a String (char indices).
+fn drain_char_range(s: &mut String, start_char: usize, end_char: usize) {
+    let start_b = byte_idx_from_char_idx(s, start_char);
+    let end_b = byte_idx_from_char_idx(s, end_char);
+    if start_b < end_b && start_b <= s.len() && end_b <= s.len() {
+        s.drain(start_b..end_b);
+    }
+}
+
+/// Slice a &str by char indices [start_char, end_char).
+fn slice_by_char_range(s: &str, start_char: usize, end_char: usize) -> &str {
+    let start_b = byte_idx_from_char_idx(s, start_char);
+    let end_b = byte_idx_from_char_idx(s, end_char);
+    &s[start_b..end_b]
+}
+
+// Tunables for click-to-position. These are *approximations*.
+const TEXTFIELD_CHAR_WIDTH_PX: f32 = 8.0;
+const TEXTAREA_LINE_HEIGHT_PX: f32 = 24.0;
+const INPUT_PADDING_X_PX: f32 = 12.0;
+const TEXTAREA_PADDING_Y_PX: f32 = 8.0;
+
 /// Pre-computed colors for form field rendering
 ///
 /// This struct holds the color values needed for form field rendering,
@@ -151,6 +191,8 @@ impl FormFieldState {
 /// - Label display
 /// - Focus management for Tab navigation
 /// - Password masking
+/// - Selection (Shift+Arrow, Cmd/Ctrl+A)
+/// - Clipboard (Cmd/Ctrl+C/X/V)
 pub struct FormTextField {
     /// Field definition from protocol
     field: Field,
@@ -158,8 +200,10 @@ pub struct FormTextField {
     colors: FormFieldColors,
     /// Current text value
     pub value: String,
-    /// Cursor position in the text
+    /// Cursor position in the text (CHAR INDEX, not bytes)
     pub cursor_position: usize,
+    /// Selection anchor (CHAR INDEX). None = no selection.
+    pub selection_anchor: Option<usize>,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
     /// Whether to mask the text (for password fields)
@@ -178,8 +222,9 @@ impl FormTextField {
         Self {
             field,
             colors,
-            value: initial_value,
-            cursor_position: 0,
+            value: initial_value.clone(),
+            cursor_position: char_len(&initial_value),
+            selection_anchor: None,
             focus_handle: cx.focus_handle(),
             is_password,
             state,
@@ -198,8 +243,9 @@ impl FormTextField {
 
     /// Set the value programmatically
     pub fn set_value(&mut self, value: String) {
-        self.cursor_position = value.len();
         self.value = value.clone();
+        self.cursor_position = char_len(&self.value);
+        self.selection_anchor = None;
         self.state.set_value(value);
     }
 
@@ -268,9 +314,253 @@ impl FormTextField {
     /// Get the display text (masked for password fields)
     fn display_text(&self) -> String {
         if self.is_password {
-            "•".repeat(self.value.len())
+            // Use char count to prevent panics with multibyte chars
+            "•".repeat(char_len(&self.value))
         } else {
             self.value.clone()
+        }
+    }
+
+    fn text_len_chars(&self) -> usize {
+        char_len(&self.value)
+    }
+
+    fn has_selection(&self) -> bool {
+        self.selection_anchor.is_some() && self.selection_anchor != Some(self.cursor_position)
+    }
+
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        self.selection_anchor.map(|a| {
+            if a <= self.cursor_position {
+                (a, self.cursor_position)
+            } else {
+                (self.cursor_position, a)
+            }
+        })
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    fn select_all(&mut self) {
+        self.selection_anchor = Some(0);
+        self.cursor_position = self.text_len_chars();
+    }
+
+    fn get_selected_text(&self) -> String {
+        if let Some((start, end)) = self.selection_range() {
+            if start != end {
+                return slice_by_char_range(&self.value, start, end).to_string();
+            }
+        }
+        String::new()
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        if let Some((start, end)) = self.selection_range() {
+            if start != end {
+                drain_char_range(&mut self.value, start, end);
+                self.cursor_position = start;
+                self.selection_anchor = None;
+                self.state.set_value(self.value.clone());
+                return true;
+            }
+        }
+        false
+    }
+
+    fn insert_text_at_cursor(&mut self, text: &str) {
+        self.delete_selection();
+        let insert_byte = byte_idx_from_char_idx(&self.value, self.cursor_position);
+        self.value.insert_str(insert_byte, text);
+        self.cursor_position = (self.cursor_position + char_len(text)).min(self.text_len_chars());
+        self.state.set_value(self.value.clone());
+    }
+
+    fn move_left(&mut self, extend_selection: bool) {
+        if !extend_selection && self.has_selection() {
+            if let Some((start, _)) = self.selection_range() {
+                self.cursor_position = start;
+            }
+            self.clear_selection();
+            return;
+        }
+        if extend_selection && self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        if self.cursor_position > 0 {
+            self.cursor_position -= 1;
+        }
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    fn move_right(&mut self, extend_selection: bool) {
+        if !extend_selection && self.has_selection() {
+            if let Some((_, end)) = self.selection_range() {
+                self.cursor_position = end;
+            }
+            self.clear_selection();
+            return;
+        }
+        if extend_selection && self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        let len = self.text_len_chars();
+        if self.cursor_position < len {
+            self.cursor_position += 1;
+        }
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    fn move_home(&mut self, extend_selection: bool) {
+        if extend_selection && self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        self.cursor_position = 0;
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    fn move_end(&mut self, extend_selection: bool) {
+        if extend_selection && self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        self.cursor_position = self.text_len_chars();
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    fn backspace_char(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        if self.cursor_position == 0 {
+            return;
+        }
+        let del_start = self.cursor_position - 1;
+        drain_char_range(&mut self.value, del_start, self.cursor_position);
+        self.cursor_position = del_start;
+        self.state.set_value(self.value.clone());
+    }
+
+    fn delete_forward_char(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        let len = self.text_len_chars();
+        if self.cursor_position >= len {
+            return;
+        }
+        drain_char_range(
+            &mut self.value,
+            self.cursor_position,
+            self.cursor_position + 1,
+        );
+        self.state.set_value(self.value.clone());
+    }
+
+    fn copy(&self, cx: &mut Context<Self>) {
+        let text = self.get_selected_text();
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn cut(&mut self, cx: &mut Context<Self>) {
+        let text = self.get_selected_text();
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.delete_selection();
+        }
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                self.insert_text_at_cursor(&text);
+            }
+        }
+    }
+
+    /// Unified key handler with selection and clipboard support
+    pub fn handle_key_event(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.to_lowercase();
+        let cmd = event.keystroke.modifiers.platform;
+        let shift = event.keystroke.modifiers.shift;
+
+        match (key.as_str(), cmd, shift) {
+            // Select all
+            ("a", true, false) => {
+                self.select_all();
+                cx.notify();
+                return;
+            }
+            // Clipboard
+            ("c", true, false) => {
+                self.copy(cx);
+                return;
+            }
+            ("x", true, false) => {
+                self.cut(cx);
+                cx.notify();
+                return;
+            }
+            ("v", true, false) => {
+                self.paste(cx);
+                cx.notify();
+                return;
+            }
+            // Navigation with optional selection
+            ("left" | "arrowleft", false, s) => {
+                self.move_left(s);
+                cx.notify();
+                return;
+            }
+            ("right" | "arrowright", false, s) => {
+                self.move_right(s);
+                cx.notify();
+                return;
+            }
+            ("home", false, s) => {
+                self.move_home(s);
+                cx.notify();
+                return;
+            }
+            ("end", false, s) => {
+                self.move_end(s);
+                cx.notify();
+                return;
+            }
+            // Editing
+            ("backspace", false, _) => {
+                self.backspace_char();
+                cx.notify();
+                return;
+            }
+            ("delete", false, _) => {
+                self.delete_forward_char();
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
+
+        // Printable character input (ignore when cmd/ctrl held)
+        if !cmd {
+            if let Some(ref key_char) = event.keystroke.key_char {
+                let s = key_char.to_string();
+                if !s.is_empty() && !s.chars().all(|c| c.is_control()) {
+                    self.insert_text_at_cursor(&s);
+                    cx.notify();
+                }
+            }
         }
     }
 }
@@ -470,6 +760,8 @@ impl Render for FormTextField {
 /// - Placeholder text
 /// - Label display
 /// - Focus management
+/// - Selection support (Shift+Arrow, mouse drag)
+/// - Clipboard operations (Cmd/Ctrl+C/X/V)
 pub struct FormTextArea {
     /// Field definition from protocol
     field: Field,
@@ -477,8 +769,10 @@ pub struct FormTextArea {
     colors: FormFieldColors,
     /// Current text value (lines)
     pub value: String,
-    /// Cursor position in the text
+    /// Cursor position in the text (char index)
     pub cursor_position: usize,
+    /// Selection anchor (char index), None if no selection
+    pub selection_anchor: Option<usize>,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
     /// Number of visible rows
@@ -491,13 +785,15 @@ impl FormTextArea {
     /// Create a new text area from a Field definition
     pub fn new(field: Field, colors: FormFieldColors, rows: usize, cx: &mut App) -> Self {
         let initial_value = field.value.clone().unwrap_or_default();
+        let cursor_pos = char_len(&initial_value);
         let state = FormFieldState::new(initial_value.clone());
 
         Self {
             field,
             colors,
             value: initial_value,
-            cursor_position: 0,
+            cursor_position: cursor_pos,
+            selection_anchor: None,
             focus_handle: cx.focus_handle(),
             rows,
             state,
@@ -516,7 +812,8 @@ impl FormTextArea {
 
     /// Set the value programmatically
     pub fn set_value(&mut self, value: String) {
-        self.cursor_position = value.len();
+        self.cursor_position = char_len(&value);
+        self.selection_anchor = None;
         self.value = value.clone();
         self.state.set_value(value);
     }
@@ -530,62 +827,319 @@ impl FormTextArea {
         self.focus_handle.clone()
     }
 
-    /// Handle text input
-    fn handle_input(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.value.insert_str(self.cursor_position, text);
-        self.cursor_position += text.len();
-        self.state.set_value(self.value.clone());
-        cx.notify();
+    // ───── Selection helpers ─────
+
+    /// Get selection range as (start, end) in char indices, ordered
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        self.selection_anchor.map(|anchor| {
+            let start = anchor.min(self.cursor_position);
+            let end = anchor.max(self.cursor_position);
+            (start, end)
+        })
     }
 
-    /// Handle key down events
-    fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
+    /// Check if there is an active selection
+    fn has_selection(&self) -> bool {
+        self.selection_anchor
+            .is_some_and(|a| a != self.cursor_position)
+    }
 
-        match key {
-            "backspace" => {
-                if self.cursor_position > 0 {
-                    self.cursor_position -= 1;
-                    self.value.remove(self.cursor_position);
-                    self.state.set_value(self.value.clone());
-                    cx.notify();
-                }
+    /// Get selected text
+    fn selected_text(&self) -> Option<String> {
+        self.selection_range()
+            .map(|(start, end)| slice_by_char_range(&self.value, start, end).to_string())
+    }
+
+    /// Delete selected text, collapse cursor to start
+    fn delete_selection(&mut self) {
+        if let Some((start, end)) = self.selection_range() {
+            drain_char_range(&mut self.value, start, end);
+            self.cursor_position = start;
+            self.selection_anchor = None;
+            self.state.set_value(self.value.clone());
+        }
+    }
+
+    /// Clear selection without deleting
+    fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    /// Select all text
+    fn select_all(&mut self) {
+        let len = char_len(&self.value);
+        if len > 0 {
+            self.selection_anchor = Some(0);
+            self.cursor_position = len;
+        }
+    }
+
+    // ───── Clipboard ─────
+
+    fn copy(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn cut(&mut self, cx: &mut Context<Self>) {
+        self.copy(cx);
+        self.delete_selection();
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                self.insert_text_at_cursor(&text);
             }
-            "delete" => {
-                if self.cursor_position < self.value.len() {
-                    self.value.remove(self.cursor_position);
-                    self.state.set_value(self.value.clone());
-                    cx.notify();
-                }
+        }
+    }
+
+    // ───── Cursor movement ─────
+
+    fn move_left(&mut self, extend_selection: bool) {
+        if !extend_selection {
+            // If selection exists, collapse to start
+            if let Some((start, _)) = self.selection_range() {
+                self.cursor_position = start;
+                self.clear_selection();
+                return;
             }
-            "left" | "arrowleft" => {
-                if self.cursor_position > 0 {
-                    self.cursor_position -= 1;
-                    cx.notify();
-                }
+        } else if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        if self.cursor_position > 0 {
+            self.cursor_position -= 1;
+        }
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    fn move_right(&mut self, extend_selection: bool) {
+        let len = char_len(&self.value);
+        if !extend_selection {
+            if let Some((_, end)) = self.selection_range() {
+                self.cursor_position = end;
+                self.clear_selection();
+                return;
             }
-            "right" | "arrowright" => {
-                if self.cursor_position < self.value.len() {
-                    self.cursor_position += 1;
-                    cx.notify();
-                }
-            }
-            "enter" => {
-                // Insert newline
-                self.value.insert(self.cursor_position, '\n');
-                self.cursor_position += 1;
-                self.state.set_value(self.value.clone());
+        } else if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        if self.cursor_position < len {
+            self.cursor_position += 1;
+        }
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    fn move_home(&mut self, extend_selection: bool) {
+        if extend_selection && self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        self.cursor_position = 0;
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    fn move_end(&mut self, extend_selection: bool) {
+        if extend_selection && self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_position);
+        }
+        self.cursor_position = char_len(&self.value);
+        if !extend_selection {
+            self.clear_selection();
+        }
+    }
+
+    // ───── Editing ─────
+
+    fn insert_text_at_cursor(&mut self, text: &str) {
+        if self.has_selection() {
+            self.delete_selection();
+        }
+        let byte_idx = byte_idx_from_char_idx(&self.value, self.cursor_position);
+        self.value.insert_str(byte_idx, text);
+        self.cursor_position += char_len(text);
+        self.state.set_value(self.value.clone());
+    }
+
+    fn backspace_char(&mut self) {
+        if self.has_selection() {
+            self.delete_selection();
+        } else if self.cursor_position > 0 {
+            drain_char_range(
+                &mut self.value,
+                self.cursor_position - 1,
+                self.cursor_position,
+            );
+            self.cursor_position -= 1;
+            self.state.set_value(self.value.clone());
+        }
+    }
+
+    fn delete_forward_char(&mut self) {
+        if self.has_selection() {
+            self.delete_selection();
+        } else if self.cursor_position < char_len(&self.value) {
+            drain_char_range(
+                &mut self.value,
+                self.cursor_position,
+                self.cursor_position + 1,
+            );
+            self.state.set_value(self.value.clone());
+        }
+    }
+
+    /// Handle text input (legacy, kept for render callback)
+    fn handle_input(&mut self, text: &str, _cx: &mut Context<Self>) {
+        self.insert_text_at_cursor(text);
+    }
+
+    /// Handle key down events (legacy, kept for render callback)
+    fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str().to_lowercase();
+        let cmd = event.keystroke.modifiers.platform;
+        let shift = event.keystroke.modifiers.shift;
+
+        match (key.as_str(), cmd, shift) {
+            // Select all
+            ("a", true, false) => {
+                self.select_all();
                 cx.notify();
             }
-            "home" => {
-                self.cursor_position = 0;
+            // Clipboard
+            ("c", true, false) => {
+                self.copy(cx);
+            }
+            ("x", true, false) => {
+                self.cut(cx);
                 cx.notify();
             }
-            "end" => {
-                self.cursor_position = self.value.len();
+            ("v", true, false) => {
+                self.paste(cx);
+                cx.notify();
+            }
+            // Navigation with optional selection
+            ("left" | "arrowleft", false, s) => {
+                self.move_left(s);
+                cx.notify();
+            }
+            ("right" | "arrowright", false, s) => {
+                self.move_right(s);
+                cx.notify();
+            }
+            ("home", false, s) => {
+                self.move_home(s);
+                cx.notify();
+            }
+            ("end", false, s) => {
+                self.move_end(s);
+                cx.notify();
+            }
+            // Editing
+            ("backspace", false, _) => {
+                self.backspace_char();
+                cx.notify();
+            }
+            ("delete", false, _) => {
+                self.delete_forward_char();
+                cx.notify();
+            }
+            // Enter inserts newline
+            ("enter", false, _) => {
+                self.insert_text_at_cursor("\n");
                 cx.notify();
             }
             _ => {}
+        }
+    }
+
+    /// Unified key event handler called by form_prompt.rs
+    ///
+    /// Handles: Selection (Shift+Arrow), Clipboard (Cmd+C/X/V/A),
+    /// Navigation (Arrow, Home, End), Editing (Backspace, Delete, Enter),
+    /// and printable character input.
+    pub fn handle_key_event(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str().to_lowercase();
+        let cmd = event.keystroke.modifiers.platform;
+        let shift = event.keystroke.modifiers.shift;
+
+        match (key.as_str(), cmd, shift) {
+            // Select all
+            ("a", true, false) => {
+                self.select_all();
+                cx.notify();
+                return;
+            }
+            // Clipboard
+            ("c", true, false) => {
+                self.copy(cx);
+                return;
+            }
+            ("x", true, false) => {
+                self.cut(cx);
+                cx.notify();
+                return;
+            }
+            ("v", true, false) => {
+                self.paste(cx);
+                cx.notify();
+                return;
+            }
+            // Navigation with optional selection
+            ("left" | "arrowleft", false, s) => {
+                self.move_left(s);
+                cx.notify();
+                return;
+            }
+            ("right" | "arrowright", false, s) => {
+                self.move_right(s);
+                cx.notify();
+                return;
+            }
+            ("home", false, s) => {
+                self.move_home(s);
+                cx.notify();
+                return;
+            }
+            ("end", false, s) => {
+                self.move_end(s);
+                cx.notify();
+                return;
+            }
+            // Editing
+            ("backspace", false, _) => {
+                self.backspace_char();
+                cx.notify();
+                return;
+            }
+            ("delete", false, _) => {
+                self.delete_forward_char();
+                cx.notify();
+                return;
+            }
+            // Enter inserts newline
+            ("enter", false, _) => {
+                self.insert_text_at_cursor("\n");
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
+
+        // Printable character input (ignore when cmd/ctrl held)
+        if !cmd {
+            if let Some(ref key_char) = event.keystroke.key_char {
+                let s = key_char.to_string();
+                if !s.is_empty() && !s.chars().all(|c| c.is_control()) {
+                    self.insert_text_at_cursor(&s);
+                    cx.notify();
+                }
+            }
         }
     }
 }

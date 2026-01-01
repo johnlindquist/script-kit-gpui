@@ -1,6 +1,6 @@
 use gpui::{
-    div, px, rgb, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, Render, Window,
-    prelude::*,
+    div, prelude::*, px, rgb, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, Render,
+    Window,
 };
 
 use crate::components::{FormCheckbox, FormFieldColors, FormTextArea, FormTextField};

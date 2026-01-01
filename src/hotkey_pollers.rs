@@ -1,12 +1,10 @@
-use gpui::{
-    size, px, App, AppContext as _, AsyncApp, Context, Focusable, Window, WindowHandle,
-};
+use gpui::{px, size, App, AppContext as _, AsyncApp, Context, Focusable, Window, WindowHandle};
 
 use crate::hotkeys;
 use crate::window_resize::{initial_window_height, reset_resize_debounce};
 use crate::{
-    calculate_eye_line_bounds_on_mouse_display, logging, move_first_window_to_bounds,
-    platform, ScriptListApp, NEEDS_RESET, PANEL_CONFIGURED, WINDOW_VISIBLE,
+    calculate_eye_line_bounds_on_mouse_display, logging, move_first_window_to_bounds, platform,
+    ScriptListApp, NEEDS_RESET, PANEL_CONFIGURED, WINDOW_VISIBLE,
 };
 
 /// A simple model that listens for hotkey triggers via async_channel (event-driven).

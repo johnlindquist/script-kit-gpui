@@ -185,10 +185,7 @@ pub enum WindowActionType {
 #[serde(untagged)]
 pub enum MouseEventData {
     /// Move to position
-    Move {
-        x: f64,
-        y: f64,
-    },
+    Move { x: f64, y: f64 },
     /// Click at position with optional button
     Click {
         x: f64,
@@ -197,10 +194,7 @@ pub enum MouseEventData {
         button: Option<String>,
     },
     /// Set absolute position
-    SetPosition {
-        x: f64,
-        y: f64,
-    },
+    SetPosition { x: f64, y: f64 },
 }
 
 impl MouseEventData {
