@@ -962,6 +962,10 @@ fn main() {
         // Must be called before opening windows that use Root wrapper
         gpui_component::init(cx);
 
+        // Sync Script Kit theme with gpui-component's ThemeColor system
+        // This ensures all gpui-component widgets use our colors
+        theme::sync_gpui_component_theme(cx);
+
         // Initialize tray icon and menu
         // MUST be done after Application::new() creates the NSApplication
         let tray_manager = match TrayManager::new() {
@@ -1039,6 +1043,9 @@ fn main() {
             while let Ok(_event) = appearance_rx.recv().await {
                 logging::log("APP", "System appearance changed, updating theme");
                 let _ = cx.update(|cx| {
+                    // Sync gpui-component theme with new system appearance
+                    theme::sync_gpui_component_theme(cx);
+
                     app_entity_for_appearance.update(cx, |view, ctx| {
                         view.update_theme(ctx);
                     });

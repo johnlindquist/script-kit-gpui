@@ -68,6 +68,9 @@ pub struct NotesApp {
     /// Whether the sidebar is collapsed
     sidebar_collapsed: bool,
 
+    /// Whether the titlebar is being hovered (for showing/hiding icons)
+    titlebar_hovered: bool,
+
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
 
@@ -136,6 +139,7 @@ impl NotesApp {
             search_state,
             search_query: String::new(),
             sidebar_collapsed: false,
+            titlebar_hovered: false,
             focus_handle,
             _subscriptions: vec![editor_sub, search_sub],
         }
@@ -368,6 +372,38 @@ impl NotesApp {
         }
     }
 
+    /// Get the character count of the current note
+    fn get_character_count(&self, cx: &Context<Self>) -> usize {
+        self.editor_state.read(cx).value().chars().count()
+    }
+
+    /// Copy the current note content to clipboard
+    fn copy_note_to_clipboard(&self, cx: &Context<Self>) {
+        let content = self.editor_state.read(cx).value().to_string();
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            let _ = Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        stdin.write_all(content.as_bytes())?;
+                    }
+                    child.wait()
+                });
+            info!("Note copied to clipboard");
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = content; // Avoid unused warning
+            info!("Clipboard copy not implemented for this platform");
+        }
+    }
+
     /// Render the search input
     fn render_search(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -562,98 +598,176 @@ impl NotesApp {
             )
     }
 
-    /// Render the main editor area
+    /// Render the main editor area with Raycast-style clean UI
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_trash = self.view_mode == NotesViewMode::Trash;
         let has_selection = self.selected_note_id.is_some();
+        // Use titlebar_hovered state for hover-reveal icons
+        let show_icons = self.titlebar_hovered;
+        let char_count = self.get_character_count(cx);
 
+        // Get note title
+        let title = self
+            .selected_note_id
+            .and_then(|id| self.get_visible_notes().iter().find(|n| n.id == id))
+            .map(|n| {
+                if n.title.is_empty() {
+                    "Untitled Note".to_string()
+                } else {
+                    n.title.clone()
+                }
+            })
+            .unwrap_or_else(|| {
+                if is_trash {
+                    "No deleted notes".to_string()
+                } else {
+                    "No note selected".to_string()
+                }
+            });
+
+        // Build titlebar with hover tracking for Raycast-style icon reveal
+        let titlebar = div()
+            .id("notes-titlebar")
+            .flex()
+            .items_center()
+            .justify_between()
+            .h(px(36.))
+            .px_3()
+            .bg(cx.theme().title_bar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                this.titlebar_hovered = *hovered;
+                cx.notify();
+            }))
+            .child(
+                // Note title (truncated)
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .child(title),
+            )
+            // Conditionally show icons based on state
+            .children(if show_icons && has_selection && !is_trash {
+                // Hover-reveal icons for edit mode: ⌘, copy, +, delete
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new("shortcut")
+                                .ghost()
+                                .xsmall()
+                                .label("⌘")
+                                .tooltip("Keyboard shortcuts"),
+                        )
+                        .child(
+                            Button::new("copy")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Copy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.copy_note_to_clipboard(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("new")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Plus)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.create_note(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("delete")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Delete)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.delete_selected_note(cx);
+                                })),
+                        ),
+                )
+            } else if has_selection && is_trash {
+                // Trash actions (always visible)
+                Some(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            Button::new("restore")
+                                .ghost()
+                                .xsmall()
+                                .label("Restore")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.restore_note(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("permanent-delete")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Delete)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.permanently_delete_note(cx);
+                                })),
+                        ),
+                )
+            } else {
+                None
+            });
+
+        // Build character count footer
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .h(px(28.))
+            .px_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().title_bar)
+            .child(
+                // Type indicator (T for text)
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("T"),
+            )
+            .child(
+                // Character count
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{} character{}",
+                        char_count,
+                        if char_count == 1 { "" } else { "s" }
+                    )),
+            );
+
+        // Build main editor layout
         div()
             .flex_1()
             .flex()
             .flex_col()
             .h_full()
-            .p_4()
-            .child(
-                // Editor header with title and actions
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .pb_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(
-                                self.selected_note_id
-                                    .and_then(|id| {
-                                        self.get_visible_notes().iter().find(|n| n.id == id)
-                                    })
-                                    .map(|n| {
-                                        if n.title.is_empty() {
-                                            "Untitled Note".to_string()
-                                        } else {
-                                            n.title.clone()
-                                        }
-                                    })
-                                    .unwrap_or_else(|| {
-                                        if is_trash {
-                                            "No deleted notes".to_string()
-                                        } else {
-                                            "No note selected".to_string()
-                                        }
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .when(has_selection && !is_trash, |d| {
-                                d.child(self.render_export_menu(cx)).child(
-                                    Button::new("delete")
-                                        .ghost()
-                                        .small()
-                                        .icon(IconName::Delete)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.delete_selected_note(cx);
-                                        })),
-                                )
-                            })
-                            .when(has_selection && is_trash, |d| {
-                                d.child(
-                                    Button::new("restore")
-                                        .ghost()
-                                        .small()
-                                        .label("Restore")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.restore_note(window, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("permanent-delete")
-                                        .ghost()
-                                        .small()
-                                        .label("Delete Forever")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.permanently_delete_note(cx);
-                                        })),
-                                )
-                            }),
-                    ),
-            )
+            .child(titlebar)
             .when(!is_trash && has_selection, |d| {
                 d.child(self.render_toolbar(cx))
             })
             .child(
-                // Editor content - full height multi-line input
                 div()
                     .flex_1()
-                    .pt_4()
+                    .p_3()
                     .child(Input::new(&self.editor_state).h_full()),
             )
+            .when(has_selection && !is_trash, |d| d.child(footer))
     }
 }
 

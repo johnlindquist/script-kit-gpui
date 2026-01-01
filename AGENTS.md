@@ -63,6 +63,7 @@ cargo check && cargo clippy --all-targets -- -D warnings && cargo test
 | **Visual Testing** | Use stdin JSON protocol + `captureScreenshot()` SDK function, save to `.test-screenshots/`, then READ the PNG file to analyze |
 | **AI Log Mode** | Set `SCRIPT_KIT_AI_LOG=1` for token-efficient compact logs (see below) |
 | **Config Settings** | Font sizes and padding are configurable via `~/.kenv/config.ts` - use `config.get_*()` helpers |
+| **Notes Window** | Separate floating window in `src/notes/`; test via `{"type": "openNotes"}` stdin command |
 
 ---
 
@@ -903,6 +904,11 @@ src/
   logging.rs    # Dual-output logging: JSONL to ~/.kenv/logs/, pretty to stderr
   lib.rs        # Module exports
   utils.rs      # Shared utilities (strip_html_tags, etc.)
+  notes/        # Notes window module (separate floating window)
+    mod.rs      # Module exports and documentation
+    window.rs   # NotesApp view, open/close/quick_capture functions
+    storage.rs  # SQLite persistence layer
+    model.rs    # Note data model (NoteId, Note struct, ExportFormat)
 ```
 
 ### Log File Location
@@ -1016,6 +1022,132 @@ fn cell_width(&self) -> f32 {
 fn cell_height(&self) -> f32 {
     self.font_size() * LINE_HEIGHT_MULTIPLIER  // 1.3 for terminal
 }
+```
+
+### Notes Window (Secondary Window)
+
+The Notes feature is a **completely separate floating window** from the main Script Kit launcher. It demonstrates the pattern for building secondary windows in the application.
+
+#### Architecture
+
+| Aspect | Details |
+|--------|---------|
+| **Location** | `src/notes/` module |
+| **UI Framework** | gpui-component library (Input, Sidebar, Button, etc.) |
+| **Window Type** | Floating panel (`NSFloatingWindowLevel` on macOS) |
+| **Storage** | SQLite database at `~/.kenv/notes.db` |
+| **Theme** | Syncs with Script Kit's `~/.kenv/theme.json` |
+
+#### File Structure
+
+```
+src/notes/
+  mod.rs      # Module exports, feature documentation
+  window.rs   # NotesApp view, open_notes_window(), close_notes_window(), quick_capture()
+  storage.rs  # SQLite persistence (init, save, search, delete)
+  model.rs    # Note struct, NoteId, ExportFormat enum
+```
+
+#### Key Features
+
+- **Markdown editing** with formatting toolbar (bold, italic, headings, code blocks, links)
+- **Sidebar** with note list, search, and trash view
+- **Full-text search** via SQLite FTS5
+- **Soft delete** with trash and restore capability
+- **Export** to plain text, Markdown, or HTML (copies to clipboard)
+- **Character count** footer (Raycast-style)
+- **Hover-reveal icons** in titlebar
+
+#### Root Wrapper Pattern
+
+gpui-component requires views to be wrapped in a `Root` component:
+
+```rust
+// REQUIRED for gpui-component - views must be wrapped in Root
+let handle = cx.open_window(window_options, |window, cx| {
+    let view = cx.new(|cx| NotesApp::new(window, cx));
+    cx.new(|cx| Root::new(view, window, cx))  // <-- Root wrapper
+})?;
+```
+
+#### Theme Synchronization
+
+The Notes window maps Script Kit's theme colors to gpui-component's `ThemeColor`:
+
+```rust
+// Script Kit colors -> gpui-component colors
+theme_color.background = hex_to_hsla(colors.background.main);
+theme_color.accent = hex_to_hsla(colors.accent.selected);
+theme_color.sidebar = hex_to_hsla(colors.background.title_bar);
+// ... etc.
+```
+
+#### Testing the Notes Window
+
+Use the stdin JSON protocol to open the Notes window for testing:
+
+```bash
+# Open the Notes window via stdin command
+echo '{"type": "openNotes"}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
+
+# The OpenNotes command is defined in src/stdin_commands.rs
+```
+
+**Available stdin commands for Notes:**
+
+| Command | Purpose |
+|---------|---------|
+| `{"type": "openNotes"}` | Open or focus the Notes window |
+
+**Visual testing pattern for Notes:**
+
+```typescript
+// tests/smoke/test-notes-window.ts
+import '../../scripts/kit-sdk';
+import { writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+
+console.error('[TEST] Testing notes window...');
+
+// Send openNotes command (the app needs to handle this)
+// For now, visual verification is done via the stdin command
+
+// Wait for window to open
+await new Promise(r => setTimeout(r, 1000));
+
+// Note: captureScreenshot() captures the MAIN window
+// For notes window, use the openNotes stdin command and verify logs
+console.error('[TEST] Check logs for "Notes window" entries');
+
+process.exit(0);
+```
+
+**Log filtering for Notes:**
+
+```bash
+# Filter for notes-related logs
+echo '{"type": "openNotes"}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1 | grep -i 'notes\|PANEL'
+```
+
+#### Hotkey Integration
+
+The Notes window can be opened via:
+
+| Method | Details |
+|--------|---------|
+| **Hotkey** | `Cmd+Shift+N` (configurable via `config.ts` `notesHotkey`) |
+| **Tray menu** | "Notes" menu item |
+| **Stdin command** | `{"type": "openNotes"}` |
+
+#### Global Window Handle
+
+The Notes window uses a global `OnceLock` to ensure only one instance:
+
+```rust
+static NOTES_WINDOW: std::sync::OnceLock<std::sync::Mutex<Option<gpui::WindowHandle<Root>>>> =
+    std::sync::OnceLock::new();
+
+// open_notes_window() checks if window exists and focuses it, or creates new
 ```
 
 ---
