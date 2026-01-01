@@ -41,6 +41,7 @@ mod hotkey_pollers;
 mod hotkeys;
 mod list_item;
 mod logging;
+mod login_item;
 mod navigation;
 mod panel;
 mod perf;
@@ -59,7 +60,6 @@ mod terminal;
 mod theme;
 mod transitions;
 mod tray;
-mod login_item;
 mod utils;
 mod watcher;
 mod window_manager;
@@ -1132,7 +1132,7 @@ fn main() {
                     let _ = cx.update(move |cx: &mut gpui::App| {
                         // Position window on mouse display at eye-line
                         platform::ensure_move_to_active_space();
-                        
+
                         let window_size = gpui::size(px(750.), initial_window_height());
                         let bounds = platform::calculate_eye_line_bounds_on_mouse_display(window_size);
                         platform::move_first_window_to_bounds(&bounds);

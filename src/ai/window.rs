@@ -940,16 +940,13 @@ impl AiApp {
                     .p_3()
                     .rounded_md()
                     .bg(cx.theme().muted.opacity(0.3))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().foreground)
-                            .child(if self.streaming_content.is_empty() {
-                                "...".to_string()
-                            } else {
-                                self.streaming_content.clone()
-                            }),
-                    ),
+                    .child(div().text_sm().text_color(cx.theme().foreground).child(
+                        if self.streaming_content.is_empty() {
+                            "...".to_string()
+                        } else {
+                            self.streaming_content.clone()
+                        },
+                    )),
             )
     }
 
@@ -1029,10 +1026,10 @@ impl AiApp {
         // Build input area at bottom - Raycast-style layout:
         // Row 1: [+ icon] [input field with magenta border]
         // Row 2: [Model picker with spinner] ... [Submit ↵] | [Actions ⌘K]
-        
+
         // Use theme accent color for input border (follows theme)
         let input_border_color = cx.theme().accent;
-        
+
         let input_area = div()
             .flex()
             .flex_col()
@@ -1118,12 +1115,7 @@ impl AiApp {
                                     .child("Submit ↵"),
                             )
                             // Divider
-                            .child(
-                                div()
-                                    .w(px(1.))
-                                    .h(px(16.))
-                                    .bg(cx.theme().border),
-                            )
+                            .child(div().w(px(1.)).h(px(16.)).bg(cx.theme().border))
                             // Actions ⌘K - placeholder for future actions menu
                             .child(
                                 div()
@@ -1335,9 +1327,9 @@ fn ensure_theme_initialized(cx: &mut App) {
 /// Toggle the AI window (open if closed, close if open)
 pub fn open_ai_window(cx: &mut App) -> Result<()> {
     use crate::logging;
-    
+
     logging::log("PANEL", "open_ai_window called - checking toggle state");
-    
+
     // Ensure gpui-component theme is initialized before opening window
     ensure_theme_initialized(cx);
 
@@ -1347,19 +1339,25 @@ pub fn open_ai_window(cx: &mut App) -> Result<()> {
     // Check if window already exists and is valid
     if let Some(ref handle) = *guard {
         // Window exists - check if it's valid and close it (toggle OFF)
-        if handle.update(cx, |_, window, _cx| {
-            window.remove_window();
-        }).is_ok() {
+        if handle
+            .update(cx, |_, window, _cx| {
+                window.remove_window();
+            })
+            .is_ok()
+        {
             logging::log("PANEL", "AI window was open - closing (toggle OFF)");
             *guard = None;
-            
+
             // After closing AI, hide the app if main window isn't supposed to be visible
             // This prevents macOS from bringing the main window forward
             if !crate::is_main_window_visible() {
-                logging::log("PANEL", "Main window not visible - hiding app to prevent focus");
+                logging::log(
+                    "PANEL",
+                    "Main window not visible - hiding app to prevent focus",
+                );
                 cx.hide();
             }
-            
+
             return Ok(());
         }
         // Window handle was invalid, fall through to create new window
@@ -1431,15 +1429,15 @@ fn configure_ai_as_floating_panel() {
         for i in 0..count {
             let window: id = msg_send![windows, objectAtIndex: i];
             let title: id = msg_send![window, title];
-            
+
             if title != nil {
                 let title_cstr: *const i8 = msg_send![title, UTF8String];
                 if !title_cstr.is_null() {
                     let title_str = CStr::from_ptr(title_cstr).to_string_lossy();
-                    
+
                     if title_str == "Script Kit AI" {
                         // Found the AI window - configure it
-                        
+
                         // NSFloatingWindowLevel = 3
                         let floating_level: i32 = 3;
                         let _: () = msg_send![window, setLevel:floating_level];
