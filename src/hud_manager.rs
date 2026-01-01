@@ -290,7 +290,7 @@ fn calculate_hud_position(cx: &App) -> (f32, f32) {
     let displays = cx.displays();
 
     // Try to get mouse position
-    let mouse_pos = crate::get_global_mouse_position();
+    let mouse_pos = crate::platform::get_global_mouse_position();
 
     // Find display containing mouse
     let target_display = if let Some((mouse_x, mouse_y)) = mouse_pos {

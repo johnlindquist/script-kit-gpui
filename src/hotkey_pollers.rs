@@ -3,9 +3,9 @@ use gpui::{px, size, App, AppContext as _, AsyncApp, Context, Focusable, Window,
 use crate::hotkeys;
 use crate::window_resize::{initial_window_height, reset_resize_debounce};
 use crate::{
-    calculate_eye_line_bounds_on_mouse_display, logging, move_first_window_to_bounds, platform,
-    ScriptListApp, NEEDS_RESET, PANEL_CONFIGURED, WINDOW_VISIBLE,
+    logging, platform, ScriptListApp, NEEDS_RESET, PANEL_CONFIGURED, WINDOW_VISIBLE,
 };
+use crate::platform::{calculate_eye_line_bounds_on_mouse_display, move_first_window_to_bounds};
 
 /// A simple model that listens for hotkey triggers via async_channel (event-driven).
 pub struct HotkeyPoller {
@@ -98,7 +98,7 @@ impl HotkeyPoller {
 
                         // Step 1: Calculate new bounds on display with mouse, at eye-line height
                         let window_size = size(px(750.), initial_window_height());
-                        let new_bounds = calculate_eye_line_bounds_on_mouse_display(window_size, cx);
+                        let new_bounds = calculate_eye_line_bounds_on_mouse_display(window_size);
 
                         logging::log(
                             "HOTKEY",
