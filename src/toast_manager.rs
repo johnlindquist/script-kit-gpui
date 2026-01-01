@@ -6,17 +6,24 @@
 //! - Toast positioning (top-right stack)
 //! - Dismiss callbacks and lifecycle management
 //!
+//! # Integration with gpui-component
+//!
+//! The ToastManager acts as a staging queue. Toasts are pushed via `push()` from
+//! anywhere in the code (even without window access). Then in the render loop,
+//! call `drain_pending()` to get the pending toasts and push them to gpui-component's
+//! notification system via `window.push_notification()`.
+//!
 //! # Example
 //! ```ignore
 //! let mut manager = ToastManager::new();
 //! let colors = ToastColors::from_theme(&theme, ToastVariant::Success);
 //! let id = manager.push(Toast::new("Operation successful!", colors));
 //!
-//! // In render loop, call tick() to handle auto-dismiss
-//! manager.tick(cx);
-//!
-//! // Manually dismiss if needed
-//! manager.dismiss(&id);
+//! // In render loop, drain pending toasts to gpui-component
+//! for toast in manager.drain_pending() {
+//!     let notification = toast_to_notification(&toast);
+//!     window.push_notification(notification, cx);
+//! }
 //! ```
 
 #![allow(dead_code)]
@@ -327,6 +334,41 @@ impl ToastManager {
 
         tracing::debug!("Toast manager cleared");
     }
+
+    /// Drain all pending (non-dismissed) toasts from the queue
+    ///
+    /// This is used to flush pending toasts to gpui-component's notification system.
+    /// After draining, the internal queue is cleared.
+    ///
+    /// Returns an iterator of Toast references with their metadata.
+    pub fn drain_pending(&mut self) -> Vec<PendingToast> {
+        let pending: Vec<PendingToast> = self
+            .notifications
+            .drain(..)
+            .filter(|n| !n.is_dismissed)
+            .map(|n| PendingToast {
+                message: n.toast.get_message().to_string(),
+                variant: n.toast.get_variant(),
+                details: n.toast.get_details().cloned(),
+                duration_ms: n.toast.get_duration_ms(),
+            })
+            .collect();
+
+        if !pending.is_empty() {
+            tracing::debug!(count = pending.len(), "Drained pending toasts");
+        }
+
+        pending
+    }
+}
+
+/// A pending toast ready to be converted to gpui-component Notification
+#[derive(Debug, Clone)]
+pub struct PendingToast {
+    pub message: String,
+    pub variant: crate::components::ToastVariant,
+    pub details: Option<String>,
+    pub duration_ms: Option<u64>,
 }
 
 #[cfg(test)]

@@ -1034,7 +1034,21 @@ fn main() {
         // TODO: start_hotkey_event_handler needs to be updated to work with Root wrapper
         // This requires changes to hotkey_pollers.rs to accept Entity<ScriptListApp> instead of WindowHandle<ScriptListApp>
         // start_hotkey_event_handler(cx, window, app_entity.clone());
-        logging::log("APP", "WARN: Hotkey event handler temporarily disabled during Root wrapper integration");
+        logging::log("APP", "WARN: Main hotkey event handler temporarily disabled during Root wrapper integration");
+
+        // Notes hotkey listener - spawns independently, doesn't need window handle
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            logging::log("HOTKEY", "Notes hotkey listener started");
+            while let Ok(()) = hotkeys::notes_hotkey_channel().1.recv().await {
+                logging::log("HOTKEY", "Notes hotkey triggered - opening notes window");
+                let _ = cx.update(|cx: &mut gpui::App| {
+                    if let Err(e) = notes::open_notes_window(cx) {
+                        logging::log("HOTKEY", &format!("Failed to open notes window: {}", e));
+                    }
+                });
+            }
+            logging::log("HOTKEY", "Notes hotkey listener exiting");
+        }).detach();
 
         // Appearance change watcher - event-driven with async_channel
         let app_entity_for_appearance = app_entity.clone();
