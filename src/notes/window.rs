@@ -9,6 +9,11 @@ use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled, Subscription, Window,
     WindowBounds, WindowOptions,
 };
+
+#[cfg(target_os = "macos")]
+use cocoa::appkit::NSApp;
+#[cfg(target_os = "macos")]
+use cocoa::base::{id, nil};
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
@@ -16,6 +21,8 @@ use gpui_component::{
     theme::{ActiveTheme, Theme as GpuiTheme, ThemeColor, ThemeMode},
     IconName, Root, Sizable,
 };
+#[cfg(target_os = "macos")]
+use objc::{msg_send, sel, sel_impl};
 use tracing::{debug, info};
 
 use super::model::{ExportFormat, Note, NoteId};
@@ -854,6 +861,10 @@ pub fn open_notes_window(cx: &mut App) -> Result<()> {
 
     *guard = Some(handle);
 
+    // Configure as floating panel (always on top) after window is created
+    // The window should now be the key window since we just created and focused it
+    configure_notes_as_floating_panel();
+
     Ok(())
 }
 
@@ -877,4 +888,48 @@ pub fn close_notes_window(cx: &mut App) {
             window.remove_window();
         });
     }
+}
+
+/// Configure the Notes window as a floating panel (always on top).
+///
+/// This sets:
+/// - NSFloatingWindowLevel (3) - floats above normal windows
+/// - NSWindowCollectionBehaviorMoveToActiveSpace - moves to current space when shown
+/// - Disabled window restoration - prevents macOS position caching
+#[cfg(target_os = "macos")]
+fn configure_notes_as_floating_panel() {
+    use crate::logging;
+
+    unsafe {
+        let app: id = NSApp();
+        let window: id = msg_send![app, keyWindow];
+
+        if window != nil {
+            // NSFloatingWindowLevel = 3
+            let floating_level: i32 = 3;
+            let _: () = msg_send![window, setLevel:floating_level];
+
+            // NSWindowCollectionBehaviorMoveToActiveSpace = 2
+            let collection_behavior: u64 = 2;
+            let _: () = msg_send![window, setCollectionBehavior:collection_behavior];
+
+            // Disable window restoration
+            let _: () = msg_send![window, setRestorable:false];
+
+            logging::log(
+                "PANEL",
+                "Notes window configured as floating panel (level=3, MoveToActiveSpace)",
+            );
+        } else {
+            logging::log(
+                "PANEL",
+                "Warning: Notes window not found as key window for floating panel config",
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_notes_as_floating_panel() {
+    // No-op on non-macOS platforms
 }
