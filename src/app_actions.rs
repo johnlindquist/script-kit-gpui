@@ -27,6 +27,10 @@ impl ScriptListApp {
                     }
                 });
                 self.last_output = Some(SharedString::from("Opened scripts folder"));
+                // Hide window after opening folder and set reset flag
+                WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                NEEDS_RESET.store(true, Ordering::SeqCst);
+                cx.hide();
             }
             "run_script" => {
                 logging::log("UI", "Run script action");
@@ -56,6 +60,10 @@ impl ScriptListApp {
                                 }
                             });
                             self.last_output = Some(SharedString::from("Revealed in Finder"));
+                            // Hide window after revealing in Finder and set reset flag
+                            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                            NEEDS_RESET.store(true, Ordering::SeqCst);
+                            cx.hide();
                         }
                         scripts::SearchResult::Scriptlet(_) => {
                             self.last_output =
@@ -81,6 +89,10 @@ impl ScriptListApp {
                                 }
                             });
                             self.last_output = Some(SharedString::from("Revealed app in Finder"));
+                            // Hide window after revealing app in Finder and set reset flag
+                            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                            NEEDS_RESET.store(true, Ordering::SeqCst);
+                            cx.hide();
                         }
                         scripts::SearchResult::Window(_) => {
                             self.last_output =
@@ -204,6 +216,10 @@ impl ScriptListApp {
                     match result {
                         scripts::SearchResult::Script(script_match) => {
                             self.edit_script(&script_match.script.path);
+                            // Hide window after opening editor and set reset flag
+                            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                            NEEDS_RESET.store(true, Ordering::SeqCst);
+                            cx.hide();
                         }
                         scripts::SearchResult::Scriptlet(_) => {
                             self.last_output = Some(SharedString::from("Cannot edit scriptlets"));

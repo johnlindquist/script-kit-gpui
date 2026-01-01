@@ -1170,6 +1170,10 @@ impl ScriptListApp {
                     match Command::new("open").args(["-R", &path_to_reveal]).spawn() {
                         Ok(_) => {
                             logging::log("UI", &format!("Revealed in Finder: {}", path_info.path));
+                            // Hide window and set reset flag after opening external app
+                            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                            NEEDS_RESET.store(true, Ordering::SeqCst);
+                            cx.hide();
                         }
                         Err(e) => {
                             logging::log("ERROR", &format!("Failed to reveal in Finder: {}", e));
@@ -1188,15 +1192,19 @@ impl ScriptListApp {
                     &format!("Opening in editor '{}': {}", editor, path_str),
                 );
 
-                std::thread::spawn(move || {
-                    use std::process::Command;
-                    match Command::new(&editor).arg(&path_str).spawn() {
-                        Ok(_) => logging::log("UI", &format!("Opened in editor: {}", path_str)),
-                        Err(e) => {
-                            logging::log("ERROR", &format!("Failed to open in editor: {}", e))
-                        }
+                match std::process::Command::new(&editor).arg(&path_str).spawn() {
+                    Ok(_) => {
+                        logging::log("UI", &format!("Opened in editor: {}", path_str));
+                        // Hide window and set reset flag after opening external app
+                        WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                        NEEDS_RESET.store(true, Ordering::SeqCst);
+                        cx.hide();
                     }
-                });
+                    Err(e) => {
+                        logging::log("ERROR", &format!("Failed to open in editor: {}", e));
+                        self.last_output = Some(SharedString::from("Failed to open in editor"));
+                    }
+                }
             }
             "open_in_terminal" => {
                 // Open terminal at this location
@@ -1225,6 +1233,10 @@ impl ScriptListApp {
                     match Command::new("osascript").args(["-e", &script]).spawn() {
                         Ok(_) => {
                             logging::log("UI", &format!("Opened terminal at: {}", dir_path));
+                            // Hide window and set reset flag after opening external app
+                            WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+                            NEEDS_RESET.store(true, Ordering::SeqCst);
+                            cx.hide();
                         }
                         Err(e) => {
                             logging::log("ERROR", &format!("Failed to open terminal: {}", e));
