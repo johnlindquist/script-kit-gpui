@@ -33,6 +33,10 @@ pub enum BuiltInFeature {
     WindowSwitcher,
     /// Design gallery for viewing separator and icon variations
     DesignGallery,
+    /// AI Chat window for conversing with AI assistants
+    AiChat,
+    /// Notes window for quick notes and scratchpad
+    Notes,
 }
 
 /// A built-in feature entry that appears in the main search
@@ -136,6 +140,46 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
         debug!("Added Window Switcher built-in entry");
     }
 
+    // AI Chat is always available
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-ai-chat",
+        "AI Chat",
+        "Chat with AI assistants (Claude, GPT)",
+        vec![
+            "ai",
+            "chat",
+            "assistant",
+            "claude",
+            "gpt",
+            "openai",
+            "anthropic",
+            "llm",
+        ],
+        BuiltInFeature::AiChat,
+        "🤖",
+    ));
+    debug!("Added AI Chat built-in entry");
+
+    // Notes is always available
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-notes",
+        "Notes",
+        "Quick notes and scratchpad",
+        vec![
+            "notes",
+            "note",
+            "scratch",
+            "scratchpad",
+            "memo",
+            "markdown",
+            "write",
+            "text",
+        ],
+        BuiltInFeature::Notes,
+        "📝",
+    ));
+    debug!("Added Notes built-in entry");
+
     // Design Gallery is always available (developer tool)
     entries.push(BuiltInEntry::new_with_icon(
         "builtin-design-gallery",
@@ -189,8 +233,8 @@ mod tests {
         let config = BuiltInConfig::default();
         let entries = get_builtin_entries(&config);
 
-        // Clipboard history, window switcher, and design gallery are built-ins (apps appear directly in search)
-        assert_eq!(entries.len(), 3);
+        // Clipboard history, window switcher, AI chat, Notes, and design gallery are built-ins (apps appear directly in search)
+        assert_eq!(entries.len(), 5);
 
         // Check clipboard history entry
         let clipboard = entries.iter().find(|e| e.id == "builtin-clipboard-history");
@@ -216,6 +260,17 @@ mod tests {
         assert!(window_switcher.keywords.contains(&"manage".to_string()));
         assert!(window_switcher.keywords.contains(&"switcher".to_string()));
 
+        // Check AI chat entry
+        let ai_chat = entries.iter().find(|e| e.id == "builtin-ai-chat");
+        assert!(ai_chat.is_some());
+        let ai_chat = ai_chat.unwrap();
+        assert_eq!(ai_chat.name, "AI Chat");
+        assert_eq!(ai_chat.feature, BuiltInFeature::AiChat);
+        assert!(ai_chat.keywords.contains(&"ai".to_string()));
+        assert!(ai_chat.keywords.contains(&"chat".to_string()));
+        assert!(ai_chat.keywords.contains(&"claude".to_string()));
+        assert!(ai_chat.keywords.contains(&"gpt".to_string()));
+
         // Note: App Launcher built-in removed - apps now appear directly in main search
     }
 
@@ -228,12 +283,16 @@ mod tests {
         };
         let entries = get_builtin_entries(&config);
 
-        // Clipboard history + Design Gallery (always enabled)
-        assert_eq!(entries.len(), 2);
+        // Clipboard history + AI Chat + Notes + Design Gallery (always enabled)
+        assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].id, "builtin-clipboard-history");
         assert_eq!(entries[0].feature, BuiltInFeature::ClipboardHistory);
-        assert_eq!(entries[1].id, "builtin-design-gallery");
-        assert_eq!(entries[1].feature, BuiltInFeature::DesignGallery);
+        assert_eq!(entries[1].id, "builtin-ai-chat");
+        assert_eq!(entries[1].feature, BuiltInFeature::AiChat);
+        assert_eq!(entries[2].id, "builtin-notes");
+        assert_eq!(entries[2].feature, BuiltInFeature::Notes);
+        assert_eq!(entries[3].id, "builtin-design-gallery");
+        assert_eq!(entries[3].feature, BuiltInFeature::DesignGallery);
     }
 
     #[test]
@@ -246,9 +305,11 @@ mod tests {
         let entries = get_builtin_entries(&config);
 
         // App launcher no longer creates a built-in entry (apps appear in main search)
-        // But Design Gallery is always enabled
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, "builtin-design-gallery");
+        // But AI Chat, Notes and Design Gallery are always enabled
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].id, "builtin-ai-chat");
+        assert_eq!(entries[1].id, "builtin-notes");
+        assert_eq!(entries[2].id, "builtin-design-gallery");
     }
 
     #[test]
@@ -260,9 +321,11 @@ mod tests {
         };
         let entries = get_builtin_entries(&config);
 
-        // Design Gallery is always enabled
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, "builtin-design-gallery");
+        // AI Chat, Notes, and Design Gallery are always enabled
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].id, "builtin-ai-chat");
+        assert_eq!(entries[1].id, "builtin-notes");
+        assert_eq!(entries[2].id, "builtin-design-gallery");
     }
 
     #[test]
@@ -274,12 +337,14 @@ mod tests {
         };
         let entries = get_builtin_entries(&config);
 
-        // Window switcher + Design Gallery (always enabled)
-        assert_eq!(entries.len(), 2);
+        // Window switcher + AI Chat + Notes + Design Gallery (always enabled)
+        assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].id, "builtin-window-switcher");
         assert_eq!(entries[0].feature, BuiltInFeature::WindowSwitcher);
         assert_eq!(entries[0].icon, Some("🪟".to_string()));
-        assert_eq!(entries[1].id, "builtin-design-gallery");
+        assert_eq!(entries[1].id, "builtin-ai-chat");
+        assert_eq!(entries[2].id, "builtin-notes");
+        assert_eq!(entries[3].id, "builtin-design-gallery");
     }
 
     #[test]
@@ -294,6 +359,7 @@ mod tests {
             BuiltInFeature::WindowSwitcher
         );
         assert_eq!(BuiltInFeature::DesignGallery, BuiltInFeature::DesignGallery);
+        assert_eq!(BuiltInFeature::AiChat, BuiltInFeature::AiChat);
         assert_ne!(
             BuiltInFeature::ClipboardHistory,
             BuiltInFeature::AppLauncher
@@ -307,6 +373,8 @@ mod tests {
             BuiltInFeature::DesignGallery,
             BuiltInFeature::ClipboardHistory
         );
+        assert_ne!(BuiltInFeature::AiChat, BuiltInFeature::ClipboardHistory);
+        assert_ne!(BuiltInFeature::AiChat, BuiltInFeature::DesignGallery);
 
         // Test App variant
         assert_eq!(

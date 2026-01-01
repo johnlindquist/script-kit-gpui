@@ -463,6 +463,8 @@ impl ScriptListApp {
                                 "Window Manager".to_string()
                             }
                             builtins::BuiltInFeature::DesignGallery => "Design Gallery".to_string(),
+                            builtins::BuiltInFeature::AiChat => "AI Assistant".to_string(),
+                            builtins::BuiltInFeature::Notes => "Notes & Scratchpad".to_string(),
                         };
                         panel = panel.child(
                             div()

@@ -1112,6 +1112,17 @@ fn main() {
                     logging::log("VISIBILITY", "Decision: HIDE");
                     script_kit_gpui::set_main_window_visible(false);
 
+                    // Check if Notes or AI windows are open BEFORE the closure
+                    let notes_open = notes::is_notes_window_open();
+                    let ai_open = ai::is_ai_window_open();
+                    logging::log(
+                        "VISIBILITY",
+                        &format!(
+                            "Secondary windows: notes_open={}, ai_open={}",
+                            notes_open, ai_open
+                        ),
+                    );
+
                     let _ = cx.update(move |cx: &mut gpui::App| {
                         // Cancel any active prompt and reset UI
                         app_entity_inner.update(cx, |view, ctx| {
@@ -1121,9 +1132,21 @@ fn main() {
                             }
                             view.reset_to_script_list(ctx);
                         });
-                        // Hide the app (GPUI doesn't support per-window hide)
-                        cx.hide();
-                        logging::log("HOTKEY", "App hidden");
+
+                        // CRITICAL: Only hide main window if Notes/AI are open
+                        // cx.hide() hides the ENTIRE app (all windows), so we use
+                        // platform::hide_main_window() to hide only the main window
+                        if notes_open || ai_open {
+                            logging::log(
+                                "HOTKEY",
+                                "Using hide_main_window() - secondary windows are open",
+                            );
+                            platform::hide_main_window();
+                        } else {
+                            logging::log("HOTKEY", "Using cx.hide() - no secondary windows");
+                            cx.hide();
+                        }
+                        logging::log("HOTKEY", "Main window hidden");
                     });
                 } else {
                     logging::log("VISIBILITY", "Decision: SHOW");

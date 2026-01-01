@@ -105,6 +105,44 @@ impl ScriptListApp {
                 defer_resize_to_view(ViewType::ScriptList, 0, cx);
                 cx.notify();
             }
+            builtins::BuiltInFeature::AiChat => {
+                logging::log("EXEC", "Opening AI Chat window");
+                // Hide the main window and open AI window
+                script_kit_gpui::set_main_window_visible(false);
+                NEEDS_RESET.store(true, Ordering::SeqCst);
+                cx.hide();
+                // Open AI window
+                if let Err(e) = ai::open_ai_window(cx) {
+                    logging::log("ERROR", &format!("Failed to open AI window: {}", e));
+                    self.toast_manager.push(
+                        components::toast::Toast::error(
+                            format!("Failed to open AI: {}", e),
+                            &self.theme,
+                        )
+                        .duration_ms(Some(5000)),
+                    );
+                    cx.notify();
+                }
+            }
+            builtins::BuiltInFeature::Notes => {
+                logging::log("EXEC", "Opening Notes window");
+                // Hide the main window and open Notes window
+                script_kit_gpui::set_main_window_visible(false);
+                NEEDS_RESET.store(true, Ordering::SeqCst);
+                cx.hide();
+                // Open Notes window
+                if let Err(e) = notes::open_notes_window(cx) {
+                    logging::log("ERROR", &format!("Failed to open Notes window: {}", e));
+                    self.toast_manager.push(
+                        components::toast::Toast::error(
+                            format!("Failed to open Notes: {}", e),
+                            &self.theme,
+                        )
+                        .duration_ms(Some(5000)),
+                    );
+                    cx.notify();
+                }
+            }
         }
     }
 
