@@ -12,6 +12,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::Root;
+use gpui_component::{Sizable, Size};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod process_manager;

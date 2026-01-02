@@ -594,7 +594,7 @@ impl ScriptListApp {
                                 .h(px(input_height))
                                 .px(px(0.))
                                 .py(px(0.))
-                                .text_xl()
+                                .with_size(Size::Size(px(20.))) // text_xl = 1.25rem = 20px
                                 .appearance(false)
                                 .bordered(false)
                                 .focus_bordered(false),
