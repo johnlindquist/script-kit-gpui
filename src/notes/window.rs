@@ -1264,10 +1264,8 @@ impl NotesApp {
                 .flex()
                 .items_center()
                 .justify_center()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_browse_panel = false;
-                    this.browse_panel = None;
-                    cx.notify();
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_browse_panel(window, cx);
                 }))
                 .child(
                     div()
