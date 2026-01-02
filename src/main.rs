@@ -694,10 +694,20 @@ impl Render for ScriptListApp {
                 }
                 AppView::EditorPromptV2 { entity, .. } => {
                     // EditorPromptV2 uses gpui-component's Input which has its own internal
-                    // focus handle. We call the entity's focus method to focus the InputState.
-                    entity.update(cx, |editor, cx| {
-                        editor.focus(window, cx);
-                    });
+                    // focus handle. But if actions dialog is showing, focus the dialog instead.
+                    if self.show_actions_popup {
+                        if let Some(ref dialog) = self.actions_dialog {
+                            let dialog_focus_handle = dialog.read(cx).focus_handle.clone();
+                            let is_focused = dialog_focus_handle.is_focused(window);
+                            if !is_focused {
+                                window.focus(&dialog_focus_handle, cx);
+                            }
+                        }
+                    } else {
+                        entity.update(cx, |editor, cx| {
+                            editor.focus(window, cx);
+                        });
+                    }
                 }
                 AppView::PathPrompt { focus_handle, .. } => {
                     // PathPrompt has its own focus handle - focus it

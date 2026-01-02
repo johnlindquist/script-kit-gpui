@@ -252,12 +252,15 @@ impl ScriptListApp {
                 let editor_height = window_resize::layout::MAX_HEIGHT;
 
                 // Create editor v2 (gpui-component based with Find/Replace)
+                // Default to markdown for all editor content
+                let resolved_language = language.unwrap_or_else(|| "markdown".to_string());
+
                 // Use with_template if template provided, otherwise with_height
                 let editor_prompt = if let Some(template_str) = template {
                     EditorPromptV2::with_template(
                         id.clone(),
                         template_str,
-                        language.unwrap_or_else(|| "plaintext".to_string()),
+                        resolved_language.clone(),
                         editor_focus_handle.clone(),
                         submit_callback,
                         std::sync::Arc::new(self.theme.clone()),
@@ -268,7 +271,7 @@ impl ScriptListApp {
                     EditorPromptV2::with_height(
                         id.clone(),
                         content.unwrap_or_default(),
-                        language.unwrap_or_else(|| "markdown".to_string()),
+                        resolved_language.clone(),
                         editor_focus_handle.clone(),
                         submit_callback,
                         std::sync::Arc::new(self.theme.clone()),

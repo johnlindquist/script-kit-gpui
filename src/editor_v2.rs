@@ -44,8 +44,7 @@ pub struct EditorPromptV2 {
     // Pending initialization data (consumed on first render)
     pending_init: Option<PendingInit>,
 
-    // Language for syntax highlighting
-    #[allow(dead_code)]
+    // Language for syntax highlighting (displayed in footer)
     language: String,
 
     // GPUI
@@ -393,6 +392,28 @@ impl Render for EditorPromptV2 {
                     .child("Loading editor..."),
             );
         }
+
+        // Footer with language indicator
+        let language_display: SharedString = self.language.clone().into();
+        container = container.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .w_full()
+                .h(px(24.))
+                .px(px(12.))
+                .bg(rgb(colors.background.title_bar))
+                .border_t_1()
+                .border_color(rgb(colors.ui.border))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(colors.text.muted))
+                        .child(language_display),
+                ),
+        );
 
         container
     }
