@@ -1422,15 +1422,11 @@ pub fn open_notes_window(cx: &mut App) -> Result<()> {
             logging::log("PANEL", "Notes window was open - closing (toggle OFF)");
             *guard = None;
 
-            // After closing Notes, hide the app if main window isn't supposed to be visible
-            // AND AI window isn't open. Only hide when no windows should be visible.
-            if !crate::is_main_window_visible() && !crate::ai::is_ai_window_open() {
-                logging::log(
-                    "PANEL",
-                    "Main window not visible and AI not open - hiding app",
-                );
-                cx.hide();
-            }
+            // NOTE: We intentionally do NOT call cx.hide() here.
+            // Closing Notes should not affect the main window's ability to be shown.
+            // The main window hotkey handles its own visibility state.
+            // If the user wants to hide everything, they can press the main hotkey
+            // when the main window is visible.
 
             return Ok(());
         }
@@ -1440,6 +1436,7 @@ pub fn open_notes_window(cx: &mut App) -> Result<()> {
 
     // If main window is visible, hide it (Notes takes focus)
     // Use platform::hide_main_window() to only hide the main window, not the whole app
+    // IMPORTANT: Set visibility to false so the main hotkey knows to SHOW (not hide) next time
     if crate::is_main_window_visible() {
         logging::log(
             "PANEL",

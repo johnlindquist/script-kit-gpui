@@ -1730,6 +1730,10 @@ fn main() {
                                 logging::log("STDIN", &format!("Setting AI search filter to: {}", text));
                                 ai::set_ai_search(ctx, &text);
                             }
+                            ExternalCommand::SetAiInput { text, submit } => {
+                                logging::log("STDIN", &format!("Setting AI input to: {} (submit={})", text, submit));
+                                ai::set_ai_input(ctx, &text, submit);
+                            }
                         }
                         ctx.notify();
                         }); // close app_entity_inner.update

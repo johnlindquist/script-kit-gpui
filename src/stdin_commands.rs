@@ -68,6 +68,14 @@ pub enum ExternalCommand {
     /// Set the AI window search filter (for testing chat search)
     /// text: Search query to filter chats
     SetAiSearch { text: String },
+    /// Set the AI window input text and optionally submit (for testing streaming)
+    /// text: Message text to set in the input field
+    /// submit: If true, submit the message after setting (triggers streaming)
+    SetAiInput {
+        text: String,
+        #[serde(default)]
+        submit: bool,
+    },
 }
 
 /// Start a thread that listens on stdin for external JSONL commands.

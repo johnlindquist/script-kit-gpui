@@ -776,11 +776,18 @@ impl AiApp {
 
     /// Render the search input
     fn render_search(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        // Fixed height container to prevent layout shift when typing
         div()
             .w_full()
-            .px_2()
-            .py_1()
-            .child(Input::new(&self.search_state).w_full().small())
+            .h(px(36.)) // Fixed height to prevent layout shift
+            .flex()
+            .items_center()
+            .child(
+                Input::new(&self.search_state)
+                    .w_full()
+                    .small()
+                    .focus_bordered(false), // Disable default focus border (too bright)
+            )
     }
 
     /// Toggle sidebar visibility
@@ -1308,16 +1315,20 @@ impl AiApp {
                                     .text_color(cx.theme().muted_foreground),
                             ),
                     )
-                    // Input field with theme accent border
+                    // Input field with subtle accent border
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .rounded_lg()
                             .border_1()
-                            .border_color(input_border_color)
+                            .border_color(input_border_color.opacity(0.6)) // Subtle border
                             .overflow_hidden()
-                            .child(Input::new(&self.input_state).w_full()),
+                            .child(
+                                Input::new(&self.input_state)
+                                    .w_full()
+                                    .focus_bordered(false), // Disable default focus ring
+                            ),
                     ),
             )
             // Bottom row: Model picker left, actions right (reduced padding)
@@ -1544,8 +1555,11 @@ fn map_scriptkit_to_gpui_theme(sk_theme: &crate::theme::Theme) -> ThemeColor {
     // Selection
     theme_color.selection = hex_to_hsla(colors.accent.selected_subtle);
 
-    // Ring (focus ring)
-    theme_color.ring = hex_to_hsla(colors.accent.selected);
+    // Ring (focus ring) - use a more subtle version of the accent color
+    // The full accent is too bright for focus borders
+    let mut ring_color = hex_to_hsla(colors.accent.selected);
+    ring_color.a = 0.5; // 50% opacity for a subtler focus ring
+    theme_color.ring = ring_color;
 
     // Tab colors
     theme_color.tab = hex_to_hsla(colors.background.main);
@@ -1732,6 +1746,43 @@ pub fn set_ai_search(cx: &mut App, query: &str) {
         });
     } else {
         logging::log("AI", "Cannot set search - AI window not open");
+    }
+}
+
+/// Set the main input text in the AI window and optionally submit.
+/// Used for testing the streaming functionality via stdin commands.
+pub fn set_ai_input(cx: &mut App, text: &str, submit: bool) {
+    use crate::logging;
+
+    // Get the AI window handle for the window context
+    let window_handle = AI_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
+    let window_guard = window_handle.lock().unwrap();
+
+    // Get the AiApp entity
+    let app_entity_holder = AI_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
+    let app_guard = app_entity_holder.lock().unwrap();
+
+    if let (Some(handle), Some(app_entity)) = (window_guard.as_ref(), app_guard.as_ref()) {
+        let text_owned = text.to_string();
+        let app_entity_clone = app_entity.clone();
+
+        let _ = handle.update(cx, |_root, window, cx| {
+            app_entity_clone.update(cx, |app, cx| {
+                // Set the input value
+                app.input_state.update(cx, |state, cx| {
+                    state.set_value(text_owned.clone(), window, cx);
+                });
+                logging::log("AI", &format!("Input set to: {}", text_owned));
+
+                // Optionally submit the message (triggers streaming)
+                if submit {
+                    app.submit_message(window, cx);
+                    logging::log("AI", "Message submitted - streaming started");
+                }
+            });
+        });
+    } else {
+        logging::log("AI", "Cannot set input - AI window not open");
     }
 }
 

@@ -107,10 +107,11 @@ impl ScriptListApp {
             }
             builtins::BuiltInFeature::AiChat => {
                 logging::log("EXEC", "Opening AI Chat window");
-                // Hide the main window and open AI window
+                // Hide the main window (NOT the entire app) and open AI window
                 script_kit_gpui::set_main_window_visible(false);
                 NEEDS_RESET.store(true, Ordering::SeqCst);
-                cx.hide();
+                // Use hide_main_window() to only hide main window, not the whole app
+                platform::hide_main_window();
                 // Open AI window
                 if let Err(e) = ai::open_ai_window(cx) {
                     logging::log("ERROR", &format!("Failed to open AI window: {}", e));
@@ -126,10 +127,11 @@ impl ScriptListApp {
             }
             builtins::BuiltInFeature::Notes => {
                 logging::log("EXEC", "Opening Notes window");
-                // Hide the main window and open Notes window
+                // Hide the main window (NOT the entire app) and open Notes window
                 script_kit_gpui::set_main_window_visible(false);
                 NEEDS_RESET.store(true, Ordering::SeqCst);
-                cx.hide();
+                // Use hide_main_window() to only hide main window, not the whole app
+                platform::hide_main_window();
                 // Open Notes window
                 if let Err(e) = notes::open_notes_window(cx) {
                     logging::log("ERROR", &format!("Failed to open Notes window: {}", e));

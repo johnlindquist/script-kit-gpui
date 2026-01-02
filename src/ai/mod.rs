@@ -77,4 +77,4 @@ pub use config::{DetectedKeys, ModelInfo, ProviderConfig};
 pub use providers::{AiProvider, ProviderMessage, ProviderRegistry};
 
 // Re-export window functions
-pub use window::{close_ai_window, is_ai_window_open, open_ai_window, set_ai_search};
+pub use window::{close_ai_window, is_ai_window_open, open_ai_window, set_ai_input, set_ai_search};
