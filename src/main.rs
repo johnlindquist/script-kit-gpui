@@ -279,6 +279,8 @@ enum AppView {
         id: String,
         entity: Entity<EditorPromptV2>,
         /// Separate focus handle for the editor (not shared with parent)
+        /// Note: This is kept for API compatibility but focus is managed via entity.focus()
+        #[allow(dead_code)]
         focus_handle: FocusHandle,
     },
     /// Showing a select prompt from a script (multi-select)
@@ -681,15 +683,21 @@ impl Render for ScriptListApp {
         // Only enforce focus when the main window is currently focused.
         if is_window_focused {
             match &self.current_view {
-                AppView::EditorPrompt { focus_handle, .. }
-                | AppView::EditorPromptV2 { focus_handle, .. } => {
-                    // EditorPrompt has its own focus handle - focus it
+                AppView::EditorPrompt { focus_handle, .. } => {
+                    // EditorPrompt (legacy) has its own focus handle - focus it
                     let is_focused = focus_handle.is_focused(window);
                     if !is_focused {
                         // Clone focus handle to satisfy borrow checker
                         let fh = focus_handle.clone();
                         window.focus(&fh, cx);
                     }
+                }
+                AppView::EditorPromptV2 { entity, .. } => {
+                    // EditorPromptV2 uses gpui-component's Input which has its own internal
+                    // focus handle. We call the entity's focus method to focus the InputState.
+                    entity.update(cx, |editor, cx| {
+                        editor.focus(window, cx);
+                    });
                 }
                 AppView::PathPrompt { focus_handle, .. } => {
                     // PathPrompt has its own focus handle - focus it

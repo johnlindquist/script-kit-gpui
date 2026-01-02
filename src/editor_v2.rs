@@ -64,6 +64,9 @@ pub struct EditorPromptV2 {
 
     // When true, ignore all key events (used when actions panel is open)
     pub suppress_keys: bool,
+
+    // Flag to request focus on next render (used for auto-focus after initialization)
+    needs_focus: bool,
 }
 
 impl EditorPromptV2 {
@@ -108,6 +111,7 @@ impl EditorPromptV2 {
             content_height,
             subscriptions: Vec::new(),
             suppress_keys: false,
+            needs_focus: true, // Auto-focus on first render
         }
     }
 
@@ -201,6 +205,8 @@ impl EditorPromptV2 {
 
         self.subscriptions = vec![editor_sub];
         self.editor_state = Some(editor_state);
+
+        logging::log("EDITOR", "Editor initialized, focus pending");
     }
 
     /// Get the current content as a String
@@ -283,6 +289,12 @@ impl EditorPromptV2 {
             });
         }
     }
+
+    /// Request focus on next render (useful when called outside of render context)
+    #[allow(dead_code)]
+    pub fn request_focus(&mut self) {
+        self.needs_focus = true;
+    }
 }
 
 impl Focusable for EditorPromptV2 {
@@ -295,6 +307,17 @@ impl Render for EditorPromptV2 {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Ensure InputState is initialized on first render
         self.ensure_initialized(window, cx);
+
+        // Handle deferred focus - focus the editor's InputState after initialization
+        if self.needs_focus {
+            if let Some(ref editor_state) = self.editor_state {
+                editor_state.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                });
+                self.needs_focus = false;
+                logging::log("EDITOR", "Editor focused via deferred focus");
+            }
+        }
 
         let colors = &self.theme.colors;
 
@@ -332,6 +355,8 @@ impl Render for EditorPromptV2 {
         let mono_font: SharedString = fonts.mono_family.into();
 
         // Build the main container - code editor fills the space completely
+        // Note: We don't track focus on the container because the InputState
+        // has its own focus handle. Key events will be handled by the Input.
         let mut container = div()
             .id("editor-v2")
             .flex()
@@ -341,7 +366,6 @@ impl Render for EditorPromptV2 {
             .bg(rgb(colors.background.main))
             .text_color(rgb(colors.text.primary))
             .font_family(mono_font) // Use monospace font for code
-            .track_focus(&self.focus_handle)
             .on_key_down(handle_key);
 
         // Add the editor content if initialized
