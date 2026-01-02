@@ -385,7 +385,7 @@ impl ScriptListApp {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .text_lg()
+                            .text_xl()
                             .text_color(if input_is_empty {
                                 rgb(text_muted)
                             } else {

@@ -223,7 +223,7 @@ impl RenderOnce for Button {
             .rounded(px(6.))
             .bg(bg_color)
             .text_color(text_color)
-            .text_sm()
+            .text_base()
             .font_weight(FontWeight::MEDIUM)
             .font_family(".AppleSystemUIFont")
             .cursor_pointer()

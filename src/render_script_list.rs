@@ -588,22 +588,17 @@ impl ScriptListApp {
                     .gap(px(header_gap))
                     // Search input with cursor and selection support
                     .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .child(
-                                Input::new(&self.gpui_input_state)
-                                    .w_full()
-                                    .h(px(input_height))
-                                    .px(px(0.))
-                                    .py(px(0.))
-                                    .text_lg()
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .focus_bordered(false),
-                            ),
+                        div().flex_1().flex().flex_row().items_center().child(
+                            Input::new(&self.gpui_input_state)
+                                .w_full()
+                                .h(px(input_height))
+                                .px(px(0.))
+                                .py(px(0.))
+                                .text_xl()
+                                .appearance(false)
+                                .bordered(false)
+                                .focus_bordered(false),
+                        ),
                     )
                     // CLS-FREE ACTIONS AREA: Fixed-size relative container with stacked children
                     // Both states are always rendered at the same position, visibility toggled via opacity
