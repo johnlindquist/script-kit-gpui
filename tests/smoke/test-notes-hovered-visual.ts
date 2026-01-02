@@ -6,7 +6,7 @@
 //     | SCRIPT_KIT_TEST_NOTES_HOVERED=1 SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
 //
 // Expected:
-//   - Title centered ("Untitled") with hover chrome visible
+//   - Title left-aligned ("Untitled Note") with hover chrome visible
 //   - Top-right actions (⌘K, list, +)
 //   - Placeholder text: "Start writing..."
 //   - Footer: centered character count, "T" on right
