@@ -1611,6 +1611,31 @@ process.stdin.resume();
 (process.stdin as any).unref?.();
 console.error('[SDK] stdin resumed, readable:', process.stdin.readable);
 
+// Helper to manage stdin ref counting for pending operations
+// When there are pending operations waiting for stdin responses, we need to
+// keep stdin referenced so the process doesn't exit prematurely
+function addPending(id: string, resolver: (msg: any) => void): void {
+  const wasEmpty = pending.size === 0;
+  // Note: This is the internal call in addPending, don't change to addPending
+  pending.set(id, resolver);
+  // If this is the first pending operation, ref stdin to keep process alive
+  if (wasEmpty && pending.size === 1) {
+    (process.stdin as any).ref?.();
+  }
+}
+
+function removePending(id: string): ((msg: any) => void) | undefined {
+  const resolver = pending.get(id);
+  if (resolver) {
+    pending.delete(id);
+    // If no more pending operations, unref stdin to allow process to exit
+    if (pending.size === 0) {
+      (process.stdin as any).unref?.();
+    }
+  }
+  return resolver;
+}
+
 process.stdin.on('data', (chunk: string) => {
   console.error('[SDK_DEBUG] Received stdin chunk:', chunk.length, 'bytes');
   stdinBuffer += chunk;
@@ -1634,9 +1659,8 @@ process.stdin.on('data', (chunk: string) => {
         }
         
         if (id && pending.has(id)) {
-          const resolver = pending.get(id);
+          const resolver = removePending(id);
           if (resolver) {
-            pending.delete(id);
             // For submit messages, pass the value directly
             if (msg.type === 'submit') {
               resolver((msg as SubmitMessage).value ?? undefined);
@@ -2495,7 +2519,7 @@ globalThis.arg = async function arg(
   }
 
   return new Promise((resolve) => {
-    pending.set(id, async (msg: SubmitMessage) => {
+    addPending(id, async (msg: SubmitMessage) => {
       // If user pressed Escape (value is null), exit the script
       if (msg.value === null) {
         process.exit(0);
@@ -2587,7 +2611,7 @@ globalThis.div = async function div(
   }
   
   return new Promise((resolve) => {
-    pending.set(id, (value?: any) => {
+    addPending(id, (value?: any) => {
       resolve(value);
     });
     
@@ -3997,7 +4021,7 @@ globalThis.captureScreenshot = async function captureScreenshot(
   const requestId = nextId();
   
   return new Promise((resolve) => {
-    pending.set(requestId, (msg: ResponseMessage) => {
+    addPending(requestId, (msg: ResponseMessage) => {
       // Handle screenshotResult message type
       if (msg.type === 'screenshotResult') {
         const resultMsg = msg as ScreenshotResultMessage;
