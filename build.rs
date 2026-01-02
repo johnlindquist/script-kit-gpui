@@ -13,4 +13,12 @@ fn main() {
 
     // Trigger rebuild when theme example changes (also embedded)
     println!("cargo:rerun-if-changed=theme.example.json");
+
+    // Trigger rebuild when bundled fonts change (embedded via include_bytes!)
+    println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-Regular.ttf");
+    println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-Bold.ttf");
+    println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-Italic.ttf");
+    println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-BoldItalic.ttf");
+    println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-Medium.ttf");
+    println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-SemiBold.ttf");
 }

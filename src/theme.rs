@@ -423,22 +423,14 @@ pub struct FontConfig {
 }
 
 fn default_mono_font_family() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "Menlo".to_string()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "Consolas".to_string()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        "DejaVu Sans Mono".to_string()
-    }
+    // JetBrains Mono is bundled with the app and registered at startup
+    // It provides excellent code readability with ligatures support
+    "JetBrains Mono".to_string()
 }
 
 fn default_mono_font_size() -> f32 {
-    14.0
+    // 16px provides better readability, especially on high-DPI displays
+    16.0
 }
 
 fn default_ui_font_family() -> String {
