@@ -1109,11 +1109,12 @@ impl NotesApp {
             });
 
         // Build character count footer - only visible on hover
-        // Raycast style: character count on LEFT, T icon on RIGHT
+        // Raycast style: character count CENTERED, T icon on RIGHT
         let footer = div()
             .flex()
             .items_center()
-            .justify_between()
+            .justify_center()
+            .relative()
             .h(px(24.))
             .px_3()
             // No border, same background as window
@@ -1121,7 +1122,7 @@ impl NotesApp {
             // Hide when window not hovered
             .when(!window_hovered, |d| d.opacity(0.))
             .child(
-                // Character count on LEFT (Raycast style)
+                // Character count CENTERED (Raycast style)
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
@@ -1134,6 +1135,8 @@ impl NotesApp {
             .child(
                 // Type indicator (T for text) on RIGHT (Raycast style)
                 div()
+                    .absolute()
+                    .right_3()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child("T"),
