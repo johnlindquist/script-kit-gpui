@@ -22,14 +22,12 @@
 //! - Escape: Close panel
 //! - Type to search/filter actions
 
+use crate::designs::icon_variations::IconName;
 use gpui::{
-    div, point, prelude::*, px, uniform_list, App, BoxShadow, Context, FocusHandle, Focusable,
+    div, point, prelude::*, px, svg, uniform_list, App, BoxShadow, Context, FocusHandle, Focusable,
     Hsla, MouseButton, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window,
 };
-use gpui_component::{
-    theme::{ActiveTheme, Theme},
-    Icon, IconName,
-};
+use gpui_component::theme::{ActiveTheme, Theme};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -166,21 +164,21 @@ impl NotesAction {
         self.shortcut_keys().join("")
     }
 
-    /// Get the icon for this action
+    /// Get the icon for this action (uses local IconName from designs module)
     pub fn icon(&self) -> IconName {
         match self {
             NotesAction::NewNote => IconName::Plus,
             NotesAction::DuplicateNote => IconName::Copy,
             NotesAction::BrowseNotes => IconName::FolderOpen,
-            NotesAction::FindInNote => IconName::Search,
+            NotesAction::FindInNote => IconName::MagnifyingGlass,
             NotesAction::CopyNoteAs => IconName::Copy,
-            NotesAction::CopyDeeplink => IconName::ExternalLink,
+            NotesAction::CopyDeeplink => IconName::ArrowRight,
             NotesAction::CreateQuicklink => IconName::Star,
             NotesAction::Export => IconName::ArrowRight,
             NotesAction::MoveListItemUp => IconName::ArrowUp,
             NotesAction::MoveListItemDown => IconName::ArrowDown,
-            NotesAction::Format => IconName::ALargeSmall,
-            NotesAction::EnableAutoSizing => IconName::Maximize,
+            NotesAction::Format => IconName::Code,
+            NotesAction::EnableAutoSizing => IconName::ArrowRight,
             NotesAction::Cancel => IconName::Close,
         }
     }
@@ -660,19 +658,18 @@ impl Render for NotesActionsPanel {
                                                                 .flex()
                                                                 .flex_row()
                                                                 .items_center()
-                                                                .gap(px(8.0))
+                                                                .gap(px(10.0))
                                                                 // Icon
-                                                                .child({
-                                                                    let icon_name: IconName =
-                                                                        action.action.icon();
-                                                                    Icon::new(icon_name)
-                                                                        .size_4()
+                                                                .child(
+                                                                    svg()
+                                                                        .external_path(action.action.icon().external_path())
+                                                                        .size(px(16.))
                                                                         .text_color(if is_enabled {
                                                                             theme.foreground
                                                                         } else {
                                                                             theme.muted_foreground
-                                                                        })
-                                                                })
+                                                                        }),
+                                                                )
                                                                 // Label
                                                                 .child(
                                                                     div()

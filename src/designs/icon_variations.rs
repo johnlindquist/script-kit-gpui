@@ -98,8 +98,12 @@ pub enum IconName {
     // Arrows
     ArrowRight,
     ArrowDown,
+    ArrowUp,
     ChevronRight,
     ChevronDown,
+
+    // UI
+    Close,
 
     // Media
     PlayFilled,
@@ -135,8 +139,11 @@ impl IconName {
             // Arrows
             Self::ArrowRight,
             Self::ArrowDown,
+            Self::ArrowUp,
             Self::ChevronRight,
             Self::ChevronDown,
+            // UI
+            Self::Close,
             // Media
             Self::PlayFilled,
             Self::PlayOutlined,
@@ -171,8 +178,10 @@ impl IconName {
             Self::BoltOutlined => "Bolt Outlined",
             Self::ArrowRight => "Arrow Right",
             Self::ArrowDown => "Arrow Down",
+            Self::ArrowUp => "Arrow Up",
             Self::ChevronRight => "Chevron Right",
             Self::ChevronDown => "Chevron Down",
+            Self::Close => "Close",
             Self::PlayFilled => "Play Filled",
             Self::PlayOutlined => "Play Outlined",
             Self::Sidebar => "Sidebar",
@@ -200,8 +209,10 @@ impl IconName {
             Self::BoltOutlined => "Quick action (outline)",
             Self::ArrowRight => "Navigate forward",
             Self::ArrowDown => "Navigate down/expand",
+            Self::ArrowUp => "Navigate up/collapse",
             Self::ChevronRight => "Expand right",
             Self::ChevronDown => "Expand down",
+            Self::Close => "Close/dismiss",
             Self::PlayFilled => "Run/execute (filled)",
             Self::PlayOutlined => "Run/execute (outline)",
             Self::Sidebar => "Toggle sidebar panel",
@@ -230,8 +241,10 @@ impl IconName {
             Self::BoltOutlined => "bolt_outlined",
             Self::ArrowRight => "arrow_right",
             Self::ArrowDown => "arrow_down",
+            Self::ArrowUp => "arrow_up",
             Self::ChevronRight => "chevron_right",
             Self::ChevronDown => "chevron_down",
+            Self::Close => "close",
             Self::PlayFilled => "play_filled",
             Self::PlayOutlined => "play_outlined",
             Self::Sidebar => "sidebar",
@@ -275,6 +288,7 @@ impl IconName {
                 concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/arrow_right.svg")
             }
             Self::ArrowDown => concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/arrow_down.svg"),
+            Self::ArrowUp => concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/arrow_up.svg"),
             Self::ChevronRight => concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/icons/chevron_right.svg"
@@ -282,6 +296,7 @@ impl IconName {
             Self::ChevronDown => {
                 concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/chevron_down.svg")
             }
+            Self::Close => concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/close.svg"),
             Self::PlayFilled => {
                 concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/play_filled.svg")
             }
@@ -307,9 +322,12 @@ impl IconName {
             Self::Check | Self::Star | Self::StarFilled | Self::BoltFilled | Self::BoltOutlined => {
                 IconCategory::Status
             }
-            Self::ArrowRight | Self::ArrowDown | Self::ChevronRight | Self::ChevronDown => {
-                IconCategory::Arrows
-            }
+            Self::ArrowRight
+            | Self::ArrowDown
+            | Self::ArrowUp
+            | Self::ChevronRight
+            | Self::ChevronDown => IconCategory::Arrows,
+            Self::Close => IconCategory::Actions,
             Self::PlayFilled | Self::PlayOutlined => IconCategory::Media,
             Self::Sidebar => IconCategory::Actions,
         }
@@ -524,8 +542,12 @@ pub fn icon_name_from_str(name: &str) -> Option<IconName> {
         // Arrows
         "arrowright" | "right" => Some(IconName::ArrowRight),
         "arrowdown" | "down" => Some(IconName::ArrowDown),
+        "arrowup" | "up" => Some(IconName::ArrowUp),
         "chevronright" => Some(IconName::ChevronRight),
         "chevrondown" => Some(IconName::ChevronDown),
+
+        // UI
+        "close" | "x" | "dismiss" => Some(IconName::Close),
 
         // Media
         "playfilled" | "play" | "run" | "execute" => Some(IconName::PlayFilled),
@@ -544,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_icon_count() {
-        assert_eq!(IconName::count(), 23); // 22 + 1 (Sidebar)
+        assert_eq!(IconName::count(), 25); // 22 + Sidebar + ArrowUp + Close
     }
 
     #[test]
