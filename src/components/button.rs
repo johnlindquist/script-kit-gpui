@@ -197,8 +197,9 @@ impl RenderOnce for Button {
         };
 
         // Build shortcut element if present - smaller than label, same accent color
+        // Use flex + items_center to ensure vertical alignment with the label
         let shortcut_element = if let Some(sc) = self.shortcut {
-            div().text_xs().ml(px(4.)).child(sc)
+            div().flex().items_center().text_xs().ml(px(4.)).child(sc)
         } else {
             div()
         };
