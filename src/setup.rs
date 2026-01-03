@@ -1064,7 +1064,7 @@ fn write_string_if_changed(path: &Path, contents: &str, warnings: &mut Vec<Strin
     }
 }
 
-/// Ensure tsconfig.json has the @johnlindquist/kit path mapping (merge-safe)
+/// Ensure tsconfig.json has the @scriptkit/kit path mapping (merge-safe)
 fn ensure_tsconfig_paths(tsconfig_path: &Path, warnings: &mut Vec<String>) {
     use serde_json::{json, Value};
 
@@ -1086,12 +1086,19 @@ fn ensure_tsconfig_paths(tsconfig_path: &Path, warnings: &mut Vec<String>) {
         config["compilerOptions"]["paths"] = json!({});
     }
 
-    let current_kit_path = config["compilerOptions"]["paths"].get("@johnlindquist/kit");
+    // Check if already has the correct @scriptkit/kit path
+    let current_kit_path = config["compilerOptions"]["paths"].get("@scriptkit/kit");
     if current_kit_path == Some(&kit_path) {
         return;
     }
 
-    config["compilerOptions"]["paths"]["@johnlindquist/kit"] = kit_path;
+    // Set the new @scriptkit/kit path
+    config["compilerOptions"]["paths"]["@scriptkit/kit"] = kit_path;
+
+    // Remove old @johnlindquist/kit path if it exists (migration)
+    if let Some(paths) = config["compilerOptions"]["paths"].as_object_mut() {
+        paths.remove("@johnlindquist/kit");
+    }
 
     match serde_json::to_string_pretty(&config) {
         Ok(json_str) => {
@@ -1103,7 +1110,7 @@ fn ensure_tsconfig_paths(tsconfig_path: &Path, warnings: &mut Vec<String>) {
                 ));
                 warn!(error = %e, "Failed to write tsconfig.json");
             } else {
-                info!("Updated tsconfig.json with @johnlindquist/kit path mapping");
+                info!("Updated tsconfig.json with @scriptkit/kit path mapping");
             }
         }
         Err(e) => {

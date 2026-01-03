@@ -226,6 +226,27 @@ export interface FileSearchResult {
 }
 
 // =============================================================================
+// Menu Bar Types
+// =============================================================================
+
+/**
+ * A menu bar item with its children and metadata.
+ * Used for reading application menu bars and executing menu actions.
+ */
+export interface MenuBarItem {
+  /** The display title of the menu item */
+  title: string;
+  /** Whether the menu item is enabled (clickable) */
+  enabled: boolean;
+  /** Keyboard shortcut string if any (e.g., "⌘S") */
+  shortcut?: string;
+  /** Child menu items (for submenus) */
+  children: MenuBarItem[];
+  /** Path of menu titles to reach this item (e.g., ["File", "New", "Window"]) */
+  menuPath: string[];
+}
+
+// =============================================================================
 // Debug Grid Types
 // =============================================================================
 
@@ -598,7 +619,7 @@ export interface ProcessLimits {
  * 
  * @example Minimal configuration (only hotkey required)
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  * 
  * export default {
  *   hotkey: {
@@ -610,7 +631,7 @@ export interface ProcessLimits {
  * 
  * @example Full configuration with all options
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  * 
  * export default {
  *   hotkey: {
@@ -1706,6 +1727,36 @@ interface RunMessage {
 interface InspectMessage {
   type: 'inspect';
   data: unknown;
+}
+
+// =============================================================================
+// Menu Bar Message Types
+// =============================================================================
+
+interface GetMenuBarMessage {
+  type: 'getMenuBar';
+  requestId: string;
+  bundleId?: string;
+}
+
+interface MenuBarResultMessage {
+  type: 'menuBarResult';
+  requestId: string;
+  items: MenuBarItem[];
+}
+
+interface ExecuteMenuActionMessage {
+  type: 'executeMenuAction';
+  requestId: string;
+  bundleId: string;
+  path: string[];
+}
+
+interface MenuActionResultMessage {
+  type: 'menuActionResult';
+  requestId: string;
+  success: boolean;
+  error?: string;
 }
 
 // =============================================================================
@@ -5036,6 +5087,127 @@ globalThis.fileSearch = async function fileSearch(query: string, options?: FindO
 };
 
 // =============================================================================
+// Menu Bar Functions
+// =============================================================================
+
+/**
+ * Get the menu bar items from the frontmost application or a specific app.
+ * 
+ * Returns a hierarchical tree of menu items with their titles, enabled state,
+ * keyboard shortcuts, and menu paths.
+ * 
+ * @param bundleId - Optional bundle ID to get menu bar from a specific app
+ *                   (e.g., "com.apple.finder"). If not provided, uses frontmost app.
+ * @returns Promise resolving to array of top-level menu bar items
+ * 
+ * @example
+ * ```typescript
+ * // Get menu bar from frontmost app
+ * const menus = await getMenuBar();
+ * console.log(menus.map(m => m.title)); // ["Apple", "File", "Edit", ...]
+ * 
+ * // Get menu bar from specific app
+ * const finderMenus = await getMenuBar("com.apple.finder");
+ * ```
+ */
+globalThis.getMenuBar = async function getMenuBar(bundleId?: string): Promise<MenuBarItem[]> {
+  const id = nextId();
+  
+  return new Promise((resolve) => {
+    pending.set(id, (msg: ResponseMessage) => {
+      // Handle MenuBarResult message type
+      if (msg.type === 'menuBarResult') {
+        const resultMsg = msg as MenuBarResultMessage;
+        resolve(resultMsg.items);
+        return;
+      }
+      
+      // Fallback to submit message handling (backwards compatibility)
+      const submitMsg = msg as SubmitMessage;
+      const value = submitMsg.value ?? '[]';
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) {
+          resolve(parsed as MenuBarItem[]);
+        } else {
+          resolve([]);
+        }
+      } catch {
+        resolve([]);
+      }
+    });
+    
+    const message: GetMenuBarMessage = {
+      type: 'getMenuBar',
+      requestId: id,
+      bundleId,
+    };
+    
+    send(message);
+  });
+};
+
+/**
+ * Execute a menu action in a specific application.
+ * 
+ * Clicks a menu item by navigating through the menu hierarchy using the provided path.
+ * The path is an array of menu titles from top-level menu to the target item.
+ * 
+ * @param bundleId - Bundle ID of the application (e.g., "com.apple.finder")
+ * @param menuPath - Array of menu titles forming the path to the item
+ *                   (e.g., ["File", "New", "Folder"])
+ * @returns Promise that resolves when the action is executed
+ * @throws Error if the menu item cannot be found or executed
+ * 
+ * @example
+ * ```typescript
+ * // Open Finder's New Window menu item
+ * await executeMenuAction("com.apple.finder", ["File", "New Finder Window"]);
+ * 
+ * // Toggle View menu option
+ * await executeMenuAction("com.apple.finder", ["View", "Show Path Bar"]);
+ * ```
+ */
+globalThis.executeMenuAction = async function executeMenuAction(
+  bundleId: string,
+  menuPath: string[]
+): Promise<void> {
+  const id = nextId();
+  
+  return new Promise((resolve, reject) => {
+    pending.set(id, (msg: ResponseMessage) => {
+      // Handle MenuActionResult message type
+      if (msg.type === 'menuActionResult') {
+        const resultMsg = msg as MenuActionResultMessage;
+        if (resultMsg.success) {
+          resolve();
+        } else {
+          reject(new Error(resultMsg.error ?? 'Menu action failed'));
+        }
+        return;
+      }
+      
+      // Fallback to submit message handling (backwards compatibility)
+      const submitMsg = msg as SubmitMessage;
+      if (submitMsg.value && submitMsg.value.startsWith('ERROR:')) {
+        reject(new Error(submitMsg.value.substring(6).trim()));
+      } else {
+        resolve();
+      }
+    });
+    
+    const message: ExecuteMenuActionMessage = {
+      type: 'executeMenuAction',
+      requestId: id,
+      bundleId,
+      path: menuPath,
+    };
+    
+    send(message);
+  });
+};
+
+// =============================================================================
 // AI-First Protocol: input() and output() Functions
 // =============================================================================
 
@@ -5328,6 +5500,10 @@ declare global {
 
   // File Search
   function fileSearch(query: string, options?: FindOptions): Promise<FileSearchResult[]>;
+
+  // Menu Bar
+  function getMenuBar(bundleId?: string): Promise<MenuBarItem[]>;
+  function executeMenuAction(bundleId: string, menuPath: string[]): Promise<void>;
 
   // Input
   const keyboard: KeyboardAPI;

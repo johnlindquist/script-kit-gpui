@@ -1,4 +1,4 @@
-import type { Config } from "@johnlindquist/kit";
+import type { Config } from "@scriptkit/kit";
 
 /**
  * Script Kit Configuration
@@ -87,6 +87,85 @@ export default {
   // Max text size (bytes) stored per clipboard history entry
   // Set to 0 to disable the limit
   // clipboardHistoryMaxTextLength: 100000,
+
+  // ===========================================================================
+  // Command Configuration
+  // ===========================================================================
+  // Configure shortcuts and visibility for any command in Script Kit.
+  // Commands are identified by category-prefixed IDs: {category}/{identifier}
+  //
+  // CATEGORIES:
+  //   builtin/   - Built-in features (clipboard-history, app-launcher, etc.)
+  //   app/       - macOS apps by bundle ID (com.apple.Safari, etc.)
+  //   script/    - User scripts by filename without .ts (my-script, etc.)
+  //   scriptlet/ - Inline scriptlets by UUID or name
+  //
+  // DEEPLINKS: Each command maps to kit://commands/{id}
+  //   Example: "builtin/clipboard-history" → kit://commands/builtin/clipboard-history
+  //
+  // OPTIONS:
+  //   shortcut - Global keyboard shortcut to invoke directly
+  //   hidden   - Hide from main menu (still accessible via shortcut/deeplink)
+
+  // commands: {
+  //   // ─────────────────────────────────────────────────────────────────────
+  //   // BUILT-IN FEATURES
+  //   // ─────────────────────────────────────────────────────────────────────
+  //
+  //   // Quick access to clipboard history with Cmd+Shift+V
+  //   "builtin/clipboard-history": {
+  //     shortcut: { modifiers: ["meta", "shift"], key: "KeyV" }
+  //   },
+  //
+  //   // Hide app launcher if you prefer Spotlight/Raycast
+  //   // "builtin/app-launcher": {
+  //   //   hidden: true
+  //   // },
+  //
+  //   // Emoji picker with Cmd+Ctrl+Space
+  //   // "builtin/emoji-picker": {
+  //   //   shortcut: { modifiers: ["meta", "ctrl"], key: "Space" }
+  //   // },
+  //
+  //   // ─────────────────────────────────────────────────────────────────────
+  //   // APPLICATIONS (by macOS bundle identifier)
+  //   // ─────────────────────────────────────────────────────────────────────
+  //   // Find bundle IDs with: osascript -e 'id of app "App Name"'
+  //
+  //   // Quick launch Safari with Cmd+Shift+S
+  //   // "app/com.apple.Safari": {
+  //   //   shortcut: { modifiers: ["meta", "shift"], key: "KeyS" }
+  //   // },
+  //
+  //   // Quick launch VS Code with Cmd+Shift+C
+  //   // "app/com.microsoft.VSCode": {
+  //   //   shortcut: { modifiers: ["meta", "shift"], key: "KeyC" }
+  //   // },
+  //
+  //   // ─────────────────────────────────────────────────────────────────────
+  //   // USER SCRIPTS (by filename without .ts extension)
+  //   // ─────────────────────────────────────────────────────────────────────
+  //   // Scripts are in ~/.sk/kit/scripts/
+  //
+  //   // Add shortcut to a frequently-used script
+  //   // "script/my-workflow": {
+  //   //   shortcut: { modifiers: ["meta", "shift"], key: "KeyW" }
+  //   // },
+  //
+  //   // Hide a deprecated script but keep it accessible via deeplink
+  //   // "script/deprecated-helper": {
+  //   //   hidden: true
+  //   // },
+  //
+  //   // ─────────────────────────────────────────────────────────────────────
+  //   // SCRIPTLETS (inline scripts by UUID or name)
+  //   // ─────────────────────────────────────────────────────────────────────
+  //
+  //   // Add shortcut to a scriptlet
+  //   // "scriptlet/clipboard-to-uppercase": {
+  //   //   shortcut: { modifiers: ["meta", "shift"], key: "KeyU" }
+  //   // },
+  // },
 
   // ===========================================================================
   // Process Limits

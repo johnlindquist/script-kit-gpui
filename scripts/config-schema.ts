@@ -7,8 +7,222 @@
  * ╚═══════════════════════════════════════════════════════════════════════════╝
  *
  * @fileoverview AI Agent Configuration Reference for Script Kit
- * @version 1.0.0
+ * @version 1.1.0
  * @license MIT
+ *
+ * ┌───────────────────────────────────────────────────────────────────────────┐
+ * │                      COMMAND ID SYSTEM (NEW IN 1.1)                        │
+ * └───────────────────────────────────────────────────────────────────────────┘
+ *
+ * Script Kit uses a unified Command ID system to identify all executable items
+ * in the main menu. This includes built-in features, applications, user scripts,
+ * and scriptlets (inline scripts).
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * COMMAND ID FORMAT
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Command IDs use a category-prefixed format: `{category}/{identifier}`
+ *
+ * CATEGORIES:
+ * ───────────────────────────────────────────────────────────────────────────
+ *
+ * 1. BUILTIN - Built-in Script Kit features
+ *    Format: `builtin/{feature-name}`
+ *    Examples:
+ *      - "builtin/clipboard-history"  → Clipboard history manager
+ *      - "builtin/app-launcher"       → Application launcher
+ *      - "builtin/window-switcher"    → Window switcher
+ *      - "builtin/file-search"        → File search
+ *      - "builtin/emoji-picker"       → Emoji picker
+ *
+ * 2. APP - macOS Applications (by bundle identifier)
+ *    Format: `app/{bundle-id}`
+ *    Examples:
+ *      - "app/com.apple.Safari"       → Safari
+ *      - "app/com.google.Chrome"      → Google Chrome
+ *      - "app/com.microsoft.VSCode"   → Visual Studio Code
+ *      - "app/com.apple.finder"       → Finder
+ *      - "app/com.spotify.client"     → Spotify
+ *
+ * 3. SCRIPT - User scripts (by filename without extension)
+ *    Format: `script/{script-name}`
+ *    Examples:
+ *      - "script/my-custom-script"    → ~/.sk/kit/scripts/my-custom-script.ts
+ *      - "script/daily-standup"       → ~/.sk/kit/scripts/daily-standup.ts
+ *      - "script/git-commit-helper"   → ~/.sk/kit/scripts/git-commit-helper.ts
+ *
+ * 4. SCRIPTLET - Inline scriptlets (by UUID)
+ *    Format: `scriptlet/{uuid}`
+ *    Examples:
+ *      - "scriptlet/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+ *      - "scriptlet/clipboard-to-uppercase"
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * DEEPLINK MAPPING
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Command IDs map 1:1 to deeplinks with the `kit://commands/` prefix:
+ *
+ * | Config Key                    | Deeplink URL                                  |
+ * |-------------------------------|-----------------------------------------------|
+ * | builtin/clipboard-history     | kit://commands/builtin/clipboard-history      |
+ * | app/com.apple.Safari          | kit://commands/app/com.apple.Safari           |
+ * | script/my-script              | kit://commands/script/my-script               |
+ * | scriptlet/abc123              | kit://commands/scriptlet/abc123               |
+ *
+ * IMPORTANT: The `commands/` prefix is part of the URL namespace, NOT the config key.
+ * In config.ts, use the ID without the prefix.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * COMMAND CONFIGURATION OPTIONS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Each command can be configured with:
+ *
+ * 1. SHORTCUT - Global keyboard shortcut
+ *    Type: HotkeyConfig (same as the main hotkey)
+ *    Purpose: Open this command directly without going through main menu
+ *    Example: { modifiers: ["meta", "shift"], key: "KeyV" }
+ *
+ * 2. HIDDEN - Hide from main menu
+ *    Type: boolean
+ *    Purpose: Keep the command available via shortcut but hide from list
+ *    Default: false
+ *    Example: true (hidden) or false (visible)
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * CONFIGURATION EXAMPLES
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * EXAMPLE 1: Add shortcuts to built-in features
+ * ```typescript
+ * commands: {
+ *   "builtin/clipboard-history": {
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyV" }
+ *   },
+ *   "builtin/emoji-picker": {
+ *     shortcut: { modifiers: ["meta", "ctrl"], key: "Space" }
+ *   }
+ * }
+ * ```
+ *
+ * EXAMPLE 2: Add shortcuts to applications
+ * ```typescript
+ * commands: {
+ *   "app/com.apple.Safari": {
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyS" }
+ *   },
+ *   "app/com.google.Chrome": {
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyC" }
+ *   }
+ * }
+ * ```
+ *
+ * EXAMPLE 3: Configure user scripts
+ * ```typescript
+ * commands: {
+ *   "script/daily-standup": {
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyD" }
+ *   },
+ *   "script/deprecated-helper": {
+ *     hidden: true  // Keep the script but hide from menu
+ *   }
+ * }
+ * ```
+ *
+ * EXAMPLE 4: Full configuration with multiple command types
+ * ```typescript
+ * import type { Config } from "@scriptkit/kit";
+ *
+ * export default {
+ *   hotkey: { modifiers: ["meta"], key: "Semicolon" },
+ *   commands: {
+ *     // Built-in features with shortcuts
+ *     "builtin/clipboard-history": {
+ *       shortcut: { modifiers: ["meta", "shift"], key: "KeyV" }
+ *     },
+ *     "builtin/app-launcher": {
+ *       shortcut: { modifiers: ["meta"], key: "Space" },
+ *       hidden: false
+ *     },
+ *     // Applications
+ *     "app/com.apple.Safari": {
+ *       shortcut: { modifiers: ["meta", "shift"], key: "KeyS" }
+ *     },
+ *     // User scripts
+ *     "script/my-workflow": {
+ *       shortcut: { modifiers: ["meta", "shift"], key: "KeyW" }
+ *     }
+ *   }
+ * } satisfies Config;
+ * ```
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * AI AGENT PATTERNS FOR COMMANDS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * PATTERN: Add a shortcut to a built-in feature
+ * ```typescript
+ * // Add Cmd+Shift+V for clipboard history
+ * commands: {
+ *   ...existingCommands,
+ *   "builtin/clipboard-history": {
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyV" }
+ *   }
+ * }
+ * ```
+ *
+ * PATTERN: Hide a command but keep its shortcut
+ * ```typescript
+ * // Hide from menu but still accessible via Cmd+Shift+X
+ * commands: {
+ *   "script/secret-tool": {
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyX" },
+ *     hidden: true
+ *   }
+ * }
+ * ```
+ *
+ * PATTERN: Remove a shortcut (set to undefined or delete key)
+ * ```typescript
+ * // Option 1: Explicitly set to undefined
+ * commands: {
+ *   "builtin/clipboard-history": {
+ *     shortcut: undefined
+ *   }
+ * }
+ *
+ * // Option 2: Omit the command entry entirely (use default behavior)
+ * commands: {
+ *   // no entry for builtin/clipboard-history
+ * }
+ * ```
+ *
+ * PATTERN: Determine command ID from user request
+ * ```
+ * User says: "Add shortcut for Safari" → "app/com.apple.Safari"
+ * User says: "Add shortcut for clipboard" → "builtin/clipboard-history"
+ * User says: "Add shortcut for my-script" → "script/my-script"
+ * User says: "Hide the app launcher" → "builtin/app-launcher" with hidden: true
+ * ```
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * VALIDATION RULES FOR COMMANDS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * 1. Command IDs MUST start with a valid category prefix:
+ *    - "builtin/" | "app/" | "script/" | "scriptlet/"
+ *
+ * 2. Shortcuts follow the same rules as the main hotkey:
+ *    - Modifiers: ["meta", "ctrl", "alt", "shift"]
+ *    - Keys: "KeyA"-"KeyZ", "Digit0"-"Digit9", "Space", etc.
+ *
+ * 3. The commands field is optional - omit it entirely if not needed
+ *
+ * 4. Individual command configs are optional - only include what you want to customize
+ *
+ * 5. Unknown command IDs are ignored (safe for forward compatibility)
  *
  * ┌───────────────────────────────────────────────────────────────────────────┐
  * │                           CONFIGURATION FILE                               │
@@ -21,7 +235,7 @@
  *
  * FILE STRUCTURE:
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  *
  * export default {
  *   // ... configuration options ...
@@ -272,7 +486,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  *
  * export default {
  *   hotkey: {
@@ -289,7 +503,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  *
  * export default {
  *   hotkey: {
@@ -321,7 +535,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  *
  * export default {
  *   hotkey: {
@@ -347,7 +561,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  *
  * export default {
  *   hotkey: {
@@ -383,7 +597,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * ```typescript
- * import type { Config } from "@johnlindquist/kit";
+ * import type { Config } from "@scriptkit/kit";
  *
  * export default {
  *   hotkey: {
@@ -434,7 +648,7 @@
  * └───────────────────────────────────────────────────────────────────────────┘
  *
  * WHEN MODIFYING CONFIG:
- * 1. Always import Config type from "@johnlindquist/kit"
+ * 1. Always import Config type from "@scriptkit/kit"
  * 2. Use `satisfies Config` at the end for type checking
  * 3. Only include fields that differ from defaults (for minimal configs)
  * 4. Hotkey is the ONLY required field
@@ -455,12 +669,11 @@
  * - ~/.sk/kit/sdk/       - SDK runtime files
  */
 
-// Re-export all Config types from kit-sdk.ts
-// This file serves as the single import point for config types
+// Re-export base types from kit-sdk.ts
+// These are the foundation types that CommandConfig builds upon
 
 export type {
-  // Core config types
-  Config,
+  // Core config types (base interface - extended below with commands)
   HotkeyConfig,
   ContentPadding,
   BuiltInConfig,
@@ -470,3 +683,369 @@ export type {
   KeyModifier,
   KeyCode,
 } from './kit-sdk';
+
+// Import base Config for extension
+import type { 
+  Config as BaseConfig,
+  HotkeyConfig 
+} from './kit-sdk';
+
+// =============================================================================
+// COMMAND ID TYPES
+// =============================================================================
+
+/**
+ * Built-in Script Kit feature command ID.
+ * 
+ * Format: `builtin/{feature-name}`
+ * 
+ * Built-in features are the core functionality provided by Script Kit:
+ * - clipboard-history: Clipboard history manager
+ * - app-launcher: Application launcher  
+ * - window-switcher: Window switcher
+ * - file-search: File search
+ * - emoji-picker: Emoji picker
+ * 
+ * @example "builtin/clipboard-history"
+ * @example "builtin/app-launcher"
+ * @example "builtin/window-switcher"
+ * 
+ * @see BuiltInConfig for enabling/disabling built-in features
+ */
+export type BuiltinCommandId = `builtin/${string}`;
+
+/**
+ * Application command ID (macOS bundle identifier).
+ * 
+ * Format: `app/{bundle-id}`
+ * 
+ * Applications are identified by their macOS bundle identifier.
+ * You can find an app's bundle ID using:
+ * - Terminal: `osascript -e 'id of app "App Name"'`
+ * - Finder: Right-click .app → Show Package Contents → Info.plist → CFBundleIdentifier
+ * 
+ * @example "app/com.apple.Safari"
+ * @example "app/com.google.Chrome"
+ * @example "app/com.microsoft.VSCode"
+ * @example "app/com.apple.finder"
+ * @example "app/com.spotify.client"
+ */
+export type AppCommandId = `app/${string}`;
+
+/**
+ * User script command ID.
+ * 
+ * Format: `script/{script-name}`
+ * 
+ * The script name is the filename without the .ts extension.
+ * Scripts are located in ~/.sk/kit/scripts/
+ * 
+ * @example "script/my-custom-script" → ~/.sk/kit/scripts/my-custom-script.ts
+ * @example "script/daily-standup" → ~/.sk/kit/scripts/daily-standup.ts
+ * @example "script/git-commit-helper" → ~/.sk/kit/scripts/git-commit-helper.ts
+ */
+export type ScriptCommandId = `script/${string}`;
+
+/**
+ * Scriptlet command ID (inline script).
+ * 
+ * Format: `scriptlet/{uuid-or-name}`
+ * 
+ * Scriptlets are small inline scripts that can be created and edited
+ * directly in Script Kit without a separate file. They're identified
+ * by a UUID or a user-provided name.
+ * 
+ * @example "scriptlet/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+ * @example "scriptlet/clipboard-to-uppercase"
+ */
+export type ScriptletCommandId = `scriptlet/${string}`;
+
+/**
+ * Union of all valid command ID formats.
+ * 
+ * This is the type to use when you need to accept any command ID.
+ * Each category has a specific prefix that identifies the command type.
+ * 
+ * Categories:
+ * - `builtin/` - Built-in Script Kit features
+ * - `app/` - macOS applications (by bundle identifier)
+ * - `script/` - User scripts (by filename)
+ * - `scriptlet/` - Inline scriptlets (by UUID or name)
+ * 
+ * @example
+ * ```typescript
+ * function getDeeplink(commandId: CommandId): string {
+ *   return `kit://commands/${commandId}`;
+ * }
+ * 
+ * getDeeplink("builtin/clipboard-history");  // "kit://commands/builtin/clipboard-history"
+ * getDeeplink("app/com.apple.Safari");       // "kit://commands/app/com.apple.Safari"
+ * ```
+ */
+export type CommandId = 
+  | BuiltinCommandId 
+  | AppCommandId 
+  | ScriptCommandId 
+  | ScriptletCommandId;
+
+// =============================================================================
+// COMMAND CONFIGURATION TYPES
+// =============================================================================
+
+/**
+ * Configuration options for a single command.
+ * 
+ * Commands can have:
+ * 1. A global keyboard shortcut to invoke them directly
+ * 2. A hidden flag to remove them from the main menu
+ * 
+ * All fields are optional - only include what you want to customize.
+ * 
+ * @example Add a shortcut to clipboard history
+ * ```typescript
+ * "builtin/clipboard-history": {
+ *   shortcut: { modifiers: ["meta", "shift"], key: "KeyV" }
+ * }
+ * ```
+ * 
+ * @example Hide a command but keep its shortcut
+ * ```typescript
+ * "script/secret-tool": {
+ *   shortcut: { modifiers: ["meta", "shift"], key: "KeyX" },
+ *   hidden: true
+ * }
+ * ```
+ * 
+ * @example Just hide a command (no shortcut)
+ * ```typescript
+ * "builtin/app-launcher": {
+ *   hidden: true
+ * }
+ * ```
+ */
+export interface CommandConfig {
+  /**
+   * Global keyboard shortcut to invoke this command directly.
+   * 
+   * When set, pressing this shortcut will immediately run the command
+   * without going through the main Script Kit menu.
+   * 
+   * Uses the same format as the main hotkey configuration:
+   * - modifiers: Array of ["meta", "ctrl", "alt", "shift"]
+   * - key: Key code like "KeyV", "Space", "Semicolon"
+   * 
+   * @default undefined (no shortcut)
+   * @example { modifiers: ["meta", "shift"], key: "KeyV" } // Cmd+Shift+V
+   * @example { modifiers: ["meta", "ctrl"], key: "Space" } // Cmd+Ctrl+Space
+   */
+  shortcut?: HotkeyConfig;
+
+  /**
+   * Whether to hide this command from the main menu.
+   * 
+   * When true, the command won't appear in the Script Kit main menu
+   * or search results. However, it can still be invoked via:
+   * - Its keyboard shortcut (if configured)
+   * - Deeplink URL (kit://commands/{id})
+   * - Programmatic invocation
+   * 
+   * Use this for commands you want accessible but not cluttering the menu.
+   * 
+   * @default false (visible in menu)
+   * @example true // Hide from menu
+   * @example false // Show in menu (default)
+   */
+  hidden?: boolean;
+}
+
+/**
+ * Map of command IDs to their configurations.
+ * 
+ * This is a partial record - you only need to include commands you want
+ * to customize. Commands not listed will use default behavior.
+ * 
+ * @example
+ * ```typescript
+ * commands: {
+ *   "builtin/clipboard-history": { 
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyV" } 
+ *   },
+ *   "app/com.apple.Safari": { 
+ *     shortcut: { modifiers: ["meta", "shift"], key: "KeyS" } 
+ *   },
+ *   "script/my-workflow": { 
+ *     hidden: true 
+ *   }
+ * }
+ * ```
+ */
+export type CommandsConfig = Partial<Record<CommandId, CommandConfig>>;
+
+// =============================================================================
+// EXTENDED CONFIG TYPE
+// =============================================================================
+
+/**
+ * Script Kit configuration schema with command configuration support.
+ * 
+ * This extends the base Config interface to add the `commands` field
+ * for configuring individual command shortcuts and visibility.
+ * 
+ * @example Minimal configuration (only hotkey required)
+ * ```typescript
+ * import type { Config } from "@scriptkit/kit";
+ * 
+ * export default {
+ *   hotkey: { modifiers: ["meta"], key: "Semicolon" }
+ * } satisfies Config;
+ * ```
+ * 
+ * @example Configuration with command shortcuts
+ * ```typescript
+ * import type { Config } from "@scriptkit/kit";
+ * 
+ * export default {
+ *   hotkey: { modifiers: ["meta"], key: "Semicolon" },
+ *   commands: {
+ *     "builtin/clipboard-history": {
+ *       shortcut: { modifiers: ["meta", "shift"], key: "KeyV" }
+ *     },
+ *     "app/com.apple.Safari": {
+ *       shortcut: { modifiers: ["meta", "shift"], key: "KeyS" }
+ *     }
+ *   }
+ * } satisfies Config;
+ * ```
+ */
+export interface Config extends BaseConfig {
+  /**
+   * Command-specific configuration for shortcuts and visibility.
+   * 
+   * Each key is a command ID in the format `{category}/{identifier}`:
+   * - `builtin/{name}` - Built-in features (clipboard-history, app-launcher, etc.)
+   * - `app/{bundle-id}` - macOS applications (com.apple.Safari, etc.)
+   * - `script/{name}` - User scripts (my-script, etc.)
+   * - `scriptlet/{uuid}` - Inline scriptlets
+   * 
+   * Each value is a CommandConfig object with optional shortcut and hidden fields.
+   * 
+   * Command IDs map 1:1 to deeplinks: `kit://commands/{id}`
+   * 
+   * @default undefined (no command customizations)
+   * @example
+   * ```typescript
+   * commands: {
+   *   "builtin/clipboard-history": {
+   *     shortcut: { modifiers: ["meta", "shift"], key: "KeyV" }
+   *   },
+   *   "app/com.apple.Safari": {
+   *     shortcut: { modifiers: ["meta", "shift"], key: "KeyS" }
+   *   },
+   *   "script/deprecated-tool": {
+   *     hidden: true
+   *   }
+   * }
+   * ```
+   */
+  commands?: CommandsConfig;
+}
+
+// =============================================================================
+// UTILITY TYPES FOR AI AGENTS
+// =============================================================================
+
+/**
+ * Extract the category from a command ID.
+ * 
+ * @example
+ * ```typescript
+ * type Category = CommandCategory<"builtin/clipboard-history">;  // "builtin"
+ * type Category = CommandCategory<"app/com.apple.Safari">;       // "app"
+ * ```
+ */
+export type CommandCategory<T extends CommandId> = 
+  T extends `${infer Category}/${string}` ? Category : never;
+
+/**
+ * Extract the identifier from a command ID.
+ * 
+ * @example
+ * ```typescript
+ * type Id = CommandIdentifier<"builtin/clipboard-history">;  // "clipboard-history"
+ * type Id = CommandIdentifier<"app/com.apple.Safari">;       // "com.apple.Safari"
+ * ```
+ */
+export type CommandIdentifier<T extends CommandId> = 
+  T extends `${string}/${infer Identifier}` ? Identifier : never;
+
+/**
+ * Construct a deeplink URL from a command ID.
+ * 
+ * The deeplink format is: `kit://commands/{commandId}`
+ * 
+ * @param commandId - The command ID (e.g., "builtin/clipboard-history")
+ * @returns The full deeplink URL
+ * 
+ * @example
+ * ```typescript
+ * const link = toDeeplink("builtin/clipboard-history");
+ * // Returns: "kit://commands/builtin/clipboard-history"
+ * ```
+ */
+export function toDeeplink(commandId: CommandId): string {
+  return `kit://commands/${commandId}`;
+}
+
+/**
+ * Parse a deeplink URL to extract the command ID.
+ * 
+ * @param deeplink - The deeplink URL (e.g., "kit://commands/builtin/clipboard-history")
+ * @returns The command ID, or null if the URL is not a valid command deeplink
+ * 
+ * @example
+ * ```typescript
+ * const id = fromDeeplink("kit://commands/builtin/clipboard-history");
+ * // Returns: "builtin/clipboard-history"
+ * 
+ * const invalid = fromDeeplink("kit://other/path");
+ * // Returns: null
+ * ```
+ */
+export function fromDeeplink(deeplink: string): CommandId | null {
+  const prefix = "kit://commands/";
+  if (!deeplink.startsWith(prefix)) {
+    return null;
+  }
+  const id = deeplink.slice(prefix.length);
+  // Validate it matches one of our categories
+  if (id.startsWith("builtin/") || 
+      id.startsWith("app/") || 
+      id.startsWith("script/") || 
+      id.startsWith("scriptlet/")) {
+    return id as CommandId;
+  }
+  return null;
+}
+
+/**
+ * Check if a string is a valid command ID.
+ * 
+ * @param value - The string to check
+ * @returns True if the string is a valid command ID format
+ * 
+ * @example
+ * ```typescript
+ * isValidCommandId("builtin/clipboard-history");  // true
+ * isValidCommandId("app/com.apple.Safari");       // true
+ * isValidCommandId("invalid-format");              // false
+ * isValidCommandId("unknown/category");            // false
+ * ```
+ */
+export function isValidCommandId(value: string): value is CommandId {
+  return (
+    value.startsWith("builtin/") ||
+    value.startsWith("app/") ||
+    value.startsWith("script/") ||
+    value.startsWith("scriptlet/")
+  );
+}

@@ -413,7 +413,7 @@ pub fn load_config() -> Config {
                         // Provide helpful error message for common config mistakes
                         let error_hint = if e.to_string().contains("missing field `hotkey`") {
                             "\n\nHint: Your config.ts must include a 'hotkey' field. Example:\n\
-                            import type { Config } from \"@johnlindquist/kit\";\n\n\
+                            import type { Config } from \"@scriptkit/kit\";\n\n\
                             export default {\n\
                               hotkey: {\n\
                                 modifiers: [\"meta\"],\n\
