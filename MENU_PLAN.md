@@ -55,7 +55,7 @@ Quick way to create a new script without opening the main window.
 
 **Implementation Steps:**
 1. Add `MenuItem::new("New Script...", true, Some(Accelerator::new(Modifiers::META, Code::KeyN)))`
-2. Handler opens editor with a new script template at `~/.kenv/scripts/`
+2. Handler opens editor with a new script template at `~/.sk/kit/scripts/`
 3. Generate unique filename: `script-{timestamp}.ts`
 4. Pre-populate with Script Kit template:
    ```typescript
@@ -84,7 +84,7 @@ Open the scripts folder in Finder/editor.
 
 **Implementation Steps:**
 1. Add menu item with accelerator
-2. Handler uses `open ~/.kenv/scripts` (macOS `open` command)
+2. Handler uses `open ~/.sk/kit/scripts` (macOS `open` command)
 3. Alternative: open in configured editor
 
 **Files to Modify:**

@@ -53,13 +53,13 @@ rm @AGENTS.md
 |------|------|-------|
 | `expert-bundles/actions-system-review.md` | 2 bytes | **Empty file** |
 | `expert-bundles/submit-values-review.md` | 205 KB | Raw console dump, no analysis |
-| `expert-bundles/kenv-setup-bundle.md` | - | Work complete, no longer needed |
+| `expert-bundles/kit-setup-bundle.md` | - | Work complete, no longer needed |
 
 **Command**:
 ```bash
 rm expert-bundles/actions-system-review.md
 rm expert-bundles/submit-values-review.md
-rm expert-bundles/kenv-setup-bundle.md
+rm expert-bundles/kit-setup-bundle.md
 ```
 
 ### 1.4 Dot Directories - Obsolete Infrastructure
@@ -315,13 +315,13 @@ Add these patterns to prevent future accumulation:
 |-----------|------|--------|
 | `.test-screenshots/` | 32 MB | Auto-delete PNGs older than 7 days |
 | `.mocks/` | 54 MB | Review visual baselines quarterly |
-| `~/.kenv/logs/` | Variable | Rotate logs older than 30 days |
+| `~/.sk/kit/logs/` | Variable | Rotate logs older than 30 days |
 
 **Suggested cron/script**:
 ```bash
 # Add to development workflow or CI
 find .test-screenshots -name "*.png" -mtime +7 -delete
-find ~/.kenv/logs -name "*.jsonl" -mtime +30 -delete
+find ~/.sk/kit/logs -name "*.jsonl" -mtime +30 -delete
 ```
 
 ### 6.3 Directory Deduplication

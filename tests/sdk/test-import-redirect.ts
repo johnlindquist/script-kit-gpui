@@ -330,19 +330,19 @@ const start10 = Date.now();
 
 try {
   const homeAvailable = typeof home === 'function';
-  const kenvPathAvailable = typeof kenvPath === 'function';
+  const skPathAvailable = typeof skPath === 'function';
   const kitPathAvailable = typeof kitPath === 'function';
   
-  debug(`home: ${homeAvailable}, kenvPath: ${kenvPathAvailable}, kitPath: ${kitPathAvailable}`);
+  debug(`home: ${homeAvailable}, skPath: ${skPathAvailable}, kitPath: ${kitPathAvailable}`);
   
-  if (homeAvailable && kenvPathAvailable && kitPathAvailable) {
+  if (homeAvailable && skPathAvailable && kitPathAvailable) {
     logTest(test10, 'pass', { 
-      result: 'home, kenvPath, kitPath all available', 
+      result: 'home, skPath, kitPath all available', 
       duration_ms: Date.now() - start10 
     });
   } else {
     logTest(test10, 'fail', { 
-      error: `Missing path utilities: home=${homeAvailable}, kenvPath=${kenvPathAvailable}, kitPath=${kitPathAvailable}`,
+      error: `Missing path utilities: home=${homeAvailable}, skPath=${skPathAvailable}, kitPath=${kitPathAvailable}`,
       duration_ms: Date.now() - start10 
     });
   }
@@ -350,7 +350,7 @@ try {
   logTest(test10, 'fail', { 
     error: String(err), 
     duration_ms: Date.now() - start10,
-    expected: 'home, kenvPath, kitPath should all be functions'
+    expected: 'home, skPath, kitPath should all be functions'
   });
 }
 
@@ -534,7 +534,7 @@ The import redirect from \`@johnlindquist/kit\` has been tested.
 | **Named Exports** | SDK_VERSION |
 | **Core Prompts** | arg, div, md, editor, select, fields |
 | **System APIs** | clipboard, beep, say, notify |
-| **Path Utils** | home, kenvPath, kitPath |
+| **Path Utils** | home, skPath, kitPath |
 | **TIER 4 APIs** | chat, widget, term |
 | **TIER 5 Utils** | wait, uuid |
 

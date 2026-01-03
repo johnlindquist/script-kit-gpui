@@ -17,11 +17,11 @@ static NOTES_DB: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 
 /// Get the path to the notes database
 fn get_notes_db_path() -> PathBuf {
-    let kenv_dir = dirs::home_dir()
-        .map(|h| h.join(".kenv"))
-        .unwrap_or_else(|| PathBuf::from(".kenv"));
+    let kit_dir = dirs::home_dir()
+        .map(|h| h.join(".sk/kit"))
+        .unwrap_or_else(|| PathBuf::from(".sk/kit"));
 
-    kenv_dir.join("db").join("notes.sqlite")
+    kit_dir.join("db").join("notes.sqlite")
 }
 
 /// Initialize the notes database

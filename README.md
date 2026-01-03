@@ -35,7 +35,7 @@ What's changed:
 - No bundled utilities (file helpers, clipboard wrappers, etc.)
 - No `kit` global with hundreds of helpers
 - Scripts must explicitly import dependencies via Bun
-- Configuration is TypeScript-based (`~/.kenv/config.ts`)
+- Configuration is TypeScript-based (`~/.sk/kit/config.ts`)
 
 ## Quick Start
 
@@ -57,9 +57,9 @@ What's changed:
    cd script-kit-gpui
    ```
 
-2. **Create the kenv directory**
+2. **Create the kit directory**
    ```bash
-   mkdir -p ~/.kenv/scripts
+   mkdir -p ~/.sk/kit/scripts
    ```
 
 3. **Build and run**
@@ -75,7 +75,7 @@ What's changed:
 
 4. **Configure your hotkey** (optional)
    
-   Create `~/.kenv/config.ts`:
+   Create `~/.sk/kit/config.ts`:
    ```typescript
    export default {
      hotkey: {
@@ -87,7 +87,7 @@ What's changed:
 
 ### Your First Script
 
-Create `~/.kenv/scripts/hello.ts`:
+Create `~/.sk/kit/scripts/hello.ts`:
 
 ```typescript
 metadata = {
@@ -149,7 +149,7 @@ const files = await drop("Drop files here");
 Since utilities aren't bundled, install what you need:
 
 ```bash
-cd ~/.kenv
+cd ~/.sk/kit
 bun add zod lodash-es date-fns
 ```
 
@@ -194,7 +194,7 @@ metadata = {
 
 ## Configuration
 
-### `~/.kenv/config.ts`
+### `~/.sk/kit/config.ts`
 
 ```typescript
 export default {
@@ -222,7 +222,7 @@ export default {
 };
 ```
 
-### `~/.kenv/theme.json`
+### `~/.sk/kit/theme.json`
 
 Customize the look and feel:
 
@@ -266,7 +266,7 @@ script-kit-gpui/
 ├── tests/
 │   ├── smoke/             # End-to-end tests
 │   └── sdk/               # SDK method tests
-└── ~/.kenv/               # User's scripts and config
+└── ~/.sk/kit/               # User's scripts and config
     ├── scripts/           # Your scripts live here
     ├── config.ts          # Configuration
     └── theme.json         # Theme customization

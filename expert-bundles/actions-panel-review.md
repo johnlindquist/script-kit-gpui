@@ -1071,7 +1071,7 @@ fn handle_action(&mut self, action_id: String, cx: &mut Context<Self>) {
     self.current_view = AppView::ScriptList;
 
     match action_id.as_str() {
-        "create_script" => { /* Opens ~/.kenv/scripts/ in Finder */ }
+        "create_script" => { /* Opens ~/.sk/kit/scripts/ in Finder */ }
         "run_script" => { self.execute_selected(cx); }
         "view_logs" => { self.toggle_logs(cx); }
         "reveal_in_finder" => { /* Opens Finder at script path */ }

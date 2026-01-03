@@ -81,7 +81,7 @@ let config = config::load_config();
 ```
 
 **What it does**:
-1. Runs `bun build ~/.kenv/config.ts` (~100-200ms)
+1. Runs `bun build ~/.sk/kit/config.ts` (~100-200ms)
 2. Runs `bun -e "import config..."` to evaluate (~100-200ms)
 
 **Impact**: 200-600ms of startup time, doubled due to duplicate call.
@@ -98,8 +98,8 @@ let config = config::load_config();
 **Location**: `src/scripts.rs`
 
 **What it does**:
-- `read_scripts()`: Globs `~/.kenv/scripts/*.ts`, reads each file for metadata
-- `read_scriptlets()`: Reads `~/.kenv/scriptlets.md`, parses markdown
+- `read_scripts()`: Globs `~/.sk/kit/scripts/*.ts`, reads each file for metadata
+- `read_scriptlets()`: Reads `~/.sk/kit/scriptlets.md`, parses markdown
 
 **Impact**: Linear with script count. 100 scripts ≈ 200ms.
 
@@ -115,7 +115,7 @@ let config = config::load_config();
 **Location**: `src/theme.rs`
 
 **What it does**:
-- Reads `~/.kenv/theme.json`
+- Reads `~/.sk/kit/theme.json`
 - Calls `defaults read -g AppleInterfaceStyle` for system appearance
 
 **Impact**: Minor, but subprocess adds latency.

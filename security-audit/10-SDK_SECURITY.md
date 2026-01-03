@@ -176,7 +176,7 @@ This is a simple regex-based markdown parser. It does NOT sanitize input - if th
 ### 5. Semi-Trusted Script Sandboxing
 
 **Current Model:**
-Scripts run via `bun run --preload ~/.kenv/sdk/kit-sdk.ts <script>` with:
+Scripts run via `bun run --preload ~/.sk/kit/sdk/kit-sdk.ts <script>` with:
 - Full file system access
 - Full network access
 - Full process spawning capability

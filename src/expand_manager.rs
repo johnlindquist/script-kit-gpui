@@ -9,7 +9,7 @@
 //! # Architecture
 //!
 //! The ExpandManager:
-//! 1. Loads scriptlets with `expand` metadata from ~/.kenv/scriptlets/
+//! 1. Loads scriptlets with `expand` metadata from ~/.sk/kit/scriptlets/
 //! 2. Registers each expand trigger with the ExpandMatcher
 //! 3. Starts the KeyboardMonitor with a callback that feeds keystrokes to the matcher
 //! 4. When a match is found, performs the expansion:
@@ -123,7 +123,7 @@ impl ExpandManager {
         }
     }
 
-    /// Load scriptlets with expand metadata from ~/.kenv/scriptlets/
+    /// Load scriptlets with expand metadata from ~/.sk/kit/scriptlets/
     ///
     /// This scans all markdown files and registers any scriptlet that has
     /// an `expand` metadata field as a trigger.

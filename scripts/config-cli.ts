@@ -2,7 +2,7 @@
 /**
  * Script Kit Config CLI
  * 
- * A CLI tool for AI agents to read and modify ~/.kenv/config.ts
+ * A CLI tool for AI agents to read and modify ~/.sk/kit/config.ts
  * 
  * Usage:
  *   bun scripts/config-cli.ts get [key]        - Read value(s)
@@ -228,7 +228,7 @@ const CONFIG_SCHEMA: ConfigOption[] = [
 // Utilities
 // =============================================================================
 
-const CONFIG_PATH = path.join(os.homedir(), '.kenv', 'config.ts');
+const CONFIG_PATH = path.join(os.homedir(), '.sk/kit', 'config.ts');
 
 interface Result<T> {
   success: boolean;

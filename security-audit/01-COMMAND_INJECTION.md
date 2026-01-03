@@ -324,7 +324,7 @@ pub fn execute_script_interactive(path: &Path) -> Result<ScriptSession, String> 
 
 This is an **acceptable risk** because:
 1. Script Kit is explicitly designed to execute user scripts
-2. Users are expected to run their own scripts from `~/.kenv/scripts/`
+2. Users are expected to run their own scripts from `~/.sk/kit/scripts/`
 3. Adding path restrictions would break legitimate use cases
 
 #### Recommendation (Defense in Depth)
@@ -360,7 +360,7 @@ fn is_allowed_script_path(path: &Path) -> bool {
 
 #### Description
 
-The embedded SDK is extracted to `~/.kenv/sdk/kit-sdk.ts` on every startup. This is a fixed, known location within the user's home directory.
+The embedded SDK is extracted to `~/.sk/kit/sdk/kit-sdk.ts` on every startup. This is a fixed, known location within the user's home directory.
 
 ```rust
 fn ensure_sdk_extracted() -> Option<PathBuf> {
@@ -380,7 +380,7 @@ This is **acceptable** because:
 
 #### Recommendation
 
-Ensure the `~/.kenv` directory has appropriate permissions (700 or 750):
+Ensure the `~/.sk/kit` directory has appropriate permissions (700 or 750):
 
 ```rust
 #[cfg(unix)]
@@ -473,7 +473,7 @@ fn shell_quote(s: &str) -> String {
 
 Script Kit GPUI operates under the following trust assumptions:
 
-1. **User scripts are trusted** - Scripts in `~/.kenv/scripts/` are created by the user
+1. **User scripts are trusted** - Scripts in `~/.sk/kit/scripts/` are created by the user
 2. **SDK is trusted** - Embedded at compile time from the repository
 3. **Scriptlets may be semi-trusted** - Could come from shared markdown files
 

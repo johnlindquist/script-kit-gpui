@@ -931,15 +931,21 @@ include!("render_script_list.rs");
 fn main() {
     logging::init();
 
-    // Ensure ~/.kenv environment is properly set up (directories, SDK, config, etc.)
+    // Migrate from legacy ~/.kenv to new ~/.sk/kit structure (one-time migration)
+    // This must happen BEFORE ensure_kit_setup() so the new path is used
+    if setup::migrate_from_kenv() {
+        logging::log("APP", "Migrated from ~/.kenv to ~/.sk/kit");
+    }
+
+    // Ensure ~/.sk/kit environment is properly set up (directories, SDK, config, etc.)
     // This is idempotent - it creates missing directories and files without overwriting user configs
-    let setup_result = setup::ensure_kenv_setup();
+    let setup_result = setup::ensure_kit_setup();
     if setup_result.is_fresh_install {
         logging::log(
             "APP",
             &format!(
-                "Fresh install detected - created ~/.kenv at {}",
-                setup_result.kenv_path.display()
+                "Fresh install detected - created ~/.sk/kit at {}",
+                setup_result.kit_path.display()
             ),
         );
     }
@@ -1101,14 +1107,14 @@ fn main() {
 
     // Start MCP server for AI agent integration
     // Server runs on localhost:43210 with Bearer token authentication
-    // Discovery file written to ~/.kenv/server.json
+    // Discovery file written to ~/.sk/kit/server.json
     let _mcp_handle = match mcp_server::McpServer::with_defaults() {
         Ok(server) => match server.start() {
             Ok(handle) => {
                 logging::log(
                     "MCP",
                     &format!(
-                        "MCP server started on {} (token in ~/.kenv/agent-token)",
+                        "MCP server started on {} (token in ~/.sk/kit/agent-token)",
                         server.url()
                     ),
                 );
@@ -1403,7 +1409,7 @@ fn main() {
             logging::log("APP", "Appearance watcher channel closed");
         }).detach();
 
-        // Config reload watcher - watches ~/.kenv/config.ts for changes
+        // Config reload watcher - watches ~/.sk/kit/config.ts for changes
         let app_entity_for_config = app_entity.clone();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             loop {
@@ -1420,7 +1426,7 @@ fn main() {
             }
         }).detach();
 
-        // Script/scriptlets reload watcher - watches ~/.kenv/scripts/ and ~/.kenv/scriptlets/
+        // Script/scriptlets reload watcher - watches ~/.sk/kit/*/scripts/ and ~/.sk/kit/*/scriptlets/
         // Uses incremental updates for scriptlet files, full reload for scripts
         // Also re-scans for scheduled scripts to pick up new/modified schedules
         let app_entity_for_scripts = app_entity.clone();
@@ -1546,7 +1552,7 @@ fn main() {
                                 match std::process::Command::new(&bun_path)
                                     .arg("run")
                                     .arg("--preload")
-                                    .arg(format!("{}/.kenv/sdk/kit-sdk.ts", std::env::var("HOME").unwrap_or_default()))
+                                    .arg(format!("{}/.sk/kit/sdk/kit-sdk.ts", std::env::var("HOME").unwrap_or_default()))
                                     .arg(&path_str)
                                     .stdout(std::process::Stdio::piped())
                                     .stderr(std::process::Stdio::piped())
@@ -2189,7 +2195,7 @@ fn main() {
                                 logging::log("TRAY", "Settings menu item clicked");
                                 // Open config file in editor
                                 let editor = config_for_tray.get_editor();
-                                let config_path = shellexpand::tilde("~/.kenv/config.ts").to_string();
+                                let config_path = shellexpand::tilde("~/.sk/kit/config.ts").to_string();
 
                                 logging::log("TRAY", &format!("Opening {} in editor '{}'", config_path, editor));
                                 match std::process::Command::new(&editor)

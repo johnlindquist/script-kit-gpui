@@ -25,7 +25,7 @@
  * - store.set(key, value) stores a value
  * - store.delete(key) removes a value
  * - Data persists across script runs
- * - Stored in ~/.kenv/store.json or similar
+ * - Stored in ~/.sk/kit/store.json or similar
  */
 
 import "../../scripts/kit-sdk";
@@ -503,7 +503,7 @@ These tests serve as a TDD-style specification for expected behavior.
 
 When implementing \`store\`, it should:
 - Be a global object with get/set/delete methods
-- Persist data to disk (e.g., \`~/.kenv/store.json\`)
+- Persist data to disk (e.g., \`~/.sk/kit/store.json\`)
 - Support any JSON-serializable values
 - Methods:
   - \`store.get<T>(key): Promise<T | undefined>\`

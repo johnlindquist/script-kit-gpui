@@ -75,7 +75,7 @@ try {
   console.error('[TEST]');
   console.error('[TEST] Expected behavior:');
   console.error('[TEST] - Every keystroke triggers save_note()');
-  console.error('[TEST] - Content is persisted to SQLite at ~/.kenv/db/notes.sqlite');
+  console.error('[TEST] - Content is persisted to SQLite at ~/.sk/kit/db/notes.sqlite');
   console.error('[TEST] - updated_at timestamp is refreshed on each save');
   console.error('[TEST]');
   console.error('[TEST] Verification method:');
@@ -192,7 +192,7 @@ const start4 = Date.now();
 try {
   console.error('[TEST] Storage layer verification (src/notes/storage.rs):');
   console.error('[TEST]');
-  console.error('[TEST] Database: ~/.kenv/db/notes.sqlite');
+  console.error('[TEST] Database: ~/.sk/kit/db/notes.sqlite');
   console.error('[TEST]');
   console.error('[TEST] save_note() (lines 112-145):');
   console.error('[TEST] - Uses INSERT ... ON CONFLICT DO UPDATE (upsert)');
@@ -205,7 +205,7 @@ try {
   console.error('[TEST] - Sorted by: is_pinned DESC, updated_at DESC');
   console.error('[TEST]');
   console.error('[TEST] Verification query:');
-  console.error('[TEST]   sqlite3 ~/.kenv/db/notes.sqlite \\');
+  console.error('[TEST]   sqlite3 ~/.sk/kit/db/notes.sqlite \\');
   console.error('[TEST]     "SELECT id, substr(title,1,20), updated_at FROM notes LIMIT 5"');
   console.error('[TEST]');
   
@@ -236,7 +236,7 @@ try {
   console.error('[TEST] 1. Type "Test content ABC" in the editor');
   console.error('[TEST] 2. Check logs for "Note saved" debug messages');
   console.error('[TEST] 3. Verify in DB:');
-  console.error('[TEST]    sqlite3 ~/.kenv/db/notes.sqlite "SELECT content FROM notes ORDER BY updated_at DESC LIMIT 1"');
+  console.error('[TEST]    sqlite3 ~/.sk/kit/db/notes.sqlite "SELECT content FROM notes ORDER BY updated_at DESC LIMIT 1"');
   console.error('[TEST] 4. Expected: Content matches what you typed');
   console.error('[TEST]');
   console.error('[TEST] === Test B: Content Preservation ===');
@@ -294,7 +294,7 @@ try {
   console.error('[TEST]   grep -i "browse_panel"');
   console.error('[TEST]   grep -i "open_browse_panel"');
   console.error('[TEST]');
-  console.error('[TEST] Full log location: ~/.kenv/logs/script-kit-gpui.jsonl');
+  console.error('[TEST] Full log location: ~/.sk/kit/logs/script-kit-gpui.jsonl');
   console.error('[TEST]');
   
   logTest(test6, 'pass', { 

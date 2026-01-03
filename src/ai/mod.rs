@@ -17,7 +17,7 @@
 //!
 //! # Database Location
 //!
-//! The AI chats database is stored at `~/.kenv/ai-chats.db`.
+//! The AI chats database is stored at `~/.sk/kit/ai-chats.db`.
 //!
 //!
 //! # Features

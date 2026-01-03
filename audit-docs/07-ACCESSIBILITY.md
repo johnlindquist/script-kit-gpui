@@ -719,7 +719,7 @@ if let (Some(idx), Some(callback)) = (index, on_hover_callback) {
 
 ### D.1 Configurable Font Sizes
 
-The application supports user-configurable font sizes via `~/.kenv/config.ts`:
+The application supports user-configurable font sizes via `~/.sk/kit/config.ts`:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|

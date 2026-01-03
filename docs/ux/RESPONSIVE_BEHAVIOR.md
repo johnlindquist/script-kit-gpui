@@ -522,7 +522,7 @@ let _: () = msg_send![window, setMaxSize:NSSize::new(750.0, 700.0)];
 
 ## 12. Configuration Options
 
-### 12.1 Relevant Config Settings (`~/.kenv/config.ts`)
+### 12.1 Relevant Config Settings (`~/.sk/kit/config.ts`)
 
 ```typescript
 export default {

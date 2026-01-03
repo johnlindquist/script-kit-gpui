@@ -76,10 +76,10 @@ const APP_DIRECTORIES: &[&str] = &[
     "/Applications/Setapp",
 ];
 
-/// Get the icon cache directory path (~/.kenv/cache/app-icons/)
+/// Get the icon cache directory path (~/.sk/kit/cache/app-icons/)
 fn get_icon_cache_dir() -> Option<PathBuf> {
-    let kenv = PathBuf::from(shellexpand::tilde("~/.kenv").as_ref());
-    Some(kenv.join("cache").join("app-icons"))
+    let kit = PathBuf::from(shellexpand::tilde("~/.sk/kit").as_ref());
+    Some(kit.join("cache").join("app-icons"))
 }
 
 /// Generate a unique cache key from an app path using a hash
@@ -206,7 +206,7 @@ pub fn get_icon_cache_stats() -> (usize, u64) {
 /// # Performance
 /// Initial scan may take ~100ms depending on the number of installed apps.
 /// Subsequent calls return immediately from cache.
-/// Icons are loaded from disk cache (~/.kenv/cache/app-icons/) when available.
+/// Icons are loaded from disk cache (~/.sk/kit/cache/app-icons/) when available.
 pub fn scan_applications() -> &'static Vec<AppInfo> {
     APP_CACHE.get_or_init(|| {
         let start = Instant::now();
@@ -675,8 +675,8 @@ mod tests {
             dir
         );
         assert!(
-            dir.to_string_lossy().contains(".kenv"),
-            "Cache dir should be under .kenv: {:?}",
+            dir.to_string_lossy().contains(".sk/kit"),
+            "Cache dir should be under .sk/kit: {:?}",
             dir
         );
     }

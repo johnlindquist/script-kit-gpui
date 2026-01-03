@@ -320,11 +320,11 @@
       "tests": ["home-path", "home-with-subpath"]
     },
     {
-      "name": "kenvPath",
+      "name": "skPath",
       "tier": "storage",
       "testFile": "test-storage-apis.ts",
       "status": "tested",
-      "tests": ["kenvPath-basic"]
+      "tests": ["skPath-basic"]
     },
     {
       "name": "kitPath",

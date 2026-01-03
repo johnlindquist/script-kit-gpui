@@ -5,11 +5,11 @@
  * SMOKE TEST: test-process-orphan.ts
  *
  * This test verifies that the process management system creates and uses
- * the active-bun-pids.json file at ~/.kenv/active-bun-pids.json for
+ * the active-bun-pids.json file at ~/.sk/kit/active-bun-pids.json for
  * tracking running script processes.
  *
  * What this tests:
- * - active-bun-pids.json exists at ~/.kenv/
+ * - active-bun-pids.json exists at ~/.sk/kit/
  * - File contains valid JSON structure
  * - JSON has expected fields (pid, script_path, started_at)
  *

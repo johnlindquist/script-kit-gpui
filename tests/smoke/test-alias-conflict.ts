@@ -5,7 +5,7 @@
  * SMOKE TEST: test-alias-conflict.ts
  *
  * This test verifies the alias conflict detection functionality:
- * 1. Creates two temp scripts in ~/.kenv/scripts/ with the same alias
+ * 1. Creates two temp scripts in ~/.sk/kit/scripts/ with the same alias
  * 2. Waits for file watcher to trigger reload_scripts
  * 3. Verifies conflict message appears in logs/HUD
  * 4. Cleans up temp scripts

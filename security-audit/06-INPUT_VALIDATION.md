@@ -217,7 +217,7 @@ let build_output = Command::new("bun")
     .output();
 ```
 
-While the path is fixed (`~/.kenv/config.ts`), a malicious symlink or modified config.ts could execute arbitrary code.
+While the path is fixed (`~/.sk/kit/config.ts`), a malicious symlink or modified config.ts could execute arbitrary code.
 
 #### Gaps
 
@@ -419,8 +419,8 @@ This only escapes double quotes, not:
 
 The current design implicitly trusts:
 1. Scripts executed via `run` command
-2. Config files in `~/.kenv/`
-3. Theme files in `~/.kenv/`
+2. Config files in `~/.sk/kit/`
+3. Theme files in `~/.sk/kit/`
 4. Scriptlet files
 
 This is reasonable for a power-user tool, but should be documented clearly.

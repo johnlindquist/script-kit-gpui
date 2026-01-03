@@ -58,13 +58,13 @@ cargo check && cargo clippy --all-targets -- -D warnings && cargo test
 | **Bead Protocol** | `hive_start` → Work → `swarm_progress` → `swarm_complete` (NOT `hive_close`) |
 | **Test Hierarchy** | `tests/smoke/` = E2E flows, `tests/sdk/` = SDK methods, `--features system-tests` for clipboard/accessibility |
 | **Verification Gate** | Always run `cargo check && cargo clippy && cargo test` before commits |
-| **SDK Preload** | Test scripts import `../../scripts/kit-sdk`; runtime uses embedded SDK extracted to `~/.kenv/sdk/` |
+| **SDK Preload** | Test scripts import `../../scripts/kit-sdk`; runtime uses embedded SDK extracted to `~/.sk/kit/sdk/` |
 | **Arrow Key Names** | ALWAYS match BOTH: `"up" \| "arrowup"`, `"down" \| "arrowdown"`, `"left" \| "arrowleft"`, `"right" \| "arrowright"` |
 | **Visual Testing** | Use stdin JSON protocol + `captureScreenshot()` SDK function, save to `.test-screenshots/`, then READ the PNG file to analyze |
 | **Grid Overlay** | Use `{"type": "showGrid", "showBounds": true}` stdin command for component bounds visualization |
 | **Layout Info** | Use `getLayoutInfo()` SDK function to get component tree with bounds and computed styles |
 | **AI Log Mode** | Set `SCRIPT_KIT_AI_LOG=1` for token-efficient compact logs (see below) |
-| **Config Settings** | Font sizes and padding are configurable via `~/.kenv/config.ts` - use `config.get_*()` helpers |
+| **Config Settings** | Font sizes and padding are configurable via `~/.sk/kit/config.ts` - use `config.get_*()` helpers |
 | **Notes Window** | Separate floating window in `src/notes/`; test via `{"type": "openNotes"}` stdin command |
 | **AI Window** | BYOK chat in `src/ai/`; test via `{"type": "openAi"}` stdin command |
 | **Script Metadata** | Prefer `metadata = {...}` global variable over `// Name:` comment-based format |
@@ -259,13 +259,13 @@ console.error('[SMOKE] result:', result);
 
 ```bash
 # With SCRIPT_KIT_AI_LOG=1, stderr shows compact logs (SS.mmm|L|C|message)
-# JSONL logs are at ~/.kenv/logs/script-kit-gpui.jsonl (full detail)
+# JSONL logs are at ~/.sk/kit/logs/script-kit-gpui.jsonl (full detail)
 
 # Filter for specific behavior with compact logs:
 echo '{"type": "run", "path": "..."}' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1 | grep -iE 'RESIZE|editor|height'
 
 # Check structured logs:
-tail -50 ~/.kenv/logs/script-kit-gpui.jsonl | grep -i resize
+tail -50 ~/.sk/kit/logs/script-kit-gpui.jsonl | grep -i resize
 ```
 
 ### Example: Testing Window Resize
@@ -1076,9 +1076,9 @@ fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement { ... }
 | Change Type | Mechanism |
 |-------------|-----------|
 | `.rs` files | cargo-watch rebuilds |
-| `~/.kenv/theme.json` | File watcher, live reload |
-| `~/.kenv/scripts/` | File watcher, live reload |
-| `~/.kenv/config.ts` | Requires restart |
+| `~/.sk/kit/theme.json` | File watcher, live reload |
+| `~/.sk/kit/scripts/` | File watcher, live reload |
+| `~/.sk/kit/config.ts` | Requires restart |
 
 ### Debugging
 
@@ -1151,7 +1151,7 @@ src/
   watcher.rs    # File watchers with observability instrumentation
   panel.rs      # macOS panel configuration
   perf.rs       # Performance timing utilities
-  logging.rs    # Dual-output logging: JSONL to ~/.kenv/logs/, pretty to stderr
+  logging.rs    # Dual-output logging: JSONL to ~/.sk/kit/logs/, pretty to stderr
   lib.rs        # Module exports
   utils.rs      # Shared utilities (strip_html_tags, etc.)
   notes/        # Notes window module (separate floating window)
@@ -1170,7 +1170,7 @@ src/
 
 ### Log File Location
 
-Logs are written to `~/.kenv/logs/script-kit-gpui.jsonl` in JSONL format for AI agent consumption.
+Logs are written to `~/.sk/kit/logs/script-kit-gpui.jsonl` in JSONL format for AI agent consumption.
 
 ### SDK Deployment Architecture
 
@@ -1180,18 +1180,18 @@ The SDK (`scripts/kit-sdk.ts`) is deployed using a two-tier system:
 |-------|----------|---------|
 | **Source** | `scripts/kit-sdk.ts` | Canonical source in repo, watched by build.rs |
 | **Embedded** | Binary (via `include_str!`) | Compiled into the binary at build time |
-| **Runtime** | `~/.kenv/sdk/kit-sdk.ts` | Extracted on app startup for bun preload |
+| **Runtime** | `~/.sk/kit/sdk/kit-sdk.ts` | Extracted on app startup for bun preload |
 
 **How it works:**
 
-1. **Build time**: `build.rs` copies `scripts/kit-sdk.ts` to `~/.kenv/sdk/` for development
+1. **Build time**: `build.rs` copies `scripts/kit-sdk.ts` to `~/.sk/kit/sdk/` for development
 2. **Compile time**: `executor.rs` embeds the SDK via `include_str!("../scripts/kit-sdk.ts")`
-3. **Runtime**: `ensure_sdk_extracted()` writes embedded SDK to `~/.kenv/sdk/kit-sdk.ts`
-4. **Execution**: Scripts are run with `bun run --preload ~/.kenv/sdk/kit-sdk.ts <script>`
+3. **Runtime**: `ensure_sdk_extracted()` writes embedded SDK to `~/.sk/kit/sdk/kit-sdk.ts`
+4. **Execution**: Scripts are run with `bun run --preload ~/.sk/kit/sdk/kit-sdk.ts <script>`
 
 **Test scripts** import from the source directly (`../../scripts/kit-sdk`) because they run in the development context. Production scripts use the runtime-extracted SDK.
 
-**Path mapping**: The app updates `~/.kenv/tsconfig.json` with:
+**Path mapping**: The app updates `~/.sk/kit/tsconfig.json` with:
 ```json
 { "compilerOptions": { "paths": { "@johnlindquist/kit": ["./sdk/kit-sdk.ts"] } } }
 ```
@@ -1200,7 +1200,7 @@ This allows scripts to use `import '@johnlindquist/kit'` for IDE support.
 
 ### User Configuration (config.ts)
 
-The app reads settings from `~/.kenv/config.ts`. Configuration is loaded at startup and accessible throughout the app via the `Config` struct.
+The app reads settings from `~/.sk/kit/config.ts`. Configuration is loaded at startup and accessible throughout the app via the `Config` struct.
 
 **Example config.ts:**
 ```typescript
@@ -1292,8 +1292,8 @@ The Notes feature is a **completely separate floating window** from the main Scr
 | **Location** | `src/notes/` module |
 | **UI Framework** | gpui-component library (Input, Sidebar, Button, etc.) |
 | **Window Type** | Floating panel (`NSFloatingWindowLevel` on macOS) |
-| **Storage** | SQLite database at `~/.kenv/notes.db` |
-| **Theme** | Syncs with Script Kit's `~/.kenv/theme.json` |
+| **Storage** | SQLite database at `~/.sk/kit/notes.db` |
+| **Theme** | Syncs with Script Kit's `~/.sk/kit/theme.json` |
 
 #### File Structure
 
@@ -1418,8 +1418,8 @@ The AI feature is a **BYOK (Bring Your Own Key) chat window** - a separate float
 | **Location** | `src/ai/` module |
 | **UI Framework** | gpui-component library (Input, Button, markdown rendering) |
 | **Window Type** | Floating panel (`NSFloatingWindowLevel` on macOS) |
-| **Storage** | SQLite database at `~/.kenv/ai-chats.db` |
-| **Theme** | Syncs with Script Kit's `~/.kenv/theme.json` |
+| **Storage** | SQLite database at `~/.sk/kit/ai-chats.db` |
+| **Theme** | Syncs with Script Kit's `~/.sk/kit/theme.json` |
 | **Model** | BYOK - uses user's own API keys |
 
 #### File Structure
@@ -1454,7 +1454,7 @@ The AI window requires API keys set as environment variables:
 
 Keys can be set in:
 - Shell profile (`~/.zshrc`, `~/.bashrc`)
-- `~/.kenv/.env` file
+- `~/.sk/kit/.env` file
 - System environment variables
 
 #### Testing the AI Window
@@ -1540,7 +1540,7 @@ fn load_config(path: &Path) -> Result<Config> {
 }
 
 fn main() -> Result<()> {
-    let config = load_config(Path::new("~/.kenv/config.json"))
+    let config = load_config(Path::new("~/.sk/kit/config.json"))
         .context("Config initialization failed")?;
     
     // Application logic...
@@ -1863,7 +1863,7 @@ For token-efficient logging when AI agents are reading logs, set `SCRIPT_KIT_AI_
 SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1
 ```
 
-This outputs compact format to stderr: `SS.mmm|L|C|message` (see "AI Compact Log Format" section above for the full legend). Standard JSONL continues to be written to `~/.kenv/logs/` for full detail when needed.
+This outputs compact format to stderr: `SS.mmm|L|C|message` (see "AI Compact Log Format" section above for the full legend). Standard JSONL continues to be written to `~/.sk/kit/logs/` for full detail when needed.
 
 ---
 
@@ -2277,7 +2277,7 @@ fn handle_task(&mut self, task: Task, cx: &mut Context<Self>) {
 
 ### JSONL Log Format
 
-Logs are written to `~/.kenv/logs/script-kit-gpui.jsonl`:
+Logs are written to `~/.sk/kit/logs/script-kit-gpui.jsonl`:
 
 ```json
 {"timestamp":"2024-01-15T10:30:45.123Z","level":"INFO","target":"script_kit::executor","message":"Script executed","fields":{"correlation_id":"abc-123","script_name":"hello.ts","duration_ms":142}}
@@ -2287,18 +2287,18 @@ Logs are written to `~/.kenv/logs/script-kit-gpui.jsonl`:
 
 ```bash
 # Find all logs for a correlation ID
-grep '"correlation_id":"abc-123"' ~/.kenv/logs/script-kit-gpui.jsonl
+grep '"correlation_id":"abc-123"' ~/.sk/kit/logs/script-kit-gpui.jsonl
 
 # Find slow operations (>100ms)
-grep '"duration_ms":' ~/.kenv/logs/script-kit-gpui.jsonl | \
+grep '"duration_ms":' ~/.sk/kit/logs/script-kit-gpui.jsonl | \
   jq 'select(.fields.duration_ms > 100)'
 
 # Find errors in last hour
-grep '"level":"ERROR"' ~/.kenv/logs/script-kit-gpui.jsonl | \
+grep '"level":"ERROR"' ~/.sk/kit/logs/script-kit-gpui.jsonl | \
   jq 'select(.timestamp > "2024-01-15T09:30:00")'
 
 # Extract timing metrics
-grep '"duration_ms":' ~/.kenv/logs/script-kit-gpui.jsonl | \
+grep '"duration_ms":' ~/.sk/kit/logs/script-kit-gpui.jsonl | \
   jq -r '.fields.duration_ms' | sort -n | tail -10
 ```
 

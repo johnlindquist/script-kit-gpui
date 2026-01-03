@@ -21,7 +21,7 @@
  *
  * Expected behavior (when implemented):
  * - db(name) returns a lowdb-like database object
- * - Data persists to ~/.kenv/db/{name}.json
+ * - Data persists to ~/.sk/kit/db/{name}.json
  * - Supports .get(), .set(), .write(), .data properties
  */
 
@@ -386,7 +386,7 @@ try {
   } else {
     // Clean up: delete the test database file
     // This might require a separate API or file system access
-    const dbPath = kenvPath("db", TEST_DB_NAME + ".json");
+    const dbPath = skPath("db", TEST_DB_NAME + ".json");
     debug(`Would delete: ${dbPath}`);
 
     // For now, just clear the data
@@ -444,7 +444,7 @@ When implementing \`db()\`, it should:
   - \`get(path)\`: Get value at dot-notation path
   - \`set(path, value)\`: Set value at path
   - \`write()\`: Persist changes to disk
-- Store data in \`~/.kenv/db/{name}.json\`
+- Store data in \`~/.sk/kit/db/{name}.json\`
 
 *Check the JSONL output for detailed results*
 

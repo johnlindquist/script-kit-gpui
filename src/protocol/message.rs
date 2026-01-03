@@ -719,9 +719,9 @@ pub enum Message {
     GetScriptlets {
         #[serde(rename = "requestId")]
         request_id: String,
-        /// Optional kenv to filter by
+        /// Optional kit to filter by
         #[serde(skip_serializing_if = "Option::is_none")]
-        kenv: Option<String>,
+        kit: Option<String>,
         /// Optional group to filter by
         #[serde(skip_serializing_if = "Option::is_none")]
         group: Option<String>,
@@ -1711,7 +1711,7 @@ impl Message {
     pub fn get_scriptlets(request_id: String) -> Self {
         Message::GetScriptlets {
             request_id,
-            kenv: None,
+            kit: None,
             group: None,
         }
     }
@@ -1719,12 +1719,12 @@ impl Message {
     /// Create a get scriptlets request with filters
     pub fn get_scriptlets_filtered(
         request_id: String,
-        kenv: Option<String>,
+        kit: Option<String>,
         group: Option<String>,
     ) -> Self {
         Message::GetScriptlets {
             request_id,
-            kenv,
+            kit,
             group,
         }
     }

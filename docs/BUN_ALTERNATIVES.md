@@ -262,7 +262,7 @@ import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync } from "fs";
 
-// Create database in ~/.kenv/db/
+// Create database in ~/.sk/kit/db/
 const dbDir = join(process.env.HOME!, ".kenv", "db");
 mkdirSync(dbDir, { recursive: true });
 
@@ -284,7 +284,7 @@ db.run(`
 ```typescript
 import { Database } from "bun:sqlite";
 
-const db = new Database("~/.kenv/db/my-script.db");
+const db = new Database("~/.sk/kit/db/my-script.db");
 
 // Single insert
 db.run("INSERT INTO items (name, value) VALUES (?, ?)", ["item1", "value1"]);
@@ -314,7 +314,7 @@ insertMany([
 ```typescript
 import { Database } from "bun:sqlite";
 
-const db = new Database("~/.kenv/db/my-script.db");
+const db = new Database("~/.sk/kit/db/my-script.db");
 
 // Get all rows
 const allItems = db.query("SELECT * FROM items").all();
@@ -341,7 +341,7 @@ const names = db.query("SELECT id, name FROM items").all() as ItemRow[];
 ```typescript
 import { Database } from "bun:sqlite";
 
-const db = new Database("~/.kenv/db/my-script.db");
+const db = new Database("~/.sk/kit/db/my-script.db");
 
 // Update
 db.run("UPDATE items SET value = ? WHERE id = ?", ["new value", 1]);

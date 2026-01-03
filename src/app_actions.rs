@@ -13,8 +13,8 @@ impl ScriptListApp {
         match action_id.as_str() {
             "create_script" => {
                 logging::log("UI", "Create script action - opening scripts folder");
-                // Open ~/.kenv/scripts/ in Finder for now (future: create script dialog)
-                let scripts_dir = shellexpand::tilde("~/.kenv/scripts").to_string();
+                // Open ~/.sk/kit/scripts/ in Finder for now (future: create script dialog)
+                let scripts_dir = shellexpand::tilde("~/.sk/kit/scripts").to_string();
                 std::thread::spawn(move || {
                     use std::process::Command;
                     match Command::new("open").arg(&scripts_dir).spawn() {

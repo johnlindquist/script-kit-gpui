@@ -87,7 +87,7 @@ All tests passed!
 
 ### Creating a New MCP Tool
 
-1. Create a script in `~/.kenv/scripts/`:
+1. Create a script in `~/.sk/kit/scripts/`:
 
 ```typescript
 import "@johnlindquist/kit"
@@ -116,7 +116,7 @@ output({ result: `${param1} x ${param2}` })
 ### Testing Your Tool
 
 ```bash
-TOKEN=$(cat ~/.kenv/agent-token)
+TOKEN=$(cat ~/.sk/kit/agent-token)
 
 # List tools (verify your tool appears)
 curl -s -X POST "http://localhost:43210/rpc" \

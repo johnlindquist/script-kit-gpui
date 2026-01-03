@@ -2,7 +2,7 @@
 //!
 //! Provides:
 //! - SSE streaming for real-time event delivery to clients
-//! - Audit logging for tool calls to ~/.kenv/logs/mcp-audit.jsonl
+//! - Audit logging for tool calls to ~/.sk/kit/logs/mcp-audit.jsonl
 //!
 //! Event format: `event: {type}\ndata: {json}\n\n`
 
@@ -140,7 +140,7 @@ impl AuditLogEntry {
     }
 }
 
-/// Audit logger that writes to ~/.kenv/logs/mcp-audit.jsonl
+/// Audit logger that writes to ~/.sk/kit/logs/mcp-audit.jsonl
 pub struct AuditLogger {
     log_path: PathBuf,
 }
@@ -149,18 +149,18 @@ impl AuditLogger {
     /// Create a new audit logger
     ///
     /// # Arguments
-    /// * `kenv_path` - Path to ~/.kenv directory
-    pub fn new(kenv_path: PathBuf) -> Self {
-        let log_path = kenv_path.join("logs").join("mcp-audit.jsonl");
+    /// * `kit_path` - Path to ~/.sk/kit directory
+    pub fn new(kit_path: PathBuf) -> Self {
+        let log_path = kit_path.join("logs").join("mcp-audit.jsonl");
         Self { log_path }
     }
 
-    /// Create audit logger with default ~/.kenv path
+    /// Create audit logger with default ~/.sk/kit path
     pub fn with_defaults() -> Result<Self> {
-        let kenv_path = dirs::home_dir()
+        let kit_path = dirs::home_dir()
             .context("Failed to get home directory")?
-            .join(".kenv");
-        Ok(Self::new(kenv_path))
+            .join(".sk/kit");
+        Ok(Self::new(kit_path))
     }
 
     /// Get the log file path

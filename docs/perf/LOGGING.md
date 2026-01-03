@@ -28,13 +28,13 @@ The logging system is **well-architected** with several performance-conscious de
 ├─────────────────────────────────────────────────────────────┤
 │  tracing_subscriber::registry()                             │
 │       ├── EnvFilter (default: info, gpui=warn)              │
-│       ├── JSON Layer → non_blocking(file) → ~/.kenv/logs/   │
+│       ├── JSON Layer → non_blocking(file) → ~/.sk/kit/logs/   │
 │       └── Stderr Layer (pretty or compact)                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### File Output (JSONL)
-- **Location**: `~/.kenv/logs/script-kit-gpui.jsonl`
+- **Location**: `~/.sk/kit/logs/script-kit-gpui.jsonl`
 - **Writer**: `tracing_appender::non_blocking(file)` - **async, non-blocking**
 - **Current Size**: ~198KB with 696 lines (reasonable)
 - **Format**: Full JSON with timestamp, level, target, message, fields

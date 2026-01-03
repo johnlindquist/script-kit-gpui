@@ -538,9 +538,9 @@ pub struct ScriptletData {
     /// Parsed metadata from HTML comments
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ScriptletMetadataData>,
-    /// The kenv this scriptlet belongs to
+    /// The kit this scriptlet belongs to
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kenv: Option<String>,
+    pub kit: Option<String>,
     /// Source file path
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
@@ -563,7 +563,7 @@ impl ScriptletData {
             group: None,
             preview: None,
             metadata: None,
-            kenv: None,
+            kit: None,
             source_path: None,
             is_scriptlet: true,
         }
@@ -593,9 +593,9 @@ impl ScriptletData {
         self
     }
 
-    /// Add kenv
-    pub fn with_kenv(mut self, kenv: String) -> Self {
-        self.kenv = Some(kenv);
+    /// Add kit
+    pub fn with_kit(mut self, kit: String) -> Self {
+        self.kit = Some(kit);
         self
     }
 

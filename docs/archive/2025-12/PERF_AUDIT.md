@@ -76,7 +76,7 @@ This document synthesizes findings from 9 detailed performance audits of the Scr
 | 4 | Extract scroll stabilization helper | All list components | 14/15 call sites lack stabilization | List Scroll |
 | 5 | Convert poll loops to event-driven | `main.rs:8387-8455` | 0-200ms latency elimination | Async |
 | 6 | Add capacity bounds to unbounded channels | `main.rs:540, 1761` | Prevent memory growth | Async |
-| 7 | Add LRU eviction to app icons cache | `~/.kenv/cache/app-icons/` | Disk space leak | Caching |
+| 7 | Add LRU eviction to app icons cache | `~/.sk/kit/cache/app-icons/` | Disk space leak | Caching |
 | 8 | Implement incremental script loading | `scripts.rs` | 90%+ reload time reduction | Script Search |
 | 9 | Parallelize Phase 3 blocking operations | `main.rs` | -200-400ms startup | Startup |
 | 10 | Reduce hot path logging | `main.rs, executor.rs` | ~15 log calls per hotkey | Logging |

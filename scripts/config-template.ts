@@ -5,7 +5,7 @@ import type { Config } from "@johnlindquist/kit";
  * ========================
  *
  * This file controls Script Kit's behavior, appearance, and built-in features.
- * It's loaded on startup from ~/.kenv/config.ts.
+ * It's loaded on startup from ~/.sk/kit/config.ts.
  *
  * HOW TO CUSTOMIZE:
  * 1. Uncomment the options you want to change

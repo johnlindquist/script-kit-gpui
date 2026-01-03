@@ -35,12 +35,12 @@ impl ScriptListApp {
         ));
         logging::log(
             "APP",
-            &format!("Loaded {} scripts from ~/.kenv/scripts", scripts.len()),
+            &format!("Loaded {} scripts from ~/.sk/kit/scripts", scripts.len()),
         );
         logging::log(
             "APP",
             &format!(
-                "Loaded {} scriptlets from ~/.kenv/scriptlets/scriptlets.md",
+                "Loaded {} scriptlets from ~/.sk/kit/scriptlets/scriptlets.md",
                 scriptlets.len()
             ),
         );
@@ -1706,7 +1706,7 @@ impl ScriptListApp {
             },
             typed_metadata: None,
             schema: None,
-            kenv: None,
+            kit: None,
             source_path: scriptlet.file_path.clone(),
         };
 

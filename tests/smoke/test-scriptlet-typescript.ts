@@ -47,7 +47,7 @@ This test verifies the TypeScript scriptlet execution system.
 ## Execution Flow
 
 1. **Temp file creation**: Script content → \`/tmp/scriptlet-{pid}.ts\`
-2. **SDK preload**: \`~/.kenv/sdk/kit-sdk.ts\` provides globals
+2. **SDK preload**: \`~/.sk/kit/sdk/kit-sdk.ts\` provides globals
 3. **Execution**: \`bun run --preload {sdk} {temp_file}\`
 4. **Cleanup**: Temp file removed after execution
 
@@ -89,7 +89,7 @@ The SDK (\`kit-sdk.ts\`) provides global functions:
 When bun runs with \`--preload\`, the SDK is loaded before the script:
 
 \`\`\`bash
-bun run --preload ~/.kenv/sdk/kit-sdk.ts /tmp/scriptlet-{pid}.ts
+bun run --preload ~/.sk/kit/sdk/kit-sdk.ts /tmp/scriptlet-{pid}.ts
 \`\`\`
 
 This injects globals into the script's scope.

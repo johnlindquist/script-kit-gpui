@@ -44,7 +44,7 @@ This audit examines file system access patterns in three critical modules:
 **Location:** `src/config.rs`, lines 188-287
 
 **Description:**  
-The `load_config()` function executes arbitrary TypeScript code from `~/.kenv/config.ts` via two separate `bun` invocations:
+The `load_config()` function executes arbitrary TypeScript code from `~/.sk/kit/config.ts` via two separate `bun` invocations:
 
 ```rust
 // Step 1: Transpile TypeScript
@@ -66,7 +66,7 @@ let json_output = Command::new("bun")
 ```
 
 **Attack Vectors:**
-1. **Malicious config.ts:** If an attacker can write to `~/.kenv/config.ts`, they gain arbitrary code execution with user privileges
+1. **Malicious config.ts:** If an attacker can write to `~/.sk/kit/config.ts`, they gain arbitrary code execution with user privileges
 2. **Import chain attacks:** config.ts can import other modules, allowing code injection through dependencies
 3. **Tilde expansion bypass:** The path uses `shellexpand::tilde()` which could be manipulated in non-standard HOME scenarios
 
@@ -188,7 +188,7 @@ File watchers accept paths from `shellexpand::tilde()` without validation:
 ```rust
 fn watch_loop(tx: Sender<ConfigReloadEvent>) -> NotifyResult<()> {
     let config_path = PathBuf::from(
-        shellexpand::tilde("~/.kenv/config.ts").as_ref()
+        shellexpand::tilde("~/.sk/kit/config.ts").as_ref()
     );
     
     let watch_path = config_path
@@ -203,7 +203,7 @@ fn watch_loop(tx: Sender<ConfigReloadEvent>) -> NotifyResult<()> {
 **Attack Vectors:**
 1. **HOME manipulation:** If `$HOME` is set to an attacker-controlled directory, the watcher monitors unintended paths
 2. **Fallback to current directory:** The `.` fallback could watch arbitrary directories
-3. **Missing directory handling:** If `~/.kenv` doesn't exist, no error is raised
+3. **Missing directory handling:** If `~/.sk/kit` doesn't exist, no error is raised
 
 **Impact:** Monitoring of unintended directories, potential trigger for malicious reloads
 
@@ -235,7 +235,7 @@ if scriptlets_path.exists() {  // TOCTOU: exists() check before watch()
 **Attack Vectors:**
 1. **Symlink injection:** An attacker could create a symlink in scripts/ pointing to a large directory tree, causing resource exhaustion
 2. **TOCTOU race:** Between `exists()` check and `watch()`, the directory state could change
-3. **Symlink to external directories:** Watching could expose file system activity outside `~/.kenv`
+3. **Symlink to external directories:** Watching could expose file system activity outside `~/.sk/kit`
 
 **Impact:** Resource exhaustion, information leakage about external file activity
 
@@ -386,20 +386,20 @@ fn validate_path(path: &Path, allowed_base: &Path) -> Result<PathBuf, &'static s
 
 1. **Scripts directory symlink attack:**
    ```
-   ~/.kenv/scripts/evil -> /etc
+   ~/.sk/kit/scripts/evil -> /etc
    # ScriptWatcher now monitors /etc for changes
    ```
 
 2. **Config file symlink swap:**
    ```
-   rm ~/.kenv/config.ts
-   ln -s /path/to/malicious.ts ~/.kenv/config.ts
+   rm ~/.sk/kit/config.ts
+   ln -s /path/to/malicious.ts ~/.sk/kit/config.ts
    # Next config reload executes attacker code
    ```
 
 3. **Theme file race condition:**
    ```
-   ln -s /dev/urandom ~/.kenv/theme.json
+   ln -s /dev/urandom ~/.sk/kit/theme.json
    # Theme loader may hang or crash
    ```
 
@@ -410,7 +410,7 @@ fn validate_path(path: &Path, allowed_base: &Path) -> Result<PathBuf, &'static s
 ### Current Threat Model
 
 The config loading system has a **trusted file model** that assumes:
-- `~/.kenv/config.ts` is always trustworthy
+- `~/.sk/kit/config.ts` is always trustworthy
 - The user controls their home directory
 - No other processes can write to config files
 

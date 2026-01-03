@@ -1416,7 +1416,7 @@ console.log("Hello from {}!")
     )
 }
 
-/// Creates a new script file at ~/.kenv/scripts/{name}.ts
+/// Creates a new script file at ~/.sk/kit/scripts/{name}.ts
 ///
 /// # Arguments
 /// * `name` - The script name (will be validated)
@@ -1435,7 +1435,7 @@ pub fn create_script_file(name: &str) -> Result<std::path::PathBuf, String> {
 
     validate_script_name(name)?;
 
-    let scripts_dir = PathBuf::from(shellexpand::tilde("~/.kenv/scripts").as_ref());
+    let scripts_dir = PathBuf::from(shellexpand::tilde("~/.sk/kit/scripts").as_ref());
 
     // Ensure directory exists
     if !scripts_dir.exists() {
@@ -1466,7 +1466,7 @@ pub fn create_script_file(name: &str) -> Result<std::path::PathBuf, String> {
 /// Useful for checking if a script already exists or for UI display
 pub fn get_script_path(name: &str) -> std::path::PathBuf {
     use std::path::PathBuf;
-    let scripts_dir = PathBuf::from(shellexpand::tilde("~/.kenv/scripts").as_ref());
+    let scripts_dir = PathBuf::from(shellexpand::tilde("~/.sk/kit/scripts").as_ref());
     scripts_dir.join(format!("{}.ts", name))
 }
 
@@ -1671,8 +1671,8 @@ mod tests {
         // Should end with the correct filename
         assert!(path.to_string_lossy().ends_with("hello-world.ts"));
 
-        // Should be in ~/.kenv/scripts/
-        assert!(path.to_string_lossy().contains(".kenv/scripts"));
+        // Should be in ~/.sk/kit/scripts/
+        assert!(path.to_string_lossy().contains(".sk/kit/scripts"));
     }
 
     #[test]

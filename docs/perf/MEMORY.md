@@ -195,7 +195,7 @@ clipboard_image_cache: HashMap<String, Arc<gpui::RenderImage>>
 **Analysis**: 
 - Images are decoded once and cached as `Arc<RenderImage>`
 - App icons use same pattern via `DecodedIcon = Arc<RenderImage>`
-- Disk cache exists at `~/.kenv/cache/app-icons/`
+- Disk cache exists at `~/.sk/kit/cache/app-icons/`
 
 **Current Status**: Well-optimized. No changes needed.
 

@@ -347,7 +347,7 @@ impl Config {
 
 #[instrument(name = "load_config")]
 pub fn load_config() -> Config {
-    let config_path = PathBuf::from(shellexpand::tilde("~/.kenv/config.ts").as_ref());
+    let config_path = PathBuf::from(shellexpand::tilde("~/.sk/kit/config.ts").as_ref());
 
     // Check if config file exists
     if !config_path.exists() {

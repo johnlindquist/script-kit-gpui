@@ -181,7 +181,7 @@ fn calculate_terminal_size_with_cells(...) -> (u16, u16) {
 
 ### 3.3 Content Padding Configuration
 
-Padding is configurable via `~/.kenv/config.ts`:
+Padding is configurable via `~/.sk/kit/config.ts`:
 
 ```rust
 // src/config.rs:6-9
@@ -432,7 +432,7 @@ fn test_arrow_key_patterns_match_both_forms() {
 
 ### 8.1 User-Configurable Settings
 
-Via `~/.kenv/config.ts`:
+Via `~/.sk/kit/config.ts`:
 
 ```typescript
 export default {

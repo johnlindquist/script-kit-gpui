@@ -1798,7 +1798,7 @@ pub fn open_notes_window(cx: &mut App) -> Result<()> {
     configure_notes_as_floating_panel();
 
     // Theme hot-reload watcher for Notes window
-    // Spawns a background task that watches ~/.kenv/theme.json for changes
+    // Spawns a background task that watches ~/.sk/kit/theme.json for changes
     if let Some(notes_app) = notes_app_holder.lock().unwrap().clone() {
         let notes_app_for_theme = notes_app.clone();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {

@@ -35,8 +35,8 @@ This section contains the contents of the repository's files.
 #![allow(dead_code)] // Some methods reserved for future use
 //!
 //! This module provides:
-//! - PID file at ~/.kenv/script-kit.pid for main app
-//! - Active child PIDs file at ~/.kenv/active-bun-pids.json
+//! - PID file at ~/.sk/kit/script-kit.pid for main app
+//! - Active child PIDs file at ~/.sk/kit/active-bun-pids.json
 //! - Thread-safe process registration/unregistration
 //! - Orphan detection on startup
 //! - Bulk kill for graceful shutdown
@@ -627,12 +627,12 @@ mod tests {
     fn test_default_paths() {
         let manager = ProcessManager::new();
 
-        // Should use ~/.kenv/ paths
+        // Should use ~/.sk/kit/ paths
         let home = dirs::home_dir().unwrap();
-        assert_eq!(manager.main_pid_path, home.join(".kenv/script-kit.pid"));
+        assert_eq!(manager.main_pid_path, home.join(".sk/kit/script-kit.pid"));
         assert_eq!(
             manager.active_pids_path,
-            home.join(".kenv/active-bun-pids.json")
+            home.join(".sk/kit/active-bun-pids.json")
         );
     }
 }
@@ -990,7 +990,7 @@ fn ensure_tsconfig_paths(tsconfig_path: &PathBuf) {
 /// Extract the embedded SDK to disk if needed
 /// Returns the path to the extracted SDK file
 fn ensure_sdk_extracted() -> Option<PathBuf> {
-    // Target path: ~/.kenv/sdk/kit-sdk.ts
+    // Target path: ~/.sk/kit/sdk/kit-sdk.ts
     let kenv_dir = dirs::home_dir()?.join(".kenv");
     let kenv_sdk = kenv_dir.join("sdk");
     let sdk_path = kenv_sdk.join("kit-sdk.ts");
@@ -1049,9 +1049,9 @@ clipboard-history.db
 fn find_sdk_path() -> Option<PathBuf> {
     logging::log("EXEC", "Looking for SDK...");
 
-    // 1. Check ~/.kenv/sdk/kit-sdk.ts (primary location)
+    // 1. Check ~/.sk/kit/sdk/kit-sdk.ts (primary location)
     if let Some(home) = dirs::home_dir() {
-        let kenv_sdk = home.join(".kenv/sdk/kit-sdk.ts");
+        let kenv_sdk = home.join(".sk/kit/sdk/kit-sdk.ts");
         logging::log(
             "EXEC",
             &format!("  Checking kenv sdk: {}", kenv_sdk.display()),
@@ -1065,7 +1065,7 @@ fn find_sdk_path() -> Option<PathBuf> {
         }
     }
 
-    // 2. Extract embedded SDK to ~/.kenv/sdk/kit-sdk.ts (production)
+    // 2. Extract embedded SDK to ~/.sk/kit/sdk/kit-sdk.ts (production)
     logging::log("EXEC", "  Trying to extract embedded SDK...");
     if let Some(sdk_path) = ensure_sdk_extracted() {
         logging::log(
@@ -3022,7 +3022,7 @@ mod tests {
     #[test]
     fn test_is_typescript_with_path() {
         assert!(is_typescript(&PathBuf::from(
-            "/home/user/.kenv/scripts/script.ts"
+            "/home/user/.sk/kit/scripts/script.ts"
         )));
         assert!(is_typescript(&PathBuf::from("/usr/local/bin/script.ts")));
     }
@@ -3030,7 +3030,7 @@ mod tests {
     #[test]
     fn test_is_javascript_with_path() {
         assert!(is_javascript(&PathBuf::from(
-            "/home/user/.kenv/scripts/script.js"
+            "/home/user/.sk/kit/scripts/script.js"
         )));
         assert!(is_javascript(&PathBuf::from("/usr/local/bin/script.js")));
     }

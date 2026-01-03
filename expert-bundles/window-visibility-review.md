@@ -1880,12 +1880,12 @@ impl ScriptListApp {
         ));
         logging::log(
             "APP",
-            &format!("Loaded {} scripts from ~/.kenv/scripts", scripts.len()),
+            &format!("Loaded {} scripts from ~/.sk/kit/scripts", scripts.len()),
         );
         logging::log(
             "APP",
             &format!(
-                "Loaded {} scriptlets from ~/.kenv/scriptlets/scriptlets.md",
+                "Loaded {} scriptlets from ~/.sk/kit/scriptlets/scriptlets.md",
                 scriptlets.len()
             ),
         );
@@ -2984,8 +2984,8 @@ impl ScriptListApp {
         match action_id.as_str() {
             "create_script" => {
                 logging::log("UI", "Create script action - opening scripts folder");
-                // Open ~/.kenv/scripts/ in Finder for now (future: create script dialog)
-                let scripts_dir = shellexpand::tilde("~/.kenv/scripts").to_string();
+                // Open ~/.sk/kit/scripts/ in Finder for now (future: create script dialog)
+                let scripts_dir = shellexpand::tilde("~/.sk/kit/scripts").to_string();
                 std::thread::spawn(move || {
                     use std::process::Command;
                     match Command::new("open").arg(&scripts_dir).spawn() {
@@ -13381,14 +13381,14 @@ fn main() {
 
     // Start MCP server for AI agent integration
     // Server runs on localhost:43210 with Bearer token authentication
-    // Discovery file written to ~/.kenv/server.json
+    // Discovery file written to ~/.sk/kit/server.json
     let _mcp_handle = match mcp_server::McpServer::with_defaults() {
         Ok(server) => match server.start() {
             Ok(handle) => {
                 logging::log(
                     "MCP",
                     &format!(
-                        "MCP server started on {} (token in ~/.kenv/agent-token)",
+                        "MCP server started on {} (token in ~/.sk/kit/agent-token)",
                         server.url()
                     ),
                 );
@@ -13515,7 +13515,7 @@ fn main() {
             logging::log("APP", "Appearance watcher channel closed");
         }).detach();
 
-        // Config reload watcher - watches ~/.kenv/config.ts for changes
+        // Config reload watcher - watches ~/.sk/kit/config.ts for changes
         let window_for_config = window;
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             loop {
@@ -13532,7 +13532,7 @@ fn main() {
             }
         }).detach();
 
-        // Script/scriptlets reload watcher - watches ~/.kenv/scripts/ and ~/.kenv/scriptlets/
+        // Script/scriptlets reload watcher - watches ~/.sk/kit/scripts/ and ~/.sk/kit/scriptlets/
         // Also re-scans for scheduled scripts to pick up new/modified schedules
         let window_for_scripts = window;
         let scheduler_for_scripts = scheduler.clone();
@@ -13604,7 +13604,7 @@ fn main() {
                                 match std::process::Command::new(&bun_path)
                                     .arg("run")
                                     .arg("--preload")
-                                    .arg(format!("{}/.kenv/sdk/kit-sdk.ts", std::env::var("HOME").unwrap_or_default()))
+                                    .arg(format!("{}/.sk/kit/sdk/kit-sdk.ts", std::env::var("HOME").unwrap_or_default()))
                                     .arg(&path_str)
                                     .stdout(std::process::Stdio::piped())
                                     .stderr(std::process::Stdio::piped())
@@ -14028,7 +14028,7 @@ fn main() {
                                 logging::log("TRAY", "Settings menu item clicked");
                                 // Open config file in editor
                                 let editor = config_for_tray.get_editor();
-                                let config_path = shellexpand::tilde("~/.kenv/config.ts").to_string();
+                                let config_path = shellexpand::tilde("~/.sk/kit/config.ts").to_string();
 
                                 logging::log("TRAY", &format!("Opening {} in editor '{}'", config_path, editor));
                                 match std::process::Command::new(&editor)

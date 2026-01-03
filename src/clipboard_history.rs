@@ -362,16 +362,16 @@ pub fn set_max_text_content_len(max_len: usize) {
     MAX_TEXT_CONTENT_LEN.store(value, Ordering::Relaxed);
 }
 
-/// Get the database path (~/.kenv/clipboard-history.db)
+/// Get the database path (~/.sk/kit/clipboard-history.db)
 fn get_db_path() -> Result<PathBuf> {
-    let kenv_dir = PathBuf::from(shellexpand::tilde("~/.kenv").as_ref());
+    let kit_dir = PathBuf::from(shellexpand::tilde("~/.sk/kit").as_ref());
 
-    // Create ~/.kenv if it doesn't exist
-    if !kenv_dir.exists() {
-        std::fs::create_dir_all(&kenv_dir).context("Failed to create ~/.kenv directory")?;
+    // Create ~/.sk/kit if it doesn't exist
+    if !kit_dir.exists() {
+        std::fs::create_dir_all(&kit_dir).context("Failed to create ~/.sk/kit directory")?;
     }
 
-    Ok(kenv_dir.join("clipboard-history.db"))
+    Ok(kit_dir.join("clipboard-history.db"))
 }
 
 /// Get or create the database connection
@@ -1484,7 +1484,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
-    /// Test-only override for database path to avoid polluting ~/.kenv in CI
+    /// Test-only override for database path to avoid polluting ~/.sk/kit in CI
     static TEST_DB_PATH: OnceLock<StdMutex<Option<PathBuf>>> = OnceLock::new();
 
     /// Set a test-specific database path (call before any DB operations in tests)
@@ -1517,14 +1517,14 @@ mod tests {
     #[test]
     fn test_db_path_format() {
         // Test the path format WITHOUT creating directories
-        // This avoids polluting ~/.kenv in CI environments
+        // This avoids polluting ~/.sk/kit in CI environments
         let expected_filename = "clipboard-history.db";
-        let kenv_dir = PathBuf::from(shellexpand::tilde("~/.kenv").as_ref());
-        let expected_path = kenv_dir.join(expected_filename);
+        let kit_dir = PathBuf::from(shellexpand::tilde("~/.sk/kit").as_ref());
+        let expected_path = kit_dir.join(expected_filename);
 
         // Verify the path format is correct (without calling get_db_path which creates dirs)
         assert!(expected_path.to_string_lossy().contains(expected_filename));
-        assert!(expected_path.to_string_lossy().contains(".kenv"));
+        assert!(expected_path.to_string_lossy().contains(".sk/kit"));
     }
 
     #[test]

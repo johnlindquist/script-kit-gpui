@@ -28,7 +28,7 @@
 ### Theme Loading Pipeline
 
 ```
-~/.kenv/theme.json (optional)
+~/.sk/kit/theme.json (optional)
         │
         ▼
   load_theme() in theme.rs
@@ -45,7 +45,7 @@
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Theme file location | `~/.kenv/theme.json` | Consistent with config path |
+| Theme file location | `~/.sk/kit/theme.json` | Consistent with config path |
 | Hot reload | **Implemented** | File watcher triggers theme reload |
 | System appearance detection | **Implemented** | Uses `defaults read -g AppleInterfaceStyle` |
 | Light/dark modes | **Code exists** | But no runtime toggle UI |

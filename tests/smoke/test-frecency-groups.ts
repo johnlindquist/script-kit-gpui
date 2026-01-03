@@ -5,7 +5,7 @@
  * SMOKE TEST: test-frecency-groups.ts
  * 
  * This script tests the frecency grouping feature that shows:
- * - RECENT section: Scripts used recently (based on ~/.kenv/frecency.json)
+ * - RECENT section: Scripts used recently (based on ~/.sk/kit/frecency.json)
  * - MAIN section: All other scripts alphabetically
  * 
  * When the user types in the filter box:
@@ -77,7 +77,7 @@ try {
 ## Test 1: Grouped View Display
 
 The main menu should have shown:
-- **RECENT** section (if you have frecency data in ~/.kenv/frecency.json)
+- **RECENT** section (if you have frecency data in ~/.sk/kit/frecency.json)
 - **MAIN** section with all other scripts
 
 Look for this log message:
@@ -101,7 +101,7 @@ Press Enter to continue...`));
 // Test 2: Execute a script to record frecency usage
 // 
 // This test simulates selecting a script, which should record usage in
-// ~/.kenv/frecency.json. The frecency system tracks:
+// ~/.sk/kit/frecency.json. The frecency system tracks:
 // - count: how many times the script was used
 // - last_used: Unix timestamp of last use
 // - score: calculated frecency score (decays over time)
@@ -112,7 +112,7 @@ const start2 = Date.now();
 
 try {
   debug('Test 2: Record script execution for frecency');
-  debug('Selecting a script should update ~/.kenv/frecency.json');
+  debug('Selecting a script should update ~/.sk/kit/frecency.json');
   
   // Show a selection that simulates script choice
   const result = await arg('Select to record frecency (pick any):', [
@@ -122,7 +122,7 @@ try {
   ]);
   
   debug(`Selected: ${result}`);
-  debug('Check ~/.kenv/frecency.json for updated entry');
+  debug('Check ~/.sk/kit/frecency.json for updated entry');
   debug('Look for log: "Updated frecency entry" or "Created new frecency entry"');
   
   logTest(test2, 'pass', { 
@@ -225,13 +225,13 @@ await div(md(`# Frecency Groups Tests Complete
 | Test | Description | Status |
 |------|-------------|--------|
 | 1 | Grouped view display | Check logs for RECENT/MAIN headers |
-| 2 | Record frecency use | Check ~/.kenv/frecency.json |
+| 2 | Record frecency use | Check ~/.sk/kit/frecency.json |
 | 3 | Flat search mode | Verified via code logic |
 | 4 | Restore grouped view | Verified via code logic |
 
 ## Key Implementation Details
 
-- **Data storage**: \`~/.kenv/frecency.json\`
+- **Data storage**: \`~/.sk/kit/frecency.json\`
 - **Section headers**: Rendered by \`render_section_header()\` in list_item.rs
 - **Grouping logic**: \`get_grouped_results()\` in scripts.rs
 - **Max recent items**: 5 (configurable via MAX_RECENT_ITEMS)
@@ -241,10 +241,10 @@ await div(md(`# Frecency Groups Tests Complete
 
 \`\`\`bash
 # Check frecency data
-cat ~/.kenv/frecency.json | jq
+cat ~/.sk/kit/frecency.json | jq
 
 # Search logs for grouping behavior
-grep -E "Grouped view|Search mode" ~/.kenv/logs/script-kit-gpui.jsonl | tail -5
+grep -E "Grouped view|Search mode" ~/.sk/kit/logs/script-kit-gpui.jsonl | tail -5
 \`\`\`
 
 Press Enter to exit.`));

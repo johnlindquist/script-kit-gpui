@@ -286,7 +286,7 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     None
 }
 
-// Note: tsconfig.json path mapping is now handled by setup::ensure_kenv_setup()
+// Note: tsconfig.json path mapping is now handled by setup::ensure_kit_setup()
 // This function is kept for backward compatibility but is a no-op
 #[allow(dead_code)]
 fn ensure_tsconfig_paths(_tsconfig_path: &PathBuf) {
@@ -294,12 +294,12 @@ fn ensure_tsconfig_paths(_tsconfig_path: &PathBuf) {
     // See setup::ensure_tsconfig_paths()
 }
 
-/// Get the SDK path - SDK extraction is now handled by setup::ensure_kenv_setup() at startup
+/// Get the SDK path - SDK extraction is now handled by setup::ensure_kit_setup() at startup
 /// This function just returns the expected path since setup has already done the work
 fn ensure_sdk_extracted() -> Option<PathBuf> {
-    // Target path: ~/.kenv/sdk/kit-sdk.ts
-    // This is extracted by setup::ensure_kenv_setup() which runs at app startup
-    let sdk_path = dirs::home_dir()?.join(".kenv/sdk/kit-sdk.ts");
+    // Target path: ~/.sk/kit/sdk/kit-sdk.ts
+    // This is extracted by setup::ensure_kit_setup() which runs at app startup
+    let sdk_path = dirs::home_dir()?.join(".sk/kit/sdk/kit-sdk.ts");
 
     if sdk_path.exists() {
         Some(sdk_path)
@@ -310,9 +310,9 @@ fn ensure_sdk_extracted() -> Option<PathBuf> {
             "EXEC",
             "SDK not found at expected path, extracting embedded SDK",
         );
-        let kenv_sdk = dirs::home_dir()?.join(".kenv/sdk");
-        if !kenv_sdk.exists() {
-            std::fs::create_dir_all(&kenv_sdk).ok()?;
+        let kit_sdk = dirs::home_dir()?.join(".sk/kit/sdk");
+        if !kit_sdk.exists() {
+            std::fs::create_dir_all(&kit_sdk).ok()?;
         }
         std::fs::write(&sdk_path, EMBEDDED_SDK).ok()?;
         logging::log(
@@ -327,23 +327,23 @@ fn ensure_sdk_extracted() -> Option<PathBuf> {
 fn find_sdk_path() -> Option<PathBuf> {
     logging::log("EXEC", "Looking for SDK...");
 
-    // 1. Check ~/.kenv/sdk/kit-sdk.ts (primary location)
+    // 1. Check ~/.sk/kit/sdk/kit-sdk.ts (primary location)
     if let Some(home) = dirs::home_dir() {
-        let kenv_sdk = home.join(".kenv/sdk/kit-sdk.ts");
+        let kit_sdk = home.join(".sk/kit/sdk/kit-sdk.ts");
         logging::log(
             "EXEC",
-            &format!("  Checking kenv sdk: {}", kenv_sdk.display()),
+            &format!("  Checking kit sdk: {}", kit_sdk.display()),
         );
-        if kenv_sdk.exists() {
+        if kit_sdk.exists() {
             logging::log(
                 "EXEC",
-                &format!("  FOUND SDK (kenv): {}", kenv_sdk.display()),
+                &format!("  FOUND SDK (kit): {}", kit_sdk.display()),
             );
-            return Some(kenv_sdk);
+            return Some(kit_sdk);
         }
     }
 
-    // 2. Extract embedded SDK to ~/.kenv/sdk/kit-sdk.ts (production)
+    // 2. Extract embedded SDK to ~/.sk/kit/sdk/kit-sdk.ts (production)
     logging::log("EXEC", "  Trying to extract embedded SDK...");
     if let Some(sdk_path) = ensure_sdk_extracted() {
         logging::log(

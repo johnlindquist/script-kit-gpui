@@ -19,9 +19,9 @@ The application employs **8 distinct caching systems** spanning filter results, 
 | **Preview Cache** | `main.rs:781-783` | Single-entry | 1 file | Path change | ✅ HIT/MISS logged |
 | **Clipboard Image Cache** | `main.rs:791` + `clipboard_history.rs:82` | HashMap | ⚠️ Unbounded | Never | ✅ Cached count logged |
 | **Clipboard Entry Cache** | `clipboard_history.rs:87` | Vec | MAX_HISTORY (1000) | On add/update | ✅ Logged |
-| **App Icons Cache** | `~/.kenv/cache/app-icons/` | Disk (PNG) | ⚠️ Unbounded | mtime comparison | ✅ Stats logged |
+| **App Icons Cache** | `~/.sk/kit/cache/app-icons/` | Disk (PNG) | ⚠️ Unbounded | mtime comparison | ✅ Stats logged |
 | **App List Cache** | `app_launcher.rs:72` | OnceLock Vec | Static | Never (restart required) | ❌ No HIT/MISS |
-| **Frecency Store** | `~/.kenv/frecency.json` | HashMap→JSON | ⚠️ Unbounded | Dirty flag | ✅ Load/Save logged |
+| **Frecency Store** | `~/.sk/kit/frecency.json` | HashMap→JSON | ⚠️ Unbounded | Dirty flag | ✅ Load/Save logged |
 | **Window Cache** | `window_control.rs:421` | OnceLock HashMap | Cleared on scan | `clear_window_cache()` | ❌ No HIT/MISS |
 
 ---
@@ -160,7 +160,7 @@ static ENTRY_CACHE: OnceLock<Mutex<Vec<ClipboardEntry>>> = OnceLock::new();
 
 **Implementation**:
 ```rust
-// Cache location: ~/.kenv/cache/app-icons/{hash}.png
+// Cache location: ~/.sk/kit/cache/app-icons/{hash}.png
 fn get_or_extract_icon(app_path: &Path) -> Option<Vec<u8>> {
     // Uses mtime comparison for invalidation
 }
@@ -230,7 +230,7 @@ pub fn scan_applications() -> &'static Vec<AppInfo> {
 ```rust
 pub struct FrecencyStore {
     entries: HashMap<String, FrecencyEntry>,
-    file_path: PathBuf,  // ~/.kenv/frecency.json
+    file_path: PathBuf,  // ~/.sk/kit/frecency.json
     dirty: bool,
 }
 ```

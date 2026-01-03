@@ -1,7 +1,7 @@
 // Build script for script-kit-gpui
 //
 // This script tells Cargo to rebuild when key files change.
-// SDK deployment to ~/.kenv is now handled at runtime by setup::ensure_kenv_setup()
+// SDK deployment to ~/.sk/kit is now handled at runtime by setup::ensure_kit_setup()
 // rather than at build time, ensuring the SDK is always in sync with the running binary.
 
 fn main() {

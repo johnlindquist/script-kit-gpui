@@ -115,7 +115,7 @@ struct FrecencyData {
 }
 
 impl FrecencyStore {
-    /// Create a new FrecencyStore with the default path (~/.kenv/frecency.json)
+    /// Create a new FrecencyStore with the default path (~/.sk/kit/frecency.json)
     pub fn new() -> Self {
         let file_path = Self::default_path();
         FrecencyStore {
@@ -168,7 +168,7 @@ impl FrecencyStore {
 
     /// Get the default frecency file path
     fn default_path() -> PathBuf {
-        PathBuf::from(shellexpand::tilde("~/.kenv/frecency.json").as_ref())
+        PathBuf::from(shellexpand::tilde("~/.sk/kit/frecency.json").as_ref())
     }
 
     /// Load frecency data from disk

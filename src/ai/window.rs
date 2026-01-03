@@ -144,15 +144,15 @@ fn generate_mock_response(user_message: &str) -> String {
     }
 
     if msg_lower.contains("help") || msg_lower.contains("how") {
-        return "I'm here to help! In demo mode, I can explain Script Kit concepts:\n\n• **Scripts** live in `~/.kenv/scripts/`\n• **SDK** provides `arg()`, `div()`, `editor()`, and more\n• **Hotkeys** are configured in script metadata\n• **This AI chat** works with Claude or GPT when you add an API key\n\nWhat would you like to know more about?".to_string();
+        return "I'm here to help! In demo mode, I can explain Script Kit concepts:\n\n• **Scripts** live in `~/.sk/kit/scripts/`\n• **SDK** provides `arg()`, `div()`, `editor()`, and more\n• **Hotkeys** are configured in script metadata\n• **This AI chat** works with Claude or GPT when you add an API key\n\nWhat would you like to know more about?".to_string();
     }
 
     if msg_lower.contains("code") || msg_lower.contains("example") {
-        return "Here's a simple Script Kit example:\n\n```typescript\n// Name: Hello World\n// Shortcut: cmd+shift+h\n\nconst name = await arg(\"What's your name?\");\nawait div(`<h1>Hello, ${name}!</h1>`);\n```\n\nThis creates a script that:\n1. Asks for your name via a prompt\n2. Displays a greeting in an HTML view\n\nSave this to `~/.kenv/scripts/hello.ts` and run it!".to_string();
+        return "Here's a simple Script Kit example:\n\n```typescript\n// Name: Hello World\n// Shortcut: cmd+shift+h\n\nconst name = await arg(\"What's your name?\");\nawait div(`<h1>Hello, ${name}!</h1>`);\n```\n\nThis creates a script that:\n1. Asks for your name via a prompt\n2. Displays a greeting in an HTML view\n\nSave this to `~/.sk/kit/scripts/hello.ts` and run it!".to_string();
     }
 
     if msg_lower.contains("api") || msg_lower.contains("key") || msg_lower.contains("configure") {
-        return "To enable real AI responses, configure an API key:\n\n**For Claude (Anthropic):**\n```bash\nexport SCRIPT_KIT_ANTHROPIC_API_KEY=\"sk-ant-...\"\n```\n\n**For GPT (OpenAI):**\n```bash\nexport SCRIPT_KIT_OPENAI_API_KEY=\"sk-...\"\n```\n\nAdd these to your `~/.zshrc` or `~/.kenv/.env` file, then restart Script Kit.".to_string();
+        return "To enable real AI responses, configure an API key:\n\n**For Claude (Anthropic):**\n```bash\nexport SCRIPT_KIT_ANTHROPIC_API_KEY=\"sk-ant-...\"\n```\n\n**For GPT (OpenAI):**\n```bash\nexport SCRIPT_KIT_OPENAI_API_KEY=\"sk-...\"\n```\n\nAdd these to your `~/.zshrc` or `~/.sk/kit/.env` file, then restart Script Kit.".to_string();
     }
 
     // Default response for unrecognized queries
@@ -1763,7 +1763,7 @@ pub fn open_ai_window(cx: &mut App) -> Result<()> {
     // that can go behind other windows
 
     // Theme hot-reload watcher for AI window
-    // Spawns a background task that watches ~/.kenv/theme.json for changes
+    // Spawns a background task that watches ~/.sk/kit/theme.json for changes
     let app_entity_holder_ref = AI_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
     if let Some(ai_app) = app_entity_holder_ref.lock().unwrap().clone() {
         let ai_app_for_theme = ai_app.clone();

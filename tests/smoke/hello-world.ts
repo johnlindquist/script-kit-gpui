@@ -12,9 +12,9 @@
  * - Script exits cleanly after user interaction
  * 
  * Expected log output from executor.rs:
- * [EXEC] execute_script_interactive: ~/.kenv/scripts/hello-world.ts
+ * [EXEC] execute_script_interactive: ~/.sk/kit/scripts/hello-world.ts
  * [EXEC] Looking for SDK...
- * [EXEC] FOUND SDK: ~/.kenv/sdk/kit-sdk.ts (or dev path)
+ * [EXEC] FOUND SDK: ~/.sk/kit/sdk/kit-sdk.ts (or dev path)
  * [EXEC] Trying: bun run --preload <sdk> <script>
  * [EXEC] SUCCESS: bun with preload
  * [EXEC] Process spawned with PID: <pid>

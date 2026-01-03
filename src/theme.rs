@@ -770,7 +770,7 @@ pub fn detect_system_appearance() -> bool {
     }
 }
 
-/// Load theme from ~/.kenv/theme.json
+/// Load theme from ~/.sk/kit/theme.json
 ///
 /// Colors should be specified as decimal integers in the JSON file.
 /// For example, 0x1e1e1e (hex) = 1980410 (decimal).
@@ -807,7 +807,7 @@ pub fn detect_system_appearance() -> bool {
 /// If system appearance detection is not available, defaults to dark mode.
 /// Logs errors to stderr but doesn't fail the application.
 pub fn load_theme() -> Theme {
-    let theme_path = PathBuf::from(shellexpand::tilde("~/.kenv/theme.json").as_ref());
+    let theme_path = PathBuf::from(shellexpand::tilde("~/.sk/kit/theme.json").as_ref());
 
     // Check if theme file exists
     if !theme_path.exists() {

@@ -14,7 +14,7 @@
  * │                           CONFIGURATION FILE                               │
  * └───────────────────────────────────────────────────────────────────────────┘
  *
- * LOCATION: ~/.kenv/config.ts
+ * LOCATION: ~/.sk/kit/config.ts
  *
  * PURPOSE: Controls Script Kit's behavior, appearance, and built-in features.
  * The config file is a TypeScript module that exports a default Config object.
@@ -339,7 +339,7 @@
  * ```
  *
  * USE CASE: Users with visual impairments, large monitors
- * NOTE: Theme colors are controlled separately in ~/.kenv/theme.json
+ * NOTE: Theme colors are controlled separately in ~/.sk/kit/theme.json
  *       High contrast themes should be configured there, not here.
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -450,9 +450,9 @@
  * - UI scale should be 0.5-2.0 for reasonable display
  *
  * RELATED FILES:
- * - ~/.kenv/theme.json - Color themes and visual appearance
- * - ~/.kenv/scripts/   - User scripts
- * - ~/.kenv/sdk/       - SDK runtime files
+ * - ~/.sk/kit/theme.json - Color themes and visual appearance
+ * - ~/.sk/kit/scripts/   - User scripts
+ * - ~/.sk/kit/sdk/       - SDK runtime files
  */
 
 // Re-export all Config types from kit-sdk.ts

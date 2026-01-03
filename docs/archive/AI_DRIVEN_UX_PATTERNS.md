@@ -169,17 +169,17 @@ echo '...' | SCRIPT_KIT_AI_LOG=1 ./target/debug/script-kit-gpui 2>&1 | tail -50
 
 #### 4. Structured Log Queries (JSONL)
 
-Full structured logs are in `~/.kenv/logs/script-kit-gpui.jsonl`:
+Full structured logs are in `~/.sk/kit/logs/script-kit-gpui.jsonl`:
 
 ```bash
 # Find specific correlation ID
-grep '"correlation_id":"abc-123"' ~/.kenv/logs/script-kit-gpui.jsonl
+grep '"correlation_id":"abc-123"' ~/.sk/kit/logs/script-kit-gpui.jsonl
 
 # Find slow operations
-grep '"duration_ms":' ~/.kenv/logs/script-kit-gpui.jsonl | jq 'select(.fields.duration_ms > 100)'
+grep '"duration_ms":' ~/.sk/kit/logs/script-kit-gpui.jsonl | jq 'select(.fields.duration_ms > 100)'
 
 # Recent errors only
-tail -100 ~/.kenv/logs/script-kit-gpui.jsonl | grep '"level":"ERROR"'
+tail -100 ~/.sk/kit/logs/script-kit-gpui.jsonl | grep '"level":"ERROR"'
 ```
 
 ### Build-Test-Iterate Loop (Mandatory)
@@ -851,7 +851,7 @@ grep '|F|' output.log  # Focus
 | File | Format | Purpose |
 |------|--------|---------|
 | stderr | Compact (`SS.mmm\|L\|C\|msg`) | Real-time debugging |
-| `~/.kenv/logs/script-kit-gpui.jsonl` | JSONL | Structured log analysis |
+| `~/.sk/kit/logs/script-kit-gpui.jsonl` | JSONL | Structured log analysis |
 
 ### Mandatory Workflow
 

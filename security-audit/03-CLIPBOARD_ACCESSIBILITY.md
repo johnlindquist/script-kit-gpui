@@ -48,7 +48,7 @@ The implementation follows reasonable security practices but has several areas r
 **Location:** `clipboard_history.rs:194-204`
 
 **Description:**
-Clipboard history is stored in a plain SQLite database at `~/.kenv/clipboard-history.db` without any encryption. This means:
+Clipboard history is stored in a plain SQLite database at `~/.sk/kit/clipboard-history.db` without any encryption. This means:
 - Any process with file system access can read clipboard history
 - Sensitive data (passwords, API keys, private messages) is exposed
 - Database survives application restarts and persists indefinitely
@@ -404,7 +404,7 @@ pub fn simulate_paste_with_cg() -> Result<()> {
 │                                                              │    │
 │  ╔═══════════════════════════════════════════════════════════╝    │
 │  ║ DATA AT REST (UNENCRYPTED):                                    │
-│  ║ - ~/.kenv/clipboard-history.db                                 │
+│  ║ - ~/.sk/kit/clipboard-history.db                                 │
 │  ║ - Up to 1000 entries                                           │
 │  ║ - No expiry                                                    │
 │  ║ - Plain text and base64 images                                 │
@@ -488,7 +488,7 @@ struct ClipboardRetentionPolicy {
 
 | Permission | Required | Implementation | Notes |
 |------------|----------|----------------|-------|
-| File System | Yes | ~/.kenv/ directory | Standard user home |
+| File System | Yes | ~/.sk/kit/ directory | Standard user home |
 | Clipboard Read | Yes | arboard crate | No special permission on macOS |
 | Clipboard Write | Yes | arboard crate | No special permission on macOS |
 | Background Execution | Yes | std::thread | No special permission |

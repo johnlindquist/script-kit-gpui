@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - Script Kit GPUI app must be running
-#   - Token file at ~/.kenv/agent-token
+#   - Token file at ~/.sk/kit/agent-token
 #   - curl and jq installed
 
 set -e
@@ -23,7 +23,7 @@ NC='\033[0m' # No Color
 # Config
 MCP_PORT="${MCP_PORT:-43210}"
 MCP_HOST="${MCP_HOST:-localhost}"
-TOKEN_FILE="${HOME}/.kenv/agent-token"
+TOKEN_FILE="${HOME}/.sk/kit/agent-token"
 BASE_URL="http://${MCP_HOST}:${MCP_PORT}"
 
 # Counters

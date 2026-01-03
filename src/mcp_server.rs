@@ -3,9 +3,9 @@
 //! Provides an HTTP server for MCP (Model Context Protocol) integration.
 //! Features:
 //! - HTTP server on localhost:43210
-//! - Bearer token authentication from ~/.kenv/agent-token
+//! - Bearer token authentication from ~/.sk/kit/agent-token
 //! - Health endpoint at GET /health
-//! - Discovery file at ~/.kenv/server.json
+//! - Discovery file at ~/.sk/kit/server.json
 
 // Allow dead code - ServerHandle methods provide full lifecycle API for future use
 #![allow(dead_code)]
@@ -45,7 +45,7 @@ impl Default for ServerCapabilities {
     }
 }
 
-/// Discovery file structure written to ~/.kenv/server.json
+/// Discovery file structure written to ~/.sk/kit/server.json
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryInfo {
     pub url: String,
@@ -62,7 +62,7 @@ pub struct McpServer {
     port: u16,
     token: String,
     running: Arc<AtomicBool>,
-    kenv_path: PathBuf,
+    kit_path: PathBuf,
 }
 
 impl McpServer {
@@ -70,35 +70,35 @@ impl McpServer {
     ///
     /// # Arguments
     /// * `port` - Port to listen on (default: 43210)
-    /// * `kenv_path` - Path to ~/.kenv directory
-    pub fn new(port: u16, kenv_path: PathBuf) -> Result<Self> {
-        let token = Self::load_or_create_token(&kenv_path)?;
+    /// * `kit_path` - Path to ~/.sk/kit directory
+    pub fn new(port: u16, kit_path: PathBuf) -> Result<Self> {
+        let token = Self::load_or_create_token(&kit_path)?;
 
         Ok(Self {
             port,
             token,
             running: Arc::new(AtomicBool::new(false)),
-            kenv_path,
+            kit_path,
         })
     }
 
     /// Create server with default settings
     pub fn with_defaults() -> Result<Self> {
-        let kenv_path = dirs::home_dir()
+        let kit_path = dirs::home_dir()
             .context("Failed to get home directory")?
-            .join(".kenv");
+            .join(".sk/kit");
 
         let port = std::env::var("MCP_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(DEFAULT_PORT);
 
-        Self::new(port, kenv_path)
+        Self::new(port, kit_path)
     }
 
     /// Load existing token or create a new one
-    fn load_or_create_token(kenv_path: &PathBuf) -> Result<String> {
-        let token_path = kenv_path.join("agent-token");
+    fn load_or_create_token(kit_path: &PathBuf) -> Result<String> {
+        let token_path = kit_path.join("agent-token");
 
         if token_path.exists() {
             let token = fs::read_to_string(&token_path)
@@ -115,8 +115,8 @@ impl McpServer {
         // Generate new token
         let token = uuid::Uuid::new_v4().to_string();
 
-        // Ensure kenv directory exists
-        fs::create_dir_all(kenv_path).context("Failed to create .kenv directory")?;
+        // Ensure kit directory exists
+        fs::create_dir_all(kit_path).context("Failed to create .kit directory")?;
 
         fs::write(&token_path, &token).context("Failed to write agent-token file")?;
 
@@ -139,7 +139,7 @@ impl McpServer {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Write discovery file to ~/.kenv/server.json
+    /// Write discovery file to ~/.sk/kit/server.json
     fn write_discovery_file(&self) -> Result<()> {
         let discovery = DiscoveryInfo {
             url: self.url(),
@@ -148,7 +148,7 @@ impl McpServer {
             capabilities: ServerCapabilities::default(),
         };
 
-        let discovery_path = self.kenv_path.join("server.json");
+        let discovery_path = self.kit_path.join("server.json");
         let json = serde_json::to_string_pretty(&discovery)
             .context("Failed to serialize discovery info")?;
 
@@ -160,7 +160,7 @@ impl McpServer {
 
     /// Remove discovery file on shutdown
     fn remove_discovery_file(&self) {
-        let discovery_path = self.kenv_path.join("server.json");
+        let discovery_path = self.kit_path.join("server.json");
         if discovery_path.exists() {
             if let Err(e) = fs::remove_file(&discovery_path) {
                 warn!("Failed to remove discovery file: {}", e);
@@ -193,7 +193,7 @@ impl McpServer {
         running.store(true, Ordering::SeqCst);
 
         let token = self.token.clone();
-        let kenv_path = self.kenv_path.clone();
+        let kit_path = self.kit_path.clone();
         let port = self.port;
 
         let handle = thread::spawn(move || {
@@ -221,7 +221,7 @@ impl McpServer {
             }
 
             // Cleanup on shutdown
-            let discovery_path = kenv_path.join("server.json");
+            let discovery_path = kit_path.join("server.json");
             if discovery_path.exists() {
                 let _ = fs::remove_file(&discovery_path);
             }
@@ -412,7 +412,7 @@ mod tests {
     use std::net::TcpStream;
     use tempfile::TempDir;
 
-    /// Helper to create a server with a temporary kenv directory
+    /// Helper to create a server with a temporary kit directory
     fn create_test_server(port: u16) -> (McpServer, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let server = McpServer::new(port, temp_dir.path().to_path_buf()).unwrap();

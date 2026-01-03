@@ -127,7 +127,7 @@ Each area was examined by a specialized audit agent:
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                 DATA PERSISTENCE                                           │
 ├────────────────────────────────────────────────────────────────────────────────────────────┤
-│  ~/.kenv/                                                                                  │
+│  ~/.sk/kit/                                                                                  │
 │  ├── clipboard-history.db  ← UNENCRYPTED (passwords, API keys may be stored)              │
 │  ├── config.ts             ← EXECUTED (arbitrary code execution if modified)              │
 │  ├── theme.json            ← PARSED (JSON, low risk)                                      │
@@ -237,9 +237,9 @@ Each area was examined by a specialized audit agent:
 
 | Component | Trust Level | Notes |
 |-----------|-------------|-------|
-| User scripts (`~/.kenv/scripts/`) | Fully Trusted | By design - user's own code |
-| Config file (`~/.kenv/config.ts`) | Fully Trusted | Currently executed as code |
-| Theme file (`~/.kenv/theme.json`) | Semi-Trusted | JSON parsed, not executed |
+| User scripts (`~/.sk/kit/scripts/`) | Fully Trusted | By design - user's own code |
+| Config file (`~/.sk/kit/config.ts`) | Fully Trusted | Currently executed as code |
+| Theme file (`~/.sk/kit/theme.json`) | Semi-Trusted | JSON parsed, not executed |
 | Scriptlets (markdown embedded) | Semi-Trusted | Need input sanitization |
 | SDK (`kit-sdk.ts`) | Fully Trusted | Embedded at compile time |
 | IPC Messages (stdin/stdout) | Validated | Typed JSON protocol |
@@ -250,7 +250,7 @@ Each area was examined by a specialized audit agent:
 |------------|---------|---------------------|
 | Accessibility | Read/write selected text, window control | Full UI automation access |
 | Clipboard | Monitor and store clipboard | Capture passwords/secrets |
-| File System | `~/.kenv/` access | Script execution, data access |
+| File System | `~/.sk/kit/` access | Script execution, data access |
 | Process Spawning | Run bun/node/shell | Arbitrary code execution |
 | Network | Script-dependent | Data exfiltration possible |
 

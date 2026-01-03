@@ -43,7 +43,7 @@ pub enum AppearanceChangeEvent {
     Light,
 }
 
-/// Watches ~/.kenv/config.ts for changes and emits reload events
+/// Watches ~/.sk/kit/config.ts for changes and emits reload events
 pub struct ConfigWatcher {
     tx: Option<Sender<ConfigReloadEvent>>,
     watcher_thread: Option<thread::JoinHandle<()>>,
@@ -65,7 +65,7 @@ impl ConfigWatcher {
 
     /// Start watching the config file for changes
     ///
-    /// This spawns a background thread that watches ~/.kenv/config.ts and sends
+    /// This spawns a background thread that watches ~/.sk/kit/config.ts and sends
     /// reload events through the receiver when changes are detected.
     pub fn start(&mut self) -> NotifyResult<()> {
         let tx = self
@@ -86,7 +86,7 @@ impl ConfigWatcher {
     /// Internal watch loop running in background thread
     fn watch_loop(tx: Sender<ConfigReloadEvent>) -> NotifyResult<()> {
         // Expand the config path
-        let config_path = PathBuf::from(shellexpand::tilde("~/.kenv/config.ts").as_ref());
+        let config_path = PathBuf::from(shellexpand::tilde("~/.sk/kit/config.ts").as_ref());
 
         // Get the parent directory to watch
         let watch_path = config_path
@@ -182,7 +182,7 @@ impl Drop for ConfigWatcher {
     }
 }
 
-/// Watches ~/.kenv/theme.json for changes and emits reload events
+/// Watches ~/.sk/kit/theme.json for changes and emits reload events
 pub struct ThemeWatcher {
     tx: Option<Sender<ThemeReloadEvent>>,
     watcher_thread: Option<thread::JoinHandle<()>>,
@@ -204,7 +204,7 @@ impl ThemeWatcher {
 
     /// Start watching the theme file for changes
     ///
-    /// This spawns a background thread that watches ~/.kenv/theme.json and sends
+    /// This spawns a background thread that watches ~/.sk/kit/theme.json and sends
     /// reload events through the receiver when changes are detected.
     pub fn start(&mut self) -> NotifyResult<()> {
         let tx = self
@@ -225,7 +225,7 @@ impl ThemeWatcher {
     /// Internal watch loop running in background thread
     fn watch_loop(tx: Sender<ThemeReloadEvent>) -> NotifyResult<()> {
         // Expand the theme path
-        let theme_path = PathBuf::from(shellexpand::tilde("~/.kenv/theme.json").as_ref());
+        let theme_path = PathBuf::from(shellexpand::tilde("~/.sk/kit/theme.json").as_ref());
 
         // Get the parent directory to watch
         let watch_path = theme_path
@@ -337,7 +337,7 @@ fn is_relevant_script_file(path: &std::path::Path) -> bool {
     )
 }
 
-/// Watches ~/.kenv/scripts and ~/.kenv/scriptlets directories for changes and emits reload events
+/// Watches ~/.sk/kit/scripts and ~/.sk/kit/scriptlets directories for changes and emits reload events
 pub struct ScriptWatcher {
     tx: Option<Sender<ScriptReloadEvent>>,
     watcher_thread: Option<thread::JoinHandle<()>>,
@@ -359,7 +359,7 @@ impl ScriptWatcher {
 
     /// Start watching the scripts directory for changes
     ///
-    /// This spawns a background thread that watches ~/.kenv/scripts recursively and sends
+    /// This spawns a background thread that watches ~/.sk/kit/scripts recursively and sends
     /// reload events through the receiver when scripts are added, modified, or deleted.
     pub fn start(&mut self) -> NotifyResult<()> {
         let tx = self
@@ -380,8 +380,8 @@ impl ScriptWatcher {
     /// Internal watch loop running in background thread
     fn watch_loop(tx: Sender<ScriptReloadEvent>) -> NotifyResult<()> {
         // Expand the scripts and scriptlets paths
-        let scripts_path = PathBuf::from(shellexpand::tilde("~/.kenv/scripts").as_ref());
-        let scriptlets_path = PathBuf::from(shellexpand::tilde("~/.kenv/scriptlets").as_ref());
+        let scripts_path = PathBuf::from(shellexpand::tilde("~/.sk/kit/scripts").as_ref());
+        let scriptlets_path = PathBuf::from(shellexpand::tilde("~/.sk/kit/scriptlets").as_ref());
 
         // Track pending events for debouncing (path -> (event_type, timestamp))
         let pending_events: Arc<
@@ -746,7 +746,7 @@ mod tests {
         // Test helper function for extracting paths from notify events
         use notify::event::{CreateKind, ModifyKind, RemoveKind};
 
-        let test_path = PathBuf::from("/Users/test/.kenv/scripts/hello.ts");
+        let test_path = PathBuf::from("/Users/test/.sk/kit/scripts/hello.ts");
 
         // Test Create event
         let create_event = notify::Event {
@@ -778,11 +778,11 @@ mod tests {
         use std::path::Path;
 
         // Test that we correctly identify relevant script files
-        let ts_path = Path::new("/Users/test/.kenv/scripts/hello.ts");
-        let js_path = Path::new("/Users/test/.kenv/scripts/hello.js");
-        let md_path = Path::new("/Users/test/.kenv/scriptlets/hello.md");
-        let txt_path = Path::new("/Users/test/.kenv/scripts/readme.txt");
-        let hidden_path = Path::new("/Users/test/.kenv/scripts/.hidden.ts");
+        let ts_path = Path::new("/Users/test/.sk/kit/scripts/hello.ts");
+        let js_path = Path::new("/Users/test/.sk/kit/scripts/hello.js");
+        let md_path = Path::new("/Users/test/.sk/kit/scriptlets/hello.md");
+        let txt_path = Path::new("/Users/test/.sk/kit/scripts/readme.txt");
+        let hidden_path = Path::new("/Users/test/.sk/kit/scripts/.hidden.ts");
 
         // TypeScript files should be relevant
         assert!(is_relevant_script_file(ts_path));

@@ -17,11 +17,11 @@ static AI_DB: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 
 /// Get the path to the AI chats database
 fn get_ai_db_path() -> PathBuf {
-    let kenv_dir = dirs::home_dir()
-        .map(|h| h.join(".kenv"))
-        .unwrap_or_else(|| PathBuf::from(".kenv"));
+    let kit_dir = dirs::home_dir()
+        .map(|h| h.join(".sk/kit"))
+        .unwrap_or_else(|| PathBuf::from(".sk/kit"));
 
-    kenv_dir.join("ai-chats.db")
+    kit_dir.join("ai-chats.db")
 }
 
 /// Initialize the AI chats database

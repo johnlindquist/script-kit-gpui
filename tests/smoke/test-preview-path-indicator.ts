@@ -6,7 +6,7 @@
  *
  * This test verifies that the preview panel shows a subtle source path
  * indicator at the top, helping users identify where scripts/scriptlets
- * come from (e.g., ~/.kenv/scriptlets/foo.md#my-snippet)
+ * come from (e.g., ~/.sk/kit/scriptlets/foo.md#my-snippet)
  */
 
 import '../../scripts/kit-sdk';
@@ -29,12 +29,12 @@ helping users quickly identify where a script or scriptlet comes from.
 
 ### For Scripts
 \`\`\`
-~/.kenv/scripts/my-script.ts
+~/.sk/kit/scripts/my-script.ts
 \`\`\`
 
 ### For Scriptlets
 \`\`\`
-~/.kenv/scriptlets/foo.md#my-snippet-name
+~/.sk/kit/scriptlets/foo.md#my-snippet-name
 \`\`\`
 
 ## Visual Styling

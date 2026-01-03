@@ -8,7 +8,7 @@
  * 
  * Test cases:
  * 1. path-home: home() path function
- * 2. path-kenv: kenvPath() function
+ * 2. path-kenv: skPath() function
  * 3. path-kit: kitPath() function
  * 4. path-tmp: tmpPath() function
  * 5. file-isFile: isFile() check
@@ -57,7 +57,7 @@ function debug(msg: string) {
 // =============================================================================
 
 debug('test-storage.ts starting...');
-debug(`SDK globals: home=${typeof home}, kenvPath=${typeof kenvPath}, kitPath=${typeof kitPath}`);
+debug(`SDK globals: home=${typeof home}, skPath=${typeof skPath}, kitPath=${typeof kitPath}`);
 
 // -----------------------------------------------------------------------------
 // Test 1: home() path function
@@ -95,20 +95,20 @@ try {
 }
 
 // -----------------------------------------------------------------------------
-// Test 2: kenvPath() function
+// Test 2: skPath() function
 // -----------------------------------------------------------------------------
 const test2 = 'path-kenv';
 logTest(test2, 'running');
 const start2 = Date.now();
 
 try {
-  debug('Test 2: kenvPath() function');
+  debug('Test 2: skPath() function');
   
-  const kenvRoot = kenvPath();
-  const scriptsPath = kenvPath('scripts', 'hello.ts');
+  const kenvRoot = skPath();
+  const scriptsPath = skPath('scripts', 'hello.ts');
   
-  debug(`kenvPath(): ${kenvRoot}`);
-  debug(`kenvPath('scripts', 'hello.ts'): ${scriptsPath}`);
+  debug(`skPath(): ${kenvRoot}`);
+  debug(`skPath('scripts', 'hello.ts'): ${scriptsPath}`);
   
   const checks = [
     kenvRoot.startsWith('/'),
@@ -120,7 +120,7 @@ try {
     logTest(test2, 'pass', { result: kenvRoot, duration_ms: Date.now() - start2 });
   } else {
     logTest(test2, 'fail', { 
-      error: 'kenvPath() did not return valid paths',
+      error: 'skPath() did not return valid paths',
       actual: kenvRoot,
       duration_ms: Date.now() - start2 
     });
@@ -342,7 +342,7 @@ All storage and path utility tests have been executed.
 
 ## Test Cases Run
 1. **path-home**: home() path function
-2. **path-kenv**: kenvPath() function
+2. **path-kenv**: skPath() function
 3. **path-kit**: kitPath() function
 4. **path-tmp**: tmpPath() function
 5. **file-isFile**: isFile() check

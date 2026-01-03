@@ -22,7 +22,7 @@ Build an autonomous testing framework that validates all Script Kit GPUI APIs wi
 | **SDK (`kit-sdk.ts`)** | ✅ Complete | 47+ global functions implemented |
 | **Protocol (`protocol.rs`)** | ✅ Complete | All message types defined |
 | **Manual Tests** | ⚠️ Partial | `tests/sdk/` has 4 tests, `tests/smoke/` has 3 |
-| **gpui-*.ts Demos** | ✅ 47 scripts | In `~/.kenv/scripts/` - API coverage reference |
+| **gpui-*.ts Demos** | ✅ 47 scripts | In `~/.sk/kit/scripts/` - API coverage reference |
 | **Autonomous Runner** | ❌ Missing | Need test harness with auto-submit |
 
 ### Target State
@@ -296,7 +296,7 @@ These messages don't expect a submit response:
 | `uuid()` | `gpui-uuid.ts` | ❌ None | N/A | Pure function |
 | `compile()` | `gpui-compile.ts` | ❌ None | N/A | Pure function |
 | `home()` | `gpui-paths.ts` | ❌ None | N/A | Pure function |
-| `kenvPath()` | `gpui-paths.ts` | ❌ None | N/A | Pure function |
+| `skPath()` | `gpui-paths.ts` | ❌ None | N/A | Pure function |
 | `kitPath()` | `gpui-paths.ts` | ❌ None | N/A | Pure function |
 | `tmpPath()` | `gpui-paths.ts` | ❌ None | N/A | Pure function |
 | `isFile()` | `gpui-file-checks.ts` | ❌ None | N/A | Pure function |
@@ -456,8 +456,8 @@ assert(Array.isArray(files), 'Should return array of FileInfo');
 const homePath = home('Documents');
 assert(homePath.includes('Documents'), 'home() should join paths');
 
-const kenv = kenvPath('scripts');
-assert(kenv.includes('.kenv'), 'kenvPath() should use kenv');
+const kenv = skPath('scripts');
+assert(kenv.includes('.kenv'), 'skPath() should use kenv');
 
 const kit = kitPath('config');
 assert(kit.includes('.kit'), 'kitPath() should use kit');
@@ -776,7 +776,7 @@ TOTAL TIME: 264ms
 
 ### Demo Scripts (API Reference)
 
-All 47 demo scripts in `~/.kenv/scripts/gpui-*.ts` serve as API usage reference:
+All 47 demo scripts in `~/.sk/kit/scripts/gpui-*.ts` serve as API usage reference:
 
 ```
 gpui-beep.ts          gpui-browse.ts        gpui-chat.ts

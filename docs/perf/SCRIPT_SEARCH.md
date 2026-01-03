@@ -47,8 +47,8 @@ Total: ~50-200μs per script + ~100-500μs base overhead
 
 ```
 Timeline:
-1. Glob ~/.kenv/scriptlets/*.md             ~200-500μs
-2. Glob ~/.kenv/kenvs/*/scriptlets/*.md     ~200-500μs
+1. Glob ~/.sk/kit/scriptlets/*.md             ~200-500μs
+2. Glob ~/.sk/kit/kenvs/*/scriptlets/*.md     ~200-500μs
 3. For each .md file:
    a. Read file content                     ~50-200μs
    b. Parse markdown sections               ~10-50μs (linear scan)
@@ -182,7 +182,7 @@ fn calculate_score(count: u32, last_used: u64) -> f64 {
 
 ```
 Timeline:
-1. Read ~/.kenv/frecency.json     ~100-500μs
+1. Read ~/.sk/kit/frecency.json     ~100-500μs
 2. Parse JSON                      ~50-200μs
 3. Recalculate all scores:
    - For each entry:
@@ -254,7 +254,7 @@ For a typical setup with:
 There is no dedicated filter cache. The only caching is:
 
 1. **Script list caching** - Scripts cached in memory after load
-2. **Frecency persistence** - Saved to `~/.kenv/frecency.json`
+2. **Frecency persistence** - Saved to `~/.sk/kit/frecency.json`
 
 ### 5.2 Missing Optimizations
 
@@ -277,8 +277,8 @@ There is no dedicated filter cache. The only caching is:
 pub struct ScriptWatcher {
     // Uses notify crate with recommended_watcher()
     // Watches:
-    //   - ~/.kenv/scripts (recursive)
-    //   - ~/.kenv/scriptlets (recursive)
+    //   - ~/.sk/kit/scripts (recursive)
+    //   - ~/.sk/kit/scriptlets (recursive)
 }
 ```
 

@@ -112,7 +112,7 @@ This document provides a comprehensive roadmap for achieving feature parity betw
 - ✅ `show()` / `hide()` / `blur()` - Window control
 - ✅ `submit()` / `exit()` / `wait()` - Flow control
 - ✅ `setPanel()` / `setPreview()` / `setPrompt()` - Content setters
-- ✅ `home()` / `kenvPath()` / `kitPath()` / `tmpPath()` - Path utilities
+- ✅ `home()` / `skPath()` / `kitPath()` / `tmpPath()` - Path utilities
 - ✅ `isFile()` / `isDir()` / `isBin()` - File checks
 - ✅ `db()` / `store` / `memoryMap` - Storage
 - ✅ `browse()` / `editFile()` / `run()` - App utilities

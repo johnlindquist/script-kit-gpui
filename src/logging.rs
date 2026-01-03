@@ -2,7 +2,7 @@
 //! Structured JSONL logging for AI agents and human-readable stderr output.
 //!
 //! This module provides dual-output logging:
-//! - **JSONL to file** (~/.kenv/logs/script-kit-gpui.jsonl) - structured for AI agent parsing
+//! - **JSONL to file** (~/.sk/kit/logs/script-kit-gpui.jsonl) - structured for AI agent parsing
 //! - **Pretty to stderr** - human-readable for developers
 //! - **Compact AI mode** (SCRIPT_KIT_AI_LOG=1) - ultra-compact line format for AI context
 //!
@@ -396,10 +396,10 @@ pub fn init() -> LoggingGuard {
     }
 }
 
-/// Get the log directory path (~/.kenv/logs/)
+/// Get the log directory path (~/.sk/kit/logs/)
 fn get_log_dir() -> PathBuf {
     dirs::home_dir()
-        .map(|h| h.join(".kenv").join("logs"))
+        .map(|h| h.join(".sk/kit").join("logs"))
         .unwrap_or_else(|| std::env::temp_dir().join("script-kit-logs"))
 }
 
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[test]
     fn test_category_to_code_config() {
-        // From: "Successfully loaded config from ~/.kenv/config.ts"
+        // From: "Successfully loaded config from ~/.sk/kit/config.ts"
         assert_eq!(category_to_code("CONFIG"), 'N');
         assert_eq!(category_to_code("config"), 'N');
         assert_eq!(category_to_code("Config"), 'N');
@@ -1327,7 +1327,7 @@ mod tests {
 
     #[test]
     fn test_infer_category_scripts() {
-        // From: "Loaded 331 scripts from ~/.kenv/scripts"
+        // From: "Loaded 331 scripts from ~/.sk/kit/scripts"
         assert_eq!(infer_category_from_target("script_kit_gpui::scripts"), 'G');
         assert_eq!(
             infer_category_from_target("script_kit_gpui::file_search"),

@@ -44,7 +44,7 @@ fn main() {
     // Test 3: Simple script execution
     println!("3. Testing simple script execution...");
     let simple_script = dirs::home_dir()
-        .map(|h| h.join(".kenv/scripts/smoke-test-simple.ts"))
+        .map(|h| h.join(".sk/kit/scripts/smoke-test-simple.ts"))
         .unwrap();
 
     if simple_script.exists() {
@@ -75,7 +75,7 @@ fn main() {
     // Test 4: Interactive script with preload
     println!("4. Testing interactive script (with preload + timeout)...");
     let demo_script = dirs::home_dir()
-        .map(|h| h.join(".kenv/scripts/demo-arg-div.ts"))
+        .map(|h| h.join(".sk/kit/scripts/demo-arg-div.ts"))
         .unwrap();
 
     if let (true, Some(bun), Some(sdk)) =
@@ -151,7 +151,7 @@ fn find_in_common_paths(name: &str) -> Option<PathBuf> {
 
 fn find_sdk() -> Option<PathBuf> {
     let locations = [
-        dirs::home_dir().map(|h| h.join(".kenv/sdk/kit-sdk.ts")),
+        dirs::home_dir().map(|h| h.join(".sk/kit/sdk/kit-sdk.ts")),
         Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/kit-sdk.ts")),
     ];
 

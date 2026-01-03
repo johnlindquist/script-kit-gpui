@@ -54,7 +54,7 @@ interface ParsedDemo {
 // Configuration
 // =============================================================================
 
-const KENV_SCRIPTS = path.join(process.env.HOME || "", ".kenv/scripts");
+const KENV_SCRIPTS = path.join(process.env.HOME || "", ".sk/kit/scripts");
 const OUTPUT_DIR = path.join(process.cwd(), "tests/autonomous");
 const MANIFEST_FILE = path.join(OUTPUT_DIR, "api-manifest.json");
 
@@ -122,7 +122,7 @@ const API_TIERS: Record<string, { tier: APIInfo["tier"]; autoSubmit: boolean; st
   uuid: { tier: "storage", autoSubmit: false, status: "untested" },
   compile: { tier: "storage", autoSubmit: false, status: "untested" },
   home: { tier: "storage", autoSubmit: false, status: "untested" },
-  kenvPath: { tier: "storage", autoSubmit: false, status: "untested" },
+  skPath: { tier: "storage", autoSubmit: false, status: "untested" },
   kitPath: { tier: "storage", autoSubmit: false, status: "untested" },
   tmpPath: { tier: "storage", autoSubmit: false, status: "untested" },
   isFile: { tier: "storage", autoSubmit: false, status: "untested" },
@@ -245,7 +245,7 @@ function extractDemoScriptName(api: string): string | null {
     uuid: "gpui-uuid.ts",
     compile: "gpui-compile.ts",
     home: "gpui-paths.ts",
-    kenvPath: "gpui-paths.ts",
+    skPath: "gpui-paths.ts",
     kitPath: "gpui-paths.ts",
     tmpPath: "gpui-paths.ts",
     isFile: "gpui-file-checks.ts",
@@ -891,10 +891,10 @@ await runTest('home-with-subpath', async () => {
   }
 });
 
-await runTest('kenvPath-basic', async () => {
-  const result = kenvPath();
-  if (!result.includes('.kenv')) {
-    throw new Error(\`Expected .kenv in path, got: \${result}\`);
+await runTest('skPath-basic', async () => {
+  const result = skPath();
+  if (!result.includes('.sk/kit')) {
+    throw new Error(\`Expected .sk/kit in path, got: \${result}\`);
   }
 });
 

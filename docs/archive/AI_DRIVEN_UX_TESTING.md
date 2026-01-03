@@ -799,7 +799,7 @@ echo '{"type":"run","path":"..."}' | \
 grep -i "panic\|sigsegv\|abort" /path/to/test.log
 
 # Check recent crashes in logs
-tail -50 ~/.kenv/logs/script-kit-gpui.jsonl | grep -i error
+tail -50 ~/.sk/kit/logs/script-kit-gpui.jsonl | grep -i error
 ```
 
 ### No Test Results Parsed

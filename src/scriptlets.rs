@@ -105,8 +105,8 @@ pub struct Scriptlet {
     pub typed_metadata: Option<TypedMetadata>,
     /// Schema definition from codefence ```schema block
     pub schema: Option<Schema>,
-    /// The kenv this scriptlet belongs to
-    pub kenv: Option<String>,
+    /// The kit this scriptlet belongs to
+    pub kit: Option<String>,
     /// Source file path
     pub source_path: Option<String>,
 }
@@ -129,7 +129,7 @@ impl Scriptlet {
             metadata: ScriptletMetadata::default(),
             typed_metadata: None,
             schema: None,
-            kenv: None,
+            kit: None,
             source_path: None,
         }
     }
@@ -428,7 +428,7 @@ pub fn parse_markdown_as_scriptlets(content: &str, source_path: Option<&str>) ->
                     metadata,
                     typed_metadata,
                     schema,
-                    kenv: None,
+                    kit: None,
                     source_path: source_path.map(|s| s.to_string()),
                 });
             }

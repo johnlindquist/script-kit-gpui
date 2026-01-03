@@ -4,7 +4,6 @@ use glob::glob;
 use nucleo_matcher::pattern::Pattern;
 use nucleo_matcher::{Matcher, Utf32Str};
 use std::cmp::Ordering;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, instrument, warn};
@@ -16,6 +15,7 @@ use crate::list_item::GroupedListItem;
 use crate::metadata_parser::{extract_typed_metadata, TypedMetadata};
 use crate::schema_parser::{extract_schema, Schema};
 use crate::scriptlets as scriptlet_parser;
+use crate::setup::get_kit_path;
 
 #[derive(Clone, Debug, Default)]
 pub struct Script {
@@ -499,20 +499,15 @@ fn parse_scriptlet_section(
     })
 }
 
-/// Reads scriptlets from all *.md files in ~/.kenv/scriptlets/
+/// Reads scriptlets from all *.md files in ~/.sk/kit/*/scriptlets/
 /// Returns a sorted list of Scriptlet structs parsed from markdown
 /// Returns empty vec if directory doesn't exist or is inaccessible
 #[instrument(level = "debug", skip_all)]
 pub fn read_scriptlets() -> Vec<Scriptlet> {
-    let home = match env::var("HOME") {
-        Ok(home_path) => PathBuf::from(home_path),
-        Err(e) => {
-            warn!(error = %e, "HOME environment variable not set, cannot read scriptlets");
-            return vec![];
-        }
-    };
+    let kit_path = get_kit_path();
 
-    let scriptlets_dir = home.join(".kenv/scriptlets");
+    // Default to main kit for backwards compatibility
+    let scriptlets_dir = kit_path.join("main").join("scriptlets");
 
     // Check if directory exists
     if !scriptlets_dir.exists() {
@@ -601,28 +596,18 @@ pub fn read_scriptlets() -> Vec<Scriptlet> {
 /// Load scriptlets from markdown files using the comprehensive parser
 ///
 /// Globs:
-/// - ~/.kenv/scriptlets/*.md (main scriptlets directory)
-/// - ~/.kenv/kenvs/*/scriptlets/*.md (nested kenvs)
+/// - ~/.sk/kit/*/scriptlets/*.md (all kits)
 ///
 /// Uses `crate::scriptlets::parse_markdown_as_scriptlets` for parsing.
 /// Returns scriptlets sorted by group then by name.
 #[instrument(level = "debug", skip_all)]
 pub fn load_scriptlets() -> Vec<Scriptlet> {
-    let home = match env::var("HOME") {
-        Ok(home_path) => PathBuf::from(home_path),
-        Err(e) => {
-            warn!(error = %e, "HOME environment variable not set, cannot load scriptlets");
-            return vec![];
-        }
-    };
+    let kit_path = get_kit_path();
 
     let mut scriptlets = Vec::new();
 
-    // Glob patterns to search
-    let patterns = [
-        home.join(".kenv/scriptlets/*.md"),
-        home.join(".kenv/kenvs/*/scriptlets/*.md"),
-    ];
+    // Glob pattern to search all kits
+    let patterns = [kit_path.join("*/scriptlets/*.md")];
 
     for pattern in patterns {
         let pattern_str = pattern.to_string_lossy().to_string();
@@ -635,8 +620,8 @@ pub fn load_scriptlets() -> Vec<Scriptlet> {
                         Ok(path) => {
                             debug!(path = %path.display(), "Parsing scriptlet file");
 
-                            // Determine kenv from path (for nested kenvs)
-                            let kenv = extract_kenv_from_path(&path, &home);
+                            // Determine kit from path
+                            let kit = extract_kit_from_path(&path, &kit_path);
 
                             match fs::read_to_string(&path) {
                                 Ok(content) => {
@@ -661,7 +646,7 @@ pub fn load_scriptlets() -> Vec<Scriptlet> {
                                             shortcut: parsed_scriptlet.metadata.shortcut,
                                             expand: parsed_scriptlet.metadata.expand,
                                             group: if parsed_scriptlet.group.is_empty() {
-                                                kenv.clone()
+                                                kit.clone()
                                             } else {
                                                 Some(parsed_scriptlet.group)
                                             },
@@ -711,17 +696,16 @@ pub fn load_scriptlets() -> Vec<Scriptlet> {
     scriptlets
 }
 
-/// Extract kenv name from a nested kenv path
-/// e.g., ~/.kenv/kenvs/my-kenv/scriptlets/file.md -> Some("my-kenv")
-fn extract_kenv_from_path(path: &std::path::Path, home: &std::path::Path) -> Option<String> {
-    let kenvs_prefix = home.join(".kenv/kenvs/");
-    let kenvs_prefix_str = kenvs_prefix.to_string_lossy().to_string();
+/// Extract kit name from a kit path
+/// e.g., ~/.sk/kit/my-kit/scriptlets/file.md -> Some("my-kit")
+fn extract_kit_from_path(path: &std::path::Path, kit_root: &std::path::Path) -> Option<String> {
+    let kit_prefix = format!("{}/", kit_root.to_string_lossy());
     let path_str = path.to_string_lossy().to_string();
 
-    if path_str.starts_with(&kenvs_prefix_str) {
-        // Extract the kenv name from the path
-        let relative = &path_str[kenvs_prefix_str.len()..];
-        // Find the first slash to get kenv name
+    if path_str.starts_with(&kit_prefix) {
+        // Extract the kit name from the path
+        let relative = &path_str[kit_prefix.len()..];
+        // Find the first slash to get kit name
         if let Some(slash_pos) = relative.find('/') {
             return Some(relative[..slash_pos].to_string());
         }
@@ -753,10 +737,8 @@ pub fn read_scriptlets_from_file(path: &std::path::Path) -> Vec<Scriptlet> {
         return vec![];
     }
 
-    // Try to get home directory for kenv extraction
-    let home = env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/"));
+    // Get kit path for kit extraction
+    let kit_path = get_kit_path();
 
     // Read file content
     let content = match fs::read_to_string(path) {
@@ -774,8 +756,8 @@ pub fn read_scriptlets_from_file(path: &std::path::Path) -> Vec<Scriptlet> {
     let path_str = path.to_string_lossy().to_string();
     let parsed = scriptlet_parser::parse_markdown_as_scriptlets(&content, Some(&path_str));
 
-    // Determine kenv from path (for nested kenvs)
-    let kenv = extract_kenv_from_path(path, &home);
+    // Determine kit from path
+    let kit = extract_kit_from_path(path, &kit_path);
 
     // Convert parsed scriptlets to our Scriptlet format
     let scriptlets: Vec<Scriptlet> = parsed
@@ -791,7 +773,7 @@ pub fn read_scriptlets_from_file(path: &std::path::Path) -> Vec<Scriptlet> {
                 shortcut: parsed_scriptlet.metadata.shortcut,
                 expand: parsed_scriptlet.metadata.expand,
                 group: if parsed_scriptlet.group.is_empty() {
-                    kenv.clone()
+                    kit.clone()
                 } else {
                     Some(parsed_scriptlet.group)
                 },
@@ -811,32 +793,49 @@ pub fn read_scriptlets_from_file(path: &std::path::Path) -> Vec<Scriptlet> {
     scriptlets
 }
 
-/// Reads scripts from ~/.kenv/scripts directory
+/// Reads scripts from ~/.sk/kit/*/scripts/ directories
 /// Returns a sorted list of Script structs for .ts and .js files
 /// Returns empty vec if directory doesn't exist or is inaccessible
 #[instrument(level = "debug", skip_all)]
 pub fn read_scripts() -> Vec<Script> {
-    // Expand ~ to home directory using HOME environment variable
-    let home = match env::var("HOME") {
-        Ok(home_path) => PathBuf::from(home_path),
+    let kit_path = get_kit_path();
+
+    // Glob pattern to find scripts in all kits
+    let pattern = kit_path.join("*/scripts");
+    let pattern_str = pattern.to_string_lossy().to_string();
+
+    let mut scripts = Vec::new();
+
+    // Find all kit script directories
+    let script_dirs: Vec<PathBuf> = match glob(&pattern_str) {
+        Ok(paths) => paths.filter_map(|p| p.ok()).collect(),
         Err(e) => {
-            warn!(error = %e, "HOME environment variable not set, cannot read scripts");
+            warn!(error = %e, pattern = %pattern_str, "Failed to glob script directories");
             return vec![];
         }
     };
 
-    let scripts_dir = home.join(".kenv/scripts");
-
-    // Check if directory exists
-    if !scripts_dir.exists() {
-        debug!(path = %scripts_dir.display(), "Scripts directory does not exist");
+    if script_dirs.is_empty() {
+        debug!(pattern = %pattern_str, "No script directories found");
         return vec![];
     }
 
-    let mut scripts = Vec::new();
+    // Read scripts from each kit's scripts directory
+    for scripts_dir in script_dirs {
+        read_scripts_from_dir(&scripts_dir, &mut scripts);
+    }
 
+    // Sort by name
+    scripts.sort_by(|a, b| a.name.cmp(&b.name));
+
+    debug!(count = scripts.len(), "Loaded scripts from all kits");
+    scripts
+}
+
+/// Read scripts from a single directory and append to the scripts vector
+fn read_scripts_from_dir(scripts_dir: &PathBuf, scripts: &mut Vec<Script>) {
     // Read the directory contents
-    match std::fs::read_dir(&scripts_dir) {
+    match std::fs::read_dir(scripts_dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
                 if let Ok(file_metadata) = entry.metadata() {
@@ -885,15 +884,8 @@ pub fn read_scripts() -> Vec<Script> {
                 path = %scripts_dir.display(),
                 "Failed to read scripts directory"
             );
-            return vec![];
         }
     }
-
-    // Sort by name
-    scripts.sort_by(|a, b| a.name.cmp(&b.name));
-
-    debug!(count = scripts.len(), "Loaded scripts");
-    scripts
 }
 
 // ============================================
@@ -1894,7 +1886,7 @@ pub fn get_grouped_results(
 
 /// Scan scripts directory and register scripts with schedule metadata
 ///
-/// Walks through ~/.kenv/scripts/ looking for .ts/.js files with
+/// Walks through ~/.sk/kit/*/scripts/ looking for .ts/.js files with
 /// `// Cron:` or `// Schedule:` metadata comments, and registers them
 /// with the provided scheduler.
 ///
@@ -1903,82 +1895,88 @@ pub fn get_grouped_results(
 pub fn register_scheduled_scripts(scheduler: &crate::scheduler::Scheduler) -> usize {
     use tracing::info;
 
-    let home = match env::var("HOME") {
-        Ok(home_path) => PathBuf::from(home_path),
+    let kit_path = get_kit_path();
+
+    // Glob pattern to find scripts in all kits
+    let pattern = kit_path.join("*/scripts");
+    let pattern_str = pattern.to_string_lossy().to_string();
+
+    // Find all kit script directories
+    let script_dirs: Vec<PathBuf> = match glob(&pattern_str) {
+        Ok(paths) => paths.filter_map(|p| p.ok()).collect(),
         Err(e) => {
-            warn!(error = %e, "HOME environment variable not set, cannot scan for scheduled scripts");
+            warn!(error = %e, pattern = %pattern_str, "Failed to glob script directories for scheduling");
             return 0;
         }
     };
 
-    let scripts_dir = home.join(".kenv/scripts");
-
-    if !scripts_dir.exists() {
-        debug!(path = %scripts_dir.display(), "Scripts directory does not exist");
-        return 0;
-    }
-
     let mut registered_count = 0;
 
-    match fs::read_dir(&scripts_dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if let Ok(file_metadata) = entry.metadata() {
-                    if file_metadata.is_file() {
-                        let path = entry.path();
+    for scripts_dir in script_dirs {
+        if !scripts_dir.exists() {
+            continue;
+        }
 
-                        // Only process .ts and .js files
-                        let is_script = path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .map(|ext| ext == "ts" || ext == "js")
-                            .unwrap_or(false);
+        match fs::read_dir(&scripts_dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    if let Ok(file_metadata) = entry.metadata() {
+                        if file_metadata.is_file() {
+                            let path = entry.path();
 
-                        if !is_script {
-                            continue;
-                        }
+                            // Only process .ts and .js files
+                            let is_script = path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|ext| ext == "ts" || ext == "js")
+                                .unwrap_or(false);
 
-                        // Extract schedule metadata
-                        let schedule_meta = extract_schedule_metadata_from_file(&path);
-
-                        // Skip if no schedule metadata
-                        if schedule_meta.cron.is_none() && schedule_meta.schedule.is_none() {
-                            continue;
-                        }
-
-                        // Register with scheduler
-                        match scheduler.add_script(
-                            path.clone(),
-                            schedule_meta.cron.clone(),
-                            schedule_meta.schedule.clone(),
-                        ) {
-                            Ok(()) => {
-                                registered_count += 1;
-                                info!(
-                                    path = %path.display(),
-                                    cron = ?schedule_meta.cron,
-                                    schedule = ?schedule_meta.schedule,
-                                    "Registered scheduled script"
-                                );
+                            if !is_script {
+                                continue;
                             }
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    path = %path.display(),
-                                    "Failed to register scheduled script"
-                                );
+
+                            // Extract schedule metadata
+                            let schedule_meta = extract_schedule_metadata_from_file(&path);
+
+                            // Skip if no schedule metadata
+                            if schedule_meta.cron.is_none() && schedule_meta.schedule.is_none() {
+                                continue;
+                            }
+
+                            // Register with scheduler
+                            match scheduler.add_script(
+                                path.clone(),
+                                schedule_meta.cron.clone(),
+                                schedule_meta.schedule.clone(),
+                            ) {
+                                Ok(()) => {
+                                    registered_count += 1;
+                                    info!(
+                                        path = %path.display(),
+                                        cron = ?schedule_meta.cron,
+                                        schedule = ?schedule_meta.schedule,
+                                        "Registered scheduled script"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        error = %e,
+                                        path = %path.display(),
+                                        "Failed to register scheduled script"
+                                    );
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                path = %scripts_dir.display(),
-                "Failed to read scripts directory for scheduling"
-            );
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = %scripts_dir.display(),
+                    "Failed to read scripts directory for scheduling"
+                );
+            }
         }
     }
 

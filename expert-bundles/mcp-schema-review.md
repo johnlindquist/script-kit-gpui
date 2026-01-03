@@ -1549,9 +1549,9 @@ const { input, output } = defineSchema({
 //! Provides an HTTP server for MCP (Model Context Protocol) integration.
 //! Features:
 //! - HTTP server on localhost:43210
-//! - Bearer token authentication from ~/.kenv/agent-token
+//! - Bearer token authentication from ~/.sk/kit/agent-token
 //! - Health endpoint at GET /health
-//! - Discovery file at ~/.kenv/server.json
+//! - Discovery file at ~/.sk/kit/server.json
 
 // Allow dead code - ServerHandle methods provide full lifecycle API for future use
 #![allow(dead_code)]
@@ -1591,7 +1591,7 @@ impl Default for ServerCapabilities {
     }
 }
 
-/// Discovery file structure written to ~/.kenv/server.json
+/// Discovery file structure written to ~/.sk/kit/server.json
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryInfo {
     pub url: String,
@@ -1615,7 +1615,7 @@ impl McpServer {
     ///
     /// # Arguments
     /// * `port` - Port to listen on (default: 43210)
-    /// * `kenv_path` - Path to ~/.kenv directory
+    /// * `kenv_path` - Path to ~/.sk/kit directory
     pub fn new(port: u16, kenv_path: PathBuf) -> Result<Self> {
         let token = Self::load_or_create_token(&kenv_path)?;
 
@@ -1678,7 +1678,7 @@ impl McpServer {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Write discovery file to ~/.kenv/server.json
+    /// Write discovery file to ~/.sk/kit/server.json
     fn write_discovery_file(&self) -> Result<()> {
         let discovery = DiscoveryInfo {
             url: self.url(),
@@ -4209,7 +4209,7 @@ pub fn get_resource_definitions() -> Vec<McpResource> {
         McpResource {
             uri: "scripts://".to_string(),
             name: "Scripts".to_string(),
-            description: Some("List of all available scripts in ~/.kenv/scripts/".to_string()),
+            description: Some("List of all available scripts in ~/.sk/kit/scripts/".to_string()),
             mime_type: "application/json".to_string(),
         },
         McpResource {
@@ -4664,7 +4664,7 @@ mod tests {
 //!
 //! Provides:
 //! - SSE streaming for real-time event delivery to clients
-//! - Audit logging for tool calls to ~/.kenv/logs/mcp-audit.jsonl
+//! - Audit logging for tool calls to ~/.sk/kit/logs/mcp-audit.jsonl
 //!
 //! Event format: `event: {type}\ndata: {json}\n\n`
 
@@ -4802,7 +4802,7 @@ impl AuditLogEntry {
     }
 }
 
-/// Audit logger that writes to ~/.kenv/logs/mcp-audit.jsonl
+/// Audit logger that writes to ~/.sk/kit/logs/mcp-audit.jsonl
 pub struct AuditLogger {
     log_path: PathBuf,
 }
@@ -4811,13 +4811,13 @@ impl AuditLogger {
     /// Create a new audit logger
     ///
     /// # Arguments
-    /// * `kenv_path` - Path to ~/.kenv directory
+    /// * `kenv_path` - Path to ~/.sk/kit directory
     pub fn new(kenv_path: PathBuf) -> Self {
         let log_path = kenv_path.join("logs").join("mcp-audit.jsonl");
         Self { log_path }
     }
 
-    /// Create audit logger with default ~/.kenv path
+    /// Create audit logger with default ~/.sk/kit path
     pub fn with_defaults() -> Result<Self> {
         let kenv_path = dirs::home_dir()
             .context("Failed to get home directory")?
@@ -5201,13 +5201,13 @@ The MCP server starts automatically on port **43210**.
 ### 2. Get Your Token
 
 ```bash
-cat ~/.kenv/agent-token
+cat ~/.sk/kit/agent-token
 ```
 
 ### 3. Test the Connection
 
 ```bash
-TOKEN=$(cat ~/.kenv/agent-token)
+TOKEN=$(cat ~/.sk/kit/agent-token)
 
 curl -X POST "http://localhost:43210/rpc" \
   -H "Authorization: Bearer $TOKEN" \
@@ -5230,7 +5230,7 @@ curl -X POST "http://localhost:43210/rpc" \
 ├──────────────┬──────────────┬───────────────┬───────────────────────┤
 │   Kit Tools  │ Script Tools │   Resources   │     Authentication    │
 │  kit/show    │ scripts/*    │ kit://state   │    Bearer Token       │
-│  kit/hide    │              │ scripts://    │  ~/.kenv/agent-token  │
+│  kit/hide    │              │ scripts://    │  ~/.sk/kit/agent-token  │
 │  kit/state   │              │ scriptlets:// │                       │
 └──────────────┴──────────────┴───────────────┴───────────────────────┘
                               │
@@ -5239,7 +5239,7 @@ curl -X POST "http://localhost:43210/rpc" \
 ├─────────────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐              │
 │  │   Scripts   │    │  Scriptlets │    │     SDK     │              │
-│  │ ~/.kenv/    │    │ ~/.kenv/    │    │ input()     │              │
+│  │ ~/.sk/kit/    │    │ ~/.sk/kit/    │    │ input()     │              │
 │  │  scripts/   │    │ scriptlets/ │    │ output()    │              │
 │  └─────────────┘    └─────────────┘    └─────────────┘              │
 └─────────────────────────────────────────────────────────────────────┘
@@ -5250,10 +5250,10 @@ curl -X POST "http://localhost:43210/rpc" \
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Port | 43210 | HTTP server port |
-| Token File | `~/.kenv/agent-token` | Authentication token location |
-| Discovery File | `~/.kenv/server.json` | Server info for clients |
+| Token File | `~/.sk/kit/agent-token` | Authentication token location |
+| Discovery File | `~/.sk/kit/server.json` | Server info for clients |
 
-### Discovery File (`~/.kenv/server.json`)
+### Discovery File (`~/.sk/kit/server.json`)
 
 ```json
 {
@@ -5274,7 +5274,7 @@ curl -X POST "http://localhost:43210/rpc" \
   -d '...'
 ```
 
-The token is automatically generated on first run and stored at `~/.kenv/agent-token`.
+The token is automatically generated on first run and stored at `~/.sk/kit/agent-token`.
 
 ## API Reference
 
@@ -5481,7 +5481,7 @@ List of all scripts.
 [
   {
     "name": "Hello World",
-    "path": "/Users/x/.kenv/scripts/hello-world.ts",
+    "path": "/Users/x/.sk/kit/scripts/hello-world.ts",
     "extension": "ts",
     "description": "A simple greeting script",
     "has_schema": true
@@ -5704,7 +5704,7 @@ sleep 3
 ### Manual Testing with curl
 
 ```bash
-TOKEN=$(cat ~/.kenv/agent-token)
+TOKEN=$(cat ~/.sk/kit/agent-token)
 
 # List tools
 curl -s -X POST "http://localhost:43210/rpc" \
@@ -5760,14 +5760,14 @@ See `tests/mcp/scripts/` for complete examples:
 lsof -i :43210
 
 # Check logs
-tail -100 ~/.kenv/logs/script-kit-gpui.jsonl | grep -i mcp
+tail -100 ~/.sk/kit/logs/script-kit-gpui.jsonl | grep -i mcp
 ```
 
 ### Token Issues
 
 ```bash
 # Verify token exists
-cat ~/.kenv/agent-token
+cat ~/.sk/kit/agent-token
 
 # Token is regenerated on app restart if missing
 ```
@@ -5789,11 +5789,11 @@ Currently, `tools/call` returns `"status": "pending"` - the script is queued but
 
 | File | Purpose |
 |------|---------|
-| `~/.kenv/agent-token` | Authentication token |
-| `~/.kenv/server.json` | Server discovery info |
-| `~/.kenv/scripts/` | User scripts |
-| `~/.kenv/scriptlets/` | Scriptlet markdown files |
-| `~/.kenv/logs/script-kit-gpui.jsonl` | Application logs |
+| `~/.sk/kit/agent-token` | Authentication token |
+| `~/.sk/kit/server.json` | Server discovery info |
+| `~/.sk/kit/scripts/` | User scripts |
+| `~/.sk/kit/scriptlets/` | Scriptlet markdown files |
+| `~/.sk/kit/logs/script-kit-gpui.jsonl` | Application logs |
 
 ---
 
@@ -5904,7 +5904,7 @@ All tests passed!
 
 ### Creating a New MCP Tool
 
-1. Create a script in `~/.kenv/scripts/`:
+1. Create a script in `~/.sk/kit/scripts/`:
 
 ```typescript
 import "@johnlindquist/kit"
@@ -5933,7 +5933,7 @@ output({ result: `${param1} x ${param2}` })
 ### Testing Your Tool
 
 ```bash
-TOKEN=$(cat ~/.kenv/agent-token)
+TOKEN=$(cat ~/.sk/kit/agent-token)
 
 # List tools (verify your tool appears)
 curl -s -X POST "http://localhost:43210/rpc" \
@@ -6011,7 +6011,7 @@ Then call it from `main()`.
 #
 # Prerequisites:
 #   - Script Kit GPUI app must be running
-#   - Token file at ~/.kenv/agent-token
+#   - Token file at ~/.sk/kit/agent-token
 #   - curl and jq installed
 
 set -e
@@ -6026,7 +6026,7 @@ NC='\033[0m' # No Color
 # Config
 MCP_PORT="${MCP_PORT:-43210}"
 MCP_HOST="${MCP_HOST:-localhost}"
-TOKEN_FILE="${HOME}/.kenv/agent-token"
+TOKEN_FILE="${HOME}/.sk/kit/agent-token"
 BASE_URL="http://${MCP_HOST}:${MCP_PORT}"
 
 # Counters
@@ -7380,7 +7380,7 @@ sleep 3
 ./tests/mcp/mcp-smoke-test.sh
 
 # Manual testing with curl
-TOKEN=$(cat ~/.kenv/agent-token)
+TOKEN=$(cat ~/.sk/kit/agent-token)
 curl -s -X POST "http://localhost:43210/rpc" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -7408,9 +7408,9 @@ When you propose changes, follow these rules strictly:
 ### Key Technical Details:
 
 - **Port**: 43210 (configurable via `MCP_PORT` env var)
-- **Auth**: Bearer token from `~/.kenv/agent-token`
-- **Discovery**: Server info written to `~/.kenv/server.json`
-- **Logs**: JSONL to `~/.kenv/logs/script-kit-gpui.jsonl`
+- **Auth**: Bearer token from `~/.sk/kit/agent-token`
+- **Discovery**: Server info written to `~/.sk/kit/server.json`
+- **Logs**: JSONL to `~/.sk/kit/logs/script-kit-gpui.jsonl`
 - **Schema patterns**: Both `schema = {...}` and `defineSchema({...})` are supported
 - **Tool naming**: `scripts/{slug}` where slug is derived from `metadata.name` or `// Name:` comment
 

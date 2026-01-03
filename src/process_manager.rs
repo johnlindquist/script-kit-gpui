@@ -4,8 +4,8 @@
 #![allow(dead_code)] // Some methods reserved for future use
 //!
 //! This module provides:
-//! - PID file at ~/.kenv/script-kit.pid for main app
-//! - Active child PIDs file at ~/.kenv/active-bun-pids.json
+//! - PID file at ~/.sk/kit/script-kit.pid for main app
+//! - Active child PIDs file at ~/.sk/kit/active-bun-pids.json
 //! - Thread-safe process registration/unregistration
 //! - Orphan detection on startup
 //! - Bulk kill for graceful shutdown
@@ -50,14 +50,14 @@ pub struct ProcessManager {
 impl ProcessManager {
     /// Create a new ProcessManager with default paths
     pub fn new() -> Self {
-        let kenv_dir = dirs::home_dir()
-            .map(|h| h.join(".kenv"))
-            .unwrap_or_else(|| PathBuf::from("/tmp/.kenv"));
+        let kit_dir = dirs::home_dir()
+            .map(|h| h.join(".sk/kit"))
+            .unwrap_or_else(|| PathBuf::from("/tmp/.sk/kit"));
 
         Self {
             active_processes: RwLock::new(HashMap::new()),
-            main_pid_path: kenv_dir.join("script-kit.pid"),
-            active_pids_path: kenv_dir.join("active-bun-pids.json"),
+            main_pid_path: kit_dir.join("script-kit.pid"),
+            active_pids_path: kit_dir.join("active-bun-pids.json"),
         }
     }
 
@@ -576,12 +576,12 @@ mod tests {
     fn test_default_paths() {
         let manager = ProcessManager::new();
 
-        // Should use ~/.kenv/ paths
+        // Should use ~/.sk/kit/ paths
         let home = dirs::home_dir().unwrap();
-        assert_eq!(manager.main_pid_path, home.join(".kenv/script-kit.pid"));
+        assert_eq!(manager.main_pid_path, home.join(".sk/kit/script-kit.pid"));
         assert_eq!(
             manager.active_pids_path,
-            home.join(".kenv/active-bun-pids.json")
+            home.join(".sk/kit/active-bun-pids.json")
         );
     }
 }

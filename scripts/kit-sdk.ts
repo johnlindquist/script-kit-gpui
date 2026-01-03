@@ -387,7 +387,7 @@ export interface LayoutInfo {
 }
 
 // =============================================================================
-// Config Types (for ~/.kenv/config.ts)
+// Config Types (for ~/.sk/kit/config.ts)
 // =============================================================================
 
 /**
@@ -593,7 +593,7 @@ export interface ProcessLimits {
 /**
  * Script Kit configuration schema.
  * 
- * This configuration is loaded from `~/.kenv/config.ts` and controls
+ * This configuration is loaded from `~/.sk/kit/config.ts` and controls
  * Script Kit's behavior, appearance, and built-in features.
  * 
  * @example Minimal configuration (only hotkey required)
@@ -2342,17 +2342,17 @@ declare global {
   function home(...segments: string[]): string;
   
   /**
-   * Returns path relative to ~/.kenv
+   * Returns path relative to ~/.sk/kit
    * @param segments - Path segments to join
-   * @returns Full path from kenv directory
+   * @returns Full path from sk/kit directory
    */
-  function kenvPath(...segments: string[]): string;
+  function skPath(...segments: string[]): string;
   
   /**
-   * Returns path relative to ~/.kenv (unified Script Kit directory)
+   * Returns path relative to ~/.sk/kit (unified Script Kit directory)
    * @param segments - Path segments to join
-   * @returns Full path from kenv directory
-   * @deprecated Use kenvPath() instead - kitPath() now returns ~/.kenv paths for backwards compatibility
+   * @returns Full path from sk/kit directory
+   * @deprecated Use skPath() instead - kitPath() now returns ~/.sk/kit paths for backwards compatibility
    */
   function kitPath(...segments: string[]): string;
   
@@ -4382,13 +4382,13 @@ globalThis.home = function home(...segments: string[]): string {
   return nodePath.join(os.homedir(), ...segments);
 };
 
-globalThis.kenvPath = function kenvPath(...segments: string[]): string {
-  return nodePath.join(os.homedir(), '.kenv', ...segments);
+globalThis.skPath = function skPath(...segments: string[]): string {
+  return nodePath.join(os.homedir(), '.sk/kit', ...segments);
 };
 
 globalThis.kitPath = function kitPath(...segments: string[]): string {
-  // Now returns ~/.kenv paths - ~/.kit is deprecated
-  return nodePath.join(os.homedir(), '.kenv', ...segments);
+  // Now returns ~/.sk/kit paths - ~/.kit is deprecated
+  return nodePath.join(os.homedir(), '.sk/kit', ...segments);
 };
 
 globalThis.tmpPath = function tmpPath(...segments: string[]): string {
@@ -5356,7 +5356,7 @@ declare global {
   function uuid(): string;
   function compile(template: string): (data: Record<string, string>) => string;
   function home(...segments: string[]): string;
-  function kenvPath(...segments: string[]): string;
+  function skPath(...segments: string[]): string;
   function kitPath(...segments: string[]): string;
   function tmpPath(...segments: string[]): string;
   function isFile(filePath: string): Promise<boolean>;

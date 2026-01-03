@@ -45,33 +45,33 @@ fn test_load_scriptlets_returns_vec() {
 }
 
 #[test]
-fn test_extract_kenv_from_path_nested() {
+fn test_extract_kit_from_path_nested() {
     use std::path::Path;
     let home = Path::new("/Users/test");
 
-    // Nested kenv path
-    let nested_path = Path::new("/Users/test/.kenv/kenvs/my-kenv/scriptlets/file.md");
-    let kenv = extract_kenv_from_path(nested_path, home);
-    assert_eq!(kenv, Some("my-kenv".to_string()));
+    // Nested kit path
+    let nested_path = Path::new("/Users/test/.sk/kit/my-kit/scriptlets/file.md");
+    let kit = extract_kit_from_path(nested_path, home);
+    assert_eq!(kit, Some("my-kit".to_string()));
 }
 
 #[test]
-fn test_extract_kenv_from_path_main_kenv() {
+fn test_extract_kit_from_path_main_kit() {
     use std::path::Path;
     let home = Path::new("/Users/test");
 
-    // Main kenv path (not nested)
-    let main_path = Path::new("/Users/test/.kenv/scriptlets/file.md");
-    let kenv = extract_kenv_from_path(main_path, home);
-    assert_eq!(kenv, None);
+    // Main kit path (not nested)
+    let main_path = Path::new("/Users/test/.sk/kit/scriptlets/file.md");
+    let kit = extract_kit_from_path(main_path, home);
+    assert_eq!(kit, None);
 }
 
 #[test]
 fn test_build_scriptlet_file_path() {
     use std::path::Path;
-    let md_path = Path::new("/Users/test/.kenv/scriptlets/my-scripts.md");
+    let md_path = Path::new("/Users/test/.sk/kit/scriptlets/my-scripts.md");
     let result = build_scriptlet_file_path(md_path, "my-slug");
-    assert_eq!(result, "/Users/test/.kenv/scriptlets/my-scripts.md#my-slug");
+    assert_eq!(result, "/Users/test/.sk/kit/scriptlets/my-scripts.md#my-slug");
 }
 
 #[test]
@@ -631,7 +631,7 @@ fn test_fuzzy_search_by_path() {
     let scripts = vec![
         Script {
             name: "foo".to_string(),
-            path: PathBuf::from("/home/user/.kenv/scripts/open.ts"),
+            path: PathBuf::from("/home/user/.sk/kit/scripts/open.ts"),
             extension: "ts".to_string(),
             icon: None,
             description: None,
@@ -1309,7 +1309,7 @@ fn test_extract_script_metadata_within_first_20_lines() {
 fn test_script_struct_creation_and_properties() {
     let script = Script {
         name: "myScript".to_string(),
-        path: PathBuf::from("/home/user/.kenv/scripts/myScript.ts"),
+        path: PathBuf::from("/home/user/.sk/kit/scripts/myScript.ts"),
         extension: "ts".to_string(),
         icon: None,
         description: Some("My custom script".to_string()),
@@ -2211,7 +2211,7 @@ fn test_search_quality_metrics() {
     let scripts = vec![
         Script {
             name: "zzzFile".to_string(),
-            path: PathBuf::from("/home/user/.kenv/scripts/zzzFile.ts"),
+            path: PathBuf::from("/home/user/.sk/kit/scripts/zzzFile.ts"),
             extension: "ts".to_string(),
             icon: None,
             description: Some("Opens a file dialog".to_string()),
@@ -2221,7 +2221,7 @@ fn test_search_quality_metrics() {
         },
         Script {
             name: "someScript".to_string(),
-            path: PathBuf::from("/home/user/.kenv/scripts/someScript.ts"),
+            path: PathBuf::from("/home/user/.sk/kit/scripts/someScript.ts"),
             extension: "ts".to_string(),
             icon: None,
             description: Some("Does something".to_string()),
@@ -2231,7 +2231,7 @@ fn test_search_quality_metrics() {
         },
         Script {
             name: "saveData".to_string(),
-            path: PathBuf::from("/home/user/.kenv/scripts/saveData.ts"),
+            path: PathBuf::from("/home/user/.sk/kit/scripts/saveData.ts"),
             extension: "ts".to_string(),
             icon: None,
             description: Some("Saves data to file".to_string()),
@@ -3322,7 +3322,7 @@ fn test_fuzzy_search_scripts_by_file_extension() {
     let scripts = vec![
         Script {
             name: "My Script".to_string(),
-            path: PathBuf::from("/home/user/.kenv/scripts/my-script.ts"),
+            path: PathBuf::from("/home/user/.sk/kit/scripts/my-script.ts"),
             extension: "ts".to_string(),
             icon: None,
             description: None,
@@ -3332,7 +3332,7 @@ fn test_fuzzy_search_scripts_by_file_extension() {
         },
         Script {
             name: "Other Script".to_string(),
-            path: PathBuf::from("/home/user/.kenv/scripts/other.js"),
+            path: PathBuf::from("/home/user/.sk/kit/scripts/other.js"),
             extension: "js".to_string(),
             icon: None,
             description: None,
@@ -3571,7 +3571,7 @@ fn test_fuzzy_search_scriptlets_display_file_path() {
         shortcut: None,
         expand: None,
         group: None,
-        file_path: Some("/home/user/.kenv/scriptlets/urls.md#test-slug".to_string()),
+        file_path: Some("/home/user/.sk/kit/scriptlets/urls.md#test-slug".to_string()),
         command: Some("test-slug".to_string()),
         alias: None,
     }];
