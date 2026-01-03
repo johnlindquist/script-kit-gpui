@@ -156,13 +156,75 @@ impl ScriptListApp {
 
     /// Move selection by a signed delta (positive = down, negative = up)
     /// Used by NavCoalescer for batched movements
+    ///
+    /// IMPORTANT: This must use grouped results and skip section headers,
+    /// just like move_selection_up/down. Otherwise, holding arrow keys
+    /// can land on headers causing navigation to feel "stuck".
     fn move_selection_by(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let len = self.get_filtered_results_cached().len();
+        // Get grouped results to check for section headers (cached)
+        let (grouped_items, _) = self.get_grouped_results_cached();
+        // Clone to avoid borrow issues with self mutation below
+        let grouped_items = grouped_items.clone();
+
+        let len = grouped_items.len();
         if len == 0 {
             self.selected_index = 0;
             return;
         }
-        let new_index = (self.selected_index as i32 + delta).clamp(0, (len as i32) - 1) as usize;
+
+        // Find bounds for selectable items (non-headers)
+        let first_selectable = grouped_items
+            .iter()
+            .position(|item| matches!(item, GroupedListItem::Item(_)));
+        let last_selectable = grouped_items
+            .iter()
+            .rposition(|item| matches!(item, GroupedListItem::Item(_)));
+
+        // If no selectable items, nothing to do
+        let (first, last) = match (first_selectable, last_selectable) {
+            (Some(f), Some(l)) => (f, l),
+            _ => return,
+        };
+
+        // Calculate target index, clamping to valid range
+        let target = (self.selected_index as i32 + delta).clamp(first as i32, last as i32) as usize;
+
+        // If moving down (positive delta), skip headers forward
+        // If moving up (negative delta), skip headers backward
+        let new_index = if delta > 0 {
+            // Moving down - find next non-header at or after target
+            let mut idx = target;
+            while idx <= last {
+                if matches!(grouped_items.get(idx), Some(GroupedListItem::Item(_))) {
+                    break;
+                }
+                idx += 1;
+            }
+            idx.min(last)
+        } else if delta < 0 {
+            // Moving up - find next non-header at or before target
+            let mut idx = target;
+            while idx >= first {
+                if matches!(grouped_items.get(idx), Some(GroupedListItem::Item(_))) {
+                    break;
+                }
+                if idx == 0 {
+                    break;
+                }
+                idx -= 1;
+            }
+            idx.max(first)
+        } else {
+            // delta == 0, no movement
+            self.selected_index
+        };
+
+        // Final validation: ensure we're not on a header
+        if matches!(grouped_items.get(new_index), Some(GroupedListItem::SectionHeader(_))) {
+            // Can't find a valid position, stay put
+            return;
+        }
+
         if new_index != self.selected_index {
             self.selected_index = new_index;
             self.scroll_to_selected_if_needed("coalesced_nav");

@@ -1894,16 +1894,34 @@ impl ScriptListApp {
         const DIVIDER_HEIGHT: f32 = 1.0;
         let header_height = px(HEADER_PADDING_Y * 2.0 + BUTTON_HEIGHT + DIVIDER_HEIGHT); // 45px
 
-        // List width is 50% of window (w_1_2())
-        let list_width = width * 0.5;
-
         // Content padding matches HEADER_PADDING_X
         let content_padding = HEADER_PADDING_X;
 
-        // List item height from list_item.rs
-        let item_height = px(48.0); // LIST_ITEM_HEIGHT
+        // Main content area (below header)
+        let content_top = header_height;
+        let content_height = height - header_height;
 
-        // Header bounds (includes padding + input + divider)
+        // Determine the current view type and build appropriate bounds
+        let view_name = match &self.current_view {
+            AppView::ScriptList => "ScriptList",
+            AppView::ArgPrompt { .. } => "ArgPrompt",
+            AppView::DivPrompt { .. } => "DivPrompt",
+            AppView::EditorPrompt { .. } => "EditorPrompt",
+            AppView::TermPrompt { .. } => "TermPrompt",
+            AppView::FormPrompt { .. } => "FormPrompt",
+            AppView::SelectPrompt { .. } => "SelectPrompt",
+            AppView::PathPrompt { .. } => "PathPrompt",
+            AppView::EnvPrompt { .. } => "EnvPrompt",
+            AppView::DropPrompt { .. } => "DropPrompt",
+            AppView::TemplatePrompt { .. } => "TemplatePrompt",
+            AppView::ClipboardHistoryView { .. } => "ClipboardHistory",
+            AppView::AppLauncherView { .. } => "AppLauncher",
+            AppView::WindowSwitcherView { .. } => "WindowSwitcher",
+            AppView::DesignGalleryView { .. } => "DesignGallery",
+            AppView::ActionsDialog => "ActionsDialog",
+        };
+
+        // Header bounds (includes padding + input + divider) - common to all views
         bounds.push(
             ComponentBounds::new(
                 "Header",
@@ -1916,55 +1934,222 @@ impl ScriptListApp {
             .with_padding(BoxModel::symmetric(HEADER_PADDING_Y, content_padding)),
         );
 
-        // Main content area (below header)
-        let content_top = header_height;
-        let content_height = height - header_height;
+        // Build view-specific bounds
+        match &self.current_view {
+            AppView::ScriptList => {
+                // ScriptList has left panel (50%) + right preview panel (50%)
+                let list_width = width * 0.5;
+                let item_height = px(48.0);
 
-        // Script list panel (left side)
-        bounds.push(
-            ComponentBounds::new(
-                "ScriptList",
-                gpui::Bounds {
-                    origin: gpui::point(px(0.), content_top),
-                    size: gpui::size(list_width, content_height),
-                },
-            )
-            .with_type(ComponentType::List)
-            .with_padding(BoxModel::uniform(0.0)),
-        );
+                bounds.push(
+                    ComponentBounds::new(
+                        "ScriptList",
+                        gpui::Bounds {
+                            origin: gpui::point(px(0.), content_top),
+                            size: gpui::size(list_width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::List)
+                    .with_padding(BoxModel::uniform(0.0)),
+                );
 
-        // Add sample list items (using LIST_ITEM_HEIGHT = 48px)
-        for i in 0..5 {
-            let item_top = content_top + px(i as f32 * 48.0);
-            if item_top + item_height > height {
-                break;
+                // Add sample list items
+                for i in 0..5 {
+                    let item_top = content_top + px(i as f32 * 48.0);
+                    if item_top + item_height > height {
+                        break;
+                    }
+                    bounds.push(
+                        ComponentBounds::new(
+                            format!("ListItem[{}]", i),
+                            gpui::Bounds {
+                                origin: gpui::point(px(0.), item_top),
+                                size: gpui::size(list_width, item_height),
+                            },
+                        )
+                        .with_type(ComponentType::ListItem)
+                        .with_padding(BoxModel::symmetric(12.0, content_padding))
+                        .with_margin(BoxModel::uniform(0.0)),
+                    );
+                }
+
+                // Preview panel (right side)
+                bounds.push(
+                    ComponentBounds::new(
+                        "PreviewPanel",
+                        gpui::Bounds {
+                            origin: gpui::point(list_width, content_top),
+                            size: gpui::size(width - list_width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::Container)
+                    .with_padding(BoxModel::uniform(content_padding)),
+                );
             }
-            bounds.push(
-                ComponentBounds::new(
-                    format!("ListItem[{}]", i),
-                    gpui::Bounds {
-                        origin: gpui::point(px(0.), item_top),
-                        size: gpui::size(list_width, item_height),
-                    },
-                )
-                .with_type(ComponentType::ListItem)
-                .with_padding(BoxModel::symmetric(12.0, content_padding))
-                .with_margin(BoxModel::uniform(0.0)),
-            );
+
+            AppView::DivPrompt { .. } => {
+                // DivPrompt takes full width below header
+                bounds.push(
+                    ComponentBounds::new(
+                        "DivContent",
+                        gpui::Bounds {
+                            origin: gpui::point(px(0.), content_top),
+                            size: gpui::size(width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::Prompt)
+                    .with_padding(BoxModel::uniform(content_padding)),
+                );
+            }
+
+            AppView::EditorPrompt { .. } => {
+                // EditorPrompt takes full width below header
+                bounds.push(
+                    ComponentBounds::new(
+                        "EditorContent",
+                        gpui::Bounds {
+                            origin: gpui::point(px(0.), content_top),
+                            size: gpui::size(width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::Prompt)
+                    .with_padding(BoxModel::uniform(content_padding)),
+                );
+            }
+
+            AppView::TermPrompt { .. } => {
+                // TermPrompt takes full width below header
+                bounds.push(
+                    ComponentBounds::new(
+                        "TerminalContent",
+                        gpui::Bounds {
+                            origin: gpui::point(px(0.), content_top),
+                            size: gpui::size(width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::Prompt)
+                    .with_padding(BoxModel::uniform(content_padding)),
+                );
+            }
+
+            AppView::ArgPrompt { choices, .. } => {
+                // ArgPrompt may have choices list
+                if choices.is_empty() {
+                    // No choices - just input area
+                    bounds.push(
+                        ComponentBounds::new(
+                            "ArgInput",
+                            gpui::Bounds {
+                                origin: gpui::point(px(0.), content_top),
+                                size: gpui::size(width, content_height),
+                            },
+                        )
+                        .with_type(ComponentType::Prompt)
+                        .with_padding(BoxModel::uniform(content_padding)),
+                    );
+                } else {
+                    // Has choices - show list
+                    let item_height = px(48.0);
+                    bounds.push(
+                        ComponentBounds::new(
+                            "ChoicesList",
+                            gpui::Bounds {
+                                origin: gpui::point(px(0.), content_top),
+                                size: gpui::size(width, content_height),
+                            },
+                        )
+                        .with_type(ComponentType::List)
+                        .with_padding(BoxModel::uniform(0.0)),
+                    );
+
+                    // Add choice items
+                    for i in 0..choices.len().min(5) {
+                        let item_top = content_top + px(i as f32 * 48.0);
+                        if item_top + item_height > height {
+                            break;
+                        }
+                        bounds.push(
+                            ComponentBounds::new(
+                                format!("Choice[{}]", i),
+                                gpui::Bounds {
+                                    origin: gpui::point(px(0.), item_top),
+                                    size: gpui::size(width, item_height),
+                                },
+                            )
+                            .with_type(ComponentType::ListItem)
+                            .with_padding(BoxModel::symmetric(12.0, content_padding)),
+                        );
+                    }
+                }
+            }
+
+            AppView::FormPrompt { .. } => {
+                bounds.push(
+                    ComponentBounds::new(
+                        "FormContent",
+                        gpui::Bounds {
+                            origin: gpui::point(px(0.), content_top),
+                            size: gpui::size(width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::Prompt)
+                    .with_padding(BoxModel::uniform(content_padding)),
+                );
+            }
+
+            AppView::SelectPrompt { .. } | AppView::PathPrompt { .. } => {
+                // List-based prompts
+                let item_height = px(48.0);
+                bounds.push(
+                    ComponentBounds::new(
+                        view_name,
+                        gpui::Bounds {
+                            origin: gpui::point(px(0.), content_top),
+                            size: gpui::size(width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::List)
+                    .with_padding(BoxModel::uniform(0.0)),
+                );
+
+                for i in 0..5 {
+                    let item_top = content_top + px(i as f32 * 48.0);
+                    if item_top + item_height > height {
+                        break;
+                    }
+                    bounds.push(
+                        ComponentBounds::new(
+                            format!("Item[{}]", i),
+                            gpui::Bounds {
+                                origin: gpui::point(px(0.), item_top),
+                                size: gpui::size(width, item_height),
+                            },
+                        )
+                        .with_type(ComponentType::ListItem)
+                        .with_padding(BoxModel::symmetric(12.0, content_padding)),
+                    );
+                }
+            }
+
+            // Other prompts - generic full-width content
+            _ => {
+                bounds.push(
+                    ComponentBounds::new(
+                        view_name,
+                        gpui::Bounds {
+                            origin: gpui::point(px(0.), content_top),
+                            size: gpui::size(width, content_height),
+                        },
+                    )
+                    .with_type(ComponentType::Prompt)
+                    .with_padding(BoxModel::uniform(content_padding)),
+                );
+            }
         }
 
-        // Preview panel (right side)
-        bounds.push(
-            ComponentBounds::new(
-                "PreviewPanel",
-                gpui::Bounds {
-                    origin: gpui::point(list_width, content_top),
-                    size: gpui::size(width - list_width, content_height),
-                },
-            )
-            .with_type(ComponentType::Container)
-            .with_padding(BoxModel::uniform(content_padding)),
-        );
+        // Only add header detail bounds for ScriptList view (the original behavior)
+        if matches!(self.current_view, AppView::ScriptList) {
+            let list_width = width * 0.5;
 
         // Input field in header
         // Positioned at: px(HEADER_PADDING_X) = 16, py(HEADER_PADDING_Y) = 8
@@ -2137,6 +2322,7 @@ impl ScriptListApp {
         // List item icons (left side of each list item)
         // Icons are typically 24x24, positioned with some padding from left edge
         // Item height is 48px, icon vertically centered: (48 - 24) / 2 = 12px from top
+        let item_height = px(48.0);
         for i in 0..5 {
             let item_top = content_top + px(i as f32 * 48.0);
             if item_top + item_height > height {
@@ -2154,6 +2340,7 @@ impl ScriptListApp {
                 .with_padding(BoxModel::uniform(0.0)),
             );
         }
+        } // End of ScriptList-specific bounds
 
         bounds
     }

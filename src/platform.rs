@@ -633,6 +633,8 @@ pub fn capture_app_screenshot(
     struct Candidate {
         window: Window,
         title: String,
+        width: u32,
+        height: u32,
     }
 
     let mut candidates = Vec::new();
@@ -647,10 +649,30 @@ pub fn capture_app_screenshot(
 
         let is_minimized = window.is_minimized().unwrap_or(true);
 
-        if is_our_window && !is_minimized {
-            candidates.push(Candidate { window, title });
+        // Get window dimensions to filter out tiny windows (tooltips, list items, etc.)
+        let width = window.width().unwrap_or(0);
+        let height = window.height().unwrap_or(0);
+
+        // Only consider windows that are reasonably sized (at least 200x200)
+        // This filters out tooltips, list items, icons, etc.
+        let is_reasonable_size = width >= 200 && height >= 200;
+
+        if is_our_window && !is_minimized && is_reasonable_size {
+            candidates.push(Candidate {
+                window,
+                title,
+                width,
+                height,
+            });
         }
     }
+
+    // Sort by size (largest first) - the main window is typically the largest
+    candidates.sort_by(|a, b| {
+        let area_a = a.width as u64 * a.height as u64;
+        let area_b = b.width as u64 * b.height as u64;
+        area_b.cmp(&area_a)
+    });
 
     let mut target = candidates
         .iter()

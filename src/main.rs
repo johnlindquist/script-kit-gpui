@@ -1727,7 +1727,7 @@ fn main() {
 
                                 // Parse modifiers
                                 let has_cmd = modifiers.iter().any(|m| m == "cmd" || m == "meta" || m == "command");
-                                let _has_shift = modifiers.iter().any(|m| m == "shift");
+                                let has_shift = modifiers.iter().any(|m| m == "shift");
                                 let _has_alt = modifiers.iter().any(|m| m == "alt" || m == "option");
                                 let _has_ctrl = modifiers.iter().any(|m| m == "ctrl" || m == "control");
 
@@ -1880,13 +1880,56 @@ fn main() {
                                         }
                                     }
                                     AppView::EditorPrompt { entity, id, .. } => {
-                                        // Editor prompt key handling for template/snippet navigation
-                                        logging::log("STDIN", &format!("SimulateKey: Dispatching '{}' to EditorPrompt (snippet test)", key_lower));
+                                        // Editor prompt key handling for template/snippet navigation and choice popup
+                                        logging::log("STDIN", &format!("SimulateKey: Dispatching '{}' to EditorPrompt", key_lower));
                                         let entity_clone = entity.clone();
                                         let prompt_id_clone = id.clone();
 
-                                        // Handle Tab key for snippet navigation
-                                        if key_lower == "tab" && !has_cmd {
+                                        // Check if choice popup is visible
+                                        let has_choice_popup = entity_clone.update(ctx, |editor: &mut EditorPrompt, _| {
+                                            editor.is_choice_popup_visible()
+                                        });
+
+                                        if has_choice_popup {
+                                            // Handle choice popup navigation
+                                            match key_lower.as_str() {
+                                                "up" | "arrowup" => {
+                                                    logging::log("STDIN", "SimulateKey: Up in choice popup");
+                                                    entity_clone.update(ctx, |editor, cx| {
+                                                        editor.choice_popup_up_public(cx);
+                                                    });
+                                                }
+                                                "down" | "arrowdown" => {
+                                                    logging::log("STDIN", "SimulateKey: Down in choice popup");
+                                                    entity_clone.update(ctx, |editor, cx| {
+                                                        editor.choice_popup_down_public(cx);
+                                                    });
+                                                }
+                                                "enter" if !has_cmd => {
+                                                    logging::log("STDIN", "SimulateKey: Enter in choice popup - confirming");
+                                                    entity_clone.update(ctx, |editor, cx| {
+                                                        editor.choice_popup_confirm_public(window, cx);
+                                                    });
+                                                }
+                                                "escape" => {
+                                                    logging::log("STDIN", "SimulateKey: Escape in choice popup - cancelling");
+                                                    entity_clone.update(ctx, |editor, cx| {
+                                                        editor.choice_popup_cancel_public(cx);
+                                                    });
+                                                }
+                                                "tab" if !has_shift => {
+                                                    logging::log("STDIN", "SimulateKey: Tab in choice popup - confirm and next");
+                                                    entity_clone.update(ctx, |editor, cx| {
+                                                        editor.choice_popup_confirm_public(window, cx);
+                                                        editor.next_tabstop_public(window, cx);
+                                                    });
+                                                }
+                                                _ => {
+                                                    logging::log("STDIN", &format!("SimulateKey: Unhandled key '{}' in choice popup", key_lower));
+                                                }
+                                            }
+                                        } else if key_lower == "tab" && !has_cmd {
+                                            // Handle Tab key for snippet navigation
                                             entity_clone.update(ctx, |editor: &mut EditorPrompt, editor_cx| {
                                                 logging::log("STDIN", "SimulateKey: Tab in EditorPrompt - calling next_tabstop");
                                                 if editor.in_snippet_mode() {

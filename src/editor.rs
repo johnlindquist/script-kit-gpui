@@ -76,6 +76,18 @@ pub struct SnippetState {
     pub last_selection_ranges: Vec<Option<(usize, usize)>>,
 }
 
+/// State for the choice dropdown popup
+/// Shown when a tabstop has multiple choices (${1|opt1,opt2,opt3|})
+#[derive(Debug, Clone)]
+pub struct ChoicesPopupState {
+    /// The list of choices to display
+    pub choices: Vec<String>,
+    /// Currently highlighted index in the list
+    pub selected_index: usize,
+    /// The tabstop index this popup is for
+    pub tabstop_idx: usize,
+}
+
 /// EditorPrompt - Full-featured code editor using gpui-component
 ///
 /// Uses deferred initialization pattern: the InputState is created on first render
@@ -118,6 +130,9 @@ pub struct EditorPrompt {
 
     // Flag to indicate we need to select the first tabstop after initialization
     needs_initial_tabstop_selection: bool,
+
+    // Choice dropdown popup state (shown when tabstop has choices)
+    choices_popup: Option<ChoicesPopupState>,
 }
 
 impl EditorPrompt {
@@ -163,6 +178,7 @@ impl EditorPrompt {
             content_height,
             subscriptions: Vec::new(),
             suppress_keys: false,
+            choices_popup: None,
             needs_focus: true, // Auto-focus on first render
             needs_initial_tabstop_selection: false,
         }
@@ -260,6 +276,7 @@ impl EditorPrompt {
             content_height,
             subscriptions: Vec::new(),
             suppress_keys: false,
+            choices_popup: None,
             needs_focus: true, // Auto-focus on first render
             needs_initial_tabstop_selection: needs_initial_selection,
         }
@@ -711,11 +728,32 @@ impl EditorPrompt {
             input_state.set_selection(start_bytes, end_bytes, window, cx);
         });
 
-        // Update the last selection range
+        // Update the last selection range and check for choices
         if let Some(ref mut state) = self.snippet_state {
             let current_idx = state.current_tabstop_idx;
             if current_idx < state.last_selection_ranges.len() {
                 state.last_selection_ranges[current_idx] = Some((start, end));
+            }
+
+            // Check if this tabstop has choices - if so, show the dropdown
+            if let Some(tabstop) = state.snippet.tabstops.get(current_idx) {
+                if let Some(ref choices) = tabstop.choices {
+                    if choices.len() > 1 {
+                        logging::log(
+                            "EDITOR",
+                            &format!(
+                                "Snippet: tabstop {} has {} choices, showing popup",
+                                current_idx,
+                                choices.len()
+                            ),
+                        );
+                        self.choices_popup = Some(ChoicesPopupState {
+                            choices: choices.clone(),
+                            selected_index: 0,
+                            tabstop_idx: current_idx,
+                        });
+                    }
+                }
             }
         }
 
@@ -781,6 +819,154 @@ impl EditorPrompt {
     pub fn request_focus(&mut self) {
         self.needs_focus = true;
     }
+
+    // === Choice Popup Methods ===
+
+    /// Check if the choice popup is currently visible
+    pub fn is_choice_popup_visible(&self) -> bool {
+        self.choices_popup.is_some()
+    }
+
+    /// Public wrapper for choice_popup_up (for SimulateKey)
+    pub fn choice_popup_up_public(&mut self, cx: &mut Context<Self>) {
+        self.choice_popup_up(cx);
+    }
+
+    /// Public wrapper for choice_popup_down (for SimulateKey)
+    pub fn choice_popup_down_public(&mut self, cx: &mut Context<Self>) {
+        self.choice_popup_down(cx);
+    }
+
+    /// Public wrapper for choice_popup_confirm (for SimulateKey)
+    pub fn choice_popup_confirm_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.choice_popup_confirm(window, cx);
+    }
+
+    /// Public wrapper for choice_popup_cancel (for SimulateKey)
+    pub fn choice_popup_cancel_public(&mut self, cx: &mut Context<Self>) {
+        self.choice_popup_cancel(cx);
+    }
+
+    /// Move selection up in the choice popup
+    fn choice_popup_up(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref mut popup) = self.choices_popup {
+            if popup.selected_index > 0 {
+                popup.selected_index -= 1;
+                logging::log(
+                    "EDITOR",
+                    &format!("Choice popup: moved up to index {}", popup.selected_index),
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    /// Move selection down in the choice popup
+    fn choice_popup_down(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref mut popup) = self.choices_popup {
+            if popup.selected_index + 1 < popup.choices.len() {
+                popup.selected_index += 1;
+                logging::log(
+                    "EDITOR",
+                    &format!("Choice popup: moved down to index {}", popup.selected_index),
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    /// Confirm the current choice and replace the selection
+    fn choice_popup_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popup) = self.choices_popup.take() else {
+            return;
+        };
+
+        let Some(chosen) = popup.choices.get(popup.selected_index) else {
+            return;
+        };
+
+        logging::log(
+            "EDITOR",
+            &format!(
+                "Choice popup: confirmed '{}' at index {}",
+                chosen, popup.selected_index
+            ),
+        );
+
+        // Replace the current selection with the chosen text
+        if let Some(ref editor_state) = self.editor_state {
+            let chosen_clone = chosen.clone();
+            editor_state.update(cx, |input_state, cx| {
+                // The current tabstop text should be selected
+                // Replace it with the chosen value
+                input_state.insert(&chosen_clone, window, cx);
+            });
+        }
+
+        // Update current_values for offset tracking
+        if let Some(ref mut state) = self.snippet_state {
+            if popup.tabstop_idx < state.current_values.len() {
+                state.current_values[popup.tabstop_idx] = chosen.clone();
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Cancel the choice popup (dismiss without changing selection)
+    fn choice_popup_cancel(&mut self, cx: &mut Context<Self>) {
+        if self.choices_popup.is_some() {
+            logging::log("EDITOR", "Choice popup: cancelled");
+            self.choices_popup = None;
+            cx.notify();
+        }
+    }
+
+    /// Render the choice popup overlay
+    fn render_choices_popup(&self, _cx: &Context<Self>) -> Option<impl IntoElement> {
+        let popup = self.choices_popup.as_ref()?;
+        let colors = &self.theme.colors;
+
+        Some(
+            div()
+                .absolute()
+                .top(px(40.)) // Position below the editor toolbar area
+                .left(px(16.))
+                //.z_index(1000) // Not available in GPUI, using layer order instead
+                .min_w(px(200.))
+                .max_w(px(400.))
+                .bg(rgb(colors.background.main))
+                .border_1()
+                .border_color(rgb(colors.ui.border))
+                .rounded_md()
+                .shadow_lg()
+                .py(px(4.))
+                .children(popup.choices.iter().enumerate().map(|(idx, choice)| {
+                    let is_selected = idx == popup.selected_index;
+                    let bg_color = if is_selected {
+                        rgb(colors.accent.selected)
+                    } else {
+                        rgb(colors.background.main)
+                    };
+                    // Use contrasting text color for selected item
+                    let text_color = if is_selected {
+                        // White text on accent background for better contrast
+                        rgb(0xffffff)
+                    } else {
+                        rgb(colors.text.primary)
+                    };
+
+                    div()
+                        .px(px(12.))
+                        .py(px(6.))
+                        .bg(bg_color)
+                        .text_color(text_color)
+                        .text_sm()
+                        .cursor_pointer()
+                        .child(choice.clone())
+                })),
+        )
+    }
 }
 
 impl Focusable for EditorPrompt {
@@ -814,7 +1000,7 @@ impl Render for EditorPrompt {
 
         let colors = &self.theme.colors;
 
-        // Key handler for submit/cancel and snippet navigation
+        // Key handler for submit/cancel, snippet navigation, and choice popup
         // IMPORTANT: We intercept Tab here BEFORE gpui-component's Input processes it,
         // so we don't get tab characters inserted when navigating snippets.
         let handle_key = cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
@@ -830,13 +1016,47 @@ impl Render for EditorPrompt {
             logging::log(
                 "EDITOR",
                 &format!(
-                    "Key event: key='{}', cmd={}, shift={}, in_snippet_mode={}",
+                    "Key event: key='{}', cmd={}, shift={}, in_snippet_mode={}, choice_popup={}",
                     key,
                     cmd,
                     shift,
-                    this.in_snippet_mode()
+                    this.in_snippet_mode(),
+                    this.is_choice_popup_visible()
                 ),
             );
+
+            // Handle choice popup keys first (takes priority)
+            if this.is_choice_popup_visible() {
+                match key.as_str() {
+                    "up" | "arrowup" => {
+                        this.choice_popup_up(cx);
+                        return; // Don't propagate
+                    }
+                    "down" | "arrowdown" => {
+                        this.choice_popup_down(cx);
+                        return; // Don't propagate
+                    }
+                    "enter" if !cmd => {
+                        this.choice_popup_confirm(window, cx);
+                        return; // Don't propagate
+                    }
+                    "escape" => {
+                        this.choice_popup_cancel(cx);
+                        return; // Don't propagate
+                    }
+                    "tab" if !shift => {
+                        // Tab confirms the choice and moves to next tabstop
+                        this.choice_popup_confirm(window, cx);
+                        this.next_tabstop(window, cx);
+                        return; // Don't propagate
+                    }
+                    _ => {
+                        // Other keys close the popup and propagate
+                        this.choice_popup_cancel(cx);
+                        // Fall through to normal handling
+                    }
+                }
+            }
 
             match (key.as_str(), cmd, shift) {
                 // Cmd+Enter submits
@@ -1024,7 +1244,15 @@ impl Render for EditorPrompt {
                 ),
         );
 
-        container
+        // Wrap in a relative container to support absolute positioning for the choices popup
+        let mut wrapper = div().relative().w_full().h_full().child(container);
+
+        // Add the choices popup overlay if visible
+        if let Some(popup_element) = self.render_choices_popup(cx) {
+            wrapper = wrapper.child(popup_element);
+        }
+
+        wrapper
     }
 }
 
