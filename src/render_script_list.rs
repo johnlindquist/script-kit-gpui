@@ -202,15 +202,31 @@ impl ScriptListApp {
                                             },
                                         );
 
-                                        // Create click handler
+                                        // Create click handler with double-click support
                                         let click_handler = cx.listener(
                                             move |this: &mut ScriptListApp,
-                                                  _event: &gpui::ClickEvent,
+                                                  event: &gpui::ClickEvent,
                                                   _window,
                                                   cx| {
+                                                // Always select the item on any click
                                                 if this.selected_index != ix {
                                                     this.selected_index = ix;
                                                     cx.notify();
+                                                }
+
+                                                // Check for double-click (mouse clicks only)
+                                                if let gpui::ClickEvent::Mouse(mouse_event) = event
+                                                {
+                                                    if mouse_event.down.click_count == 2 {
+                                                        logging::log(
+                                                            "UI",
+                                                            &format!(
+                                                                "Double-click on item {}, executing",
+                                                                ix
+                                                            ),
+                                                        );
+                                                        this.execute_selected(cx);
+                                                    }
                                                 }
                                             },
                                         );

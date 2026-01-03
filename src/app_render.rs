@@ -468,6 +468,22 @@ impl ScriptListApp {
                             builtins::BuiltInFeature::MenuBarAction(_) => {
                                 "Menu Bar Action".to_string()
                             }
+                            builtins::BuiltInFeature::SystemAction(_) => {
+                                "System Action".to_string()
+                            }
+                            builtins::BuiltInFeature::WindowAction(_) => {
+                                "Window Action".to_string()
+                            }
+                            builtins::BuiltInFeature::NotesCommand(_) => {
+                                "Notes Command".to_string()
+                            }
+                            builtins::BuiltInFeature::AiCommand(_) => "AI Command".to_string(),
+                            builtins::BuiltInFeature::ScriptCommand(_) => {
+                                "Script Creation".to_string()
+                            }
+                            builtins::BuiltInFeature::PermissionCommand(_) => {
+                                "Permission Management".to_string()
+                            }
                         };
                         panel = panel.child(
                             div()

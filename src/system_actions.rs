@@ -399,21 +399,25 @@ pub fn open_notifications_settings() -> Result<(), String> {
 }
 
 /// Open System Preferences to the General pane
+#[allow(dead_code)]
 pub fn open_general_settings() -> Result<(), String> {
     open_system_preferences("com.apple.preference.general")
 }
 
 /// Open System Preferences to the Desktop & Dock pane
+#[allow(dead_code)]
 pub fn open_dock_settings() -> Result<(), String> {
     open_system_preferences("com.apple.preference.dock")
 }
 
 /// Open System Preferences to the Battery pane
+#[allow(dead_code)]
 pub fn open_battery_settings() -> Result<(), String> {
     open_system_preferences("com.apple.preference.battery")
 }
 
 /// Open System Preferences to the Trackpad pane
+#[allow(dead_code)]
 pub fn open_trackpad_settings() -> Result<(), String> {
     open_system_preferences("com.apple.preference.trackpad")
 }

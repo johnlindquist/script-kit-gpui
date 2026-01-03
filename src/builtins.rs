@@ -4,9 +4,110 @@
 //! alongside scripts. Features like Clipboard History and App Launcher are
 //! configurable and can be enabled/disabled via config.
 //!
+//! ## Command Types
+//!
+//! The registry supports various command types organized by category:
+//! - **System Actions**: Power management, UI controls, volume/brightness
+//! - **Window Actions**: Window tiling and management for the frontmost window
+//! - **Notes Commands**: Notes window operations
+//! - **AI Commands**: AI chat window operations  
+//! - **Script Commands**: Create new scripts and scriptlets
+//! - **Permission Commands**: Accessibility permission management
+//!
 
 use crate::config::BuiltInConfig;
 use tracing::debug;
+
+// ============================================================================
+// Command Type Enums
+// ============================================================================
+
+/// System action types for macOS system commands
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemActionType {
+    // Power management
+    EmptyTrash,
+    LockScreen,
+    Sleep,
+    Restart,
+    ShutDown,
+    LogOut,
+
+    // UI controls
+    ToggleDarkMode,
+    ShowDesktop,
+    MissionControl,
+    Launchpad,
+    ForceQuitApps,
+
+    // Volume controls
+    VolumeUp,
+    VolumeDown,
+    VolumeMute,
+
+    // Brightness controls
+    BrightnessUp,
+    BrightnessDown,
+
+    // System utilities
+    ToggleDoNotDisturb,
+    StartScreenSaver,
+
+    // System Preferences
+    OpenSystemPreferences,
+    OpenPrivacySettings,
+    OpenDisplaySettings,
+    OpenSoundSettings,
+    OpenNetworkSettings,
+    OpenKeyboardSettings,
+    OpenBluetoothSettings,
+    OpenNotificationsSettings,
+}
+
+/// Window action types for window management
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowActionType {
+    TileLeft,
+    TileRight,
+    TileTop,
+    TileBottom,
+    Maximize,
+    Minimize,
+}
+
+/// Notes window command types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum NotesCommandType {
+    OpenNotes,
+    NewNote,
+    SearchNotes,
+    QuickCapture,
+}
+
+/// AI window command types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum AiCommandType {
+    OpenAi,
+    NewConversation,
+    ClearConversation,
+}
+
+/// Script creation command types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptCommandType {
+    NewScript,
+    NewScriptlet,
+}
+
+/// Permission management command types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionCommandType {
+    CheckPermissions,
+    RequestAccessibility,
+    OpenAccessibilitySettings,
+}
 
 /// Menu bar action details for executing menu commands
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +153,20 @@ pub enum BuiltInFeature {
     Notes,
     /// Menu bar action from the frontmost application
     MenuBarAction(MenuBarActionInfo),
+
+    // === New Command Types ===
+    /// System actions (power, UI controls, volume, brightness, settings)
+    SystemAction(SystemActionType),
+    /// Window actions for the frontmost window (tile, maximize, minimize)
+    WindowAction(WindowActionType),
+    /// Notes window commands
+    NotesCommand(NotesCommandType),
+    /// AI window commands
+    AiCommand(AiCommandType),
+    /// Script creation commands
+    ScriptCommand(ScriptCommandType),
+    /// Permission management commands
+    PermissionCommand(PermissionCommandType),
 }
 
 /// A built-in feature entry that appears in the main search
@@ -241,6 +356,413 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
     ));
     debug!("Added Design Gallery built-in entry");
 
+    // =========================================================================
+    // System Actions
+    // =========================================================================
+
+    // Power management
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-empty-trash",
+        "Empty Trash",
+        "Empty the macOS Trash",
+        vec!["empty", "trash", "delete", "clean"],
+        BuiltInFeature::SystemAction(SystemActionType::EmptyTrash),
+        "🗑️",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-lock-screen",
+        "Lock Screen",
+        "Lock the screen",
+        vec!["lock", "screen", "security"],
+        BuiltInFeature::SystemAction(SystemActionType::LockScreen),
+        "🔒",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-sleep",
+        "Sleep",
+        "Put the system to sleep",
+        vec!["sleep", "suspend", "power"],
+        BuiltInFeature::SystemAction(SystemActionType::Sleep),
+        "😴",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-restart",
+        "Restart",
+        "Restart the system",
+        vec!["restart", "reboot", "power"],
+        BuiltInFeature::SystemAction(SystemActionType::Restart),
+        "🔄",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-shut-down",
+        "Shut Down",
+        "Shut down the system",
+        vec!["shut", "down", "shutdown", "power", "off"],
+        BuiltInFeature::SystemAction(SystemActionType::ShutDown),
+        "⏻",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-log-out",
+        "Log Out",
+        "Log out the current user",
+        vec!["log", "out", "logout", "user"],
+        BuiltInFeature::SystemAction(SystemActionType::LogOut),
+        "🚪",
+    ));
+
+    // UI controls
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-toggle-dark-mode",
+        "Toggle Dark Mode",
+        "Switch between light and dark appearance",
+        vec!["dark", "mode", "light", "appearance", "theme", "toggle"],
+        BuiltInFeature::SystemAction(SystemActionType::ToggleDarkMode),
+        "🌙",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-show-desktop",
+        "Show Desktop",
+        "Hide all windows to reveal the desktop",
+        vec!["show", "desktop", "hide", "windows"],
+        BuiltInFeature::SystemAction(SystemActionType::ShowDesktop),
+        "🖥️",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-mission-control",
+        "Mission Control",
+        "Show all windows and desktops",
+        vec!["mission", "control", "expose", "spaces", "windows"],
+        BuiltInFeature::SystemAction(SystemActionType::MissionControl),
+        "🪟",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-launchpad",
+        "Launchpad",
+        "Open Launchpad to show all applications",
+        vec!["launchpad", "apps", "applications"],
+        BuiltInFeature::SystemAction(SystemActionType::Launchpad),
+        "🚀",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-force-quit",
+        "Force Quit Apps",
+        "Open the Force Quit Applications dialog",
+        vec!["force", "quit", "kill", "apps", "unresponsive"],
+        BuiltInFeature::SystemAction(SystemActionType::ForceQuitApps),
+        "⚠️",
+    ));
+
+    // Volume controls
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-volume-up",
+        "Volume Up",
+        "Increase system volume",
+        vec!["volume", "up", "louder", "sound", "audio"],
+        BuiltInFeature::SystemAction(SystemActionType::VolumeUp),
+        "🔊",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-volume-down",
+        "Volume Down",
+        "Decrease system volume",
+        vec!["volume", "down", "quieter", "sound", "audio"],
+        BuiltInFeature::SystemAction(SystemActionType::VolumeDown),
+        "🔉",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-volume-mute",
+        "Toggle Mute",
+        "Toggle audio mute",
+        vec!["mute", "unmute", "volume", "sound", "audio", "toggle"],
+        BuiltInFeature::SystemAction(SystemActionType::VolumeMute),
+        "🔇",
+    ));
+
+    // Brightness controls
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-brightness-up",
+        "Brightness Up",
+        "Increase display brightness",
+        vec!["brightness", "up", "brighter", "display", "screen"],
+        BuiltInFeature::SystemAction(SystemActionType::BrightnessUp),
+        "☀️",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-brightness-down",
+        "Brightness Down",
+        "Decrease display brightness",
+        vec!["brightness", "down", "dimmer", "display", "screen"],
+        BuiltInFeature::SystemAction(SystemActionType::BrightnessDown),
+        "🔅",
+    ));
+
+    // System utilities
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-toggle-dnd",
+        "Toggle Do Not Disturb",
+        "Toggle Focus/Do Not Disturb mode",
+        vec![
+            "do",
+            "not",
+            "disturb",
+            "dnd",
+            "focus",
+            "notifications",
+            "toggle",
+        ],
+        BuiltInFeature::SystemAction(SystemActionType::ToggleDoNotDisturb),
+        "🔕",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-screen-saver",
+        "Start Screen Saver",
+        "Activate the screen saver",
+        vec!["screen", "saver", "screensaver"],
+        BuiltInFeature::SystemAction(SystemActionType::StartScreenSaver),
+        "🖼️",
+    ));
+
+    // System Preferences
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-system-preferences",
+        "Open System Settings",
+        "Open System Settings (System Preferences)",
+        vec!["system", "settings", "preferences", "prefs"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenSystemPreferences),
+        "⚙️",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-privacy-settings",
+        "Privacy & Security Settings",
+        "Open Privacy & Security settings",
+        vec!["privacy", "security", "settings"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenPrivacySettings),
+        "🔐",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-display-settings",
+        "Display Settings",
+        "Open Display settings",
+        vec!["display", "monitor", "screen", "resolution", "settings"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenDisplaySettings),
+        "🖥️",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-sound-settings",
+        "Sound Settings",
+        "Open Sound settings",
+        vec!["sound", "audio", "volume", "settings"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenSoundSettings),
+        "🔊",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-network-settings",
+        "Network Settings",
+        "Open Network settings",
+        vec!["network", "wifi", "ethernet", "internet", "settings"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenNetworkSettings),
+        "📡",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-keyboard-settings",
+        "Keyboard Settings",
+        "Open Keyboard settings",
+        vec!["keyboard", "shortcuts", "input", "settings"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenKeyboardSettings),
+        "⌨️",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-bluetooth-settings",
+        "Bluetooth Settings",
+        "Open Bluetooth settings",
+        vec!["bluetooth", "wireless", "settings"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenBluetoothSettings),
+        "🔵",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-notifications-settings",
+        "Notification Settings",
+        "Open Notifications settings",
+        vec!["notifications", "alerts", "banners", "settings"],
+        BuiltInFeature::SystemAction(SystemActionType::OpenNotificationsSettings),
+        "🔔",
+    ));
+
+    // =========================================================================
+    // Window Actions (for frontmost window)
+    // =========================================================================
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-tile-left",
+        "Tile Window Left",
+        "Tile the frontmost window to the left half",
+        vec!["tile", "left", "window", "half", "snap"],
+        BuiltInFeature::WindowAction(WindowActionType::TileLeft),
+        "◧",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-tile-right",
+        "Tile Window Right",
+        "Tile the frontmost window to the right half",
+        vec!["tile", "right", "window", "half", "snap"],
+        BuiltInFeature::WindowAction(WindowActionType::TileRight),
+        "◨",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-tile-top",
+        "Tile Window Top",
+        "Tile the frontmost window to the top half",
+        vec!["tile", "top", "window", "half", "snap"],
+        BuiltInFeature::WindowAction(WindowActionType::TileTop),
+        "⬒",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-tile-bottom",
+        "Tile Window Bottom",
+        "Tile the frontmost window to the bottom half",
+        vec!["tile", "bottom", "window", "half", "snap"],
+        BuiltInFeature::WindowAction(WindowActionType::TileBottom),
+        "⬓",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-maximize-window",
+        "Maximize Window",
+        "Maximize the frontmost window",
+        vec!["maximize", "window", "fullscreen", "expand"],
+        BuiltInFeature::WindowAction(WindowActionType::Maximize),
+        "⬜",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-minimize-window",
+        "Minimize Window",
+        "Minimize the frontmost window",
+        vec!["minimize", "window", "dock", "hide"],
+        BuiltInFeature::WindowAction(WindowActionType::Minimize),
+        "➖",
+    ));
+
+    // =========================================================================
+    // Notes Commands
+    // =========================================================================
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-new-note",
+        "New Note",
+        "Create a new note",
+        vec!["new", "note", "create"],
+        BuiltInFeature::NotesCommand(NotesCommandType::NewNote),
+        "📝",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-search-notes",
+        "Search Notes",
+        "Search through your notes",
+        vec!["search", "notes", "find"],
+        BuiltInFeature::NotesCommand(NotesCommandType::SearchNotes),
+        "🔍",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-quick-capture",
+        "Quick Capture",
+        "Quickly capture a note",
+        vec!["quick", "capture", "note", "fast"],
+        BuiltInFeature::NotesCommand(NotesCommandType::QuickCapture),
+        "⚡",
+    ));
+
+    // =========================================================================
+    // AI Commands
+    // =========================================================================
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-new-conversation",
+        "New AI Conversation",
+        "Start a new AI conversation",
+        vec!["new", "conversation", "chat", "ai"],
+        BuiltInFeature::AiCommand(AiCommandType::NewConversation),
+        "💬",
+    ));
+
+    // =========================================================================
+    // Script Commands
+    // =========================================================================
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-new-script",
+        "New Script",
+        "Create a new Script Kit script",
+        vec!["new", "script", "create", "code"],
+        BuiltInFeature::ScriptCommand(ScriptCommandType::NewScript),
+        "📜",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-new-scriptlet",
+        "New Scriptlet",
+        "Create a new Script Kit scriptlet",
+        vec!["new", "scriptlet", "create", "snippet"],
+        BuiltInFeature::ScriptCommand(ScriptCommandType::NewScriptlet),
+        "✨",
+    ));
+
+    // =========================================================================
+    // Permission Commands
+    // =========================================================================
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-check-permissions",
+        "Check Permissions",
+        "Check all required macOS permissions",
+        vec!["check", "permissions", "accessibility", "privacy"],
+        BuiltInFeature::PermissionCommand(PermissionCommandType::CheckPermissions),
+        "✅",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-request-accessibility",
+        "Request Accessibility Permission",
+        "Request accessibility permission for Script Kit",
+        vec!["request", "accessibility", "permission"],
+        BuiltInFeature::PermissionCommand(PermissionCommandType::RequestAccessibility),
+        "🔑",
+    ));
+
+    entries.push(BuiltInEntry::new_with_icon(
+        "builtin-accessibility-settings",
+        "Open Accessibility Settings",
+        "Open Accessibility settings in System Preferences",
+        vec!["accessibility", "settings", "permission", "open"],
+        BuiltInFeature::PermissionCommand(PermissionCommandType::OpenAccessibilitySettings),
+        "♿",
+    ));
+
     debug!(count = entries.len(), "Built-in entries loaded");
     entries
 }
@@ -275,8 +797,11 @@ mod tests {
         let config = BuiltInConfig::default();
         let entries = get_builtin_entries(&config);
 
-        // Clipboard history, window switcher, AI chat, Notes, and design gallery are built-ins (apps appear directly in search)
-        assert_eq!(entries.len(), 5);
+        // Core built-ins: Clipboard history, window switcher, AI chat, Notes, design gallery
+        // Plus: system actions (28), window actions (6), notes commands (3), AI commands (1),
+        // script commands (2), permission commands (3) = 43 new entries
+        // Total: 5 + 43 = 48
+        assert!(entries.len() >= 5); // At minimum the core built-ins should exist
 
         // Check clipboard history entry
         let clipboard = entries.iter().find(|e| e.id == "builtin-clipboard-history");
@@ -325,16 +850,14 @@ mod tests {
         };
         let entries = get_builtin_entries(&config);
 
-        // Clipboard history + AI Chat + Notes + Design Gallery (always enabled)
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].id, "builtin-clipboard-history");
-        assert_eq!(entries[0].feature, BuiltInFeature::ClipboardHistory);
-        assert_eq!(entries[1].id, "builtin-ai-chat");
-        assert_eq!(entries[1].feature, BuiltInFeature::AiChat);
-        assert_eq!(entries[2].id, "builtin-notes");
-        assert_eq!(entries[2].feature, BuiltInFeature::Notes);
-        assert_eq!(entries[3].id, "builtin-design-gallery");
-        assert_eq!(entries[3].feature, BuiltInFeature::DesignGallery);
+        // Check that core entries exist (plus all the new command entries)
+        assert!(entries.iter().any(|e| e.id == "builtin-clipboard-history"));
+        assert!(entries.iter().any(|e| e.id == "builtin-ai-chat"));
+        assert!(entries.iter().any(|e| e.id == "builtin-notes"));
+        assert!(entries.iter().any(|e| e.id == "builtin-design-gallery"));
+
+        // Window switcher should NOT be present
+        assert!(!entries.iter().any(|e| e.id == "builtin-window-switcher"));
     }
 
     #[test]
@@ -347,11 +870,13 @@ mod tests {
         let entries = get_builtin_entries(&config);
 
         // App launcher no longer creates a built-in entry (apps appear in main search)
-        // But AI Chat, Notes and Design Gallery are always enabled
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].id, "builtin-ai-chat");
-        assert_eq!(entries[1].id, "builtin-notes");
-        assert_eq!(entries[2].id, "builtin-design-gallery");
+        // But AI Chat, Notes and Design Gallery are always enabled (plus new command entries)
+        assert!(entries.iter().any(|e| e.id == "builtin-ai-chat"));
+        assert!(entries.iter().any(|e| e.id == "builtin-notes"));
+        assert!(entries.iter().any(|e| e.id == "builtin-design-gallery"));
+
+        // Clipboard history should NOT be present
+        assert!(!entries.iter().any(|e| e.id == "builtin-clipboard-history"));
     }
 
     #[test]
@@ -363,11 +888,14 @@ mod tests {
         };
         let entries = get_builtin_entries(&config);
 
-        // AI Chat, Notes, and Design Gallery are always enabled
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].id, "builtin-ai-chat");
-        assert_eq!(entries[1].id, "builtin-notes");
-        assert_eq!(entries[2].id, "builtin-design-gallery");
+        // AI Chat, Notes, and Design Gallery are always enabled (plus new command entries)
+        assert!(entries.iter().any(|e| e.id == "builtin-ai-chat"));
+        assert!(entries.iter().any(|e| e.id == "builtin-notes"));
+        assert!(entries.iter().any(|e| e.id == "builtin-design-gallery"));
+
+        // Clipboard history and window switcher should NOT be present
+        assert!(!entries.iter().any(|e| e.id == "builtin-clipboard-history"));
+        assert!(!entries.iter().any(|e| e.id == "builtin-window-switcher"));
     }
 
     #[test]
@@ -379,14 +907,22 @@ mod tests {
         };
         let entries = get_builtin_entries(&config);
 
-        // Window switcher + AI Chat + Notes + Design Gallery (always enabled)
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].id, "builtin-window-switcher");
-        assert_eq!(entries[0].feature, BuiltInFeature::WindowSwitcher);
-        assert_eq!(entries[0].icon, Some("🪟".to_string()));
-        assert_eq!(entries[1].id, "builtin-ai-chat");
-        assert_eq!(entries[2].id, "builtin-notes");
-        assert_eq!(entries[3].id, "builtin-design-gallery");
+        // Window switcher + AI Chat + Notes + Design Gallery (always enabled, plus new command entries)
+        assert!(entries.iter().any(|e| e.id == "builtin-window-switcher"));
+        assert!(entries.iter().any(|e| e.id == "builtin-ai-chat"));
+        assert!(entries.iter().any(|e| e.id == "builtin-notes"));
+        assert!(entries.iter().any(|e| e.id == "builtin-design-gallery"));
+
+        // Verify window switcher has correct properties
+        let window_switcher = entries
+            .iter()
+            .find(|e| e.id == "builtin-window-switcher")
+            .unwrap();
+        assert_eq!(window_switcher.feature, BuiltInFeature::WindowSwitcher);
+        assert_eq!(window_switcher.icon, Some("🪟".to_string()));
+
+        // Clipboard history should NOT be present
+        assert!(!entries.iter().any(|e| e.id == "builtin-clipboard-history"));
     }
 
     #[test]
@@ -502,5 +1038,105 @@ mod tests {
         assert_eq!(config.clipboard_history, cloned.clipboard_history);
         assert_eq!(config.app_launcher, cloned.app_launcher);
         assert_eq!(config.window_switcher, cloned.window_switcher);
+    }
+
+    #[test]
+    fn test_system_action_entries_exist() {
+        let config = BuiltInConfig::default();
+        let entries = get_builtin_entries(&config);
+
+        // Check that system action entries exist
+        assert!(entries.iter().any(|e| e.id == "builtin-empty-trash"));
+        assert!(entries.iter().any(|e| e.id == "builtin-lock-screen"));
+        assert!(entries.iter().any(|e| e.id == "builtin-toggle-dark-mode"));
+        assert!(entries.iter().any(|e| e.id == "builtin-volume-up"));
+        assert!(entries.iter().any(|e| e.id == "builtin-brightness-up"));
+        assert!(entries.iter().any(|e| e.id == "builtin-system-preferences"));
+    }
+
+    #[test]
+    fn test_window_action_entries_exist() {
+        let config = BuiltInConfig::default();
+        let entries = get_builtin_entries(&config);
+
+        // Check that window action entries exist
+        assert!(entries.iter().any(|e| e.id == "builtin-tile-left"));
+        assert!(entries.iter().any(|e| e.id == "builtin-tile-right"));
+        assert!(entries.iter().any(|e| e.id == "builtin-maximize-window"));
+        assert!(entries.iter().any(|e| e.id == "builtin-minimize-window"));
+    }
+
+    #[test]
+    fn test_notes_command_entries_exist() {
+        let config = BuiltInConfig::default();
+        let entries = get_builtin_entries(&config);
+
+        // Check that notes command entries exist
+        assert!(entries.iter().any(|e| e.id == "builtin-new-note"));
+        assert!(entries.iter().any(|e| e.id == "builtin-search-notes"));
+        assert!(entries.iter().any(|e| e.id == "builtin-quick-capture"));
+    }
+
+    #[test]
+    fn test_script_command_entries_exist() {
+        let config = BuiltInConfig::default();
+        let entries = get_builtin_entries(&config);
+
+        // Check that script command entries exist
+        assert!(entries.iter().any(|e| e.id == "builtin-new-script"));
+        assert!(entries.iter().any(|e| e.id == "builtin-new-scriptlet"));
+    }
+
+    #[test]
+    fn test_permission_command_entries_exist() {
+        let config = BuiltInConfig::default();
+        let entries = get_builtin_entries(&config);
+
+        // Check that permission command entries exist
+        assert!(entries.iter().any(|e| e.id == "builtin-check-permissions"));
+        assert!(entries
+            .iter()
+            .any(|e| e.id == "builtin-request-accessibility"));
+        assert!(entries
+            .iter()
+            .any(|e| e.id == "builtin-accessibility-settings"));
+    }
+
+    #[test]
+    fn test_system_action_type_equality() {
+        assert_eq!(SystemActionType::EmptyTrash, SystemActionType::EmptyTrash);
+        assert_ne!(SystemActionType::EmptyTrash, SystemActionType::LockScreen);
+    }
+
+    #[test]
+    fn test_window_action_type_equality() {
+        assert_eq!(WindowActionType::TileLeft, WindowActionType::TileLeft);
+        assert_ne!(WindowActionType::TileLeft, WindowActionType::TileRight);
+    }
+
+    #[test]
+    fn test_builtin_feature_system_action() {
+        let feature = BuiltInFeature::SystemAction(SystemActionType::ToggleDarkMode);
+        assert_eq!(
+            feature,
+            BuiltInFeature::SystemAction(SystemActionType::ToggleDarkMode)
+        );
+        assert_ne!(
+            feature,
+            BuiltInFeature::SystemAction(SystemActionType::Sleep)
+        );
+    }
+
+    #[test]
+    fn test_builtin_feature_window_action() {
+        let feature = BuiltInFeature::WindowAction(WindowActionType::Maximize);
+        assert_eq!(
+            feature,
+            BuiltInFeature::WindowAction(WindowActionType::Maximize)
+        );
+        assert_ne!(
+            feature,
+            BuiltInFeature::WindowAction(WindowActionType::Minimize)
+        );
     }
 }

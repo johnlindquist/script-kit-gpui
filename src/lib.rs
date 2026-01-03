@@ -42,6 +42,16 @@ pub mod clipboard_history;
 pub mod file_search;
 pub mod window_control;
 
+// System actions - macOS AppleScript-based system commands
+#[cfg(target_os = "macos")]
+pub mod system_actions;
+
+// Script creation - Create new scripts and scriptlets
+pub mod script_creation;
+
+// Permissions wizard - Check and request macOS permissions
+pub mod permissions_wizard;
+
 // Menu bar reader - macOS Accessibility API for reading app menus
 // Provides get_frontmost_menu_bar() with recursive parsing up to 3 levels
 #[cfg(target_os = "macos")]

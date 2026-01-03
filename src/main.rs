@@ -74,6 +74,16 @@ mod file_search;
 mod toast_manager;
 mod window_control;
 
+// System actions - macOS AppleScript-based system commands
+#[cfg(target_os = "macos")]
+mod system_actions;
+
+// Script creation - Create new scripts and scriptlets
+mod script_creation;
+
+// Permissions wizard - Check and request macOS permissions
+mod permissions_wizard;
+
 // Built-in features registry
 mod app_launcher;
 mod builtins;
