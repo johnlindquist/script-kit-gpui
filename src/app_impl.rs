@@ -1882,13 +1882,26 @@ impl ScriptListApp {
         let width = window_size.width;
         let height = window_size.height;
 
-        // Layout constants (matching our actual layout)
-        let header_height = px(52.);
-        let list_width = px(300.); // Approximate left panel width
-        let content_padding = 12.0_f32;
-        let item_height = px(52.);
+        // Layout constants from panel.rs and list_item.rs
+        // Header: py(HEADER_PADDING_Y=8) + max(input=22px, buttons=28px) + py(8) + divider(1px)
+        // The buttons are 28px tall, input is 22px, so header content height is 28px
+        // Total: 8 + 28 + 8 + 1 = 45px
+        const HEADER_PADDING_Y: f32 = 8.0;
+        const HEADER_PADDING_X: f32 = 16.0;
+        const BUTTON_HEIGHT: f32 = 28.0;
+        const DIVIDER_HEIGHT: f32 = 1.0;
+        let header_height = px(HEADER_PADDING_Y * 2.0 + BUTTON_HEIGHT + DIVIDER_HEIGHT); // 45px
 
-        // Header bounds
+        // List width is 50% of window (w_1_2())
+        let list_width = width * 0.5;
+
+        // Content padding matches HEADER_PADDING_X
+        let content_padding = HEADER_PADDING_X;
+
+        // List item height from list_item.rs
+        let item_height = px(48.0); // LIST_ITEM_HEIGHT
+
+        // Header bounds (includes padding + input + divider)
         bounds.push(
             ComponentBounds::new(
                 "Header",
@@ -1898,7 +1911,7 @@ impl ScriptListApp {
                 },
             )
             .with_type(ComponentType::Header)
-            .with_padding(BoxModel::symmetric(8.0, content_padding)),
+            .with_padding(BoxModel::symmetric(HEADER_PADDING_Y, content_padding)),
         );
 
         // Main content area (below header)
@@ -1918,9 +1931,9 @@ impl ScriptListApp {
             .with_padding(BoxModel::uniform(0.0)),
         );
 
-        // Add sample list items
+        // Add sample list items (using LIST_ITEM_HEIGHT = 48px)
         for i in 0..5 {
-            let item_top = content_top + px(i as f32 * 52.0);
+            let item_top = content_top + px(i as f32 * 48.0);
             if item_top + item_height > height {
                 break;
             }
@@ -1928,12 +1941,12 @@ impl ScriptListApp {
                 ComponentBounds::new(
                     format!("ListItem[{}]", i),
                     gpui::Bounds {
-                        origin: gpui::point(px(content_padding), item_top),
-                        size: gpui::size(list_width - px(content_padding * 2.0), item_height),
+                        origin: gpui::point(px(0.), item_top),
+                        size: gpui::size(list_width, item_height),
                     },
                 )
                 .with_type(ComponentType::ListItem)
-                .with_padding(BoxModel::symmetric(8.0, content_padding))
+                .with_padding(BoxModel::symmetric(12.0, content_padding))
                 .with_margin(BoxModel::uniform(0.0)),
             );
         }
@@ -1951,65 +1964,95 @@ impl ScriptListApp {
             .with_padding(BoxModel::uniform(content_padding)),
         );
 
-        // Input field (if visible in header)
+        // Input field in header
+        // Positioned at: px(HEADER_PADDING_X) = 16, py(HEADER_PADDING_Y) = 8
+        // The input is vertically centered in the header (which has 28px content height)
+        // Input height is ~22px (CURSOR_HEIGHT_LG=18 + CURSOR_MARGIN_Y*2=4)
+        const INPUT_HEIGHT: f32 = 22.0;
+        let input_x = px(content_padding);
+        let input_y = px(HEADER_PADDING_Y + (BUTTON_HEIGHT - INPUT_HEIGHT) / 2.0); // Vertically centered
+        // Input takes flex-1, estimate it takes most of the header width before buttons
+        // Buttons area is roughly: Run(50) + divider(20) + Actions(70) + divider(20) + Logo(16) + padding(16) = ~192px
+        let buttons_area_width = px(200.);
+        let input_width = width - px(content_padding) - buttons_area_width;
+
         bounds.push(
             ComponentBounds::new(
                 "SearchInput",
                 gpui::Bounds {
-                    origin: gpui::point(px(60.), px(10.)),
-                    size: gpui::size(px(200.), px(32.)),
+                    origin: gpui::point(input_x, input_y),
+                    size: gpui::size(input_width, px(INPUT_HEIGHT)),
                 },
             )
             .with_type(ComponentType::Input)
-            .with_padding(BoxModel::symmetric(6.0, 12.0)),
+            .with_padding(BoxModel::symmetric(0.0, 0.0)),
         );
 
         // Header buttons (right side)
-        let button_y = px(12.);
-        let button_height = px(28.);
+        // Buttons are h(28px) positioned at top of content area (after top padding)
+        let button_height = px(BUTTON_HEIGHT);
+        let button_y = px(HEADER_PADDING_Y); // Buttons at top of content area
 
-        // Run button
+        // Buttons layout from right to left:
+        // [SearchInput flex-1] [Run ~45px] [|] [Actions ~70px] [|] [Logo 16px] [padding 16px]
+        // Spacing: gap=12, divider ~8px each side = ~20px between groups
+        let logo_size = px(16.);
+        let right_padding = px(content_padding);
+
+        // Logo (Script Kit icon) - rightmost, 16x16 vertically centered in button area
+        let logo_x = width - right_padding - logo_size;
+        let logo_y = px(HEADER_PADDING_Y + (BUTTON_HEIGHT - 16.0) / 2.0); // Vertically centered
         bounds.push(
             ComponentBounds::new(
-                "RunButton",
+                "Lg", // Short name for Logo to fit in small space
                 gpui::Bounds {
-                    origin: gpui::point(width - px(200.), button_y),
-                    size: gpui::size(px(60.), button_height),
+                    origin: gpui::point(logo_x, logo_y),
+                    size: gpui::size(logo_size, logo_size),
+                },
+            )
+            .with_type(ComponentType::Other)
+            .with_padding(BoxModel::uniform(0.0)),
+        );
+
+        // Actions button - left of divider, left of logo
+        // Actual button text "Actions ⌘K" is roughly 80-90px wide
+        let actions_width = px(85.);
+        let actions_x = logo_x - px(24.) - actions_width; // ~24px for divider + spacing
+
+        bounds.push(
+            ComponentBounds::new(
+                "Actions", // Shortened from ActionsButton
+                gpui::Bounds {
+                    origin: gpui::point(actions_x, button_y),
+                    size: gpui::size(actions_width, button_height),
                 },
             )
             .with_type(ComponentType::Button)
-            .with_padding(BoxModel::symmetric(4.0, 12.0)),
+            .with_padding(BoxModel::symmetric(4.0, 8.0)),
         );
 
-        // Actions button
+        // Run button - left of divider, left of Actions
+        // Actual button text "Run ↵" is roughly 50-60px wide
+        let run_width = px(55.);
+        let run_x = actions_x - px(24.) - run_width; // ~24px for divider + spacing
+
         bounds.push(
             ComponentBounds::new(
-                "ActionsButton",
+                "Run", // Shortened from RunButton
                 gpui::Bounds {
-                    origin: gpui::point(width - px(130.), button_y),
-                    size: gpui::size(px(90.), button_height),
+                    origin: gpui::point(run_x, button_y),
+                    size: gpui::size(run_width, button_height),
                 },
             )
             .with_type(ComponentType::Button)
-            .with_padding(BoxModel::symmetric(4.0, 12.0)),
+            .with_padding(BoxModel::symmetric(4.0, 8.0)),
         );
 
-        // Play button
-        bounds.push(
-            ComponentBounds::new(
-                "PlayButton",
-                gpui::Bounds {
-                    origin: gpui::point(width - px(36.), button_y),
-                    size: gpui::size(px(28.), button_height),
-                },
-            )
-            .with_type(ComponentType::Button)
-            .with_padding(BoxModel::uniform(4.0)),
-        );
-
-        // Preview panel contents
-        let preview_left = list_width + px(content_padding);
-        let preview_width = width - list_width - px(content_padding * 2.0);
+        // Preview panel contents (right 50% of window)
+        // Preview has its own padding, content starts at list_width + padding
+        let preview_padding = 16.0_f32;
+        let preview_left = list_width + px(preview_padding);
+        let preview_width = width * 0.5 - px(preview_padding * 2.0);
 
         // Script path label (small text at top of preview)
         bounds.push(
@@ -2040,7 +2083,7 @@ impl ScriptListApp {
         // Description label
         bounds.push(
             ComponentBounds::new(
-                "DescriptionLabel",
+                "DescLabel", // Shortened
                 gpui::Bounds {
                     origin: gpui::point(preview_left, content_top + px(72.)),
                     size: gpui::size(px(80.), px(16.)),
@@ -2053,7 +2096,7 @@ impl ScriptListApp {
         // Description value
         bounds.push(
             ComponentBounds::new(
-                "DescriptionValue",
+                "DescValue", // Shortened
                 gpui::Bounds {
                     origin: gpui::point(preview_left, content_top + px(92.)),
                     size: gpui::size(preview_width, px(20.)),
@@ -2066,7 +2109,7 @@ impl ScriptListApp {
         // Code Preview label
         bounds.push(
             ComponentBounds::new(
-                "CodePreviewLabel",
+                "CodeLabel", // Shortened from CodePreviewLabel
                 gpui::Bounds {
                     origin: gpui::point(preview_left, content_top + px(130.)),
                     size: gpui::size(px(100.), px(16.)),
@@ -2090,8 +2133,10 @@ impl ScriptListApp {
         );
 
         // List item icons (left side of each list item)
+        // Icons are typically 24x24, positioned with some padding from left edge
+        // Item height is 48px, icon vertically centered: (48 - 24) / 2 = 12px from top
         for i in 0..5 {
-            let item_top = content_top + px(i as f32 * 52.0);
+            let item_top = content_top + px(i as f32 * 48.0);
             if item_top + item_height > height {
                 break;
             }
@@ -2099,12 +2144,12 @@ impl ScriptListApp {
                 ComponentBounds::new(
                     format!("Icon[{}]", i),
                     gpui::Bounds {
-                        origin: gpui::point(px(content_padding + 8.0), item_top + px(14.)),
+                        origin: gpui::point(px(content_padding), item_top + px(12.)),
                         size: gpui::size(px(24.), px(24.)),
                     },
                 )
                 .with_type(ComponentType::Other)
-                .with_padding(BoxModel::uniform(2.0)),
+                .with_padding(BoxModel::uniform(0.0)),
             );
         }
 
