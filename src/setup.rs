@@ -313,14 +313,98 @@ pub fn ensure_kit_setup() -> SetupResult {
 
     // App-managed: .gitignore (refresh if changed)
     let gitignore_path = kit_dir.join(".gitignore");
-    let gitignore_content = r#"# Script Kit managed files (may be regenerated on start)
+    let gitignore_content = r#"# Script Kit managed .gitignore
+# This file is regenerated on app start - edit with caution
+
+# =============================================================================
+# Node.js / Bun dependencies
+# =============================================================================
+# Root node_modules (for package.json at ~/.sk/kit/)
+node_modules/
+
+# Kit-specific node_modules (e.g., main/node_modules, examples/node_modules)
+*/node_modules/
+
+# Package manager files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+.pnpm-store/
+
+# =============================================================================
+# Databases
+# =============================================================================
+# SQLite databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Specific databases (redundant with *.db but explicit for clarity)
+db/
+clipboard-history.db
+notes.db
+ai-chats.db
+
+# =============================================================================
+# Runtime & Cache
+# =============================================================================
+# SDK is managed by the app, always regenerated
 sdk/
+
+# Application logs
 logs/
+
+# Cache files (app icons, etc.)
 cache/
-db/clipboard-history.db
+
+# Frecency tracking (regenerated from usage)
 frecency.json
+
+# Server state
 server.json
+
+# Authentication tokens
 agent-token
+
+# =============================================================================
+# Build & Tooling
+# =============================================================================
+# TypeScript build output
+*.tsbuildinfo
+dist/
+build/
+.turbo/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+._*
+
+# =============================================================================
+# Secrets & Environment
+# =============================================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# =============================================================================
+# Temporary files
+# =============================================================================
+*.tmp
+*.temp
+*.log
+tmp/
+temp/
 "#;
     write_string_if_changed(
         &gitignore_path,
