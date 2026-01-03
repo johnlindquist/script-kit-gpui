@@ -193,7 +193,11 @@ impl PromptContainer {
         // Semi-transparent border (60% opacity)
         let border_with_alpha = (colors.border << 8) | 0x60;
 
-        div().mx(px(margin)).h(px(1.)).bg(rgba(border_with_alpha))
+        // Use rems for margin (1.0rem = 16px at 16px base), keep px for 1px divider line
+        div()
+            .mx(rems(margin / 16.0))
+            .h(px(1.))
+            .bg(rgba(border_with_alpha))
     }
 
     /// Render the footer hint text
@@ -202,8 +206,8 @@ impl PromptContainer {
 
         div()
             .w_full()
-            .px(px(16.))
-            .py(px(8.))
+            .px(rems(1.0)) // 16px at 16px base
+            .py(rems(0.5)) // 8px at 16px base
             .flex()
             .items_center()
             .justify_center()
@@ -244,10 +248,11 @@ impl RenderOnce for PromptContainer {
         // Add divider if configured and header was present
         if config.show_divider && has_header {
             // Render divider inline to avoid borrow issues
+            // Use rems for margin, keep px for 1px divider line
             let border_with_alpha = (colors.border << 8) | 0x60;
             container = container.child(
                 div()
-                    .mx(px(config.divider_margin))
+                    .mx(rems(config.divider_margin / 16.0))
                     .h(px(1.))
                     .bg(rgba(border_with_alpha)),
             );
@@ -265,11 +270,12 @@ impl RenderOnce for PromptContainer {
             container = container.child(footer);
         } else if let Some(ref hint) = config.hint_text {
             // Render hint inline to avoid borrow issues
+            // Use rems for padding (1.0rem = 16px, 0.5rem = 8px at 16px base)
             container = container.child(
                 div()
                     .w_full()
-                    .px(px(16.))
-                    .py(px(8.))
+                    .px(rems(1.0))
+                    .py(rems(0.5))
                     .flex()
                     .items_center()
                     .justify_center()

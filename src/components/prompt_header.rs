@@ -358,7 +358,7 @@ impl PromptHeader {
         container = container.child(primary_btn);
         container = container.child(
             div()
-                .mx(px(4.))
+                .mx(rems(0.25))
                 .text_color(rgba((colors.text_dimmed << 8) | 0x60))
                 .text_sm()
                 .child("|"),
@@ -380,7 +380,7 @@ impl PromptHeader {
             container = container.child(actions_btn);
             container = container.child(
                 div()
-                    .mx(px(4.))
+                    .mx(rems(0.25))
                     .text_color(rgba((colors.text_dimmed << 8) | 0x60))
                     .text_sm()
                     .child("|"),
@@ -415,14 +415,14 @@ impl PromptHeader {
             .w(px(130.))
             .min_w(px(130.))
             .max_w(px(130.))
-            .h(px(24.))
-            .min_h(px(24.))
-            .max_h(px(24.))
+            .h(rems(1.5))
+            .min_h(rems(1.5))
+            .max_h(rems(1.5))
             .overflow_hidden()
             .flex()
             .flex_row()
             .items_center()
-            .px(px(8.))
+            .px(rems(0.5))
             .rounded(px(4.))
             .bg(rgba(
                 (colors.search_box_bg << 8) | if search_is_empty { 0x40 } else { 0x80 },
@@ -443,7 +443,7 @@ impl PromptHeader {
             search_input = search_input.child(
                 div()
                     .w(px(2.))
-                    .h(px(14.))
+                    .h(rems(0.875))
                     .mr(px(2.))
                     .rounded(px(1.))
                     .bg(cursor_bg),
@@ -457,7 +457,7 @@ impl PromptHeader {
             search_input = search_input.child(
                 div()
                     .w(px(2.))
-                    .h(px(14.))
+                    .h(rems(0.875))
                     .ml(px(2.))
                     .rounded(px(1.))
                     .bg(cursor_bg),
@@ -469,7 +469,7 @@ impl PromptHeader {
             .flex_row()
             .items_center()
             .justify_end()
-            .gap(px(8.))
+            .gap(rems(0.5))
             // ⌘K indicator
             .child(
                 div()
@@ -481,7 +481,7 @@ impl PromptHeader {
             .child(search_input)
             .child(
                 div()
-                    .mx(px(4.))
+                    .mx(rems(0.25))
                     .text_color(rgba((colors.text_dimmed << 8) | 0x60))
                     .text_sm()
                     .child("|"),
@@ -492,7 +492,7 @@ impl PromptHeader {
     fn render_logo(&self) -> impl IntoElement {
         svg()
             .external_path(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo.svg"))
-            .size(px(16.))
+            .size(rems(1.0))
             .text_color(rgb(self.colors.accent))
     }
 }
@@ -546,19 +546,19 @@ impl RenderOnce for PromptHeader {
 
         div()
             .w_full()
-            .px(px(16.))
-            .py(px(8.))
+            .px(rems(1.0))
+            .py(rems(0.5))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(12.))
+            .gap(rems(0.75))
             // Search input area
             .child(self.render_input_area())
             // CLS-free actions area with stacked layers
             .child(
                 div()
                     .relative()
-                    .h(px(28.))
+                    .h(rems(1.75))
                     .flex()
                     .items_center()
                     .child(buttons_layer)

@@ -333,41 +333,41 @@ impl RenderOnce for Toast {
             .flex()
             .flex_col()
             .w_full()
-            .max_w(px(400.))
+            .max_w(rems(25.)) // 400px at 16px base
             .bg(rgba((colors.background << 8) | 0xF0)) // 94% opacity
-            .border_l(px(4.))
+            .border_l(px(4.)) // Keep borders as px
             .border_color(rgb(colors.border))
-            .rounded(px(8.))
+            .rounded(px(8.)) // Keep border-radius as px
             .shadow_md()
             .overflow_hidden()
             // Apply transition opacity
             .opacity(transition.opacity.value())
             // Apply transition offset via top margin (positive y = down, negative = up)
-            .mt(px(transition.offset.y));
+            .mt(px(transition.offset.y)); // Keep animation offset as px
 
         // Content row (icon, message, actions, dismiss)
         let content_row = div()
             .flex()
             .flex_row()
             .items_start()
-            .gap(px(12.))
-            .px(px(16.))
-            .py(px(12.));
+            .gap(rems(0.75)) // 12px at 16px base
+            .px(rems(1.0)) // 16px at 16px base
+            .py(rems(0.75)); // 12px at 16px base
 
-        // Icon
+        // Icon - keep as px for fixed icon container size
         let icon = div()
             .flex()
             .items_center()
             .justify_center()
-            .w(px(24.))
-            .h(px(24.))
+            .w(px(24.)) // Fixed icon size
+            .h(px(24.)) // Fixed icon size
             .text_lg()
             .text_color(rgb(colors.icon))
             .font_weight(FontWeight::BOLD)
             .child(variant.icon());
 
         // Message and actions column
-        let mut message_col = div().flex().flex_col().flex_1().gap(px(8.));
+        let mut message_col = div().flex().flex_col().flex_1().gap(rems(0.5)); // 8px at 16px base
 
         // Message text
         let message_text = div()
@@ -380,15 +380,15 @@ impl RenderOnce for Toast {
 
         // Actions row (if any)
         if !self.actions.is_empty() {
-            let mut actions_row = div().flex().flex_row().gap(px(8.)).mt(px(4.));
+            let mut actions_row = div().flex().flex_row().gap(rems(0.5)).mt(rems(0.25)); // 8px gap, 4px margin at 16px base
 
             for action in self.actions {
                 let callback = action.callback.clone();
                 let action_btn = div()
                     .id(ElementId::Name(action.label.clone()))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(4.))
+                    .px(rems(0.5)) // 8px at 16px base
+                    .py(rems(0.25)) // 4px at 16px base
+                    .rounded(px(4.)) // Keep border-radius as px
                     .bg(rgba((colors.action_background << 8) | 0x80))
                     .text_xs()
                     .text_color(rgb(colors.action_text))
@@ -437,9 +437,9 @@ impl RenderOnce for Toast {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .w(px(20.))
-                    .h(px(20.))
-                    .rounded(px(4.))
+                    .w(rems(1.25)) // 20px at 16px base - interactive element scales
+                    .h(rems(1.25)) // 20px at 16px base
+                    .rounded(px(4.)) // Keep border-radius as px
                     .text_sm()
                     .text_color(rgb(colors.dismiss))
                     .cursor_pointer()
@@ -470,8 +470,8 @@ impl RenderOnce for Toast {
             if let Some(details_text) = self.details {
                 let details_section = div()
                     .w_full()
-                    .px(px(16.))
-                    .py(px(12.))
+                    .px(rems(1.0)) // 16px at 16px base
+                    .py(rems(0.75)) // 12px at 16px base
                     .bg(rgba(0x00000020))
                     .border_t_1()
                     .border_color(rgba((colors.border << 8) | 0x40))

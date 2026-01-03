@@ -627,8 +627,8 @@ impl Render for FormTextField {
             },
         );
 
-        // Build cursor element
-        let cursor_element = div().w(px(2.)).h(px(18.)).bg(rgb(colors.cursor));
+        // Build cursor element (2px width is fixed for crisp rendering)
+        let cursor_element = div().w(px(2.)).h(rems(1.125)).bg(rgb(colors.cursor));
 
         // Build text content based on value and focus state
         let text_content: Div = if has_value {
@@ -680,14 +680,14 @@ impl Render for FormTextField {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(12.))
+            .gap(rems(0.75))
             .w_full();
 
         // Add label if present - fixed width for alignment
         if let Some(label_text) = label {
             container = container.child(
                 div()
-                    .w(px(120.))
+                    .w(rems(7.5))
                     .text_sm()
                     .text_color(rgb(colors.label))
                     .font_weight(FontWeight::MEDIUM)
@@ -718,8 +718,8 @@ impl Render for FormTextField {
                 .flex_row()
                 .items_center()
                 .flex_1()
-                .h(px(36.))
-                .px(px(12.))
+                .h(rems(2.25))
+                .px(rems(0.75))
                 .bg(bg_color)
                 .border_1()
                 .border_color(border_color)
@@ -1158,8 +1158,8 @@ impl Render for FormTextArea {
             rgba((colors.background << 8) | 0x80)
         };
 
-        // Calculate height based on rows (approx 24px per row)
-        let height = (rows as f32) * 24.0 + 16.0; // Add padding
+        // Calculate height based on rows (1.5rem per row + 1rem padding)
+        let height_rems = (rows as f32) * 1.5 + 1.0;
 
         let field_name = self.field.name.clone();
         let field_name_for_log = field_name.clone();
@@ -1222,15 +1222,15 @@ impl Render for FormTextArea {
             .flex()
             .flex_row()
             .items_start() // Align label to top of textarea
-            .gap(px(12.))
+            .gap(rems(0.75))
             .w_full();
 
         // Add label if present - fixed width for alignment
         if let Some(label_text) = label {
             container = container.child(
                 div()
-                    .w(px(120.))
-                    .pt(px(8.)) // Align with textarea padding
+                    .w(rems(7.5))
+                    .pt(rems(0.5)) // Align with textarea padding
                     .text_sm()
                     .text_color(rgb(colors.label))
                     .font_weight(FontWeight::MEDIUM)
@@ -1248,9 +1248,9 @@ impl Render for FormTextArea {
                 .flex()
                 .flex_col()
                 .flex_1()
-                .h(px(height))
-                .px(px(12.))
-                .py(px(8.))
+                .h(rems(height_rems))
+                .px(rems(0.75))
+                .py(rems(0.5))
                 .bg(bg_color)
                 .border_1()
                 .border_color(border_color)
@@ -1387,8 +1387,8 @@ impl Render for FormCheckbox {
             .flex()
             .items_center()
             .justify_center()
-            .w(px(18.))
-            .h(px(18.))
+            .w(rems(1.125))
+            .h(rems(1.125))
             .bg(box_bg)
             .border_1()
             .border_color(border_color)
@@ -1415,21 +1415,21 @@ impl Render for FormCheckbox {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(12.))
+            .gap(rems(0.75))
             .w_full()
             .cursor_pointer()
             .on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
                 this.toggle(cx);
             }))
             // Empty label area for alignment with other fields
-            .child(div().w(px(120.)))
+            .child(div().w(rems(7.5)))
             // Checkbox and label group
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(rems(0.5))
                     // Checkbox box
                     .child(checkbox_box)
                     // Label

@@ -1797,7 +1797,7 @@ pub fn get_grouped_results(
         return (grouped, results);
     }
 
-    // Grouped view mode: create RECENT and MAIN sections
+    // Grouped view mode: create RECENT and type-based sections
     let mut grouped = Vec::new();
 
     // Get recent items from frecency store
@@ -1824,9 +1824,12 @@ pub fn get_grouped_results(
         }
     };
 
-    // Find indices of results that are "recent"
+    // Find indices of results that are "recent" and categorize non-recent by type
     let mut recent_indices: Vec<(usize, f64)> = Vec::new();
-    let mut main_indices: Vec<usize> = Vec::new();
+    let mut scripts_indices: Vec<usize> = Vec::new();
+    let mut scriptlets_indices: Vec<usize> = Vec::new();
+    let mut commands_indices: Vec<usize> = Vec::new();
+    let mut apps_indices: Vec<usize> = Vec::new();
 
     for (idx, result) in results.iter().enumerate() {
         if let Some(path) = get_result_path(result) {
@@ -1834,10 +1837,24 @@ pub fn get_grouped_results(
             if score > 0.0 && recent_paths.contains(&path) {
                 recent_indices.push((idx, score));
             } else {
-                main_indices.push(idx);
+                // Categorize by SearchResult variant
+                match result {
+                    SearchResult::Script(_) => scripts_indices.push(idx),
+                    SearchResult::Scriptlet(_) => scriptlets_indices.push(idx),
+                    SearchResult::BuiltIn(_) | SearchResult::Window(_) => {
+                        commands_indices.push(idx)
+                    }
+                    SearchResult::App(_) => apps_indices.push(idx),
+                }
             }
         } else {
-            main_indices.push(idx);
+            // If no path, categorize by type (shouldn't happen, but handle gracefully)
+            match result {
+                SearchResult::Script(_) => scripts_indices.push(idx),
+                SearchResult::Scriptlet(_) => scriptlets_indices.push(idx),
+                SearchResult::BuiltIn(_) | SearchResult::Window(_) => commands_indices.push(idx),
+                SearchResult::App(_) => apps_indices.push(idx),
+            }
         }
     }
 
@@ -1847,15 +1864,22 @@ pub fn get_grouped_results(
     // Limit recent items to max_recent_items
     recent_indices.truncate(max_recent_items);
 
-    // Sort main items alphabetically by name (case-insensitive)
-    main_indices.sort_by(|&a, &b| {
-        results[a]
-            .name()
-            .to_lowercase()
-            .cmp(&results[b].name().to_lowercase())
-    });
+    // Sort each type section alphabetically by name (case-insensitive)
+    let sort_alphabetically = |indices: &mut Vec<usize>| {
+        indices.sort_by(|&a, &b| {
+            results[a]
+                .name()
+                .to_lowercase()
+                .cmp(&results[b].name().to_lowercase())
+        });
+    };
 
-    // Build grouped list
+    sort_alphabetically(&mut scripts_indices);
+    sort_alphabetically(&mut scriptlets_indices);
+    sort_alphabetically(&mut commands_indices);
+    sort_alphabetically(&mut apps_indices);
+
+    // Build grouped list: RECENT first, then SCRIPTS, SCRIPTLETS, COMMANDS, APPS
     if !recent_indices.is_empty() {
         grouped.push(GroupedListItem::SectionHeader("RECENT".to_string()));
         for (idx, _score) in &recent_indices {
@@ -1863,22 +1887,42 @@ pub fn get_grouped_results(
         }
     }
 
-    // Always add MAIN section if there are any items
-    if !main_indices.is_empty() || !recent_indices.is_empty() {
-        grouped.push(GroupedListItem::SectionHeader("MAIN".to_string()));
-        for idx in main_indices {
-            grouped.push(GroupedListItem::Item(idx));
+    if !scripts_indices.is_empty() {
+        grouped.push(GroupedListItem::SectionHeader("SCRIPTS".to_string()));
+        for idx in &scripts_indices {
+            grouped.push(GroupedListItem::Item(*idx));
+        }
+    }
+
+    if !scriptlets_indices.is_empty() {
+        grouped.push(GroupedListItem::SectionHeader("SCRIPTLETS".to_string()));
+        for idx in &scriptlets_indices {
+            grouped.push(GroupedListItem::Item(*idx));
+        }
+    }
+
+    if !commands_indices.is_empty() {
+        grouped.push(GroupedListItem::SectionHeader("COMMANDS".to_string()));
+        for idx in &commands_indices {
+            grouped.push(GroupedListItem::Item(*idx));
+        }
+    }
+
+    if !apps_indices.is_empty() {
+        grouped.push(GroupedListItem::SectionHeader("APPS".to_string()));
+        for idx in &apps_indices {
+            grouped.push(GroupedListItem::Item(*idx));
         }
     }
 
     debug!(
         recent_count = recent_indices.len(),
-        main_count = grouped
-            .len()
-            .saturating_sub(recent_indices.len())
-            .saturating_sub(if recent_indices.is_empty() { 1 } else { 2 }),
+        scripts_count = scripts_indices.len(),
+        scriptlets_count = scriptlets_indices.len(),
+        commands_count = commands_indices.len(),
+        apps_count = apps_indices.len(),
         total_grouped = grouped.len(),
-        "Grouped view: created RECENT/MAIN sections"
+        "Grouped view: created type-based sections"
     );
 
     (grouped, results)

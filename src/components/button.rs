@@ -191,16 +191,21 @@ impl RenderOnce for Button {
         // Build shortcut element if present - smaller than label, same accent color
         // Use flex + items_center to ensure vertical alignment with the label
         let shortcut_element = if let Some(sc) = self.shortcut {
-            div().flex().items_center().text_xs().ml(px(4.)).child(sc)
+            div()
+                .flex()
+                .items_center()
+                .text_xs()
+                .ml(rems(0.25))
+                .child(sc)
         } else {
             div()
         };
 
-        // Determine padding based on variant
+        // Determine padding based on variant (rem-relative for consistent scaling)
         let (px_val, py_val) = match variant {
-            ButtonVariant::Primary => (px(12.), px(6.)),
-            ButtonVariant::Ghost => (px(8.), px(4.)),
-            ButtonVariant::Icon => (px(6.), px(6.)),
+            ButtonVariant::Primary => (rems(0.75), rems(0.375)), // 12px, 6px at 16px base
+            ButtonVariant::Ghost => (rems(0.5), rems(0.25)),     // 8px, 4px at 16px base
+            ButtonVariant::Icon => (rems(0.375), rems(0.375)),   // 6px, 6px at 16px base
         };
 
         // Build the button element
@@ -210,13 +215,13 @@ impl RenderOnce for Button {
             .flex_row()
             .items_center()
             .justify_center()
-            .gap(px(2.))
+            .gap(rems(0.125))
             .px(px_val)
             .py(py_val)
             .rounded(px(6.))
             .bg(bg_color)
             .text_color(text_color)
-            .text_size(px(13.))
+            .text_sm()
             .font_weight(FontWeight::MEDIUM)
             .font_family(".AppleSystemUIFont")
             .cursor_pointer()
