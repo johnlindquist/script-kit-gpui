@@ -606,6 +606,110 @@ impl ScriptletData {
     }
 }
 
+// ============================================================
+// DEBUG GRID OVERLAY
+// ============================================================
+
+/// Options for the debug grid overlay
+///
+/// Used with ShowGrid message to configure the visual debugging overlay
+/// that displays grid lines, component bounds, and alignment guides.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GridOptions {
+    /// Grid line spacing in pixels (8 or 16)
+    #[serde(default = "default_grid_size")]
+    pub grid_size: u32,
+
+    /// Show component bounding boxes with labels
+    #[serde(default)]
+    pub show_bounds: bool,
+
+    /// Show CSS box model (padding/margin) visualization
+    #[serde(default)]
+    pub show_box_model: bool,
+
+    /// Show alignment guides between components
+    #[serde(default)]
+    pub show_alignment_guides: bool,
+
+    /// Which components to show bounds for
+    /// - "prompts": Top-level prompts only
+    /// - "all": All rendered elements
+    /// - ["name1", "name2"]: Specific component names
+    #[serde(default)]
+    pub depth: GridDepthOption,
+
+    /// Optional custom color scheme
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<GridColorScheme>,
+}
+
+fn default_grid_size() -> u32 {
+    8
+}
+
+/// Depth option for grid bounds display
+///
+/// Controls which components have their bounding boxes shown.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum GridDepthOption {
+    /// Preset mode: "prompts" or "all"
+    Preset(String),
+    /// Specific component names to show bounds for
+    Components(Vec<String>),
+}
+
+impl Default for GridDepthOption {
+    fn default() -> Self {
+        GridDepthOption::Preset("prompts".to_string())
+    }
+}
+
+/// Custom color scheme for the debug grid overlay
+///
+/// All colors are in "#RRGGBBAA" or "#RRGGBB" hex format.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GridColorScheme {
+    /// Color for grid lines
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid_lines: Option<String>,
+
+    /// Color for prompt bounding boxes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_bounds: Option<String>,
+
+    /// Color for input bounding boxes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_bounds: Option<String>,
+
+    /// Color for button bounding boxes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub button_bounds: Option<String>,
+
+    /// Color for list bounding boxes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_bounds: Option<String>,
+
+    /// Fill color for padding visualization
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub padding_fill: Option<String>,
+
+    /// Fill color for margin visualization
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_fill: Option<String>,
+
+    /// Color for alignment guide lines
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alignment_guide: Option<String>,
+}
+
+// ============================================================
+// ERROR DATA
+// ============================================================
+
 /// Script error data for structured error reporting
 ///
 /// Sent when a script execution fails, providing detailed error information

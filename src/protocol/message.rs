@@ -762,6 +762,24 @@ pub enum Message {
     },
 
     // ============================================================
+    // DEBUG/VISUAL TESTING
+    // ============================================================
+    /// Show the debug grid overlay with options
+    ///
+    /// Displays a grid overlay for visual debugging and layout verification.
+    /// The grid shows alignment lines, component bounds, and box model visualization.
+    #[serde(rename = "showGrid")]
+    ShowGrid {
+        /// Grid configuration options (flattened into the message)
+        #[serde(flatten)]
+        options: GridOptions,
+    },
+
+    /// Hide the debug grid overlay
+    #[serde(rename = "hideGrid")]
+    HideGrid,
+
+    // ============================================================
     // ACTIONS API
     // ============================================================
     /// Set actions to display in the ActionsDialog (incoming from SDK)
@@ -1778,5 +1796,26 @@ impl Message {
     /// Create a SetInput message
     pub fn set_input(text: String) -> Self {
         Message::SetInput { text }
+    }
+
+    // ============================================================
+    // Constructor methods for debug grid
+    // ============================================================
+
+    /// Create a ShowGrid message with default options
+    pub fn show_grid() -> Self {
+        Message::ShowGrid {
+            options: GridOptions::default(),
+        }
+    }
+
+    /// Create a ShowGrid message with custom options
+    pub fn show_grid_with_options(options: GridOptions) -> Self {
+        Message::ShowGrid { options }
+    }
+
+    /// Create a HideGrid message
+    pub fn hide_grid() -> Self {
+        Message::HideGrid
     }
 }

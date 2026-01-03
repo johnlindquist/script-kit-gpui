@@ -34,7 +34,6 @@ mod components;
 mod config;
 mod designs;
 mod editor;
-mod editor_v2;
 mod error;
 mod executor;
 mod filter_coalescer;
@@ -118,6 +117,9 @@ mod scheduler;
 // HUD manager - system-level overlay notifications (separate floating windows)
 mod hud_manager;
 
+// Debug grid overlay for visual testing
+mod debug_grid;
+
 // MCP Server modules for AI agent integration
 mod mcp_kit_tools;
 mod mcp_protocol;
@@ -140,7 +142,6 @@ use crate::navigation::{NavCoalescer, NavDirection, NavRecord};
 use crate::toast_manager::{PendingToast, ToastManager};
 use components::ToastVariant;
 use editor::EditorPrompt;
-use editor_v2::EditorPromptV2;
 use prompts::{
     ContainerOptions, ContainerPadding, DivPrompt, DropPrompt, EnvPrompt, PathInfo, PathPrompt,
     SelectPrompt, TemplatePrompt,
@@ -310,20 +311,11 @@ enum AppView {
         id: String,
         entity: Entity<term_prompt::TermPrompt>,
     },
-    /// Showing an editor prompt from a script (legacy - keeping for backward compatibility)
-    #[allow(dead_code)]
+    /// Showing an editor prompt from a script (gpui-component based with Find/Replace)
     EditorPrompt {
         #[allow(dead_code)]
         id: String,
         entity: Entity<EditorPrompt>,
-        /// Separate focus handle for the editor (not shared with parent)
-        focus_handle: FocusHandle,
-    },
-    /// Showing an editor prompt v2 (gpui-component based with Find/Replace)
-    EditorPromptV2 {
-        #[allow(dead_code)]
-        id: String,
-        entity: Entity<EditorPromptV2>,
         /// Separate focus handle for the editor (not shared with parent)
         /// Note: This is kept for API compatibility but focus is managed via entity.focus()
         #[allow(dead_code)]
@@ -529,6 +521,12 @@ enum PromptMessage {
     SetActions {
         actions: Vec<protocol::ProtocolAction>,
     },
+    /// Show the debug grid overlay
+    ShowGrid {
+        options: protocol::GridOptions,
+    },
+    /// Hide the debug grid overlay
+    HideGrid,
 }
 
 struct ScriptListApp {
@@ -649,6 +647,8 @@ struct ScriptListApp {
     sdk_actions: Option<Vec<protocol::ProtocolAction>>,
     /// SDK action shortcuts: normalized_shortcut -> action_name (for O(1) lookup)
     action_shortcuts: std::collections::HashMap<String, String>,
+    /// Debug grid overlay configuration (None = hidden)
+    grid_config: Option<debug_grid::GridConfig>,
     // Navigation coalescing for rapid arrow key events (20ms window)
     nav_coalescer: NavCoalescer,
     // Window focus tracking - for detecting focus lost and auto-dismissing prompts
@@ -729,17 +729,8 @@ impl Render for ScriptListApp {
         // Only enforce focus when the main window is currently focused.
         if is_window_focused {
             match &self.current_view {
-                AppView::EditorPrompt { focus_handle, .. } => {
-                    // EditorPrompt (legacy) has its own focus handle - focus it
-                    let is_focused = focus_handle.is_focused(window);
-                    if !is_focused {
-                        // Clone focus handle to satisfy borrow checker
-                        let fh = focus_handle.clone();
-                        window.focus(&fh, cx);
-                    }
-                }
-                AppView::EditorPromptV2 { entity, .. } => {
-                    // EditorPromptV2 uses gpui-component's Input which has its own internal
+                AppView::EditorPrompt { entity, .. } => {
+                    // EditorPrompt uses gpui-component's Input which has its own internal
                     // focus handle. But if actions dialog is showing, focus the dialog instead.
                     if self.show_actions_popup {
                         if let Some(ref dialog) = self.actions_dialog {
@@ -825,45 +816,99 @@ impl Render for ScriptListApp {
         // HUD is now handled by hud_manager as a separate floating window
         // No need to render it as part of this view
         let current_view = self.current_view.clone();
-        match current_view {
-            AppView::ScriptList => self.render_script_list(cx),
+        let main_content: AnyElement = match current_view {
+            AppView::ScriptList => self.render_script_list(cx).into_any_element(),
             AppView::ActionsDialog => self.render_actions_dialog(cx),
             AppView::ArgPrompt {
                 id,
                 placeholder,
                 choices,
                 actions,
-            } => self.render_arg_prompt(id, placeholder, choices, actions, cx),
-            AppView::DivPrompt { entity, .. } => self.render_div_prompt(entity, cx),
-            AppView::FormPrompt { entity, .. } => self.render_form_prompt(entity, cx),
-            AppView::TermPrompt { entity, .. } => self.render_term_prompt(entity, cx),
-            AppView::EditorPrompt { entity, .. } => self.render_editor_prompt(entity, cx),
-            AppView::EditorPromptV2 { entity, .. } => self.render_editor_prompt_v2(entity, cx),
-            AppView::SelectPrompt { entity, .. } => self.render_select_prompt(entity, cx),
-            AppView::PathPrompt { entity, .. } => self.render_path_prompt(entity, cx),
-            AppView::EnvPrompt { entity, .. } => self.render_env_prompt(entity, cx),
-            AppView::DropPrompt { entity, .. } => self.render_drop_prompt(entity, cx),
-            AppView::TemplatePrompt { entity, .. } => self.render_template_prompt(entity, cx),
+            } => self
+                .render_arg_prompt(id, placeholder, choices, actions, cx)
+                .into_any_element(),
+            AppView::DivPrompt { entity, .. } => {
+                self.render_div_prompt(entity, cx).into_any_element()
+            }
+            AppView::FormPrompt { entity, .. } => {
+                self.render_form_prompt(entity, cx).into_any_element()
+            }
+            AppView::TermPrompt { entity, .. } => {
+                self.render_term_prompt(entity, cx).into_any_element()
+            }
+            AppView::EditorPrompt { entity, .. } => {
+                self.render_editor_prompt(entity, cx).into_any_element()
+            }
+            AppView::SelectPrompt { entity, .. } => {
+                self.render_select_prompt(entity, cx).into_any_element()
+            }
+            AppView::PathPrompt { entity, .. } => {
+                self.render_path_prompt(entity, cx).into_any_element()
+            }
+            AppView::EnvPrompt { entity, .. } => {
+                self.render_env_prompt(entity, cx).into_any_element()
+            }
+            AppView::DropPrompt { entity, .. } => {
+                self.render_drop_prompt(entity, cx).into_any_element()
+            }
+            AppView::TemplatePrompt { entity, .. } => {
+                self.render_template_prompt(entity, cx).into_any_element()
+            }
             AppView::ClipboardHistoryView {
                 entries,
                 filter,
                 selected_index,
-            } => self.render_clipboard_history(entries, filter, selected_index, cx),
+            } => self
+                .render_clipboard_history(entries, filter, selected_index, cx)
+                .into_any_element(),
             AppView::AppLauncherView {
                 apps,
                 filter,
                 selected_index,
-            } => self.render_app_launcher(apps, filter, selected_index, cx),
+            } => self
+                .render_app_launcher(apps, filter, selected_index, cx)
+                .into_any_element(),
             AppView::WindowSwitcherView {
                 windows,
                 filter,
                 selected_index,
-            } => self.render_window_switcher(windows, filter, selected_index, cx),
+            } => self
+                .render_window_switcher(windows, filter, selected_index, cx)
+                .into_any_element(),
             AppView::DesignGalleryView {
                 filter,
                 selected_index,
-            } => self.render_design_gallery(filter, selected_index, cx),
-        }
+            } => self
+                .render_design_gallery(filter, selected_index, cx)
+                .into_any_element(),
+        };
+
+        // Wrap content in a container that can have the debug grid overlay
+        let window_bounds = window.bounds();
+        let window_size = gpui::size(window_bounds.size.width, window_bounds.size.height);
+
+        // Clone grid_config for use in the closure
+        let grid_config = self.grid_config.clone();
+
+        // Build component bounds for the current view (for debug overlay)
+        let component_bounds = self.build_component_bounds(window_size);
+
+        div()
+            .w_full()
+            .h_full()
+            .relative()
+            .child(main_content)
+            .when_some(grid_config, |container, config| {
+                let overlay_bounds = gpui::Bounds {
+                    origin: gpui::point(px(0.), px(0.)),
+                    size: window_size,
+                };
+                container.child(debug_grid::render_grid_overlay(
+                    &config,
+                    overlay_bounds,
+                    &component_bounds,
+                ))
+            })
     }
 }
 
@@ -1879,6 +1924,25 @@ fn main() {
                             ExternalCommand::SetAiInput { text, submit } => {
                                 logging::log("STDIN", &format!("Setting AI input to: {} (submit={})", text, submit));
                                 ai::set_ai_input(ctx, &text, submit);
+                            }
+                            ExternalCommand::ShowGrid { grid_size, show_bounds, show_box_model, show_alignment_guides, ref depth } => {
+                                logging::log("STDIN", &format!(
+                                    "ShowGrid: size={}, bounds={}, box_model={}, guides={}, depth={:?}",
+                                    grid_size, show_bounds, show_box_model, show_alignment_guides, depth
+                                ));
+                                let options = protocol::GridOptions {
+                                    grid_size,
+                                    show_bounds,
+                                    show_box_model,
+                                    show_alignment_guides,
+                                    depth: depth.clone(),
+                                    color_scheme: None,
+                                };
+                                view.show_grid(options, ctx);
+                            }
+                            ExternalCommand::HideGrid => {
+                                logging::log("STDIN", "HideGrid: hiding debug grid overlay");
+                                view.hide_grid(ctx);
                             }
                         }
                         ctx.notify();

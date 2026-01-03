@@ -247,6 +247,13 @@ impl ScriptListApp {
             // SDK actions - starts empty, populated by setActions() from scripts
             sdk_actions: None,
             action_shortcuts: std::collections::HashMap::new(),
+            // Debug grid overlay - check env var at startup
+            grid_config: if std::env::var("SCRIPT_KIT_DEBUG_GRID").is_ok() {
+                logging::log("DEBUG_GRID", "SCRIPT_KIT_DEBUG_GRID env var set - enabling grid overlay");
+                Some(debug_grid::GridConfig::default())
+            } else {
+                None
+            },
             // Navigation coalescing for rapid arrow key events
             nav_coalescer: NavCoalescer::new(),
             // Window focus tracking - for detecting focus lost and auto-dismissing prompts
@@ -880,7 +887,7 @@ impl ScriptListApp {
             }
             AppView::DivPrompt { .. } => (ViewType::DivPrompt, 0),
             AppView::FormPrompt { .. } => (ViewType::DivPrompt, 0), // Use DivPrompt size for forms
-            AppView::EditorPrompt { .. } | AppView::EditorPromptV2 { .. } => {
+            AppView::EditorPrompt { .. } => {
                 (ViewType::EditorPrompt, 0)
             }
             AppView::SelectPrompt { .. } => (ViewType::ArgPromptWithChoices, 0),
@@ -1796,7 +1803,7 @@ impl ScriptListApp {
     fn is_dismissable_view(&self) -> bool {
         !matches!(
             self.current_view,
-            AppView::TermPrompt { .. } | AppView::EditorPrompt { .. } | AppView::EditorPromptV2 { .. }
+            AppView::TermPrompt { .. } | AppView::EditorPrompt { .. }
         )
     }
 
@@ -1813,6 +1820,295 @@ impl ScriptListApp {
         // Delegate to the HUD manager which creates a separate floating window
         // This ensures the HUD is visible even when the main app window is hidden
         hud_manager::show_hud(text, duration_ms, cx);
+    }
+
+    /// Show the debug grid overlay with specified options
+    ///
+    /// This method converts protocol::GridOptions to debug_grid::GridConfig
+    /// and enables the grid overlay rendering.
+    fn show_grid(&mut self, options: protocol::GridOptions, cx: &mut Context<Self>) {
+        use debug_grid::{GridColorScheme, GridConfig, GridDepth};
+        use protocol::GridDepthOption;
+
+        // Convert protocol depth to debug_grid depth
+        let depth = match &options.depth {
+            GridDepthOption::Preset(s) if s == "all" => GridDepth::All,
+            GridDepthOption::Preset(_) => GridDepth::Prompts,
+            GridDepthOption::Components(names) => GridDepth::Components(names.clone()),
+        };
+
+        self.grid_config = Some(GridConfig {
+            grid_size: options.grid_size,
+            show_bounds: options.show_bounds,
+            show_box_model: options.show_box_model,
+            show_alignment_guides: options.show_alignment_guides,
+            depth,
+            color_scheme: GridColorScheme::default(),
+        });
+
+        logging::log(
+            "DEBUG_GRID",
+            &format!(
+                "Grid overlay enabled: size={}, bounds={}, box_model={}, guides={}",
+                options.grid_size,
+                options.show_bounds,
+                options.show_box_model,
+                options.show_alignment_guides
+            ),
+        );
+
+        cx.notify();
+    }
+
+    /// Hide the debug grid overlay
+    fn hide_grid(&mut self, cx: &mut Context<Self>) {
+        self.grid_config = None;
+        logging::log("DEBUG_GRID", "Grid overlay hidden");
+        cx.notify();
+    }
+
+    /// Build component bounds for the debug grid overlay based on current view
+    ///
+    /// This creates approximate bounds for major UI components based on our
+    /// known layout structure. Since GPUI doesn't expose layout bounds at runtime,
+    /// we calculate them based on our layout constants.
+    fn build_component_bounds(
+        &self,
+        window_size: gpui::Size<gpui::Pixels>,
+    ) -> Vec<debug_grid::ComponentBounds> {
+        use debug_grid::{BoxModel, ComponentBounds, ComponentType};
+
+        let mut bounds = Vec::new();
+        let width = window_size.width;
+        let height = window_size.height;
+
+        // Layout constants (matching our actual layout)
+        let header_height = px(52.);
+        let list_width = px(300.); // Approximate left panel width
+        let content_padding = 12.0_f32;
+        let item_height = px(52.);
+
+        // Header bounds
+        bounds.push(
+            ComponentBounds::new(
+                "Header",
+                gpui::Bounds {
+                    origin: gpui::point(px(0.), px(0.)),
+                    size: gpui::size(width, header_height),
+                },
+            )
+            .with_type(ComponentType::Header)
+            .with_padding(BoxModel::symmetric(8.0, content_padding)),
+        );
+
+        // Main content area (below header)
+        let content_top = header_height;
+        let content_height = height - header_height;
+
+        // Script list panel (left side)
+        bounds.push(
+            ComponentBounds::new(
+                "ScriptList",
+                gpui::Bounds {
+                    origin: gpui::point(px(0.), content_top),
+                    size: gpui::size(list_width, content_height),
+                },
+            )
+            .with_type(ComponentType::List)
+            .with_padding(BoxModel::uniform(0.0)),
+        );
+
+        // Add sample list items
+        for i in 0..5 {
+            let item_top = content_top + px(i as f32 * 52.0);
+            if item_top + item_height > height {
+                break;
+            }
+            bounds.push(
+                ComponentBounds::new(
+                    format!("ListItem[{}]", i),
+                    gpui::Bounds {
+                        origin: gpui::point(px(content_padding), item_top),
+                        size: gpui::size(list_width - px(content_padding * 2.0), item_height),
+                    },
+                )
+                .with_type(ComponentType::ListItem)
+                .with_padding(BoxModel::symmetric(8.0, content_padding))
+                .with_margin(BoxModel::uniform(0.0)),
+            );
+        }
+
+        // Preview panel (right side)
+        bounds.push(
+            ComponentBounds::new(
+                "PreviewPanel",
+                gpui::Bounds {
+                    origin: gpui::point(list_width, content_top),
+                    size: gpui::size(width - list_width, content_height),
+                },
+            )
+            .with_type(ComponentType::Container)
+            .with_padding(BoxModel::uniform(content_padding)),
+        );
+
+        // Input field (if visible in header)
+        bounds.push(
+            ComponentBounds::new(
+                "SearchInput",
+                gpui::Bounds {
+                    origin: gpui::point(px(60.), px(10.)),
+                    size: gpui::size(px(200.), px(32.)),
+                },
+            )
+            .with_type(ComponentType::Input)
+            .with_padding(BoxModel::symmetric(6.0, 12.0)),
+        );
+
+        // Header buttons (right side)
+        let button_y = px(12.);
+        let button_height = px(28.);
+
+        // Run button
+        bounds.push(
+            ComponentBounds::new(
+                "RunButton",
+                gpui::Bounds {
+                    origin: gpui::point(width - px(200.), button_y),
+                    size: gpui::size(px(60.), button_height),
+                },
+            )
+            .with_type(ComponentType::Button)
+            .with_padding(BoxModel::symmetric(4.0, 12.0)),
+        );
+
+        // Actions button
+        bounds.push(
+            ComponentBounds::new(
+                "ActionsButton",
+                gpui::Bounds {
+                    origin: gpui::point(width - px(130.), button_y),
+                    size: gpui::size(px(90.), button_height),
+                },
+            )
+            .with_type(ComponentType::Button)
+            .with_padding(BoxModel::symmetric(4.0, 12.0)),
+        );
+
+        // Play button
+        bounds.push(
+            ComponentBounds::new(
+                "PlayButton",
+                gpui::Bounds {
+                    origin: gpui::point(width - px(36.), button_y),
+                    size: gpui::size(px(28.), button_height),
+                },
+            )
+            .with_type(ComponentType::Button)
+            .with_padding(BoxModel::uniform(4.0)),
+        );
+
+        // Preview panel contents
+        let preview_left = list_width + px(content_padding);
+        let preview_width = width - list_width - px(content_padding * 2.0);
+
+        // Script path label (small text at top of preview)
+        bounds.push(
+            ComponentBounds::new(
+                "ScriptPath",
+                gpui::Bounds {
+                    origin: gpui::point(preview_left, content_top + px(8.)),
+                    size: gpui::size(preview_width, px(16.)),
+                },
+            )
+            .with_type(ComponentType::Other)
+            .with_padding(BoxModel::symmetric(2.0, 0.0)),
+        );
+
+        // Script title (large heading)
+        bounds.push(
+            ComponentBounds::new(
+                "ScriptTitle",
+                gpui::Bounds {
+                    origin: gpui::point(preview_left, content_top + px(32.)),
+                    size: gpui::size(preview_width, px(32.)),
+                },
+            )
+            .with_type(ComponentType::Header)
+            .with_padding(BoxModel::symmetric(4.0, 0.0)),
+        );
+
+        // Description label
+        bounds.push(
+            ComponentBounds::new(
+                "DescriptionLabel",
+                gpui::Bounds {
+                    origin: gpui::point(preview_left, content_top + px(72.)),
+                    size: gpui::size(px(80.), px(16.)),
+                },
+            )
+            .with_type(ComponentType::Other)
+            .with_padding(BoxModel::uniform(2.0)),
+        );
+
+        // Description value
+        bounds.push(
+            ComponentBounds::new(
+                "DescriptionValue",
+                gpui::Bounds {
+                    origin: gpui::point(preview_left, content_top + px(92.)),
+                    size: gpui::size(preview_width, px(20.)),
+                },
+            )
+            .with_type(ComponentType::Other)
+            .with_padding(BoxModel::symmetric(2.0, 0.0)),
+        );
+
+        // Code Preview label
+        bounds.push(
+            ComponentBounds::new(
+                "CodePreviewLabel",
+                gpui::Bounds {
+                    origin: gpui::point(preview_left, content_top + px(130.)),
+                    size: gpui::size(px(100.), px(16.)),
+                },
+            )
+            .with_type(ComponentType::Other)
+            .with_padding(BoxModel::uniform(2.0)),
+        );
+
+        // Code preview area
+        bounds.push(
+            ComponentBounds::new(
+                "CodePreview",
+                gpui::Bounds {
+                    origin: gpui::point(preview_left, content_top + px(150.)),
+                    size: gpui::size(preview_width, height - content_top - px(170.)),
+                },
+            )
+            .with_type(ComponentType::Container)
+            .with_padding(BoxModel::uniform(12.0)),
+        );
+
+        // List item icons (left side of each list item)
+        for i in 0..5 {
+            let item_top = content_top + px(i as f32 * 52.0);
+            if item_top + item_height > height {
+                break;
+            }
+            bounds.push(
+                ComponentBounds::new(
+                    format!("Icon[{}]", i),
+                    gpui::Bounds {
+                        origin: gpui::point(px(content_padding + 8.0), item_top + px(14.)),
+                        size: gpui::size(px(24.), px(24.)),
+                    },
+                )
+                .with_type(ComponentType::Other)
+                .with_padding(BoxModel::uniform(2.0)),
+            );
+        }
+
+        bounds
     }
 
     /// Rebuild alias and shortcut registries from current scripts/scriptlets.
@@ -1934,7 +2230,6 @@ impl ScriptListApp {
             AppView::FormPrompt { .. } => "FormPrompt",
             AppView::TermPrompt { .. } => "TermPrompt",
             AppView::EditorPrompt { .. } => "EditorPrompt",
-            AppView::EditorPromptV2 { .. } => "EditorPromptV2",
             AppView::SelectPrompt { .. } => "SelectPrompt",
             AppView::PathPrompt { .. } => "PathPrompt",
             AppView::EnvPrompt { .. } => "EnvPrompt",
@@ -2043,7 +2338,6 @@ impl ScriptListApp {
                 | AppView::FormPrompt { .. }
                 | AppView::TermPrompt { .. }
                 | AppView::EditorPrompt { .. }
-                | AppView::EditorPromptV2 { .. }
                 | AppView::ClipboardHistoryView { .. }
                 | AppView::AppLauncherView { .. }
                 | AppView::WindowSwitcherView { .. }

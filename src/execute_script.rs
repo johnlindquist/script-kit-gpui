@@ -1063,6 +1063,10 @@ impl ScriptListApp {
                                     Message::SetInput { text } => {
                                         Some(PromptMessage::SetInput { text })
                                     }
+                                    Message::ShowGrid { options } => {
+                                        Some(PromptMessage::ShowGrid { options })
+                                    }
+                                    Message::HideGrid => Some(PromptMessage::HideGrid),
                                     other => {
                                         // Get the message type name for user feedback
                                         let msg_type = format!("{:?}", other);

@@ -31,6 +31,12 @@
 //! ```
 
 use crate::logging;
+use crate::protocol::GridDepthOption;
+
+/// Default grid size for ShowGrid command
+fn default_grid_size() -> u32 {
+    8
+}
 
 /// External commands that can be sent to the app via stdin
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -76,6 +82,21 @@ pub enum ExternalCommand {
         #[serde(default)]
         submit: bool,
     },
+    /// Show the debug grid overlay with options (for visual testing)
+    ShowGrid {
+        #[serde(default = "default_grid_size", rename = "gridSize")]
+        grid_size: u32,
+        #[serde(default, rename = "showBounds")]
+        show_bounds: bool,
+        #[serde(default, rename = "showBoxModel")]
+        show_box_model: bool,
+        #[serde(default, rename = "showAlignmentGuides")]
+        show_alignment_guides: bool,
+        #[serde(default)]
+        depth: GridDepthOption,
+    },
+    /// Hide the debug grid overlay
+    HideGrid,
 }
 
 /// Start a thread that listens on stdin for external JSONL commands.
@@ -278,5 +299,74 @@ mod tests {
             }
             _ => panic!("Expected CaptureWindow command"),
         }
+    }
+
+    #[test]
+    fn test_external_command_show_grid_defaults() {
+        let json = r#"{"type": "showGrid"}"#;
+        let cmd: ExternalCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            ExternalCommand::ShowGrid {
+                grid_size,
+                show_bounds,
+                show_box_model,
+                show_alignment_guides,
+                depth,
+            } => {
+                assert_eq!(grid_size, 8); // default
+                assert!(!show_bounds); // default false
+                assert!(!show_box_model); // default false
+                assert!(!show_alignment_guides); // default false
+                assert!(matches!(depth, GridDepthOption::Preset(_))); // default
+            }
+            _ => panic!("Expected ShowGrid command"),
+        }
+    }
+
+    #[test]
+    fn test_external_command_show_grid_with_options() {
+        let json = r#"{"type": "showGrid", "gridSize": 16, "showBounds": true, "showBoxModel": true, "showAlignmentGuides": true, "depth": "all"}"#;
+        let cmd: ExternalCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            ExternalCommand::ShowGrid {
+                grid_size,
+                show_bounds,
+                show_box_model,
+                show_alignment_guides,
+                depth,
+            } => {
+                assert_eq!(grid_size, 16);
+                assert!(show_bounds);
+                assert!(show_box_model);
+                assert!(show_alignment_guides);
+                match depth {
+                    GridDepthOption::Preset(s) => assert_eq!(s, "all"),
+                    _ => panic!("Expected Preset depth"),
+                }
+            }
+            _ => panic!("Expected ShowGrid command"),
+        }
+    }
+
+    #[test]
+    fn test_external_command_show_grid_with_components() {
+        let json = r#"{"type": "showGrid", "depth": ["header", "footer"]}"#;
+        let cmd: ExternalCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            ExternalCommand::ShowGrid { depth, .. } => match depth {
+                GridDepthOption::Components(components) => {
+                    assert_eq!(components, vec!["header", "footer"]);
+                }
+                _ => panic!("Expected Components depth"),
+            },
+            _ => panic!("Expected ShowGrid command"),
+        }
+    }
+
+    #[test]
+    fn test_external_command_hide_grid_deserialization() {
+        let json = r#"{"type": "hideGrid"}"#;
+        let cmd: ExternalCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, ExternalCommand::HideGrid));
     }
 }

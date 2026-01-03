@@ -257,7 +257,7 @@ impl ScriptListApp {
 
                 // Use with_template if template provided, otherwise with_height
                 let editor_prompt = if let Some(template_str) = template {
-                    EditorPromptV2::with_template(
+                    EditorPrompt::with_template(
                         id.clone(),
                         template_str,
                         resolved_language.clone(),
@@ -268,7 +268,7 @@ impl ScriptListApp {
                         Some(editor_height),
                     )
                 } else {
-                    EditorPromptV2::with_height(
+                    EditorPrompt::with_height(
                         id.clone(),
                         content.unwrap_or_default(),
                         resolved_language.clone(),
@@ -281,7 +281,7 @@ impl ScriptListApp {
                 };
 
                 let entity = cx.new(|_| editor_prompt);
-                self.current_view = AppView::EditorPromptV2 {
+                self.current_view = AppView::EditorPrompt {
                     id,
                     entity,
                     focus_handle: editor_focus_handle,
@@ -620,7 +620,7 @@ impl ScriptListApp {
                         -1,
                         None,
                     ),
-                    AppView::EditorPrompt { id, .. } | AppView::EditorPromptV2 { id, .. } => (
+                    AppView::EditorPrompt { id, .. } => (
                         "editor".to_string(),
                         Some(id.clone()),
                         None,
@@ -835,7 +835,6 @@ impl ScriptListApp {
                     AppView::FormPrompt { id, .. } => Some(id.clone()),
                     AppView::TermPrompt { id, .. } => Some(id.clone()),
                     AppView::EditorPrompt { id, .. } => Some(id.clone()),
-                    AppView::EditorPromptV2 { id, .. } => Some(id.clone()),
                     _ => None,
                 };
 
@@ -1200,6 +1199,23 @@ impl ScriptListApp {
                 }
 
                 cx.notify();
+            }
+            PromptMessage::ShowGrid { options } => {
+                logging::log(
+                    "DEBUG_GRID",
+                    &format!(
+                        "ShowGrid from script: size={}, bounds={}, box_model={}, guides={}",
+                        options.grid_size,
+                        options.show_bounds,
+                        options.show_box_model,
+                        options.show_alignment_guides
+                    ),
+                );
+                self.show_grid(options, cx);
+            }
+            PromptMessage::HideGrid => {
+                logging::log("DEBUG_GRID", "HideGrid from script");
+                self.hide_grid(cx);
             }
         }
     }

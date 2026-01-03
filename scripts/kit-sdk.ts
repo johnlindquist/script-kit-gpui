@@ -226,6 +226,38 @@ export interface FileSearchResult {
 }
 
 // =============================================================================
+// Debug Grid Types
+// =============================================================================
+
+/** Custom color scheme for grid overlay */
+export interface GridColorScheme {
+  gridLines?: string;
+  promptBounds?: string;
+  inputBounds?: string;
+  buttonBounds?: string;
+  listBounds?: string;
+  paddingFill?: string;
+  marginFill?: string;
+  alignmentGuide?: string;
+}
+
+/** Options for the debug grid overlay */
+export interface GridOptions {
+  /** Grid line spacing in pixels (8 or 16, default: 8) */
+  gridSize?: 8 | 16;
+  /** Show component bounding boxes with labels */
+  showBounds?: boolean;
+  /** Show CSS box model (padding/margin) visualization */
+  showBoxModel?: boolean;
+  /** Show alignment guides between components */
+  showAlignmentGuides?: boolean;
+  /** Which components to show bounds for */
+  depth?: 'prompts' | 'all' | string[];
+  /** Custom color scheme */
+  colorScheme?: GridColorScheme;
+}
+
+// =============================================================================
 // Screenshot Types
 // =============================================================================
 
@@ -1484,6 +1516,20 @@ interface HideMessage {
   type: 'hide';
 }
 
+interface ShowGridMessage {
+  type: 'showGrid';
+  gridSize?: 8 | 16;
+  showBounds?: boolean;
+  showBoxModel?: boolean;
+  showAlignmentGuides?: boolean;
+  depth?: 'prompts' | 'all' | string[];
+  colorScheme?: GridColorScheme;
+}
+
+interface HideGridMessage {
+  type: 'hideGrid';
+}
+
 interface BlurMessage {
   type: 'blur';
 }
@@ -2066,6 +2112,17 @@ declare global {
    * Hide the main window
    */
   function hide(): Promise<void>;
+  
+  /**
+   * Show the debug grid overlay for visual testing
+   * @param options - Grid display options
+   */
+  function showGrid(options?: GridOptions): Promise<void>;
+  
+  /**
+   * Hide the debug grid overlay
+   */
+  function hideGrid(): Promise<void>;
   
   /**
    * Blur - return focus to previous app
@@ -3962,6 +4019,25 @@ globalThis.hide = async function hide(): Promise<void> {
   send(message);
 };
 
+/**
+ * Show the debug grid overlay for visual testing
+ */
+globalThis.showGrid = async function showGrid(options?: GridOptions): Promise<void> {
+  const message: ShowGridMessage = { 
+    type: 'showGrid',
+    ...options
+  };
+  send(message);
+};
+
+/**
+ * Hide the debug grid overlay
+ */
+globalThis.hideGrid = async function hideGrid(): Promise<void> {
+  const message: HideGridMessage = { type: 'hideGrid' };
+  send(message);
+};
+
 globalThis.blur = async function blur(): Promise<void> {
   const message: BlurMessage = { type: 'blur' };
   send(message);
@@ -5062,6 +5138,8 @@ declare global {
   // UI Control
   function show(): Promise<void>;
   function hide(): Promise<void>;
+  function showGrid(options?: GridOptions): Promise<void>;
+  function hideGrid(): Promise<void>;
   function blur(): Promise<void>;
   function getWindowBounds(): Promise<WindowBounds>;
   function setWindowBounds(bounds: Partial<WindowBounds>): Promise<void>;
