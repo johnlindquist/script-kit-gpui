@@ -27,25 +27,6 @@
 //! safe access from multiple threads. The PTY I/O can run on a background
 //! thread while the main thread reads terminal content for rendering.
 //!
-//! # Example
-//!
-//! ```rust,ignore
-//! use script_kit_gpui::terminal::TerminalHandle;
-//!
-//! let mut terminal = TerminalHandle::new(80, 24)?;
-//!
-//! // Process incoming data from PTY
-//! let events = terminal.process();
-//!
-//! // Send keyboard input
-//! terminal.input(b"ls -la\n")?;
-//!
-//! // Get content for rendering
-//! let content = terminal.content();
-//! for line in &content.lines {
-//!     println!("{}", line);
-//! }
-//! ```
 
 use std::sync::{Arc, Mutex};
 

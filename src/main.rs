@@ -1421,29 +1421,83 @@ fn main() {
         }).detach();
 
         // Script/scriptlets reload watcher - watches ~/.kenv/scripts/ and ~/.kenv/scriptlets/
+        // Uses incremental updates for scriptlet files, full reload for scripts
         // Also re-scans for scheduled scripts to pick up new/modified schedules
         let app_entity_for_scripts = app_entity.clone();
         let scheduler_for_scripts = scheduler.clone();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            use watcher::ScriptReloadEvent;
+            
             loop {
                 Timer::after(std::time::Duration::from_millis(200)).await;
 
-                if script_rx.try_recv().is_ok() {
-                    logging::log("APP", "Scripts or scriptlets changed, reloading");
-
-                    // Re-scan for scheduled scripts when files change
-                    if let Ok(scheduler_guard) = scheduler_for_scripts.lock() {
-                        let new_count = scripts::register_scheduled_scripts(&scheduler_guard);
-                        if new_count > 0 {
-                            logging::log("APP", &format!("Re-registered {} scheduled scripts after file change", new_count));
+                // Drain all pending events
+                while let Ok(event) = script_rx.try_recv() {
+                    match event {
+                        ScriptReloadEvent::FileChanged(path) | ScriptReloadEvent::FileCreated(path) => {
+                            // Check if it's a scriptlet file (markdown in scriptlets directory)
+                            let is_scriptlet = path.extension().map(|e| e == "md").unwrap_or(false);
+                            
+                            if is_scriptlet {
+                                logging::log("APP", &format!("Scriptlet file changed: {}", path.display()));
+                                let path_clone = path.clone();
+                                let _ = cx.update(|cx| {
+                                    app_entity_for_scripts.update(cx, |view, ctx| {
+                                        view.handle_scriptlet_file_change(&path_clone, false, ctx);
+                                    });
+                                });
+                            } else {
+                                logging::log("APP", &format!("Script file changed: {}", path.display()));
+                                // Re-scan for scheduled scripts when script files change
+                                if let Ok(scheduler_guard) = scheduler_for_scripts.lock() {
+                                    let new_count = scripts::register_scheduled_scripts(&scheduler_guard);
+                                    if new_count > 0 {
+                                        logging::log("APP", &format!("Re-registered {} scheduled scripts after file change", new_count));
+                                    }
+                                }
+                                let _ = cx.update(|cx| {
+                                    app_entity_for_scripts.update(cx, |view, ctx| {
+                                        view.refresh_scripts(ctx);
+                                    });
+                                });
+                            }
+                        }
+                        ScriptReloadEvent::FileDeleted(path) => {
+                            let is_scriptlet = path.extension().map(|e| e == "md").unwrap_or(false);
+                            
+                            if is_scriptlet {
+                                logging::log("APP", &format!("Scriptlet file deleted: {}", path.display()));
+                                let path_clone = path.clone();
+                                let _ = cx.update(|cx| {
+                                    app_entity_for_scripts.update(cx, |view, ctx| {
+                                        view.handle_scriptlet_file_change(&path_clone, true, ctx);
+                                    });
+                                });
+                            } else {
+                                logging::log("APP", &format!("Script file deleted: {}", path.display()));
+                                let _ = cx.update(|cx| {
+                                    app_entity_for_scripts.update(cx, |view, ctx| {
+                                        view.refresh_scripts(ctx);
+                                    });
+                                });
+                            }
+                        }
+                        ScriptReloadEvent::FullReload => {
+                            logging::log("APP", "Full script/scriptlet reload requested");
+                            // Re-scan for scheduled scripts
+                            if let Ok(scheduler_guard) = scheduler_for_scripts.lock() {
+                                let new_count = scripts::register_scheduled_scripts(&scheduler_guard);
+                                if new_count > 0 {
+                                    logging::log("APP", &format!("Re-registered {} scheduled scripts after full reload", new_count));
+                                }
+                            }
+                            let _ = cx.update(|cx| {
+                                app_entity_for_scripts.update(cx, |view, ctx| {
+                                    view.refresh_scripts(ctx);
+                                });
+                            });
                         }
                     }
-
-                    let _ = cx.update(|cx| {
-                        app_entity_for_scripts.update(cx, |view, ctx| {
-                            view.refresh_scripts(ctx);
-                        });
-                    });
                 }
             }
         }).detach();

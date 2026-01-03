@@ -11,20 +11,6 @@
 //! - Time-based grouping (Today, Yesterday, This Week, etc.)
 //! - OCR text storage for image entries
 //!
-//! ## Usage
-//! ```ignore
-//! use crate::clipboard_history::{init_clipboard_history, get_clipboard_history_page, group_entries_by_time};
-//!
-//! // Initialize on app startup
-//! init_clipboard_history()?;
-//!
-//! // Get paginated entries
-//! let entries = get_clipboard_history_page(50, 0);
-//! let total = get_total_entry_count();
-//!
-//! // Group by time for UI display
-//! let grouped = group_entries_by_time(entries);
-//! ```
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;

@@ -17,18 +17,6 @@
 //! - L = single char level (i/w/e/d/t)
 //! - C = single char category code (see AGENTS.md for legend)
 //!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use script_kit_gpui::logging;
-//!
-//! // Initialize logging - MUST keep guard alive for duration of program
-//! let _guard = logging::init();
-//!     
-//! // Use tracing macros directly
-//! tracing::info!(event_type = "app_start", "Application started");
-//! tracing::error!(error_code = 42, "Something went wrong");
-//! ```
 //!
 //! # JSONL Output Format
 //!
@@ -305,13 +293,6 @@ pub struct LoggingGuard {
 /// Returns a guard that MUST be kept alive for the duration of the program.
 /// Dropping the guard will flush remaining logs and close the file.
 ///
-/// # Example
-///
-/// ```rust,ignore
-/// let _guard = logging::init();
-/// // ... rest of program
-/// // guard dropped here, logs flushed
-/// ```
 pub fn init() -> LoggingGuard {
     // Initialize legacy log buffer for UI display
     let _ = LOG_BUFFER.set(Mutex::new(VecDeque::with_capacity(MAX_LOG_LINES)));

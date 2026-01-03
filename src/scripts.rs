@@ -735,6 +735,82 @@ fn build_scriptlet_file_path(md_path: &std::path::Path, command: &str) -> String
     format!("{}#{}", md_path.display(), command)
 }
 
+/// Read scriptlets from a single markdown file
+///
+/// This function parses a single .md file and returns all scriptlets found in it.
+/// Used for incremental updates when a scriptlet file changes.
+///
+/// # Arguments
+/// * `path` - Path to the markdown file
+///
+/// # Returns
+/// Vector of Scriptlet structs parsed from the file, or empty vec on error
+#[instrument(level = "debug", skip_all, fields(path = %path.display()))]
+pub fn read_scriptlets_from_file(path: &std::path::Path) -> Vec<Scriptlet> {
+    // Verify it's a markdown file
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        debug!(path = %path.display(), "Not a markdown file, skipping");
+        return vec![];
+    }
+
+    // Try to get home directory for kenv extraction
+    let home = env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
+
+    // Read file content
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %path.display(),
+                "Failed to read scriptlet file"
+            );
+            return vec![];
+        }
+    };
+
+    let path_str = path.to_string_lossy().to_string();
+    let parsed = scriptlet_parser::parse_markdown_as_scriptlets(&content, Some(&path_str));
+
+    // Determine kenv from path (for nested kenvs)
+    let kenv = extract_kenv_from_path(path, &home);
+
+    // Convert parsed scriptlets to our Scriptlet format
+    let scriptlets: Vec<Scriptlet> = parsed
+        .into_iter()
+        .map(|parsed_scriptlet| {
+            let file_path = build_scriptlet_file_path(path, &parsed_scriptlet.command);
+
+            Scriptlet {
+                name: parsed_scriptlet.name,
+                description: parsed_scriptlet.metadata.description,
+                code: parsed_scriptlet.scriptlet_content,
+                tool: parsed_scriptlet.tool,
+                shortcut: parsed_scriptlet.metadata.shortcut,
+                expand: parsed_scriptlet.metadata.expand,
+                group: if parsed_scriptlet.group.is_empty() {
+                    kenv.clone()
+                } else {
+                    Some(parsed_scriptlet.group)
+                },
+                file_path: Some(file_path),
+                command: Some(parsed_scriptlet.command),
+                alias: parsed_scriptlet.metadata.alias,
+            }
+        })
+        .collect();
+
+    debug!(
+        count = scriptlets.len(),
+        path = %path.display(),
+        "Parsed scriptlets from file"
+    );
+
+    scriptlets
+}
+
 /// Reads scripts from ~/.kenv/scripts directory
 /// Returns a sorted list of Script structs for .ts and .js files
 /// Returns empty vec if directory doesn't exist or is inaccessible
@@ -1706,16 +1782,6 @@ pub const DEFAULT_MAX_RECENT_ITEMS: usize = 10;
 /// `(Vec<GroupedListItem>, Vec<SearchResult>)` - Grouped items and the flat results array.
 /// The `usize` in `Item(usize)` is the index into the flat results array.
 ///
-/// # Example
-/// ```ignore
-/// let frecency_store = FrecencyStore::new();
-/// let (grouped, results) = get_grouped_results(
-///     &scripts, &scriptlets, &builtins, &apps,
-///     &frecency_store, "", 10
-/// );
-/// // grouped contains: [SectionHeader("RECENT"), Item(0), Item(1), SectionHeader("MAIN"), ...]
-/// // results contains the flat array of SearchResults
-/// ```
 #[instrument(level = "debug", skip_all, fields(filter_len = filter_text.len()))]
 pub fn get_grouped_results(
     scripts: &[Script],

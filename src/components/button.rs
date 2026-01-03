@@ -94,14 +94,6 @@ pub type OnClickCallback = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'sta
 /// - Hover states with themed colors
 /// - Click callback
 ///
-/// # Example
-/// ```ignore
-/// let colors = ButtonColors::from_theme(&theme);
-/// Button::new("Run", colors)
-///     .variant(ButtonVariant::Primary)
-///     .shortcut("↵")
-///     .on_click(Box::new(|_, _, _| println!("Clicked!")))
-/// ```
 #[derive(IntoElement)]
 pub struct Button {
     label: SharedString,

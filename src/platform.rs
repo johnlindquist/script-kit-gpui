@@ -108,12 +108,6 @@ pub fn ensure_move_to_active_space() {
 ///
 /// Uses Objective-C message sending internally on macOS.
 ///
-/// # Example
-///
-/// ```ignore
-/// // Call after window is created and visible
-/// configure_as_floating_panel();
-/// ```
 #[cfg(target_os = "macos")]
 pub fn configure_as_floating_panel() {
     unsafe {

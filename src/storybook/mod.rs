@@ -8,28 +8,6 @@
 //! - [`StoryBrowser`] - Main UI for browsing stories
 //! - [`story_container`], [`story_section`], etc. - Layout helpers
 //!
-//! # Usage
-//!
-//! ```ignore
-//! // Define a story
-//! use crate::storybook::{Story, StoryVariant, story_container, story_section, story_item};
-//!
-//! pub struct MyComponentStory;
-//!
-//! impl Story for MyComponentStory {
-//!     fn id(&self) -> &'static str { "my-component" }
-//!     fn name(&self) -> &'static str { "My Component" }
-//!     fn category(&self) -> &'static str { "Components" }
-//!     fn render(&self) -> AnyElement {
-//!         story_container()
-//!             .child(story_section("Variants")
-//!                 .child(story_item("Default", MyComponent::new())))
-//!             .into_any_element()
-//!     }
-//! }
-//!
-//! // Register it in stories/mod.rs get_all_stories()
-//! ```
 
 mod browser;
 mod layout;

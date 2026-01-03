@@ -1108,6 +1108,9 @@ impl Render for EditorPrompt {
         let fonts = self.theme.get_fonts();
         let mono_font: SharedString = fonts.mono_family.into();
 
+        // Get font size from config (used for inner container inheritance)
+        let font_size = self.config.get_editor_font_size();
+
         // Action handlers for snippet Tab navigation
         // GPUI actions bubble up from focused element to parents, but only if the
         // focused element calls cx.propagate(). Since gpui-component's Input handles
@@ -1155,7 +1158,8 @@ impl Render for EditorPrompt {
             .h(height)
             .bg(rgb(colors.background.main))
             .text_color(rgb(colors.text.primary))
-            .font_family(mono_font) // Use monospace font for code
+            .font_family(mono_font.clone()) // Use monospace font for code
+            .text_size(px(font_size)) // Apply configured font size
             .on_key_down(handle_key)
             .on_action(handle_indent)
             .on_action(handle_outdent);
@@ -1168,6 +1172,8 @@ impl Render for EditorPrompt {
                     .w_full()
                     .min_h(px(0.))
                     .overflow_hidden()
+                    .text_size(px(font_size)) // Apply font size to inner container for inheritance
+                    .font_family(mono_font.clone()) // Also apply mono font
                     // No padding - editor fills the space completely
                     // The Input component from gpui-component
                     // appearance(false) removes border styling for seamless integration

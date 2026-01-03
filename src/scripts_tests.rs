@@ -75,6 +75,24 @@ fn test_build_scriptlet_file_path() {
 }
 
 #[test]
+fn test_read_scriptlets_from_file_nonexistent() {
+    use std::path::Path;
+    // Non-existent file should return empty vec
+    let path = Path::new("/nonexistent/path/to/file.md");
+    let scriptlets = read_scriptlets_from_file(path);
+    assert!(scriptlets.is_empty());
+}
+
+#[test]
+fn test_read_scriptlets_from_file_not_markdown() {
+    use std::path::Path;
+    // Non-markdown file should return empty vec
+    let path = Path::new("/some/path/to/file.ts");
+    let scriptlets = read_scriptlets_from_file(path);
+    assert!(scriptlets.is_empty());
+}
+
+#[test]
 fn test_scriptlet_new_fields() {
     // Verify the new Scriptlet struct fields work
     let scriptlet = Scriptlet {

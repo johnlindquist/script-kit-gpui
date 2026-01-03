@@ -10,26 +10,6 @@
 //! - Orphan detection on startup
 //! - Bulk kill for graceful shutdown
 //!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use script_kit_gpui::process_manager::{ProcessManager, PROCESS_MANAGER};
-//!
-//! // Write main app PID
-//! PROCESS_MANAGER.write_main_pid().unwrap();
-//!
-//! // Register a child process
-//! PROCESS_MANAGER.register_process(pid, "/path/to/script.ts");
-//!
-//! // Unregister when done
-//! PROCESS_MANAGER.unregister_process(pid);
-//!
-//! // Kill all on shutdown
-//! PROCESS_MANAGER.kill_all_processes();
-//!
-//! // Cleanup main PID on exit
-//! PROCESS_MANAGER.remove_main_pid();
-//! ```
 
 use crate::logging;
 use chrono::{DateTime, Utc};

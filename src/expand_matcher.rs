@@ -5,24 +5,6 @@
 //! fully typed, a match is returned with information needed to perform the
 //! text expansion.
 //!
-//! # Example
-//!
-//! ```rust,ignore
-//! use std::path::PathBuf;
-//! use script_kit_gpui::expand_matcher::ExpandMatcher;
-//!
-//! let mut matcher = ExpandMatcher::new();
-//! matcher.register_trigger(":sig", PathBuf::from("/path/to/signature.md"));
-//!
-//! // User types "Hello :sig"
-//! for c in "Hello :sig".chars() {
-//!     if let Some(result) = matcher.process_keystroke(c) {
-//!         // result.trigger = ":sig"
-//!         // result.chars_to_delete = 4
-//!         // result.scriptlet_path = PathBuf::from("/path/to/signature.md")
-//!     }
-//! }
-//! ```
 
 use std::collections::HashMap;
 use std::path::PathBuf;

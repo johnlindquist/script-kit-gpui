@@ -4,20 +4,6 @@
 //! prompt window layout with consistent styling. It handles the header, content,
 //! footer, and optional divider between sections.
 //!
-//! # Example
-//! ```ignore
-//! let colors = PromptContainerColors::from_theme(&theme);
-//! let config = PromptContainerConfig::new()
-//!     .rounded_corners(12.0)
-//!     .show_divider(true)
-//!     .hint("Press ↵ to select");
-//!
-//! PromptContainer::new(colors)
-//!     .config(config)
-//!     .header(my_header_element)
-//!     .content(my_content_element)
-//!     .footer(my_footer_element)
-//! ```
 
 #![allow(dead_code)]
 
@@ -148,18 +134,6 @@ impl PromptContainerConfig {
 /// - Content slot (scrollable, fills remaining space)
 /// - Footer slot (optional, for hints)
 ///
-/// # Example
-/// ```ignore
-/// let colors = PromptContainerColors::from_theme(&theme);
-/// let config = PromptContainerConfig::new()
-///     .rounded_corners(12.0)
-///     .show_divider(true);
-///
-/// PromptContainer::new(colors)
-///     .config(config)
-///     .header(header_element)
-///     .content(content_element)
-/// ```
 #[derive(IntoElement)]
 pub struct PromptContainer {
     colors: PromptContainerColors,

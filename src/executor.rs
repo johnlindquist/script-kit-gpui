@@ -237,13 +237,6 @@ impl AutoSubmitConfig {
 /// Call this once at startup or when needed, rather than repeatedly
 /// reading env vars.
 ///
-/// # Example
-/// ```rust,ignore
-/// let config = get_auto_submit_config();
-/// if config.enabled {
-///     // Schedule auto-submit after config.delay
-/// }
-/// ```
 #[allow(dead_code)]
 pub fn get_auto_submit_config() -> AutoSubmitConfig {
     AutoSubmitConfig::from_env()
@@ -1230,14 +1223,6 @@ pub fn generate_suggestions(stderr: &str, exit_code: Option<i32>) -> Vec<String>
 /// including signal detection on Unix systems. Use `from_exit_status()`
 /// to create from a process's exit status.
 ///
-/// # Example
-/// ```ignore
-/// let status = child.wait()?;
-/// let crash_info = CrashInfo::from_exit_status(status);
-/// if crash_info.is_crash {
-///     println!("{}", crash_info.error_message());
-/// }
-/// ```
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Infrastructure ready for integration into main.rs
 pub struct CrashInfo {
@@ -2078,17 +2063,6 @@ pub enum SelectedTextHandleResult {
 /// * `SelectedTextHandleResult::Handled(response)` - Message was handled, send response back
 /// * `SelectedTextHandleResult::NotHandled` - Message was not a selected text operation
 ///
-/// # Example
-/// ```ignore
-/// match handle_selected_text_message(&msg) {
-///     SelectedTextHandleResult::Handled(response) => {
-///         send_response(response);
-///     }
-///     SelectedTextHandleResult::NotHandled => {
-///         // Handle as other message type
-///     }
-/// }
-/// ```
 #[instrument(skip_all)]
 pub fn handle_selected_text_message(msg: &Message) -> SelectedTextHandleResult {
     match msg {

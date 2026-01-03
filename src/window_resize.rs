@@ -118,12 +118,6 @@ pub fn initial_window_height() -> Pixels {
 /// * `item_count` - Item count (used for some view types)
 /// * `cx` - The GPUI context (must implement `Render`)
 ///
-/// # Example
-/// ```ignore
-/// // In a prompt message handler:
-/// defer_resize_to_view(ViewType::EditorPrompt, 0, cx);
-/// cx.notify();
-/// ```
 pub fn defer_resize_to_view<T: Render>(
     view_type: ViewType,
     item_count: usize,

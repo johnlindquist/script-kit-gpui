@@ -22,23 +22,6 @@
 //! When the window is unfocused, colors are dimmed by blending toward gray
 //! to provide visual feedback that the terminal is not active.
 //!
-//! # Example
-//!
-//! ```rust,ignore
-//! use script_kit_gpui::terminal::ThemeAdapter;
-//! use script_kit_gpui::theme::Theme;
-//!
-//! let theme = Theme::default();
-//! let mut adapter = ThemeAdapter::from_theme(&theme);
-//!
-//! // Get terminal colors
-//! let bg = adapter.background();
-//! let fg = adapter.foreground();
-//!
-//! // Update for focus state
-//! adapter.update_for_focus(false);  // Window lost focus
-//! let dimmed_bg = adapter.background();  // Colors now dimmed
-//! ```
 
 use vte::ansi::Rgb;
 
@@ -361,19 +344,6 @@ impl ThemeAdapter {
     ///
     /// * `is_focused` - Whether the window is currently focused
     ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let mut adapter = ThemeAdapter::dark_default();
-    ///
-    /// // Window loses focus
-    /// adapter.update_for_focus(false);
-    /// // Colors are now dimmed
-    ///
-    /// // Window regains focus
-    /// adapter.update_for_focus(true);
-    /// // Colors restored to original
-    /// ```
     pub fn update_for_focus(&mut self, is_focused: bool) {
         if self.is_focused == is_focused {
             return; // No change needed
@@ -419,14 +389,6 @@ impl Default for ThemeAdapter {
 ///
 /// An `Rgb` struct with the extracted red, green, and blue components.
 ///
-/// # Example
-///
-/// ```rust,ignore
-/// let white = hex_to_rgb(0xffffff);
-/// assert_eq!(white.r, 255);
-/// assert_eq!(white.g, 255);
-/// assert_eq!(white.b, 255);
-/// ```
 #[inline]
 pub fn hex_to_rgb(hex: u32) -> Rgb {
     Rgb {

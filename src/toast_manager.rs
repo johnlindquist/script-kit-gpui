@@ -13,18 +13,6 @@
 //! call `drain_pending()` to get the pending toasts and push them to gpui-component's
 //! notification system via `window.push_notification()`.
 //!
-//! # Example
-//! ```ignore
-//! let mut manager = ToastManager::new();
-//! let colors = ToastColors::from_theme(&theme, ToastVariant::Success);
-//! let id = manager.push(Toast::new("Operation successful!", colors));
-//!
-//! // In render loop, drain pending toasts to gpui-component
-//! for toast in manager.drain_pending() {
-//!     let notification = toast_to_notification(&toast);
-//!     window.push_notification(notification, cx);
-//! }
-//! ```
 
 #![allow(dead_code)]
 

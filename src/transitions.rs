@@ -13,25 +13,6 @@
 //! - `AppearTransition`: Combined opacity + slide for toast/notification animations
 //! - `HoverState`: Background color transition for list item hover effects
 //!
-//! # Usage
-//!
-//! These types implement `Lerp` for linear interpolation, which can be used
-//! with GPUI's animation primitives or custom animation systems.
-//!
-//! ```ignore
-//! use crate::transitions::{TransitionColor, Opacity, ease_out_quad, DURATION_FAST};
-//!
-//! // Create color values for hover transition
-//! let normal = TransitionColor::transparent();
-//! let hovered = TransitionColor::from_hex_alpha(0xffffff, 0.2);
-//!
-//! // Interpolate at 50% through the transition
-//! let current = normal.lerp(&hovered, 0.5);
-//!
-//! // Apply easing for smoother animation
-//! let eased_t = ease_out_quad(0.5);
-//! let current_eased = normal.lerp(&hovered, eased_t);
-//! ```
 //!
 //! # Easing Functions
 //!

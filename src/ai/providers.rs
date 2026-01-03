@@ -10,15 +10,6 @@
 //! - `ProviderRegistry` manages available providers based on detected API keys
 //! - Individual provider implementations (OpenAI, Anthropic, etc.) implement the trait
 //!
-//! # Usage
-//!
-//! ```rust,ignore
-//! let registry = ProviderRegistry::from_environment();
-//! if registry.has_any_provider() {
-//!     let models = registry.get_all_models();
-//!     // Use models...
-//! }
-//! ```
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;

@@ -8,21 +8,6 @@
 //! - Automatic Vision framework initialization
 //! - Graceful error handling
 //!
-//! ## Usage
-//! ```ignore
-//! use crate::ocr::{extract_text_from_rgba, extract_text_async};
-//!
-//! // Synchronous extraction (blocks current thread)
-//! let text = extract_text_from_rgba(width, height, &rgba_data)?;
-//!
-//! // Async extraction (runs on background thread)
-//! extract_text_async(width, height, rgba_data, |result| {
-//!     match result {
-//!         Ok(text) => println!("Extracted: {}", text),
-//!         Err(e) => eprintln!("OCR failed: {}", e),
-//!     }
-//! });
-//! ```
 //!
 //! ## Platform Support
 //! This module only works on macOS. On other platforms, the functions will return
@@ -105,11 +90,6 @@ extern "C" {}
 /// * `Ok(String)` - Extracted text, may be empty if no text was found
 /// * `Err` - If OCR fails or platform is not supported
 ///
-/// # Example
-/// ```ignore
-/// let text = extract_text_from_rgba(100, 100, &image_bytes)?;
-/// println!("Found text: {}", text);
-/// ```
 #[cfg(target_os = "macos")]
 pub fn extract_text_from_rgba(width: u32, height: u32, rgba_data: &[u8]) -> Result<String> {
     let expected_size = (width as usize) * (height as usize) * 4;
@@ -151,14 +131,6 @@ pub fn extract_text_from_rgba(_width: u32, _height: u32, _rgba_data: &[u8]) -> R
 /// * `rgba_data` - Raw RGBA pixel data (ownership transferred to background thread)
 /// * `callback` - Function called with OCR result when complete
 ///
-/// # Example
-/// ```ignore
-/// extract_text_async(100, 100, image_bytes, |result| {
-///     if let Ok(text) = result {
-///         update_ocr_text(&entry_id, &text).ok();
-///     }
-/// });
-/// ```
 pub fn extract_text_async<F>(width: u32, height: u32, rgba_data: Vec<u8>, callback: F)
 where
     F: FnOnce(Result<String>) + Send + 'static,

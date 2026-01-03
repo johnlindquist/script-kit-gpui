@@ -3,18 +3,6 @@
 //! This module provides a theme-aware header component used across all prompt types.
 //! It includes a search input with blinking cursor, action buttons, and logo.
 //!
-//! # Example
-//! ```ignore
-//! let colors = PromptHeaderColors::from_theme(&theme);
-//! let config = PromptHeaderConfig::new()
-//!     .placeholder("Search scripts...")
-//!     .primary_button_label("Run")
-//!     .primary_button_shortcut("↵");
-//!     
-//! PromptHeader::new(config, colors)
-//!     .on_primary_click(Box::new(|_, _, _| println!("Run clicked!")))
-//!     .on_actions_click(Box::new(|_, _, _| println!("Actions clicked!")))
-//! ```
 
 #![allow(dead_code)]
 
@@ -211,16 +199,6 @@ pub type HeaderClickCallback = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 
 /// - Actions button (optional)
 /// - Script Kit logo
 ///
-/// # Example
-/// ```ignore
-/// let colors = PromptHeaderColors::from_theme(&theme);
-/// let config = PromptHeaderConfig::new()
-///     .placeholder("Search...")
-///     .primary_button_label("Run");
-///
-/// PromptHeader::new(config, colors)
-///     .on_primary_click(Box::new(|_, _, _| { /* handle run */ }))
-/// ```
 #[derive(IntoElement)]
 pub struct PromptHeader {
     config: PromptHeaderConfig,

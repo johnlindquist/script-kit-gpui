@@ -9,18 +9,6 @@
 //! - Extracts app icons using NSWorkspace for display
 //! - Launches applications via `open -a`
 //!
-//! ## Usage
-//! ```ignore
-//! use crate::app_launcher::{scan_applications, launch_application, AppInfo};
-//!
-//! // Get all installed applications (cached after first call)
-//! let apps = scan_applications();
-//!
-//! // Launch an application
-//! if let Some(app) = apps.iter().find(|a| a.name == "Finder") {
-//!     launch_application(app)?;
-//! }
-//! ```
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -460,13 +448,6 @@ fn extract_app_icon(app_path: &Path) -> Option<Vec<u8>> {
 /// # Returns
 /// Ok(()) if the application was launched successfully, Err otherwise.
 ///
-/// # Example
-/// ```ignore
-/// let apps = scan_applications();
-/// if let Some(finder) = apps.iter().find(|a| a.name == "Finder") {
-///     launch_application(finder)?;
-/// }
-/// ```
 pub fn launch_application(app: &AppInfo) -> Result<()> {
     info!(
         app_name = %app.name,

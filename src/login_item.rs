@@ -6,18 +6,6 @@
 
 // Allow dead code as this module provides utility functions that may not all be used yet
 #![allow(dead_code)]
-//! # Usage
-//! ```ignore
-//! use script_kit_gpui::login_item::{enable_login_item, disable_login_item, is_login_item_enabled};
-//!
-//! // Check current status
-//! if !is_login_item_enabled() {
-//!     enable_login_item().expect("Failed to enable login item");
-//! }
-//!
-//! // Toggle off
-//! disable_login_item().expect("Failed to disable login item");
-//! ```
 //!
 //! # Platform Support
 //! - macOS 13+: Uses SMAppService

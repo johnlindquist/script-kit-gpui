@@ -7,16 +7,6 @@
 //! - Zed's built-in icons (Lucide-based)
 //! - Custom Script Kit icons
 //!
-//! # Usage
-//! ```ignore
-//! use designs::icon_variations::{IconName, IconStyle};
-//!
-//! // Get the SVG path for an icon
-//! let path = IconName::File.path();
-//!
-//! // Render with GPUI
-//! svg().path(path).size(px(16.)).color(rgb(0xffffff))
-//! ```
 
 use std::sync::Arc;
 

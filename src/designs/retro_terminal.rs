@@ -336,19 +336,6 @@ impl Default for TerminalWindowConfig {
 /// - Monospace font (Menlo/SF Mono)
 /// - Optional CRT glow effect
 ///
-/// # Example
-///
-/// ```ignore
-/// let config = render_terminal_window_container();
-/// div()
-///     .bg(rgb(config.background))
-///     .border_1()
-///     .border_color(rgb(config.border))
-///     .font_family(config.font_family)
-///     .shadow(if config.glow_enabled {
-///         vec![BoxShadow { color: config.glow_color, blur_radius: px(config.glow_blur), ... }]
-///     } else { vec![] })
-/// ```
 pub fn render_terminal_window_container() -> TerminalWindowConfig {
     TerminalWindowConfig::default()
 }

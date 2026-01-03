@@ -18,21 +18,9 @@
 //!    c. Pastes replacement text via clipboard
 //!    d. Resumes keyboard monitor
 //!
-//! # Example
-//!
-//! ```ignore
-//! use script_kit_gpui::expand_manager::ExpandManager;
-//!
-//! let mut manager = ExpandManager::new();
-//! manager.load_scriptlets()?;  // Loads triggers from ~/.kenv/scriptlets/
-//! manager.enable()?;           // Starts keyboard monitoring
-//! // ... user types ":sig" in any app ...
-//! // ... manager detects match and expands to signature text ...
-//! manager.disable();           // Stops keyboard monitoring
-//! ```
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -102,6 +90,9 @@ pub struct ExpandManager {
     scriptlets: Arc<Mutex<HashMap<String, ExpandScriptlet>>>,
     /// The expand matcher for trigger detection
     matcher: Arc<Mutex<ExpandMatcher>>,
+    /// Reverse lookup: file path -> set of triggers from that file
+    /// Used for efficient clearing/updating of triggers when a file changes
+    file_triggers: Arc<Mutex<HashMap<PathBuf, HashSet<String>>>>,
     /// The keyboard monitor (optional - created on enable)
     monitor: Option<KeyboardMonitor>,
     /// The text injector (reserved for future direct use)
@@ -125,6 +116,7 @@ impl ExpandManager {
             config,
             scriptlets: Arc::new(Mutex::new(HashMap::new())),
             matcher: Arc::new(Mutex::new(ExpandMatcher::new())),
+            file_triggers: Arc::new(Mutex::new(HashMap::new())),
             monitor: None,
             injector,
             enabled: false,
@@ -180,6 +172,16 @@ impl ExpandManager {
                     // Use a dummy path since we store scriptlet data separately
                     let dummy_path = PathBuf::from(format!("scriptlet:{}", scriptlet.name));
                     matcher_guard.register_trigger(expand_trigger, dummy_path);
+                }
+
+                // Track which file this trigger came from for incremental updates
+                if let Some(ref file_path) = scriptlet.file_path {
+                    let path = PathBuf::from(file_path);
+                    let mut file_triggers_guard = self.file_triggers.lock().unwrap();
+                    file_triggers_guard
+                        .entry(path)
+                        .or_default()
+                        .insert(expand_trigger.clone());
                 }
 
                 loaded_count += 1;
@@ -456,6 +458,10 @@ impl ExpandManager {
             let mut matcher_guard = self.matcher.lock().unwrap();
             matcher_guard.clear_triggers();
         }
+        {
+            let mut file_triggers_guard = self.file_triggers.lock().unwrap();
+            file_triggers_guard.clear();
+        }
 
         debug!("All expand triggers cleared");
     }
@@ -477,6 +483,314 @@ impl ExpandManager {
             .iter()
             .map(|(trigger, scriptlet)| (trigger.clone(), scriptlet.name.clone()))
             .collect()
+    }
+
+    /// Unregister a single trigger by its keyword
+    ///
+    /// This removes the trigger from the matcher and the scriptlets store.
+    ///
+    /// # Arguments
+    /// * `trigger` - The trigger keyword to remove (e.g., ":sig")
+    ///
+    /// # Returns
+    /// `true` if the trigger was removed, `false` if it didn't exist
+    #[allow(dead_code)]
+    pub fn unregister_trigger(&mut self, trigger: &str) -> bool {
+        let scriptlet_removed = {
+            let mut scriptlets_guard = self.scriptlets.lock().unwrap();
+            scriptlets_guard.remove(trigger).is_some()
+        };
+
+        let matcher_removed = {
+            let mut matcher_guard = self.matcher.lock().unwrap();
+            matcher_guard.unregister_trigger(trigger)
+        };
+
+        // Also remove from file_triggers tracking
+        {
+            let mut file_triggers_guard = self.file_triggers.lock().unwrap();
+            for triggers_set in file_triggers_guard.values_mut() {
+                triggers_set.remove(trigger);
+            }
+            // Clean up empty entries
+            file_triggers_guard.retain(|_, triggers| !triggers.is_empty());
+        }
+
+        if scriptlet_removed || matcher_removed {
+            debug!(trigger = %trigger, "Unregistered expand trigger");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear all triggers that came from a specific file
+    ///
+    /// This is useful when a scriptlet file is deleted - all triggers
+    /// registered from that file should be removed.
+    ///
+    /// # Arguments
+    /// * `path` - The path to the scriptlet file
+    ///
+    /// # Returns
+    /// The number of triggers that were removed
+    #[allow(dead_code)]
+    pub fn clear_triggers_for_file(&mut self, path: &Path) -> usize {
+        // Get the triggers registered from this file
+        let triggers_to_remove: Vec<String> = {
+            let file_triggers_guard = self.file_triggers.lock().unwrap();
+            file_triggers_guard
+                .get(path)
+                .map(|set| set.iter().cloned().collect())
+                .unwrap_or_default()
+        };
+
+        if triggers_to_remove.is_empty() {
+            debug!(path = %path.display(), "No triggers to clear for file");
+            return 0;
+        }
+
+        let count = triggers_to_remove.len();
+
+        // Remove each trigger
+        for trigger in &triggers_to_remove {
+            {
+                let mut scriptlets_guard = self.scriptlets.lock().unwrap();
+                scriptlets_guard.remove(trigger);
+            }
+            {
+                let mut matcher_guard = self.matcher.lock().unwrap();
+                matcher_guard.unregister_trigger(trigger);
+            }
+        }
+
+        // Remove the file entry from tracking
+        {
+            let mut file_triggers_guard = self.file_triggers.lock().unwrap();
+            file_triggers_guard.remove(path);
+        }
+
+        info!(
+            path = %path.display(),
+            count = count,
+            "Cleared triggers for file"
+        );
+
+        count
+    }
+
+    /// Get triggers registered for a specific file (for debugging/testing)
+    #[allow(dead_code)]
+    pub fn get_triggers_for_file(&self, path: &Path) -> Vec<String> {
+        let file_triggers_guard = self.file_triggers.lock().unwrap();
+        file_triggers_guard
+            .get(path)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Register a trigger from a specific file
+    ///
+    /// This is like `register_trigger` but also tracks the source file
+    /// for incremental updates.
+    ///
+    /// # Arguments
+    /// * `trigger` - The trigger keyword (e.g., ":sig")
+    /// * `name` - The scriptlet name
+    /// * `content` - The replacement text
+    /// * `tool` - The tool type (e.g., "paste", "type")
+    /// * `source_path` - The file this trigger came from
+    #[allow(dead_code)]
+    pub fn register_trigger_from_file(
+        &mut self,
+        trigger: &str,
+        name: &str,
+        content: &str,
+        tool: &str,
+        source_path: &Path,
+    ) {
+        if trigger.is_empty() {
+            debug!("Attempted to register empty trigger, ignoring");
+            return;
+        }
+
+        info!(
+            trigger = %trigger,
+            name = %name,
+            source = %source_path.display(),
+            "Registering expand trigger from file"
+        );
+
+        let expand_scriptlet = ExpandScriptlet {
+            trigger: trigger.to_string(),
+            name: name.to_string(),
+            content: content.to_string(),
+            tool: tool.to_string(),
+            source_path: Some(source_path.to_string_lossy().into_owned()),
+        };
+
+        {
+            let mut scriptlets_guard = self.scriptlets.lock().unwrap();
+            scriptlets_guard.insert(trigger.to_string(), expand_scriptlet);
+        }
+
+        {
+            let mut matcher_guard = self.matcher.lock().unwrap();
+            let dummy_path = PathBuf::from(format!("manual:{}", name));
+            matcher_guard.register_trigger(trigger, dummy_path);
+        }
+
+        // Track the file -> trigger mapping
+        {
+            let mut file_triggers_guard = self.file_triggers.lock().unwrap();
+            file_triggers_guard
+                .entry(source_path.to_path_buf())
+                .or_default()
+                .insert(trigger.to_string());
+        }
+    }
+
+    /// Update triggers for a file with new scriptlet data
+    ///
+    /// This performs a diff between the existing triggers and the new triggers:
+    /// - Triggers that no longer exist are removed
+    /// - New triggers are added
+    /// - Triggers with changed content are updated
+    ///
+    /// # Arguments
+    /// * `path` - The path to the scriptlet file
+    /// * `new_triggers` - The new trigger definitions: (trigger, name, content, tool)
+    ///
+    /// # Returns
+    /// A tuple of (added_count, removed_count, updated_count)
+    #[allow(dead_code)]
+    pub fn update_triggers_for_file(
+        &mut self,
+        path: &Path,
+        new_triggers: &[(String, String, String, String)],
+    ) -> (usize, usize, usize) {
+        // Get existing triggers for this file
+        let existing_triggers: HashSet<String> = {
+            let file_triggers_guard = self.file_triggers.lock().unwrap();
+            file_triggers_guard.get(path).cloned().unwrap_or_default()
+        };
+
+        // Build set of new trigger keywords
+        let new_trigger_keys: HashSet<String> =
+            new_triggers.iter().map(|(t, _, _, _)| t.clone()).collect();
+
+        // Find triggers to remove (exist in old but not in new)
+        let to_remove: Vec<String> = existing_triggers
+            .difference(&new_trigger_keys)
+            .cloned()
+            .collect();
+
+        // Find triggers to add (exist in new but not in old)
+        let to_add: Vec<_> = new_triggers
+            .iter()
+            .filter(|(t, _, _, _)| !existing_triggers.contains(t))
+            .collect();
+
+        // Find triggers to update (exist in both, check if content changed)
+        let mut updated_count = 0;
+        for (trigger, name, content, tool) in new_triggers {
+            if existing_triggers.contains(trigger) {
+                // Check if content changed
+                let content_changed = {
+                    let scriptlets_guard = self.scriptlets.lock().unwrap();
+                    if let Some(existing) = scriptlets_guard.get(trigger) {
+                        existing.content != *content
+                            || existing.name != *name
+                            || existing.tool != *tool
+                    } else {
+                        true // Treat as changed if not found
+                    }
+                };
+
+                if content_changed {
+                    // Update the scriptlet
+                    let expand_scriptlet = ExpandScriptlet {
+                        trigger: trigger.clone(),
+                        name: name.clone(),
+                        content: content.clone(),
+                        tool: tool.clone(),
+                        source_path: Some(path.to_string_lossy().into_owned()),
+                    };
+
+                    {
+                        let mut scriptlets_guard = self.scriptlets.lock().unwrap();
+                        scriptlets_guard.insert(trigger.clone(), expand_scriptlet);
+                    }
+
+                    debug!(
+                        trigger = %trigger,
+                        path = %path.display(),
+                        "Updated trigger content"
+                    );
+                    updated_count += 1;
+                }
+            }
+        }
+
+        // Remove old triggers
+        for trigger in &to_remove {
+            {
+                let mut scriptlets_guard = self.scriptlets.lock().unwrap();
+                scriptlets_guard.remove(trigger);
+            }
+            {
+                let mut matcher_guard = self.matcher.lock().unwrap();
+                matcher_guard.unregister_trigger(trigger);
+            }
+            debug!(trigger = %trigger, path = %path.display(), "Removed trigger");
+        }
+
+        // Add new triggers
+        for (trigger, name, content, tool) in &to_add {
+            let expand_scriptlet = ExpandScriptlet {
+                trigger: trigger.clone(),
+                name: name.clone(),
+                content: content.clone(),
+                tool: tool.clone(),
+                source_path: Some(path.to_string_lossy().into_owned()),
+            };
+
+            {
+                let mut scriptlets_guard = self.scriptlets.lock().unwrap();
+                scriptlets_guard.insert(trigger.clone(), expand_scriptlet);
+            }
+
+            {
+                let mut matcher_guard = self.matcher.lock().unwrap();
+                let dummy_path = PathBuf::from(format!("scriptlet:{}", name));
+                matcher_guard.register_trigger(trigger, dummy_path);
+            }
+
+            debug!(trigger = %trigger, path = %path.display(), "Added trigger");
+        }
+
+        // Update file_triggers tracking
+        {
+            let mut file_triggers_guard = self.file_triggers.lock().unwrap();
+            if new_trigger_keys.is_empty() {
+                file_triggers_guard.remove(path);
+            } else {
+                file_triggers_guard.insert(path.to_path_buf(), new_trigger_keys);
+            }
+        }
+
+        let added_count = to_add.len();
+        let removed_count = to_remove.len();
+
+        info!(
+            path = %path.display(),
+            added = added_count,
+            removed = removed_count,
+            updated = updated_count,
+            "Updated triggers for file"
+        );
+
+        (added_count, removed_count, updated_count)
     }
 }
 
@@ -583,6 +897,340 @@ mod tests {
     fn test_accessibility_check_does_not_panic() {
         // Just verify it doesn't panic - actual result depends on system
         let _ = ExpandManager::has_accessibility_permission();
+    }
+
+    // ========================================
+    // Unregister Trigger Tests
+    // ========================================
+
+    #[test]
+    fn test_unregister_trigger() {
+        let mut manager = ExpandManager::new();
+
+        manager.register_trigger(":test", "Test Snippet", "Hello, World!", "paste");
+        assert_eq!(manager.trigger_count(), 1);
+
+        // Unregister the trigger
+        let removed = manager.unregister_trigger(":test");
+        assert!(removed);
+        assert_eq!(manager.trigger_count(), 0);
+
+        // Verify it's not in the list
+        let triggers = manager.list_triggers();
+        assert!(triggers.is_empty());
+    }
+
+    #[test]
+    fn test_unregister_nonexistent_trigger() {
+        let mut manager = ExpandManager::new();
+
+        let removed = manager.unregister_trigger(":nonexistent");
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_unregister_one_of_multiple_triggers() {
+        let mut manager = ExpandManager::new();
+
+        manager.register_trigger(":a", "A", "Content A", "paste");
+        manager.register_trigger(":b", "B", "Content B", "paste");
+        manager.register_trigger(":c", "C", "Content C", "paste");
+
+        assert_eq!(manager.trigger_count(), 3);
+
+        // Unregister just one
+        let removed = manager.unregister_trigger(":b");
+        assert!(removed);
+        assert_eq!(manager.trigger_count(), 2);
+
+        // Verify the right ones remain
+        let triggers = manager.list_triggers();
+        let trigger_names: Vec<_> = triggers.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(trigger_names.contains(&":a"));
+        assert!(!trigger_names.contains(&":b"));
+        assert!(trigger_names.contains(&":c"));
+    }
+
+    // ========================================
+    // Clear Triggers For File Tests
+    // ========================================
+
+    #[test]
+    fn test_clear_triggers_for_file() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/scriptlets/test.md");
+
+        // Register triggers from a file
+        manager.register_trigger_from_file(":sig", "Signature", "Best regards", "paste", &path);
+        manager.register_trigger_from_file(":addr", "Address", "123 Main St", "paste", &path);
+
+        assert_eq!(manager.trigger_count(), 2);
+        assert_eq!(manager.get_triggers_for_file(&path).len(), 2);
+
+        // Clear triggers for the file
+        let cleared = manager.clear_triggers_for_file(&path);
+        assert_eq!(cleared, 2);
+        assert_eq!(manager.trigger_count(), 0);
+        assert!(manager.get_triggers_for_file(&path).is_empty());
+    }
+
+    #[test]
+    fn test_clear_triggers_for_file_only_affects_that_file() {
+        let mut manager = ExpandManager::new();
+        let path1 = PathBuf::from("/test/file1.md");
+        let path2 = PathBuf::from("/test/file2.md");
+
+        // Register triggers from two different files
+        manager.register_trigger_from_file(":a", "A", "Content A", "paste", &path1);
+        manager.register_trigger_from_file(":b", "B", "Content B", "paste", &path1);
+        manager.register_trigger_from_file(":c", "C", "Content C", "paste", &path2);
+
+        assert_eq!(manager.trigger_count(), 3);
+
+        // Clear triggers for file1 only
+        let cleared = manager.clear_triggers_for_file(&path1);
+        assert_eq!(cleared, 2);
+        assert_eq!(manager.trigger_count(), 1);
+
+        // Verify file2's trigger is still there
+        let triggers = manager.list_triggers();
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].0, ":c");
+    }
+
+    #[test]
+    fn test_clear_triggers_for_nonexistent_file() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/nonexistent.md");
+
+        let cleared = manager.clear_triggers_for_file(&path);
+        assert_eq!(cleared, 0);
+    }
+
+    // ========================================
+    // Update Triggers For File Tests
+    // ========================================
+
+    #[test]
+    fn test_update_triggers_add_new() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        // Start with no triggers
+        assert_eq!(manager.trigger_count(), 0);
+
+        // Add new triggers
+        let new_triggers = vec![
+            (
+                ":a".to_string(),
+                "A".to_string(),
+                "Content A".to_string(),
+                "paste".to_string(),
+            ),
+            (
+                ":b".to_string(),
+                "B".to_string(),
+                "Content B".to_string(),
+                "paste".to_string(),
+            ),
+        ];
+
+        let (added, removed, updated) = manager.update_triggers_for_file(&path, &new_triggers);
+
+        assert_eq!(added, 2);
+        assert_eq!(removed, 0);
+        assert_eq!(updated, 0);
+        assert_eq!(manager.trigger_count(), 2);
+    }
+
+    #[test]
+    fn test_update_triggers_remove_old() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        // Start with two triggers
+        manager.register_trigger_from_file(":a", "A", "Content A", "paste", &path);
+        manager.register_trigger_from_file(":b", "B", "Content B", "paste", &path);
+        assert_eq!(manager.trigger_count(), 2);
+
+        // Update with only one trigger (removes :b)
+        let new_triggers = vec![(
+            ":a".to_string(),
+            "A".to_string(),
+            "Content A".to_string(),
+            "paste".to_string(),
+        )];
+
+        let (added, removed, updated) = manager.update_triggers_for_file(&path, &new_triggers);
+
+        assert_eq!(added, 0);
+        assert_eq!(removed, 1);
+        assert_eq!(updated, 0);
+        assert_eq!(manager.trigger_count(), 1);
+
+        let triggers = manager.list_triggers();
+        assert_eq!(triggers[0].0, ":a");
+    }
+
+    #[test]
+    fn test_update_triggers_change_content() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        // Start with a trigger
+        manager.register_trigger_from_file(":sig", "Signature", "Old content", "paste", &path);
+        assert_eq!(manager.trigger_count(), 1);
+
+        // Update with changed content
+        let new_triggers = vec![(
+            ":sig".to_string(),
+            "Signature".to_string(),
+            "New content".to_string(),
+            "paste".to_string(),
+        )];
+
+        let (added, removed, updated) = manager.update_triggers_for_file(&path, &new_triggers);
+
+        assert_eq!(added, 0);
+        assert_eq!(removed, 0);
+        assert_eq!(updated, 1);
+        assert_eq!(manager.trigger_count(), 1);
+    }
+
+    #[test]
+    fn test_update_triggers_mixed_operations() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        // Start with triggers :a, :b, :c
+        manager.register_trigger_from_file(":a", "A", "Content A", "paste", &path);
+        manager.register_trigger_from_file(":b", "B", "Content B", "paste", &path);
+        manager.register_trigger_from_file(":c", "C", "Content C", "paste", &path);
+        assert_eq!(manager.trigger_count(), 3);
+
+        // Update:
+        // - Keep :a unchanged
+        // - Remove :b
+        // - Change :c content
+        // - Add :d
+        let new_triggers = vec![
+            (
+                ":a".to_string(),
+                "A".to_string(),
+                "Content A".to_string(),
+                "paste".to_string(),
+            ),
+            (
+                ":c".to_string(),
+                "C".to_string(),
+                "New content C".to_string(),
+                "paste".to_string(),
+            ),
+            (
+                ":d".to_string(),
+                "D".to_string(),
+                "Content D".to_string(),
+                "paste".to_string(),
+            ),
+        ];
+
+        let (added, removed, updated) = manager.update_triggers_for_file(&path, &new_triggers);
+
+        assert_eq!(added, 1); // :d
+        assert_eq!(removed, 1); // :b
+        assert_eq!(updated, 1); // :c
+        assert_eq!(manager.trigger_count(), 3);
+
+        let triggers = manager.list_triggers();
+        let trigger_names: Vec<_> = triggers.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(trigger_names.contains(&":a"));
+        assert!(!trigger_names.contains(&":b"));
+        assert!(trigger_names.contains(&":c"));
+        assert!(trigger_names.contains(&":d"));
+    }
+
+    #[test]
+    fn test_update_triggers_empty_removes_all() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        // Start with triggers
+        manager.register_trigger_from_file(":a", "A", "Content A", "paste", &path);
+        manager.register_trigger_from_file(":b", "B", "Content B", "paste", &path);
+        assert_eq!(manager.trigger_count(), 2);
+
+        // Update with empty list
+        let new_triggers: Vec<(String, String, String, String)> = vec![];
+
+        let (added, removed, updated) = manager.update_triggers_for_file(&path, &new_triggers);
+
+        assert_eq!(added, 0);
+        assert_eq!(removed, 2);
+        assert_eq!(updated, 0);
+        assert_eq!(manager.trigger_count(), 0);
+    }
+
+    #[test]
+    fn test_update_triggers_does_not_affect_other_files() {
+        let mut manager = ExpandManager::new();
+        let path1 = PathBuf::from("/test/file1.md");
+        let path2 = PathBuf::from("/test/file2.md");
+
+        // Register triggers from two files
+        manager.register_trigger_from_file(":a", "A", "Content A", "paste", &path1);
+        manager.register_trigger_from_file(":b", "B", "Content B", "paste", &path2);
+        assert_eq!(manager.trigger_count(), 2);
+
+        // Update file1 to remove its trigger
+        let new_triggers: Vec<(String, String, String, String)> = vec![];
+        manager.update_triggers_for_file(&path1, &new_triggers);
+
+        // File2's trigger should still exist
+        assert_eq!(manager.trigger_count(), 1);
+        let triggers = manager.list_triggers();
+        assert_eq!(triggers[0].0, ":b");
+    }
+
+    // ========================================
+    // Register Trigger From File Tests
+    // ========================================
+
+    #[test]
+    fn test_register_trigger_from_file() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        manager.register_trigger_from_file(":test", "Test", "Content", "paste", &path);
+
+        assert_eq!(manager.trigger_count(), 1);
+        assert_eq!(
+            manager.get_triggers_for_file(&path),
+            vec![":test".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_register_trigger_from_file_empty_ignored() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        manager.register_trigger_from_file("", "Test", "Content", "paste", &path);
+
+        assert_eq!(manager.trigger_count(), 0);
+    }
+
+    #[test]
+    fn test_get_triggers_for_file() {
+        let mut manager = ExpandManager::new();
+        let path = PathBuf::from("/test/file.md");
+
+        manager.register_trigger_from_file(":a", "A", "Content A", "paste", &path);
+        manager.register_trigger_from_file(":b", "B", "Content B", "paste", &path);
+
+        let triggers = manager.get_triggers_for_file(&path);
+        assert_eq!(triggers.len(), 2);
+        assert!(triggers.contains(&":a".to_string()));
+        assert!(triggers.contains(&":b".to_string()));
     }
 
     // Integration tests that require system permissions

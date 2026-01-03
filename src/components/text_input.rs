@@ -6,13 +6,6 @@
 //! - Word navigation (alt+arrows)
 //! - Standard cursor movement (arrows, home/end)
 //!
-//! # Usage
-//! ```ignore
-//! let mut input = TextInputState::new();
-//! input.set_text("Hello");
-//! input.handle_key(&keystroke, cx); // Returns true if handled
-//! let display = input.display_text(is_secret);
-//! ```
 
 use gpui::{ClipboardItem, Context, Render};
 

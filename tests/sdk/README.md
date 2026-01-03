@@ -2,6 +2,37 @@
 
 Automated test suite for Script Kit SDK methods. These tests validate the SDK implementation against expected behavior.
 
+## Protocol Coverage Summary
+
+**Run coverage report:** `bun run tests/protocol-coverage-matrix.ts`
+
+| Status | Count | Percentage |
+|--------|-------|------------|
+| **Fully Tested** | 12 | 16% |
+| **Partially Tested** | 38 | 49% |
+| **Untested** | 27 | 35% |
+| **Total Coverage** | 50/77 | 65% (tested + partial) |
+
+### Tested Messages (Full Coverage)
+- `arg`, `div`, `submit`, `exit` - Core prompts
+- `editor` - Code/text editor
+- `fields` - Form fields
+- `term` - Terminal emulator
+- `captureScreenshot`, `screenshotResult` - Screenshot capture
+- `setActions`, `actionTriggered` - Actions API
+- `show` - Window visibility
+
+### High Priority Untested Messages (8)
+- `forceSubmit` - SDK submit() function
+- `setInput` - Set input programmatically
+- `keyboard` - Keyboard simulation
+- `mouse` - Mouse control
+- `getState` - Query UI state
+- `getElements` - Query visible elements
+- `setPanel`, `setPreview`, `setPrompt` - UI updates
+
+See `tests/protocol-coverage-matrix.ts` for the complete breakdown (77 message types tracked).
+
 ## Quick Start
 
 ### Run All Tests

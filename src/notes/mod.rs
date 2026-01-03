@@ -20,16 +20,7 @@
 //! launcher. It uses gpui-component for UI components (Input, Sidebar, Button, etc.)
 //! and follows the Root wrapper pattern required by gpui-component.
 //!
-//! ## Usage
-//! ```ignore
-//! use crate::notes::{NotesApp, open_notes_window};
-//!
-//! // Open notes window (creates new or focuses existing)
-//! open_notes_window(cx);
-//!
-//! // Quick capture - opens notes with new note focused
-//! quick_capture(cx);
-//! ```
+
 
 // Allow dead code in this module - many functions are designed for future use
 #![allow(dead_code)]

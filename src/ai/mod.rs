@@ -19,32 +19,6 @@
 //!
 //! The AI chats database is stored at `~/.kenv/ai-chats.db`.
 //!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use crate::ai::{storage, model::{Chat, Message, MessageRole}};
-//!
-//! // Initialize the database (call once at app startup)
-//! storage::init_ai_db()?;
-//!
-//! // Create a new chat
-//! let chat = Chat::new("claude-3-opus", "anthropic");
-//! storage::create_chat(&chat)?;
-//!
-//! // Add messages
-//! let user_msg = Message::user(chat.id, "Hello!");
-//! storage::save_message(&user_msg)?;
-//!
-//! let assistant_msg = Message::assistant(chat.id, "Hi there! How can I help?")
-//!     .with_tokens(15);
-//! storage::save_message(&assistant_msg)?;
-//!
-//! // Search chats
-//! let results = storage::search_chats("hello")?;
-//!
-//! // Get all messages in a chat
-//! let messages = storage::get_chat_messages(&chat.id)?;
-//! ```
 //!
 //! # Features
 //!

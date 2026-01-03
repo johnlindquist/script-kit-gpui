@@ -372,6 +372,207 @@ impl ScriptListApp {
         cx.notify();
     }
 
+    /// Handle incremental scriptlet file change
+    ///
+    /// Instead of reloading all scriptlets, this method:
+    /// 1. Parses only the changed file
+    /// 2. Diffs against cached state to find what changed
+    /// 3. Updates hotkeys/expand triggers incrementally
+    /// 4. Updates the scriptlets list
+    ///
+    /// # Arguments
+    /// * `path` - Path to the changed/deleted scriptlet file
+    /// * `is_deleted` - Whether the file was deleted (vs created/modified)
+    /// * `cx` - The context for UI updates
+    fn handle_scriptlet_file_change(
+        &mut self,
+        path: &std::path::Path,
+        is_deleted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use script_kit_gpui::scriptlet_cache::{diff_scriptlets, CachedScriptlet};
+
+        logging::log(
+            "APP",
+            &format!(
+                "Incremental scriptlet change: {} (deleted={})",
+                path.display(),
+                is_deleted
+            ),
+        );
+
+        // Get old cached scriptlets for this file (if any)
+        // Note: We're using a simple approach here - comparing name+shortcut+expand+alias
+        let old_scriptlets: Vec<CachedScriptlet> = self
+            .scriptlets
+            .iter()
+            .filter(|s| {
+                s.file_path
+                    .as_ref()
+                    .map(|fp| fp.starts_with(&path.to_string_lossy().to_string()))
+                    .unwrap_or(false)
+            })
+            .map(|s| {
+                CachedScriptlet::new(
+                    s.name.clone(),
+                    s.shortcut.clone(),
+                    s.expand.clone(),
+                    s.alias.clone(),
+                    s.file_path.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        // Parse new scriptlets from file (empty if deleted)
+        let new_scripts_scriptlets = if is_deleted {
+            vec![]
+        } else {
+            scripts::read_scriptlets_from_file(path)
+        };
+
+        let new_scriptlets: Vec<CachedScriptlet> = new_scripts_scriptlets
+            .iter()
+            .map(|s| {
+                CachedScriptlet::new(
+                    s.name.clone(),
+                    s.shortcut.clone(),
+                    s.expand.clone(),
+                    s.alias.clone(),
+                    s.file_path.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        // Compute diff
+        let diff = diff_scriptlets(&old_scriptlets, &new_scriptlets);
+
+        if diff.is_empty() {
+            logging::log(
+                "APP",
+                &format!("No changes detected in {}", path.display()),
+            );
+            return;
+        }
+
+        logging::log(
+            "APP",
+            &format!(
+                "Scriptlet diff: {} added, {} removed, {} shortcut changes, {} expand changes, {} alias changes",
+                diff.added.len(),
+                diff.removed.len(),
+                diff.shortcut_changes.len(),
+                diff.expand_changes.len(),
+                diff.alias_changes.len()
+            ),
+        );
+
+        // Apply hotkey changes
+        for removed in &diff.removed {
+            if removed.shortcut.is_some() {
+                if let Err(e) = hotkeys::unregister_script_hotkey(&removed.file_path) {
+                    logging::log(
+                        "HOTKEY",
+                        &format!("Failed to unregister hotkey for {}: {}", removed.name, e),
+                    );
+                }
+            }
+        }
+
+        for added in &diff.added {
+            if let Some(ref shortcut) = added.shortcut {
+                if let Err(e) = hotkeys::register_script_hotkey(&added.file_path, shortcut) {
+                    logging::log(
+                        "HOTKEY",
+                        &format!("Failed to register hotkey for {}: {}", added.name, e),
+                    );
+                }
+            }
+        }
+
+        for change in &diff.shortcut_changes {
+            if let Err(e) = hotkeys::update_script_hotkey(
+                &change.file_path,
+                change.old.as_deref(),
+                change.new.as_deref(),
+            ) {
+                logging::log(
+                    "HOTKEY",
+                    &format!("Failed to update hotkey for {}: {}", change.name, e),
+                );
+            }
+        }
+
+        // Apply expand manager changes (macOS only)
+        #[cfg(target_os = "macos")]
+        {
+            // For removed scriptlets, clear their triggers
+            for removed in &diff.removed {
+                if removed.expand.is_some() {
+                    // We'd need access to the expand manager here
+                    // For now, log that we would clear triggers
+                    logging::log(
+                        "EXPAND",
+                        &format!("Would clear expand trigger for removed: {}", removed.name),
+                    );
+                }
+            }
+
+            // For added scriptlets with expand, register them
+            for added in &diff.added {
+                if added.expand.is_some() {
+                    logging::log(
+                        "EXPAND",
+                        &format!("Would register expand trigger for added: {}", added.name),
+                    );
+                }
+            }
+
+            // For changed expand triggers, update them
+            for change in &diff.expand_changes {
+                logging::log(
+                    "EXPAND",
+                    &format!(
+                        "Would update expand trigger for {}: {:?} -> {:?}",
+                        change.name, change.old, change.new
+                    ),
+                );
+            }
+        }
+
+        // Update the scriptlets list
+        // Remove old scriptlets from this file
+        let path_str = path.to_string_lossy().to_string();
+        self.scriptlets
+            .retain(|s| !s.file_path.as_ref().map(|fp| fp.starts_with(&path_str)).unwrap_or(false));
+
+        // Add new scriptlets from this file
+        self.scriptlets.extend(new_scripts_scriptlets);
+
+        // Sort by name to maintain consistent ordering
+        self.scriptlets.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Invalidate caches
+        self.invalidate_filter_cache();
+        self.invalidate_grouped_cache();
+
+        // Rebuild alias/shortcut registries for this file's scriptlets
+        let conflicts = self.rebuild_registries();
+        for conflict in conflicts {
+            self.show_hud(conflict, Some(4000), cx);
+        }
+
+        logging::log(
+            "APP",
+            &format!(
+                "Scriptlet file updated incrementally: {} now has {} total scriptlets",
+                path.display(),
+                self.scriptlets.len()
+            ),
+        );
+
+        cx.notify();
+    }
+
     /// Get unified filtered results combining scripts and scriptlets
     /// Helper to get filter text as string (for compatibility with existing code)
     fn filter_text(&self) -> &str {
@@ -1522,6 +1723,27 @@ impl ScriptListApp {
                             scriptlet.name, result.exit_code
                         ),
                     );
+
+                    // Handle special tool types that need interactive prompts
+                    if tool == "template" && !result.stdout.is_empty() {
+                        // Template tool: show template prompt with the content
+                        let id = format!("scriptlet-template-{}", uuid::Uuid::new_v4());
+                        logging::log(
+                            "EXEC",
+                            &format!(
+                                "Template scriptlet '{}' - showing template prompt",
+                                scriptlet.name
+                            ),
+                        );
+                        self.handle_prompt_message(
+                            PromptMessage::ShowTemplate {
+                                id,
+                                template: result.stdout.clone(),
+                            },
+                            cx,
+                        );
+                        return;
+                    }
 
                     // Store output if any
                     if !result.stdout.is_empty() {

@@ -22,9 +22,16 @@ pub enum ThemeReloadEvent {
 }
 
 /// Event emitted when scripts need to be reloaded
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptReloadEvent {
-    Reload,
+    /// A specific file was modified
+    FileChanged(PathBuf),
+    /// A new file was created
+    FileCreated(PathBuf),
+    /// A file was deleted
+    FileDeleted(PathBuf),
+    /// Fallback for complex events (e.g., bulk changes, renames)
+    FullReload,
 }
 
 /// Event emitted when system appearance changes (light/dark mode)
@@ -314,6 +321,22 @@ impl Drop for ThemeWatcher {
     }
 }
 
+/// Check if a file path is a relevant script file (ts, js, or md)
+fn is_relevant_script_file(path: &std::path::Path) -> bool {
+    // Skip hidden files
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        if file_name.starts_with('.') {
+            return false;
+        }
+    }
+
+    // Check for relevant extensions
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("ts") | Some("js") | Some("md")
+    )
+}
+
 /// Watches ~/.kenv/scripts and ~/.kenv/scriptlets directories for changes and emits reload events
 pub struct ScriptWatcher {
     tx: Option<Sender<ScriptReloadEvent>>,
@@ -360,9 +383,14 @@ impl ScriptWatcher {
         let scripts_path = PathBuf::from(shellexpand::tilde("~/.kenv/scripts").as_ref());
         let scriptlets_path = PathBuf::from(shellexpand::tilde("~/.kenv/scriptlets").as_ref());
 
-        // Create a debounce timer using Arc<Mutex>
-        let debounce_active = Arc::new(Mutex::new(false));
-        let debounce_active_clone = debounce_active.clone();
+        // Track pending events for debouncing (path -> (event_type, timestamp))
+        let pending_events: Arc<
+            Mutex<std::collections::HashMap<PathBuf, (ScriptReloadEvent, std::time::Instant)>>,
+        > = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let pending_events_clone = pending_events.clone();
+
+        // Debounce interval
+        let debounce_ms = 500;
 
         // Channel for the file watcher thread
         let (watch_tx, watch_rx) = channel();
@@ -393,40 +421,81 @@ impl ScriptWatcher {
             "Script watcher started"
         );
 
+        // Spawn a background thread to flush pending events after debounce interval
+        let tx_clone = tx.clone();
+        let flush_pending = pending_events_clone.clone();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(100)); // Check every 100ms
+
+                let now = std::time::Instant::now();
+                let mut events_to_send = Vec::new();
+
+                {
+                    let mut pending = flush_pending.lock().unwrap();
+                    let debounce_threshold = Duration::from_millis(debounce_ms);
+
+                    // Find events that have been pending long enough
+                    let expired: Vec<PathBuf> = pending
+                        .iter()
+                        .filter(|(_, (_, timestamp))| {
+                            now.duration_since(*timestamp) >= debounce_threshold
+                        })
+                        .map(|(path, _)| path.clone())
+                        .collect();
+
+                    // Remove expired events and collect them for sending
+                    for path in expired {
+                        if let Some((event, _)) = pending.remove(&path) {
+                            events_to_send.push((path, event));
+                        }
+                    }
+                }
+
+                // Send events outside the lock
+                for (path, event) in events_to_send {
+                    info!(
+                        path = %path.display(),
+                        event_type = ?event,
+                        "Emitting script reload event"
+                    );
+                    if tx_clone.send(event).is_err() {
+                        // Channel closed, exit flush thread
+                        return;
+                    }
+                }
+            }
+        });
+
         // Main watch loop
         loop {
             match watch_rx.recv() {
                 Ok(Ok(event)) => {
-                    // Care about Create, Modify, and Remove events in scripts directory
-                    let is_relevant_event = matches!(
-                        event.kind,
-                        notify::EventKind::Create(_)
-                            | notify::EventKind::Modify(_)
-                            | notify::EventKind::Remove(_)
-                    );
-
-                    if is_relevant_event {
-                        // Check if debounce is already active
-                        let mut debounce = debounce_active_clone.lock().unwrap();
-                        if !*debounce {
-                            *debounce = true;
-                            drop(debounce); // Release lock before spawning thread
-
-                            let tx_clone = tx.clone();
-                            let debounce_flag = debounce_active_clone.clone();
-
-                            // Spawn debounce thread
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(500));
-                                let _ = tx_clone.send(ScriptReloadEvent::Reload);
-                                let mut flag = debounce_flag.lock().unwrap();
-                                *flag = false;
-                                info!(
-                                    directory = "scripts",
-                                    "Script directory changed, emitting reload event"
-                                );
-                            });
+                    // Process each path in the event
+                    for path in event.paths.iter() {
+                        // Skip non-relevant files
+                        if !is_relevant_script_file(path) {
+                            continue;
                         }
+
+                        // Determine the event type based on notify::EventKind
+                        let reload_event = match event.kind {
+                            notify::EventKind::Create(_) => {
+                                ScriptReloadEvent::FileCreated(path.clone())
+                            }
+                            notify::EventKind::Modify(_) => {
+                                ScriptReloadEvent::FileChanged(path.clone())
+                            }
+                            notify::EventKind::Remove(_) => {
+                                ScriptReloadEvent::FileDeleted(path.clone())
+                            }
+                            // For other events (Access, Other), use FullReload as fallback
+                            _ => continue,
+                        };
+
+                        // Update pending events map (this implements per-file debouncing)
+                        let mut pending = pending_events.lock().unwrap();
+                        pending.insert(path.clone(), (reload_event, std::time::Instant::now()));
                     }
                 }
                 Ok(Err(e)) => {
@@ -600,9 +669,135 @@ mod tests {
 
     #[test]
     fn test_script_reload_event_clone() {
-        let event = ScriptReloadEvent::Reload;
+        let event = ScriptReloadEvent::FullReload;
         let _cloned = event.clone();
         // Event should be cloneable
+    }
+
+    #[test]
+    fn test_script_reload_event_file_changed() {
+        let path = PathBuf::from("/test/path/script.ts");
+        let event = ScriptReloadEvent::FileChanged(path.clone());
+
+        // Verify the event contains the correct path
+        if let ScriptReloadEvent::FileChanged(event_path) = event {
+            assert_eq!(event_path, path);
+        } else {
+            panic!("Expected FileChanged variant");
+        }
+    }
+
+    #[test]
+    fn test_script_reload_event_file_created() {
+        let path = PathBuf::from("/test/path/new-script.ts");
+        let event = ScriptReloadEvent::FileCreated(path.clone());
+
+        // Verify the event contains the correct path
+        if let ScriptReloadEvent::FileCreated(event_path) = event {
+            assert_eq!(event_path, path);
+        } else {
+            panic!("Expected FileCreated variant");
+        }
+    }
+
+    #[test]
+    fn test_script_reload_event_file_deleted() {
+        let path = PathBuf::from("/test/path/deleted-script.ts");
+        let event = ScriptReloadEvent::FileDeleted(path.clone());
+
+        // Verify the event contains the correct path
+        if let ScriptReloadEvent::FileDeleted(event_path) = event {
+            assert_eq!(event_path, path);
+        } else {
+            panic!("Expected FileDeleted variant");
+        }
+    }
+
+    #[test]
+    fn test_script_reload_event_equality() {
+        let path1 = PathBuf::from("/test/path/script.ts");
+        let path2 = PathBuf::from("/test/path/script.ts");
+        let path3 = PathBuf::from("/test/path/other.ts");
+
+        // Same path should be equal
+        assert_eq!(
+            ScriptReloadEvent::FileChanged(path1.clone()),
+            ScriptReloadEvent::FileChanged(path2.clone())
+        );
+
+        // Different paths should not be equal
+        assert_ne!(
+            ScriptReloadEvent::FileChanged(path1.clone()),
+            ScriptReloadEvent::FileChanged(path3.clone())
+        );
+
+        // Different event types should not be equal
+        assert_ne!(
+            ScriptReloadEvent::FileChanged(path1.clone()),
+            ScriptReloadEvent::FileCreated(path1.clone())
+        );
+
+        // FullReload should equal itself
+        assert_eq!(ScriptReloadEvent::FullReload, ScriptReloadEvent::FullReload);
+    }
+
+    #[test]
+    fn test_extract_file_path_from_event() {
+        // Test helper function for extracting paths from notify events
+        use notify::event::{CreateKind, ModifyKind, RemoveKind};
+
+        let test_path = PathBuf::from("/Users/test/.kenv/scripts/hello.ts");
+
+        // Test Create event
+        let create_event = notify::Event {
+            kind: notify::EventKind::Create(CreateKind::File),
+            paths: vec![test_path.clone()],
+            attrs: Default::default(),
+        };
+        assert_eq!(create_event.paths.first(), Some(&test_path));
+
+        // Test Modify event
+        let modify_event = notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            paths: vec![test_path.clone()],
+            attrs: Default::default(),
+        };
+        assert_eq!(modify_event.paths.first(), Some(&test_path));
+
+        // Test Remove event
+        let remove_event = notify::Event {
+            kind: notify::EventKind::Remove(RemoveKind::File),
+            paths: vec![test_path.clone()],
+            attrs: Default::default(),
+        };
+        assert_eq!(remove_event.paths.first(), Some(&test_path));
+    }
+
+    #[test]
+    fn test_is_relevant_script_file() {
+        use std::path::Path;
+
+        // Test that we correctly identify relevant script files
+        let ts_path = Path::new("/Users/test/.kenv/scripts/hello.ts");
+        let js_path = Path::new("/Users/test/.kenv/scripts/hello.js");
+        let md_path = Path::new("/Users/test/.kenv/scriptlets/hello.md");
+        let txt_path = Path::new("/Users/test/.kenv/scripts/readme.txt");
+        let hidden_path = Path::new("/Users/test/.kenv/scripts/.hidden.ts");
+
+        // TypeScript files should be relevant
+        assert!(is_relevant_script_file(ts_path));
+
+        // JavaScript files should be relevant
+        assert!(is_relevant_script_file(js_path));
+
+        // Markdown files in scriptlets should be relevant
+        assert!(is_relevant_script_file(md_path));
+
+        // Other file types should not be relevant
+        assert!(!is_relevant_script_file(txt_path));
+
+        // Hidden files should not be relevant
+        assert!(!is_relevant_script_file(hidden_path));
     }
 
     #[test]

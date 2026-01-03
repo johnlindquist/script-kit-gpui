@@ -54,6 +54,10 @@ pub mod process_manager;
 // Scriptlet parsing and variable substitution
 pub mod scriptlets;
 
+// Scriptlet cache for tracking per-file state with change detection
+// Used by file watchers to diff scriptlet changes and update registrations incrementally
+pub mod scriptlet_cache;
+
 // Typed metadata parser for new `metadata = {}` global syntax
 pub mod metadata_parser;
 

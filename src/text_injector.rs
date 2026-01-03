@@ -102,11 +102,6 @@ impl TextInjector {
     /// # Errors
     /// Returns error if CGEventPost fails
     ///
-    /// # Example
-    /// ```ignore
-    /// let injector = TextInjector::new();
-    /// injector.delete_chars(5)?; // Delete 5 characters
-    /// ```
     #[instrument(skip(self), fields(count))]
     pub fn delete_chars(&self, count: usize) -> Result<()> {
         if count == 0 {
@@ -144,11 +139,6 @@ impl TextInjector {
     /// # Errors
     /// Returns error if clipboard or paste operation fails
     ///
-    /// # Example
-    /// ```ignore
-    /// let injector = TextInjector::new();
-    /// injector.paste_text("Hello, World!")?;
-    /// ```
     #[instrument(skip(self, text), fields(text_len = text.len()))]
     pub fn paste_text(&self, text: &str) -> Result<()> {
         if text.is_empty() {
@@ -210,12 +200,6 @@ impl TextInjector {
     /// # Errors
     /// Returns error if delete or paste operation fails
     ///
-    /// # Example
-    /// ```ignore
-    /// let injector = TextInjector::new();
-    /// // User typed "btw" (3 chars), replace with "by the way"
-    /// injector.inject_text(3, "by the way")?;
-    /// ```
     #[allow(dead_code)]
     #[instrument(skip(self, replacement), fields(delete_count, replacement_len = replacement.len()))]
     pub fn inject_text(&self, delete_count: usize, replacement: &str) -> Result<()> {

@@ -7,20 +7,6 @@
 //! - [`FormTextArea`] - Multi-line text input
 //! - [`FormCheckbox`] - Checkbox with label
 //!
-//! # Usage
-//!
-//! ```ignore
-//! use crate::components::form_fields::{FormTextField, FormTextArea, FormCheckbox, FormFieldColors};
-//! use crate::protocol::Field;
-//!
-//! // Create a text field from a Field definition
-//! let field = Field::new("username".to_string())
-//!     .with_label("Username".to_string())
-//!     .with_placeholder("Enter username".to_string());
-//!
-//! let colors = FormFieldColors::from_theme(&theme);
-//! let text_field = FormTextField::new(field, colors, cx);
-//! ```
 //!
 //! # Design Patterns
 //!

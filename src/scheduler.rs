@@ -8,29 +8,6 @@
 //! - `// Cron: */5 * * * *` - Raw cron patterns (minute precision)
 //! - `// Schedule: every tuesday at 2pm` - Natural language schedules
 //!
-//! # Example Usage
-//! ```rust,ignore
-//! use std::sync::mpsc;
-//! use script_kit_gpui::scheduler::{Scheduler, SchedulerEvent};
-//!
-//! let (scheduler, rx) = Scheduler::new();
-//! scheduler.add_script(
-//!     PathBuf::from("/path/to/script.ts"),
-//!     Some("*/5 * * * *".to_string()),  // Run every 5 minutes
-//!     None,
-//! ).expect("Failed to add script");
-//!
-//! // Start the background scheduler loop
-//! let handle = scheduler.start();
-//!
-//! // Handle events in your main loop
-//! while let Ok(event) = rx.recv() {
-//!     match event {
-//!         SchedulerEvent::RunScript(path) => execute_script(path),
-//!         SchedulerEvent::Error(msg) => log_error(msg),
-//!     }
-//! }
-//! ```
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

@@ -141,13 +141,6 @@ fn detect_file_type(path: &Path) -> FileType {
 /// # Returns
 /// Vector of FileResult structs containing file information
 ///
-/// # Example
-/// ```ignore
-/// let results = search_files("readme", Some("/Users/me/projects"), 20);
-/// for file in results {
-///     println!("{}: {} bytes", file.name, file.size);
-/// }
-/// ```
 #[instrument(skip_all, fields(query = %query, onlyin = ?onlyin, limit = limit))]
 pub fn search_files(query: &str, onlyin: Option<&str>, limit: usize) -> Vec<FileResult> {
     debug!("Starting mdfind search");
@@ -238,12 +231,6 @@ pub fn search_files(query: &str, onlyin: Option<&str>, limit: usize) -> Vec<File
 /// # Returns
 /// Some(FileMetadata) if the file exists and is readable, None otherwise
 ///
-/// # Example
-/// ```ignore
-/// if let Some(meta) = get_file_metadata("/Users/me/document.pdf") {
-///     println!("Size: {} bytes, Modified: {}", meta.size, meta.modified);
-/// }
-/// ```
 #[allow(dead_code)]
 #[instrument(skip_all, fields(path = %path))]
 pub fn get_file_metadata(path: &str) -> Option<FileMetadata> {

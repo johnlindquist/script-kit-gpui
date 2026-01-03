@@ -49,6 +49,25 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  typescript-tests:
+    name: TypeScript SDK Tests
+    runs-on: macos-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install
+      - name: Build binary
+        run: cargo build
+      - name: Run TypeScript SDK tests
+        run: bun run scripts/test-runner.ts
+        timeout-minutes: 5
+
   build-artifact:
     name: Build macOS Artifact
     runs-on: macos-latest

@@ -4,13 +4,6 @@
 //! This module renders grid lines, component bounds, box model visualization,
 //! and alignment guides on top of the UI.
 //!
-//! # Usage
-//! ```ignore
-//! use debug_grid::{GridConfig, ComponentBounds, render_grid_overlay};
-//!
-//! let config = GridConfig::default();
-//! let overlay = render_grid_overlay(&config, window_bounds, &component_bounds);
-//! ```
 
 #![allow(dead_code)]
 

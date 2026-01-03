@@ -11,26 +11,6 @@
 //! - Semi-transparent and only visible when content overflows
 //! - Theme-aware colors
 //!
-//! # Usage
-//!
-//! ```ignore
-//! use crate::components::{Scrollbar, ScrollbarColors};
-//!
-//! // In your render method:
-//! let scrollbar_colors = ScrollbarColors::from_theme(&theme);
-//! let scrollbar = Scrollbar::new(
-//!     total_items,      // Total number of items in list
-//!     visible_items,    // Number of items visible at once
-//!     scroll_offset,    // Index of first visible item
-//!     scrollbar_colors,
-//! );
-//!
-//! // Overlay scrollbar on your list container:
-//! div()
-//!     .relative()
-//!     .child(your_list)
-//!     .child(scrollbar)
-//! ```
 
 #![allow(dead_code)]
 
@@ -114,24 +94,6 @@ impl Default for ScrollbarColors {
 /// - Be semi-transparent and unobtrusive
 /// - Only render when content overflows (total > visible)
 ///
-/// # Example
-///
-/// ```ignore
-/// // Container with list and overlay scrollbar
-/// div()
-///     .relative()
-///     .w_full()
-///     .h_full()
-///     .child(
-///         uniform_list(...)
-///             .w_full()
-///             .h_full()
-///     )
-///     .child(
-///         Scrollbar::new(100, 20, scroll_offset, colors)
-///             .container_height(400.0)
-///     )
-/// ```
 #[derive(IntoElement)]
 pub struct Scrollbar {
     /// Total number of items in the list

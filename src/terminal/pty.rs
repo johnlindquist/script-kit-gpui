@@ -10,20 +10,6 @@
 //! - **Linux**: Uses native PTY via `/dev/ptmx` or `/dev/pts`
 //! - **Windows**: Uses ConPTY (Windows 10 1809+)
 //!
-//! # Example
-//!
-//! ```rust,ignore
-//! use script_kit_gpui::terminal::PtyManager;
-//!
-//! let mut pty = PtyManager::new()?;
-//!
-//! // Write to the PTY
-//! pty.write(b"echo hello\n")?;
-//!
-//! // Read output
-//! let mut buf = [0u8; 1024];
-//! let n = pty.read(&mut buf)?;
-//! ```
 
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -84,12 +70,6 @@ impl PtyManager {
     /// - PTY creation fails (e.g., resource exhaustion)
     /// - Shell spawning fails
     ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let mut pty = PtyManager::new()?;
-    /// assert!(pty.is_running());
-    /// ```
     #[instrument(level = "info", name = "pty_spawn_default")]
     pub fn new() -> Result<Self> {
         let shell = Self::detect_shell();
@@ -125,11 +105,6 @@ impl PtyManager {
     ///
     /// Returns an error if PTY creation or command spawning fails.
     ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let mut pty = PtyManager::with_command("python3", &["-c", "print('hello')"])?;
-    /// ```
     #[instrument(level = "info", name = "pty_spawn_command", fields(cmd = %cmd))]
     pub fn with_command(cmd: &str, args: &[&str]) -> Result<Self> {
         Self::spawn_internal(cmd, args, 80, 24)
@@ -264,12 +239,6 @@ impl PtyManager {
     ///
     /// Returns an error if the resize operation fails.
     ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// pty.resize(120, 40)?;
-    /// assert_eq!(pty.size(), (120, 40));
-    /// ```
     #[instrument(level = "debug", name = "pty_resize", skip(self), fields(cols, rows))]
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         let new_size = PtySize {

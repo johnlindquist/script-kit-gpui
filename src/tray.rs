@@ -182,18 +182,6 @@ impl TrayManager {
     }
 
     /// Returns the menu event receiver for handling menu clicks
-    ///
-    /// Use this in your event loop to process menu events:
-    /// ```ignore
-    /// if let Ok(event) = tray_manager.menu_event_receiver().try_recv() {
-    ///     match tray_manager.match_menu_event(&event) {
-    ///         Some(TrayMenuAction::OpenScriptKit) => { /* handle */ }
-    ///         Some(TrayMenuAction::Settings) => { /* handle */ }
-    ///         Some(TrayMenuAction::Quit) => { /* handle */ }
-    ///         None => { /* unknown menu item */ }
-    ///     }
-    /// }
-    /// ```
     pub fn menu_event_receiver(&self) -> &MenuEventReceiver {
         MenuEvent::receiver()
     }

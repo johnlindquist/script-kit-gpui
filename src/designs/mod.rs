@@ -6,15 +6,6 @@
 //! Each design variant implements the `DesignRenderer` trait to provide
 //! its own visual style while maintaining the same functionality.
 //!
-//! # Usage
-//! ```ignore
-//! use designs::{DesignVariant, uses_default_renderer};
-//!
-//! // Check if we should use the default implementation
-//! if !uses_default_renderer(variant) {
-//!     // Use custom renderer (when implemented)
-//! }
-//! ```
 
 pub mod apple_hig;
 pub mod brutalist;
@@ -292,15 +283,6 @@ pub fn get_item_height(variant: DesignVariant) -> f32 {
 /// Returns a boxed trait object that provides the complete design token set
 /// for the specified variant. Use this when you need dynamic dispatch.
 ///
-/// # Example
-///
-/// ```ignore
-/// use designs::{DesignVariant, get_tokens};
-///
-/// let tokens = get_tokens(DesignVariant::Minimal);
-/// let bg_color = gpui::rgb(tokens.colors().background);
-/// let item_height = tokens.item_height();
-/// ```
 pub fn get_tokens(variant: DesignVariant) -> Box<dyn DesignTokens> {
     match variant {
         DesignVariant::Default => Box::new(DefaultDesignTokens),
@@ -322,15 +304,6 @@ pub fn get_tokens(variant: DesignVariant) -> Box<dyn DesignTokens> {
 /// Returns the concrete token type for the specified variant.
 /// Use this when you know the variant at compile time for better performance.
 ///
-/// # Example
-///
-/// ```ignore
-/// use designs::{DesignVariant, get_tokens_static, MinimalDesignTokens};
-///
-/// // Get tokens with static dispatch
-/// let tokens = MinimalDesignTokens;
-/// let bg_color = gpui::rgb(tokens.colors().background);
-/// ```
 #[allow(dead_code)]
 pub fn get_tokens_static<T: DesignTokens + Copy + Default>() -> T {
     T::default()

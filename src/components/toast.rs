@@ -4,22 +4,6 @@
 //! (Success, Warning, Error, Info) and support for auto-dismiss, action buttons, and
 //! expandable details.
 //!
-//! # Transitions
-//!
-//! Toasts support appear/dismiss transitions via the `AppearTransition` type:
-//!
-//! ```ignore
-//! use crate::transitions::{AppearTransition, Opacity, SlideOffset, Lerp, ease_out_quad};
-//!
-//! // Create toast with initial hidden state
-//! let mut toast = Toast::success("Saved!", &theme)
-//!     .with_transition(AppearTransition::hidden());
-//!
-//! // Animate to visible (caller manages timing)
-//! let t = ease_out_quad(progress); // 0.0 to 1.0
-//! let current = AppearTransition::hidden().lerp(&AppearTransition::visible(), t);
-//! toast = toast.with_transition(current);
-//! ```
 
 #![allow(dead_code)]
 
@@ -189,25 +173,6 @@ pub type ToastDismissCallback = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 /// - Action buttons (e.g., "Copy Error", "View Details")
 /// - Appear/dismiss transitions via `AppearTransition`
 ///
-/// # Example
-/// ```ignore
-/// let colors = ToastColors::from_theme(&theme, ToastVariant::Error);
-/// Toast::new("An error occurred", colors)
-///     .variant(ToastVariant::Error)
-///     .details("Stack trace here...")
-///     .dismissible(true)
-///     .action(ToastAction::new("Copy", Box::new(|_, _, _| { /* copy to clipboard */ })))
-/// ```
-///
-/// # Transitions Example
-/// ```ignore
-/// // Create with hidden state for animation
-/// let toast = Toast::success("Done!", &theme)
-///     .with_transition(AppearTransition::hidden());
-///
-/// // Later, animate to visible:
-/// let toast = toast.with_transition(current_transition_state);
-/// ```
 #[derive(IntoElement)]
 pub struct Toast {
     /// The main message to display
@@ -311,15 +276,6 @@ impl Toast {
     /// - `AppearTransition::visible()` - Fully visible state
     /// - `AppearTransition::dismissed()` - Dismiss state (invisible, offset up)
     ///
-    /// # Example
-    /// ```ignore
-    /// use crate::transitions::{AppearTransition, Lerp, ease_out_quad};
-    ///
-    /// // Animate from hidden to visible
-    /// let progress = ease_out_quad(animation_progress); // 0.0 to 1.0
-    /// let state = AppearTransition::hidden().lerp(&AppearTransition::visible(), progress);
-    /// let toast = Toast::success("Done!", &theme).with_transition(state);
-    /// ```
     pub fn with_transition(mut self, transition: AppearTransition) -> Self {
         self.transition = transition;
         self

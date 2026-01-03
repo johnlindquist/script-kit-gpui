@@ -62,19 +62,6 @@ pub enum GroupedListItem {
 /// - `next_selectable()` / `prev_selectable()`: O(k) where k is consecutive headers
 /// - Memory: O(h) where h is number of headers (typically < 10)
 ///
-/// ## Usage Pattern
-/// ```ignore
-/// // Build once when data changes
-/// let grouped = GroupedListState::from_groups(&[
-///     ("Today", 5),      // 5 items in Today group
-///     ("Yesterday", 3),  // 3 items in Yesterday group
-/// ]);
-///
-/// // Use for navigation (fast, no allocation)
-/// let next = grouped.next_selectable(current_index);
-/// let prev = grouped.prev_selectable(current_index);
-/// let is_hdr = grouped.is_header(index);
-/// ```
 #[derive(Clone, Debug)]
 pub struct GroupedListState {
     /// Set of indices that are headers (for O(1) lookup)
@@ -241,21 +228,6 @@ pub type OnHoverCallback = Box<dyn Fn(usize, bool) + 'static>;
 /// - Hover callback for mouse interaction (optional)
 /// - Semantic ID for AI-driven targeting (optional)
 ///
-/// # Example
-/// ```ignore
-/// let colors = ListItemColors::from_theme(&theme);
-/// ListItem::new("My Script", colors)
-///     .icon("📜")
-///     .description("A helpful script")
-///     .shortcut("⌘K")
-///     .selected(true)
-///     .hovered(false)
-///     .index(0)
-///     .semantic_id("choice:0:my-script")
-///     .on_hover(Box::new(|index, hovered| {
-///         if hovered { println!("Hovered item {}", index); }
-///     }))
-/// ```
 #[derive(IntoElement)]
 pub struct ListItem {
     name: SharedString,
@@ -756,11 +728,6 @@ pub fn icon_from_png(png_data: &[u8]) -> Option<IconKind> {
 /// * `label` - The section label (displayed as-is, standard casing)
 /// * `colors` - ListItemColors for theme-aware styling
 ///
-/// # Example
-/// ```ignore
-/// let colors = ListItemColors::from_theme(&theme);
-/// render_section_header("Recent", colors)
-/// ```
 pub fn render_section_header(label: &str, colors: ListItemColors) -> impl IntoElement {
     // Compact section header with explicit height (SECTION_HEADER_HEIGHT = 24px)
     // Used with GPUI's list() component which supports variable-height items.

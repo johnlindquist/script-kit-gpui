@@ -28,19 +28,6 @@
 //! | `month` | Month name | "January" |
 //! | `year` | Year | "2024" |
 //!
-//! # Usage
-//!
-//! ```ignore
-//! use crate::template_variables::{substitute_variables, VariableContext};
-//!
-//! // Basic substitution with defaults
-//! let result = substitute_variables("Hello, today is ${date}");
-//!
-//! // With custom context (e.g., for testing or custom values)
-//! let mut ctx = VariableContext::new();
-//! ctx.set("name", "John");
-//! let result = substitute_variables_with_context("Hello {{name}}", &ctx);
-//! ```
 
 use arboard::Clipboard;
 use chrono::{Datelike, Local, Timelike};
@@ -134,11 +121,6 @@ impl VariableContext {
 /// # Returns
 /// The content with all recognized variables substituted
 ///
-/// # Example
-/// ```ignore
-/// let result = substitute_variables("Today is ${date}, time: {{time}}");
-/// // Result: "Today is 2024-01-15, time: 14:30:45"
-/// ```
 pub fn substitute_variables(content: &str) -> String {
     let ctx = VariableContext::new();
     substitute_variables_with_context(content, &ctx)
@@ -156,13 +138,6 @@ pub fn substitute_variables(content: &str) -> String {
 /// # Returns
 /// The content with all recognized variables substituted
 ///
-/// # Example
-/// ```ignore
-/// let mut ctx = VariableContext::new();
-/// ctx.set("name", "Alice");
-/// let result = substitute_variables_with_context("Hello {{name}}!", &ctx);
-/// // Result: "Hello Alice!"
-/// ```
 pub fn substitute_variables_with_context(content: &str, ctx: &VariableContext) -> String {
     let mut result = content.to_string();
 

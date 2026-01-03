@@ -19,27 +19,6 @@
 //! - **Theme Adapter** ([`ThemeAdapter`]): Converts Script Kit's theme system to
 //!   Alacritty's color configuration for seamless visual integration.
 //!
-//! # Example
-//!
-//! ```rust,ignore
-//! use script_kit_gpui::terminal::{PtyManager, TerminalHandle, TerminalEvent};
-//!
-//! // Create a PTY with default shell
-//! let pty_manager = PtyManager::new()?;
-//!
-//! // Create terminal handle for rendering
-//! let terminal = TerminalHandle::new(80, 24);
-//!
-//! // Process events
-//! while let Some(event) = terminal.poll_event() {
-//!     match event {
-//!         TerminalEvent::Output(text) => { /* render text */ }
-//!         TerminalEvent::Bell => { /* play bell */ }
-//!         TerminalEvent::Title(title) => { /* update window title */ }
-//!         TerminalEvent::Exit(code) => { /* terminal exited */ }
-//!     }
-//! }
-//! ```
 //!
 //! # Features
 //!

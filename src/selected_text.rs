@@ -122,13 +122,6 @@ pub fn show_permission_dialog() -> Result<bool> {
 /// - Returns error if no accessibility permission
 /// - Returns error if the operation fails
 ///
-/// # Example
-/// ```ignore
-/// let text = get_selected_text()?;
-/// if !text.is_empty() {
-///     println!("Selected: {}", text);
-/// }
-/// ```
 #[instrument(skip_all)]
 pub fn get_selected_text() -> Result<String> {
     // Check permissions first
@@ -178,10 +171,6 @@ pub fn get_selected_text() -> Result<String> {
 /// - Returns error if no accessibility permission
 /// - Returns error if clipboard or paste operation fails
 ///
-/// # Example
-/// ```ignore
-/// set_selected_text("Hello, World!")?;
-/// ```
 #[instrument(skip(text), fields(text_len = text.len()))]
 pub fn set_selected_text(text: &str) -> Result<()> {
     if !has_accessibility_permission() {

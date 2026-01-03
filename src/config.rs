@@ -9,7 +9,7 @@ pub const DEFAULT_PADDING_LEFT: f32 = 12.0;
 pub const DEFAULT_PADDING_RIGHT: f32 = 12.0;
 
 /// Default font sizes
-pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 14.0;
+pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 16.0;
 pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 14.0;
 
 /// Default UI scale
@@ -1222,7 +1222,7 @@ mod tests {
         assert_eq!(DEFAULT_PADDING_TOP, 8.0);
         assert_eq!(DEFAULT_PADDING_LEFT, 12.0);
         assert_eq!(DEFAULT_PADDING_RIGHT, 12.0);
-        assert_eq!(DEFAULT_EDITOR_FONT_SIZE, 14.0);
+        assert_eq!(DEFAULT_EDITOR_FONT_SIZE, 16.0);
         assert_eq!(DEFAULT_TERMINAL_FONT_SIZE, 14.0);
         assert_eq!(DEFAULT_UI_SCALE, 1.0);
     }

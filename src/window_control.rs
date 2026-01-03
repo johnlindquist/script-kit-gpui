@@ -15,21 +15,6 @@
 //!
 //! Requires Accessibility permission in System Preferences > Privacy & Security > Accessibility
 //!
-//! ## Example
-//!
-//! ```ignore
-//! use script_kit_gpui::window_control::{list_windows, tile_window, TilePosition};
-//!
-//! let windows = list_windows()?;
-//! for window in &windows {
-//!     println!("{}: {} - {:?}", window.app, window.title, window.bounds);
-//! }
-//!
-//! // Tile the first window to the left half of the screen
-//! if let Some(window) = windows.first() {
-//!     tile_window(window.id, TilePosition::LeftHalf)?;
-//! }
-//! ```
 
 #![allow(non_upper_case_globals)]
 #![allow(dead_code)]
@@ -487,13 +472,6 @@ pub fn request_accessibility_permission() -> bool {
 /// # Errors
 /// Returns error if accessibility permission is not granted.
 ///
-/// # Example
-/// ```ignore
-/// let windows = list_windows()?;
-/// for window in &windows {
-///     println!("{}: {}", window.app, window.title);
-/// }
-/// ```
 #[instrument]
 pub fn list_windows() -> Result<Vec<WindowInfo>> {
     if !has_accessibility_permission() {
@@ -769,11 +747,6 @@ pub fn maximize_window(window_id: u32) -> Result<()> {
 /// # Errors
 /// Returns error if window not found or operation fails.
 ///
-/// # Example
-/// ```ignore
-/// // Tile window to left half of screen
-/// tile_window(window_id, TilePosition::LeftHalf)?;
-/// ```
 #[instrument]
 pub fn tile_window(window_id: u32, position: TilePosition) -> Result<()> {
     let window = get_cached_window(window_id)

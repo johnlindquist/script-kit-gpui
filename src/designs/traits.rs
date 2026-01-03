@@ -394,13 +394,6 @@ impl Default for DesignVisual {
 /// design tokens. This enables consistent theming across the entire application
 /// while allowing each design to have its own unique visual identity.
 ///
-/// # Example
-///
-/// ```ignore
-/// let tokens = get_tokens(DesignVariant::Minimal);
-/// let bg = gpui::rgb(tokens.colors().background);
-/// let padding = gpui::px(tokens.spacing().padding_md);
-/// ```
 pub trait DesignTokens: Send + Sync {
     /// Get the color tokens for this design
     fn colors(&self) -> DesignColors;

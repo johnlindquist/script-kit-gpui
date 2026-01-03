@@ -48,25 +48,6 @@
 //! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Usage
-//!
-//! ## Registering a Window
-//! ```ignore
-//! // After GPUI creates the window, register it:
-//! let window_handle = cx.open_window(...);
-//! // The window_handle contains the native window id internally
-//! // We use find_and_register_main_window() to locate it by size
-//! find_and_register_main_window();
-//! ```
-//!
-//! ## Retrieving a Window
-//! ```ignore
-//! // In window_resize.rs or anywhere else:
-//! if let Some(window_id) = get_main_window() {
-//!     // Use window_id for NSWindow operations
-//!     let _: () = msg_send![window_id, setFrame:new_frame display:true];
-//! }
-//! ```
 //!
 //! # Thread Safety
 //!
@@ -217,11 +198,6 @@ fn get_manager() -> &'static Mutex<WindowManager> {
 /// * `role` - The purpose/role of this window
 /// * `window_id` - The native macOS window ID (NSWindow pointer)
 ///
-/// # Example
-/// ```ignore
-/// // After finding the window:
-/// register_window(WindowRole::MainWindow, ns_window_id);
-/// ```
 #[cfg(target_os = "macos")]
 pub fn register_window(role: WindowRole, window_id: id) {
     if let Ok(mut manager) = get_manager().lock() {

@@ -4,17 +4,6 @@
 //! alongside scripts. Features like Clipboard History and App Launcher are
 //! configurable and can be enabled/disabled via config.
 //!
-//! ## Usage
-//! ```ignore
-//! use crate::builtins::get_builtin_entries;
-//! use crate::config::BuiltInConfig;
-//!
-//! let config = BuiltInConfig::default();
-//! let entries = get_builtin_entries(&config);
-//! for entry in entries {
-//!     println!("{}: {}", entry.name, entry.description);
-//! }
-//! ```
 
 use crate::config::BuiltInConfig;
 use tracing::debug;

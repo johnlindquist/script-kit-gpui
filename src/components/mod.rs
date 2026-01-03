@@ -14,36 +14,6 @@
 //! - [`PromptHeader`] - Header component with search input, buttons, and logo
 //! - [`PromptContainer`] - Container component for consistent prompt window layout
 //!
-//! # Usage
-//!
-//! ```ignore
-//! use crate::components::{Button, ButtonColors, ButtonVariant};
-//!
-//! let colors = ButtonColors::from_theme(&theme);
-//! let button = Button::new("Run", colors)
-//!     .variant(ButtonVariant::Primary)
-//!     .shortcut("↵")
-//!     .on_click(Box::new(|_, _, _| println!("Clicked!")));
-//!
-//! // Toast example
-//! use crate::components::{Toast, ToastColors, ToastVariant};
-//!
-//! let toast_colors = ToastColors::from_theme(&theme, ToastVariant::Error);
-//! let toast = Toast::new("An error occurred", toast_colors)
-//!     .variant(ToastVariant::Error)
-//!     .details("Stack trace here...")
-//!     .dismissible(true);
-//!
-//! // Form field example
-//! use crate::components::{FormTextField, FormFieldColors};
-//! use crate::protocol::Field;
-//!
-//! let field = Field::new("username".to_string())
-//!     .with_label("Username".to_string())
-//!     .with_placeholder("Enter username".to_string());
-//! let colors = FormFieldColors::from_theme(&theme);
-//! let text_field = FormTextField::new(field, colors, cx);
-//! ```
 //!
 //! # Design Patterns
 //!

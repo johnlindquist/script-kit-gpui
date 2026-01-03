@@ -438,7 +438,8 @@ fn default_ui_font_family() -> String {
 }
 
 fn default_ui_font_size() -> f32 {
-    14.0
+    // 16px provides better readability and matches rem_size for gpui-component
+    16.0
 }
 
 impl Default for FontConfig {
@@ -896,17 +897,6 @@ pub fn load_theme() -> Theme {
 /// This struct pre-computes the exact colors needed for rendering list items,
 /// avoiding the need to clone the full ThemeColors struct into render closures.
 ///
-/// # Example
-/// ```ignore
-/// let list_colors = theme.colors.list_item_colors();
-/// // Pass list_colors into closure - it's Copy, so no heap allocation
-/// uniform_list(cx, |_this, visible_range, _window, _cx| {
-///     for ix in visible_range {
-///         let bg = if is_selected { list_colors.background_selected } else { list_colors.background };
-///         // ... render item
-///     }
-/// })
-/// ```
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub struct ListItemColors {
@@ -1084,11 +1074,6 @@ fn log_theme_config(theme: &Theme) {
 // Used by both main.rs and notes/window.rs for consistent theming.
 
 /// Convert a u32 hex color to Hsla
-///
-/// # Example
-/// ```ignore
-/// let hsla = hex_to_hsla(0x1e1e1e);
-/// ```
 #[inline]
 pub fn hex_to_hsla(hex: u32) -> Hsla {
     rgb(hex).into()
