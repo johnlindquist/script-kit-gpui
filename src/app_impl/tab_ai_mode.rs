@@ -242,8 +242,7 @@ impl ScriptListApp {
         };
 
         // No ambient capture needed — explicit target path skips desktop snapshot.
-        let (_tx, rx) =
-            async_channel::bounded::<Result<TabAiDeferredCaptureArtifacts, String>>(1);
+        let (_tx, rx) = async_channel::bounded::<Result<TabAiDeferredCaptureArtifacts, String>>(1);
 
         self.open_tab_ai_acp_view_from_request_impl(
             request,
@@ -447,12 +446,7 @@ impl ScriptListApp {
         capture_kind: crate::ai::TabAiCaptureKind,
         cx: &mut Context<Self>,
     ) {
-        self.open_tab_ai_chat_with_capture_kind_and_options(
-            entry_intent,
-            capture_kind,
-            false,
-            cx,
-        );
+        self.open_tab_ai_chat_with_capture_kind_and_options(entry_intent, capture_kind, false, cx);
     }
 
     fn open_tab_ai_chat_with_capture_kind_and_options(
@@ -5308,10 +5302,12 @@ mod tests {
             None, false,
         ));
         assert!(ScriptListApp::should_reuse_embedded_acp_view_for_open(
-            Some("explain this"), false,
+            Some("explain this"),
+            false,
         ));
         assert!(!ScriptListApp::should_reuse_embedded_acp_view_for_open(
-            Some("switch agent"), true,
+            Some("switch agent"),
+            true,
         ));
     }
 

@@ -746,6 +746,7 @@ mod tests {
             window_management: None,
             commands: None,
             claude_code: None,
+            mcp: None,
         };
         assert_eq!(default_config.get_editor(), "code");
 
@@ -777,6 +778,7 @@ mod tests {
             window_management: None,
             commands: None,
             claude_code: None,
+            mcp: None,
         };
         assert_eq!(custom_config.get_editor(), "vim");
 

@@ -3,6 +3,8 @@ import * as nodePath from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import { spawn as spawnChildProcess } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 // =============================================================================
 // SDK Benchmarking - for hotkey → chat latency analysis
@@ -988,6 +990,118 @@ export interface ClaudeCodeConfig {
   addDirs?: string[];
 }
 
+export type McpTransport = 'stdio' | 'http';
+
+export interface McpBaseServerConfig {
+  /**
+   * Optional human-readable label for the server.
+   */
+  name?: string;
+
+  /**
+   * Optional description shown in config documentation and tooling.
+   */
+  description?: string;
+
+  /**
+   * Whether Script Kit should use this server.
+   *
+   * @default true
+   */
+  enabled?: boolean;
+}
+
+/**
+ * A local stdio-backed MCP server.
+ */
+export interface McpStdioServerConfig extends McpBaseServerConfig {
+  transport: 'stdio';
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+/**
+ * A remote HTTP-backed MCP server.
+ */
+export interface McpHttpServerConfig extends McpBaseServerConfig {
+  transport: 'http';
+  endpoint: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
+
+/**
+ * Script Kit-managed MCP server definitions shared by scripts and ACP Chat.
+ */
+export interface McpConfig {
+  /**
+   * Master switch for Script Kit-managed MCP integrations.
+   *
+   * @default true
+   */
+  enabled?: boolean;
+
+  /**
+   * Named MCP server definitions keyed by server id.
+   *
+   * @default {}
+   */
+  servers?: Record<string, McpServerConfig>;
+}
+
+export interface McpServerInfo {
+  id: string;
+  transport: McpTransport;
+  enabled: boolean;
+  name?: string;
+  description?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  endpoint?: string;
+  headers?: Record<string, string>;
+}
+
+export interface McpToolInfo {
+  serverId: string;
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+export interface McpToolCallContent {
+  type: string;
+  text?: string;
+  mimeType?: string;
+  data?: unknown;
+  [key: string]: unknown;
+}
+
+export interface McpToolCallResult {
+  serverId: string;
+  toolName: string;
+  content: McpToolCallContent[];
+  structuredContent?: unknown;
+  isError?: boolean;
+  raw: Record<string, unknown>;
+}
+
+export interface McpApi {
+  listServers(): Promise<McpServerInfo[]>;
+  getServer(id: string): Promise<McpServerInfo | null>;
+  listTools(serverId?: string): Promise<McpToolInfo[]>;
+  discover(query: string): Promise<McpToolInfo[]>;
+  call(
+    serverId: string,
+    toolName: string,
+    args?: Record<string, unknown>
+  ): Promise<McpToolCallResult>;
+}
+
 /**
  * Suggested-commands configuration.
  * Controls the frecency-based "Suggested" section in the main menu.
@@ -1478,6 +1592,29 @@ export interface Config {
    * ```
    */
   claudeCode?: ClaudeCodeConfig;
+
+  /**
+   * External MCP servers that scripts and ACP Chat can use.
+   *
+   * @default undefined
+   * @example
+   * ```typescript
+   * mcp: {
+   *   servers: {
+   *     notion: {
+   *       transport: "http",
+   *       endpoint: "https://mcp.notion.com/mcp"
+   *     },
+   *     github: {
+   *       transport: "stdio",
+   *       command: "npx",
+   *       args: ["-y", "@modelcontextprotocol/server-github"]
+   *     }
+   *   }
+   * }
+   * ```
+   */
+  mcp?: McpConfig;
 }
 
 // =============================================================================
@@ -3379,6 +3516,11 @@ declare global {
    * Mouse API object
    */
   var mouse: MouseAPI;
+
+  /**
+   * Direct MCP client for Script Kit-managed external MCP servers.
+   */
+  var mcp: McpApi;
   
   // =============================================================================
   // TIER 4A: Chat Prompt (Inline UI in Main Window)
@@ -8196,5 +8338,503 @@ globalThis.batch = async function batch(
     send(message);
   });
 };
+
+const MCP_PROTOCOL_VERSION = '2024-11-05';
+let cachedScriptKitConfig: Promise<Config | null> | null = null;
+
+type McpJsonRpcId = number | string;
+type McpJsonRpcSuccess = {
+  jsonrpc: '2.0';
+  id: McpJsonRpcId;
+  result?: Record<string, unknown>;
+};
+type McpJsonRpcFailure = {
+  jsonrpc: '2.0';
+  id: McpJsonRpcId | null;
+  error: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+};
+type McpJsonRpcResponse = McpJsonRpcSuccess | McpJsonRpcFailure;
+
+function defaultMcpConfig(): McpConfig {
+  return {
+    enabled: true,
+    servers: {},
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeMcpConfig(config: unknown): McpConfig {
+  if (!isRecord(config)) {
+    return defaultMcpConfig();
+  }
+
+  const servers = isRecord(config.servers)
+    ? (config.servers as Record<string, McpServerConfig>)
+    : {};
+
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : true,
+    servers,
+  };
+}
+
+async function loadScriptKitConfig(): Promise<Config | null> {
+  if (!cachedScriptKitConfig) {
+    cachedScriptKitConfig = (async () => {
+      const configPath = nodePath.join(os.homedir(), '.scriptkit', 'kit', 'config.ts');
+
+      try {
+        await fs.access(configPath, fsConstants.F_OK);
+      } catch {
+        return null;
+      }
+
+      const moduleUrl = `${pathToFileURL(configPath).href}?t=${Date.now()}`;
+      const imported = await import(moduleUrl);
+      const config = (imported.default ?? imported) as Config;
+      return config ?? null;
+    })();
+  }
+
+  return cachedScriptKitConfig;
+}
+
+async function loadScriptKitMcpConfig(): Promise<McpConfig> {
+  const config = await loadScriptKitConfig();
+  return normalizeMcpConfig(config?.mcp);
+}
+
+function isServerEnabled(server: McpServerConfig): boolean {
+  return server.enabled ?? true;
+}
+
+function getEnabledMcpServerEntries(config: McpConfig): Array<[string, McpServerConfig]> {
+  if (config.enabled === false) {
+    return [];
+  }
+
+  return Object.entries(config.servers ?? {}).filter(([, server]) => isServerEnabled(server));
+}
+
+function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
+  if (server.transport === 'stdio') {
+    return {
+      id,
+      transport: 'stdio',
+      enabled: isServerEnabled(server),
+      name: server.name,
+      description: server.description,
+      command: server.command,
+      args: server.args ?? [],
+      env: server.env ?? {},
+      cwd: server.cwd,
+    };
+  }
+
+  return {
+    id,
+    transport: 'http',
+    enabled: isServerEnabled(server),
+    name: server.name,
+    description: server.description,
+    endpoint: server.endpoint,
+    headers: server.headers ?? {},
+  };
+}
+
+async function getConfiguredMcpServer(id: string): Promise<McpServerConfig | null> {
+  const config = await loadScriptKitMcpConfig();
+  const entries = getEnabledMcpServerEntries(config);
+  return entries.find(([serverId]) => serverId === id)?.[1] ?? null;
+}
+
+function getMcpErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function assertMcpJsonRpcSuccess(
+  response: McpJsonRpcResponse,
+  serverId: string,
+  method: string
+): Record<string, unknown> {
+  if ('error' in response) {
+    throw new Error(
+      `[mcp:${serverId}] ${method} failed: ${response.error.message} (code ${response.error.code})`
+    );
+  }
+
+  return response.result ?? {};
+}
+
+async function createStdioMcpSession(serverId: string, server: McpStdioServerConfig) {
+  if (!server.command?.trim()) {
+    throw new Error(`[mcp:${serverId}] stdio server is missing a command`);
+  }
+
+  const child = spawnChildProcess(server.command, server.args ?? [], {
+    cwd: server.cwd,
+    env: {
+      ...process.env,
+      ...(server.env ?? {}),
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  let nextRequestId = 1;
+  const stderrChunks: string[] = [];
+  const pending = new Map<
+    number,
+    {
+      resolve: (response: McpJsonRpcResponse) => void;
+      reject: (error: Error) => void;
+    }
+  >();
+
+  child.stderr.on('data', (chunk) => {
+    stderrChunks.push(chunk.toString());
+  });
+
+  const rejectPending = (error: Error) => {
+    for (const { reject } of pending.values()) {
+      reject(error);
+    }
+    pending.clear();
+  };
+
+  child.once('error', (error) => {
+    rejectPending(new Error(`[mcp:${serverId}] failed to start: ${error.message}`));
+  });
+
+  child.once('exit', (code, signal) => {
+    if (pending.size === 0) {
+      return;
+    }
+    const stderr = stderrChunks.join('').trim();
+    const details = stderr ? ` stderr: ${stderr}` : '';
+    rejectPending(
+      new Error(
+        `[mcp:${serverId}] server exited before responding (code=${code ?? 'null'}, signal=${signal ?? 'null'})${details}`
+      )
+    );
+  });
+
+  const lineReader = readline.createInterface({
+    input: child.stdout,
+    crlfDelay: Infinity,
+  });
+
+  lineReader.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    try {
+      const message = JSON.parse(trimmed) as Partial<McpJsonRpcResponse>;
+      if (typeof message.id === 'number' && pending.has(message.id)) {
+        const request = pending.get(message.id);
+        pending.delete(message.id);
+        request?.resolve(message as McpJsonRpcResponse);
+      }
+    } catch {
+      // Ignore non-JSON stdout noise from the child process.
+    }
+  });
+
+  const writeMessage = (payload: Record<string, unknown>) =>
+    new Promise<void>((resolve, reject) => {
+      child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+
+  return {
+    async request(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const requestId = nextRequestId++;
+      const response = await new Promise<McpJsonRpcResponse>((resolve, reject) => {
+        pending.set(requestId, {
+          resolve,
+          reject,
+        });
+        writeMessage({
+          jsonrpc: '2.0',
+          id: requestId,
+          method,
+          params,
+        }).catch((error) => {
+          pending.delete(requestId);
+          reject(
+            new Error(`[mcp:${serverId}] failed to write ${method}: ${getMcpErrorMessage(error)}`)
+          );
+        });
+      });
+      return assertMcpJsonRpcSuccess(response, serverId, method);
+    },
+    async notify(method: string, params?: Record<string, unknown>): Promise<void> {
+      await writeMessage({
+        jsonrpc: '2.0',
+        method,
+        params,
+      });
+    },
+    async close(): Promise<void> {
+      lineReader.close();
+      child.stdin.end();
+      if (!child.killed) {
+        child.kill();
+      }
+    },
+  };
+}
+
+async function createHttpMcpSession(serverId: string, server: McpHttpServerConfig) {
+  if (!server.endpoint?.trim()) {
+    throw new Error(`[mcp:${serverId}] http server is missing an endpoint`);
+  }
+
+  let sessionId: string | null = null;
+
+  const sendRequest = async (
+    method: string,
+    params?: Record<string, unknown>,
+    includeId = true
+  ): Promise<Record<string, unknown>> => {
+    const payload = includeId
+      ? {
+          jsonrpc: '2.0',
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          method,
+          params,
+        }
+      : {
+          jsonrpc: '2.0',
+          method,
+          params,
+        };
+
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      'mcp-protocol-version': MCP_PROTOCOL_VERSION,
+      ...(server.headers ?? {}),
+    };
+
+    if (sessionId) {
+      headers['mcp-session-id'] = sessionId;
+    }
+
+    const response = await fetch(server.endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `[mcp:${serverId}] ${method} failed with HTTP ${response.status} ${response.statusText}`
+      );
+    }
+
+    const nextSessionId = response.headers.get('mcp-session-id');
+    if (nextSessionId) {
+      sessionId = nextSessionId;
+    }
+
+    if (!includeId) {
+      return {};
+    }
+
+    const json = (await response.json()) as McpJsonRpcResponse;
+    return assertMcpJsonRpcSuccess(json, serverId, method);
+  };
+
+  return {
+    request(method: string, params?: Record<string, unknown>) {
+      return sendRequest(method, params, true);
+    },
+    async notify(method: string, params?: Record<string, unknown>) {
+      try {
+        await sendRequest(method, params, false);
+      } catch {
+        // Ignore initialized notification failures for remote servers.
+      }
+    },
+    async close(): Promise<void> {
+      sessionId = null;
+    },
+  };
+}
+
+async function withMcpSession<T>(
+  serverId: string,
+  server: McpServerConfig,
+  handler: (session: {
+    request(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
+    notify(method: string, params?: Record<string, unknown>): Promise<void>;
+    close(): Promise<void>;
+  }) => Promise<T>
+): Promise<T> {
+  const session =
+    server.transport === 'stdio'
+      ? await createStdioMcpSession(serverId, server)
+      : await createHttpMcpSession(serverId, server);
+
+  try {
+    await session.request('initialize', {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: {
+        name: 'script-kit',
+        version: SDK_VERSION,
+      },
+    });
+    await session.notify('notifications/initialized', {});
+    return await handler(session);
+  } finally {
+    await session.close();
+  }
+}
+
+function normalizeMcpToolInfo(serverId: string, tool: Record<string, unknown>): McpToolInfo {
+  return {
+    serverId,
+    name: typeof tool.name === 'string' ? tool.name : 'unknown',
+    description: typeof tool.description === 'string' ? tool.description : undefined,
+    inputSchema: isRecord(tool.inputSchema)
+      ? tool.inputSchema
+      : isRecord(tool.input_schema)
+        ? tool.input_schema
+        : undefined,
+  };
+}
+
+function normalizeMcpToolCallResult(
+  serverId: string,
+  toolName: string,
+  result: Record<string, unknown>
+): McpToolCallResult {
+  const content = Array.isArray(result.content)
+    ? (result.content as McpToolCallContent[])
+    : [];
+
+  return {
+    serverId,
+    toolName,
+    content,
+    structuredContent: result.structuredContent ?? result.structured_content,
+    isError: typeof result.isError === 'boolean'
+      ? result.isError
+      : typeof result.is_error === 'boolean'
+        ? result.is_error
+        : undefined,
+    raw: result,
+  };
+}
+
+function scoreDiscoveredTool(tool: McpToolInfo, query: string): number {
+  const haystack = `${tool.serverId} ${tool.name} ${tool.description ?? ''}`.toLowerCase();
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter(Boolean);
+
+  let score = 0;
+  for (const term of terms) {
+    if (tool.name.toLowerCase().includes(term)) {
+      score += 3;
+    }
+    if (tool.serverId.toLowerCase().includes(term)) {
+      score += 2;
+    }
+    if (haystack.includes(term)) {
+      score += 1;
+    }
+  }
+
+  return score;
+}
+
+globalThis.mcp = {
+  async listServers(): Promise<McpServerInfo[]> {
+    const config = await loadScriptKitMcpConfig();
+    return getEnabledMcpServerEntries(config).map(([id, server]) => toMcpServerInfo(id, server));
+  },
+
+  async getServer(id: string): Promise<McpServerInfo | null> {
+    const server = await getConfiguredMcpServer(id);
+    return server ? toMcpServerInfo(id, server) : null;
+  },
+
+  async listTools(serverId?: string): Promise<McpToolInfo[]> {
+    const config = await loadScriptKitMcpConfig();
+    const entries = serverId
+      ? (() => {
+          const server = getEnabledMcpServerEntries(config).find(([id]) => id === serverId);
+          return server ? [server] : [];
+        })()
+      : getEnabledMcpServerEntries(config);
+
+    const toolGroups = await Promise.all(
+      entries.map(async ([id, server]) => {
+        const result = await withMcpSession(id, server, async (session) => {
+          const response = await session.request('tools/list', {});
+          return Array.isArray(response.tools)
+            ? response.tools.map((tool) => normalizeMcpToolInfo(id, tool as Record<string, unknown>))
+            : [];
+        });
+        return result;
+      })
+    );
+
+    return toolGroups.flat();
+  },
+
+  async discover(query: string): Promise<McpToolInfo[]> {
+    const tools = await globalThis.mcp.listTools();
+    const scored = tools
+      .map((tool) => ({
+        tool,
+        score: scoreDiscoveredTool(tool, query),
+      }))
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || left.tool.name.localeCompare(right.tool.name));
+
+    return scored.map((entry) => entry.tool);
+  },
+
+  async call(
+    serverId: string,
+    toolName: string,
+    args: Record<string, unknown> = {}
+  ): Promise<McpToolCallResult> {
+    const server = await getConfiguredMcpServer(serverId);
+    if (!server) {
+      throw new Error(`[mcp:${serverId}] server is not configured or is disabled`);
+    }
+
+    return withMcpSession(serverId, server, async (session) => {
+      const response = await session.request('tools/call', {
+        name: toolName,
+        arguments: args,
+      });
+      return normalizeMcpToolCallResult(serverId, toolName, response);
+    });
+  },
+} satisfies McpApi;
 
 export {};

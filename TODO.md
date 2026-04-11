@@ -1,1 +1,0 @@
-When we run the actions window with the terminal open, the actions window isn't properly aligned/pinned to the footer just like it is in every other prompt: '/Users/johnlindquist/screenshots/CleanShot 2026-02-15 at 18.04.24@2x.png'

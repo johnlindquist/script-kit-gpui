@@ -371,9 +371,7 @@ enum FileSearchThumbnailPreviewState {
     /// No thumbnail should be rendered (no selection or non-image selection).
     Idle,
     /// Thumbnail load is in-flight for this path.
-    Loading {
-        path: String,
-    },
+    Loading { path: String },
     /// Thumbnail loaded successfully with decoded image and dimensions.
     Ready {
         path: String,
@@ -382,10 +380,7 @@ enum FileSearchThumbnailPreviewState {
         height: u32,
     },
     /// Thumbnail not available for this path (size/format/decode constraints).
-    Unavailable {
-        path: String,
-        message: String,
-    },
+    Unavailable { path: String, message: String },
 }
 
 /// State for the inline shortcut recorder overlay.

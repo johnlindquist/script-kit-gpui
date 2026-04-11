@@ -1367,53 +1367,15 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
         // =========================================================================
         // Permission Commands
         // =========================================================================
-
-        entries.push(BuiltInEntry::new_with_icon(
-            "builtin/check-permissions",
-            "Check Permissions",
-            "Run a check for all required macOS permissions",
-            vec!["check", "permissions", "accessibility", "privacy"],
-            BuiltInFeature::PermissionCommand(PermissionCommandType::CheckPermissions),
-            "circle-check",
-        ));
-
-        entries.push(BuiltInEntry::new_with_icon(
-            "builtin/request-accessibility",
-            "Request Accessibility Permission",
-            "Request accessibility permission for Script Kit in System Settings",
-            vec!["request", "accessibility", "permission"],
-            BuiltInFeature::PermissionCommand(PermissionCommandType::RequestAccessibility),
-            "key-round",
-        ));
-
-        entries.push(BuiltInEntry::new_with_icon(
-            "builtin/accessibility-settings",
-            "Open Accessibility Settings",
-            "Open Accessibility settings in System Preferences",
-            vec!["accessibility", "settings", "permission", "open"],
-            BuiltInFeature::PermissionCommand(PermissionCommandType::OpenAccessibilitySettings),
-            "accessibility",
-        ));
+        // These actions are intentionally routed through the Script Kit Settings hub
+        // instead of competing as top-level launcher commands.
 
         // =========================================================================
         // Frecency/Suggested Commands
         // =========================================================================
 
-        entries.push(BuiltInEntry::new_with_icon(
-            "builtin/clear-suggested",
-            "Clear Suggested",
-            "Clear all items from Suggested / Recently Used",
-            vec![
-                "clear",
-                "suggested",
-                "recent",
-                "frecency",
-                "reset",
-                "history",
-            ],
-            BuiltInFeature::FrecencyCommand(FrecencyCommandType::ClearSuggested),
-            "eraser",
-        ));
+        // Clear Suggested is intentionally routed through Script Kit Settings
+        // instead of competing as a top-level launcher command.
 
         // =========================================================================
     }
@@ -1433,6 +1395,10 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
                 "configure",
                 "options",
                 "setup",
+                "permissions",
+                "permission",
+                "accessibility",
+                "privacy",
             ],
             BuiltInFeature::Settings,
             "settings",
@@ -1629,33 +1595,17 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
                 "context",
                 "browser",
                 "selection",
+                // Collapsed alias coverage from Turn This Into a Command.
+                "turn this into a command",
+                "teach",
+                "save",
+                "recipe",
             ],
             BuiltInFeature::UtilityCommand(UtilityCommandType::DoInCurrentApp),
             "target",
         ));
-
-        entries.push(BuiltInEntry::new_with_icon(
-            "builtin/turn-this-into-a-command",
-            crate::menu_bar::current_app_commands::TURN_THIS_INTO_A_COMMAND_LABEL,
-            "Describe what you want in the frontmost app; Script Kit captures a reusable automation recipe and opens script generation",
-            vec![
-                "turn",
-                "this",
-                "into",
-                "command",
-                "teach",
-                "automation",
-                "current",
-                "app",
-                "save",
-                "script",
-                "recipe",
-                "intent",
-                "generate",
-            ],
-            BuiltInFeature::UtilityCommand(UtilityCommandType::TurnThisIntoCommand),
-            "puzzle",
-        ));
+        // Turn This Into a Command intentionally collapses into Do in Current App
+        // in the launcher registry. The execution path remains for compatibility.
 
         #[cfg(debug_assertions)]
         {
@@ -2601,18 +2551,30 @@ mod tests {
         );
     }
     #[test]
-    fn test_permission_command_entries_exist() {
+    fn test_permission_commands_are_routed_through_settings_hub() {
         let config = BuiltInConfig::default();
         let entries = get_builtin_entries(&config);
+        for id in [
+            "builtin/check-permissions",
+            "builtin/request-accessibility",
+            "builtin/accessibility-settings",
+        ] {
+            assert!(
+                entries.iter().all(|entry| entry.id != id),
+                "{id} should be routed through the Script Kit Settings hub instead of the top-level registry"
+            );
+        }
 
-        // Check that permission command entries exist
-        assert!(entries.iter().any(|e| e.id == "builtin/check-permissions"));
-        assert!(entries
+        let settings = entries
             .iter()
-            .any(|e| e.id == "builtin/request-accessibility"));
-        assert!(entries
-            .iter()
-            .any(|e| e.id == "builtin/accessibility-settings"));
+            .find(|entry| entry.id == "builtin/settings")
+            .expect("builtin/settings must remain registered");
+        for keyword in ["permissions", "permission", "accessibility", "privacy"] {
+            assert!(
+                settings.keywords.iter().any(|item| item == keyword),
+                "Script Kit Settings should preserve {keyword} discoverability from collapsed permission commands"
+            );
+        }
     }
     #[test]
     fn test_system_action_type_equality() {
@@ -2731,6 +2693,19 @@ mod tests {
                 "{id} should be routed through the Script Kit Settings hub instead of the top-level registry"
             );
         }
+    }
+
+    #[test]
+    fn test_settings_hub_absorbs_clear_suggested_command() {
+        let config = BuiltInConfig::default();
+        let entries = get_builtin_entries(&config);
+
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.id != "builtin/clear-suggested"),
+            "Clear Suggested should be exposed through Script Kit Settings instead of the top-level registry"
+        );
     }
 
     #[test]
@@ -3045,6 +3020,41 @@ mod tests {
         assert!(
             entry.keywords.contains(&"menubar".to_string()),
             "Do in Current App should include 'menubar' keyword from collapsed entry"
+        );
+    }
+
+    #[test]
+    fn turn_this_into_command_builtin_is_no_longer_registered() {
+        let entries = get_builtin_entries(&BuiltInConfig::default());
+        let found = entries
+            .iter()
+            .find(|e| e.id == "builtin/turn-this-into-a-command");
+        assert!(
+            found.is_none(),
+            "builtin/turn-this-into-a-command should no longer be registered (collapsed into Do in Current App)"
+        );
+    }
+
+    #[test]
+    fn do_in_current_app_absorbs_turn_this_into_command_keywords() {
+        let entries = get_builtin_entries(&BuiltInConfig::default());
+        let entry = entries
+            .iter()
+            .find(|e| e.id == "builtin/do-in-current-app")
+            .expect("builtin/do-in-current-app must be registered");
+        assert!(
+            entry
+                .keywords
+                .contains(&"turn this into a command".to_string()),
+            "Do in Current App should include the collapsed turn-this alias phrase"
+        );
+        assert!(
+            entry.keywords.contains(&"teach".to_string()),
+            "Do in Current App should include the collapsed 'teach' keyword"
+        );
+        assert!(
+            entry.keywords.contains(&"recipe".to_string()),
+            "Do in Current App should include the collapsed 'recipe' keyword"
         );
     }
 

@@ -2636,9 +2636,7 @@ impl ScriptListApp {
                             SettingsCommandType::DisableWindowSnapping => {
                                 window_control::SnapMode::Off
                             }
-                            SettingsCommandType::SnapModeSimple => {
-                                window_control::SnapMode::Simple
-                            }
+                            SettingsCommandType::SnapModeSimple => window_control::SnapMode::Simple,
                             SettingsCommandType::SnapModeExpanded => {
                                 window_control::SnapMode::Expanded
                             }
@@ -2703,15 +2701,9 @@ impl ScriptListApp {
                         );
 
                         let hud_text = match mode {
-                            window_control::SnapMode::Off => {
-                                "Window snapping disabled".to_string()
-                            }
-                            window_control::SnapMode::Simple => {
-                                "Snap mode: Simple".to_string()
-                            }
-                            window_control::SnapMode::Expanded => {
-                                "Snap mode: Expanded".to_string()
-                            }
+                            window_control::SnapMode::Off => "Window snapping disabled".to_string(),
+                            window_control::SnapMode::Simple => "Snap mode: Simple".to_string(),
+                            window_control::SnapMode::Expanded => "Snap mode: Expanded".to_string(),
                             window_control::SnapMode::Precision => {
                                 "Snap mode: Precision".to_string()
                             }
@@ -3748,7 +3740,9 @@ impl ScriptListApp {
                                     "current_app_commands.snapshot_ready"
                                 );
 
-                                self.present_current_app_commands_entries(entries, &receipt, "", cx);
+                                self.present_current_app_commands_entries(
+                                    entries, &receipt, "", cx,
+                                );
                                 Self::builtin_success(dctx, "open_current_app_commands")
                             }
                             Err(e) => {

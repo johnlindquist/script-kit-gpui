@@ -34,18 +34,11 @@ fn do_in_current_app_builtin_is_registered() {
         entry.feature,
         BuiltInFeature::UtilityCommand(UtilityCommandType::DoInCurrentApp)
     );
-
-    let do_pos = entries
-        .iter()
-        .position(|e| e.id == "builtin/do-in-current-app")
-        .unwrap();
-    let turn_pos = entries
-        .iter()
-        .position(|e| e.id == "builtin/turn-this-into-a-command")
-        .unwrap();
     assert!(
-        do_pos < turn_pos,
-        "builtin/do-in-current-app should appear before builtin-turn-this-into-a-command"
+        entry
+            .keywords
+            .contains(&"turn this into a command".to_string()),
+        "builtin/do-in-current-app should absorb the collapsed turn-this alias phrase"
     );
 }
 
@@ -618,29 +611,13 @@ fn trace_receipt_serializes_to_valid_json() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn turn_this_into_a_command_builtin_is_registered() {
+fn turn_this_into_a_command_builtin_is_no_longer_registered() {
     let entries = builtins::get_builtin_entries(&BuiltInConfig::default());
-    let entry = entries
-        .iter()
-        .find(|e| e.id == "builtin/turn-this-into-a-command")
-        .expect("builtin/turn-this-into-a-command must be in the registry");
-
-    assert_eq!(
-        entry.feature,
-        BuiltInFeature::UtilityCommand(UtilityCommandType::TurnThisIntoCommand)
-    );
-
-    let do_pos = entries
-        .iter()
-        .position(|e| e.id == "builtin/do-in-current-app")
-        .unwrap();
-    let turn_pos = entries
-        .iter()
-        .position(|e| e.id == "builtin/turn-this-into-a-command")
-        .unwrap();
     assert!(
-        do_pos < turn_pos,
-        "Turn This Into a Command should follow Do in Current App"
+        entries
+            .iter()
+            .all(|e| e.id != "builtin/turn-this-into-a-command"),
+        "builtin/turn-this-into-a-command should no longer be in the registry"
     );
 }
 

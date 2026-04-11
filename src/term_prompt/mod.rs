@@ -112,6 +112,8 @@ pub struct TermPrompt {
     /// Fractional line remainder from pixel-based scroll events (trackpad/momentum).
     /// Accumulated across events so small deltas aren't silently dropped.
     wheel_scroll_remainder: f32,
+    /// When true, render and size the terminal edge-to-edge without prompt padding.
+    pub edge_to_edge: bool,
 }
 
 // --- merged from part_001.rs ---
@@ -169,7 +171,18 @@ impl TermPrompt {
             has_received_output: false,
             prefer_buffer_scroll_on_wheel: false,
             wheel_scroll_remainder: 0.0,
+            edge_to_edge: false,
         })
+    }
+
+    #[inline]
+    fn effective_padding(&self) -> (f32, f32, f32) {
+        if self.edge_to_edge {
+            (0.0, 0.0, 0.0)
+        } else {
+            let padding = self.config.get_padding();
+            (padding.top, padding.left, padding.right)
+        }
     }
 
     /// Whether the terminal process is still alive.
@@ -527,11 +540,11 @@ impl TermPrompt {
 
     /// Convert pixel position to terminal grid cell (col, row)
     fn pixel_to_cell(&self, position: gpui::Point<Pixels>) -> (usize, usize) {
-        let padding = self.config.get_padding();
+        let (padding_top, padding_left, _) = self.effective_padding();
         let pos_x: f32 = position.x.into();
         let pos_y: f32 = position.y.into();
-        let x = (pos_x - padding.left).max(0.0);
-        let y = (pos_y - padding.top).max(0.0);
+        let x = (pos_x - padding_left).max(0.0);
+        let y = (pos_y - padding_top).max(0.0);
 
         let col = (x / self.cell_width()) as usize;
         let row = (y / self.cell_height()) as usize;
@@ -607,17 +620,17 @@ impl TermPrompt {
 
     /// Resize terminal if needed based on new dimensions
     fn resize_if_needed(&mut self, width: Pixels, height: Pixels) {
-        let padding = self.config.get_padding();
+        let (padding_top, padding_left, padding_right) = self.effective_padding();
         let cell_width = self.cell_width();
         let cell_height = self.cell_height();
         // Note: We use padding.top for bottom padding as well (see render() which uses pb(px(padding.top)))
         let (new_cols, new_rows) = Self::calculate_terminal_size_with_cells(
             width,
             height,
-            padding.left,
-            padding.right,
-            padding.top,
-            padding.top,
+            padding_left,
+            padding_right,
+            padding_top,
+            padding_top,
             cell_width,
             cell_height,
         );
@@ -1329,7 +1342,7 @@ impl Render for TermPrompt {
         let terminal_content = self.render_content(&content, &theme);
 
         // Get padding from config
-        let padding = self.config.get_padding();
+        let (padding_top, padding_left, padding_right) = self.effective_padding();
 
         // Check if bell is flashing and clear expired state
         // This ensures bell flash doesn't stick if timer has stopped (e.g., after terminal exit)
@@ -1359,10 +1372,10 @@ impl Render for TermPrompt {
             .flex()
             .flex_col()
             .w_full()
-            .pl(px(padding.left))
-            .pr(px(padding.right))
-            .pt(px(padding.top))
-            .pb(px(padding.top)) // Use same as top for consistent spacing
+            .pl(px(padding_left))
+            .pr(px(padding_right))
+            .pt(px(padding_top))
+            .pb(px(padding_top)) // Use same as top for consistent spacing
             // No .bg() - vibrancy support
             .text_color(rgb(colors.text.primary))
             .overflow_hidden() // Clip any overflow

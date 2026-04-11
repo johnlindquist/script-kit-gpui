@@ -4,11 +4,14 @@ use std::sync::OnceLock;
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::ai::ModelInfo;
 
 /// Cached agent config — avoids spawning bun processes on every Tab press.
 static CACHED_AGENT_CONFIG: OnceLock<AcpAgentConfig> = OnceLock::new();
+
+const CLAUDE_MCP_SYNC_SCHEMA_VERSION: u32 = 1;
 
 /// Configuration for a generic ACP-compatible AI agent.
 ///
@@ -111,6 +114,230 @@ fn default_claude_code_models() -> Vec<AcpModelEntry> {
     ]
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeManagedMcpState {
+    schema_version: u32,
+    #[serde(default)]
+    managed_servers: Vec<String>,
+}
+
+impl Default for ClaudeManagedMcpState {
+    fn default() -> Self {
+        Self {
+            schema_version: CLAUDE_MCP_SYNC_SCHEMA_VERSION,
+            managed_servers: Vec::new(),
+        }
+    }
+}
+
+fn script_kit_claude_mcp_sync_path() -> PathBuf {
+    crate::setup::get_kit_path()
+        .join("mcp")
+        .join("claude-sync.json")
+}
+
+fn default_claude_user_config_path() -> anyhow::Result<PathBuf> {
+    let home = dirs::home_dir().context("resolve home directory for Claude MCP sync")?;
+    Ok(home.join(".claude.json"))
+}
+
+fn build_claude_mcp_server_config(
+    server: &crate::config::McpServerConfig,
+) -> anyhow::Result<Value> {
+    let value = match server {
+        crate::config::McpServerConfig::Stdio(config) => {
+            if config.command.trim().is_empty() {
+                anyhow::bail!("MCP stdio server command cannot be empty");
+            }
+
+            let mut object = Map::new();
+            object.insert("type".to_string(), Value::String("stdio".to_string()));
+            object.insert("command".to_string(), Value::String(config.command.clone()));
+
+            if !config.args.is_empty() {
+                object.insert(
+                    "args".to_string(),
+                    Value::Array(config.args.iter().cloned().map(Value::String).collect()),
+                );
+            }
+            if !config.env.is_empty() {
+                object.insert(
+                    "env".to_string(),
+                    Value::Object(
+                        config
+                            .env
+                            .iter()
+                            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(cwd) = config.cwd.as_ref().filter(|cwd| !cwd.trim().is_empty()) {
+                object.insert("cwd".to_string(), Value::String(cwd.clone()));
+            }
+
+            Value::Object(object)
+        }
+        crate::config::McpServerConfig::Http(config) => {
+            if config.endpoint.trim().is_empty() {
+                anyhow::bail!("MCP HTTP server endpoint cannot be empty");
+            }
+
+            let mut object = Map::new();
+            object.insert("type".to_string(), Value::String("http".to_string()));
+            object.insert("url".to_string(), Value::String(config.endpoint.clone()));
+
+            if !config.headers.is_empty() {
+                object.insert(
+                    "headers".to_string(),
+                    Value::Object(
+                        config
+                            .headers
+                            .iter()
+                            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+
+            Value::Object(object)
+        }
+    };
+
+    Ok(value)
+}
+
+fn script_kit_managed_claude_mcp_servers(
+    config: &crate::config::Config,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    let mut servers = config
+        .get_mcp()
+        .enabled_servers()
+        .map(|(server_id, server)| {
+            build_claude_mcp_server_config(server).map(|value| (server_id.clone(), value))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    servers.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(servers)
+}
+
+fn load_claude_managed_mcp_state(path: &Path) -> anyhow::Result<ClaudeManagedMcpState> {
+    if !path.exists() {
+        return Ok(ClaudeManagedMcpState::default());
+    }
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read Claude MCP sync state {}", path.display()))?;
+    let state = serde_json::from_slice::<ClaudeManagedMcpState>(&bytes)
+        .with_context(|| format!("parse Claude MCP sync state {}", path.display()))?;
+    Ok(state)
+}
+
+fn write_claude_managed_mcp_state(path: &Path, managed_servers: &[String]) -> anyhow::Result<()> {
+    if managed_servers.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(path)
+                .with_context(|| format!("remove Claude MCP sync state {}", path.display()))?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create Claude MCP sync state directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let state = ClaudeManagedMcpState {
+        schema_version: CLAUDE_MCP_SYNC_SCHEMA_VERSION,
+        managed_servers: managed_servers.to_vec(),
+    };
+    let bytes = serde_json::to_vec_pretty(&state)
+        .with_context(|| format!("serialize Claude MCP sync state {}", path.display()))?;
+    std::fs::write(path, bytes)
+        .with_context(|| format!("write Claude MCP sync state {}", path.display()))?;
+    Ok(())
+}
+
+fn sync_script_kit_mcp_to_claude(config: &crate::config::Config) -> anyhow::Result<()> {
+    let desired_servers = script_kit_managed_claude_mcp_servers(config)?;
+    let managed_server_names = desired_servers
+        .iter()
+        .map(|(server_id, _)| server_id.clone())
+        .collect::<Vec<_>>();
+    let claude_config_path = default_claude_user_config_path()?;
+    let state_path = script_kit_claude_mcp_sync_path();
+
+    sync_script_kit_mcp_to_claude_at(
+        &desired_servers,
+        &managed_server_names,
+        &claude_config_path,
+        &state_path,
+    )
+}
+
+fn sync_script_kit_mcp_to_claude_at(
+    desired_servers: &[(String, Value)],
+    managed_server_names: &[String],
+    claude_config_path: &Path,
+    state_path: &Path,
+) -> anyhow::Result<()> {
+    let previous_state = load_claude_managed_mcp_state(state_path)?;
+    let mut root = if claude_config_path.exists() {
+        let bytes = std::fs::read(claude_config_path)
+            .with_context(|| format!("read Claude config {}", claude_config_path.display()))?;
+        serde_json::from_slice::<Value>(&bytes)
+            .with_context(|| format!("parse Claude config {}", claude_config_path.display()))?
+    } else {
+        Value::Object(Map::new())
+    };
+
+    let root_object = root
+        .as_object_mut()
+        .context("Claude config root must be a JSON object")?;
+
+    let mut existing_mcp_servers = match root_object.remove("mcpServers") {
+        Some(Value::Object(object)) => object,
+        Some(_) => anyhow::bail!("Claude config mcpServers must be a JSON object"),
+        None => Map::new(),
+    };
+
+    for server_name in previous_state.managed_servers {
+        existing_mcp_servers.remove(&server_name);
+    }
+
+    for (server_name, server_value) in desired_servers {
+        existing_mcp_servers.insert(server_name.clone(), server_value.clone());
+    }
+
+    if existing_mcp_servers.is_empty() {
+        root_object.remove("mcpServers");
+    } else {
+        root_object.insert(
+            "mcpServers".to_string(),
+            Value::Object(existing_mcp_servers),
+        );
+    }
+
+    if let Some(parent) = claude_config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create Claude config directory {}", parent.display()))?;
+    }
+
+    let bytes = serde_json::to_vec_pretty(&root)
+        .with_context(|| format!("serialize Claude config {}", claude_config_path.display()))?;
+    std::fs::write(claude_config_path, bytes)
+        .with_context(|| format!("write Claude config {}", claude_config_path.display()))?;
+
+    write_claude_managed_mcp_state(state_path, managed_server_names)?;
+    Ok(())
+}
+
 impl AcpAgentConfig {
     /// Provider ID used for `AiProvider::provider_id()`.
     pub(crate) fn provider_id(&self) -> &str {
@@ -193,6 +420,13 @@ pub(crate) fn prewarm_agent_config() {
 /// bun subprocess spawns.
 fn claude_code_agent_config() -> anyhow::Result<AcpAgentConfig> {
     let config = crate::config::load_config();
+    if let Err(error) = sync_script_kit_mcp_to_claude(&config) {
+        tracing::warn!(
+            target: "script_kit::tab_ai",
+            event = "script_kit_mcp_sync_failed",
+            error = %error,
+        );
+    }
     let claude_code = config.claude_code.unwrap_or_default();
 
     let mut args = Vec::new();
@@ -799,6 +1033,7 @@ pub(crate) fn persist_acp_agent_runtime_state(agent_id: String, next: AcpAgentRu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn round_trip_minimal_config() {
@@ -1079,5 +1314,96 @@ mod tests {
             Some(crate::ai::acp::catalog::AcpAgentAuthState::NeedsAuthentication)
         );
         assert!(!merged.last_session_ok);
+    }
+
+    #[test]
+    fn sync_script_kit_mcp_to_claude_preserves_unmanaged_servers() {
+        let temp = tempdir().expect("temp dir");
+        let claude_config_path = temp.path().join(".claude.json");
+        let state_path = temp.path().join("claude-sync.json");
+
+        let existing = serde_json::json!({
+            "mcpServers": {
+                "user-server": {
+                    "type": "http",
+                    "url": "https://example.com/mcp"
+                },
+                "old-script-kit": {
+                    "type": "stdio",
+                    "command": "old"
+                }
+            }
+        });
+        std::fs::write(
+            &claude_config_path,
+            serde_json::to_vec_pretty(&existing).expect("serialize existing config"),
+        )
+        .expect("write existing config");
+
+        write_claude_managed_mcp_state(&state_path, &["old-script-kit".to_string()])
+            .expect("seed sync state");
+
+        let desired_servers = vec![(
+            "linear".to_string(),
+            serde_json::json!({
+                "type": "http",
+                "url": "https://mcp.linear.app/sse"
+            }),
+        )];
+
+        sync_script_kit_mcp_to_claude_at(
+            &desired_servers,
+            &["linear".to_string()],
+            &claude_config_path,
+            &state_path,
+        )
+        .expect("sync MCP config");
+
+        let synced = serde_json::from_slice::<Value>(
+            &std::fs::read(&claude_config_path).expect("read synced config"),
+        )
+        .expect("parse synced config");
+        let servers = synced["mcpServers"]
+            .as_object()
+            .expect("mcpServers object after sync");
+        assert!(servers.contains_key("user-server"));
+        assert!(servers.contains_key("linear"));
+        assert!(!servers.contains_key("old-script-kit"));
+    }
+
+    #[test]
+    fn sync_script_kit_mcp_to_claude_removes_state_when_empty() {
+        let temp = tempdir().expect("temp dir");
+        let claude_config_path = temp.path().join(".claude.json");
+        let state_path = temp.path().join("claude-sync.json");
+
+        let existing = serde_json::json!({
+            "theme": "dark",
+            "mcpServers": {
+                "old-script-kit": {
+                    "type": "stdio",
+                    "command": "old"
+                }
+            }
+        });
+        std::fs::write(
+            &claude_config_path,
+            serde_json::to_vec_pretty(&existing).expect("serialize existing config"),
+        )
+        .expect("write existing config");
+
+        write_claude_managed_mcp_state(&state_path, &["old-script-kit".to_string()])
+            .expect("seed sync state");
+
+        sync_script_kit_mcp_to_claude_at(&[], &[], &claude_config_path, &state_path)
+            .expect("clear managed servers");
+
+        let synced = serde_json::from_slice::<Value>(
+            &std::fs::read(&claude_config_path).expect("read synced config"),
+        )
+        .expect("parse synced config");
+        assert_eq!(synced["theme"], "dark");
+        assert!(synced.get("mcpServers").is_none());
+        assert!(!state_path.exists());
     }
 }

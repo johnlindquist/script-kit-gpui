@@ -344,6 +344,7 @@ fn recover_config_fields(value: Value, correlation_id: &str) -> Config {
         window_management: parse_optional_field(object, "windowManagement", correlation_id),
         commands: parse_optional_field(object, "commands", correlation_id),
         claude_code: parse_optional_field(object, "claudeCode", correlation_id),
+        mcp: parse_optional_field(object, "mcp", correlation_id),
     }
 }
 

@@ -360,6 +360,7 @@ impl ScriptListApp {
                 config.left_info = Some(crate::footer_popup::FooterLeftInfo {
                     dot_status,
                     model_name: thread.selected_model_display().to_string(),
+                    prefer_accent_for_active_states: true,
                 });
             }
         }

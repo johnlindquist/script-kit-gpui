@@ -121,7 +121,10 @@ impl Render for ScriptListApp {
 
             // Close popups when the main window regains focus (user clicked on it)
             if confirm::is_confirm_window_open() {
-                logging::log("FOCUS", "Main window regained focus - closing confirm popup");
+                logging::log(
+                    "FOCUS",
+                    "Main window regained focus - closing confirm popup",
+                );
                 confirm::route_key_to_confirm_popup("escape", cx);
             }
             if actions::is_actions_window_open() {
@@ -385,9 +388,7 @@ impl Render for ScriptListApp {
             AppView::SettingsView {
                 filter,
                 selected_index,
-            } => {
-                self.render_settings(filter, selected_index, cx)
-            }
+            } => self.render_settings(filter, selected_index, cx),
             AppView::FavoritesBrowseView {
                 filter,
                 selected_index,

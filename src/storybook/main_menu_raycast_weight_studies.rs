@@ -702,7 +702,15 @@ fn resolve_spec(stable_id: &str) -> Option<MainMenuWeightSpec> {
 
 fn scale(value: f32, compact: bool) -> f32 {
     if compact {
-        value * 0.68
+        value * 0.60
+    } else {
+        value
+    }
+}
+
+fn type_scale(value: f32, compact: bool) -> f32 {
+    if compact {
+        value * 0.58
     } else {
         value
     }
@@ -745,7 +753,7 @@ fn render_gallery_item(spec: MainMenuWeightSpec) -> AnyElement {
 fn render_spec_stage(spec: MainMenuWeightSpec, compact: bool) -> AnyElement {
     let theme = get_cached_theme();
     let width = if compact { 320.0 } else { 1216.0 };
-    let height = if compact { 200.0 } else { 760.0 };
+    let height = if compact { 240.0 } else { 760.0 };
 
     div()
         .w(px(width))
@@ -785,10 +793,9 @@ fn render_main_menu_shell(spec: MainMenuWeightSpec, compact: bool) -> AnyElement
 
 fn render_header(spec: MainMenuWeightSpec, compact: bool) -> AnyElement {
     let theme = get_cached_theme();
-    let search_size = scale(spec.search_size, compact);
-    let ask_size = scale(spec.ask_size, compact);
-
-    div()
+    let search_size = type_scale(spec.search_size, compact);
+    let ask_size = type_scale(spec.ask_size, compact);
+    let header = div()
         .w_full()
         .h(px(scale(spec.header_height, compact)))
         .px(px(scale(22.0, compact)))
@@ -811,38 +818,44 @@ fn render_header(spec: MainMenuWeightSpec, compact: bool) -> AnyElement {
                 .child(
                     div()
                         .text_size(px(search_size))
-                        .line_height(px(search_size + scale(2.0, compact)))
+                        .line_height(px(search_size + type_scale(2.0, compact)))
                         .font_weight(spec.search_weight)
                         .text_color(theme.colors.text.primary.with_opacity(spec.search_opacity))
                         .child("Search for apps and commands..."),
                 ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(scale(12.0, compact)))
-                .child(
-                    div()
-                        .text_size(px(ask_size))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.colors.text.primary.with_opacity(0.64))
-                        .child("Ask AI"),
-                )
-                .child(
-                    div()
-                        .px(px(scale(12.0, compact)))
-                        .py(px(scale(6.0, compact)))
-                        .rounded(px(scale(9.0, compact)))
-                        .border_1()
-                        .border_color(theme.colors.ui.border.with_opacity(0.32))
-                        .text_size(px(scale(14.0, compact)))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.colors.text.primary.with_opacity(0.60))
-                        .child("Tab"),
-                ),
-        )
-        .into_any_element()
+        );
+
+    if compact {
+        header.into_any_element()
+    } else {
+        header
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(scale(12.0, compact)))
+                    .child(
+                        div()
+                            .text_size(px(ask_size))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.colors.text.primary.with_opacity(0.64))
+                            .child("Ask AI"),
+                    )
+                    .child(
+                        div()
+                            .px(px(scale(12.0, compact)))
+                            .py(px(scale(6.0, compact)))
+                            .rounded(px(scale(9.0, compact)))
+                            .border_1()
+                            .border_color(theme.colors.ui.border.with_opacity(0.32))
+                            .text_size(px(type_scale(14.0, compact)))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.colors.text.primary.with_opacity(0.60))
+                            .child("Tab"),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 fn render_rows(spec: MainMenuWeightSpec, compact: bool) -> AnyElement {
@@ -858,18 +871,15 @@ fn render_rows(spec: MainMenuWeightSpec, compact: bool) -> AnyElement {
         .gap(px(scale(spec.row_gap, compact)));
 
     column = column.child(render_section_header("Suggestions", spec, compact));
-    for row in ROWS.iter().take(5).copied() {
+    for row in ROWS.iter().take(if compact { 4 } else { 5 }).copied() {
         column = column.child(render_row(row, spec, compact));
     }
 
-    column = column.child(render_section_header("Commands", spec, compact));
-    for row in ROWS
-        .iter()
-        .skip(5)
-        .take(if compact { 2 } else { 3 })
-        .copied()
-    {
-        column = column.child(render_row(row, spec, compact));
+    if !compact {
+        column = column.child(render_section_header("Commands", spec, compact));
+        for row in ROWS.iter().skip(5).take(3).copied() {
+            column = column.child(render_row(row, spec, compact));
+        }
     }
 
     column.into_any_element()
@@ -881,14 +891,14 @@ fn render_section_header(
     compact: bool,
 ) -> AnyElement {
     let theme = get_cached_theme();
-    let section_size = scale(spec.section_size, compact);
+    let section_size = type_scale(spec.section_size, compact);
 
     div()
         .w_full()
         .pt(px(scale(6.0, compact)))
         .pb(px(scale(3.0, compact)))
         .text_size(px(section_size))
-        .line_height(px(section_size + scale(2.0, compact)))
+        .line_height(px(section_size + type_scale(2.0, compact)))
         .font_weight(spec.section_weight)
         .text_color(theme.colors.text.primary.with_opacity(0.62))
         .child(label)
@@ -899,12 +909,12 @@ fn render_row(row: MenuPreviewRow, spec: MainMenuWeightSpec, compact: bool) -> A
     let theme = get_cached_theme();
     let row_height = scale(spec.row_height + 8.0, compact);
     let icon_size = scale(spec.icon_size, compact);
-    let title_size = scale(spec.title_size, compact);
-    let meta_size = scale(spec.meta_size, compact);
-    let kind_size = scale(spec.kind_size, compact);
-    let chip_size = scale(spec.chip_size, compact);
-    let title_line_height = scale(spec.title_line_height, compact);
-    let metadata_line_height = scale(spec.metadata_line_height, compact);
+    let title_size = type_scale(spec.title_size, compact);
+    let meta_size = type_scale(spec.meta_size, compact);
+    let kind_size = type_scale(spec.kind_size, compact);
+    let chip_size = type_scale(spec.chip_size, compact);
+    let title_line_height = type_scale(spec.title_line_height, compact);
+    let metadata_line_height = type_scale(spec.metadata_line_height, compact);
 
     div()
         .w_full()
@@ -935,7 +945,7 @@ fn render_row(row: MenuPreviewRow, spec: MainMenuWeightSpec, compact: bool) -> A
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(scale(14.0, compact)))
+                        .text_size(px(type_scale(14.0, compact)))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(if row.icon_bg == 0xF2F2F2 {
                             rgb(0x3478F6)
@@ -993,7 +1003,7 @@ fn render_row(row: MenuPreviewRow, spec: MainMenuWeightSpec, compact: bool) -> A
                                     .border_color(theme.colors.ui.border.with_opacity(0.34))
                                     .font_family(FONT_MONO)
                                     .text_size(px(chip_size))
-                                    .line_height(px(chip_size + scale(2.0, compact)))
+                                    .line_height(px(chip_size + type_scale(2.0, compact)))
                                     .font_weight(spec.chip_weight)
                                     .text_color(theme.colors.text.primary.with_opacity(0.58))
                                     .child(chip),
@@ -1004,7 +1014,7 @@ fn render_row(row: MenuPreviewRow, spec: MainMenuWeightSpec, compact: bool) -> A
         .child(
             div()
                 .text_size(px(kind_size))
-                .line_height(px(kind_size + scale(2.0, compact)))
+                .line_height(px(kind_size + type_scale(2.0, compact)))
                 .font_weight(spec.kind_weight)
                 .text_color(theme.colors.text.primary.with_opacity(spec.kind_opacity))
                 .child(row.kind),
@@ -1014,7 +1024,7 @@ fn render_row(row: MenuPreviewRow, spec: MainMenuWeightSpec, compact: bool) -> A
 
 fn render_footer(spec: MainMenuWeightSpec, compact: bool) -> AnyElement {
     let theme = get_cached_theme();
-    let text_size = scale(spec.footer_size, compact);
+    let text_size = type_scale(spec.footer_size, compact);
 
     div()
         .w_full()

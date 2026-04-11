@@ -53,6 +53,7 @@ fn test_config_serialization() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -107,6 +108,7 @@ fn test_config_with_bun_path() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
     assert_eq!(config.bun_path, Some("/custom/path/bun".to_string()));
 }
@@ -143,6 +145,7 @@ fn test_config_without_bun_path() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
     assert_eq!(config.bun_path, None);
 }
@@ -179,6 +182,7 @@ fn test_config_serialization_skip_none_bun_path() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -220,6 +224,7 @@ fn test_config_serialization_preserves_multiple_modifiers() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -328,6 +333,7 @@ fn test_config_with_empty_modifiers_list() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     assert_eq!(config.hotkey.modifiers.len(), 0);
@@ -370,6 +376,7 @@ fn test_config_key_preservation() {
             window_management: None,
             commands: None,
             claude_code: None,
+            mcp: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -411,6 +418,7 @@ fn test_config_with_editor() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -452,6 +460,7 @@ fn test_config_without_editor() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -495,6 +504,7 @@ fn test_get_editor_from_config() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     // Config editor takes precedence
@@ -539,6 +549,7 @@ fn test_get_editor_from_env() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     // Should fall back to EDITOR env var
@@ -589,6 +600,7 @@ fn test_get_editor_default() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     // Should fall back to "code" default
@@ -639,6 +651,7 @@ fn test_config_editor_priority() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     // Config editor should win
@@ -758,6 +771,7 @@ fn test_config_get_padding_custom() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let padding = config.get_padding();
@@ -804,6 +818,7 @@ fn test_config_get_editor_font_size_custom() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     assert_eq!(config.get_editor_font_size(), 16.0);
@@ -858,6 +873,7 @@ fn test_config_get_terminal_font_size_custom() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     assert_eq!(config.get_terminal_font_size(), 12.0);
@@ -973,6 +989,7 @@ fn test_config_serialization_includes_set_ui_settings() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -1085,6 +1102,7 @@ fn test_config_with_builtins() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let builtins = config.get_builtins();
@@ -1189,6 +1207,7 @@ fn test_config_serialization_includes_set_builtins() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -1345,6 +1364,7 @@ fn test_config_with_process_limits() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let limits = config.get_process_limits();
@@ -1476,6 +1496,7 @@ fn test_config_serialization_includes_set_process_limits() {
         window_management: None,
         commands: None,
         claude_code: None,
+        mcp: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -1606,6 +1627,7 @@ fn test_requires_confirmation_user_override_disable() {
         window_management: None,
         commands: Some(commands),
         claude_code: None,
+        mcp: None,
     };
 
     // Should NOT require confirmation because user disabled it
@@ -1657,6 +1679,7 @@ fn test_requires_confirmation_user_override_enable() {
         window_management: None,
         commands: Some(commands),
         claude_code: None,
+        mcp: None,
     };
 
     // Should require confirmation because user enabled it
@@ -1781,6 +1804,7 @@ fn test_requires_confirmation_with_partial_command_config() {
         window_management: None,
         commands: Some(commands),
         claude_code: None,
+        mcp: None,
     };
 
     // Should still require confirmation (falls back to default)

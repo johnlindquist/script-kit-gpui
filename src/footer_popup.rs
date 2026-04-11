@@ -121,6 +121,9 @@ pub(crate) struct FooterLeftInfo {
     pub dot_status: FooterDotStatus,
     /// Model display name (e.g. "Claude Sonnet 4"). Empty = hide label.
     pub model_name: String,
+    /// When true, active ACP states should use the accent token instead of the
+    /// generic high-contrast fallback so the footer clearly reads as AI-active.
+    pub prefer_accent_for_active_states: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -140,10 +143,15 @@ impl MainWindowFooterConfig {
     }
 }
 
-fn footer_active_dot_hex(theme: &crate::theme::Theme) -> u32 {
+fn footer_active_dot_hex(theme: &crate::theme::Theme, prefer_accent: bool) -> u32 {
     let colors = &theme.colors;
-    let background = colors.background.main;
     let accent = colors.accent.selected;
+
+    if prefer_accent {
+        return accent;
+    }
+
+    let background = colors.background.main;
     let primary_text = colors.text.primary;
 
     if crate::theme::contrast_ratio(accent, background)
@@ -155,11 +163,15 @@ fn footer_active_dot_hex(theme: &crate::theme::Theme) -> u32 {
     }
 }
 
-fn footer_dot_hex(status: FooterDotStatus, theme: &crate::theme::Theme) -> u32 {
+fn footer_dot_hex(
+    status: FooterDotStatus,
+    theme: &crate::theme::Theme,
+    prefer_accent_for_active_states: bool,
+) -> u32 {
     let colors = &theme.colors;
     match status {
         FooterDotStatus::Streaming | FooterDotStatus::WaitingForPermission => {
-            footer_active_dot_hex(theme)
+            footer_active_dot_hex(theme, prefer_accent_for_active_states)
         }
         FooterDotStatus::Idle => colors.text.secondary,
         FooterDotStatus::Error => colors.ui.error,
@@ -630,7 +642,11 @@ unsafe fn layout_footer_left_info(
     let show_dot = !matches!(info.dot_status, FooterDotStatus::Hidden);
     if show_dot {
         let theme = crate::theme::get_cached_theme();
-        let dot_hex = footer_dot_hex(info.dot_status, &theme);
+        let dot_hex = footer_dot_hex(
+            info.dot_status,
+            &theme,
+            info.prefer_accent_for_active_states,
+        );
         let should_pulse = matches!(
             info.dot_status,
             FooterDotStatus::Streaming | FooterDotStatus::WaitingForPermission
@@ -1084,10 +1100,29 @@ mod footer_layout_tests {
         theme.colors.accent.selected = 0x3a4250;
         theme.colors.text.primary = 0xf5f7fa;
 
-        assert_eq!(footer_active_dot_hex(&theme), theme.colors.text.primary);
+        assert_eq!(
+            footer_active_dot_hex(&theme, false),
+            theme.colors.text.primary
+        );
 
         theme.colors.accent.selected = 0xffc600;
-        assert_eq!(footer_active_dot_hex(&theme), theme.colors.accent.selected);
+        assert_eq!(
+            footer_active_dot_hex(&theme, false),
+            theme.colors.accent.selected
+        );
+    }
+
+    #[test]
+    fn active_dot_can_force_accent_for_acp_states() {
+        let mut theme = crate::theme::Theme::dark_default();
+        theme.colors.background.main = 0x101114;
+        theme.colors.accent.selected = 0x3a4250;
+        theme.colors.text.primary = 0xf5f7fa;
+
+        assert_eq!(
+            footer_active_dot_hex(&theme, true),
+            theme.colors.accent.selected
+        );
     }
 
     #[test]
@@ -1097,11 +1132,11 @@ mod footer_layout_tests {
         theme.colors.ui.error = 0xaa3344;
 
         assert_eq!(
-            footer_dot_hex(FooterDotStatus::Idle, &theme),
+            footer_dot_hex(FooterDotStatus::Idle, &theme, false),
             theme.colors.text.secondary
         );
         assert_eq!(
-            footer_dot_hex(FooterDotStatus::Error, &theme),
+            footer_dot_hex(FooterDotStatus::Error, &theme, false),
             theme.colors.ui.error
         );
     }

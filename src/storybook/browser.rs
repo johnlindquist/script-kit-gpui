@@ -706,8 +706,6 @@ impl StoryBrowser {
 
     fn render_compare_preview(&self, story: &'static StoryEntry) -> AnyElement {
         let theme = crate::theme::get_cached_theme();
-        let card_bg = theme.colors.background.title_bar;
-        let preview_bg = theme.colors.background.main;
         let border = theme.colors.ui.border;
         let accent = theme.colors.accent.selected;
         let text_primary = theme.colors.text.primary;
@@ -720,11 +718,7 @@ impl StoryBrowser {
 
         let variants = self.current_story_variants();
 
-        const CARD_WIDTH: f32 = 360.;
-        const CARD_GAP: f32 = 16.; // gap_4
-
-        let row_width = variants.len().max(1) as f32 * CARD_WIDTH
-            + variants.len().saturating_sub(1) as f32 * CARD_GAP;
+        let variant_count = variants.len();
 
         div()
             .id("compare-scroll")
@@ -735,94 +729,105 @@ impl StoryBrowser {
             .p_4()
             .overflow_x_scroll()
             .child(
-                div()
-                    .w(px(row_width))
-                    .h_full()
-                    .flex()
-                    .flex_row()
-                    .gap_4()
-                    .children(variants.into_iter().enumerate().map(|(index, variant)| {
-                        let variant_id = variant.stable_id();
-                        let description = variant.description.clone().unwrap_or_default();
-                        let is_selected = index == self.selected_variant_index;
-                        let is_adopted = adopted_variant.as_deref() == Some(variant_id.as_str());
-                        let preview_content = story.story.render_compare_variant(&variant);
+                div().h_full().flex().flex_row().children(
+                    variants
+                        .into_iter()
+                        .enumerate()
+                        .flat_map(|(index, variant)| {
+                            let variant_id = variant.stable_id();
+                            let description = variant.description.clone().unwrap_or_default();
+                            let is_selected = index == self.selected_variant_index;
+                            let is_adopted =
+                                adopted_variant.as_deref() == Some(variant_id.as_str());
+                            let preview_content = story.story.render_compare_variant(&variant);
+                            let mut items = Vec::new();
 
-                        let mut card = div()
-                            .w(px(CARD_WIDTH))
-                            .h_full()
-                            .min_h(px(0.))
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .p_3()
-                            .rounded(px(12.))
-                            .border_1()
-                            .border_color(rgb(border))
-                            .bg(rgb(card_bg));
-
-                        if is_selected {
-                            card = card.border_color(rgb(accent));
-                        }
-
-                        card.child(
-                            div()
+                            let panel = div()
+                                .h_full()
+                                .min_h(px(0.))
+                                .flex_shrink_0()
                                 .flex()
-                                .flex_row()
-                                .justify_between()
-                                .items_center()
-                                .gap_3()
+                                .flex_col()
+                                .gap_2()
+                                .pr(px(16.))
                                 .child(
                                     div()
-                                        .flex_1()
+                                        .flex()
+                                        .flex_row()
+                                        .justify_between()
+                                        .items_center()
+                                        .gap_3()
                                         .child(
                                             div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(text_primary))
-                                                .child(format!("[{}] {}", index + 1, variant.name)),
+                                                .flex_1()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(if is_selected {
+                                                            rgb(accent)
+                                                        } else {
+                                                            rgb(text_primary)
+                                                        })
+                                                        .child(format!(
+                                                            "[{}] {}",
+                                                            index + 1,
+                                                            variant.name
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(text_muted))
+                                                        .child(description),
+                                                ),
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(text_muted))
-                                                .child(description),
+                                                .text_color(if is_adopted {
+                                                    rgb(accent)
+                                                } else {
+                                                    rgb(text_muted)
+                                                })
+                                                .child(if is_adopted { "Adopted" } else { "" }),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(if is_adopted {
-                                            rgb(accent)
-                                        } else {
-                                            rgb(text_muted)
-                                        })
-                                        .child(if is_adopted { "Adopted" } else { "" }),
-                                ),
-                        )
-                        .child({
-                            let mut preview = div()
-                                .id(gpui::ElementId::Name(
-                                    format!("variant-preview-{index}").into(),
-                                ))
-                                .flex_1()
-                                .min_h(px(0.))
-                                .min_w(px(0.))
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(rgb(border))
-                                .bg(rgb(preview_bg));
+                                .child({
+                                    let mut preview = div()
+                                        .id(gpui::ElementId::Name(
+                                            format!("variant-preview-{index}").into(),
+                                        ))
+                                        .flex_1()
+                                        .min_h(px(0.))
+                                        .min_w(px(0.));
 
-                            if is_selected {
-                                preview = preview.overflow_y_scroll();
-                            } else {
-                                preview = preview.overflow_hidden();
+                                    if is_selected {
+                                        preview = preview.overflow_y_scroll();
+                                    } else {
+                                        preview = preview.overflow_hidden();
+                                    }
+
+                                    preview.child(preview_content)
+                                });
+
+                            items.push(panel.into_any_element());
+
+                            if index + 1 < variant_count {
+                                items.push(
+                                    div()
+                                        .w(px(1.0))
+                                        .h_full()
+                                        .bg(rgb(border))
+                                        .opacity(0.5)
+                                        .mr(px(16.0))
+                                        .into_any_element(),
+                                );
                             }
 
-                            preview.child(div().w_full().child(preview_content))
-                        })
-                    })),
+                            items
+                        }),
+                ),
             )
             .into_any_element()
     }

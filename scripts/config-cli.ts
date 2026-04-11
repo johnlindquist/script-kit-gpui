@@ -133,6 +133,35 @@ interface ClaudeCodeConfig {
   addDirs?: string[];
 }
 
+type McpTransport = "stdio" | "http";
+
+interface McpBaseServerConfig {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+}
+
+interface McpStdioServerConfig extends McpBaseServerConfig {
+  transport: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+interface McpHttpServerConfig extends McpBaseServerConfig {
+  transport: "http";
+  endpoint: string;
+  headers?: Record<string, string>;
+}
+
+type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
+
+interface McpConfig {
+  enabled?: boolean;
+  servers?: Record<string, McpServerConfig>;
+}
+
 interface Config {
   hotkey: HotkeyConfig;
   bun_path?: string;
@@ -160,6 +189,7 @@ interface Config {
   windowManagement?: WindowManagementPreferences;
   commands?: Record<string, CommandConfig>;
   claudeCode?: ClaudeCodeConfig;
+  mcp?: McpConfig;
 }
 
 // =============================================================================
@@ -224,6 +254,10 @@ const DEFAULTS: Config & Record<string, unknown> = {
     permissionMode: "plan",
     allowedTools: undefined,
     addDirs: []
+  },
+  mcp: {
+    enabled: true,
+    servers: {}
   }
 };
 
@@ -1131,7 +1165,7 @@ async function cmdValidate(): Promise<void> {
       'aiHotkey', 'aiHotkeyEnabled', 'logsHotkey', 'logsHotkeyEnabled',
       'dictationHotkey', 'dictationHotkeyEnabled', 'watcher', 'layout',
       'theme', 'dictation', 'ai', 'windowManagement',
-      'commands', 'claudeCode',
+      'commands', 'claudeCode', 'mcp',
     ];
     for (const key of Object.keys(config)) {
       if (!knownTopLevel.includes(key)) {

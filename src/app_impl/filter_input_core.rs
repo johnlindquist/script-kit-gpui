@@ -176,13 +176,7 @@ impl ScriptListApp {
         // Mini opens small and grows only as results arrive.
         Self::resize_file_search_window_for_presentation(presentation, 0);
 
-        self.restart_file_search_stream_for_query(
-            query,
-            presentation,
-            None,
-            false,
-            cx,
-        );
+        self.restart_file_search_stream_for_query(query, presentation, None, false, cx);
     }
 }
 
@@ -218,7 +212,9 @@ mod tests {
     #[test]
     fn test_should_enter_file_search_from_script_list() {
         use super::ScriptListApp;
-        assert!(ScriptListApp::should_enter_file_search_from_script_list("~"));
+        assert!(ScriptListApp::should_enter_file_search_from_script_list(
+            "~"
+        ));
         assert!(ScriptListApp::should_enter_file_search_from_script_list(
             "~/src"
         ));
@@ -236,10 +232,7 @@ mod tests {
     #[test]
     fn test_normalize_mini_file_search_query() {
         use super::ScriptListApp;
-        assert_eq!(
-            ScriptListApp::normalize_mini_file_search_query("~"),
-            "~/"
-        );
+        assert_eq!(ScriptListApp::normalize_mini_file_search_query("~"), "~/");
         assert_eq!(
             ScriptListApp::normalize_mini_file_search_query("~/src"),
             "~/src"

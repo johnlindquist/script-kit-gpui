@@ -307,9 +307,9 @@ fn resolve_automation_read_target(
     })?;
 
     match resolved.kind {
-        crate::protocol::AutomationWindowKind::Main => {
-            Ok(AutomationReadTarget::Main { info: Some(resolved) })
-        }
+        crate::protocol::AutomationWindowKind::Main => Ok(AutomationReadTarget::Main {
+            info: Some(resolved),
+        }),
         crate::protocol::AutomationWindowKind::AcpDetached => {
             match crate::ai::acp::chat_window::get_detached_acp_view_entity() {
                 Some(entity) => {
@@ -321,7 +321,10 @@ fn resolve_automation_read_target(
                         kind = ?resolved.kind,
                         "automation.target.acp_detached_resolved"
                     );
-                    Ok(AutomationReadTarget::AcpDetached { info: resolved, entity })
+                    Ok(AutomationReadTarget::AcpDetached {
+                        info: resolved,
+                        entity,
+                    })
                 }
                 None => Err(crate::protocol::TransactionError::action_failed(format!(
                     "{op} resolved detached ACP target {} but no live view entity is available",
@@ -340,7 +343,11 @@ fn resolve_automation_read_target(
                         kind = ?resolved.kind,
                         "automation.target.notes_resolved"
                     );
-                    Ok(AutomationReadTarget::Notes { info: resolved, entity, handle })
+                    Ok(AutomationReadTarget::Notes {
+                        info: resolved,
+                        entity,
+                        handle,
+                    })
                 }
                 None => Err(crate::protocol::TransactionError::action_failed(format!(
                     "{op} resolved Notes target {} but no live Notes entity is available",
@@ -359,7 +366,10 @@ fn resolve_automation_read_target(
                         kind = ?resolved.kind,
                         "automation.target.actions_dialog_resolved"
                     );
-                    Ok(AutomationReadTarget::ActionsDialog { info: resolved, entity })
+                    Ok(AutomationReadTarget::ActionsDialog {
+                        info: resolved,
+                        entity,
+                    })
                 }
                 None => Err(crate::protocol::TransactionError::action_failed(format!(
                     "{op} resolved ActionsDialog target {} but no live dialog entity is available",
@@ -509,11 +519,7 @@ fn build_acp_resolved_target(
     let (window_id, window_kind, title) = match acp_target {
         AcpReadTarget::Main { info } => {
             if let Some(info) = info {
-                (
-                    info.id.clone(),
-                    "main".to_string(),
-                    info.title.clone(),
-                )
+                (info.id.clone(), "main".to_string(), info.title.clone())
             } else {
                 (
                     "main".to_string(),
@@ -522,9 +528,11 @@ fn build_acp_resolved_target(
                 )
             }
         }
-        AcpReadTarget::Detached { info, .. } => {
-            (info.id.clone(), "acpDetached".to_string(), info.title.clone())
-        }
+        AcpReadTarget::Detached { info, .. } => (
+            info.id.clone(),
+            "acpDetached".to_string(),
+            info.title.clone(),
+        ),
     };
 
     tracing::info!(
@@ -571,7 +579,10 @@ fn build_notes_ui_snapshot(
     );
     let (semantic_ids, focused_id) = match surface {
         Some(ref snap) => (
-            snap.elements.iter().map(|e| e.semantic_id.clone()).collect(),
+            snap.elements
+                .iter()
+                .map(|e| e.semantic_id.clone())
+                .collect(),
             snap.focused_semantic_id.clone(),
         ),
         None => (Vec::new(), None),
@@ -602,20 +613,25 @@ fn notes_wait_condition_satisfied(
         crate::protocol::WaitCondition::Named(crate::protocol::WaitNamedCondition::InputEmpty) => {
             snapshot.input_value.as_deref().unwrap_or("").is_empty()
         }
-        crate::protocol::WaitCondition::Named(crate::protocol::WaitNamedCondition::WindowVisible) => {
-            snapshot.window_visible
-        }
-        crate::protocol::WaitCondition::Named(crate::protocol::WaitNamedCondition::WindowFocused) => {
-            snapshot.window_focused
-        }
-        crate::protocol::WaitCondition::Named(crate::protocol::WaitNamedCondition::ChoicesRendered) => {
+        crate::protocol::WaitCondition::Named(
+            crate::protocol::WaitNamedCondition::WindowVisible,
+        ) => snapshot.window_visible,
+        crate::protocol::WaitCondition::Named(
+            crate::protocol::WaitNamedCondition::WindowFocused,
+        ) => snapshot.window_focused,
+        crate::protocol::WaitCondition::Named(
+            crate::protocol::WaitNamedCondition::ChoicesRendered,
+        ) => {
             // Notes has no choices
             false
         }
         crate::protocol::WaitCondition::Detailed(
             crate::protocol::WaitDetailedCondition::ElementExists { semantic_id }
             | crate::protocol::WaitDetailedCondition::ElementVisible { semantic_id },
-        ) => snapshot.visible_semantic_ids.iter().any(|id| id == semantic_id),
+        ) => snapshot
+            .visible_semantic_ids
+            .iter()
+            .any(|id| id == semantic_id),
         crate::protocol::WaitCondition::Detailed(
             crate::protocol::WaitDetailedCondition::ElementFocused { semantic_id },
         ) => snapshot.focused_semantic_id.as_deref() == Some(semantic_id.as_str()),
@@ -669,12 +685,13 @@ fn classify_prompt_message_route(message: &PromptMessage) -> PromptMessageRoute 
     }
 }
 
-fn prompt_message_from_protocol_message(message: crate::protocol::Message) -> Option<PromptMessage> {
+fn prompt_message_from_protocol_message(
+    message: crate::protocol::Message,
+) -> Option<PromptMessage> {
     match message {
-        Message::GetState { request_id, target } => Some(PromptMessage::GetState {
-            request_id,
-            target,
-        }),
+        Message::GetState { request_id, target } => {
+            Some(PromptMessage::GetState { request_id, target })
+        }
         Message::GetElements {
             request_id,
             limit,
@@ -684,10 +701,9 @@ fn prompt_message_from_protocol_message(message: crate::protocol::Message) -> Op
             limit,
             target,
         }),
-        Message::GetAcpState { request_id, target } => Some(PromptMessage::GetAcpState {
-            request_id,
-            target,
-        }),
+        Message::GetAcpState { request_id, target } => {
+            Some(PromptMessage::GetAcpState { request_id, target })
+        }
         Message::PerformAcpSetupAction {
             request_id,
             action,
@@ -711,10 +727,9 @@ fn prompt_message_from_protocol_message(message: crate::protocol::Message) -> Op
             tail,
             target,
         }),
-        Message::GetLayoutInfo { request_id, target } => Some(PromptMessage::GetLayoutInfo {
-            request_id,
-            target,
-        }),
+        Message::GetLayoutInfo { request_id, target } => {
+            Some(PromptMessage::GetLayoutInfo { request_id, target })
+        }
         Message::InspectAutomationWindow {
             request_id,
             target,
@@ -783,11 +798,8 @@ impl ScriptListApp {
             Message::ListAutomationWindows { request_id } => {
                 let windows = crate::windows::list_automation_windows();
                 let focused_window_id = crate::windows::focused_automation_window_id();
-                let response = Message::automation_window_list_result(
-                    request_id,
-                    windows,
-                    focused_window_id,
-                );
+                let response =
+                    Message::automation_window_list_result(request_id, windows, focused_window_id);
                 if let Some(ref sender) = self.response_sender {
                     let _ = sender.try_send(response);
                 } else {
@@ -800,7 +812,12 @@ impl ScriptListApp {
             other => {
                 let message_type = serde_json::to_value(&other)
                     .ok()
-                    .and_then(|value| value.get("type").and_then(|ty| ty.as_str()).map(str::to_owned))
+                    .and_then(|value| {
+                        value
+                            .get("type")
+                            .and_then(|ty| ty.as_str())
+                            .map(str::to_owned)
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 tracing::warn!(
                     category = "STDIN",
@@ -902,9 +919,7 @@ impl ScriptListApp {
         }
     }
 
-    fn script_error_acp_view_entity(
-        &self,
-    ) -> Option<gpui::Entity<crate::ai::acp::AcpChatView>> {
+    fn script_error_acp_view_entity(&self) -> Option<gpui::Entity<crate::ai::acp::AcpChatView>> {
         crate::ai::acp::chat_window::get_detached_acp_view_entity().or_else(|| {
             if let AppView::AcpChatView { entity } = &self.current_view {
                 Some(entity.clone())
@@ -971,12 +986,9 @@ impl ScriptListApp {
 
         let prompt =
             build_script_error_acp_prompt(script_path, error_message, exit_code, suggestions);
-        if let Err(error) = Self::stage_script_error_context_on_acp_view(
-            view_entity,
-            bundle,
-            prompt,
-            cx,
-        ) {
+        if let Err(error) =
+            Self::stage_script_error_context_on_acp_view(view_entity, bundle, prompt, cx)
+        {
             tracing::warn!(
                 target: "script_kit::tab_ai",
                 event = "script_error_acp_stage_failed",
@@ -1440,8 +1452,7 @@ impl ScriptListApp {
                 );
 
                 let keep_tab_ai_save_offer_open = self.tab_ai_save_offer_state.is_some();
-                let keep_acp_chat_open =
-                    matches!(self.current_view, AppView::AcpChatView { .. });
+                let keep_acp_chat_open = matches!(self.current_view, AppView::AcpChatView { .. });
 
                 if keep_tab_ai_save_offer_open {
                     tracing::info!(
@@ -1451,10 +1462,7 @@ impl ScriptListApp {
                         "Tab AI active after script exit - preserving view"
                     );
 
-                    if should_restore_main_window_after_script_exit(
-                        script_hid_window,
-                        true,
-                    ) {
+                    if should_restore_main_window_after_script_exit(script_hid_window, true) {
                         tracing::info!(
                             category = "VISIBILITY",
                             "Script had hidden window - requesting show for follow-up UI"
@@ -1796,9 +1804,15 @@ impl ScriptListApp {
                 // machine-readable promptType and promptId fields instead
                 // of a bare "error" string.
                 if let Some(ref t) = target {
-                    if !matches!(t, protocol::AutomationWindowTarget::Main | protocol::AutomationWindowTarget::Focused) {
+                    if !matches!(
+                        t,
+                        protocol::AutomationWindowTarget::Main
+                            | protocol::AutomationWindowTarget::Focused
+                    ) {
                         match crate::windows::resolve_automation_window(Some(t)) {
-                            Ok(resolved) if resolved.kind != protocol::AutomationWindowKind::Main => {
+                            Ok(resolved)
+                                if resolved.kind != protocol::AutomationWindowKind::Main =>
+                            {
                                 tracing::warn!(
                                     target: "script_kit::automation",
                                     request_id = %request_id,
@@ -1813,7 +1827,11 @@ impl ScriptListApp {
                                         Some(format!("target_unsupported:{:?}", resolved.kind)),
                                         None,
                                         String::new(),
-                                        0, 0, -1, None, false,
+                                        0,
+                                        0,
+                                        -1,
+                                        None,
+                                        false,
                                         resolved.visible,
                                     ));
                                 }
@@ -1833,7 +1851,12 @@ impl ScriptListApp {
                                         Some(format!("target_error:{}", err)),
                                         None,
                                         String::new(),
-                                        0, 0, -1, None, false, false,
+                                        0,
+                                        0,
+                                        -1,
+                                        None,
+                                        false,
+                                        false,
                                     ));
                                 }
                                 return;
@@ -1867,7 +1890,9 @@ impl ScriptListApp {
                                     scripts::SearchResult::Window(m) => m.window.title.clone(),
                                     scripts::SearchResult::Agent(m) => m.agent.name.clone(),
                                     scripts::SearchResult::Skill(m) => m.skill.title.clone(),
-                                    scripts::SearchResult::Fallback(m) => m.fallback.display_label(),
+                                    scripts::SearchResult::Fallback(m) => {
+                                        m.fallback.display_label()
+                                    }
                                 })
                         } else {
                             None
@@ -2101,7 +2126,10 @@ impl ScriptListApp {
                                     .iter()
                                     .filter(|entry| {
                                         entry.first_message.to_lowercase().contains(&filter_lower)
-                                            || entry.timestamp.to_lowercase().contains(&filter_lower)
+                                            || entry
+                                                .timestamp
+                                                .to_lowercase()
+                                                .contains(&filter_lower)
                                     })
                                     .collect()
                             };
@@ -2532,23 +2560,22 @@ impl ScriptListApp {
 
                 // Resolve target: Main → main window, AcpDetached → detached entity,
                 // anything else → structured error.
-                let acp_target = match resolve_acp_read_target(&request_id, "getAcpState", target.as_ref()) {
-                    Ok(t) => t,
-                    Err(error) => {
-                        let mut state = protocol::AcpStateSnapshot::default();
-                        state.warnings = vec![format!(
-                            "target_unsupported: {}",
-                            error.message
-                        )];
-                        let response = Message::acp_state_result(request_id.clone(), state);
-                        if let Some(ref sender) = self.response_sender {
-                            let _ = sender.try_send(response);
+                let acp_target =
+                    match resolve_acp_read_target(&request_id, "getAcpState", target.as_ref()) {
+                        Ok(t) => t,
+                        Err(error) => {
+                            let mut state = protocol::AcpStateSnapshot::default();
+                            state.warnings = vec![format!("target_unsupported: {}", error.message)];
+                            let response = Message::acp_state_result(request_id.clone(), state);
+                            if let Some(ref sender) = self.response_sender {
+                                let _ = sender.try_send(response);
+                            }
+                            return;
                         }
-                        return;
-                    }
-                };
+                    };
 
-                let resolved_target = build_acp_resolved_target(&request_id, "getAcpState", &acp_target);
+                let resolved_target =
+                    build_acp_resolved_target(&request_id, "getAcpState", &acp_target);
 
                 let mut state = match &acp_target {
                     AcpReadTarget::Main { .. } => self.collect_acp_state(cx),
@@ -2674,11 +2701,9 @@ impl ScriptListApp {
                         }),
                         _ => Err("current main view is not AcpChatView".to_string()),
                     },
-                    AcpReadTarget::Detached { entity, .. } => {
-                        entity.update(cx, |view, cx| {
-                            view.perform_setup_automation_action(action, agent_id.as_deref(), cx)
-                        })
-                    }
+                    AcpReadTarget::Detached { entity, .. } => entity.update(cx, |view, cx| {
+                        view.perform_setup_automation_action(action, agent_id.as_deref(), cx)
+                    }),
                 };
 
                 let mut state = match &acp_target {
@@ -2723,14 +2748,15 @@ impl ScriptListApp {
 
                 // Resolve target: Main → main window, AcpDetached → detached entity,
                 // anything else → structured error.
-                let acp_target = match resolve_acp_read_target(&request_id, "resetAcpTestProbe", target.as_ref()) {
+                let acp_target = match resolve_acp_read_target(
+                    &request_id,
+                    "resetAcpTestProbe",
+                    target.as_ref(),
+                ) {
                     Ok(t) => t,
                     Err(error) => {
                         let mut probe = protocol::AcpTestProbeSnapshot::default();
-                        probe.warnings = vec![format!(
-                            "target_unsupported: {}",
-                            error.message
-                        )];
+                        probe.warnings = vec![format!("target_unsupported: {}", error.message)];
                         let response = Message::acp_test_probe_result(request_id.clone(), probe);
                         if let Some(ref sender) = self.response_sender {
                             let _ = sender.try_send(response);
@@ -2739,7 +2765,8 @@ impl ScriptListApp {
                     }
                 };
 
-                let resolved_target = build_acp_resolved_target(&request_id, "resetAcpTestProbe", &acp_target);
+                let resolved_target =
+                    build_acp_resolved_target(&request_id, "resetAcpTestProbe", &acp_target);
 
                 match &acp_target {
                     AcpReadTarget::Main { .. } => {
@@ -2786,8 +2813,14 @@ impl ScriptListApp {
                 }
             }
 
-            PromptMessage::GetAcpTestProbe { request_id, tail, target } => {
-                let tail = tail.unwrap_or(protocol::ACP_TEST_PROBE_MAX_EVENTS).clamp(1, protocol::ACP_TEST_PROBE_MAX_EVENTS);
+            PromptMessage::GetAcpTestProbe {
+                request_id,
+                tail,
+                target,
+            } => {
+                let tail = tail
+                    .unwrap_or(protocol::ACP_TEST_PROBE_MAX_EVENTS)
+                    .clamp(1, protocol::ACP_TEST_PROBE_MAX_EVENTS);
                 tracing::info!(
                     category = "ACP_PROBE",
                     request_id = %request_id,
@@ -2798,14 +2831,15 @@ impl ScriptListApp {
 
                 // Resolve target: Main → main window, AcpDetached → detached entity,
                 // anything else → structured error.
-                let acp_target = match resolve_acp_read_target(&request_id, "getAcpTestProbe", target.as_ref()) {
+                let acp_target = match resolve_acp_read_target(
+                    &request_id,
+                    "getAcpTestProbe",
+                    target.as_ref(),
+                ) {
                     Ok(t) => t,
                     Err(error) => {
                         let mut probe = protocol::AcpTestProbeSnapshot::default();
-                        probe.warnings = vec![format!(
-                            "target_unsupported: {}",
-                            error.message
-                        )];
+                        probe.warnings = vec![format!("target_unsupported: {}", error.message)];
                         let response = Message::acp_test_probe_result(request_id.clone(), probe);
                         if let Some(ref sender) = self.response_sender {
                             let _ = sender.try_send(response);
@@ -2814,7 +2848,8 @@ impl ScriptListApp {
                     }
                 };
 
-                let resolved_target = build_acp_resolved_target(&request_id, "getAcpTestProbe", &acp_target);
+                let resolved_target =
+                    build_acp_resolved_target(&request_id, "getAcpTestProbe", &acp_target);
 
                 let mut probe = match &acp_target {
                     AcpReadTarget::Main { .. } => self.collect_acp_test_probe(tail, cx),
@@ -2847,7 +2882,11 @@ impl ScriptListApp {
                 }
             }
 
-            PromptMessage::GetElements { request_id, limit, target } => {
+            PromptMessage::GetElements {
+                request_id,
+                limit,
+                target,
+            } => {
                 let max_elements = limit.unwrap_or(50).clamp(1, 1000);
 
                 tracing::info!(
@@ -2989,7 +3028,8 @@ impl ScriptListApp {
                                 "getLayoutInfo: target rejected"
                             );
                             let empty_info = crate::protocol::LayoutInfo::default();
-                            let response = Message::layout_info_result(request_id.clone(), empty_info);
+                            let response =
+                                Message::layout_info_result(request_id.clone(), empty_info);
                             if let Some(ref sender) = self.response_sender {
                                 let _ = sender.try_send(response);
                             }
@@ -3073,9 +3113,10 @@ impl ScriptListApp {
                             warnings: vec![format!("target_resolution_failed: {}", err)],
                         };
                         if let Some(ref sender) = self.response_sender {
-                            let _ = sender.try_send(
-                                Message::automation_inspect_result(request_id.clone(), snapshot),
-                            );
+                            let _ = sender.try_send(Message::automation_inspect_result(
+                                request_id.clone(),
+                                snapshot,
+                            ));
                         }
                         return;
                     }
@@ -3179,12 +3220,10 @@ impl ScriptListApp {
 
                 // Step 4: Resolve the native OS window ID (CGWindowID) for
                 // strict screenshot capture threading.
-                let os_window_id =
-                    crate::platform::resolve_targeted_os_window_id(target.as_ref());
+                let os_window_id = crate::platform::resolve_targeted_os_window_id(target.as_ref());
 
                 // Step 5: Compute screenshot-relative geometry for the target surface.
-                let target_bounds_in_screenshot =
-                    protocol::target_bounds_in_screenshot(&resolved);
+                let target_bounds_in_screenshot = protocol::target_bounds_in_screenshot(&resolved);
                 let surface_hit_point = target_bounds_in_screenshot
                     .as_ref()
                     .map(protocol::default_surface_hit_point);
@@ -3238,9 +3277,10 @@ impl ScriptListApp {
                 );
 
                 if let Some(ref sender) = self.response_sender {
-                    let _ = sender.try_send(
-                        Message::automation_inspect_result(request_id.clone(), snapshot),
-                    );
+                    let _ = sender.try_send(Message::automation_inspect_result(
+                        request_id.clone(),
+                        snapshot,
+                    ));
                 }
             }
 
@@ -3261,68 +3301,65 @@ impl ScriptListApp {
                     &condition,
                     protocol::WaitCondition::Detailed(
                         protocol::WaitDetailedCondition::AcpReady
-                        | protocol::WaitDetailedCondition::AcpPickerOpen
-                        | protocol::WaitDetailedCondition::AcpPickerClosed
-                        | protocol::WaitDetailedCondition::AcpItemAccepted
-                        | protocol::WaitDetailedCondition::AcpCursorAt { .. }
-                        | protocol::WaitDetailedCondition::AcpStatus { .. }
-                        | protocol::WaitDetailedCondition::AcpInputMatch { .. }
-                        | protocol::WaitDetailedCondition::AcpInputContains { .. }
-                        | protocol::WaitDetailedCondition::AcpAcceptedViaKey { .. }
-                        | protocol::WaitDetailedCondition::AcpAcceptedLabel { .. }
-                        | protocol::WaitDetailedCondition::AcpAcceptedCursorAt { .. }
-                        | protocol::WaitDetailedCondition::AcpInputLayoutMatch { .. }
-                        | protocol::WaitDetailedCondition::AcpSetupVisible
-                        | protocol::WaitDetailedCondition::AcpSetupReasonCode { .. }
-                        | protocol::WaitDetailedCondition::AcpSetupPrimaryAction { .. }
-                        | protocol::WaitDetailedCondition::AcpSetupAgentPickerOpen
-                        | protocol::WaitDetailedCondition::AcpSetupSelectedAgent { .. }
+                            | protocol::WaitDetailedCondition::AcpPickerOpen
+                            | protocol::WaitDetailedCondition::AcpPickerClosed
+                            | protocol::WaitDetailedCondition::AcpItemAccepted
+                            | protocol::WaitDetailedCondition::AcpCursorAt { .. }
+                            | protocol::WaitDetailedCondition::AcpStatus { .. }
+                            | protocol::WaitDetailedCondition::AcpInputMatch { .. }
+                            | protocol::WaitDetailedCondition::AcpInputContains { .. }
+                            | protocol::WaitDetailedCondition::AcpAcceptedViaKey { .. }
+                            | protocol::WaitDetailedCondition::AcpAcceptedLabel { .. }
+                            | protocol::WaitDetailedCondition::AcpAcceptedCursorAt { .. }
+                            | protocol::WaitDetailedCondition::AcpInputLayoutMatch { .. }
+                            | protocol::WaitDetailedCondition::AcpSetupVisible
+                            | protocol::WaitDetailedCondition::AcpSetupReasonCode { .. }
+                            | protocol::WaitDetailedCondition::AcpSetupPrimaryAction { .. }
+                            | protocol::WaitDetailedCondition::AcpSetupAgentPickerOpen
+                            | protocol::WaitDetailedCondition::AcpSetupSelectedAgent { .. }
                     )
                 );
 
                 // Resolve target: ACP conditions accept AcpDetached; generic
                 // conditions accept Main, AcpDetached, and Notes.
-                let resolved_target: AutomationReadTarget =
-                    if target.is_some() {
-                        if is_acp_condition {
-                            match resolve_acp_read_target(&rid, "waitFor", target.as_ref()) {
-                                Ok(AcpReadTarget::Detached { entity, info }) => {
-                                    AutomationReadTarget::AcpDetached { entity, info }
-                                }
-                                Ok(AcpReadTarget::Main { info }) => {
-                                    AutomationReadTarget::Main { info }
-                                }
-                                Err(error) => {
-                                    if let Some(ref sender) = self.response_sender {
-                                        let _ = sender.try_send(Message::wait_for_result(
-                                            request_id.clone(),
-                                            false,
-                                            0,
-                                            Some(error),
-                                        ));
-                                    }
-                                    return;
-                                }
+                let resolved_target: AutomationReadTarget = if target.is_some() {
+                    if is_acp_condition {
+                        match resolve_acp_read_target(&rid, "waitFor", target.as_ref()) {
+                            Ok(AcpReadTarget::Detached { entity, info }) => {
+                                AutomationReadTarget::AcpDetached { entity, info }
                             }
-                        } else {
-                            match resolve_automation_read_target(&rid, "waitFor", target.as_ref(), cx) {
-                                Ok(resolved) => resolved,
-                                Err(error) => {
-                                    if let Some(ref sender) = self.response_sender {
-                                        let _ = sender.try_send(Message::wait_for_result(
-                                            request_id.clone(),
-                                            false,
-                                            0,
-                                            Some(error),
-                                        ));
-                                    }
-                                    return;
+                            Ok(AcpReadTarget::Main { info }) => AutomationReadTarget::Main { info },
+                            Err(error) => {
+                                if let Some(ref sender) = self.response_sender {
+                                    let _ = sender.try_send(Message::wait_for_result(
+                                        request_id.clone(),
+                                        false,
+                                        0,
+                                        Some(error),
+                                    ));
                                 }
+                                return;
                             }
                         }
                     } else {
-                        AutomationReadTarget::Main { info: None }
-                    };
+                        match resolve_automation_read_target(&rid, "waitFor", target.as_ref(), cx) {
+                            Ok(resolved) => resolved,
+                            Err(error) => {
+                                if let Some(ref sender) = self.response_sender {
+                                    let _ = sender.try_send(Message::wait_for_result(
+                                        request_id.clone(),
+                                        false,
+                                        0,
+                                        Some(error),
+                                    ));
+                                }
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    AutomationReadTarget::Main { info: None }
+                };
 
                 // Extract the detached ACP entity for backward-compatible condition checking.
                 let detached_entity: Option<gpui::Entity<crate::ai::acp::view::AcpChatView>> =
@@ -3346,12 +3383,15 @@ impl ScriptListApp {
                     AutomationReadTarget::Notes { entity, .. } => {
                         notes_wait_condition_satisfied(entity, &condition, cx)
                     }
-                    _ => {
-                        self.wait_condition_satisfied_for_target(&condition, detached_entity.as_ref(), cx)
-                    }
+                    _ => self.wait_condition_satisfied_for_target(
+                        &condition,
+                        detached_entity.as_ref(),
+                        cx,
+                    ),
                 };
                 if already_satisfied {
-                    let include_trace = protocol::transaction_trace::should_include_trace(trace_mode, true);
+                    let include_trace =
+                        protocol::transaction_trace::should_include_trace(trace_mode, true);
                     let trace = if include_trace {
                         let started_at_ms = protocol::transaction_trace::now_epoch_ms();
                         Some(protocol::TransactionTrace {
@@ -3414,11 +3454,18 @@ impl ScriptListApp {
                             if start.elapsed() >= timeout_dur {
                                 let elapsed_ms = start.elapsed().as_millis() as u64;
                                 let error = crate::protocol::TransactionError {
-                                    code: crate::protocol::TransactionErrorCode::WaitConditionTimeout,
-                                    message: format!("Timeout after {}ms waiting for {:?}", timeout_ms, condition),
+                                    code:
+                                        crate::protocol::TransactionErrorCode::WaitConditionTimeout,
+                                    message: format!(
+                                        "Timeout after {}ms waiting for {:?}",
+                                        timeout_ms, condition
+                                    ),
                                     suggestion: None,
                                 };
-                                let include_trace = protocol::transaction_trace::should_include_trace(trace_mode, false);
+                                let include_trace =
+                                    protocol::transaction_trace::should_include_trace(
+                                        trace_mode, false,
+                                    );
                                 let trace = if include_trace {
                                     Some(protocol::TransactionTrace {
                                         request_id: rid.clone(),
@@ -3467,13 +3514,20 @@ impl ScriptListApp {
                                 })
                             } else {
                                 this.update(cx, |this, cx| {
-                                    this.wait_condition_satisfied_for_target(&condition, detached_entity.as_ref(), cx)
+                                    this.wait_condition_satisfied_for_target(
+                                        &condition,
+                                        detached_entity.as_ref(),
+                                        cx,
+                                    )
                                 })
                             };
                             match poll_result {
                                 Ok(true) => {
                                     let elapsed_ms = start.elapsed().as_millis() as u64;
-                                    let include_trace = protocol::transaction_trace::should_include_trace(trace_mode, true);
+                                    let include_trace =
+                                        protocol::transaction_trace::should_include_trace(
+                                            trace_mode, true,
+                                        );
                                     let trace = if include_trace {
                                         Some(protocol::TransactionTrace {
                                             request_id: rid.clone(),
@@ -3523,7 +3577,10 @@ impl ScriptListApp {
                                         message: "Entity dropped during WaitFor".to_string(),
                                         suggestion: None,
                                     };
-                                    let include_trace = protocol::transaction_trace::should_include_trace(trace_mode, false);
+                                    let include_trace =
+                                        protocol::transaction_trace::should_include_trace(
+                                            trace_mode, false,
+                                        );
                                     let trace = if include_trace {
                                         Some(protocol::TransactionTrace {
                                             request_id: rid.clone(),
@@ -3588,33 +3645,32 @@ impl ScriptListApp {
                 let sender = self.response_sender.clone();
 
                 // Resolve target: accept Main, AcpDetached, and Notes.
-                let batch_target: AutomationReadTarget =
-                    if target.is_some() {
-                        match resolve_automation_read_target(&rid, "batch", target.as_ref(), cx) {
-                            Ok(resolved) => resolved,
-                            Err(error) => {
-                                if let Some(ref sender) = self.response_sender {
-                                    let _ = sender.try_send(Message::batch_result(
-                                        request_id.clone(),
-                                        false,
-                                        vec![crate::protocol::BatchResultEntry {
-                                            index: 0,
-                                            success: false,
-                                            command: "batch".to_string(),
-                                            elapsed: Some(0),
-                                            value: None,
-                                            error: Some(error),
-                                        }],
-                                        Some(0),
-                                        0,
-                                    ));
-                                }
-                                return;
+                let batch_target: AutomationReadTarget = if target.is_some() {
+                    match resolve_automation_read_target(&rid, "batch", target.as_ref(), cx) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            if let Some(ref sender) = self.response_sender {
+                                let _ = sender.try_send(Message::batch_result(
+                                    request_id.clone(),
+                                    false,
+                                    vec![crate::protocol::BatchResultEntry {
+                                        index: 0,
+                                        success: false,
+                                        command: "batch".to_string(),
+                                        elapsed: Some(0),
+                                        value: None,
+                                        error: Some(error),
+                                    }],
+                                    Some(0),
+                                    0,
+                                ));
                             }
+                            return;
                         }
-                    } else {
-                        AutomationReadTarget::Main { info: None }
-                    };
+                    }
+                } else {
+                    AutomationReadTarget::Main { info: None }
+                };
 
                 let detached_batch_entity: Option<gpui::Entity<crate::ai::acp::view::AcpChatView>> =
                     if let AutomationReadTarget::AcpDetached { ref entity, .. } = batch_target {
@@ -3626,18 +3682,24 @@ impl ScriptListApp {
                 let notes_batch_target: Option<(
                     gpui::Entity<crate::notes::NotesApp>,
                     gpui::WindowHandle<crate::Root>,
-                )> = if let AutomationReadTarget::Notes { ref entity, ref handle, .. } = batch_target {
+                )> = if let AutomationReadTarget::Notes {
+                    ref entity,
+                    ref handle,
+                    ..
+                } = batch_target
+                {
                     Some((entity.clone(), *handle))
                 } else {
                     None
                 };
 
-                let actions_dialog_batch_entity: Option<gpui::Entity<crate::actions::ActionsDialog>> =
-                    if let AutomationReadTarget::ActionsDialog { ref entity, .. } = batch_target {
-                        Some(entity.clone())
-                    } else {
-                        None
-                    };
+                let actions_dialog_batch_entity: Option<
+                    gpui::Entity<crate::actions::ActionsDialog>,
+                > = if let AutomationReadTarget::ActionsDialog { ref entity, .. } = batch_target {
+                    Some(entity.clone())
+                } else {
+                    None
+                };
 
                 let is_prompt_popup_batch =
                     matches!(batch_target, AutomationReadTarget::PromptPopup { .. });
@@ -5587,8 +5649,8 @@ impl ScriptListApp {
                 let send_fallback = send_response;
 
                 // Open parent confirm dialog via shared async helper
-                cx.spawn(async move |_this, cx| {
-                    match crate::confirm::confirm_with_parent_dialog(
+                cx.spawn(
+                    async move |_this, cx| match crate::confirm::confirm_with_parent_dialog(
                         cx,
                         crate::confirm::ParentConfirmOptions {
                             title: "Confirm".into(),
@@ -5615,8 +5677,8 @@ impl ScriptListApp {
                             );
                             send_fallback(false);
                         }
-                    }
-                })
+                    },
+                )
                 .detach();
 
                 cx.notify();
@@ -6056,8 +6118,9 @@ impl ScriptListApp {
                 let chat_id = crate::ai::ChatId::new();
                 let should_submit = !no_response;
                 let provider = model_id.as_deref().and_then(|selected_model_id| {
-                    let registry =
-                        crate::ai::ProviderRegistry::from_environment_with_config(Some(&self.config));
+                    let registry = crate::ai::ProviderRegistry::from_environment_with_config(Some(
+                        &self.config,
+                    ));
                     resolve_ai_start_chat_provider(&registry, selected_model_id)
                 });
                 let context_parts = parts
@@ -6310,9 +6373,7 @@ impl ScriptListApp {
                             .selected_value
                             .as_deref()
                             .is_none_or(|v| selected_value.as_deref() == Some(v))
-                        && expected
-                            .window_visible
-                            .is_none_or(|v| v == window_visible)
+                        && expected.window_visible.is_none_or(|v| v == window_visible)
                 }
                 // ── ACP-specific wait conditions ────────────────────
                 protocol::WaitDetailedCondition::AcpReady => {
@@ -6402,21 +6463,15 @@ impl ScriptListApp {
                 }
                 protocol::WaitDetailedCondition::AcpSetupAgentPickerOpen => {
                     let state = self.collect_acp_state(cx);
-                    state
-                        .setup
-                        .as_ref()
-                        .is_some_and(|s| s.agent_picker_open)
+                    state.setup.as_ref().is_some_and(|s| s.agent_picker_open)
                 }
                 protocol::WaitDetailedCondition::AcpSetupSelectedAgent { agent_id } => {
                     let state = self.collect_acp_state(cx);
-                    state
-                        .setup
-                        .as_ref()
-                        .is_some_and(|s| {
-                            s.selected_agent_id
-                                .as_ref()
-                                .is_some_and(|id| id == agent_id)
-                        })
+                    state.setup.as_ref().is_some_and(|s| {
+                        s.selected_agent_id
+                            .as_ref()
+                            .is_some_and(|id| id == agent_id)
+                    })
                 }
             },
         }
@@ -6493,18 +6548,29 @@ impl ScriptListApp {
                     }
                     protocol::WaitDetailedCondition::AcpAcceptedViaKey { key } => {
                         let probe = probe_fn();
-                        probe.accepted_items.last().is_some_and(|item| item.accepted_via_key == *key)
+                        probe
+                            .accepted_items
+                            .last()
+                            .is_some_and(|item| item.accepted_via_key == *key)
                     }
                     protocol::WaitDetailedCondition::AcpAcceptedLabel { label } => {
                         let probe = probe_fn();
-                        probe.accepted_items.last().is_some_and(|item| item.item_label == *label)
+                        probe
+                            .accepted_items
+                            .last()
+                            .is_some_and(|item| item.item_label == *label)
                     }
                     protocol::WaitDetailedCondition::AcpAcceptedCursorAt { index } => {
                         let probe = probe_fn();
-                        probe.accepted_items.last().is_some_and(|item| item.cursor_after == *index)
+                        probe
+                            .accepted_items
+                            .last()
+                            .is_some_and(|item| item.cursor_after == *index)
                     }
                     protocol::WaitDetailedCondition::AcpInputLayoutMatch {
-                        visible_start, visible_end, cursor_in_window,
+                        visible_start,
+                        visible_end,
+                        cursor_in_window,
                     } => {
                         let probe = probe_fn();
                         probe.input_layout.as_ref().is_some_and(|layout| {
@@ -6513,21 +6579,23 @@ impl ScriptListApp {
                                 && layout.cursor_in_window == *cursor_in_window
                         })
                     }
-                    protocol::WaitDetailedCondition::AcpSetupVisible => {
-                        state.setup.is_some()
-                    }
-                    protocol::WaitDetailedCondition::AcpSetupReasonCode { reason_code } => {
-                        state.setup.as_ref().is_some_and(|s| s.reason_code == *reason_code)
-                    }
-                    protocol::WaitDetailedCondition::AcpSetupPrimaryAction { action } => {
-                        state.setup.as_ref().is_some_and(|s| s.primary_action == *action)
-                    }
+                    protocol::WaitDetailedCondition::AcpSetupVisible => state.setup.is_some(),
+                    protocol::WaitDetailedCondition::AcpSetupReasonCode { reason_code } => state
+                        .setup
+                        .as_ref()
+                        .is_some_and(|s| s.reason_code == *reason_code),
+                    protocol::WaitDetailedCondition::AcpSetupPrimaryAction { action } => state
+                        .setup
+                        .as_ref()
+                        .is_some_and(|s| s.primary_action == *action),
                     protocol::WaitDetailedCondition::AcpSetupAgentPickerOpen => {
                         state.setup.as_ref().is_some_and(|s| s.agent_picker_open)
                     }
                     protocol::WaitDetailedCondition::AcpSetupSelectedAgent { agent_id } => {
                         state.setup.as_ref().is_some_and(|s| {
-                            s.selected_agent_id.as_ref().is_some_and(|id| id == agent_id)
+                            s.selected_agent_id
+                                .as_ref()
+                                .is_some_and(|id| id == agent_id)
                         })
                     }
                     // Non-ACP conditions (already handled above, but required for exhaustiveness)
@@ -6798,10 +6866,7 @@ impl ScriptListApp {
                 cx.notify();
             }
             _ => {
-                tracing::warn!(
-                    category = "BATCH",
-                    "submit not supported for current view"
-                );
+                tracing::warn!(category = "BATCH", "submit not supported for current view");
             }
         }
     }
@@ -6824,10 +6889,9 @@ fn batch_command_name(cmd: &protocol::BatchCommand) -> String {
 #[cfg(test)]
 mod prompt_handler_message_tests {
     use super::{
-        classify_prompt_message_route, escape_windows_cmd_open_target,
-        prompt_coming_soon_warning, resolve_ai_start_chat_provider,
-        should_restore_main_window_after_script_exit, unhandled_message_warning,
-        PromptMessageRoute,
+        classify_prompt_message_route, escape_windows_cmd_open_target, prompt_coming_soon_warning,
+        resolve_ai_start_chat_provider, should_restore_main_window_after_script_exit,
+        unhandled_message_warning, PromptMessageRoute,
     };
     use crate::ai::providers::OpenAiProvider;
     use crate::PromptMessage;
