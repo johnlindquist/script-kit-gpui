@@ -37,6 +37,7 @@ node_modules/
 *.db-*
 
 # Codex audit build artifacts
+target-codex/
 target-codex-*/
 
 # External repos / proof-of-concept clones
