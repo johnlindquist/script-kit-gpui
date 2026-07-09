@@ -477,6 +477,8 @@ fn file_search_layout_model_uses_main_view_context_chrome() {
     assert!(layout.contains("| AppView::ClipboardHistoryView { .. }"));
     assert!(layout.contains("| AppView::ProfileSearchView { .. }"));
     assert!(layout.contains("| AppView::AgentChatView { .. }"));
+    assert!(layout
+        .contains("| AppView::AgentChatView { .. } => crate::window_resize::ViewType::MainWindow"));
     assert!(bounds.contains("| AppView::FileSearchView { .. }"));
     assert!(bounds.contains("| AppView::ClipboardHistoryView { .. }"));
     assert!(bounds.contains("| AppView::ProfileSearchView { .. }"));
