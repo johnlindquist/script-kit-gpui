@@ -9,6 +9,7 @@ mod agent_chat_setup;
 mod focused_text_entry;
 mod source_classification;
 mod types;
+use agent_chat_context_staging::materialize_selection_context_parts;
 use source_classification::{
     app_view_to_prompt_type_str, build_tab_ai_apply_back_hint, detect_tab_ai_source_type,
     detect_tab_ai_source_type_early,
@@ -36,83 +37,6 @@ agent_chat_preferred_agent_preserved_during_fallback_launch
 enum TabAiHarnessCloseDisposition {
     RestoreOrigin,
     CloseMainWindowStateFirst,
-}
-
-/// Replace the lazy `@selection` resource part with a concrete text block
-/// captured before Agent Chat takes over app activation.
-///
-/// Capture order: a fresh AX read of the still-focused source app first, then
-/// the spine live-preview cache (captured seconds earlier while the style/
-/// context list was open). When both are empty the lazy part is kept so the
-/// downstream resolution failure surfaces in the receipt instead of silently
-/// dropping the attachment.
-fn materialize_selection_context_parts(
-    parts: Vec<crate::ai::message_parts::AiContextPart>,
-    cached_selection: Option<crate::selected_text::CapturedText>,
-    capture_live: impl FnOnce() -> Option<crate::selected_text::CapturedText>,
-) -> Vec<crate::ai::message_parts::AiContextPart> {
-    use crate::ai::message_parts::AiContextPart;
-
-    let selection_uri = crate::ai::context_contract::ContextAttachmentKind::Selection
-        .spec()
-        .uri;
-    let needs_selection = parts
-        .iter()
-        .any(|part| matches!(part, AiContextPart::ResourceUri { uri, .. } if uri == selection_uri));
-    if !needs_selection {
-        return parts;
-    }
-
-    let captured = capture_live()
-        .filter(|captured| !captured.text.trim().is_empty())
-        .or_else(|| {
-            cached_selection.filter(|captured| !captured.text.trim().is_empty())
-        });
-
-    let Some(captured) = captured else {
-        tracing::warn!(
-            target: "script_kit::spine",
-            event = "spine_selection_capture_empty_at_handoff",
-            "No selection text available at prompt-plan handoff; keeping lazy resource part"
-        );
-        return parts;
-    };
-
-    tracing::info!(
-        target: "script_kit::spine",
-        event = "spine_selection_materialized_at_handoff",
-        text_len = captured.text.len(),
-        kind = ?captured.kind,
-        source_app = captured.source_app.as_deref().unwrap_or("unknown"),
-    );
-
-    // Label carries provenance into the transcript attachment chip:
-    // "Selection — Safari" / "Draft — Google Chrome".
-    let what = match captured.kind {
-        crate::selected_text::CapturedTextKind::Selection => "Selection",
-        crate::selected_text::CapturedTextKind::FocusedField => "Draft",
-    };
-    let label = match &captured.source_app {
-        Some(app) => format!("{what} \u{2014} {app}"),
-        None => what.to_string(),
-    };
-
-    parts
-        .into_iter()
-        .map(|part| match part {
-            AiContextPart::ResourceUri { uri, .. } if uri == selection_uri => {
-                AiContextPart::TextBlock {
-                    label: label.clone(),
-                    // `#selection=` keys the `@selected` inline token, keeping
-                    // the chip distinct from the lazy `@selection` mention.
-                    source: "frontmost-app#selection=full".to_string(),
-                    text: captured.text.clone(),
-                    mime_type: None,
-                }
-            }
-            other => other,
-        })
-        .collect()
 }
 
 impl ScriptListApp {
