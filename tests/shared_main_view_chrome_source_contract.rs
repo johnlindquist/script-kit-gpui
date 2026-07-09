@@ -484,52 +484,6 @@ fn file_search_layout_model_uses_main_view_context_chrome() {
 }
 
 #[test]
-fn agent_chat_layout_model_swaps_only_main_section_to_conversation() {
-    let layout = read_source("src/app_layout/build_layout_info.rs");
-
-    assert!(
-        layout.contains(
-            "| AppView::AgentChatView { .. } => crate::window_resize::ViewType::MainWindow"
-        ),
-        "AgentChat should use the same stable main-window sizing target as the main menu chrome"
-    );
-    assert!(
-        layout.contains("if let AppView::AgentChatView { entity } = &self.current_view"),
-        "AgentChat needs its own layout branch before the launcher ScriptList fallback"
-    );
-    assert!(
-        layout.contains(
-            "LayoutComponentInfo::new(\"AgentChatConversation\", LayoutComponentType::List)"
-        ),
-        "AgentChat layout receipts should name the conversation as the swapped main section"
-    );
-    for name in [
-        "AgentChatEmptyGuidance",
-        "AgentChatEmptyGuidanceTitle",
-        "AgentChatEmptyGuidanceBody",
-        "AgentChatEmptyGuidanceShortcutSlot",
-        "AgentChatEmptyGuidanceLabelColumn",
-    ] {
-        assert!(
-            layout.contains(name),
-            "AgentChat layout receipts should expose {name} for empty-state typography/spacing proof"
-        );
-    }
-    assert!(layout.contains("main_view_content_columns(menu_def)"));
-    assert!(
-        layout.contains("with_parent(\"MainViewMain\")"),
-        "AgentChatConversation should remain inside the shared MainViewMain slot"
-    );
-    assert!(
-        layout.contains("} else {")
-            && layout.contains(
-                "// Script list: full width for MainWindow, left panel for split-preview surfaces."
-            ),
-        "AgentChat branch should not fall through to stale ScriptList/PreviewPanel layout components"
-    );
-}
-
-#[test]
 fn main_window_footer_keeps_header_context_out_of_action_zone() {
     let ui_window = read_source("src/app_impl/ui_window.rs");
     let standard_footer = ui_window

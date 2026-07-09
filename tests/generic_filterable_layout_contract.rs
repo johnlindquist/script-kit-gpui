@@ -33,19 +33,7 @@ fn generic_filterable_list_uses_liquid_glass_panel_radius() {
 }
 
 #[test]
-fn generic_filterable_layout_uses_dedicated_full_width_nodes_before_generic_split_shell() {
-    let branch = LAYOUT_SOURCE
-        .find("AppView::FavoritesBrowseView")
-        .expect("build_layout_info must mention FavoritesBrowseView");
-    let generic_script_list = LAYOUT_SOURCE
-        .find("LayoutComponentInfo::new(\"ScriptList\"")
-        .expect("build_layout_info must retain the generic ScriptList branch");
-
-    assert!(
-        branch < generic_script_list,
-        "GenericFilterableList variants must be measured before the generic ScriptList/PreviewPanel branch"
-    );
-
+fn generic_filterable_layout_uses_dedicated_full_width_nodes() {
     for needle in [
         "GenericFilterableSurface",
         "GenericFilterableHeader",

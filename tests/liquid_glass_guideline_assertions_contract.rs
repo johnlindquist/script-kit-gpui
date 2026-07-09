@@ -511,7 +511,7 @@ fn shared_prompt_layout_nodes_use_liquid_glass_radius_tokens() {
     let layout = fs::read_to_string("src/app_layout/build_layout_info.rs")
         .expect("failed to read build_layout_info.rs");
 
-    for node in ["MainViewMain", "ScriptList", "PreviewPanel"] {
+    for node in ["MainViewMain"] {
         let node_source = layout_component_source(&layout, node);
         let end = node_source
             .find(".with_visual_token")

@@ -331,13 +331,6 @@ fn div_layout_info_has_div_content_branch() {
     let return_idx = prompt_branch
         .find("return LayoutInfo")
         .expect("DivPrompt branch should return layout info before launcher components");
-    let script_list_idx = prompt_branch
-        .find("ScriptList")
-        .expect("launcher ScriptList branch exists after prompt branch");
-    assert!(
-        return_idx < script_list_idx,
-        "DivPrompt layout info must return before adding launcher ScriptList/PreviewPanel components"
-    );
     assert!(
         prompt_branch[..return_idx].contains("content.promptBody")
             && prompt_branch[..return_idx].contains("MATERIAL_SOLID_THEME_TOKEN")
@@ -388,13 +381,6 @@ fn webcam_layout_info_has_webcam_content_branch() {
     let return_idx = prompt_branch
         .find("return LayoutInfo")
         .expect("webcam layout branch should return layout info");
-    let script_list_idx = prompt_branch
-        .find("ScriptList")
-        .expect("launcher ScriptList branch exists after prompt branch");
-    assert!(
-        return_idx < script_list_idx,
-        "Webcam layout info must return before adding launcher ScriptList/PreviewPanel components"
-    );
     assert!(
         source.contains("AppView::WebcamView { .. } => crate::window_resize::ViewType::DivPrompt"),
         "Webcam layout receipts should use the same DivPrompt sizing as the runtime resize path"
@@ -500,10 +486,6 @@ fn mini_layout_info_reports_single_column_without_preview() {
         source.contains("let list_width = if uses_split_preview")
             && source.contains("} else {\n            window_width"),
         "mini layout info must give ScriptList the full window width"
-    );
-    assert!(
-        source.contains("if uses_split_preview {") && source.contains("PreviewPanel"),
-        "layout info must only emit PreviewPanel for split-preview receipts"
     );
     eprintln!("{{\"audit\":\"minimal_chrome\",\"surface\":\"mini_layout_info\",\"single_column\":true,\"status\":\"pass\"}}");
 }

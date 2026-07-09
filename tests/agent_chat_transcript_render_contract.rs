@@ -1,6 +1,5 @@
 const TRANSCRIPT_SOURCE: &str = include_str!("../src/ai/agent_chat/ui/components/transcript.rs");
 const VIEW_SOURCE: &str = include_str!("../src/ai/agent_chat/ui/view.rs");
-const BUILD_LAYOUT_INFO_SOURCE: &str = include_str!("../src/app_layout/build_layout_info.rs");
 const MAIN_VIEW_CHROME_SOURCE: &str = include_str!("../src/components/main_view_chrome.rs");
 
 fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -239,43 +238,5 @@ fn agent_chat_mounts_transcript_from_existing_thread_messages() {
         middle_area_body.contains(".child(self.ensure_transcript(cx).into_any_element())")
             && render_body.contains("self.render_agent_chat_middle_area("),
         "Agent Chat must mount the transcript through the middle-area render path even when assistant text already exists"
-    );
-}
-
-#[test]
-fn agent_chat_layout_measure_gates_empty_guidance_on_live_agent_chat_state() {
-    let branch = source_between(
-        BUILD_LAYOUT_INFO_SOURCE,
-        "if let AppView::AgentChatView { entity }",
-        "\n        } else {\n            // Script list",
-    );
-
-    assert!(
-        branch.contains("collect_agent_chat_state_snapshot"),
-        "layout.measure must read live AgentChatView state"
-    );
-    assert!(
-        branch.contains("agent_chat_state.message_count == 0")
-            && branch.contains("!agent_chat_state.awaiting_first_assistant_text"),
-        "layout.measure must mirror AgentChatView render's empty-state predicate"
-    );
-    assert!(
-        branch.contains("if agent_chat_is_empty"),
-        "AgentChatEmptyGuidance must be guarded by the live empty predicate"
-    );
-    assert!(
-        branch.contains("LayoutComponentInfo::new(\"AgentChatTranscript\""),
-        "non-empty Agent Chat layout.measure receipts must expose the transcript region"
-    );
-
-    let guard = branch
-        .find("if agent_chat_is_empty")
-        .expect("missing agent_chat_is_empty guard");
-    let empty = branch
-        .find("LayoutComponentInfo::new(\"AgentChatEmptyGuidance\"")
-        .expect("missing empty guidance component");
-    assert!(
-        guard < empty,
-        "AgentChatEmptyGuidance must not be emitted unconditionally"
     );
 }

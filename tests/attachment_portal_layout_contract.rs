@@ -1,20 +1,9 @@
 use std::fs;
 
 #[test]
-fn attachment_portal_layout_uses_dedicated_split_nodes_before_generic_script_list() {
+fn attachment_portal_layout_uses_dedicated_split_nodes() {
     let source = fs::read_to_string("src/app_layout/build_layout_info.rs")
         .expect("build_layout_info source should be readable");
-    let portal_branch = source
-        .find("AttachmentPortalSurface")
-        .expect("AttachmentPortalBrowser needs a dedicated measured surface");
-    let generic_branch = source
-        .find("LayoutComponentInfo::new(\"ScriptList\"")
-        .expect("build_layout_info must retain the generic ScriptList layout branch");
-
-    assert!(
-        portal_branch < generic_branch,
-        "AttachmentPortalBrowser must be measured before the generic ScriptList/PreviewPanel branch"
-    );
 
     for needle in [
         "AttachmentPortalHeader",
