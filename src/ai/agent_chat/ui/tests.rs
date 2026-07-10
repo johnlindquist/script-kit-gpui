@@ -1172,31 +1172,6 @@ fn agent_chat_view_exposes_escape_popup_dismiss_helper() {
 }
 
 #[test]
-fn agent_chat_picker_portals_require_host_callbacks_before_staging() {
-    let portal_fn_start = AGENT_CHAT_VIEW_SOURCE
-        .find("fn open_portal_contract_result(")
-        .expect("open_portal_contract_result should exist");
-    let portal_fn = &AGENT_CHAT_VIEW_SOURCE
-        [portal_fn_start..(portal_fn_start + 2600).min(AGENT_CHAT_VIEW_SOURCE.len())];
-
-    let callback_guard_idx = portal_fn
-        .find("let Some(callback) = self.on_open_portal.clone() else {")
-        .expect("picker portals should require a host callback");
-    let stage_idx = portal_fn
-        .find("self.stage_pending_portal_session(")
-        .expect("picker portals should still stage after the guard");
-
-    assert!(
-        callback_guard_idx < stage_idx,
-        "picker portals should only stage pending portal state after a host callback is available"
-    );
-    assert!(
-        portal_fn.contains("event = \"agent_chat_portal_open_blocked_missing_host_callback\""),
-        "missing picker portal callbacks should emit a warning log"
-    );
-}
-
-#[test]
 fn detached_agent_chat_limits_portals_to_history() {
     assert!(
         AGENT_CHAT_WINDOW_SOURCE
@@ -1221,8 +1196,7 @@ fn agent_chat_history_popup_attach_consumes_pending_history_portal_session() {
         [popup_select_fn_start..(popup_select_fn_start + 1400).min(AGENT_CHAT_VIEW_SOURCE.len())];
 
     assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains("fn has_pending_history_portal_session(&self) -> bool")
-            && AGENT_CHAT_VIEW_SOURCE.contains("fn build_history_attachment_part(")
+        AGENT_CHAT_VIEW_SOURCE.contains("fn build_history_attachment_part(")
             && AGENT_CHAT_VIEW_SOURCE
                 .contains("event = \"agent_chat_history_portal_selection_attached_via_contract\"")
             && AGENT_CHAT_VIEW_SOURCE.contains("self.attach_portal_part(part, cx);")

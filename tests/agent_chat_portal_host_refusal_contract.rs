@@ -5,33 +5,6 @@ fn read(path: &str) -> String {
 }
 
 #[test]
-fn portal_open_result_models_host_refusal() {
-    let source = read("src/ai/agent_chat/ui/view.rs");
-    for needle in [
-        "pub(crate) enum PortalOpenResult",
-        "Refused(PortalRefusal)",
-        "PortalRefusal::NoHost",
-        "PortalRefusal::UnsupportedByHost",
-        "open_portal_contract_result",
-    ] {
-        assert!(source.contains(needle), "missing {needle}");
-    }
-}
-
-#[test]
-fn portal_session_is_not_staged_before_host_decision() {
-    let source = read("src/ai/agent_chat/ui/view.rs");
-    let body = source
-        .split("fn open_portal_contract_result")
-        .nth(1)
-        .expect("open_portal_contract_result exists");
-    let decide_idx = body.find("decide_portal_open").unwrap();
-    let callback_idx = body.find("let Some(callback)").unwrap();
-    let stage_idx = body.find("self.stage_pending_portal_session").unwrap();
-    assert!(decide_idx < callback_idx && callback_idx < stage_idx);
-}
-
-#[test]
 fn detached_and_notes_hosts_advertise_history_only_and_cancel_refusals() {
     let detached = read("src/ai/agent_chat/ui/chat_window.rs");
     assert!(

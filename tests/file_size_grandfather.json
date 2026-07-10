@@ -3,7 +3,7 @@
   "src/actions/window.rs": 2879,
   "src/ai/agent_chat/ui/config.rs": 2245,
   "src/ai/agent_chat/ui/thread.rs": 4266,
-  "src/ai/agent_chat/ui/view.rs": 15055,
+  "src/ai/agent_chat/ui/view.rs": 14697,
   "src/ai/agent_prompt_handoff.rs": 2274,
   "src/ai/harness/mod.rs": 3381,
   "src/ai/providers.rs": 3292,

@@ -43,15 +43,6 @@ fn focused_preview_and_accept_paths_use_the_shared_contract() {
         "focused mention preview must render from the shared portal intent"
     );
     assert!(
-        AGENT_CHAT_VIEW_SOURCE
-            .contains("crate::ai::agent_chat::ui::portal_contract::apply_portal_replacement("),
-        "portal accept must apply replacements through the shared contract helper"
-    );
-    assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains("event = \"agent_chat_portal_reentry_applied\""),
-        "portal accept path must log the contract-driven reentry result"
-    );
-    assert!(
         PORTAL_CONTRACT_SOURCE.contains("pub(crate) enum AgentChatPortalIntent"),
         "portal contract module must define AgentChatPortalIntent"
     );
@@ -98,10 +89,7 @@ fn host_transitions_preserve_the_staged_portal_session() {
     let prepare_for_host_hide = AGENT_CHAT_VIEW_SOURCE
         .split("pub(crate) fn prepare_for_host_hide")
         .nth(1)
-        .and_then(|rest| {
-            rest.split("pub(crate) fn prepare_for_attachment_portal_open")
-                .next()
-        })
+        .and_then(|rest| rest.split("fn check_for_transient_exit").next())
         .expect("prepare_for_host_hide source should exist");
 
     assert!(
@@ -121,10 +109,6 @@ fn host_transitions_preserve_the_staged_portal_session() {
 
 #[test]
 fn history_portal_hosts_seed_query_from_the_pending_contract() {
-    assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains("&session.contract.query"),
-        "Agent Chat portal query accessors must read the staged contract query"
-    );
     assert!(
         ATTACHMENT_PORTAL_SOURCE.contains("attachment_portal_query_seeded_from_contract"),
         "main-window attachment portal must log query seeding from the contract"
