@@ -7,6 +7,10 @@ RESOURCES_DIR="${APP_PATH}/Contents/Resources"
 ASSETS_DIR="${RESOURCES_DIR}/assets"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_ASSETS_DIR="${REPO_ROOT}/assets"
+SOURCE_SCRIPTS_DIR="${REPO_ROOT}/scripts"
+SOURCE_MIGRATE_DIR="${SOURCE_SCRIPTS_DIR}/migrate"
+BUNDLED_SCRIPTS_DIR="${RESOURCES_DIR}/scripts"
+BUNDLED_MIGRATE_DIR="${BUNDLED_SCRIPTS_DIR}/migrate"
 EXPECTED_BIN="${MACOS_DIR}/script-kit-gpui"
 EXPECTED_PI_BIN="${MACOS_DIR}/pi"
 
@@ -60,6 +64,18 @@ required_resources=(
   "${ASSETS_DIR}/fonts/JetBrainsMono-BoldItalic.ttf"
   "${ASSETS_DIR}/fonts/JetBrainsMono-Medium.ttf"
   "${ASSETS_DIR}/fonts/JetBrainsMono-SemiBold.ttf"
+  "${RESOURCES_DIR}/scripts/kit-sdk.ts"
+  "${RESOURCES_DIR}/scripts/migrate/cli.ts"
+  "${RESOURCES_DIR}/scripts/migrate/pipeline.ts"
+  "${RESOURCES_DIR}/scripts/migrate/classify.ts"
+  "${RESOURCES_DIR}/scripts/migrate/agent.ts"
+  "${RESOURCES_DIR}/scripts/migrate/metadata.ts"
+  "${RESOURCES_DIR}/scripts/migrate/types.ts"
+  "${RESOURCES_DIR}/scripts/migrate/validators.ts"
+  "${RESOURCES_DIR}/scripts/migrate/compat-map.json"
+  "${RESOURCES_DIR}/scripts/migrate/prompts/port.md"
+  "${RESOURCES_DIR}/scripts/migrate/prompts/repair.md"
+  "${RESOURCES_DIR}/scripts/migrate/prompts/honesty.md"
 )
 
 for resource in "${required_resources[@]}"; do
@@ -68,6 +84,54 @@ for resource in "${required_resources[@]}"; do
     exit 1
   fi
 done
+
+verify_file_parity() {
+  local src_file="$1"
+  local dst_file="$2"
+
+  if [[ ! -f "${src_file}" ]]; then
+    echo "bundle_verify missing_source_resource=${src_file}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${dst_file}" ]]; then
+    echo "bundle_verify missing_bundled_resource=${dst_file}" >&2
+    exit 1
+  fi
+  if ! cmp -s "${src_file}" "${dst_file}"; then
+    echo "bundle_verify resource_content_mismatch source=${src_file} bundle=${dst_file}" >&2
+    exit 1
+  fi
+}
+
+verify_resource_family_parity() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  local pattern="$3"
+
+  test -d "${src_dir}"
+  test -d "${dst_dir}"
+
+  while IFS= read -r src_file; do
+    local name="${src_file##*/}"
+    verify_file_parity "${src_file}" "${dst_dir}/${name}"
+  done < <(find "${src_dir}" -maxdepth 1 -type f -name "${pattern}" | sort)
+
+  while IFS= read -r dst_file; do
+    local name="${dst_file##*/}"
+    if [[ ! -f "${src_dir}/${name}" ]]; then
+      echo "bundle_verify unexpected_bundled_resource=${dst_file}" >&2
+      exit 1
+    fi
+  done < <(find "${dst_dir}" -maxdepth 1 -type f -name "${pattern}" | sort)
+}
+
+verify_file_parity "${SOURCE_SCRIPTS_DIR}/kit-sdk.ts" "${BUNDLED_SCRIPTS_DIR}/kit-sdk.ts"
+verify_resource_family_parity "${SOURCE_MIGRATE_DIR}" "${BUNDLED_MIGRATE_DIR}" "*.ts"
+verify_resource_family_parity "${SOURCE_MIGRATE_DIR}" "${BUNDLED_MIGRATE_DIR}" "*.json"
+verify_resource_family_parity \
+  "${SOURCE_MIGRATE_DIR}/prompts" \
+  "${BUNDLED_MIGRATE_DIR}/prompts" \
+  "*.md"
 
 verify_asset_family() {
   local subdir="$1"

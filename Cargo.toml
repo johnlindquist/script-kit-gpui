@@ -330,6 +330,12 @@ resources = [
     "assets/icons/*.svg",
     "assets/fonts/*.ttf",
     "assets/fonts/*.txt",
+    # Runtime for the Migrate v1 board. scripts/verify-macos-bundle.sh checks
+    # source-to-bundle parity for these globs so new engine modules ship too.
+    "scripts/kit-sdk.ts",
+    "scripts/migrate/*.ts",
+    "scripts/migrate/*.json",
+    "scripts/migrate/prompts/*.md",
 ]
 # LSUIElement makes app an "agent app" - no menu bar, no Dock icon (like Raycast)
 osx_info_plist_exts = ["assets/Info.plist.ext"]

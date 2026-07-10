@@ -1,4 +1,91 @@
-const MIGRATE_V1_ENGINE_DEFAULT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/migrate/cli.ts");
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MigrateV1EngineUnavailable {
+    InvalidOverride(std::path::PathBuf),
+    Missing,
+}
+
+impl MigrateV1EngineUnavailable {
+    fn board_message(&self) -> String {
+        match self {
+            Self::InvalidOverride(path) => format!(
+                "SK_MIGRATE_CLI does not point to an existing migration CLI file: {}",
+                path.display()
+            ),
+            Self::Missing => "The v1 migration engine is unavailable in this build".to_string(),
+        }
+    }
+}
+
+fn bundled_migrate_v1_engine(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos_dir = executable.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+    Some(
+        contents_dir
+            .join("Resources")
+            .join("scripts")
+            .join("migrate")
+            .join("cli.ts"),
+    )
+}
+
+fn resolve_migrate_v1_engine(
+    override_path: Option<std::path::PathBuf>,
+    executable: Option<&std::path::Path>,
+    development_engine: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, MigrateV1EngineUnavailable> {
+    if let Some(path) = override_path {
+        return path
+            .is_file()
+            .then_some(path.clone())
+            .ok_or(MigrateV1EngineUnavailable::InvalidOverride(path));
+    }
+
+    if let Some(path) = executable.and_then(bundled_migrate_v1_engine) {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(path) = development_engine {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    Err(MigrateV1EngineUnavailable::Missing)
+}
+
+#[cfg(debug_assertions)]
+fn development_migrate_v1_engine() -> Option<std::path::PathBuf> {
+    Some(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join("migrate")
+            .join("cli.ts"),
+    )
+}
+
+#[cfg(not(debug_assertions))]
+fn development_migrate_v1_engine() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn migrate_v1_engine_path() -> Result<std::path::PathBuf, MigrateV1EngineUnavailable> {
+    let executable = std::env::current_exe().ok();
+    resolve_migrate_v1_engine(
+        std::env::var_os("SK_MIGRATE_CLI")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from),
+        executable.as_deref(),
+        development_migrate_v1_engine(),
+    )
+}
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct MigrateScanFinding {
@@ -106,29 +193,21 @@ impl ScriptListApp {
             };
         }
 
-        let engine_path = std::env::var("SK_MIGRATE_CLI")
-            .ok()
-            .filter(|path| std::path::Path::new(path).exists())
-            .or_else(|| {
-                std::path::Path::new(MIGRATE_V1_ENGINE_DEFAULT)
-                    .exists()
-                    .then(|| MIGRATE_V1_ENGINE_DEFAULT.to_string())
-            });
-
-        let Some(engine_path) = engine_path else {
-            return MigrateBoardState {
-                phase: MigrateBoardPhase::Unavailable(
-                    "The v1 migration engine is unavailable in this build".to_string(),
-                ),
-                v1_dir,
-                ..Default::default()
-            };
+        let engine_path = match migrate_v1_engine_path() {
+            Ok(path) => path,
+            Err(error) => {
+                return MigrateBoardState {
+                    phase: MigrateBoardPhase::Unavailable(error.board_message()),
+                    v1_dir,
+                    ..Default::default()
+                };
+            }
         };
 
         MigrateBoardState {
             phase: MigrateBoardPhase::Scanning,
             v1_dir,
-            engine_path: Some(engine_path),
+            engine_path: Some(engine_path.to_string_lossy().into_owned()),
             ..Default::default()
         }
     }
@@ -688,5 +767,127 @@ impl ScriptListApp {
                 overlays: Vec::new(),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod migrate_v1_engine_tests {
+    use super::{
+        bundled_migrate_v1_engine, resolve_migrate_v1_engine, MigrateV1EngineUnavailable,
+    };
+
+    static NEXT_FIXTURE: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "script-kit-migrate-engine-{name}-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    fn touch(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("create fixture");
+        std::fs::write(path, "// fixture").expect("write fixture");
+    }
+
+    #[test]
+    fn derives_engine_from_a_macos_app_executable_only() {
+        let app_executable = std::path::Path::new(
+            "/Applications/Script Kit.app/Contents/MacOS/script-kit-gpui",
+        );
+        assert_eq!(
+            bundled_migrate_v1_engine(app_executable),
+            Some(std::path::PathBuf::from(
+                "/Applications/Script Kit.app/Contents/Resources/scripts/migrate/cli.ts"
+            ))
+        );
+        assert_eq!(
+            bundled_migrate_v1_engine(std::path::Path::new("/tmp/script-kit-gpui")),
+            None
+        );
+    }
+
+    #[test]
+    fn valid_override_wins_over_bundle_and_development_engine() {
+        let root = temp_root("precedence");
+        let override_engine = root.join("override/cli.ts");
+        let executable = root.join("Script Kit.app/Contents/MacOS/script-kit-gpui");
+        let bundle_engine = root.join("Script Kit.app/Contents/Resources/scripts/migrate/cli.ts");
+        let development_engine = root.join("repo/scripts/migrate/cli.ts");
+        touch(&override_engine);
+        touch(&bundle_engine);
+        touch(&development_engine);
+
+        assert_eq!(
+            resolve_migrate_v1_engine(
+                Some(override_engine.clone()),
+                Some(&executable),
+                Some(development_engine),
+            ),
+            Ok(override_engine)
+        );
+
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn invalid_explicit_override_fails_closed() {
+        let root = temp_root("invalid-override");
+        let missing_override = root.join("missing/cli.ts");
+        let executable = root.join("Script Kit.app/Contents/MacOS/script-kit-gpui");
+        let bundle_engine = root.join("Script Kit.app/Contents/Resources/scripts/migrate/cli.ts");
+        let development_engine = root.join("repo/scripts/migrate/cli.ts");
+        touch(&bundle_engine);
+        touch(&development_engine);
+
+        assert_eq!(
+            resolve_migrate_v1_engine(
+                Some(missing_override.clone()),
+                Some(&executable),
+                Some(development_engine),
+            ),
+            Err(MigrateV1EngineUnavailable::InvalidOverride(
+                missing_override.clone()
+            ))
+        );
+        assert!(
+            MigrateV1EngineUnavailable::InvalidOverride(missing_override)
+                .board_message()
+                .contains("SK_MIGRATE_CLI")
+        );
+
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn bundle_precedes_development_and_release_fails_without_bundle() {
+        let root = temp_root("fallbacks");
+        let executable = root.join("Script Kit.app/Contents/MacOS/script-kit-gpui");
+        let bundle_engine = root.join("Script Kit.app/Contents/Resources/scripts/migrate/cli.ts");
+        let development_engine = root.join("repo/scripts/migrate/cli.ts");
+        touch(&bundle_engine);
+        touch(&development_engine);
+
+        assert_eq!(
+            resolve_migrate_v1_engine(
+                None,
+                Some(&executable),
+                Some(development_engine.clone()),
+            ),
+            Ok(bundle_engine.clone())
+        );
+        std::fs::remove_file(&bundle_engine).expect("remove bundled fixture");
+        assert_eq!(
+            resolve_migrate_v1_engine(None, Some(&executable), Some(development_engine.clone())),
+            Ok(development_engine)
+        );
+        assert_eq!(
+            resolve_migrate_v1_engine(None, Some(&executable), None),
+            Err(MigrateV1EngineUnavailable::Missing)
+        );
+
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 }
