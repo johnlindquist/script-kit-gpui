@@ -243,6 +243,9 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 .shot-footer-rail {
   border-top: var(--sk-window-divider-height) solid rgb(255 255 255 / 0.08);
 }
+
+/* demo support: [hidden] always wins */
+[hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -342,7 +345,7 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 
       <div class="shot-split">
         <section class="shot-list">
-          <div class="sk-list-row" data-state="selected">
+          <div class="sk-list-row" data-state="selected" data-demo-role="result" data-demo-key="row-screenshots">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon-tile" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy">
@@ -352,56 +355,56 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-git-rebase">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">git rebase -i HEAD~3</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-hex">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">#7C5CFF</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-url">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">https://scriptkit.com</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-launch-post">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">Ship the launch post by Friday — include the...</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-sentinel-hint">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">CLIPBOARD-SENTINEL-selection-hint-prob...</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-sentinel-gdocs">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">CLIPBOARD-SENTINEL-gdocs-probe</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-googledocs-probe">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">GoogleDocs capture probe sentenceGoogle...</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-syscopy2">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">SENTINEL–syscopy2</span></span>
@@ -411,7 +414,7 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 
         <aside class="shot-preview">
           <div class="shot-preview__content">
-<pre>// Rename Desktop screenshots by
+<pre data-demo-key="preview-text">// Rename Desktop screenshots by
 capture date
 const shots = await readdir(home(
 "Desktop"))
@@ -431,7 +434,7 @@ f.endsWith(".png"))) {
             </div>
             <div class="shot-preview__info-row">
               <span class="shot-preview__info-label">Size</span>
-              <span class="shot-preview__info-value">279 bytes</span>
+              <span class="shot-preview__info-value" data-demo-key="info-size">279 bytes</span>
             </div>
             <div class="shot-preview__info-row">
               <span class="shot-preview__info-label">Pinned</span>
@@ -439,11 +442,11 @@ f.endsWith(".png"))) {
             </div>
             <div class="shot-preview__info-row">
               <span class="shot-preview__info-label">Characters</span>
-              <span class="shot-preview__info-value">279</span>
+              <span class="shot-preview__info-value" data-demo-key="info-chars">279</span>
             </div>
             <div class="shot-preview__info-row">
               <span class="shot-preview__info-label">Lines</span>
-              <span class="shot-preview__info-value">6</span>
+              <span class="shot-preview__info-value" data-demo-key="info-lines">6</span>
             </div>
           </div>
         </aside>
@@ -452,11 +455,11 @@ f.endsWith(".png"))) {
       <footer class="sk-footer-host">
         <div class="sk-footer-rail shot-footer-rail">
           <span class="sk-footer-spacer"></span>
-          <button class="sk-footer-action">
+          <button class="sk-footer-action" data-demo-key="primary">
             <span class="sk-footer-label">Paste into Finder</span>
             <kbd class="sk-keycap">↵</kbd>
           </button>
-          <button class="sk-footer-action">
+          <button class="sk-footer-action" data-demo-key="actions">
             <span class="sk-footer-label">Actions</span>
             <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">K</kbd>
           </button>
@@ -466,5 +469,15 @@ f.endsWith(".png"))) {
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body>
 </html>
