@@ -148,6 +148,14 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   border-radius:var(--sk-footer-keycap-radius);display:grid;place-items:center;
   color:var(--sk-footer-text);font-size:12px;line-height:1}
 .f-gap{width:36px}
+
+/* demo support: [hidden] always wins; footer press-flash is scene-local and
+   gated so the canonical frame (no data-sk-demo attribute) can never change. */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] .f-action[data-selected="true"] {
+  background: var(--sk-footer-button-active);
+  border-radius: var(--sk-footer-button-radius);
+}
 </style></head>
 <body>
 <div class="scene">
@@ -184,11 +192,11 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           <span class="hkey"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1 6h7M5.5 3.5 8 6l-2.5 2.5M10.5 2.5v7"/></svg></span>
         </div>
       </div>
-      <div class="search"><span>launch</span><span class="caret"></span></div>
+      <div class="search"><span data-demo-key="query">launch</span><span class="caret"></span></div>
       <div class="sk-divider"></div>
       <div class="body">
         <div class="list">
-          <div class="row" data-state="selected">
+          <div class="row" data-state="selected" data-demo-role="result" data-demo-key="launch-md" data-demo-match="launch md">
             <div class="row-surface">
               <div class="row-icon">
                 <svg width="24" height="24" viewBox="0 0 24 24">
@@ -212,62 +220,72 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
 
           <!-- folder rows -->
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launchxl" data-demo-match="launchxl"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">LAUNCHXL</span></div>
             <span class="row-meta">128 B &middot; 10/27/&hellip;</span>
           </div></div>
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launch-application-action" data-demo-match="launch application action"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">Launch Application.action</span></div>
             <span class="row-meta">96 B &middot; May 21</span>
           </div></div>
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launch-agent-plist" data-demo-match="launch agent plist"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><g transform="rotate(-3 11 11)"><rect x="4" y="4" width="14" height="12.5" fill="url(#pg)"/><g stroke="#8a8a90" stroke-width=".7"><line x1="5.5" y1="7.5" x2="16.5" y2="7.5"/><line x1="5.5" y1="9" x2="16.5" y2="9"/><line x1="5.5" y1="10.5" x2="16.5" y2="10.5"/><line x1="5.5" y1="12" x2="14" y2="12"/></g><path d="M3 16.2 Q11 14.8 19 16.2 L19 17.6 Q11 16.4 3 17.6 Z" fill="#c9c9ce"/></g></svg></div>
             <div class="row-copy"><span class="row-name">LaunchAgent.plist</span></div>
             <span class="row-meta">196 B &middot; May 21</span>
           </div></div>
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launch-agents" data-demo-match="launch agents"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">LaunchAgents</span></div>
             <span class="row-meta">14.6 KB &middot; May&hellip;</span>
           </div></div>
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launch-angels" data-demo-match="launch angels"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">LaunchAngels</span></div>
             <span class="row-meta">160 B &middot; May 21</span>
           </div></div>
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launchapp-cat" data-demo-match="launch app cat"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">LaunchApp.cat</span></div>
             <span class="row-meta">1.1 KB &middot; May 21</span>
           </div></div>
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launchapp-catfamily" data-demo-match="launch app catfamily"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">LaunchApp.catfamily</span></div>
             <span class="row-meta">576 B &middot; May 21</span>
           </div></div>
-          <div class="row"><div class="row-surface">
+          <div class="row" data-demo-role="result" data-demo-key="launchapp-patternfamily" data-demo-match="launch app.patternfamily"><div class="row-surface">
             <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">LaunchApp.patternfamily</span></div>
             <span class="row-meta">256 B &middot; May 21</span>
           </div></div>
         </div>
         <div class="preview">
-          <div class="pv-title">LAUNCH.md</div>
-          <div class="pv-path">/Users/johnlindquist/dev/beads/npm-package/LAUNCH.md</div>
-          <div class="pv-kv"><span>Size</span><span>4.3 KB</span></div>
-          <div class="pv-kv"><span>Modified</span><span>12/8/25</span></div>
-          <div class="pv-kv"><span>Type</span><span>File</span></div>
+          <div class="pv-title" data-demo-key="preview-title">LAUNCH.md</div>
+          <div class="pv-path" data-demo-key="preview-path">/Users/johnlindquist/dev/beads/npm-package/LAUNCH.md</div>
+          <div class="pv-kv"><span>Size</span><span data-demo-key="preview-size">4.3 KB</span></div>
+          <div class="pv-kv"><span>Modified</span><span data-demo-key="preview-modified">12/8/25</span></div>
+          <div class="pv-kv"><span>Type</span><span data-demo-key="preview-type">File</span></div>
         </div>
       </div>
       <div class="footer">
-        <div class="f-action"><span class="f-label">Run</span><span class="keycap">&#9166;</span></div>
+        <div class="f-action" data-demo-key="run"><span class="f-label">Run</span><span class="keycap">&#9166;</span></div>
         <div class="f-gap"></div>
-        <div class="f-action"><span class="f-label">Actions</span><span class="keycap">&#8984;</span><span class="keycap">K</span></div>
+        <div class="f-action" data-demo-key="actions"><span class="f-label">Actions</span><span class="keycap">&#8984;</span><span class="keycap">K</span></div>
       </div>
     </div>
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body></html>
