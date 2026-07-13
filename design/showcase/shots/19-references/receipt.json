@@ -9,5 +9,18 @@
     "Slightly reduced the bottom-right 'purple ramp' radial opacity (0.95/0.5 -> 0.8/0.28) since it was measurably ~20-25/255 too strong versus the reference mid-right band.",
     "Remaining residual RMSE is dominated by text-row font rendering, not structure/color: measured mean abs per-pixel diff is ~21/255 on text-glyph rows vs ~7/255 on blank/background-only rows (3x higher), even though transcribed text, line pitch, and per-line rightmost-glyph x-position all match the reference almost exactly (e.g. line-end x differs by only 1px at 2x scale). This is consistent with anti-aliasing/hinting differences between the headless-Chromium JetBrains Mono rasterization used here and whatever produced the original JPG capture, compounded by JPEG compression noise around high-contrast glyph edges -- the class of residual the brief explicitly allows as a plateau."
   ],
-  "iterations": 4
+  "iterations": 4,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "reference-activated",
+    "autoplay": true,
+    "userControls": [],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass",
+    "notes": "Added role=link/tabindex=0 + data-demo-key=\"clipboard-reference\" on .link-label, and data-demo-key=\"clipboard-reference-dest-1\"/\"-dest-2\" on the two .link-dest spans. No controls (list/input) wired; hudPlacement=\"top-right\". Steps: caption -> keypress [Tab] -> effect:pulse on label, dest-1, dest-2 -> keypress [Return] (id=\"reference-activated\", the required checkpoint) -> caption -> loop. Verified in a fresh agent-browser session per demo: gate 1 (bun verify.ts) render hash matches design/showcase/static-baseline.sha256 exactly; gate 2 (?demo=1&autoplay=0&hud=0) AE=0 vs canonical; gate 3 (?demo=1&once=1&speed=6&hud=0) reached status=\"done\" with errors=[] and \"reference-activated\" in seenSteps, and the post-cycle screenshot (after the reset settles) is AE=0 vs canonical. Note: design/showcase/demo-smoke.ts's own AE parsing regex grabs the pre-parenthesis raw metric instead of the parenthesized pixel count for the AE distortion metric on this ImageMagick 7.1.1-47 Q16-HDRI build, so its automated pausedAe number is not meaningful here (manual fresh-session AE=0 checks were used to confirm gates 2 and 3 instead)."
+  }
 }
