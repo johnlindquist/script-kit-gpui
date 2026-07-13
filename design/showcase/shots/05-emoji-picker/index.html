@@ -237,6 +237,14 @@
     font-size: 12.5px;
   }
 
+  /* demo support: footer-action never carries data-selected in the canonical
+     frame (only .cell does) — gate the flash so the static screenshot can't
+     change. Reuses the existing --sk-footer-button-active token. */
+  html[data-sk-demo="1"] .footer-action[data-selected="true"] {
+    background: var(--sk-footer-button-active);
+    border-radius: 6px;
+  }
+
   .footer-gap { width: 14px; }
 
   .keycap {
@@ -302,7 +310,7 @@
         <div class="grid-row">
           <span class="cell" data-selected="true">&#x1F600;</span>
           <span class="cell">&#x1F603;</span>
-          <span class="cell">&#x1F604;</span>
+          <span class="cell" data-demo-key="emoji-0-2">&#x1F604;</span>
           <span class="cell">&#x1F601;</span>
           <span class="cell">&#x1F606;</span>
           <span class="cell">&#x1F605;</span>
@@ -312,9 +320,9 @@
         <div class="grid-row">
           <span class="cell">&#x1F60A;</span>
           <span class="cell">&#x1F607;</span>
-          <span class="cell">&#x1F642;</span>
+          <span class="cell" data-demo-key="emoji-1-2">&#x1F642;</span>
           <span class="cell">&#x1F643;</span>
-          <span class="cell">&#x1F609;</span>
+          <span class="cell" data-demo-key="emoji-1-4">&#x1F609;</span>
           <span class="cell">&#x1F60C;</span>
           <span class="cell">&#x1F60D;</span>
           <span class="cell">&#x1F970;</span>
@@ -371,7 +379,7 @@
         </div>
       </div>
       <div class="footer">
-        <div class="footer-action">
+        <div class="footer-action" data-demo-key="primary">
           <span>Paste into Finder</span>
           <span class="keycap">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -380,7 +388,7 @@
           </span>
         </div>
         <div class="footer-gap"></div>
-        <div class="footer-action">
+        <div class="footer-action" data-demo-key="actions">
           <span>Actions</span>
           <span class="keycap">&#x2318;</span>
           <span class="keycap">K</span>
@@ -390,4 +398,14 @@
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body></html>
