@@ -1,0 +1,48 @@
+/* Demo script: 09-terminal — "run a shell command without leaving the launcher". */
+SKDemo.define({
+  id: "09-terminal",
+  initialHoldMs: 900,
+  idleResetMs: 8000,
+  loopDelayMs: 1200,
+  controls: {},
+  steps: [
+    { id: "intro", op: "caption", text: "Run a shell command without leaving the launcher.", holdMs: 1100 },
+    { id: "reveal-clone", op: "hide", target: '.term:not([data-demo-only])' },
+    { op: "show", target: '[data-demo-key="terminal-demo"]' },
+    { op: "pause", ms: 350 },
+    {
+      id: "type-command",
+      op: "typeInto",
+      target: '[data-demo-key="cmd"]',
+      text: "ls ~/dev | head -14",
+      clear: true,
+      perCharacterMs: 55,
+    },
+    { op: "pause", ms: 350 },
+    { id: "run-command", op: "keypress", keys: ["↵"], holdMs: 300 },
+    { id: "output-lines-1-7", op: "show", target: '[data-demo-role="out-early"]' },
+    { op: "pause", ms: 500 },
+    {
+      id: "terminal-output",
+      op: "show",
+      target: '[data-demo-role="out-late"], [data-demo-key="prompt2"], [data-demo-key="cursor2"]',
+    },
+    { op: "pause", ms: 900 },
+    {
+      id: "hand-to-agent",
+      op: "keypress",
+      keys: ["⌘", "↵"],
+      activate: '[data-demo-key="agent"]',
+      holdMs: 700,
+    },
+    { id: "agent-caption", op: "caption", text: "Hand the session to an agent.", holdMs: 1100 },
+    {
+      id: "close",
+      op: "keypress",
+      keys: ["⌘", "W"],
+      activate: '[data-demo-key="close"]',
+      holdMs: 700,
+    },
+    { op: "loop", delayMs: 1200 },
+  ],
+});
