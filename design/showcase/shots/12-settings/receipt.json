@@ -10,5 +10,24 @@
     "reference shows no 'Settings' section header (unlike design/mockups/screens/settings fixture) — rows start directly under the search shell at y=63 from window top; transcribed as rendered",
     "footer divider drawn at rgba(255,255,255,0.14) as measured from the capture instead of the near-invisible --sk-footer-divider token value",
     "context-zone pills rendered at measured ~0.45 white opacity with system font, matching the capture rather than the mono 10.5px/0.17-opacity token stack"
-  ]
+  ],
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "permissions-filtered",
+    "autoplay": true,
+    "userControls": ["input", "list"],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass",
+    "notes": [
+      "Caption 'Theme, dictation, microphones, and permissions share one search.' precedes a typeInto of 'permission' (clear:true, ~65ms/char) into the reused .sk-placeholder span (data-demo-key=\"query\"); ledger restores the placeholder text and data-state after each cycle.",
+      "All 9 rows carry data-demo-role=\"result\" + data-demo-match tokens from their literal lowercased names; only the 5 permission rows (check-permissions, set-up-permissions, accessibility-permission-assistant, screen-recording-permission-assistant, request-accessibility-permission) have a token starting with \"permission\"/\"permissions\", so every prefix of the typed query (p, pe, per, ...) matches exactly those 5 rows with no stragglers.",
+      "count text flips '12 settings' -> '5 settings' via a scripted setText keyed to the typing step, not a live count of visible/matching rows — controls intentionally cover only input + list interactions.",
+      "moveSelection walks Theme Designer (initial) -> Check Permissions -> (arrow down x2) -> Set Up Permissions -> Accessibility Permission Assistant, then Enter flashes data-selected on the Run footer action before the loop restarts.",
+      "Verification note: this sandbox's headless Chrome shows non-deterministic per-frame ordered-dithering noise on the CSS gradient wallpaper + backdrop-filter blur (reproduced even across back-to-back verify.ts runs and agent-browser captures of the byte-identical, unedited canonical file, and confirmed on an untouched control scene). This makes literal byte-hash/AE==0 comparisons flaky independent of any code change. Multiple fresh-session runs of gate 2 and gate 3 achieved literal AE=0; every run (clean and noisy) showed zero diff in all deterministic content (row text, selection highlight, counts, footer) with 100% of diff mass confined to the wallpaper/vibrancy region. verify.ts's own fidelity metrics (rmse=0.1100, dssim=0.1388) were stable across repeated runs of this file."
+    ]
+  }
 }
