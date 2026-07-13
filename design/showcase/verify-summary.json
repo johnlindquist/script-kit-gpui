@@ -8,6 +8,224 @@
   },
   "shots": [
     {
+      "id": "01-main-launcher",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        87,
+        89,
+        1500,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.090081,
+        "ssimDissimilarity": 0.123982,
+        "lowPassRmse": 0.0748775,
+        "windowRmse": 0.0870569,
+        "wallpaperRmse": 0.09881021030012646
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\".AppleSystemUIFont\", -apple-system, \"system-ui\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/01-main-launcher-render.png",
+      "diff": ".test-output/showcase-verify/01-main-launcher-diff.png"
+    },
+    {
+      "id": "02-search-filter",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        87,
+        88,
+        1500,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.106413,
+        "ssimDissimilarity": 0.171267,
+        "lowPassRmse": 0.08438,
+        "windowRmse": 0.105671,
+        "wallpaperRmse": 0.10866513600094187
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\".AppleSystemUIFont\", -apple-system, \"system-ui\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/02-search-filter-render.png",
+      "diff": ".test-output/showcase-verify/02-search-filter-diff.png"
+    },
+    {
+      "id": "04-clipboard-history",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        88,
+        88,
+        1500,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.16345,
+        "ssimDissimilarity": 0.220588,
+        "lowPassRmse": 0.121273,
+        "windowRmse": 0.176765,
+        "wallpaperRmse": 0.11301478538456206
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\".AppleSystemUIFont\", -apple-system, \"system-ui\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/04-clipboard-history-render.png",
+      "diff": ".test-output/showcase-verify/04-clipboard-history-diff.png"
+    },
+    {
+      "id": "05-emoji-picker",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        88,
+        89,
+        1497,
+        961
+      ],
+      "metrics": {
+        "rmse": 0.100397,
+        "ssimDissimilarity": 0.163349,
+        "lowPassRmse": 0.085832,
+        "windowRmse": 0.092074,
+        "wallpaperRmse": 0.12243847465000038
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\"Apple Color Emoji\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/05-emoji-picker-render.png",
+      "diff": ".test-output/showcase-verify/05-emoji-picker-diff.png"
+    },
+    {
+      "id": "06-notes",
+      "status": "ok",
+      "referenceSize": [
+        1560,
+        1351
+      ],
+      "sceneSize": [
+        780,
+        676
+      ],
+      "windowRect": [
+        90,
+        91,
+        1381,
+        1135
+      ],
+      "metrics": {
+        "rmse": 0.0632505,
+        "ssimDissimilarity": 0.0806417,
+        "lowPassRmse": 0.0539636,
+        "windowRmse": 0.0547297,
+        "wallpaperRmse": 0.08317421711635181
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\"JetBrains Mono\", \"JetBrains Mono\", ui-monospace, \"SF Mono\", monospace"
+      ],
+      "render": ".test-output/showcase-verify/06-notes-render.png",
+      "diff": ".test-output/showcase-verify/06-notes-diff.png"
+    },
+    {
+      "id": "07-day-page",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        89,
+        89,
+        1498,
+        959
+      ],
+      "metrics": {
+        "rmse": 0.112636,
+        "ssimDissimilarity": 0.141377,
+        "lowPassRmse": 0.0840992,
+        "windowRmse": 0.11969,
+        "wallpaperRmse": 0.08769783630980066
+      },
+      "fonts": [
+        "Times",
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\"JetBrains Mono\", ui-monospace, \"SF Mono\", Menlo, monospace"
+      ],
+      "render": ".test-output/showcase-verify/07-day-page-render.png",
+      "diff": ".test-output/showcase-verify/07-day-page-diff.png"
+    },
+    {
+      "id": "08-agent-chat",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        87,
+        90,
+        1500,
+        959
+      ],
+      "metrics": {
+        "rmse": 0.1501,
+        "ssimDissimilarity": 0.177661,
+        "lowPassRmse": 0.11029,
+        "windowRmse": 0.163856,
+        "wallpaperRmse": 0.09639906371119834
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\"JetBrains Mono\", ui-monospace, \"SF Mono\", monospace"
+      ],
+      "render": ".test-output/showcase-verify/08-agent-chat-render.png",
+      "diff": ".test-output/showcase-verify/08-agent-chat-diff.png"
+    },
+    {
       "id": "09-terminal",
       "status": "ok",
       "referenceSize": [
@@ -25,11 +243,11 @@
         964
       ],
       "metrics": {
-        "rmse": 0.0786523,
+        "rmse": 0.0786491,
         "ssimDissimilarity": 0.102558,
-        "lowPassRmse": 0.0675891,
-        "windowRmse": 0.0689181,
-        "wallpaperRmse": 0.10360428393814095
+        "lowPassRmse": 0.0675874,
+        "windowRmse": 0.068917,
+        "wallpaperRmse": 0.10359648022570327
       },
       "fonts": [
         "Times",
@@ -38,6 +256,339 @@
       ],
       "render": ".test-output/showcase-verify/09-terminal-render.png",
       "diff": ".test-output/showcase-verify/09-terminal-diff.png"
+    },
+    {
+      "id": "10-file-search",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        87,
+        89,
+        1500,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.11035,
+        "ssimDissimilarity": 0.139904,
+        "lowPassRmse": 0.0846284,
+        "windowRmse": 0.117034,
+        "wallpaperRmse": 0.08659652914822526
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/10-file-search-render.png",
+      "diff": ".test-output/showcase-verify/10-file-search-diff.png"
+    },
+    {
+      "id": "11-theme-designer",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        88,
+        90,
+        1498,
+        958
+      ],
+      "metrics": {
+        "rmse": 0.132359,
+        "ssimDissimilarity": 0.16775,
+        "lowPassRmse": 0.100244,
+        "windowRmse": 0.143315,
+        "wallpaperRmse": 0.09138013452204267
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/11-theme-designer-render.png",
+      "diff": ".test-output/showcase-verify/11-theme-designer-diff.png"
+    },
+    {
+      "id": "12-settings",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        88,
+        88,
+        1500,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.109976,
+        "ssimDissimilarity": 0.138789,
+        "lowPassRmse": 0.0837068,
+        "windowRmse": 0.111309,
+        "wallpaperRmse": 0.10576753815278318
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/12-settings-render.png",
+      "diff": ".test-output/showcase-verify/12-settings-diff.png"
+    },
+    {
+      "id": "13-agent-chat-composer",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        87,
+        88,
+        1498,
+        958
+      ],
+      "metrics": {
+        "rmse": 0.0965701,
+        "ssimDissimilarity": 0.145926,
+        "lowPassRmse": 0.082839,
+        "windowRmse": 0.0849788,
+        "wallpaperRmse": 0.12535550876925983
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/13-agent-chat-composer-render.png",
+      "diff": ".test-output/showcase-verify/13-agent-chat-composer-diff.png"
+    },
+    {
+      "id": "14-window-switcher",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        87,
+        89,
+        1500,
+        959
+      ],
+      "metrics": {
+        "rmse": 0.107346,
+        "ssimDissimilarity": 0.139028,
+        "lowPassRmse": 0.0826704,
+        "windowRmse": 0.108229,
+        "wallpaperRmse": 0.10459314011155794
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/14-window-switcher-render.png",
+      "diff": ".test-output/showcase-verify/14-window-switcher-diff.png"
+    },
+    {
+      "id": "15-app-launcher",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        89,
+        90,
+        1498,
+        957
+      ],
+      "metrics": {
+        "rmse": 0.0678271,
+        "ssimDissimilarity": 0.087343,
+        "lowPassRmse": 0.0622228,
+        "windowRmse": 0.0504344,
+        "wallpaperRmse": 0.10401114023580967
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/15-app-launcher-render.png",
+      "diff": ".test-output/showcase-verify/15-app-launcher-diff.png"
+    },
+    {
+      "id": "17-rewrite",
+      "status": "ok",
+      "referenceSize": [
+        2150,
+        1294
+      ],
+      "sceneSize": [
+        1075,
+        647
+      ],
+      "windowRect": [
+        74,
+        120,
+        1498,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.110717,
+        "ssimDissimilarity": 0.143967,
+        "lowPassRmse": 0.0793693,
+        "windowRmse": 0.133286,
+        "wallpaperRmse": 0.07978693380206471
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/17-rewrite-render.png",
+      "diff": ".test-output/showcase-verify/17-rewrite-diff.png"
+    },
+    {
+      "id": "18-rewrite-styles",
+      "status": "ok",
+      "referenceSize": [
+        2150,
+        1294
+      ],
+      "sceneSize": [
+        1075,
+        647
+      ],
+      "windowRect": [
+        72,
+        119,
+        1500,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.0933845,
+        "ssimDissimilarity": 0.152186,
+        "lowPassRmse": 0.0842639,
+        "windowRmse": 0.0716358,
+        "wallpaperRmse": 0.11212243818499505
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\"Helvetica Neue\", Helvetica, -apple-system, sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/18-rewrite-styles-render.png",
+      "diff": ".test-output/showcase-verify/18-rewrite-styles-diff.png"
+    },
+    {
+      "id": "19-references",
+      "status": "ok",
+      "referenceSize": [
+        1573,
+        335
+      ],
+      "sceneSize": [
+        787,
+        168
+      ],
+      "windowRect": [
+        0,
+        0,
+        1524,
+        335
+      ],
+      "metrics": {
+        "rmse": 0.0646427,
+        "ssimDissimilarity": 0.0646343,
+        "lowPassRmse": 0.04293,
+        "windowRmse": 0.0635925,
+        "wallpaperRmse": 0.09147279149719438
+      },
+      "fonts": [
+        "\"JetBrains Mono\", ui-monospace, monospace"
+      ],
+      "render": ".test-output/showcase-verify/19-references-render.png",
+      "diff": ".test-output/showcase-verify/19-references-diff.png"
+    },
+    {
+      "id": "20-brain-inbox",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        88,
+        88,
+        1500,
+        960
+      ],
+      "metrics": {
+        "rmse": 0.100294,
+        "ssimDissimilarity": 0.160304,
+        "lowPassRmse": 0.079767,
+        "windowRmse": 0.10365,
+        "wallpaperRmse": 0.08917478083773954
+      },
+      "fonts": [
+        "Times",
+        "\".AppleSystemUIFont\", -apple-system, \"system-ui\", sans-serif",
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/20-brain-inbox-render.png",
+      "diff": ".test-output/showcase-verify/20-brain-inbox-diff.png"
+    },
+    {
+      "id": "21-dictation",
+      "status": "ok",
+      "referenceSize": [
+        1428,
+        531
+      ],
+      "sceneSize": [
+        714,
+        266
+      ],
+      "windowRect": [
+        196,
+        179,
+        1039,
+        143
+      ],
+      "metrics": {
+        "rmse": 0.0607172,
+        "ssimDissimilarity": 0.0848667,
+        "lowPassRmse": 0.0472625,
+        "windowRmse": 0.105448,
+        "wallpaperRmse": 0.04330457338000159
+      },
+      "fonts": [
+        "-apple-system, \"system-ui\", \"SF Pro Text\", \"Helvetica Neue\", sans-serif"
+      ],
+      "render": ".test-output/showcase-verify/21-dictation-render.png",
+      "diff": ".test-output/showcase-verify/21-dictation-diff.png"
     }
   ]
 }

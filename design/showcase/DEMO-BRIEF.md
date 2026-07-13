@@ -57,7 +57,7 @@ shared machinery already exists and is frozen — do not modify anything under
 
 ## Mandatory verification (all three gates)
 
-Baseline hashes: /tmp/showcase-static-baseline.sha256
+Baseline hashes: design/showcase/static-baseline.sha256 (repo-root-relative; hash of .test-output/showcase-verify/<id>-render.png)
 
 ```bash
 ID=<your-id>
