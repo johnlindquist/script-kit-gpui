@@ -277,6 +277,13 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
   font-size: 12px;
   line-height: 1;
 }
+
+/* demo support: [hidden] always wins; typed query text reads like a real
+ * search string instead of a placeholder once the demo starts typing. */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] .sk-placeholder[data-state="input"] {
+  color: var(--sk-text-name);
+}
 </style></head>
 <body>
 <div class="scene">
@@ -292,30 +299,30 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
         </div>
         <div class="sk-search-shell">
           <span class="sk-caret"></span>
-          <span class="sk-placeholder">Search settings...</span>
-          <span class="sk-count">12 settings</span>
+          <span class="sk-placeholder" data-demo-key="query">Search settings...</span>
+          <span class="sk-count" data-demo-key="count">12 settings</span>
         </div>
       </header>
 
       <section class="sk-list">
-        <div class="sk-list-row" data-state="selected">
+        <div class="sk-list-row" data-state="selected" data-demo-role="result" data-demo-key="theme-designer" data-demo-match="theme designer">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__name">Theme Designer</span>
             <span class="sk-list-row__description">Design your color theme with live preview</span>
           </div>
         </div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Dictation Setup</span></div></div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Select Microphone</span></div></div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Clear Suggested Items</span></div></div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Check Permissions</span></div></div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Set Up Permissions</span></div></div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Accessibility Permission Assistant</span></div></div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Screen Recording Permission Assistant</span></div></div>
-        <div class="sk-list-row"><div class="sk-list-row__surface"><span class="sk-list-row__name">Request Accessibility Permission</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="dictation-setup" data-demo-match="dictation setup"><div class="sk-list-row__surface"><span class="sk-list-row__name">Dictation Setup</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="select-microphone" data-demo-match="select microphone"><div class="sk-list-row__surface"><span class="sk-list-row__name">Select Microphone</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="clear-suggested-items" data-demo-match="clear suggested items"><div class="sk-list-row__surface"><span class="sk-list-row__name">Clear Suggested Items</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="check-permissions" data-demo-match="check permissions"><div class="sk-list-row__surface"><span class="sk-list-row__name">Check Permissions</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="set-up-permissions" data-demo-match="set up permissions"><div class="sk-list-row__surface"><span class="sk-list-row__name">Set Up Permissions</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="accessibility-permission-assistant" data-demo-match="accessibility permission assistant"><div class="sk-list-row__surface"><span class="sk-list-row__name">Accessibility Permission Assistant</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="screen-recording-permission-assistant" data-demo-match="screen recording permission assistant"><div class="sk-list-row__surface"><span class="sk-list-row__name">Screen Recording Permission Assistant</span></div></div>
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="request-accessibility-permission" data-demo-match="request accessibility permission"><div class="sk-list-row__surface"><span class="sk-list-row__name">Request Accessibility Permission</span></div></div>
       </section>
 
       <footer class="sk-footer">
-        <span class="sk-footer-action">
+        <span class="sk-footer-action" data-demo-key="run-action">
           <span class="sk-footer-label">Run</span>
           <kbd class="sk-keycap">↵</kbd>
         </span>
@@ -324,4 +331,14 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body></html>
