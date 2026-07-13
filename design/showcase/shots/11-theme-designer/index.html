@@ -155,6 +155,20 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   border:1px solid rgba(255,255,255,0.22);display:grid;place-items:center;
   color:rgba(255,255,255,0.8);font-size:11px;line-height:1}
 .keycap svg{width:12px;height:12px}
+.footer-group{display:flex;align-items:center;gap:4px}
+
+/* demo support: [hidden] always wins; everything below is gated behind
+   data-sk-demo so the canonical (non-demo) render never sees it. */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] .row.hov-demo .row-surface { background: rgba(255,255,255,0.07); }
+html[data-sk-demo="1"] .search .ph[data-demo-key="query"] { color: rgba(255,255,255,0.92); }
+html[data-sk-demo="1"] [data-demo-key="accent-chip"][data-demo-theme="dracula"] { background: #BD93F9; }
+html[data-sk-demo="1"] [data-demo-key="accent-chip"][data-demo-theme="nord"] { background: #88C0D0; }
+html[data-sk-demo="1"] [data-demo-key="accent-chip"][data-demo-theme="tokyo-night"] { background: #7AA2F7; }
+html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="dracula"] { background: #282A36; }
+html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="nord"] { background: #2E3440; }
+html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="tokyo-night"] { background: #1A1B26; }
+html[data-sk-demo="1"] .footer-group[data-selected="true"] { background: var(--sk-footer-button-active); border-radius: 7px; }
 </style></head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -208,12 +222,13 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
         </div>
       </div>
       <div class="search">
-        <span class="ph">Search themes or paste #hex...</span>
+        <span class="ph" data-demo-key="placeholder">Search themes or paste #hex...</span>
+        <span class="ph" hidden data-demo-only data-demo-key="query"></span>
         <span class="count">73 themes</span>
       </div>
 
       <div class="list">
-        <div class="row sel"><div class="row-surface">
+        <div class="row sel" data-demo-role="result" data-demo-match="script kit dark"><div class="row-surface">
           <span class="swatch"><i style="background:#0f0f0f"></i><i style="background:#fbbf24"></i><i style="background:#ffffff"></i><i style="background:#ffffff"></i><i style="background:#353136"></i></span>
           <span class="row-copy">
             <span class="row-name">Script Kit Dark</span>
@@ -221,35 +236,35 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </span>
           <span class="pill">Saved</span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-key="theme-dracula" data-demo-match="dracula"><div class="row-surface">
           <span class="swatch"><i style="background:#282a36"></i><i style="background:#bd93f9"></i><i style="background:#ffffff"></i><i style="background:#c0c0c0"></i><i style="background:#44475a"></i></span>
           <span class="row-copy"><span class="row-name">Dracula</span></span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-key="theme-nord" data-demo-match="nord"><div class="row-surface">
           <span class="swatch"><i style="background:#2e3440"></i><i style="background:#88c0d0"></i><i style="background:#ffffff"></i><i style="background:#d8dee9"></i><i style="background:#4c566a"></i></span>
           <span class="row-copy"><span class="row-name">Nord</span></span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-match="catppuccin mocha"><div class="row-surface">
           <span class="swatch"><i style="background:#1e1e2e"></i><i style="background:#cba6f7"></i><i style="background:#ffffff"></i><i style="background:#bac2de"></i><i style="background:#45475a"></i></span>
           <span class="row-copy"><span class="row-name">Catppuccin Mocha</span></span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-match="one dark"><div class="row-surface">
           <span class="swatch"><i style="background:#282c34"></i><i style="background:#61afef"></i><i style="background:#ffffff"></i><i style="background:#9da5b4"></i><i style="background:#3e4452"></i></span>
           <span class="row-copy"><span class="row-name">One Dark</span></span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-key="theme-tokyo-night" data-demo-match="tokyo night"><div class="row-surface">
           <span class="swatch"><i style="background:#1a1b26"></i><i style="background:#7aa2f7"></i><i style="background:#ffffff"></i><i style="background:#a9b1d6"></i><i style="background:#3b4261"></i></span>
           <span class="row-copy"><span class="row-name">Tokyo Night</span></span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-match="gruvbox dark"><div class="row-surface">
           <span class="swatch"><i style="background:#282828"></i><i style="background:#fe8019"></i><i style="background:#ffffff"></i><i style="background:#d5c4a1"></i><i style="background:#504945"></i></span>
           <span class="row-copy"><span class="row-name">Gruvbox Dark</span></span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-match="rosé pine"><div class="row-surface">
           <span class="swatch"><i style="background:#191724"></i><i style="background:#ebbcba"></i><i style="background:#ffffff"></i><i style="background:#c4a7e7"></i><i style="background:#403d52"></i></span>
           <span class="row-copy"><span class="row-name">Rosé Pine</span></span>
         </div></div>
-        <div class="row"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-match="solarized dark"><div class="row-surface">
           <span class="swatch"><i style="background:#002b36"></i><i style="background:#268bd2"></i><i style="background:#ffffff"></i><i style="background:#eee8d5"></i><i style="background:#586e75"></i></span>
           <span class="row-copy"><span class="row-name">Solarized Dark</span></span>
         </div></div>
@@ -259,7 +274,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
         <div class="strip">
           <span class="btn preview">Preview</span>
           <span class="btn customize">Customize</span>
-          <span class="base">Base: Script Kit Dark</span>
+          <span class="base" data-demo-key="base">Base: Script Kit Dark</span>
         </div>
         <div class="facts">
           <div class="facts-title">THEME FACTS</div>
@@ -267,8 +282,8 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           <div class="fgrid">
             <div class="frow"><span class="flabel">Status</span><span class="fvalue">Built-in preset</span></div>
             <div class="frow"><span class="flabel">Source</span><span class="fvalue">Built-in preset</span></div>
-            <div class="frow"><span class="flabel">Accent</span><span class="fvalue"><span class="chip amber"></span>Amber #FBBF24</span></div>
-            <div class="frow"><span class="flabel">Background</span><span class="fvalue"><span class="chip bg"></span>#0F0F0F</span></div>
+            <div class="frow"><span class="flabel">Accent</span><span class="fvalue"><span class="chip amber" data-demo-key="accent-chip"></span><span data-demo-key="accent-text">Amber #FBBF24</span></span></div>
+            <div class="frow"><span class="flabel">Background</span><span class="fvalue"><span class="chip bg" data-demo-key="bg-chip"></span><span data-demo-key="bg-text">#0F0F0F</span></span></div>
             <div class="frow"><span class="flabel">Appearance</span><span class="fvalue">Dark · dark colors</span></div>
             <div class="frow"><span class="flabel">Vibrancy</span><span class="fvalue">On · Menu</span></div>
             <div class="frow"><span class="flabel">Surface Opacity</span><span class="fvalue">50%</span></div>
@@ -279,15 +294,29 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
       </div>
 
       <div class="footer">
-        <span class="flab">Apply</span>
-        <span class="keycap" style="min-width:26px"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 4v4H4"/><path d="m6.5 5.5-2.5 2.5 2.5 2.5"/></svg></span>
+        <span class="footer-group" data-demo-key="apply">
+          <span class="flab">Apply</span>
+          <span class="keycap" style="min-width:26px"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 4v4H4"/><path d="m6.5 5.5-2.5 2.5 2.5 2.5"/></svg></span>
+        </span>
         <span class="fgap"></span>
-        <span class="flab">Actions</span>
-        <span class="keycap">⌘</span>
-        <span class="keycap">K</span>
+        <span class="footer-group" data-demo-key="actions">
+          <span class="flab">Actions</span>
+          <span class="keycap">⌘</span>
+          <span class="keycap">K</span>
+        </span>
       </div>
     </div>
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body></html>
