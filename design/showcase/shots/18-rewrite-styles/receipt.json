@@ -7,5 +7,17 @@
     "Content verified against reference: header pill \"Rewrite “Hey, so basically I thin…”\", model label \"Script Kit · GPT-5.5\", list rows Professional/Concise/Friendly/Direct with matching description text and sparkle icons, footer \"Rewrite ↵\" / \"Actions ⌘ K\" all match exactly.",
     "Fine antialiasing/JPEG artifacting around small text (ruler numerals, description ellipsis) and subtle scrollbar-track opacity in the TextEdit pane are left as photographic/rendering-detail noise, not structural mismatches."
   ],
-  "iterations": 2
+  "iterations": 2,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "friendly-selected",
+    "autoplay": true,
+    "userControls": ["input", "list"],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }
