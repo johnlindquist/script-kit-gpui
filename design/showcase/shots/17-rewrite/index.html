@@ -136,6 +136,15 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 .p-footer .gap{width:16px}
 .p-footer .sk-keycap{color:rgba(255,255,255,0.75)}
 .p-footer .kc-wide{padding-inline:4px}
+
+/* demo support: [hidden] always wins; footer press-flash is scene-local and
+   gated so the canonical frame (no data-sk-demo attribute) can never change. */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] [data-demo-key="paste-response"][data-selected="true"] .lbl,
+html[data-sk-demo="1"] [data-demo-key="paste-response"][data-selected="true"] .sk-keycap {
+  background: var(--sk-footer-button-active);
+  border-radius: var(--sk-footer-button-radius);
+}
 </style></head>
 <body>
 <div class="scene">
@@ -163,7 +172,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
     <div class="te-tab-marker"></div>
     <div class="te-doc">
       <div class="te-selline">
-        <div class="te-seltext">hectic right now. Anyway let me know if that works or whatever.</div>
+        <div class="te-seltext" data-demo-key="te-seltext">hectic right now. Anyway let me know if that works or whatever.</div>
       </div>
     </div>
     <div class="te-vscroll"></div>
@@ -171,7 +180,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   </div>
 
   <!-- Script Kit rewrite panel -->
-  <div class="panel" data-verify-window>
+  <div class="panel" data-verify-window data-demo-key="panel">
     <div class="p-abs p-path">~/</div>
     <div class="p-abs p-btn" style="left:38px;top:7.5px">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h8M7 4.5 10.5 8 7 11.5M13 4v8"/></svg>
@@ -193,11 +202,13 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
     <div class="p-abs p-sellabel">Selection &mdash; TextEdit</div>
     <div class="p-abs p-quote">Hey, so basically I think we should maybe push the meeting because stuff came up and things are kind of hectic right now. Anyway let me know if that works or whatever.</div>
     <div class="p-abs p-prompt">@selected Rewrite the attached selection in a polished, professional workplace tone. Preserve the meaning and approximate length; return only the rewritten text.</div>
-    <div class="p-abs p-response">Hi, I think we should consider rescheduling the meeting, as something has come up and things are a bit hectic right now. Please let me know if that works for you.</div>
+    <div class="p-abs p-response" data-demo-key="response">Hi, I think we should consider rescheduling the meeting, as something has come up and things are a bit hectic right now. Please let me know if that works for you.</div>
 
     <div class="p-abs p-footer">
-      <span class="lbl">Paste Response</span>
-      <span class="sk-keycap kc-wide">&#9166;</span>
+      <span data-demo-key="paste-response" style="display:contents">
+        <span class="lbl">Paste Response</span>
+        <span class="sk-keycap kc-wide">&#9166;</span>
+      </span>
       <span class="gap"></span>
       <span class="lbl">Actions</span>
       <span class="sk-keycap">&#8984;</span>
@@ -205,4 +216,15 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
     </div>
   </div>
 </div>
-<script src="../../shared/fit.js"></script></body></html>
+<script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
+</body></html>
