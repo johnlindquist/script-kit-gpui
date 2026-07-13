@@ -121,6 +121,13 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 .footer .keys{display:flex;gap:4px}
 .footer .kcap{min-width:20px;height:20px;font-size:12px;color:rgba(255,255,255,.82);
   border-color:rgba(255,255,255,.24)}
+
+/* demo support: [hidden] always wins; canonical frame never sets these */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] .footer .act[data-selected="true"] {
+  background: var(--sk-footer-button-active);
+  border-radius: 6px;
+}
 </style></head>
 <body>
 <div class="scene">
@@ -148,26 +155,26 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
       <div class="user">Explain what makes a great keyboard-first macOS launcher. Give me 5 markdown bullets, each one sentence, plus a one-line closing tip. Be specific and punchy.</div>
 
       <div class="think">
-        <span class="tri"><svg width="9" height="9" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
-        <span class="lbl">Thinking</span><span class="meta">3 lines</span>
+        <span class="tri" data-demo-key="thinking-tri"><svg width="9" height="9" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
+        <span class="lbl" data-demo-key="thinking-lbl">Thinking</span><span class="meta">3 lines</span>
       </div>
 
       <div class="md">
         <ul>
-          <li><b>Instant fuzzy search</b> should forgive typos, learn abbreviations, and rank what you actually use most.</li>
-          <li><b>Zero-mouse workflows</b> need clear shortcuts for launching apps, running scripts, opening files, and choosing actions.</li>
-          <li><b>Context-aware results</b> should prioritize the current app, clipboard, selected text, recent files, and active project.</li>
-          <li><b>Fast extensibility</b> matters because great launchers let you add custom commands, scripts, snippets, and API actions quickly.</li>
-          <li><b>Trustworthy feedback</b> requires previews, confirmations for destructive actions, and visible progress for anything slow.</li>
+          <li data-demo-key="bullet-1" data-demo-role="stream-item"><b>Instant fuzzy search</b> should forgive typos, learn abbreviations, and rank what you actually use most.</li>
+          <li data-demo-key="bullet-2" data-demo-role="stream-item"><b>Zero-mouse workflows</b> need clear shortcuts for launching apps, running scripts, opening files, and choosing actions.</li>
+          <li data-demo-key="bullet-3" data-demo-role="stream-item"><b>Context-aware results</b> should prioritize the current app, clipboard, selected text, recent files, and active project.</li>
+          <li data-demo-key="bullet-4" data-demo-role="stream-item"><b>Fast extensibility</b> matters because great launchers let you add custom commands, scripts, snippets, and API actions quickly.</li>
+          <li data-demo-key="bullet-5" data-demo-role="stream-item"><b>Trustworthy feedback</b> requires previews, confirmations for destructive actions, and visible progress for anything slow.</li>
         </ul>
-        <p class="tip"><b>Tip:</b> Optimize for “thought-to-action” speed: type a few characters, press Return, done.</p>
+        <p class="tip" data-demo-key="tip" data-demo-role="stream-item"><b>Tip:</b> Optimize for “thought-to-action” speed: type a few characters, press Return, done.</p>
       </div>
 
       <div class="footer">
-        <span class="act">Paste Response
+        <span class="act" data-demo-key="paste-response">Paste Response
           <span class="keys"><span class="kcap"><svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 3v4.5H4M6 5 3.5 7.5 6 10"/></svg></span></span>
         </span>
-        <span class="act">Actions
+        <span class="act" data-demo-key="actions">Actions
           <span class="keys"><span class="kcap">⌘</span><span class="kcap">K</span></span>
         </span>
       </div>
@@ -175,4 +182,14 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body></html>

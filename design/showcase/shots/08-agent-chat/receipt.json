@@ -8,5 +8,17 @@
     "Remaining error is dominated by text glyph edge antialiasing differences between headless-Chromium rendering and the real macOS Retina screenshot: word-level crops (e.g. the user bubble's first line, the 'Tip:' line, the footer labels) are visually pixel-identical in content, kerning, weight and position, yet contribute the largest share of per-pixel RMSE purely from AA/subpixel edge variance (measured: text-classified pixels ~6% of window area but ~60% of window MSE). Tried an alternate -webkit-font-smoothing value; it measured worse and was reverted.",
     "Photographic fine detail in the reference (noise/speckle in the wallpaper corners, e.g. top-right and bottom-left) cannot be reproduced by flat CSS gradients and is visible as residual speckle in the diff image; this is treated as acceptable per the brief's photographic-detail allowance."
   ],
-  "iterations": 5
+  "iterations": 5,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "answer-streamed",
+    "autoplay": true,
+    "userControls": [],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }
