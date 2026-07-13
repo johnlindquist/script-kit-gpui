@@ -8,5 +8,17 @@
     "Tuned the 'seen only through the vibrancy blur' desktop fields (list-pane, header, footer, and top-right preview fields) three times to reduce excess purple/magenta saturation vs. the reference's cooler, darker interior tones; local pixel sampling confirms these regions are now materially closer to the reference (e.g. list-pane background at x=700 improved from render(45,26,76)/ref(28,27,71) to render(31,19,74)/ref(28,27,71)), even though the aggregate RMSE metric barely moved because it is dominated by the pervasive high-frequency noise described above.",
     "Preview-pane background and the outside-window right/top-left wallpaper strips already matched closely from the initial draft and were left unchanged."
   ],
-  "iterations": 4
+  "iterations": 4,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "hex-preview",
+    "autoplay": true,
+    "userControls": ["list"],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }
