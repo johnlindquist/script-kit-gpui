@@ -104,6 +104,7 @@
             if (v) el.style.setProperty(prop, v);
             else el.style.removeProperty(prop);
           });
+          if (el.getAttribute && el.getAttribute("style") === "") el.removeAttribute("style");
           if (e.moved) e.moved.parent.insertBefore(el, e.moved.next);
         });
         ledger.clear();

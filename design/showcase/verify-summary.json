@@ -25,11 +25,11 @@
         960
       ],
       "metrics": {
-        "rmse": 0.090081,
-        "ssimDissimilarity": 0.123982,
-        "lowPassRmse": 0.0748775,
-        "windowRmse": 0.0870569,
-        "wallpaperRmse": 0.09881021030012646
+        "rmse": 0.0900751,
+        "ssimDissimilarity": 0.124023,
+        "lowPassRmse": 0.0748712,
+        "windowRmse": 0.0870557,
+        "wallpaperRmse": 0.09879152851740844
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
@@ -56,11 +56,11 @@
         960
       ],
       "metrics": {
-        "rmse": 0.106413,
-        "ssimDissimilarity": 0.171267,
-        "lowPassRmse": 0.08438,
-        "windowRmse": 0.105671,
-        "wallpaperRmse": 0.10866513600094187
+        "rmse": 0.106412,
+        "ssimDissimilarity": 0.171295,
+        "lowPassRmse": 0.0843783,
+        "windowRmse": 0.105669,
+        "wallpaperRmse": 0.10866712891365242
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
@@ -87,11 +87,11 @@
         960
       ],
       "metrics": {
-        "rmse": 0.16345,
-        "ssimDissimilarity": 0.220588,
+        "rmse": 0.163449,
+        "ssimDissimilarity": 0.220592,
         "lowPassRmse": 0.121273,
-        "windowRmse": 0.176765,
-        "wallpaperRmse": 0.11301478538456206
+        "windowRmse": 0.176764,
+        "wallpaperRmse": 0.11301370176058753
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
@@ -118,11 +118,11 @@
         961
       ],
       "metrics": {
-        "rmse": 0.100397,
-        "ssimDissimilarity": 0.163349,
-        "lowPassRmse": 0.085832,
-        "windowRmse": 0.092074,
-        "wallpaperRmse": 0.12243847465000038
+        "rmse": 0.100395,
+        "ssimDissimilarity": 0.163342,
+        "lowPassRmse": 0.0858302,
+        "windowRmse": 0.0920722,
+        "wallpaperRmse": 0.1224359567134858
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
@@ -180,11 +180,11 @@
         959
       ],
       "metrics": {
-        "rmse": 0.112636,
-        "ssimDissimilarity": 0.141377,
-        "lowPassRmse": 0.0840992,
-        "windowRmse": 0.11969,
-        "wallpaperRmse": 0.08769783630980066
+        "rmse": 0.112644,
+        "ssimDissimilarity": 0.141388,
+        "lowPassRmse": 0.0841012,
+        "windowRmse": 0.119699,
+        "wallpaperRmse": 0.08770198895960413
       },
       "fonts": [
         "Times",
@@ -212,11 +212,11 @@
         959
       ],
       "metrics": {
-        "rmse": 0.1501,
-        "ssimDissimilarity": 0.177661,
-        "lowPassRmse": 0.11029,
-        "windowRmse": 0.163856,
-        "wallpaperRmse": 0.09639906371119834
+        "rmse": 0.150099,
+        "ssimDissimilarity": 0.177654,
+        "lowPassRmse": 0.110291,
+        "windowRmse": 0.163855,
+        "wallpaperRmse": 0.09639794401740194
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
@@ -243,11 +243,11 @@
         964
       ],
       "metrics": {
-        "rmse": 0.0786491,
+        "rmse": 0.0786523,
         "ssimDissimilarity": 0.102558,
-        "lowPassRmse": 0.0675874,
-        "windowRmse": 0.068917,
-        "wallpaperRmse": 0.10359648022570327
+        "lowPassRmse": 0.0675891,
+        "windowRmse": 0.0689181,
+        "wallpaperRmse": 0.10360428393814095
       },
       "fonts": [
         "Times",
@@ -276,10 +276,10 @@
       ],
       "metrics": {
         "rmse": 0.11035,
-        "ssimDissimilarity": 0.139904,
-        "lowPassRmse": 0.0846284,
-        "windowRmse": 0.117034,
-        "wallpaperRmse": 0.08659652914822526
+        "ssimDissimilarity": 0.139897,
+        "lowPassRmse": 0.0846253,
+        "windowRmse": 0.117033,
+        "wallpaperRmse": 0.0866006890046602
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
@@ -335,11 +335,11 @@
         960
       ],
       "metrics": {
-        "rmse": 0.109976,
-        "ssimDissimilarity": 0.138789,
-        "lowPassRmse": 0.0837068,
+        "rmse": 0.109975,
+        "ssimDissimilarity": 0.138787,
+        "lowPassRmse": 0.0837062,
         "windowRmse": 0.111309,
-        "wallpaperRmse": 0.10576753815278318
+        "wallpaperRmse": 0.1057632977475245
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
@@ -365,11 +365,11 @@
         958
       ],
       "metrics": {
-        "rmse": 0.0965701,
-        "ssimDissimilarity": 0.145926,
-        "lowPassRmse": 0.082839,
-        "windowRmse": 0.0849788,
-        "wallpaperRmse": 0.12535550876925983
+        "rmse": 0.0965682,
+        "ssimDissimilarity": 0.145927,
+        "lowPassRmse": 0.0828394,
+        "windowRmse": 0.0849763,
+        "wallpaperRmse": 0.1253547464476284
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
@@ -455,11 +455,11 @@
         960
       ],
       "metrics": {
-        "rmse": 0.110717,
-        "ssimDissimilarity": 0.143967,
-        "lowPassRmse": 0.0793693,
+        "rmse": 0.11072,
+        "ssimDissimilarity": 0.143973,
+        "lowPassRmse": 0.0793744,
         "windowRmse": 0.133286,
-        "wallpaperRmse": 0.07978693380206471
+        "wallpaperRmse": 0.07979555074518656
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif"
@@ -485,11 +485,11 @@
         960
       ],
       "metrics": {
-        "rmse": 0.0933845,
-        "ssimDissimilarity": 0.152186,
-        "lowPassRmse": 0.0842639,
-        "windowRmse": 0.0716358,
-        "wallpaperRmse": 0.11212243818499505
+        "rmse": 0.0933861,
+        "ssimDissimilarity": 0.152243,
+        "lowPassRmse": 0.0842641,
+        "windowRmse": 0.0716415,
+        "wallpaperRmse": 0.11212129305026011
       },
       "fonts": [
         "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
@@ -516,11 +516,11 @@
         335
       ],
       "metrics": {
-        "rmse": 0.0646427,
-        "ssimDissimilarity": 0.0646343,
-        "lowPassRmse": 0.04293,
-        "windowRmse": 0.0635925,
-        "wallpaperRmse": 0.09147279149719438
+        "rmse": 0.0646438,
+        "ssimDissimilarity": 0.0646534,
+        "lowPassRmse": 0.0429295,
+        "windowRmse": 0.0635938,
+        "wallpaperRmse": 0.09146963704583681
       },
       "fonts": [
         "\"JetBrains Mono\", ui-monospace, monospace"
@@ -546,11 +546,11 @@
         960
       ],
       "metrics": {
-        "rmse": 0.100294,
-        "ssimDissimilarity": 0.160304,
-        "lowPassRmse": 0.079767,
-        "windowRmse": 0.10365,
-        "wallpaperRmse": 0.08917478083773954
+        "rmse": 0.100293,
+        "ssimDissimilarity": 0.160283,
+        "lowPassRmse": 0.0797645,
+        "windowRmse": 0.103649,
+        "wallpaperRmse": 0.08917377198757491
       },
       "fonts": [
         "Times",
