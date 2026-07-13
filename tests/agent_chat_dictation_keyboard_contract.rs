@@ -132,14 +132,14 @@ fn embedded_agent_chat_host_wires_close_window_shortcut_callback() {
     assert!(
         section.contains("set_on_close_requested")
             && section.contains("set_on_close_window_requested")
+            && section.contains("if app.opened_from_main_menu")
             && section.contains("close_tab_ai_harness_terminal_with_window(window, cx)")
-            && section.contains("close_and_reset_window(cx)"),
-        "embedded Agent Chat host must distinguish Escape/close from Cmd+W host-window close"
+            && section.contains("close_agent_chat_main_window_state_first(cx)"),
+        "embedded Agent Chat close must restore a launcher origin, while direct close and Cmd+W use the strict main-window hide path"
     );
-    assert_ordered(
-        section,
-        "close_tab_ai_harness_terminal_with_window(window, cx)",
-        "close_and_reset_window(cx)",
+    assert!(
+        !section.contains("close_and_reset_window(cx)"),
+        "footer callbacks must not synchronously combine origin restoration with main-window reset"
     );
 }
 

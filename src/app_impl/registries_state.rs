@@ -169,6 +169,21 @@ impl ScriptListApp {
     /// Reset all state and return to the script list view.
     /// This clears all prompt state and resizes the window appropriately.
     pub(crate) fn reset_to_script_list(&mut self, cx: &mut Context<Self>) {
+        self.reset_to_script_list_impl(false, cx);
+    }
+
+    pub(crate) fn reset_to_script_list_after_agent_chat_prepared(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_to_script_list_impl(true, cx);
+    }
+
+    fn reset_to_script_list_impl(
+        &mut self,
+        agent_chat_already_prepared: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.reset_main_list_boundary_affordance(
             crate::scrolling::boundary_affordance::SettleReason::Reset,
         );
@@ -288,11 +303,13 @@ impl ScriptListApp {
         // If reset bypasses the normal Agent Chat close button/Escape route, still
         // hide Agent Chat-owned popups before the view is dropped. This covers
         // window hide/reset paths after launcher-triggered "/" opens.
-        if let AppView::AgentChatView { entity } = &self.current_view {
-            self.embedded_agent_chat = Some(entity.clone());
-            entity.update(cx, |view, cx| {
-                view.prepare_for_host_hide(cx);
-            });
+        if !agent_chat_already_prepared {
+            if let AppView::AgentChatView { entity } = &self.current_view {
+                self.embedded_agent_chat = Some(entity.clone());
+                entity.update(cx, |view, cx| {
+                    view.prepare_for_host_hide(cx);
+                });
+            }
         }
 
         // Reset view

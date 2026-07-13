@@ -1,5 +1,20 @@
 use super::*;
 
+struct HiddenMainWindowResetRequest {
+    _native_hidden: crate::platform::NativeMainWindowHidden,
+    visibility_generation: u64,
+    reason: &'static str,
+    reset_mini_bounds_after_hidden_reset: bool,
+}
+
+fn hidden_main_window_reset_is_current(
+    expected_visibility_generation: u64,
+    current_visibility_generation: u64,
+    is_logically_visible: bool,
+) -> bool {
+    !is_logically_visible && current_visibility_generation == expected_visibility_generation
+}
+
 #[cfg(unix)]
 fn process_group_id_from_pid(pid: u32) -> Result<i32, String> {
     i32::try_from(pid).map_err(|_| format!("PID {} is out of range for killpg", pid))
@@ -171,26 +186,37 @@ impl ScriptListApp {
         );
     }
 
-    pub(crate) fn close_and_reset_window(&mut self, cx: &mut Context<Self>) {
+    fn prepare_main_window_close(
+        &mut self,
+        cx: &mut Context<Self>,
+        reason: &'static str,
+        honor_day_page_context_return: bool,
+        normalize_mode_before_hide: bool,
+    ) -> Option<u64> {
         self.reset_main_list_boundary_affordance(
             crate::scrolling::boundary_affordance::SettleReason::Reset,
         );
         // Today → main-menu `@context` round trip: Escape/close while the
         // search is pending cancels back to Today instead of closing the
         // launcher (the second Escape then closes from Today as usual).
-        if self.day_page_context_return.is_some()
+        if honor_day_page_context_return
+            && self.day_page_context_return.is_some()
             && matches!(self.current_view, AppView::ScriptList)
         {
             self.cancel_day_page_context_round_trip_deferred(cx);
-            return;
+            return None;
         }
         logging::log("VISIBILITY", "=== Close and reset window ===");
-        self.close_floating_popups_for_owner_loss("close_and_reset_window", cx);
+        self.close_floating_popups_for_owner_loss(reason, cx);
         clear_main_state_restore_after_focus_loss();
 
-        // Reset pin state when window is closed
+        // Reset pin state when window is closed. Agent Chat defers mode
+        // normalization until after AppKit confirms the panel is hidden so a
+        // layout change cannot flash during dismissal.
         self.is_pinned = false;
-        self.set_main_window_mode_state_only(MainWindowMode::Full, cx, "close_and_reset_window");
+        if normalize_mode_before_hide {
+            self.set_main_window_mode_state_only(MainWindowMode::Full, cx, reason);
+        }
 
         // Close child windows FIRST if open (they are children of main window)
         // Actions window
@@ -254,9 +280,24 @@ impl ScriptListApp {
         logging::log(
             "VISIBILITY",
             &format!(
-                "Using defer_hide_main_window() - main-only hide, secondary_windows_open={}",
+                "Prepared main-only hide, secondary_windows_open={}",
                 secondary_windows_open
             ),
+        );
+        Some(script_kit_gpui::main_window_visibility_generation())
+    }
+
+    pub(crate) fn close_and_reset_window(&mut self, cx: &mut Context<Self>) {
+        if self
+            .prepare_main_window_close(cx, "close_and_reset_window", true, true)
+            .is_none()
+        {
+            return;
+        }
+
+        logging::log(
+            "VISIBILITY",
+            "Using defer_hide_main_window() - main-only hide",
         );
         platform::defer_hide_main_window(cx);
         self.defer_reset_to_script_list_after_main_window_hidden(
@@ -265,6 +306,92 @@ impl ScriptListApp {
             false,
         );
         logging::log("VISIBILITY", "=== Window closed ===");
+    }
+
+    /// Agent Chat's strict close barrier: native `orderOut:` must complete and
+    /// AppKit must report the window hidden before ScriptList can be rendered.
+    pub(crate) fn close_agent_chat_and_reset_window_after_native_hide(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        logging::log(
+            "VISIBILITY",
+            "=== Close Agent Chat with native hide/reset barrier ===",
+        );
+        let Some(visibility_generation) =
+            self.prepare_main_window_close(
+                cx,
+                "close_agent_chat_native_hide_barrier",
+                false,
+                false,
+            )
+        else {
+            return;
+        };
+        let app_entity = cx.entity().downgrade();
+        platform::defer_hide_main_window_with_completion(
+            cx,
+            visibility_generation,
+            move |completion, cx| match completion {
+                crate::platform::MainWindowHideCompletion::Hidden(native_hidden) => {
+                    let request = HiddenMainWindowResetRequest {
+                        _native_hidden: native_hidden,
+                        visibility_generation,
+                        reason: "close_agent_chat_native_hide_barrier",
+                        reset_mini_bounds_after_hidden_reset: false,
+                    };
+                    if let Some(app_entity) = app_entity.upgrade() {
+                        let _ = app_entity.update(cx, |app, cx| {
+                            app.complete_hidden_main_window_reset(request, cx);
+                        });
+                    }
+                }
+                failure => {
+                    logging::log(
+                        "VISIBILITY",
+                        &format!("Agent Chat native hide barrier failed closed: {failure:?}"),
+                    );
+                }
+            },
+        );
+    }
+
+    fn complete_hidden_main_window_reset(
+        &mut self,
+        request: HiddenMainWindowResetRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if !hidden_main_window_reset_is_current(
+            request.visibility_generation,
+            script_kit_gpui::main_window_visibility_generation(),
+            script_kit_gpui::is_main_window_visible(),
+        ) {
+            logging::log(
+                "VISIBILITY",
+                &format!(
+                    "Skipping stale Agent Chat hidden reset after {}",
+                    request.reason
+                ),
+            );
+            return;
+        }
+
+        logging::log(
+            "VISIBILITY",
+            &format!(
+                "Resetting prepared Agent Chat in hidden main window to ScriptList after {}",
+                request.reason
+            ),
+        );
+        let was_mini = self.main_window_mode == MainWindowMode::Mini;
+        self.reset_to_script_list_after_agent_chat_prepared(cx);
+        let post_reset_is_mini = self.main_window_mode == MainWindowMode::Mini;
+        self.rekey_main_automation_surface_from_current_view();
+        crate::windows::set_automation_visibility("main", false);
+        let hidden_reset_is_mini = was_mini || post_reset_is_mini;
+        if request.reset_mini_bounds_after_hidden_reset || hidden_reset_is_mini {
+            crate::window_resize::resize_to_mini_main_window_sync();
+        }
     }
 
     pub(crate) fn reset_hidden_main_window_to_script_list(
@@ -784,7 +911,14 @@ impl ScriptListApp {
 
 #[cfg(all(test, unix))]
 mod lifecycle_reset_unix_tests {
-    use super::process_group_id_from_pid;
+    use super::{hidden_main_window_reset_is_current, process_group_id_from_pid};
+
+    #[test]
+    fn hidden_reset_requires_same_hidden_visibility_generation() {
+        assert!(hidden_main_window_reset_is_current(11, 11, false));
+        assert!(!hidden_main_window_reset_is_current(11, 12, false));
+        assert!(!hidden_main_window_reset_is_current(11, 11, true));
+    }
 
     #[test]
     fn test_process_group_id_from_pid_rejects_out_of_range_u32() {

@@ -1,0 +1,358 @@
+{
+  "generatedBy": "design/showcase/demo-smoke.ts",
+  "runnerVersion": 1,
+  "sceneCount": 19,
+  "canonicalStaticHashesMatch": false,
+  "scenes": [
+    {
+      "id": "01-main-launcher",
+      "checkpoint": "notes-filtered",
+      "smokeStatus": "fail",
+      "pausedAe": 15291100000,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "type-notes",
+        "notes-filtered",
+        "actions",
+        "agent"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 15291100000,
+      "durationMs": 7202
+    },
+    {
+      "id": "02-search-filter",
+      "checkpoint": "clip-final",
+      "smokeStatus": "pass",
+      "pausedAe": 0,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "unfiltered",
+        "type-clip",
+        "clip-final",
+        "arrow-down",
+        "arrow-up",
+        "actions"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 0,
+      "durationMs": 6933
+    },
+    {
+      "id": "04-clipboard-history",
+      "checkpoint": "hex-preview",
+      "smokeStatus": "fail",
+      "pausedAe": 16915600000,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "arrow-down-1",
+        "arrow-down-2",
+        "hex-preview",
+        "preview-follows",
+        "paste",
+        "actions"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 15793900,
+      "durationMs": 7820
+    },
+    {
+      "id": "05-emoji-picker",
+      "checkpoint": "emoji-row-2",
+      "smokeStatus": "pass",
+      "pausedAe": 0,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "arrow-right-a1",
+        "arrow-right-a2",
+        "emoji-row-2",
+        "arrow-right-b1",
+        "arrow-right-b2",
+        "outro",
+        "paste",
+        "actions"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 0,
+      "durationMs": 7307
+    },
+    {
+      "id": "06-notes",
+      "checkpoint": "two-tasks-checked",
+      "smokeStatus": "fail",
+      "pausedAe": 7462990000,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "check-hero-demo",
+        "two-tasks-checked",
+        "pulse-updated",
+        "outro"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 7462990000,
+      "durationMs": 8227
+    },
+    {
+      "id": "07-day-page",
+      "checkpoint": "reference-focused",
+      "smokeStatus": "fail",
+      "pausedAe": 6487960,
+      "finalStatus": "missing",
+      "errors": [
+        "__SK_DEMO__ missing"
+      ],
+      "seenSteps": [],
+      "checkpointSeen": false,
+      "postResetAe": 11018600000,
+      "durationMs": 74817
+    },
+    {
+      "id": "08-agent-chat",
+      "checkpoint": "answer-streamed",
+      "smokeStatus": "fail",
+      "pausedAe": 17599800000,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "hide-stream",
+        "thinking-pulse",
+        "progress-caption",
+        "show-bullet-1",
+        "show-bullet-2",
+        "answer-streamed",
+        "markdown-caption",
+        "paste-response",
+        "actions"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 17599800000,
+      "durationMs": 7193
+    },
+    {
+      "id": "09-terminal",
+      "checkpoint": "terminal-output",
+      "smokeStatus": "fail",
+      "pausedAe": 1048560,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "reveal-clone",
+        "type-command",
+        "run-command",
+        "output-lines-1-7",
+        "terminal-output",
+        "hand-to-agent",
+        "agent-caption",
+        "close"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 11362100000,
+      "durationMs": 7233
+    },
+    {
+      "id": "10-file-search",
+      "checkpoint": "plist-preview",
+      "smokeStatus": "fail",
+      "pausedAe": 17979100000,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "type-plist",
+        "select-plist",
+        "plist-preview",
+        "run",
+        "actions"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 17979100000,
+      "durationMs": 7043
+    },
+    {
+      "id": "11-theme-designer",
+      "checkpoint": "tokyo-night",
+      "smokeStatus": "fail",
+      "pausedAe": 16569700000,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "arrow-down-1",
+        "arrow-down-2",
+        "facts-live",
+        "tokyo-night",
+        "apply",
+        "actions"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 16569700000,
+      "durationMs": 6712
+    },
+    {
+      "id": "12-settings",
+      "checkpoint": "permissions-filtered",
+      "smokeStatus": "fail",
+      "pausedAe": 0,
+      "finalStatus": "missing",
+      "errors": [
+        "__SK_DEMO__ missing"
+      ],
+      "seenSteps": [],
+      "checkpointSeen": false,
+      "postResetAe": 0,
+      "durationMs": 74794
+    },
+    {
+      "id": "13-agent-chat-composer",
+      "checkpoint": "context-shortcuts",
+      "smokeStatus": "fail",
+      "pausedAe": 2162660,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "key-at",
+        "key-slash",
+        "key-newline",
+        "key-previous-chats",
+        "key-chat-actions",
+        "context-shortcuts",
+        "key-send"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 29729600000,
+      "durationMs": 10326
+    },
+    {
+      "id": "14-window-switcher",
+      "checkpoint": "uad-filtered",
+      "smokeStatus": "fail",
+      "pausedAe": 0,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "arrow-down",
+        "cmux-detail",
+        "arrow-up",
+        "uad-detail",
+        "type-uad",
+        "uad-filtered",
+        "enter-switch",
+        "return-caption",
+        "escape"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 17944700000,
+      "durationMs": 9081
+    },
+    {
+      "id": "15-app-launcher",
+      "checkpoint": "safari-filtered",
+      "smokeStatus": "fail",
+      "pausedAe": 0,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "unfiltered",
+        "type-safari",
+        "safari-filtered",
+        "run-caption",
+        "run",
+        "actions"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 16744100000,
+      "durationMs": 7501
+    },
+    {
+      "id": "17-rewrite",
+      "checkpoint": "rewrite-pasted",
+      "smokeStatus": "pass",
+      "pausedAe": 0,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "clear-response",
+        "streaming-caption",
+        "type-response",
+        "paste-key",
+        "rewrite-pasted",
+        "panel-fade"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 0,
+      "durationMs": 7060
+    },
+    {
+      "id": "18-rewrite-styles",
+      "checkpoint": "friendly-selected",
+      "smokeStatus": "fail",
+      "error": "Error: ENOENT: no such file or directory, open '/Users/johnlindquist/dev/script-kit-gpui/design/showcase/shots/18-rewrite-styles/demo.js'"
+    },
+    {
+      "id": "19-references",
+      "checkpoint": "reference-activated",
+      "smokeStatus": "fail",
+      "error": "Error: ENOENT: no such file or directory, open '/Users/johnlindquist/dev/script-kit-gpui/design/showcase/shots/19-references/demo.js'"
+    },
+    {
+      "id": "20-brain-inbox",
+      "checkpoint": "dash-filtered",
+      "smokeStatus": "fail",
+      "pausedAe": 12550500000,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "arrow-down-1",
+        "arrow-down-2",
+        "type-dash",
+        "dash-filtered",
+        "outro",
+        "activate-ask",
+        "activate-agent"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 12550500000,
+      "durationMs": 7835
+    },
+    {
+      "id": "21-dictation",
+      "checkpoint": "dictation-stopped",
+      "smokeStatus": "fail",
+      "pausedAe": 65535,
+      "finalStatus": "done",
+      "errors": [],
+      "seenSteps": [
+        "intro",
+        "waveform-active",
+        "timer-08",
+        "timer-09",
+        "select-mic-pulse",
+        "select-mic-caption",
+        "stop-keypress",
+        "dictation-stopped",
+        "cancel-pulse",
+        "timer-reset"
+      ],
+      "checkpointSeen": true,
+      "postResetAe": 3710460000,
+      "durationMs": 6402
+    }
+  ]
+}

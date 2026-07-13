@@ -97,22 +97,26 @@ fn next_show_consumes_restore_intent_without_selection_normalization() {
 
 #[test]
 fn explicit_reset_paths_clear_focus_loss_restore_intent() {
-    let close_path = source_block_after(LIFECYCLE_RESET, "fn close_and_reset_window", 500);
+    let close_path = source_block_after(LIFECYCLE_RESET, "fn prepare_main_window_close", 1800);
     assert!(close_path.contains("clear_main_state_restore_after_focus_loss();"));
 
-    let reset_path = source_block_after(REGISTRIES_STATE, "fn reset_to_script_list", 500);
+    let reset_path = source_block_after(REGISTRIES_STATE, "fn reset_to_script_list_impl", 1800);
     assert!(reset_path.contains("clear_main_state_restore_after_focus_loss();"));
 }
 
 #[test]
 fn close_and_reset_enqueues_native_hide_before_script_list_reset() {
-    let close_path = source_block_after(LIFECYCLE_RESET, "fn close_and_reset_window", 5200);
-    let hidden = close_path
+    let preparation = source_block_after(LIFECYCLE_RESET, "fn prepare_main_window_close", 5200);
+    let close_path = source_block_after(LIFECYCLE_RESET, "fn close_and_reset_window", 1200);
+    let hidden = preparation
         .find("set_main_window_visible(false)")
         .expect("close_and_reset_window must mark the main window hidden");
-    let footer_close = close_path
+    let footer_close = preparation
         .find("close_main_footer_popup")
         .expect("close_and_reset_window must close the main footer popup");
+    let prepared = close_path
+        .find(".prepare_main_window_close(cx, \"close_and_reset_window\", true, true)")
+        .expect("close_and_reset_window must run shared preparation");
     let defer_hide = close_path
         .find("defer_hide_main_window(cx);")
         .expect("close_and_reset_window must use the main-panel-only deferred hide");
@@ -121,19 +125,19 @@ fn close_and_reset_enqueues_native_hide_before_script_list_reset() {
         .expect("close_and_reset_window must defer reset until after native hide is enqueued");
 
     assert!(
-        hidden < defer_hide,
-        "windowVisible must become false before native hide is enqueued"
+        prepared < defer_hide,
+        "shared preparation must complete before native hide is enqueued"
     );
     assert!(
-        footer_close < defer_hide,
-        "footer popup must close before native hide is enqueued"
+        footer_close < preparation.len(),
+        "shared preparation must close the footer popup"
     );
     assert!(
         defer_hide < deferred_reset,
         "ScriptList reset must be deferred until after native hide is enqueued"
     );
     assert!(
-        !close_path[hidden..defer_hide].contains("reset_to_script_list(cx);"),
+        !preparation[hidden..].contains("reset_to_script_list(cx);"),
         "close path must not reset to ScriptList while the AppKit window can still be visible"
     );
 }

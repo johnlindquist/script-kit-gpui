@@ -63,7 +63,7 @@ fn test_script_list_app_new_uses_event_driven_receive_when_loading_startup_data(
 }
 
 #[test]
-fn test_script_list_arrow_history_navigation_uses_top_of_grouped_items_boundary() {
+fn test_script_list_up_history_navigation_uses_top_of_grouped_items_boundary() {
     let source = read_script_list_startup_source();
 
     assert!(
@@ -87,7 +87,9 @@ fn test_script_list_arrow_history_navigation_uses_top_of_grouped_items_boundary(
         source.contains("let filter_has_text = !this.filter_text.is_empty()")
             && source.contains("filter_has_text,")
             && source.contains("\"filter_text_up_noop\"")
-            && source.contains("if !source_filter_mode && filter_has_text && at_top_of_list {")
+            && source.contains("if !source_filter_mode")
+            && source.contains("&& filter_has_text")
+            && source.contains("&& at_top_of_list")
             && source.contains("cx.stop_propagation();")
             && source.contains("return;"),
         "Up arrow handler should consume and noop when the main menu filter has text"
@@ -98,13 +100,6 @@ fn test_script_list_arrow_history_navigation_uses_top_of_grouped_items_boundary(
             && source.contains("cx.stop_propagation();")
             && source.contains("return;"),
         "Up arrow handler should route to history recall and consume the event only when the filter is empty and in history or at top"
-    );
-    assert!(
-        source.contains("let in_history =")
-            && source.contains("if let Some(text) = this.input_history.navigate_down() {")
-            && source.contains("this.input_history.reset_navigation();")
-            && source.contains("this.clear_filter(window, cx);"),
-        "Down arrow handler should navigate history and clear back to empty when moving past newest"
     );
     assert!(
         source.contains("history_filter_render_pending")

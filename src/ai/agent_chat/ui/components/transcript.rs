@@ -45,6 +45,51 @@ fn transcript_row_fidelity_id(message: &AgentChatThreadMessage) -> String {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingActivityPlacement {
+    Hidden,
+    TailSentinel,
+    EmptyAssistantRow(usize),
+}
+
+fn pending_activity_placement(
+    messages: &[AgentChatThreadMessage],
+    pending: bool,
+) -> PendingActivityPlacement {
+    if !pending {
+        return PendingActivityPlacement::Hidden;
+    }
+
+    let Some(user_index) = messages
+        .iter()
+        .rposition(|message| matches!(message.role, AgentChatThreadMessageRole::User))
+    else {
+        return PendingActivityPlacement::TailSentinel;
+    };
+
+    let response = messages[user_index + 1..]
+        .iter()
+        .enumerate()
+        .find(|(_, message)| {
+            matches!(
+                message.role,
+                AgentChatThreadMessageRole::Assistant | AgentChatThreadMessageRole::Error
+            )
+        })
+        .map(|(relative_index, message)| (user_index + 1 + relative_index, message));
+
+    match response {
+        None => PendingActivityPlacement::TailSentinel,
+        Some((message_index, message))
+            if matches!(message.role, AgentChatThreadMessageRole::Assistant)
+                && message.body.trim().is_empty() =>
+        {
+            PendingActivityPlacement::EmptyAssistantRow(message_index)
+        }
+        Some(_) => PendingActivityPlacement::Hidden,
+    }
+}
+
 /// Callback invoked when the user forks the thread by editing message `u64`.
 type ForkEditMessageHandler = Arc<dyn Fn(u64, &mut Window, &mut App) + 'static>;
 
@@ -768,6 +813,7 @@ impl AgentChatTranscript {
         fork_points: &[AgentChatForkPoint],
         thread_status: AgentChatThreadStatus,
         on_fork_edit_message: Option<ForkEditMessageHandler>,
+        show_pending_activity: bool,
     ) -> gpui::AnyElement {
         let theme = theme::get_cached_theme();
         let presentation = ui_variant.config().transcript;
@@ -793,6 +839,7 @@ impl AgentChatTranscript {
                 text_view_state,
                 presentation,
                 style_def,
+                show_pending_activity,
             ),
             AgentChatThreadMessageRole::Thought => Self::render_collapsible_block(
                 msg,
@@ -823,10 +870,7 @@ impl AgentChatTranscript {
         }
     }
 
-    /// Synthetic tail row shown while a turn is streaming with no assistant
-    /// text yet: a pulsing accent dot plus a dimmed "Thinking…" label, so
-    /// submit always produces immediate visible feedback in the transcript.
-    fn render_activity_row(
+    fn render_pending_activity(
         theme: &crate::theme::Theme,
         style_def: &AgentChatStyleDef,
     ) -> gpui::AnyElement {
@@ -845,23 +889,37 @@ impl AgentChatTranscript {
             );
 
         div()
+            .flex()
+            .items_center()
+            .gap(px(style_contract::AGENT_CHAT_ACTIVITY_GAP))
+            .child(dot)
+            .child(
+                div()
+                    .text_size(px(style_def.markdown.body_font_size))
+                    .text_color(rgba(resolved.activity_label_rgba))
+                    .child("Thinking\u{2026}"),
+            )
+            .into_any()
+    }
+
+    fn render_activity_row(
+        theme: &crate::theme::Theme,
+        colors: &PromptColors,
+        presentation: AgentChatTranscriptPresentation,
+        style_def: &AgentChatStyleDef,
+    ) -> gpui::AnyElement {
+        div()
             .w_full()
             .px(px(style_def.transcript.row_padding_x))
             .pb(px(style_def.transcript.row_padding_bottom))
             .mt(px(style_def.transcript.response_start_margin_top))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(style_contract::AGENT_CHAT_ACTIVITY_GAP))
-                    .child(dot)
-                    .child(
-                        div()
-                            .text_size(px(style_def.markdown.body_font_size))
-                            .text_color(rgba(resolved.activity_label_rgba))
-                            .child("Thinking\u{2026}"),
-                    ),
-            )
+            .child(Self::render_assistant_message_shell(
+                Self::render_pending_activity(theme, style_def),
+                colors,
+                theme,
+                presentation,
+                style_def,
+            ))
             .into_any()
     }
 
@@ -1014,6 +1072,31 @@ impl AgentChatTranscript {
         text_view_state: &gpui::Entity<TextViewState>,
         presentation: AgentChatTranscriptPresentation,
         style_def: &AgentChatStyleDef,
+        show_pending_activity: bool,
+    ) -> gpui::AnyElement {
+        let content = if show_pending_activity {
+            Self::render_pending_activity(_theme, style_def)
+        } else {
+            Self::selectable_markdown_view(
+                text_view_state,
+                _theme,
+                _colors,
+                rgb(_colors.text_primary),
+                style_def,
+                Self::message_text_fidelity_scope(msg),
+            )
+            .into_any_element()
+        };
+
+        Self::render_assistant_message_shell(content, _colors, _theme, presentation, style_def)
+    }
+
+    fn render_assistant_message_shell(
+        content: gpui::AnyElement,
+        _colors: &PromptColors,
+        theme: &crate::theme::Theme,
+        presentation: AgentChatTranscriptPresentation,
+        style_def: &AgentChatStyleDef,
     ) -> gpui::AnyElement {
         let assistant_style = style_def.assistant_message;
         let message = div()
@@ -1029,18 +1112,11 @@ impl AgentChatTranscript {
             .rounded(px(assistant_style.radius))
             .when(assistant_style.bg_alpha > 0.0, |d| {
                 d.bg(rgba(style_contract::pack_rgb_alpha(
-                    _theme.colors.text.primary,
+                    theme.colors.text.primary,
                     assistant_style.bg_alpha,
                 )))
             })
-            .child(Self::selectable_markdown_view(
-                text_view_state,
-                _theme,
-                _colors,
-                rgb(_colors.text_primary),
-                style_def,
-                Self::message_text_fidelity_scope(msg),
-            ));
+            .child(content);
 
         if matches!(presentation, AgentChatTranscriptPresentation::RoleSplit) {
             div()
@@ -1529,6 +1605,10 @@ impl Render for AgentChatTranscript {
         let markdown_view_count = message_views_snapshot.len();
         let heavy_preview_count = self.message_previews.len();
         let expanded_heavy_markdown_count = self.expanded_heavy_markdown_ids.len();
+        let pending_activity_placement = pending_activity_placement(
+            &messages_snapshot,
+            self.show_activity_row || matches!(thread_status, AgentChatThreadStatus::Streaming),
+        );
         let transcript_content = if focused_text_preview {
             let mut preview = div().size_full().flex().flex_col().overflow_hidden();
 
@@ -1578,6 +1658,7 @@ impl Render for AgentChatTranscript {
                         &fork_points_snapshot,
                         thread_status,
                         on_fork_edit_message.clone(),
+                        false,
                     ));
                 } else {
                     continue;
@@ -1588,13 +1669,19 @@ impl Render for AgentChatTranscript {
 
             preview.into_any_element()
         } else {
-            let show_activity_row = self.show_activity_row;
             list(self.list_state.clone(), move |ix, _window, _cx| {
                 if ix == visible_indices.len() {
-                    return if show_activity_row {
-                        Self::render_activity_row(&theme, &style_def)
-                    } else {
-                        Self::render_empty_activity_row()
+                    return match pending_activity_placement {
+                        PendingActivityPlacement::TailSentinel => Self::render_activity_row(
+                            &theme,
+                            &colors,
+                            ui_variant.config().transcript,
+                            &style_def,
+                        ),
+                        PendingActivityPlacement::Hidden
+                        | PendingActivityPlacement::EmptyAssistantRow(_) => {
+                            Self::render_empty_activity_row()
+                        }
                     };
                 }
                 let Some(&message_ix) = visible_indices.get(ix) else {
@@ -1684,6 +1771,11 @@ impl Render for AgentChatTranscript {
                     &fork_points_snapshot,
                     thread_status,
                     on_fork_edit_message.clone(),
+                    matches!(
+                        pending_activity_placement,
+                        PendingActivityPlacement::EmptyAssistantRow(index)
+                            if index == message_ix
+                    ),
                 ))
                 .into_any()
             })
@@ -1762,6 +1854,38 @@ mod tests {
         assert_eq!(
             transcript_row_fidelity_id(&tool),
             "agent-chat-transcript-row-tool-20"
+        );
+    }
+
+    #[test]
+    fn pending_activity_transfers_with_the_latest_user_response() {
+        let prior_user = message(AgentChatThreadMessageRole::User, "Earlier");
+        let prior_empty_assistant = message(AgentChatThreadMessageRole::Assistant, "");
+        let latest_user = message(AgentChatThreadMessageRole::User, "Latest");
+        let mut messages = vec![prior_user, prior_empty_assistant, latest_user];
+
+        assert_eq!(
+            pending_activity_placement(&messages, true),
+            PendingActivityPlacement::TailSentinel,
+            "historical empty assistant rows must not capture current activity"
+        );
+
+        messages.push(message(AgentChatThreadMessageRole::Assistant, ""));
+        assert_eq!(
+            pending_activity_placement(&messages, true),
+            PendingActivityPlacement::EmptyAssistantRow(3)
+        );
+
+        messages[3].body = "First token".into();
+        assert_eq!(
+            pending_activity_placement(&messages, true),
+            PendingActivityPlacement::Hidden,
+            "first visible assistant text must replace pending activity"
+        );
+
+        assert_eq!(
+            pending_activity_placement(&messages, false),
+            PendingActivityPlacement::Hidden
         );
     }
 

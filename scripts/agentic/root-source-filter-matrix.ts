@@ -22,6 +22,7 @@ const session = argValue(
 const query = argValue("--query", `codexsource${Date.now()}`);
 const timeoutMs = Number(argValue("--timeout", "12000"));
 const pollMs = Number(argValue("--poll", "50"));
+const recentFilesOnly = process.argv.includes("--recent-files-only");
 const outputDir = join(
   repoRoot,
   ".test-output",
@@ -33,6 +34,11 @@ const kitDir = join(homeDir, ".scriptkit");
 const dbDir = join(kitDir, "db");
 const sessionRoot = join(outputDir, "sessions");
 const recentDir = join(outputDir, "recent");
+const recentFilePath = join(recentDir, `${query}-recent-file.txt`);
+const recentDirectoryPath = join(
+  recentDir,
+  `${query}-legacy-recent-folder`,
+);
 const aiVaultPoisonStrings = [
   "POISON_TRANSCRIPT",
   "POISON_PREVIEW",
@@ -158,15 +164,23 @@ function seedFixtures() {
 `,
   );
 
-  const recentFilePath = join(recentDir, `${query}-recent-file.txt`);
   writeFileSync(recentFilePath, `${query} recent file body\n`);
+  mkdirSync(recentDirectoryPath, { recursive: true });
   writeFileSync(
     join(kitDir, "frecency.json"),
     `${JSON.stringify({
       entries: {
+        [`file/${recentDirectoryPath}`]: {
+          count: 99,
+          last_used: Math.floor(Date.now() / 1000),
+        },
+        [`dir/${recentDirectoryPath}`]: {
+          count: 99,
+          last_used: Math.floor(Date.now() / 1000),
+        },
         [`file/${recentFilePath}`]: {
           count: 3,
-          last_used: Math.floor(Date.now() / 1000),
+          last_used: Math.floor(Date.now() / 1000) - 1,
         },
       },
     })}\n`,
@@ -442,6 +456,112 @@ async function runEmptyCase(head: string, spec: Json): Promise<Json> {
   throw new Error(`${input}: timed out, lastFrame=${JSON.stringify(lastFrame)}`);
 }
 
+async function runRecentFilesProof(): Promise<Json> {
+  const input = "files:";
+  const expectedStableKey = `file/${recentFilePath}`;
+  const legacyDirectoryStableKey = `file/${recentDirectoryPath}`;
+  send({
+    type: "setFilter",
+    text: input,
+    requestId: `source-filter-matrix-recent-files-${Date.now()}`,
+  });
+  await waitForInput(input);
+
+  let lastEvidence: Json | null = null;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await getState("recent-files-proof");
+    const elementsResponse = await driver.getElements(
+      { limit: 160, includeHeaders: true },
+      { timeoutMs },
+    );
+    const preflight = state.mainWindowPreflight ?? {};
+    const visibleResults = preflight.visibleResults ?? [];
+    const elements = elementsResponse.elements ?? [];
+    lastEvidence = { state, elements };
+
+    try {
+      if (state.inputValue !== input) {
+        throw new Error(`expected input ${input}, got ${state.inputValue}`);
+      }
+      if (preflight.computedSearchText !== "") {
+        throw new Error(
+          `expected empty computedSearchText, got ${preflight.computedSearchText}`,
+        );
+      }
+      if (JSON.stringify(preflight.sourceFilters) !== JSON.stringify(["files"])) {
+        throw new Error(
+          `expected Files source filter, got ${JSON.stringify(preflight.sourceFilters)}`,
+        );
+      }
+
+      const recentRows = visibleResults.filter(
+        (row: Json) => row.stableKey === expectedStableKey,
+      );
+      if (recentRows.length !== 1) {
+        throw new Error(
+          `expected one recent file row, got ${JSON.stringify(visibleResults)}`,
+        );
+      }
+      if (
+        visibleResults.some(
+          (row: Json) =>
+            row.stableKey === legacyDirectoryStableKey ||
+            JSON.stringify(row).includes("legacy-recent-folder"),
+        )
+      ) {
+        throw new Error(
+          `legacy recent directory remained visible: ${JSON.stringify(visibleResults)}`,
+        );
+      }
+
+      const recentHeader = elements.find(
+        (element: Json) =>
+          element.role === "sectionHeader" && element.text === "Recent Files",
+      );
+      if (!recentHeader) {
+        throw new Error(`missing Recent Files semantic header: ${JSON.stringify(elements)}`);
+      }
+      const expectedFileElements = elements.filter(
+        (element: Json) =>
+          element.role === "row" &&
+          element.text === `${query}-recent-file.txt` &&
+          element.value === recentFilePath &&
+          element.kind === "file",
+      );
+      if (expectedFileElements.length !== 1) {
+        throw new Error(
+          `expected one truthful recent file semantic row: ${JSON.stringify(elements)}`,
+        );
+      }
+      if (elements.some((element: Json) => JSON.stringify(element).includes(recentDirectoryPath))) {
+        throw new Error(
+          `semantic elements referenced legacy directory: ${JSON.stringify(elements)}`,
+        );
+      }
+
+      return {
+        input,
+        computedSearchText: preflight.computedSearchText,
+        sourceFilters: preflight.sourceFilters,
+        expectedStableKey,
+        recentFileOccurrences: recentRows.length,
+        legacyDirectoryStableKey,
+        legacyDirectoryVisible: false,
+        recentFilesHeaderVisible: true,
+        fileElement: expectedFileElements[0],
+      };
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw error;
+      }
+      await Bun.sleep(pollMs);
+    }
+  }
+
+  throw new Error(`recent Files proof timed out: ${JSON.stringify(lastEvidence)}`);
+}
+
 async function main() {
   const startedAt = performance.now();
   seedFixtures();
@@ -452,24 +572,56 @@ async function main() {
   });
 
   const results: Json[] = [];
+  let recentFilesProof: Json | null = null;
+  let finalState: Json | null = null;
   try {
     await driver.getState({ timeoutMs });
-    for (const spec of cases) {
-      for (const head of spec.heads) {
-        results.push(await runCase(head, spec));
-        send({ type: "setFilter", text: "", requestId: `source-filter-matrix-reset-${Date.now()}` });
-        await waitForInput("");
-        results.push(await runAttachedCase(head, spec));
-        send({ type: "setFilter", text: "", requestId: `source-filter-matrix-attached-reset-${Date.now()}` });
-        await waitForInput("");
-        results.push(await runEmptyCase(head, spec));
-        send({ type: "setFilter", text: "", requestId: `source-filter-matrix-empty-reset-${Date.now()}` });
-        await waitForInput("");
+    if (!recentFilesOnly) {
+      for (const spec of cases) {
+        for (const head of spec.heads) {
+          results.push(await runCase(head, spec));
+          send({ type: "setFilter", text: "", requestId: `source-filter-matrix-reset-${Date.now()}` });
+          await waitForInput("");
+          results.push(await runAttachedCase(head, spec));
+          send({ type: "setFilter", text: "", requestId: `source-filter-matrix-attached-reset-${Date.now()}` });
+          await waitForInput("");
+          results.push(await runEmptyCase(head, spec));
+          send({ type: "setFilter", text: "", requestId: `source-filter-matrix-empty-reset-${Date.now()}` });
+          await waitForInput("");
+        }
       }
     }
+    recentFilesProof = await runRecentFilesProof();
+    await driver.simulateGpuiEvent(
+      { type: "keyDown", key: "escape", modifiers: [] },
+      { timeoutMs },
+    );
+    send({
+      type: "hide",
+      requestId: `source-filter-matrix-cleanup-${Date.now()}`,
+    });
+    await driver.waitForState(
+      { windowVisible: false },
+      { timeoutMs, pollIntervalMs: pollMs },
+    );
+    finalState = await driver.getState({ timeoutMs });
   } finally {
-    // Close before reading artifacts so the driver's log writer is flushed.
-    await driver.close();
+    try {
+      if (finalState?.windowVisible !== false) {
+        send({
+          type: "hide",
+          requestId: `source-filter-matrix-finally-cleanup-${Date.now()}`,
+        });
+        await driver.waitForState(
+          { windowVisible: false },
+          { timeoutMs, pollIntervalMs: pollMs },
+        );
+        finalState = await driver.getState({ timeoutMs });
+      }
+    } finally {
+      // Close before reading artifacts so the driver's log writer is flushed.
+      await driver.close();
+    }
   }
 
   const logPath = driver.logPath;
@@ -483,6 +635,8 @@ async function main() {
     query,
     homeDir,
     cases: results,
+    recentFilesProof,
+    finalState,
     logExcerpt: readFileSync(logPath, "utf8").split("\n").slice(-80),
     responsesPath,
   };

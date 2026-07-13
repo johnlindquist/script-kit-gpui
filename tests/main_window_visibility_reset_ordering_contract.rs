@@ -36,43 +36,47 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 
 #[test]
 fn close_path_hides_before_deferred_script_list_reset() {
-    let body = function_body(LIFECYCLE_RESET, "pub(crate) fn close_and_reset_window");
+    let preparation = function_body(LIFECYCLE_RESET, "fn prepare_main_window_close");
+    let close = function_body(LIFECYCLE_RESET, "pub(crate) fn close_and_reset_window");
 
-    let hidden = body
+    let hidden = preparation
         .find("script_kit_gpui::set_main_window_visible(false)")
         .expect("close path must mark main window logically hidden");
-    let automation_hidden = body
+    let automation_hidden = preparation
         .find("crate::windows::set_automation_visibility(\"main\", false)")
         .expect("close path must mark automation hidden");
-    let hide = body
+    let prepared = close
+        .find(".prepare_main_window_close(cx, \"close_and_reset_window\", true, true)")
+        .expect("close path must run shared preparation before native hide");
+    let hide = close
         .find("platform::defer_hide_main_window(cx);")
         .expect("close path must enqueue main-panel-only hide");
-    let deferred_reset = body
+    let deferred_reset = close
         .find("self.defer_reset_to_script_list_after_main_window_hidden")
         .expect("close path must schedule hidden reset after native hide is enqueued");
 
     assert!(
-        hidden < hide,
-        "logical hidden state must precede native hide"
+        prepared < hide,
+        "shared close preparation must complete before native hide is enqueued"
     );
     assert!(
-        automation_hidden < hide,
-        "automation hidden state must precede native hide"
+        automation_hidden < preparation.len(),
+        "shared close preparation must mark automation hidden"
     );
     assert!(
         hide < deferred_reset,
         "hidden ScriptList reset must be scheduled after native hide is enqueued"
     );
     assert!(
-        !body[hidden..hide].contains("reset_to_script_list(cx);"),
-        "close path must not reset to ScriptList while the native window can still be visible"
+        !preparation[hidden..].contains("reset_to_script_list(cx);"),
+        "shared close preparation must not reset to ScriptList while the native window can still be visible"
     );
     assert!(
-        !body.contains("self.cancel_script_execution(cx);"),
+        !preparation.contains("self.cancel_script_execution(cx);"),
         "close path must cancel scripts without using the reset-owning cancellation helper"
     );
     assert!(
-        !body[..hide].contains("update_automation_semantic_surface(\"main\", Some(\"scriptList\""),
+        !preparation.contains("update_automation_semantic_surface(\"main\", Some(\"scriptList\""),
         "close path must not rekey automation to ScriptList before hidden reset"
     );
 }

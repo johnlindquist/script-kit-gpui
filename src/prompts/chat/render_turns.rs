@@ -1,9 +1,24 @@
 use super::*;
+use std::borrow::Cow;
 
 fn truncate_str_chars(s: &str, max_chars: usize) -> &str {
     s.char_indices()
         .nth(max_chars)
         .map_or(s, |(index, _)| &s[..index])
+}
+
+fn assistant_response_region_source<'a>(
+    script_generation_mode: bool,
+    response: &'a str,
+    streaming: bool,
+) -> Cow<'a, str> {
+    match (response.trim().is_empty(), streaming) {
+        (true, true) => Cow::Borrowed("_Thinking…_"),
+        (true, false) => Cow::Borrowed("_No response returned._"),
+        (false, _) => {
+            super::types::assistant_response_markdown_source(script_generation_mode, response)
+        }
+    }
 }
 
 impl ChatPrompt {
@@ -118,61 +133,29 @@ impl ChatPrompt {
         }
         // AI response (only show if no error, or show partial if stream interrupted)
         else if let Some(ref response) = turn.assistant_response {
-            let markdown_response = super::types::assistant_response_markdown_source(
+            let markdown_response = assistant_response_region_source(
                 self.script_generation_mode,
                 response,
+                turn.streaming,
             );
 
-            // Use markdown rendering for assistant responses
-            if turn.streaming && response.is_empty() {
-                // Empty streaming state: pulse so a slow first token reads
-                // as alive, not stuck (same sine pulse as Agent Chat).
-                content = content.child(div().text_xs().child("Thinking...").with_animation(
-                    ("chat-turn-thinking-pulse", turn_index),
-                    Animation::new(std::time::Duration::from_millis(1200)).repeat(),
-                    |style, delta| {
-                        let sine = (delta * std::f32::consts::PI * 2.0).sin();
-                        style.opacity(0.35 + (0.3 * ((sine + 1.0) / 2.0)))
-                    },
-                ));
-            } else if turn.streaming {
-                // Streaming with content: markdown renders separately from
-                // the live affordance so the cache survives every frame; the
-                // pulsing accent dot below is the "still working" signal
-                // between chunks (Agent Chat's dot-pulse pattern).
-                content = content.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .overflow_x_hidden()
-                        .child(render_markdown(markdown_response.as_ref(), colors)),
-                );
-                content = content.child(
-                    div().pt(px(2.0)).child(
-                        div()
-                            .size(px(7.0))
-                            .rounded(px(999.0))
-                            .bg(rgb(theme_colors.accent.selected))
-                            .with_animation(
-                                ("chat-turn-streaming-dot-pulse", turn_index),
-                                Animation::new(std::time::Duration::from_millis(1200)).repeat(),
-                                |style, delta| {
-                                    let sine = (delta * std::f32::consts::PI * 2.0).sin();
-                                    style.opacity(0.65 + (0.35 * ((sine + 1.0) / 2.0)))
-                                },
-                            ),
-                    ),
-                );
-            } else {
-                // Complete response - full markdown rendering (with container for proper wrapping)
-                content = content
-                    .child(render_markdown(markdown_response.as_ref(), colors).overflow_x_hidden());
-            }
+            // Empty pending, first text, and terminal-empty responses all use
+            // the same markdown response region. Streaming activity lives in
+            // the card's fixed trailing slot, so it cannot add a row below it.
+            content = content.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .child(render_markdown(markdown_response.as_ref(), colors)),
+            );
         }
 
-        // Copy button (appears on right side) - copies assistant response
-        let copy_button = div()
+        let show_streaming_indicator =
+            turn.error.is_none() && turn.assistant_response.is_some() && turn.streaming;
+        let trailing_control = div()
             .id(format!("copy-turn-{}", turn_index))
+            .relative()
             .flex()
             .items_center()
             .justify_center()
@@ -188,6 +171,25 @@ impl ChatPrompt {
                     .size(px(16.))
                     .text_color(rgb(theme_colors.text.secondary)),
             )
+            .when(show_streaming_indicator, |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .right(px(1.0))
+                        .bottom(px(1.0))
+                        .size(px(7.0))
+                        .rounded(px(999.0))
+                        .bg(rgb(theme_colors.accent.selected))
+                        .with_animation(
+                            ("chat-turn-streaming-dot-pulse", turn_index),
+                            Animation::new(std::time::Duration::from_millis(1200)).repeat(),
+                            |style, delta| {
+                                let sine = (delta * std::f32::consts::PI * 2.0).sin();
+                                style.opacity(0.65 + (0.35 * ((sine + 1.0) / 2.0)))
+                            },
+                        ),
+                )
+            })
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.copy_turn_response(turn_index, cx);
             }));
@@ -204,7 +206,7 @@ impl ChatPrompt {
             .items_start()
             .gap(px(8.0))
             .child(content.flex_1())
-            .child(copy_button)
+            .child(trailing_control)
     }
 
     /// Handle retry for a failed message
@@ -252,7 +254,7 @@ impl ChatPrompt {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_str_chars;
+    use super::{assistant_response_region_source, truncate_str_chars};
     const CHAT_RENDER_TURNS_SOURCE: &str = include_str!("render_turns.rs");
 
     #[test]
@@ -264,6 +266,22 @@ mod tests {
     fn test_truncate_str_chars_truncates_detail_without_breaking_utf8_chars() {
         let input = "🙂🙂🙂abc";
         assert_eq!(truncate_str_chars(input, 2), "🙂🙂");
+    }
+
+    #[test]
+    fn assistant_response_region_has_stable_honest_empty_states() {
+        assert_eq!(
+            assistant_response_region_source(false, "", true),
+            "_Thinking…_"
+        );
+        assert_eq!(
+            assistant_response_region_source(false, "", false),
+            "_No response returned._"
+        );
+        assert_eq!(
+            assistant_response_region_source(false, "First token", true),
+            "First token"
+        );
     }
 
     #[test]

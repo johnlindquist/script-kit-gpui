@@ -5,6 +5,33 @@
 #[cfg(target_os = "macos")]
 use cocoa::foundation::NSRect;
 
+/// Proof that AppKit reported the main window hidden after `orderOut:`.
+///
+/// The private field keeps this receipt constructible only by this module's
+/// native visibility verification path.
+#[derive(Debug)]
+pub struct NativeMainWindowHidden {
+    _private: (),
+}
+
+#[derive(Debug)]
+pub enum MainWindowHideCompletion {
+    Hidden(NativeMainWindowHidden),
+    Superseded,
+    MissingWindow,
+    StillVisible,
+    WrongThread,
+    UnsupportedPlatform,
+}
+
+fn main_window_hide_was_superseded(
+    expected_visibility_generation: u64,
+    current_visibility_generation: u64,
+    is_logically_visible: bool,
+) -> bool {
+    is_logically_visible || current_visibility_generation != expected_visibility_generation
+}
+
 /// Hide the main window without hiding the entire app (synchronous, low-level).
 ///
 /// # Reentrancy Danger — Do NOT call from GPUI callbacks
@@ -160,6 +187,90 @@ pub fn defer_hide_main_window(cx: &mut gpui::App) {
         hide_main_window();
     })
     .detach();
+}
+
+/// Hide the main window outside the current GPUI borrow and report the verified
+/// native outcome to `completion`.
+///
+/// This strict variant is intentionally separate from the existing fire-and-
+/// forget APIs. It fails closed if logical visibility changed before or during
+/// the native hide, or if AppKit cannot confirm that the window is no longer
+/// visible.
+pub fn defer_hide_main_window_with_completion(
+    cx: &mut gpui::App,
+    expected_visibility_generation: u64,
+    completion: impl FnOnce(MainWindowHideCompletion, &mut gpui::AsyncApp) + 'static,
+) {
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        let outcome = hide_main_window_with_completion(expected_visibility_generation);
+        completion(outcome, cx);
+    })
+    .detach();
+}
+
+#[cfg(target_os = "macos")]
+fn hide_main_window_with_completion(
+    expected_visibility_generation: u64,
+) -> MainWindowHideCompletion {
+    if require_main_thread("hide_main_window_with_completion") {
+        return MainWindowHideCompletion::WrongThread;
+    }
+
+    if main_window_hide_was_superseded(
+        expected_visibility_generation,
+        crate::main_window_visibility_generation(),
+        crate::is_main_window_visible(),
+    ) {
+        return MainWindowHideCompletion::Superseded;
+    }
+
+    // SAFETY: Main thread verified. The WindowManager owns the registered
+    // NSWindow, and orderOut:/isVisible are standard AppKit methods.
+    unsafe {
+        let Some(window) = window_manager::get_main_window() else {
+            return MainWindowHideCompletion::MissingWindow;
+        };
+
+        let _: () = msg_send![window, orderOut:nil];
+
+        if main_window_hide_was_superseded(
+            expected_visibility_generation,
+            crate::main_window_visibility_generation(),
+            crate::is_main_window_visible(),
+        ) {
+            return MainWindowHideCompletion::Superseded;
+        }
+
+        let is_visible: bool = msg_send![window, isVisible];
+        if is_visible {
+            return MainWindowHideCompletion::StillVisible;
+        }
+    }
+
+    logging::log(
+        "PANEL",
+        "Main window hidden via orderOut: with native completion receipt",
+    );
+    MainWindowHideCompletion::Hidden(NativeMainWindowHidden { _private: () })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_main_window_with_completion(
+    _expected_visibility_generation: u64,
+) -> MainWindowHideCompletion {
+    MainWindowHideCompletion::UnsupportedPlatform
+}
+
+#[cfg(test)]
+mod native_hide_completion_tests {
+    use super::main_window_hide_was_superseded;
+
+    #[test]
+    fn native_hide_requires_same_hidden_visibility_generation() {
+        assert!(!main_window_hide_was_superseded(7, 7, false));
+        assert!(main_window_hide_was_superseded(7, 8, false));
+        assert!(main_window_hide_was_superseded(7, 7, true));
+    }
 }
 
 pub fn defer_hide_main_window_with_geometry_trace(cx: &mut gpui::App, cycle_id: u64) {

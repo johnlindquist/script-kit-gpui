@@ -1,4 +1,11 @@
 // Element collection for getElements protocol support.
+
+fn root_file_semantic_kind(file_type: crate::file_search::FileType) -> &'static str {
+    match file_type {
+        crate::file_search::FileType::Directory => "directory",
+        _ => "file",
+    }
+}
 // Returns a bounded list of visible UI elements with semantic IDs.
 
 /// Outcome of collecting visible UI elements, carrying receipt metadata
@@ -3221,8 +3228,11 @@ impl ScriptListApp {
                         action_disabled: None,
                         style: None,
                     };
-                    if matches!(result, scripts::SearchResult::File(_)) {
-                        element.kind = Some("file".to_string());
+                    if let scripts::SearchResult::File(file_match) = result {
+                        element.kind =
+                            Some(root_file_semantic_kind(file_match.file.file_type).to_string());
+                        // Semantic identity stays exact even though the rendered subtitle is shortened.
+                        element.value = Some(file_match.file.path.clone());
                     }
                     elements.push(element);
                     row_index += 1;
@@ -3298,3 +3308,20 @@ impl ScriptListApp {
     }
 }
 include!("prompt_and_script_list_collectors.rs");
+
+#[cfg(test)]
+mod recent_files_semantic_tests {
+    use super::*;
+
+    #[test]
+    fn recent_files_semantic_kind_distinguishes_directories() {
+        assert_eq!(
+            root_file_semantic_kind(crate::file_search::FileType::Directory),
+            "directory"
+        );
+        assert_eq!(
+            root_file_semantic_kind(crate::file_search::FileType::Document),
+            "file"
+        );
+    }
+}

@@ -2668,6 +2668,28 @@ impl ScriptListApp {
 
                                         this.move_selection_up(cx);
                                     } else if is_down {
+                                        let in_history =
+                                            this.input_history.current_index().is_some();
+                                        let source_filter_mode =
+                                            this.source_filter_mode_blocks_input_history_recall();
+                                        if !source_filter_mode && in_history {
+                                            let history_index_before =
+                                                this.input_history.current_index();
+                                            let filter_len_before = this.filter_text.len();
+                                            this.input_history.reset_navigation();
+                                            tracing::info!(
+                                                target: "script_kit::input_history",
+                                                event = "history_exit_to_list_down",
+                                                history_index_before = ?history_index_before,
+                                                history_index_after = ?this.input_history.current_index(),
+                                                filter_len_before,
+                                                filter_len_after = this.filter_text.len(),
+                                                selected_index_before = this.selected_index,
+                                            );
+                                            this.move_selection_down(cx);
+                                            cx.stop_propagation();
+                                            return;
+                                        }
                                         if let Some(pending_filter) =
                                             this.history_filter_render_pending.as_ref()
                                         {
@@ -2682,10 +2704,6 @@ impl ScriptListApp {
                                             cx.stop_propagation();
                                             return;
                                         }
-                                        let in_history =
-                                            this.input_history.current_index().is_some();
-                                        let source_filter_mode =
-                                            this.source_filter_mode_blocks_input_history_recall();
                                         tracing::info!(
                                             target: "script_kit::input_history",
                                             event = "main_menu_arrow_history_decision",
@@ -2704,54 +2722,6 @@ impl ScriptListApp {
                                                 "list_down"
                                             },
                                         );
-                                        if !source_filter_mode && in_history {
-                                            if let Some(text) = this.input_history.navigate_down() {
-                                                let safe = logging::log_user_value(&text);
-                                                tracing::info!(
-                                                    target: "script_kit::input_history",
-                                                    event = "history_recalled",
-                                                    direction = "down",
-                                                    filter_preview = %safe,
-                                                    filter_bytes = safe.raw_bytes,
-                                                    filter_safe_bytes = safe.safe_bytes,
-                                                    filter_truncated = safe.truncated,
-                                                    history_index = ?this.input_history.current_index(),
-                                                );
-                                                logging::log(
-                                                    HISTORY,
-                                                    &format!("Recalled len={}", text.len()),
-                                                );
-                                                if text != this.filter_text
-                                                    || text != this.computed_filter_text
-                                                {
-                                                    this.history_filter_render_pending =
-                                                        Some(text.clone());
-                                                    this.set_filter_text_immediate(
-                                                        text, window, cx,
-                                                    );
-                                                } else {
-                                                    tracing::info!(
-                                                        target: "script_kit::input_history",
-                                                        event = "history_recall_noop_already_rendered",
-                                                        direction = "down",
-                                                        filter_len = text.len(),
-                                                        history_index = ?this.input_history.current_index(),
-                                                    );
-                                                }
-                                            } else {
-                                                this.input_history.reset_navigation();
-                                                if !this.filter_text.is_empty()
-                                                    || !this.computed_filter_text.is_empty()
-                                                {
-                                                    this.history_filter_render_pending =
-                                                        Some(String::new());
-                                                }
-                                                this.clear_filter(window, cx);
-                                            }
-                                            cx.stop_propagation();
-                                            return;
-                                        }
-
                                         this.move_selection_down(cx);
                                     }
                                     cx.stop_propagation();
