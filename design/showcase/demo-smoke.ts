@@ -57,7 +57,11 @@ const browser = (args: string[]) => run(["agent-browser", "--session", SESSION, 
 
 async function ae(a: string, b: string): Promise<number> {
   const out = await run(["magick", "compare", "-metric", "AE", a, b, "null:"], true);
-  const m = out.match(/^([\d.eE+]+)/);
+  // This ImageMagick build prints "<distance> (<count>)"; the parenthesized
+  // value is the differing-pixel count. Fall back to the bare number.
+  const paren = out.match(/\(([\d.eE+]+)\)/);
+  const bare = out.match(/^([\d.eE+]+)/);
+  const m = paren ?? bare;
   if (!m) throw new Error(`unparseable AE: ${out}`);
   return Number(m[1]);
 }
