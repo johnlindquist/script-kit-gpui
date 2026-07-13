@@ -95,6 +95,18 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   border-radius:6px;display:grid;place-items:center;
   color:var(--sk-footer-text);font-size:11px;line-height:1;font-family:inherit}
 .f-gap{flex:1 1 auto}
+
+/* ── demo support ──────────────────────────────────────────────────────── */
+[hidden] { display: none !important; }
+/* Typed query text sits alongside the (hidden-while-typing) placeholder;
+ * inherits full-bright text color from .sk-window__content already, this
+ * just pins the behavior explicitly and preserves run spacing. Gated so
+ * the canonical (non-demo) frame can never be affected. */
+html[data-sk-demo="1"] .search .q { color: var(--sk-text-name); white-space: pre; }
+/* Footer action flash on keypress-activate, mirrors the shared
+ * .sk-footer-action[data-selected="true"] vocabulary for this scene's
+ * bespoke .f-act footer buttons. */
+html[data-sk-demo="1"] .f-act[data-selected="true"] { background: var(--sk-footer-button-active); }
 </style></head>
 <body>
 <div class="scene">
@@ -121,7 +133,8 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 
       <div class="search">
         <span class="sk-caret"></span>
-        <span class="ph">Search&nbsp; •&nbsp; @ context&nbsp; •&nbsp; / command&nbsp; •&nbsp; . style&nbsp; •&nbsp; | profile</span>
+        <span class="ph" data-demo-key="placeholder">Search&nbsp; •&nbsp; @ context&nbsp; •&nbsp; / command&nbsp; •&nbsp; . style&nbsp; •&nbsp; | profile</span>
+        <span class="q" data-demo-key="query" hidden data-demo-only></span>
       </div>
 
       <section class="sk-list">
@@ -129,7 +142,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           <div class="sk-section-header">Brain Inbox</div>
         </div>
 
-        <div class="sk-list-row" data-state="selected">
+        <div class="sk-list-row" data-state="selected" data-demo-role="result" data-demo-key="dash" data-demo-match="dash">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon-tile tile-inbox" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -141,7 +154,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-list-row">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="sideshow" data-demo-match="sideshow">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -150,7 +163,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-list-row">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="lively-rafter" data-demo-match="lively-rafter-gf4n">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -159,7 +172,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-section-slot">
+        <div class="sk-section-slot" data-demo-key="suggested-slot">
           <div class="sk-section-header">
             <span class="sk-section-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
@@ -168,7 +181,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-list-row">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="theme-designer" data-demo-match="theme designer">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 10-10c0 2.21-1.79 3-3 3h-2.5a2.5 2.5 0 0 0-2.5 2.5c0 .61.22 1.17.58 1.6.36.44.42 1.06.05 1.49-.6.7-1.55 1.41-2.63 1.41z"/><circle cx="13.5" cy="6.5" r=".8" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".8" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".8" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".8" fill="currentColor"/></svg>
@@ -177,7 +190,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-list-row">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="clipboard-history" data-demo-match="clipboard history">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2.5"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -186,7 +199,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-list-row">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="search-files" data-demo-match="search files">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.7 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-9.3z"/><circle cx="11.5" cy="12.5" r="2.6"/><path d="m13.4 14.4 2.1 2.1"/></svg>
@@ -195,7 +208,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-list-row">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="reset-windows" data-demo-match="reset window positions">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
@@ -204,7 +217,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
           </div>
         </div>
 
-        <div class="sk-list-row">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="open-notes" data-demo-match="open notes">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4M2 10h4M2 14h4M2 18h4"/><path d="M21.4 2.6a2.05 2.05 0 0 1 0 2.9L13 14l-4 1 1-4 8.4-8.4a2.05 2.05 0 0 1 3 0z"/></svg>
@@ -216,15 +229,15 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 
       <footer class="footer">
         <span class="f-gap"></span>
-        <button class="f-act f-act--ask">
+        <button class="f-act f-act--ask" data-demo-key="ask">
           <span class="f-label">Ask Your Brain</span>
           <kbd class="f-key">↵</kbd>
         </button>
-        <button class="f-act">
+        <button class="f-act" data-demo-key="actions">
           <span class="f-label">Actions</span>
           <kbd class="f-key">⌘</kbd><kbd class="f-key">K</kbd>
         </button>
-        <button class="f-act">
+        <button class="f-act" data-demo-key="agent">
           <span class="f-label">Agent</span>
           <kbd class="f-key">⌘</kbd><kbd class="f-key">↵</kbd>
         </button>
@@ -234,4 +247,14 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body></html>
