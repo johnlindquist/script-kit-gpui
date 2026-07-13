@@ -1,0 +1,107 @@
+/* Demo chrome: direct-scene HUD + landing-page rail. Never inside .scene. */
+
+/* ---- direct-scene HUD (fixed overlay, sibling of .scene) ---- */
+.sk-demo-hud {
+  position: fixed;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(680px, calc(100vw - 24px));
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(12, 12, 16, 0.82);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  font: 500 12.5px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  color: rgba(255, 255, 255, 0.72);
+  opacity: 0;
+  transition: opacity 140ms ease, translate 140ms ease;
+  translate: 0 3px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.sk-demo-hud[data-visible="1"] { opacity: 1; translate: 0 0; }
+.sk-demo-hud[data-placement="top-right"] {
+  left: auto; right: 10px; top: 10px; bottom: auto; transform: none;
+}
+.sk-demo-hud__caption {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sk-demo-hud__keys { display: inline-flex; gap: 4px; }
+
+.sk-demo-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  min-width: 20px;
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font: 500 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk-demo-hud { transition: none; }
+}
+
+/* ---- landing rail (inserted by demo-host.js after each iframe) ---- */
+.sk-demo-rail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 2px;
+  /* NOTE: never use a CSS-wide keyword inside the `font` shorthand here —
+     an invalid `font: … inherit` in this sheet measurably re-rasterized
+     every scene's text/blur in Chromium even though the selector matches
+     nothing (found via pixel-diff bisect, 2026-07-13). */
+  font-weight: 500;
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.72);
+}
+@media (max-width: 700px) { .sk-demo-rail { height: 44px; } }
+.sk-demo-rail .sk-demo-caption {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.sk-demo-rail .sk-demo-keys { display: inline-flex; gap: 4px; flex: none; }
+.sk-demo-rail .sk-demo-engage {
+  flex: none;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 500;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+.sk-demo-rail .sk-demo-engage:hover { background: rgba(255, 255, 255, 0.12); }
+.sk-demo-rail .sk-demo-engage:focus-visible {
+  outline: 2px solid rgba(245, 189, 12, 0.8);
+  outline-offset: 1px;
+}
+
+/* engaged figure focus ring on the landing page */
+figure.shot[data-demo-engaged="1"] {
+  outline: 2px solid rgba(245, 189, 12, 0.65);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+figure.shot[data-demo-engaged="1"] iframe.embed { pointer-events: auto !important; }

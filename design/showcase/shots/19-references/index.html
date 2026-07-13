@@ -89,13 +89,18 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 /* ── Editor text (raw markdown, NotesEditor mono grid) ─────────────────── */
 .editor {
   position: absolute;
-  left: 61.5px;
+  left: 64.3px;
   top: 6px;
-  letter-spacing: 0.1px;
+  letter-spacing: 0.0025px;
   font-size: var(--sk-notes-editor-font-size, 16px);
   line-height: var(--sk-notes-editor-line-box-height, 20px);
   color: var(--sk-notes-editor-text-color, rgb(255 255 255));
   font-weight: 400;
+  font-synthesis: none;
+  font-variant-ligatures: none;
+  font-kerning: none;
+  font-feature-settings: "liga" 0, "calt" 0, "kern" 0;
+  -webkit-font-smoothing: antialiased;
 }
 .editor .line { height: 20px; white-space: pre; }
 

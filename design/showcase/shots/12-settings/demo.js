@@ -1,0 +1,56 @@
+/* Demo script: 12-settings — "Theme, dictation, microphones, and permissions share one search." */
+SKDemo.define({
+  id: "12-settings",
+  initialHoldMs: 900,
+  idleResetMs: 8000,
+  loopDelayMs: 1200,
+  controls: {
+    input: {
+      target: '[data-demo-key="query"]',
+      maxLength: 40,
+      items: '[data-demo-role="result"]',
+      matchAttribute: "data-demo-match",
+    },
+    list: {
+      items: '[data-demo-role="result"]',
+      state: { type: "attribute", name: "data-state", selected: "selected", hover: "hover" },
+    },
+  },
+  steps: [
+    { id: "intro", op: "caption", text: "Theme, dictation, microphones, and permissions share one search.", holdMs: 1300 },
+    { op: "pause", ms: 500 },
+    {
+      id: "type-permission",
+      op: "typeInto",
+      target: '[data-demo-key="query"]',
+      text: "permission",
+      clear: true,
+      perCharacterMs: 65,
+      filter: { items: '[data-demo-role="result"]', matchAttribute: "data-demo-match" },
+    },
+    { id: "permissions-filtered", op: "setText", target: '[data-demo-key="count"]', text: "5 settings" },
+    { op: "pause", ms: 550 },
+    {
+      id: "select-check-permissions",
+      op: "moveSelection",
+      group: '[data-demo-role="result"]',
+      to: '[data-demo-key="check-permissions"]',
+      holdMs: 300,
+    },
+    { op: "pause", ms: 400 },
+    { id: "arrow-down-1", op: "keypress", keys: ["↓"], holdMs: 250 },
+    { op: "moveSelection", group: '[data-demo-role="result"]', to: '[data-demo-key="set-up-permissions"]', holdMs: 200 },
+    { op: "pause", ms: 350 },
+    { id: "arrow-down-2", op: "keypress", keys: ["↓"], holdMs: 250 },
+    { op: "moveSelection", group: '[data-demo-role="result"]', to: '[data-demo-key="accessibility-permission-assistant"]', holdMs: 200 },
+    { op: "pause", ms: 600 },
+    {
+      id: "activate-run",
+      op: "keypress",
+      keys: ["↵"],
+      activate: '[data-demo-key="run-action"]',
+      holdMs: 700,
+    },
+    { op: "loop", delayMs: 1200 },
+  ],
+});

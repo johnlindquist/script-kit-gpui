@@ -1,135 +1,43 @@
-[
-  {
-    "id": "01-main-launcher",
-    "status": "ok",
-    "rmse": 0.0858818,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/01-main-launcher-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/01-main-launcher-diff.png"
+{
+  "generatedBy": "design/showcase/verify.ts v2 (exact native canvas)",
+  "environment": {
+    "dpr": 2,
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/147.0.0.0 Safari/537.36",
+    "magick": "Version: ImageMagick 7.1.1-47 Q16-HDRI aarch64 22763 https://imagemagick.org",
+    "platform": "darwin"
   },
-  {
-    "id": "02-search-filter",
-    "status": "ok",
-    "rmse": 0.105771,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/02-search-filter-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/02-search-filter-diff.png"
-  },
-  {
-    "id": "04-clipboard-history",
-    "status": "ok",
-    "rmse": 0.155595,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/04-clipboard-history-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/04-clipboard-history-diff.png"
-  },
-  {
-    "id": "05-emoji-picker",
-    "status": "ok",
-    "rmse": 0.0931451,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/05-emoji-picker-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/05-emoji-picker-diff.png"
-  },
-  {
-    "id": "06-notes",
-    "status": "ok",
-    "rmse": 0.0754437,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/06-notes-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/06-notes-diff.png"
-  },
-  {
-    "id": "07-day-page",
-    "status": "ok",
-    "rmse": 0.0992481,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/07-day-page-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/07-day-page-diff.png"
-  },
-  {
-    "id": "08-agent-chat",
-    "status": "ok",
-    "rmse": 0.164653,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/08-agent-chat-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/08-agent-chat-diff.png"
-  },
-  {
-    "id": "09-terminal",
-    "status": "ok",
-    "rmse": 0.0798251,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/09-terminal-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/09-terminal-diff.png"
-  },
-  {
-    "id": "10-file-search",
-    "status": "ok",
-    "rmse": 0.103943,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/10-file-search-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/10-file-search-diff.png"
-  },
-  {
-    "id": "11-theme-designer",
-    "status": "ok",
-    "rmse": 0.130109,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/11-theme-designer-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/11-theme-designer-diff.png"
-  },
-  {
-    "id": "12-settings",
-    "status": "ok",
-    "rmse": 0.109613,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/12-settings-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/12-settings-diff.png"
-  },
-  {
-    "id": "13-agent-chat-composer",
-    "status": "ok",
-    "rmse": 0.0944577,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/13-agent-chat-composer-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/13-agent-chat-composer-diff.png"
-  },
-  {
-    "id": "14-window-switcher",
-    "status": "ok",
-    "rmse": 0.100977,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/14-window-switcher-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/14-window-switcher-diff.png"
-  },
-  {
-    "id": "15-app-launcher",
-    "status": "ok",
-    "rmse": 0.0667869,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/15-app-launcher-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/15-app-launcher-diff.png"
-  },
-  {
-    "id": "17-rewrite",
-    "status": "ok",
-    "rmse": 0.11072,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/17-rewrite-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/17-rewrite-diff.png"
-  },
-  {
-    "id": "18-rewrite-styles",
-    "status": "ok",
-    "rmse": 0.0933845,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/18-rewrite-styles-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/18-rewrite-styles-diff.png"
-  },
-  {
-    "id": "19-references",
-    "status": "ok",
-    "rmse": 0.17669,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/19-references-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/19-references-diff.png"
-  },
-  {
-    "id": "20-brain-inbox",
-    "status": "ok",
-    "rmse": 0.0983369,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/20-brain-inbox-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/20-brain-inbox-diff.png"
-  },
-  {
-    "id": "21-dictation",
-    "status": "ok",
-    "rmse": 0.0583916,
-    "render": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/21-dictation-render.png",
-    "diff": "/Users/johnlindquist/dev/script-kit-gpui/.test-output/showcase-verify/21-dictation-diff.png"
-  }
-]
+  "shots": [
+    {
+      "id": "09-terminal",
+      "status": "ok",
+      "referenceSize": [
+        1675,
+        1139
+      ],
+      "sceneSize": [
+        838,
+        570
+      ],
+      "windowRect": [
+        87,
+        89,
+        1504,
+        964
+      ],
+      "metrics": {
+        "rmse": 0.0786523,
+        "ssimDissimilarity": 0.102558,
+        "lowPassRmse": 0.0675891,
+        "windowRmse": 0.0689181,
+        "wallpaperRmse": 0.10360428393814095
+      },
+      "fonts": [
+        "Times",
+        "-apple-system, \"system-ui\", \"SF Pro Text\", sans-serif",
+        "\"JetBrains Mono\", ui-monospace, Menlo, monospace"
+      ],
+      "render": ".test-output/showcase-verify/09-terminal-render.png",
+      "diff": ".test-output/showcase-verify/09-terminal-diff.png"
+    }
+  ]
+}

@@ -151,6 +151,19 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 </style></head>
 <body>
 <div class="scene">
+<!-- Shared SVG paint servers: defined once at the scene root so sibling
+     <svg> icons can reference them without cross-element resolution risk. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <linearGradient id="yl" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#f0c455"/><stop offset="1" stop-color="#dfa332"/>
+  </linearGradient>
+  <linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#fbfbfb"/><stop offset="1" stop-color="#d9d9dc"/>
+  </linearGradient>
+  <linearGradient id="fd" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#e3e3e6"/><stop offset="1" stop-color="#9d9da4"/>
+  </linearGradient>
+</defs></svg>
   <div class="wall"></div>
   <div class="edge edge-top"></div>
   <div class="edge edge-bottom"></div>
@@ -179,14 +192,6 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
             <div class="row-surface">
               <div class="row-icon">
                 <svg width="24" height="24" viewBox="0 0 24 24">
-                  <defs>
-                    <linearGradient id="yl" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0" stop-color="#f0c455"/><stop offset="1" stop-color="#dfa332"/>
-                    </linearGradient>
-                    <linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0" stop-color="#fbfbfb"/><stop offset="1" stop-color="#d9d9dc"/>
-                    </linearGradient>
-                  </defs>
                   <rect width="24" height="24" rx="6" fill="url(#yl)"/>
                   <g transform="rotate(-4 12 12)">
                     <rect x="5" y="5" width="14" height="12.5" fill="url(#pg)"/>
@@ -208,7 +213,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 
           <!-- folder rows -->
           <div class="row"><div class="row-surface">
-            <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><defs><linearGradient id="fd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e3e3e6"/><stop offset="1" stop-color="#9d9da4"/></linearGradient></defs><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
+            <div class="row-icon"><svg width="22" height="22" viewBox="0 0 22 22"><path d="M4 5.5 l4.5 -1.2 1 1.7 6.5 0 v11 H4 Z" fill="#55555c"/><rect x="3.6" y="6.8" width="14.8" height="10.4" rx=".6" fill="url(#fd)" transform="skewX(-2)"/></svg></div>
             <div class="row-copy"><span class="row-name">LAUNCHXL</span></div>
             <span class="row-meta">128 B &middot; 10/27/&hellip;</span>
           </div></div>

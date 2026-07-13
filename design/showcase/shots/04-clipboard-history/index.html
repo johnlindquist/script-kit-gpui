@@ -42,13 +42,15 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
     /* bottom mid dark */
     radial-gradient(420px 150px at 45% 107%, rgb(6 3 34 / 0.95), transparent 85%),
     /* top edge dark navy strip */
-    linear-gradient(180deg, rgb(11 6 84) 0px, rgb(11 6 84 / 0.9) 28px, transparent 50px),
+    linear-gradient(180deg, rgb(11 6 84 / 0.7) 0px, rgb(11 6 84 / 0.55) 28px, transparent 50px),
     /* ── window-region fields (seen only through the vibrancy blur; the
        saturate(2.6) in the material re-amplifies these desaturated values) ── */
     /* gray-purple field behind list pane (plateau through mid-list, decays before the divider) */
     radial-gradient(285px 320px at 22% 48%, rgb(66 50 90 / 0.94), rgb(66 50 90 / 0.85) 52%, transparent 76%),
-    /* gray footer band (darker, tighter so it fades before the right edge) */
-    radial-gradient(420px 95px at 38% 93%, rgb(48 45 58 / 0.85), transparent 74%),
+    /* gray footer band: wide flat band spanning the full footer width (the
+       reference footer reads as a near-neutral gray-blue strip, not a
+       localized radial hot-spot) */
+    radial-gradient(900px 90px at 46% 94%, rgb(52 50 56 / 0.96), rgb(52 50 56 / 0.92) 55%, transparent 88%),
     /* muted navy band behind header */
     radial-gradient(360px 100px at 45% 9%, rgb(38 39 58 / 0.9), transparent 78%),
     /* blue-violet top-right interior (less saturated) */
@@ -57,6 +59,16 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
     radial-gradient(430px 300px at 80% 58%, rgb(40 37 54 / 0.97), rgb(40 37 54 / 0.88) 60%, transparent 84%),
     /* base */
     linear-gradient(107deg, rgb(120 38 190) 0%, rgb(72 26 148) 15%, rgb(20 12 80) 34%, rgb(18 12 62) 52%, rgb(26 12 58) 66%, rgb(56 20 86) 82%, rgb(118 32 145) 100%);
+}
+
+/* ── Wallpaper geometric facets (edge-local; never reach under the window):
+   reference has a hard-edged blue/navy diagonal at the top-right corner and
+   a charcoal ribbon + silver highlight along the bottom edge. Curved,
+   feathered (mask-blurred) shapes layered above the soft gradient base. ── */
+.desktop-facets {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
 /* ── Window shell overrides (750×480 at measured position) ─────────────── */
@@ -236,6 +248,64 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 <body>
 <div class="scene">
   <div class="desktop"></div>
+  <svg class="desktop-facets" viewBox="0 0 838 570" preserveAspectRatio="none" aria-hidden="true">
+    <defs>
+      <linearGradient id="wp-facet-a" x1="838" y1="8" x2="796" y2="34" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stop-color="rgb(24 5 50)"/>
+        <stop offset="100%" stop-color="rgb(15 3 35)"/>
+      </linearGradient>
+      <!-- The dark navy boundary keeps riding the window's right edge well
+           past the corner (measured solid to ~y=175, fading out by ~y=230)
+           before the reference's pink swirl takes over — a plain vertical
+           fade lets the existing right-pink-swirl gradient show through
+           underneath instead of a hard cutoff. -->
+      <linearGradient id="wp-facet-a-sliver" x1="794" y1="42" x2="794" y2="232" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stop-color="rgb(16 5 39)" stop-opacity="1"/>
+        <stop offset="62%" stop-color="rgb(14 5 37)" stop-opacity="0.96"/>
+        <stop offset="100%" stop-color="rgb(14 5 37)" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="wp-facet-b-body" x1="180" y1="528" x2="304" y2="579" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stop-color="rgb(60 57 60)"/>
+        <stop offset="50%" stop-color="rgb(52 50 52)"/>
+        <stop offset="100%" stop-color="rgb(42 40 42)"/>
+      </linearGradient>
+      <linearGradient id="wp-facet-b-ridge" x1="172" y1="528" x2="234" y2="578" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stop-color="rgb(96 96 100)"/>
+        <stop offset="55%" stop-color="rgb(140 139 144)"/>
+        <stop offset="100%" stop-color="rgb(172 170 176)"/>
+      </linearGradient>
+      <!-- Feather the MASK edge only (1-3 physical px = ~0.75 CSS px at 2x
+           capture), never the ribbon body fill, so the gradient stays crisp
+           and only the silhouette edge softens like the photographic ref. -->
+      <filter id="wp-facet-feather" x="-30%" y="-30%" width="160%" height="160%">
+        <feGaussianBlur stdDeviation="0.8"/>
+      </filter>
+      <mask id="wp-mask-a" maskUnits="userSpaceOnUse" x="0" y="0" width="838" height="570">
+        <path d="M 838,8 L 835,10 L 825,16 L 816,20 L 809,24 L 800,30 L 796,34 L 796,42 L 838,42 Z" fill="#fff" filter="url(#wp-facet-feather)"/>
+      </mask>
+      <mask id="wp-mask-a-sliver" maskUnits="userSpaceOnUse" x="0" y="0" width="838" height="570">
+        <rect x="794" y="42" width="44" height="190" fill="#fff" filter="url(#wp-facet-feather)"/>
+      </mask>
+      <mask id="wp-mask-b-body" maskUnits="userSpaceOnUse" x="0" y="0" width="838" height="570">
+        <path d="M 180,528 L 194,541 L 212,555 L 230,569 L 234,578 L 304,579 L 299,569 L 278,555 L 256,540 L 236,527 Z" fill="#fff" filter="url(#wp-facet-feather)"/>
+      </mask>
+      <mask id="wp-mask-b-ridge" maskUnits="userSpaceOnUse" x="0" y="0" width="838" height="570">
+        <path d="M 172,528 L 186,541 L 204,555 L 222,569 L 226,578 L 234,578 L 230,569 L 212,555 L 194,541 L 180,528 Z" fill="#fff" filter="url(#wp-facet-feather)"/>
+      </mask>
+    </defs>
+    <!-- top-right blue/navy diagonal boundary (clipped ≥2px clear of the
+         window's top-right corner at 794,44 — never painted under it) -->
+    <rect x="0" y="0" width="838" height="570" fill="url(#wp-facet-a)" mask="url(#wp-mask-a)"/>
+    <!-- boundary keeps hugging the window's right edge below the corner,
+         fading into the existing right-pink-swirl gradient (never painted
+         under the window: starts at x=794, the window's own right edge) -->
+    <rect x="0" y="0" width="838" height="570" fill="url(#wp-facet-a-sliver)" mask="url(#wp-mask-a-sliver)"/>
+    <!-- bottom-edge charcoal ribbon body, starting ≥4px below the window's
+         bottom edge (524) -->
+    <rect x="0" y="0" width="838" height="570" fill="url(#wp-facet-b-body)" mask="url(#wp-mask-b-body)"/>
+    <!-- narrower silver ridge highlight along the ribbon's upper edge -->
+    <rect x="0" y="0" width="838" height="570" fill="url(#wp-facet-b-ridge)" mask="url(#wp-mask-b-ridge)"/>
+  </svg>
 
   <div class="sk-window">
     <div class="sk-window__material"></div>

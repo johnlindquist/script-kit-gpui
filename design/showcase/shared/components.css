@@ -368,12 +368,12 @@
   height: var(--sk-window-native-footer-host-height);
   flex: none;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
 }
 
 .sk-footer-rail {
   width: 100%;
-  height: 100%;
+  height: var(--sk-footer-rail-height);
   padding-inline: var(--sk-footer-side-inset);
   display: flex;
   align-items: center;
