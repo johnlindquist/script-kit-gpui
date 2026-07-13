@@ -7,5 +7,20 @@
     "Content (search query 'safari', selected 'Safari' row with Safari app icon, header chips, 'Script Kit · GPT-5.5' model label, footer 'Run ↵' / 'Actions ⌘ K') was verified against the reference and matches exactly; no content corrections were needed.",
     "Window geometry (left/top/width/height, footer height, row pitch) measured via luminance-edge scan and confirmed within ~1px of the existing draft; no structural changes were needed."
   ],
-  "iterations": 3
+  "iterations": 3,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "safari-filtered",
+    "autoplay": true,
+    "userControls": ["input", "list"],
+    "extraCanonicalHiddenDom": [
+      "[data-demo-only] .app-row rows for Codex, Finder, TextEdit, Screen Sharing (unfiltered launcher list state)"
+    ],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass",
+    "notes": "The scene's canonical CSS paints .app-row .row-surface as selected unconditionally (there is only one real row, Safari, in the canonical frame). Left that rule untouched; gave Safari's row an inert data-state=\"selected\" (no visual change) plus data-demo-role=\"result\"/data-demo-key=\"safari\"/data-demo-match=\"safari\", and added a demo-gated override — html[data-sk-demo=\"1\"] .app-row:not([data-state=\"selected\"]) .row-surface { background: transparent } — that only fires behind ?demo=1. Added four hidden data-demo-only .app-row siblings (Codex, Finder, TextEdit, Screen Sharing) reusing the row anatomy with small inline-SVG rounded-square gradient icon approximations, each with data-demo-role=\"result\" + a data-demo-match token; added the [hidden]{display:none!important} guard. controls.input targets [data-demo-key=\"query\"] filtering via [data-demo-role=\"result\"]/data-demo-match; controls.list uses the existing data-state selected/hover vocabulary. Steps: caption \"Type an app name and press Return.\" -> applyState unfiltered (clear query, show the four rows, moveSelection to Finder) -> typeInto \"safari\" at 75ms/char with filter -> moveSelection back to Safari (id \"safari-filtered\", the required checkpoint) -> caption \"Return launches Safari.\" -> keypress [Return] activating [data-demo-key=\"primary\"] (Run) -> keypress [Cmd K] activating [data-demo-key=\"actions\"] (Actions) -> loop. Verified in fresh agent-browser sessions per gate: gate 1 (bun design/showcase/verify.ts 15-app-launcher) render hash matches design/showcase/static-baseline.sha256 exactly; gate 2 (?demo=1&autoplay=0&hud=0) AE=0 vs canonical; gate 3 (?demo=1&once=1&speed=6&hud=0) reached status=\"done\" with errors=[] and \"safari-filtered\" in seenSteps/demoStep history, post-cycle reset screenshot AE=0 vs canonical. Note: like other scenes done under this shared worktree (see 19-references' receipt), gate-1 verify.ts hash and the raw (non-fuzzed) ImageMagick AE metric are bimodal under heavy concurrent-agent contention in this sandbox — reruns alternated between the exact baseline hash/AE=0 and a slightly different but content-identical render (AE dropped to 0 under -fuzz 2% in every off-baseline run, and this same jitter reproduces on the untouched pre-edit HEAD content for both this scene and 01-main-launcher, confirming it is environmental render-pipeline jitter, not caused by this change); reran until clean baseline matches were captured for all three gates."
+  }
 }
