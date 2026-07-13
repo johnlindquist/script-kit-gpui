@@ -247,6 +247,17 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
   font-size: var(--sk-footer-label-font-size);
 }
 .footer-gap { width: 12px; }
+
+/* demo support: [hidden] always wins; gated so the canonical frame never
+ * changes (see design/showcase/DEMO-BRIEF.md). */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] .grow[data-state="selected"] {
+  background: var(--sk-main-menu-row-hover-background);
+  border-radius: var(--sk-main-menu-row-radius);
+}
+html[data-sk-demo="1"] .footer-action[data-selected="true"] {
+  background: var(--sk-footer-button-active);
+}
 </style>
 </head>
 <body>
@@ -301,23 +312,23 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
           <div class="guidance__body">Describe the result you want. Use / for skills or @ to attach context before you send.</div>
         </div>
         <div class="guidance__rows">
-          <div class="grow">
+          <div class="grow" data-demo-role="guidance" data-demo-key="use-skill">
             <span class="grow__slot"><span class="keycap">/</span></span>
             <span class="grow__label">Use a skill or agent command</span>
           </div>
-          <div class="grow">
+          <div class="grow" data-demo-role="guidance" data-demo-key="attach-context">
             <span class="grow__slot"><span class="keycap">@</span></span>
             <span class="grow__label">Attach files, scripts, clipboard, or history</span>
           </div>
-          <div class="grow">
+          <div class="grow" data-demo-role="guidance" data-demo-key="add-newline">
             <span class="grow__slot"><span class="keycap">⇧</span><span class="keycap">↵</span></span>
             <span class="grow__label">Add a newline</span>
           </div>
-          <div class="grow">
+          <div class="grow" data-demo-role="guidance" data-demo-key="previous-chats">
             <span class="grow__slot"><span class="keycap">⌘</span><span class="keycap">P</span></span>
             <span class="grow__label">Open previous chats</span>
           </div>
-          <div class="grow">
+          <div class="grow" data-demo-role="guidance" data-demo-key="chat-actions">
             <span class="grow__slot"><span class="keycap">⌘</span><span class="keycap">K</span></span>
             <span class="grow__label">Show every chat action</span>
           </div>
@@ -325,12 +336,12 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
       </section>
 
       <footer class="footer">
-        <div class="footer-action">
+        <div class="footer-action" data-demo-key="send">
           <span>Send</span>
           <span class="keycap">↵</span>
         </div>
         <div class="footer-gap"></div>
-        <div class="footer-action">
+        <div class="footer-action" data-demo-key="actions">
           <span>Actions</span>
           <span class="keycap">⌘</span>
           <span class="keycap">K</span>
@@ -341,5 +352,15 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
   </div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body>
 </html>
