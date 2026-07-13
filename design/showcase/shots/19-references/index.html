@@ -137,11 +137,21 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
     <div class="line">twice yesterday and it was just *here* this morning. That's the</div>
     <div class="line">hero demo.</div>
     <div class="line"></div>
-    <div class="line">00:05 [<span class="link-label">Clipboard entry</span>](<span class="link-dest">kit://clipboard-history</span></div>
-    <div class="line"><span class="link-dest">?id=91a36280-01cc-4ca0-ae7a-9181468742f9</span>)</div>
+    <div class="line">00:05 [<span class="link-label" role="link" tabindex="0" data-demo-key="clipboard-reference">Clipboard entry</span>](<span class="link-dest" data-demo-key="clipboard-reference-dest-1">kit://clipboard-history</span></div>
+    <div class="line"><span class="link-dest" data-demo-key="clipboard-reference-dest-2">?id=91a36280-01cc-4ca0-ae7a-9181468742f9</span>)</div>
   </div>
   <div class="thumb"></div>
 </div>
 <script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
 </body>
 </html>
