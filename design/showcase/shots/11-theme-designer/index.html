@@ -155,24 +155,20 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   border:1px solid rgba(255,255,255,0.22);display:grid;place-items:center;
   color:rgba(255,255,255,0.8);font-size:11px;line-height:1}
 .keycap svg{width:12px;height:12px}
+.footer-group{display:flex;align-items:center;gap:4px}
 
-/* demo support: [hidden] always wins; gated rules never affect the
-   canonical (non-demo) frame since data-sk-demo is only ever set by
-   shared/demo.js behind the ?demo=1 gate. */
+/* demo support: [hidden] always wins; everything below is gated behind
+   data-sk-demo so the canonical (non-demo) render never sees it. */
 [hidden] { display: none !important; }
-html[data-sk-demo="1"] .row.hov-demo .row-surface { background: var(--sk-theme-hover-background); }
-html[data-sk-demo="1"] .search .ph[data-state="input"] { color: rgba(255,255,255,0.94); }
-html[data-sk-demo="1"] [data-demo-key="apply"][data-selected="true"],
-html[data-sk-demo="1"] [data-demo-key="actions"][data-selected="true"] { color: #fff; }
-/* Accent/background chip colors keyed off data-demo-theme, sourced from the
-   same swatch hex values already present in the canonical row markup below
-   (Dracula/Nord/Tokyo Night `.swatch i` dots) — no new colors introduced. */
+html[data-sk-demo="1"] .row.hov-demo .row-surface { background: rgba(255,255,255,0.07); }
+html[data-sk-demo="1"] .search .ph[data-demo-key="query"] { color: rgba(255,255,255,0.92); }
 html[data-sk-demo="1"] [data-demo-key="accent-chip"][data-demo-theme="dracula"] { background: #BD93F9; }
 html[data-sk-demo="1"] [data-demo-key="accent-chip"][data-demo-theme="nord"] { background: #88C0D0; }
 html[data-sk-demo="1"] [data-demo-key="accent-chip"][data-demo-theme="tokyo-night"] { background: #7AA2F7; }
 html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="dracula"] { background: #282A36; }
 html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="nord"] { background: #2E3440; }
 html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="tokyo-night"] { background: #1A1B26; }
+html[data-sk-demo="1"] .footer-group[data-selected="true"] { background: var(--sk-footer-button-active); border-radius: 7px; }
 </style></head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -226,12 +222,13 @@ html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="tokyo-night"] 
         </div>
       </div>
       <div class="search">
-        <span class="ph" data-demo-key="query">Search themes or paste #hex...</span>
+        <span class="ph" data-demo-key="placeholder">Search themes or paste #hex...</span>
+        <span class="ph" hidden data-demo-only data-demo-key="query"></span>
         <span class="count">73 themes</span>
       </div>
 
       <div class="list">
-        <div class="row sel" data-demo-role="result" data-demo-key="script-kit-dark" data-demo-match="script kit dark"><div class="row-surface">
+        <div class="row sel" data-demo-role="result" data-demo-match="script kit dark"><div class="row-surface">
           <span class="swatch"><i style="background:#0f0f0f"></i><i style="background:#fbbf24"></i><i style="background:#ffffff"></i><i style="background:#ffffff"></i><i style="background:#353136"></i></span>
           <span class="row-copy">
             <span class="row-name">Script Kit Dark</span>
@@ -263,7 +260,7 @@ html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="tokyo-night"] 
           <span class="swatch"><i style="background:#282828"></i><i style="background:#fe8019"></i><i style="background:#ffffff"></i><i style="background:#d5c4a1"></i><i style="background:#504945"></i></span>
           <span class="row-copy"><span class="row-name">Gruvbox Dark</span></span>
         </div></div>
-        <div class="row" data-demo-role="result" data-demo-match="rose pine"><div class="row-surface">
+        <div class="row" data-demo-role="result" data-demo-match="rosé pine"><div class="row-surface">
           <span class="swatch"><i style="background:#191724"></i><i style="background:#ebbcba"></i><i style="background:#ffffff"></i><i style="background:#c4a7e7"></i><i style="background:#403d52"></i></span>
           <span class="row-copy"><span class="row-name">Rosé Pine</span></span>
         </div></div>
@@ -297,12 +294,16 @@ html[data-sk-demo="1"] [data-demo-key="bg-chip"][data-demo-theme="tokyo-night"] 
       </div>
 
       <div class="footer">
-        <span class="flab" data-demo-key="apply">Apply</span>
-        <span class="keycap" style="min-width:26px"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 4v4H4"/><path d="m6.5 5.5-2.5 2.5 2.5 2.5"/></svg></span>
+        <span class="footer-group" data-demo-key="apply">
+          <span class="flab">Apply</span>
+          <span class="keycap" style="min-width:26px"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 4v4H4"/><path d="m6.5 5.5-2.5 2.5 2.5 2.5"/></svg></span>
+        </span>
         <span class="fgap"></span>
-        <span class="flab" data-demo-key="actions">Actions</span>
-        <span class="keycap">⌘</span>
-        <span class="keycap">K</span>
+        <span class="footer-group" data-demo-key="actions">
+          <span class="flab">Actions</span>
+          <span class="keycap">⌘</span>
+          <span class="keycap">K</span>
+        </span>
       </div>
     </div>
   </div>

@@ -136,16 +136,15 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 .p-footer .gap{width:16px}
 .p-footer .sk-keycap{color:rgba(255,255,255,0.75)}
 .p-footer .kc-wide{padding-inline:4px}
-.p-footer-action{display:flex;align-items:center;gap:8px}
 
-/* Demo-only: flash the Paste Response footer action on activation. Gated so
- * the canonical (non-demo) frame is untouched; reuses the existing footer
- * active-fill token, not a new color. */
-html[data-sk-demo="1"] .p-footer-action[data-selected="true"]{
-  background:var(--sk-footer-button-active);
-  border-radius:var(--sk-footer-button-radius);
-  padding-inline:8px;margin-inline:-8px}
-[hidden]{display:none!important}
+/* demo support: [hidden] always wins; footer press-flash is scene-local and
+   gated so the canonical frame (no data-sk-demo attribute) can never change. */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] [data-demo-key="paste-response"][data-selected="true"] .lbl,
+html[data-sk-demo="1"] [data-demo-key="paste-response"][data-selected="true"] .sk-keycap {
+  background: var(--sk-footer-button-active);
+  border-radius: var(--sk-footer-button-radius);
+}
 </style></head>
 <body>
 <div class="scene">
@@ -206,7 +205,7 @@ html[data-sk-demo="1"] .p-footer-action[data-selected="true"]{
     <div class="p-abs p-response" data-demo-key="response">Hi, I think we should consider rescheduling the meeting, as something has come up and things are a bit hectic right now. Please let me know if that works for you.</div>
 
     <div class="p-abs p-footer">
-      <span class="p-footer-action" data-demo-key="paste-response">
+      <span data-demo-key="paste-response" style="display:contents">
         <span class="lbl">Paste Response</span>
         <span class="sk-keycap kc-wide">&#9166;</span>
       </span>

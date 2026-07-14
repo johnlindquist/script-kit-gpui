@@ -7,5 +7,17 @@
     "Text rendering (antialiasing, subpixel hinting) differs slightly between the reference's real macOS/TextEdit rendering and the Chromium render used for the scene; visible only as thin edge outlines in the diff, no wrap or position mismatch remains.",
     "TextEdit ruler ticks/marks approximated with repeating-linear-gradient layers rather than exact per-tick SVG; matches reference spacing and phase closely."
   ],
-  "iterations": 4
+  "iterations": 4,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "rewrite-pasted",
+    "autoplay": true,
+    "userControls": [],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }

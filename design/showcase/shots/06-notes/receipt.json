@@ -12,5 +12,21 @@
     "Iteration 2: found the editor text was offset ~2px left of the reference (measured via first/last bright-column scan on several lines); increased .editor padding-left from 25px to 27px. This single fix dropped RMSE from 0.159 to 0.0754 — confirms text-edge misalignment was the dominant error source, not color/wallpaper.",
     "Iteration 3: measured window glass-morphism glow (left pink radial, top-right blue radial) via blank-margin row sampling — render was systematically brighter/more saturated than reference (left margin +9 to +28 luminance). Reduced .win background-color opacity 0.5->0.64 darker base, radial glow alphas 0.38/0.22/0.35 -> 0.22/0.14/0.20, and backdrop-filter saturate 1.3 -> 1.05. Left-margin diff dropped to single digits; net RMSE unchanged (background strip is a small fraction of frame) but structurally more correct.",
     "Iteration 4: attempted to re-derive wall-left/wall-bottom gradient stops directly from measured reference pixel columns/rows; this improved point-sample accuracy but raised overall RMSE (0.075->0.082) because the true photo has a much sharper corner falloff than a simple mask retune could capture — reverted wall-left/wall-bottom to the original draft's gradients, confirmed RMSE back at 0.0754."
-  ]
+  ],
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "two-tasks-checked",
+    "autoplay": true,
+    "userControls": [],
+    "extraCanonicalHiddenDom": [
+      "[data-demo-key=\"task-hero-demo-on\"] (hidden data-demo-only clone of the hero-demo checklist line with [x])",
+      "[data-demo-key=\"task-launch-post-on\"] (hidden data-demo-only clone of the launch-post checklist line with [x])"
+    ],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass",
+    "notes": "Checklist text is never split into a new inline span (splitting the flat '[ ] Record...' text node into an in-place span for setText shifted downstream monospace glyph rasterization by a small but real amount — confirmed via repeated compare -metric AE: ~1382 differing pixels vs baseline, reproducible, non-zero). Instead each checked line uses a pre-existing pair of full sibling <div> rows sharing the reference's own row structure — the canonical '[ ]' row and a hidden data-demo-only '[x]' row — and the demo swaps which one is hidden via patch{hide,show}. Both rows are simple flat text (same shape as the two already-checked lines above them), so nothing is ever mid-line split. Verified over 6 repeated fresh renders that canonical render matches static-baseline.sha256 exactly whenever the shared host isn't under concurrent renderer load (the same intermittent non-baseline hash, ~113860px AE, reproduces on the untouched HEAD file with zero markup changes, confirming it is pre-existing environmental render jitter unrelated to this change, not a regression)."
+  }
 }

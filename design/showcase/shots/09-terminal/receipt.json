@@ -8,5 +8,19 @@
     "Terminal row pitch measured ~36.6px (2x) vs the --sk-terminal-cell-height token (18.2px * 2 = 36.4px) — matches within antialiasing/measurement noise.",
     "All terminal lines, prompt arrows, '~' cyan segments, ls output filenames, and footer keycap labels transcribed and re-verified character-for-character against the reference; no content mismatches found."
   ],
-  "iterations": 2
+  "iterations": 2,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "terminal-output",
+    "autoplay": true,
+    "userControls": [],
+    "extraCanonicalHiddenDom": [
+      "[data-demo-key=\"terminal-demo\"] (duplicate <pre> clone with cmd/out-1..14/prompt2/cursor2 spans)"
+    ],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }

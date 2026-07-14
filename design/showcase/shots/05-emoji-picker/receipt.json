@@ -10,5 +10,17 @@
     "selected-cell border approximated as 1px rgba(215,165,90,0.75) ring sampled from JPEG (JPEG chroma bleed makes the exact native accent color ambiguous)",
     "header chip icons (tab-pin, send-up) and footer return-arrow drawn as inline SVG approximations of the native glyphs",
     "font antialiasing / SF Pro browser rasterization differs from native CoreText"
-  ]
+  ],
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "emoji-row-2",
+    "autoplay": true,
+    "userControls": ["list"],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }

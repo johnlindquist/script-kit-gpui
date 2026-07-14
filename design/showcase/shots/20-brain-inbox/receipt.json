@@ -7,5 +7,23 @@
     "Window vibrancy (backdrop-filter blur) samples the CSS-gradient backdrop instead of the true photo, so the window's left edge (closest to the brightest wallpaper region) shows a larger per-pixel color delta than the plain right side of the window.",
     "List-row icons are inline-SVG Lucide-style approximations; glyph stroke placement/antialiasing differs slightly from the reference's rendered icon font, producing small local diffs inside icon tiles (e.g. the yellow inbox icon on the selected 'dash' row)."
   ],
-  "iterations": 1
+  "iterations": 1,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "dash-filtered",
+    "autoplay": true,
+    "userControls": [
+      "input",
+      "list"
+    ],
+    "extraCanonicalHiddenDom": [
+      "[data-demo-key=\"query\"]"
+    ],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass",
+    "notes": "Browses the Brain Inbox recents (dash → sideshow → lively-rafter-gf4n) via arrow keys before any typing, then reveals the query span (data-demo-key=query, canonical-hidden behind the long placeholder) and typeInto's 'dash' over it, filtering all 8 result rows (3 recents + 5 Suggested) via data-demo-match tokens drawn from each row's name. Only the 'dash' row's token starts with the 'dash' prefix chain, so the applyState checkpoint 'dash-filtered' moveSelection's back onto it and hides the now-empty Suggested section header. Two closing keypress+activate steps flash 'Ask Your Brain' (↵) and 'Agent' (⌘↵) before looping. Exploration controls cover the input (typing/backspace re-filters) and list (arrow keys / hover / click re-select among visible rows)."
+  }
 }

@@ -243,6 +243,9 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 .shot-footer-rail {
   border-top: var(--sk-window-divider-height) solid rgb(255 255 255 / 0.08);
 }
+
+/* demo support: [hidden] always wins */
+[hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -342,7 +345,7 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 
       <div class="shot-split">
         <section class="shot-list">
-          <div class="sk-list-row" data-state="selected" data-demo-role="result">
+          <div class="sk-list-row" data-state="selected" data-demo-role="result" data-demo-key="row-screenshots">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon-tile" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy">
@@ -366,42 +369,42 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
             </div>
           </div>
 
-          <div class="sk-list-row" data-demo-role="result">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-url">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">https://scriptkit.com</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row" data-demo-role="result">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-launch-post">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">Ship the launch post by Friday — include the...</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row" data-demo-role="result">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-sentinel-hint">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">CLIPBOARD-SENTINEL-selection-hint-prob...</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row" data-demo-role="result">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-sentinel-gdocs">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">CLIPBOARD-SENTINEL-gdocs-probe</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row" data-demo-role="result">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-googledocs-probe">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">GoogleDocs capture probe sentenceGoogle...</span></span>
             </div>
           </div>
 
-          <div class="sk-list-row" data-demo-role="result">
+          <div class="sk-list-row" data-demo-role="result" data-demo-key="row-syscopy2">
             <div class="sk-list-row__surface">
               <span class="sk-list-row__icon" aria-hidden="true"><span class="sk-clipboard-emoji">📄</span></span>
               <span class="sk-list-row__copy"><span class="sk-list-row__name">SENTINEL–syscopy2</span></span>

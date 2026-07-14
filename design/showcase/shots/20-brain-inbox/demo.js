@@ -18,19 +18,25 @@ SKDemo.define({
   },
   states: {
     dashFiltered: [
-      { op: "hide", target: '[data-demo-key="suggested-section"]' },
       { op: "moveSelection", group: '[data-demo-role="result"]', to: '[data-demo-key="dash"]' },
+      { op: "hide", target: '[data-demo-key="suggested-slot"]' },
     ],
   },
   steps: [
     { id: "intro", op: "caption", text: "Recent captures resurface before you search.", holdMs: 1100 },
     { op: "pause", ms: 500 },
     { id: "arrow-down-1", op: "keypress", keys: ["↓"], holdMs: 250 },
-    { op: "moveSelection", group: '[data-demo-role="result"]', to: '[data-demo-key="sideshow"]', holdMs: 200 },
-    { op: "pause", ms: 450 },
+    { op: "moveSelection", group: '[data-demo-role="result"]', to: '[data-demo-key="sideshow"]', holdMs: 350 },
     { id: "arrow-down-2", op: "keypress", keys: ["↓"], holdMs: 250 },
-    { op: "moveSelection", group: '[data-demo-role="result"]', to: '[data-demo-key="lively-rafter"]', holdMs: 200 },
-    { op: "pause", ms: 650 },
+    { op: "moveSelection", group: '[data-demo-role="result"]', to: '[data-demo-key="lively-rafter"]', holdMs: 550 },
+    {
+      id: "show-query",
+      op: "patch",
+      ops: [
+        { op: "hide", target: '[data-demo-key="placeholder"]' },
+        { op: "show", target: '[data-demo-key="query"]' },
+      ],
+    },
     {
       id: "type-dash",
       op: "typeInto",
@@ -41,14 +47,13 @@ SKDemo.define({
       filter: { items: '[data-demo-role="result"]', matchAttribute: "data-demo-match" },
     },
     { id: "dash-filtered", op: "applyState", name: "dashFiltered" },
-    { op: "pause", ms: 900 },
-    { id: "outro", op: "caption", text: "Search your memory like the launcher.", holdMs: 1100 },
-    { op: "pause", ms: 400 },
+    { op: "pause", ms: 650 },
+    { id: "caption-search", op: "caption", text: "Search your memory like the launcher.", holdMs: 1100 },
     {
       id: "activate-ask",
       op: "keypress",
       keys: ["↵"],
-      activate: '[data-demo-key="primary"]',
+      activate: '[data-demo-key="ask"]',
       holdMs: 700,
     },
     { op: "pause", ms: 300 },

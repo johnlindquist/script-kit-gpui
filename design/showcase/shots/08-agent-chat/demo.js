@@ -10,12 +10,13 @@ SKDemo.define({
     { id: "hide-stream", op: "hide", target: '[data-demo-role="stream-item"]' },
     {
       id: "thinking-pulse",
-      op: "effect",
-      name: "thinking",
-      target: '[data-demo-key="thinking"]',
-      durationMs: 1500,
-      holdMs: 1500,
+      op: "patch",
+      ops: [
+        { op: "effect", name: "thinking", target: '[data-demo-key="thinking-tri"]', durationMs: 1500 },
+        { op: "effect", name: "thinking", target: '[data-demo-key="thinking-lbl"]', durationMs: 1500 },
+      ],
     },
+    { op: "pause", ms: 1500 },
 
     { id: "progress-caption", op: "caption", text: "Progress stays visible while the answer is prepared.", holdMs: 1100 },
 

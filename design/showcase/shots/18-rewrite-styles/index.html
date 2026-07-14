@@ -150,6 +150,17 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   border:1px solid rgb(255 255 255 / .2);display:grid;place-items:center;
   font-size:11px;color:rgb(255 255 255 / .8);line-height:1}
 .f-gap{width:16px}
+
+/* demo support: [hidden] always wins; footer-affordance flash keeps its
+ * outer box footprint constant (padding gain cancelled by negative margin)
+ * so activating it never shifts sibling footer items. */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] .f-label[data-selected="true"] {
+  background: var(--sk-footer-button-active);
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin: -3px -8px;
+}
 </style></head>
 <body><div class="scene">
   <div class="wallpaper"></div>
@@ -201,7 +212,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
       </div>
       <div class="input-zone">
         <span class="input-text" data-demo-key="query">.</span>
-        <span class="input-caret"></span>
+        <span class="input-caret" data-demo-key="caret"></span>
       </div>
       <div class="sk-section-slot"><div class="sk-section-header">Styles</div></div>
       <div class="rows">
@@ -212,42 +223,38 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
               <span class="sk-list-row__name">Professional</span>
               <span class="row-desc-inline">Will rewrite selection in TextEdit: &ldquo;Hey, so basically I think we should maybe push the meeting because stuff came&hellip;</span>
             </div>
-            <span class="sparkle" data-demo-key="sparkle-professional"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
+            <span class="sparkle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
           </div>
         </div>
         <div class="sk-list-row" data-demo-role="result" data-demo-key="concise" data-demo-match="concise">
           <div class="sk-list-row__surface">
             <div class="sk-list-row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg></div>
             <div class="sk-list-row__copy"><span class="sk-list-row__name">Concise</span></div>
-            <span class="sparkle" data-demo-key="sparkle-concise"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
+            <span class="sparkle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
           </div>
         </div>
         <div class="sk-list-row" data-demo-role="result" data-demo-key="friendly" data-demo-match="friendly">
           <div class="sk-list-row__surface">
             <div class="sk-list-row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></div>
             <div class="sk-list-row__copy"><span class="sk-list-row__name">Friendly</span></div>
-            <span class="sparkle" data-demo-key="sparkle-friendly"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
+            <span class="sparkle" data-demo-key="friendly-sparkle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
           </div>
         </div>
         <div class="sk-list-row" data-demo-role="result" data-demo-key="direct" data-demo-match="direct">
           <div class="sk-list-row__surface">
             <div class="sk-list-row__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></div>
             <div class="sk-list-row__copy"><span class="sk-list-row__name">Direct</span></div>
-            <span class="sparkle" data-demo-key="sparkle-direct"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
+            <span class="sparkle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5c.9 3.6 2 4.7 5.5 5.5-3.5.8-4.6 1.9-5.5 5.5-.9-3.6-2-4.7-5.5-5.5 3.5-.8 4.6-1.9 5.5-5.5Z"/><path d="M18 13.5c.4 1.7 1 2.3 2.7 2.7-1.7.4-2.3 1-2.7 2.7-.4-1.7-1-2.3-2.7-2.7 1.7-.4 2.3-1 2.7-2.7Z"/><circle cx="7.5" cy="18.5" r="1" fill="currentColor" stroke="none"/></svg></span>
           </div>
         </div>
       </div>
       <div class="footer">
-        <span class="act" data-demo-key="rewrite">
-          <span class="f-label">Rewrite</span>
-          <span class="f-key">&#x21B5;</span>
-        </span>
+        <span class="f-label" data-demo-key="rewrite-affordance">Rewrite</span>
+        <span class="f-key">&#x21B5;</span>
         <span class="f-gap"></span>
-        <span class="act" data-demo-key="actions">
-          <span class="f-label">Actions</span>
-          <span class="f-key">&#x2318;</span>
-          <span class="f-key">K</span>
-        </span>
+        <span class="f-label" data-demo-key="actions-affordance">Actions</span>
+        <span class="f-key">&#x2318;</span>
+        <span class="f-key">K</span>
       </div>
     </div>
   </div>

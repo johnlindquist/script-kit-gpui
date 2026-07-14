@@ -122,11 +122,10 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 .footer .kcap{min-width:20px;height:20px;font-size:12px;color:rgba(255,255,255,.82);
   border-color:rgba(255,255,255,.24)}
 
-/* demo support: [hidden] always wins; footer press-flash is scene-local and
-   gated so the canonical frame (no data-sk-demo attribute) can never change. */
+/* demo support: [hidden] always wins; canonical frame never sets these */
 [hidden] { display: none !important; }
 html[data-sk-demo="1"] .footer .act[data-selected="true"] {
-  background: rgba(255,255,255,.09);
+  background: var(--sk-footer-button-active);
   border-radius: 6px;
 }
 </style></head>
@@ -155,9 +154,9 @@ html[data-sk-demo="1"] .footer .act[data-selected="true"] {
 
       <div class="user">Explain what makes a great keyboard-first macOS launcher. Give me 5 markdown bullets, each one sentence, plus a one-line closing tip. Be specific and punchy.</div>
 
-      <div class="think" data-demo-key="thinking">
-        <span class="tri"><svg width="9" height="9" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
-        <span class="lbl">Thinking</span><span class="meta">3 lines</span>
+      <div class="think">
+        <span class="tri" data-demo-key="thinking-tri"><svg width="9" height="9" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
+        <span class="lbl" data-demo-key="thinking-lbl">Thinking</span><span class="meta">3 lines</span>
       </div>
 
       <div class="md">

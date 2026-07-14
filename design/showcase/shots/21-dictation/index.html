@@ -95,6 +95,9 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 .kgroup{display:flex;align-items:center;gap:5px}
 .cancel-label{margin-left:25px}
 svg{display:block}
+
+/* demo support: [hidden] always wins (no demo-only nodes yet, kept for parity) */
+[hidden] { display: none !important; }
 </style></head>
 <body>
 <div class="scene">
@@ -102,7 +105,7 @@ svg{display:block}
   <div class="swoosh-top"></div>
   <div class="pink"></div>
 
-  <div class="pill">
+  <div class="pill" data-verify-window>
     <div class="pill-top">
       <span class="timer" data-demo-key="timer">0:07</span>
       <div class="wave" data-demo-key="waveform">
@@ -136,7 +139,7 @@ svg{display:block}
       </div>
     </div>
     <div class="pill-bottom">
-      <div class="f-left" data-demo-key="select-mic">
+      <div class="f-left" data-demo-key="mic">
         <span class="keycap" style="width:20px;height:19.5px">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#d6d4e2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
@@ -148,7 +151,7 @@ svg{display:block}
       </div>
       <div class="f-right">
         <span class="flabel" data-demo-key="stop-label">Stop</span>
-        <span class="kgroup">
+        <span class="kgroup" data-demo-key="stop-keys">
           <span class="keycap">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#d6d4e2" stroke-width="2" stroke-linejoin="round">
               <path d="M12 3 4.5 11h4.5v8h6v-8h4.5L12 3Z"/>

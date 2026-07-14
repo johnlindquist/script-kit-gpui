@@ -6,5 +6,20 @@
     "Wallpaper (purple/blue/orange abstract macOS art) approximated with layered CSS radial/linear gradients rather than the exact photographic source; the diagonal metallic streak faintly visible through the window's backdrop-filter blur (bottom-right of detail pane) is a coarser CSS approximation than the photographic original.",
     "Remaining RMSE is dominated by photographic wallpaper texture/JPEG compression grain outside and faintly through the vibrancy-blurred window, plus font antialiasing differences — not content or layout mismatches."
   ],
-  "iterations": 2
+  "iterations": 2,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "uad-filtered",
+    "autoplay": true,
+    "userControls": ["input", "list"],
+    "extraCanonicalHiddenDom": [
+      ".search .ph[data-demo-key=\"query\"] (hidden data-demo-only span that receives the typed query text; canonical frame only shows the placeholder span)"
+    ],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass",
+    "notes": "List and input exploration controls are wired (arrow keys / hover / typing re-filter via data-demo-match), but the detail pane (title/subtitle/Bounds row) only patches for the two scripted rows (uad, cmux) via the cmuxDetail/uadDetail states — hovering or arrow-selecting any other row during free exploration moves the list selection/hover highlight but does not update the detail pane, since patch content for the other 7 rows was out of scope for this pass."
+  }
 }

@@ -67,6 +67,8 @@ SKDemo.define({
     { op: "applyState", name: "nord" },
     { op: "pause", ms: 700 },
     { id: "facts-live", op: "caption", text: "The facts panel updates live.", holdMs: 1100 },
+    { op: "hide", target: '[data-demo-key="placeholder"]' },
+    { op: "show", target: '[data-demo-key="query"]' },
     {
       id: "tokyo-night",
       op: "typeInto",

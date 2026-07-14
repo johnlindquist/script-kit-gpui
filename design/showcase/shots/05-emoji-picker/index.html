@@ -237,6 +237,14 @@
     font-size: 12.5px;
   }
 
+  /* demo support: footer-action never carries data-selected in the canonical
+     frame (only .cell does) — gate the flash so the static screenshot can't
+     change. Reuses the existing --sk-footer-button-active token. */
+  html[data-sk-demo="1"] .footer-action[data-selected="true"] {
+    background: var(--sk-footer-button-active);
+    border-radius: 6px;
+  }
+
   .footer-gap { width: 14px; }
 
   .keycap {

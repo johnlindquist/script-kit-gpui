@@ -104,6 +104,9 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   border-radius:6px;display:grid;place-items:center;color:rgba(255,255,255,.8);
   font-size:11px;line-height:1}
 .kc + .kc{margin-left:4.5px}
+
+/* demo support: [hidden] always wins */
+[hidden] { display: none !important; }
 </style></head>
 <body><div class="scene">
   <div class="w-top"></div><div class="w-bottom"></div>
@@ -122,13 +125,13 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
       </div>
     </div>
     <div class="editor">
-      <div class="ln" data-demo-key="ln-heading"><span class="caret" data-demo-key="caret"><span class="mk">#</span> <span class="ttl">Friday, July 4</span></div>
+      <div class="ln"><span class="caret" data-demo-key="caret"></span><span class="mk">#</span> <span class="ttl">Friday, July 4</span></div>
       <div class="ln"></div>
       <div class="ln">Up early — launch week. Freedom ships today. <span class="emoji"></span></div>
       <div class="ln"></div>
       <div class="ln"><span class="mk">##</span> <span class="ttl">Focus</span></div>
       <div class="ln"></div>
-      <div class="ln"><span class="b">-</span> [ ] Cut the v2.1 release and push the tag</div>
+      <div class="ln" data-demo-key="ln-focus-task"><span class="b">-</span> <span data-demo-key="focus-task-checkbox">[ ]</span> Cut the v2.1 release and push the tag</div>
       <div class="ln"><span class="b">-</span> [ ] Screenshot tour for the new landing page</div>
       <div class="ln"><span class="b">-</span> [x] Morning run before it gets hot</div>
       <div class="ln"></div>
@@ -138,7 +141,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
       <div class="ln">twice yesterday and it was just *here* this morning. That's the</div>
       <div class="ln">hero demo.</div>
       <div class="ln"></div>
-      <div class="ln">00:05 [<span class="lbl">Clipboard entry</span>]<span class="dst">(kit://clipboard-history</span></div>
+      <div class="ln" data-demo-key="ln-ref-entry">00:05 [<span class="lbl" data-demo-key="ref-lbl">Clipboard entry</span>]<span class="dst" data-demo-key="ref-dst">(kit://clipboard-history</span></div>
       <div class="ln"><span class="dst">?id=91a36280-01cc-4ca0-ae7a-9181468742f9)</span></div>
       <div class="ln">00:11 [<span class="lbl">Clipboard entry</span>]<span class="dst">(kit://clipboard-history</span></div>
     </div>
@@ -150,4 +153,15 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
     </div>
   </div>
 </div>
-<script src="../../shared/fit.js"></script></body></html>
+<script src="../../shared/fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  if (params.get("demo") !== "1") return;
+  const runner = document.createElement("script");
+  runner.src = "../../shared/demo.js";
+  runner.dataset.config = "./demo.js";
+  document.head.appendChild(runner);
+})();
+</script>
+</body></html>

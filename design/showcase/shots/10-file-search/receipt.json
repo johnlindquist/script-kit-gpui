@@ -9,5 +9,18 @@
     "Row folder icons are a simplified flat-gradient approximation (folder tab + body, generic Finder-style grey gradient) rather than a precise vector trace of the exact macOS folder icon bevel/highlight; close in color and silhouette but slightly less rounded/3D than the reference.",
     "Row-pitch and text baseline alignment were verified to match the reference within 1px across all 9 visible rows (measured via glyph luminance peak scan), so no structural/layout fix was needed."
   ],
-  "iterations": 2
+  "iterations": 2,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "plist-preview",
+    "autoplay": true,
+    "userControls": ["input", "list"],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass",
+    "notes": "typeInto types 'plist' over the canonical 'launch' query (data-demo-key=query) and filters the 9 rows via data-demo-match tokens drawn from each real filename; tokens are chosen so only LaunchAgent.plist's 'plist' extension token starts with the p/pl/pli/plis/plist prefix chain (LaunchApp.patternfamily is tokenized as 'launch app.patternfamily' rather than a standalone 'patternfamily' word, which would otherwise transiently match at query='p'). moveSelection lands on that row, then a patch step (checkpoint id 'plist-preview') rewrites the preview pane (title/path/size/modified/type) to LaunchAgent.plist's real metadata. Exploration controls cover the input (typing/backspace re-filters) and list (arrow keys / hover / click re-select among visible rows); the preview pane itself only updates for the one scripted row during the authored demo steps, not live during free exploration of other rows — same scope as the 02-search-filter reference."
+  }
 }

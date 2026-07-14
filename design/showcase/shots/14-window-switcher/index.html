@@ -261,19 +261,21 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
   color: rgb(255 255 255 / 0.85);
 }
 .keycap svg { width: 11px; height: 11px; display: block; }
+.run-group { display: flex; align-items: center; }
 
-/* demo support: [hidden] always wins; typed query brightens like real input
-   text; hover/press flashes reuse the scene's own surfaces. Gated so the
-   canonical frame (no data-sk-demo attribute) can never change. */
+/* demo support: [hidden] always wins; everything below is gated behind
+   data-sk-demo so the canonical (non-demo) render never sees it. */
 [hidden] { display: none !important; }
-html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"] {
-  color: rgb(255 255 255 / 0.92);
+html[data-sk-demo="1"] .search .ph[data-demo-key="query"] { color: rgb(255 255 255 / 0.92); }
+html[data-sk-demo="1"] .row.hover-demo .surface { background: rgb(255 255 255 / 0.05); }
+html[data-sk-demo="1"] .run-group[data-selected="true"] {
+  background: var(--sk-footer-button-active);
+  border-radius: 7px;
+  padding: 4px 8px;
+  margin: -4px -8px;
 }
-html[data-sk-demo="1"] .row.hover-demo:not(.selected) .surface {
-  background: rgb(255 255 255 / 0.06);
-}
-html[data-sk-demo="1"] .footer[data-selected="true"] {
-  background: rgb(255 255 255 / 0.09);
+html[data-sk-demo="1"] .d-btn[data-selected="true"] {
+  background: var(--sk-footer-button-active);
 }
 </style>
 </head>
@@ -314,25 +316,26 @@ html[data-sk-demo="1"] .footer[data-selected="true"] {
 
       <div class="search">
         <span class="caret"></span>
-        <span class="ph" data-demo-key="query">Search windows...</span>
+        <span class="ph" data-demo-key="placeholder">Search windows...</span>
+        <span class="ph" hidden data-demo-only data-demo-key="query"></span>
         <span class="count" data-demo-key="count">15 windows</span>
       </div>
 
       <div class="list">
-        <div class="row selected" data-demo-role="result" data-demo-key="row-uad" data-demo-match="uad meter control panel">
+        <div class="row selected" data-demo-role="result" data-demo-key="uad" data-demo-match="uad meter control panel">
           <div class="surface">
             <div class="name">UAD Meter &amp; Control Panel: UAD Meter</div>
             <div class="desc">344&times;72 at (0, 38)</div>
           </div>
         </div>
-        <div class="row" data-demo-role="result" data-demo-key="row-cmux" data-demo-match="cmux claude code"><div class="surface"><div class="name">cmux: &middot;&nbsp; Claude Code</div></div></div>
-        <div class="row" data-demo-role="result" data-demo-key="row-activity-monitor" data-demo-match="activity monitor"><div class="surface"><div class="name">Activity Monitor: Activity Monitor</div></div></div>
-        <div class="row" data-demo-role="result" data-demo-key="row-safari" data-demo-match="safari claude platform"><div class="surface"><div class="name">Safari: Claude Platform</div></div></div>
-        <div class="row" data-demo-role="result" data-demo-key="row-1password" data-demo-match="1password lock screen"><div class="surface"><div class="name">1Password: Lock Screen &mdash; 1Password</div></div></div>
-        <div class="row" data-demo-role="result" data-demo-key="row-finder-static" data-demo-match="finder static"><div class="surface"><div class="name">Finder: static</div></div></div>
-        <div class="row" data-demo-role="result" data-demo-key="row-finder-eggo" data-demo-match="finder eggo-paper-mario"><div class="surface"><div class="name">Finder: eggo-paper-mario</div></div></div>
-        <div class="row" data-demo-role="result" data-demo-key="row-messages" data-demo-match="messages google"><div class="surface"><div class="name">Messages: Messages - Google Messages for we&hellip;</div></div></div>
-        <div class="row" data-demo-role="result" data-demo-key="row-zed" data-demo-match="zed codex-workshop"><div class="surface"><div class="name">Zed: codex-workshop &mdash; xpert-20260625-23221</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="cmux" data-demo-match="cmux claude code"><div class="surface"><div class="name">cmux: &middot;&nbsp; Claude Code</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="activity-monitor" data-demo-match="activity monitor"><div class="surface"><div class="name">Activity Monitor: Activity Monitor</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="safari" data-demo-match="safari claude platform"><div class="surface"><div class="name">Safari: Claude Platform</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="1password" data-demo-match="1password lock screen"><div class="surface"><div class="name">1Password: Lock Screen &mdash; 1Password</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="finder-static" data-demo-match="finder static"><div class="surface"><div class="name">Finder: static</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="finder-eggo" data-demo-match="finder eggo-paper-mario"><div class="surface"><div class="name">Finder: eggo-paper-mario</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="messages" data-demo-match="messages google"><div class="surface"><div class="name">Messages: Messages - Google Messages for we&hellip;</div></div></div>
+        <div class="row" data-demo-role="result" data-demo-key="zed" data-demo-match="zed codex-workshop xpert-20260625-23221"><div class="surface"><div class="name">Zed: codex-workshop &mdash; xpert-20260625-23221</div></div></div>
       </div>
       <span class="dot"></span>
 
@@ -344,8 +347,10 @@ html[data-sk-demo="1"] .footer[data-selected="true"] {
         <div class="d-sub" data-demo-key="detail-sub">UAD Meter &amp; Control Panel</div>
         <div class="d-div"></div>
         <div class="lbl d-details">DETAILS</div>
-        <div class="d-bounds-lbl" data-demo-key="bounds-label">Bounds</div>
-        <div class="d-bounds-val" data-demo-key="bounds-value">344&times;72 &middot; 0, 38</div>
+        <div data-demo-key="detail-bounds">
+          <div class="d-bounds-lbl">Bounds</div>
+          <div class="d-bounds-val">344&times;72 &middot; 0, 38</div>
+        </div>
         <div class="lbl d-shortcuts">SHORTCUTS</div>
         <div class="d-btns">
           <div class="d-btn" data-demo-key="switch-btn">
@@ -354,19 +359,21 @@ html[data-sk-demo="1"] .footer[data-selected="true"] {
             </svg>
             <span class="g">Switch</span>
           </div>
-          <div class="d-btn">
+          <div class="d-btn" data-demo-key="back-btn">
             <span class="esc">Esc</span>
             <span class="back">Back</span>
           </div>
         </div>
       </div>
 
-      <div class="footer" data-demo-key="run-footer">
-        <span class="run">Run</span>
-        <span class="keycap">
-          <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10 2.5v3a1.5 1.5 0 0 1-1.5 1.5H2.5M4.5 4.5L2 7l2.5 2.5"/>
-          </svg>
+      <div class="footer">
+        <span class="run-group" data-demo-key="run">
+          <span class="run">Run</span>
+          <span class="keycap">
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 2.5v3a1.5 1.5 0 0 1-1.5 1.5H2.5M4.5 4.5L2 7l2.5 2.5"/>
+            </svg>
+          </span>
         </span>
       </div>
 

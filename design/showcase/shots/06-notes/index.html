@@ -91,6 +91,9 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   white-space:nowrap}
 .f-right{flex:none;color:rgb(255 255 255 / 0.17);white-space:nowrap}
 .f-right .txt{margin-left:6px}
+
+/* demo support: [hidden] always wins */
+[hidden] { display: none !important; }
 </style></head>
 <body><div class="scene">
   <div class="wall">
@@ -115,8 +118,10 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
       <div></div>
       <div><span class="d">-</span> [x] Ship clipboard sediment view</div>
       <div><span class="d">-</span> [x] Selection hint chip for instant rewrites</div>
-      <div><span class="d">-</span> <span data-demo-key="task-hero-demo">[ ]</span> Record the 90-second hero demo</div>
-      <div><span class="d">-</span> <span data-demo-key="task-launch-post">[ ]</span> Draft the launch post for scriptkit.com</div>
+      <div data-demo-key="task-hero-demo-off"><span class="d">-</span> [ ] Record the 90-second hero demo</div>
+      <div hidden data-demo-only data-demo-key="task-hero-demo-on"><span class="d">-</span> [x] Record the 90-second hero demo</div>
+      <div data-demo-key="task-launch-post-off"><span class="d">-</span> [ ] Draft the launch post for scriptkit.com</div>
+      <div hidden data-demo-only data-demo-key="task-launch-post-on"><span class="d">-</span> [x] Draft the launch post for scriptkit.com</div>
       <div></div>
       <div>## <span class="h">The hero loop</span></div>
       <div></div>
@@ -137,7 +142,7 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
         <span class="check">✓</span><span class="count">1/14</span>
       </span>
       <span class="f-center">Ln 22/21 · 100 words · 562 chars · ~1 min read</span>
-      <span class="f-right"><span data-demo-key="updated">updated ↓ just now</span><span class="txt">TXT</span></span>
+      <span class="f-right"><span data-demo-key="updated-status">updated ↓ just now</span><span class="txt">TXT</span></span>
     </div>
   </div>
 </div>

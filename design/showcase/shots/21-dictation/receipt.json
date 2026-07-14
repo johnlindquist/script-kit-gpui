@@ -7,5 +7,17 @@
     "Finder-style icon in the top-right of the pill is an inline-SVG approximation (rounded-square gradient + simplified face glyph), not a pixel match of the real icon's internal shading at this tiny size.",
     "Minor sub-pixel text kerning/antialiasing differences (e.g. 'Stop' label, keycap glyphs) from browser font rendering vs the reference capture; content strings, keycap set, and order all verified to match exactly (timer '0:07', waveform bars, 'Select Mic' + mic icon, 'Stop' + shift/cmd/semicolon keycaps, 'Cancel' + undo keycap)."
   ],
-  "iterations": 2
+  "iterations": 2,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "dictation-stopped",
+    "autoplay": true,
+    "userControls": [],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }

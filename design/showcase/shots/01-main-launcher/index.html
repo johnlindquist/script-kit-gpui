@@ -129,9 +129,10 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
 /* Amber Theme Designer tile uses the shared icon-tile tokens */
 .sk-list-row__icon-tile svg{width:14px;height:14px}
 
-/* demo support: [hidden] always wins; demo input-state text uses normal name color */
-[hidden] { display: none !important; }
-html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"] { color: var(--sk-text-name); }
+/* demo support: [hidden] always wins; demo brightens the typed query since
+   the placeholder text otherwise renders at --sk-text-placeholder (dim). */
+[hidden]{display:none!important}
+html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"]{color:var(--sk-text-name)}
 </style></head>
 <body><div class="scene">
   <div class="wallpaper"></div>

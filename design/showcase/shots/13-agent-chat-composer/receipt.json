@@ -7,5 +7,17 @@
     "Window rect (left/top/width/height), header context-zone chips ('~/' + arrow icon, 'Script Kit · gpt-5.5' model pill + two icons), composer text '@cmd:\"Test what's going on here\"', guidance title/body, all 5 guidance rows (/, @, ⇧↵, ⌘P, ⌘K with exact labels), and footer (Send ↵, Actions ⌘K) were verified character-for-character against the reference — no content mismatches found.",
     "Font antialiasing differences between the browser rasterizer and the original screenshot's rasterizer account for residual low-level diff noise on all text glyphs."
   ],
-  "iterations": 2
+  "iterations": 2,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "context-shortcuts",
+    "autoplay": true,
+    "userControls": ["list"],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }

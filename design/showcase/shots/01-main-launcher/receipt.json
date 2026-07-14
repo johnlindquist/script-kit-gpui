@@ -9,5 +9,17 @@
     "Font rendering antialiasing/hinting differs slightly between the JPG capture's source renderer and the headless Chromium used for the HTML recreation, contributing sub-pixel edge noise across all text.",
     "Window border/shadow softness (box-shadow blur radius) is a measured approximation, not a pixel-exact match of the reference's compositor shadow falloff."
   ],
-  "iterations": 5
+  "iterations": 5,
+  "demo": {
+    "version": 1,
+    "script": "demo.js",
+    "visualSimulation": true,
+    "backendCapabilities": [],
+    "checkpoint": "notes-filtered",
+    "autoplay": true,
+    "userControls": ["input", "list"],
+    "extraCanonicalHiddenDom": [],
+    "canonicalRenderUnchanged": true,
+    "smokeStatus": "pass"
+  }
 }

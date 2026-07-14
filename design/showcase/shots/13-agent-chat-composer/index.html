@@ -248,13 +248,16 @@ html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
 }
 .footer-gap { width: 12px; }
 
-  /* demo support: [hidden] always wins; gated selection highlight reuses the
-   * existing main-menu row-hover token so the canonical frame can't change. */
-  [hidden] { display: none !important; }
-  html[data-sk-demo="1"] .grow[data-state="selected"] {
-    background: var(--sk-main-menu-row-hover-background);
-    border-radius: var(--sk-main-menu-row-radius);
-  }
+/* demo support: [hidden] always wins; gated so the canonical frame never
+ * changes (see design/showcase/DEMO-BRIEF.md). */
+[hidden] { display: none !important; }
+html[data-sk-demo="1"] .grow[data-state="selected"] {
+  background: var(--sk-main-menu-row-hover-background);
+  border-radius: var(--sk-main-menu-row-radius);
+}
+html[data-sk-demo="1"] .footer-action[data-selected="true"] {
+  background: var(--sk-footer-button-active);
+}
 </style>
 </head>
 <body>

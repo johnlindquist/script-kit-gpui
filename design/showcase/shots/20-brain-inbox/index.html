@@ -96,9 +96,17 @@ html,body{margin:0;padding:0;overflow:hidden;background:#000}
   color:var(--sk-footer-text);font-size:11px;line-height:1;font-family:inherit}
 .f-gap{flex:1 1 auto}
 
-/* demo support: [hidden] always wins; demo input-state text uses normal name color */
+/* ── demo support ──────────────────────────────────────────────────────── */
 [hidden] { display: none !important; }
-html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"] { color: var(--sk-text-name); }
+/* Typed query text sits alongside the (hidden-while-typing) placeholder;
+ * inherits full-bright text color from .sk-window__content already, this
+ * just pins the behavior explicitly and preserves run spacing. Gated so
+ * the canonical (non-demo) frame can never be affected. */
+html[data-sk-demo="1"] .search .q { color: var(--sk-text-name); white-space: pre; }
+/* Footer action flash on keypress-activate, mirrors the shared
+ * .sk-footer-action[data-selected="true"] vocabulary for this scene's
+ * bespoke .f-act footer buttons. */
+html[data-sk-demo="1"] .f-act[data-selected="true"] { background: var(--sk-footer-button-active); }
 </style></head>
 <body>
 <div class="scene">
@@ -125,7 +133,8 @@ html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"] { color: var(
 
       <div class="search">
         <span class="sk-caret"></span>
-        <span class="ph" data-demo-key="query">Search&nbsp; •&nbsp; @ context&nbsp; •&nbsp; / command&nbsp; •&nbsp; . style&nbsp; •&nbsp; | profile</span>
+        <span class="ph" data-demo-key="placeholder">Search&nbsp; •&nbsp; @ context&nbsp; •&nbsp; / command&nbsp; •&nbsp; . style&nbsp; •&nbsp; | profile</span>
+        <span class="q" data-demo-key="query" hidden data-demo-only></span>
       </div>
 
       <section class="sk-list">
@@ -154,7 +163,7 @@ html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"] { color: var(
           </div>
         </div>
 
-        <div class="sk-list-row" data-demo-role="result" data-demo-key="lively-rafter" data-demo-match="lively rafter gf4n">
+        <div class="sk-list-row" data-demo-role="result" data-demo-key="lively-rafter" data-demo-match="lively-rafter-gf4n">
           <div class="sk-list-row__surface">
             <span class="sk-list-row__icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -163,7 +172,7 @@ html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"] { color: var(
           </div>
         </div>
 
-        <div class="sk-section-slot" data-demo-key="suggested-section">
+        <div class="sk-section-slot" data-demo-key="suggested-slot">
           <div class="sk-section-header">
             <span class="sk-section-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"/></svg>
@@ -220,8 +229,8 @@ html[data-sk-demo="1"] [data-demo-key="query"][data-state="input"] { color: var(
 
       <footer class="footer">
         <span class="f-gap"></span>
-        <button class="f-act f-act--ask" data-demo-key="primary">
-          <span class="f-label" data-demo-key="primary-label">Ask Your Brain</span>
+        <button class="f-act f-act--ask" data-demo-key="ask">
+          <span class="f-label">Ask Your Brain</span>
           <kbd class="f-key">↵</kbd>
         </button>
         <button class="f-act" data-demo-key="actions">
