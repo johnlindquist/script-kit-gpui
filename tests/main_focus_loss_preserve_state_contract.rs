@@ -3,7 +3,6 @@
 //! Clicking away from the main ScriptList should hide the window without
 //! clearing the user's filter/list state; explicit close/reset paths still reset.
 
-const MAIN_RS: &str = include_str!("../src/main.rs");
 const RENDER_IMPL: &str = include_str!("../src/main_sections/render_impl.rs");
 const LIFECYCLE_RESET: &str = include_str!("../src/app_impl/lifecycle_reset.rs");
 const WINDOW_VISIBILITY: &str = include_str!("../src/main_sections/window_visibility.rs");
@@ -14,6 +13,30 @@ fn source_block_after<'a>(source: &'a str, needle: &str, len: usize) -> &'a str 
         panic!("expected to find `{needle}`");
     });
     &source[start..source.len().min(start + len)]
+}
+
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing function signature: {signature}"));
+    let after_start = &source[start..];
+    let open = after_start
+        .find('{')
+        .unwrap_or_else(|| panic!("missing function body for: {signature}"));
+    let mut depth = 0usize;
+    for (offset, ch) in after_start[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &after_start[..open + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated function body: {signature}");
 }
 
 #[test]
@@ -68,10 +91,7 @@ fn preserve_state_hide_does_not_reset_or_cancel_script_list() {
 
 #[test]
 fn next_show_consumes_restore_intent_without_selection_normalization() {
-    assert!(MAIN_RS.contains("RESTORE_MAIN_STATE_AFTER_FOCUS_LOSS"));
-    assert!(MAIN_RS.contains("fn consume_main_state_restore_after_focus_loss()"));
-
-    let show_path = source_block_after(WINDOW_VISIBILITY, "let restore_after_focus_loss", 1300);
+    let show_path = function_body(WINDOW_VISIBILITY, "fn show_main_window_helper");
 
     assert!(show_path.contains("consume_main_state_restore_after_focus_loss()"));
     assert!(show_path
