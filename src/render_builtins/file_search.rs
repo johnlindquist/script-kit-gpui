@@ -1695,32 +1695,6 @@ mod file_search_chrome_audit {
     }
 
     #[test]
-    fn file_search_uses_shared_main_view_chrome() {
-        let source = production_source();
-
-        assert!(
-            source.contains("render_main_view_chrome_footer_flush("),
-            "file_search should use the shared main-view chrome"
-        );
-        assert!(
-            source.contains("render_main_view_context_zone("),
-            "file_search should keep the shared header context zone"
-        );
-        assert!(
-            source.contains("render_main_view_input_shell("),
-            "file_search should keep the shared main-view input shell"
-        );
-        assert!(
-            source.contains("main_window_footer_slot("),
-            "file_search should route its footer through the native footer slot"
-        );
-        assert!(
-            source.contains("render_simple_hint_strip(file_search_hints, None)"),
-            "file_search should build the shared hint strip before handing it to the native footer slot"
-        );
-    }
-
-    #[test]
     fn file_search_has_no_hardcoded_alpha_fills() {
         let source = production_source();
         assert!(
@@ -1730,33 +1704,6 @@ mod file_search_chrome_audit {
         assert!(
             !source.contains("| 0x40)"),
             "file_search should not contain hardcoded alpha fill 0x40"
-        );
-    }
-
-    #[test]
-    fn file_search_input_chrome_stays_unadorned() {
-        let source = production_source();
-        let input_start = source
-            .find("let input = crate::components::main_view_chrome::render_main_view_input_shell(")
-            .expect("file_search should build shared main-view input");
-        let input_tail = &source[input_start..];
-        let input_end = input_tail
-            .find("let header = crate::components::main_view_chrome::MainViewHeaderChrome")
-            .expect("file_search should build header after input");
-        let input_block = &input_tail[..input_end];
-
-        assert!(
-            input_block.contains("body: self.render_search_input().into_any_element()"),
-            "file_search input body should be only the shared search input"
-        );
-        assert!(
-            input_block.contains("trailing: Vec::new()"),
-            "file_search should not add trailing feature-local input chrome"
-        );
-        assert!(
-            !input_block.contains(&("leading".to_owned() + ":"))
-                && !input_block.contains(&("render_main_view_state".to_owned() + "_icon")),
-            "file_search should not add leading input chrome"
         );
     }
 

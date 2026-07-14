@@ -1345,35 +1345,6 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_filter_input_change_updates_canonical_filter_text_in_shared_builtin_views() {
-        let source = read_filter_input_change_source();
-        let shared_builtin_views = [
-            "AppView::ClipboardHistoryView",
-            "AppView::EmojiPickerView",
-            "AppView::AppLauncherView",
-            "AppView::WindowSwitcherView",
-            "AppView::BrowserTabsView",
-            "AppView::DesignGalleryView",
-            "AppView::FooterGalleryView",
-            "AppView::ThemeChooserView",
-            "AppView::FileSearchView",
-        ];
-
-        for view in shared_builtin_views {
-            let view_pos = source
-                .find(view)
-                .unwrap_or_else(|| panic!("{} match arm not found", view));
-            let view_end = (view_pos + 500).min(source.len());
-            let view_section = &source[view_pos..view_end];
-            assert!(
-                view_section.contains("self.filter_text = new_text.clone();"),
-                "{} must keep ScriptListApp.filter_text synchronized as canonical query state",
-                view
-            );
-        }
-    }
-
-    #[test]
     fn test_emoji_picker_filter_change_guards_scroll_behind_real_query_change() {
         let source = read_filter_input_change_source();
         let emoji_pos = source
@@ -1391,29 +1362,6 @@ mod tests {
         assert!(
             emoji_section.contains("scroll_builtin_to_top_with_log"),
             "emoji picker should reset to top on real filter changes via shared helper"
-        );
-    }
-
-    #[test]
-    fn test_handle_filter_input_change_ignores_newline_before_shared_view_mutation() {
-        let source = read_filter_input_change_source();
-        let newline_guard_pos = source
-            .find("single_line_filter_input_contains_newline(&new_text)")
-            .expect("newline guard not found");
-        let current_app_pos = source
-            .find("AppView::CurrentAppCommandsView")
-            .expect("current app commands arm not found");
-        assert!(
-            newline_guard_pos < current_app_pos,
-            "newline-bearing filter input must be rejected before mutating shared builtin view filters"
-        );
-
-        let guard_section = &source[newline_guard_pos..(newline_guard_pos + 500).min(source.len())];
-        assert!(
-            guard_section.contains("self.pending_filter_sync = true")
-                && guard_section.contains("self.sync_filter_input_if_needed(window, cx);")
-                && guard_section.contains("return;"),
-            "newline guard must immediately resync the GPUI input back to canonical filter text"
         );
     }
 

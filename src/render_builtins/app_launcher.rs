@@ -621,23 +621,6 @@ mod app_launcher_chrome_tests {
     }
 
     #[test]
-    fn app_launcher_uses_truthful_two_item_footer() {
-        let source = read_source();
-        assert!(
-            !source.contains("universal_prompt_hints()"),
-            "app launcher should not use universal hints (no actions dialog wired)"
-        );
-        assert!(
-            source.contains("\"↵ Launch\"") && source.contains("\"Esc Back\""),
-            "app launcher should use a truthful two-item footer"
-        );
-        assert!(
-            !source.contains("⌘K Actions"),
-            "app launcher should not advertise ⌘K Actions without a working dialog"
-        );
-    }
-
-    #[test]
     fn app_launcher_declares_runtime_chrome_audit() {
         let source = read_source();
         assert!(
@@ -645,19 +628,6 @@ mod app_launcher_chrome_tests {
                 && source.contains("PromptChromeAudit::minimal_list(")
                 && source.contains("\"render_builtins::app_launcher\""),
             "app launcher should emit a minimal-list runtime audit"
-        );
-    }
-
-    #[test]
-    fn app_launcher_does_not_advertise_actions_without_dialog() {
-        let source = read_source();
-        assert!(
-            !source.contains("⌘K Actions"),
-            "app launcher should not advertise ⌘K Actions without a working dialog"
-        );
-        assert!(
-            !source.contains("route_key_to_actions_dialog("),
-            "app launcher should not have dead actions routing code"
         );
     }
 

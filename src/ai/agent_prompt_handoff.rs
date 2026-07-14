@@ -933,6 +933,12 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn lock_env_test() -> std::sync::MutexGuard<'static, ()> {
+        env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn adapter_from_action_id_recognizes_cmux_codex() {
         assert_eq!(
@@ -1044,7 +1050,7 @@ mod tests {
 
     #[test]
     fn export_file_writes_prompt_to_configured_directory() {
-        let _guard = env_test_lock().lock().expect("env test lock");
+        let _guard = lock_env_test();
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let receipt_path = temp_dir.path().join("receipt.json");
         let export_dir = temp_dir.path().join("exports");
@@ -1087,7 +1093,7 @@ mod tests {
 
     #[test]
     fn export_gist_uses_private_gh_gist_create_without_leaking_prompt_in_receipt() {
-        let _guard = env_test_lock().lock().expect("env test lock");
+        let _guard = lock_env_test();
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let gh_stub_path = temp_dir.path().join("gh-stub.py");
         let gh_receipt_path = temp_dir.path().join("gh-receipt.json");
@@ -1185,7 +1191,7 @@ print('https://gist.github.com/fake/private-gist')
 
     #[test]
     fn copy_prompt_dry_run_receipt_hash_matches_exact_prompt_without_clipboard_write() {
-        let _guard = env_test_lock().lock().expect("env test lock");
+        let _guard = lock_env_test();
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let receipt_path = temp_dir.path().join("copy-receipt.json");
         let prompt = "copy prompt proof";
@@ -1218,7 +1224,7 @@ print('https://gist.github.com/fake/private-gist')
 
     #[test]
     fn copy_prompt_to_clipboard_writer_receives_exact_prompt() {
-        let _guard = env_test_lock().lock().expect("env test lock");
+        let _guard = lock_env_test();
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let copied_path = temp_dir.path().join("copied.txt");
         let receipt_path = temp_dir.path().join("copy-receipt.json");
@@ -1292,7 +1298,7 @@ print('https://gist.github.com/fake/private-gist')
 
     #[test]
     fn prompt_actions_share_identical_compiled_prompt_hash_for_file_and_clipboard() {
-        let _guard = env_test_lock().lock().expect("env test lock");
+        let _guard = lock_env_test();
         let fixture = RichPromptContextFixture::new();
         let payload = compile_fixture_payload(&fixture);
         let export_dir = fixture.temp_dir.path().join("exports");
@@ -1498,7 +1504,7 @@ print('https://gist.github.com/fake/private-gist')
             ),
             (
                 "context mention builtin",
-                "@selection rewrite this",
+                "@diagnostics explain this",
                 Expected::Submit,
             ),
             (
@@ -1584,7 +1590,7 @@ print('https://gist.github.com/fake/private-gist')
 
     #[test]
     fn configured_prompt_target_launch_sets_prompt_env_and_placeholders() {
-        let _guard = env_test_lock().lock().expect("env test lock");
+        let _guard = lock_env_test();
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let target_path = temp_dir.path().join("target.py");
         let receipt_path = temp_dir.path().join("target-receipt.json");
@@ -1658,12 +1664,18 @@ with open(os.environ["TARGET_RECEIPT"], "w") as handle:
         wait_for_file(&receipt_path, Duration::from_secs(5)).expect("target receipt");
 
         let target_receipt = std::fs::read_to_string(&receipt_path).expect("target receipt");
+        let target_receipt_json: serde_json::Value =
+            serde_json::from_str(&target_receipt).expect("target receipt json");
+        let actual_cwd = target_receipt_json["cwd"]
+            .as_str()
+            .map(PathBuf::from)
+            .expect("target receipt cwd");
         let canonical_project_dir =
             std::fs::canonicalize(&project_dir).expect("canonical project dir");
-        assert!(target_receipt.contains(&format!(
-            "\"cwd\": \"{}\"",
-            canonical_project_dir.to_string_lossy()
-        )));
+        assert_eq!(
+            std::fs::canonicalize(actual_cwd).expect("canonical target cwd"),
+            canonical_project_dir
+        );
         assert!(target_receipt.contains(&format!("\"promptSha256\": \"{}\"", sha256_hex(prompt))));
         assert!(
             target_receipt.contains(&format!("\"promptFileSha256\": \"{}\"", sha256_hex(prompt)))
@@ -1813,7 +1825,7 @@ with open(os.environ["TARGET_RECEIPT"], "w") as handle:
 
     #[test]
     fn launch_cmux_codex_spawns_cmux_stub_that_executes_codex_stub() {
-        let _guard = env_test_lock().lock().expect("env test lock");
+        let _guard = lock_env_test();
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let project_dir = temp_dir.path().join("project");
         std::fs::create_dir(&project_dir).expect("project dir");

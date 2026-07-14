@@ -841,15 +841,21 @@ mod builtin_command_window_visibility_tests {
 
     #[test]
     fn test_headless_builtin_commands_do_not_show_main_window_after_hotkey_execution() {
-        let config = crate::config::BuiltInConfig::default();
-        for command_id in ["builtin/reset-window-positions"] {
-            let entry = crate::builtins::resolve_builtin_entry(command_id, &config)
-                .unwrap_or_else(|| panic!("{command_id} should resolve"));
-            assert!(
-                !builtin_entry_needs_main_window(&entry),
-                "{command_id} should execute headlessly from a shortcut"
-            );
-        }
+        let entry = crate::builtins::BuiltInEntry {
+            id: "builtin/reset-window-positions".to_string(),
+            name: "Reset Window Positions".to_string(),
+            description: "Restore all windows to default positions".to_string(),
+            keywords: vec!["reset".to_string(), "window".to_string(), "position".to_string()],
+            feature: crate::builtins::BuiltInFeature::SettingsCommand(
+                crate::builtins::SettingsCommandType::ResetWindowPositions,
+            ),
+            icon: Some("rotate-ccw".to_string()),
+            group: crate::builtins::BuiltInGroup::Core,
+        };
+        assert!(
+            !builtin_entry_needs_main_window(&entry),
+            "reset-window-positions should execute headlessly from a shortcut"
+        );
     }
 
     #[test]

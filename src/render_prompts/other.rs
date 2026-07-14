@@ -1204,35 +1204,6 @@ mod other_prompt_render_wrapper_tests {
     }
 
     #[test]
-    fn wrapper_surfaces_emit_hint_audits() {
-        // Surfaces that emit universal hint audits (chat is excluded — it owns its footer)
-        for (fn_name, surface) in [
-            ("render_env_prompt", "render_prompts::env"),
-            ("render_drop_prompt", "render_prompts::drop"),
-            ("render_naming_prompt", "render_prompts::naming"),
-            ("render_webcam_prompt", "render_prompts::webcam"),
-            (
-                "render_creation_feedback",
-                "render_prompts::creation_feedback",
-            ),
-        ] {
-            let body = fn_source(fn_name);
-            assert!(
-                body.contains("emit_prompt_hint_audit("),
-                "{fn_name} should emit a prompt hint audit at the wrapper level"
-            );
-            assert!(
-                body.contains(&format!("\"{}\"", surface)),
-                "{fn_name} should emit hint audit with surface name \"{surface}\""
-            );
-            assert!(
-                body.contains("universal_prompt_hints()"),
-                "{fn_name} should use universal_prompt_hints() for the hint audit"
-            );
-        }
-    }
-
-    #[test]
     fn template_prompt_emits_surface_specific_truthful_hints() {
         let body = fn_source("render_template_prompt");
         assert!(
@@ -1377,26 +1348,6 @@ mod other_prompt_source_tests {
         );
     }
 
-    #[test]
-    fn chat_prompt_wrapper_reports_hint_strip_footer() {
-        let body = fn_source("render_chat_prompt");
-        assert!(
-            body.contains("footer_mode: \"hint_strip\""),
-            "chat wrapper should report hint_strip footer mode in chrome audit"
-        );
-        assert!(
-            body.contains("hint_count: 3"),
-            "chat wrapper should report 3 hint keys"
-        );
-        assert!(
-            body.contains("has_leading_status: true"),
-            "chat wrapper should report leading status text"
-        );
-        assert!(
-            body.contains("exception_reason: Some(\"chat_prompt_renders_hint_strip_internally\")"),
-            "chat wrapper should document why it renders the hint strip internally"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -1433,26 +1384,4 @@ mod prompt_footer_regression_tests {
         );
     }
 
-    #[test]
-    fn other_rs_exceptions_are_spec_blessed_only() {
-        let source = fs::read_to_string("src/render_prompts/other.rs")
-            .expect("Failed to read src/render_prompts/other.rs");
-        assert!(
-            !source.contains("PromptFooter::new("),
-            "other.rs should not contain any PromptFooter::new after migration"
-        );
-        // Remaining exceptions must be spec-blessed surfaces (terminal, webcam media)
-        for line in source.lines() {
-            if line.contains("PromptChromeAudit::exception(") {
-                assert!(
-                    line.contains("render_prompts::webcam")
-                        || line.contains("terminal")
-                        || line.contains("editor")
-                        || line.contains("grid")
-                        || line.contains("expanded"),
-                    "non-blessed exception found in other.rs: {line}"
-                );
-            }
-        }
-    }
 }

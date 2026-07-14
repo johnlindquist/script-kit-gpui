@@ -172,15 +172,30 @@ impl FlowCatalog {
             }
             placeholder.status = RosterStatus::Loading;
         }
-        let catalog = Arc::clone(self);
-        let cwd = cwd.to_string();
-        std::thread::Builder::new()
-            .name("flow-roster-fetch".into())
-            .spawn(move || {
-                let entry = fetch_roster_blocking(&cwd);
-                catalog.complete_refresh(cwd, entry);
-            })
-            .ok();
+
+        // Unit tests run under GPUI's deterministic scheduler. An OS thread
+        // completing a roster fetch during an unrelated GPUI test makes that
+        // test nondeterministic, so keep test refreshes local and side-effect
+        // free. Fetch parsing and cache-completion behavior have direct unit
+        // coverage below; production retains the asynchronous process path.
+        #[cfg(test)]
+        {
+            self.complete_refresh(cwd.to_string(), RosterEntry::empty(RosterStatus::Ready));
+            return;
+        }
+
+        #[cfg(not(test))]
+        {
+            let catalog = Arc::clone(self);
+            let cwd = cwd.to_string();
+            std::thread::Builder::new()
+                .name("flow-roster-fetch".into())
+                .spawn(move || {
+                    let entry = fetch_roster_blocking(&cwd);
+                    catalog.complete_refresh(cwd, entry);
+                })
+                .ok();
+        }
     }
 
     /// Land a fetched roster: store the entry, bump the generation so
@@ -197,6 +212,11 @@ impl FlowCatalog {
     #[cfg(test)]
     fn insert_for_test(&self, cwd: &str, entry: RosterEntry) {
         self.entries.lock().insert(cwd.to_string(), entry);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prime_ready_for_test(&self, cwd: &str) {
+        self.insert_for_test(cwd, RosterEntry::empty(RosterStatus::Ready));
     }
 }
 

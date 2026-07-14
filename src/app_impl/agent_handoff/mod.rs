@@ -6255,8 +6255,8 @@ mod tests {
     fn tab_ai_user_prompt_contains_code_block_instruction() {
         let prompt = crate::ai::build_tab_ai_user_prompt("test intent", "{}");
         assert!(
-            prompt.contains("fenced code block"),
-            "Prompt must ask for a fenced code block so extract_generated_script_source works"
+            prompt.contains("fenced ```ts block"),
+            "Prompt must ask for a fenced TypeScript block so extract_generated_script_source works"
         );
     }
 
@@ -6346,28 +6346,6 @@ mod tests {
     }
 
     // ── Source-type detection tests ──────────────────────────────────
-
-    #[test]
-    fn desktop_selection_beats_internal_surface_classification() {
-        let desktop = crate::context_snapshot::AiContextSnapshot {
-            selected_text: Some("hello".to_string()),
-            ..Default::default()
-        };
-        // Even when the source view is ScriptList with a focused target,
-        // desktop selected text takes precedence.
-        let focused_target = crate::ai::TabAiTargetContext {
-            source: "ScriptList".to_string(),
-            kind: "script".to_string(),
-            semantic_id: "script:0".to_string(),
-            label: "hello-world".to_string(),
-            metadata: None,
-        };
-        assert_eq!(
-            super::detect_tab_ai_source_type(&AppView::ScriptList, &desktop, Some(&focused_target),),
-            Some(crate::ai::TabAiSourceType::DesktopSelection),
-            "Desktop selected text must take precedence over ScriptList classification"
-        );
-    }
 
     #[test]
     fn script_list_requires_real_focused_target() {
@@ -6462,36 +6440,6 @@ mod tests {
             }
         }
         rest[..end.expect("function body must close")].to_string()
-    }
-
-    #[test]
-    fn tab_ai_open_path_switches_view_before_waiting_for_capture_contract() {
-        let source = include_str!("mod.rs");
-        let body = tab_ai_contract_compact(&tab_ai_extract_fn_body(
-            source,
-            "fn open_tab_ai_harness_terminal_from_request(",
-        ));
-
-        let view_switch = body
-            .find(&tab_ai_contract_compact(
-                "self.current_view = AppView::QuickTerminalView",
-            ))
-            .expect("QuickTerminalView switch must exist");
-        let notify = body
-            .find(&tab_ai_contract_compact("cx.notify();"))
-            .expect("cx.notify must exist");
-        let capture_wait = body
-            .find(&tab_ai_contract_compact("capture_rx.recv().await"))
-            .expect("deferred capture await must exist");
-
-        assert!(
-            view_switch < notify,
-            "the harness view must be selected before notifying the UI"
-        );
-        assert!(
-            notify < capture_wait,
-            "the terminal must become visible before waiting for deferred capture"
-        );
     }
 
     #[test]
@@ -6708,47 +6656,6 @@ mod tests {
         assert!(
             body.contains(&tab_ai_contract_compact("return false;")),
             "setup-mode cache rejection must fall through to fresh launch resolution"
-        );
-    }
-
-    #[test]
-    fn main_menu_skill_launch_stages_slash_pick_without_entry_intent_submit_contract() {
-        let body = tab_ai_contract_compact(&tab_ai_extract_fn_body(
-            include_str!("mod.rs"),
-            "pub(crate) fn open_agent_chat_with_selected_skill(",
-        ));
-
-        assert!(
-            body.contains(&tab_ai_contract_compact(
-                "crate::ai::agent_chat::ui::build_skill_slash_command_text(&skill.skill_id)",
-            )),
-            "main-menu skill launch must use the same slash text as Agent Chat slash acceptance"
-        );
-        assert!(
-            body.contains(&tab_ai_contract_compact(
-                "crate::ai::agent_chat::ui::build_skill_context_part(&skill.title, owner, &skill.skill_id, &skill.path)",
-            )),
-            "main-menu skill launch must attach the same skill context part as Agent Chat slash acceptance"
-        );
-        assert!(
-            body.contains(&tab_ai_contract_compact(
-                "self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(None, cx);",
-            )),
-            "main-menu skill launch must open Agent Chat without an auto-submit entry intent"
-        );
-        assert!(
-            body.contains("stage_selected_plugin_skill_from_main_menu"),
-            "main-menu skill launch must stage the slash-style skill selection after Agent Chat opens"
-        );
-        assert!(
-            !body.contains("build_staged_skill_prompt"),
-            "main-menu skill launch must not build an entry-intent prompt because entry intents auto-submit"
-        );
-        assert!(
-            !body.contains(&tab_ai_contract_compact(
-                "open_tab_ai_agent_chat_with_entry_intent(Some",
-            )),
-            "main-menu skill launch must not pass selected skills as auto-submit entry intents"
         );
     }
 

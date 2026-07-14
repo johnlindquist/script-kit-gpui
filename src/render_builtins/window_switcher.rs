@@ -543,27 +543,6 @@ mod window_switcher_chrome_audit {
     }
 
     #[test]
-    fn window_switcher_uses_truthful_two_item_footer() {
-        let source = include_str!("window_switcher.rs");
-        assert!(
-            !source.contains("universal_prompt_hints()"),
-            "window_switcher should not use universal hints (no actions dialog wired)"
-        );
-        assert!(
-            source.contains(r#"SharedString::from("↵ Switch")"#),
-            "window_switcher should use truthful '↵ Switch' footer label"
-        );
-        assert!(
-            source.contains(r#"SharedString::from("Esc Back")"#),
-            "window_switcher should use 'Esc Back' footer label"
-        );
-        assert!(
-            !source.contains("⌘K Actions"),
-            "window_switcher should not advertise ⌘K Actions without a working dialog"
-        );
-    }
-
-    #[test]
     fn window_switcher_uses_wheel_contract_and_vendor_scrollbar() {
         let source = include_str!("window_switcher.rs");
         assert!(

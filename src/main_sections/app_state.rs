@@ -646,17 +646,19 @@ fn main_menu_selection_test_app(
     );
     let catalog = crate::flows::catalog::flow_catalog();
     catalog.set_notify_hook(|| {});
-    while catalog.roster_for(&flow_cwd).status == crate::flows::catalog::RosterStatus::Loading {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    catalog.prime_ready_for_test(&flow_cwd);
 
     let app = std::sync::Arc::new(std::sync::Mutex::new(None));
     let app_for_window = app.clone();
     cx.update(|cx| {
         gpui_component::init(cx);
         cx.open_window(Default::default(), |window, cx| {
+            let mut config = crate::config::Config::default();
+            let mut built_ins = config.get_builtins();
+            built_ins.app_launcher = false;
+            config.built_ins = Some(built_ins);
             let entity = cx.new(|cx| {
-                ScriptListApp::new(crate::config::Config::default(), false, window, cx)
+                ScriptListApp::new(config, false, window, cx)
             });
             *app_for_window.lock().expect("lock selection test app") = Some(entity);
             cx.new(|_| MainMenuSelectionTestHost)

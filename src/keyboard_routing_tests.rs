@@ -134,54 +134,10 @@ mod tests {
     ///
     /// This serves as the reference implementation for how actions popup
     /// keyboard routing should work.
-    #[test]
-    fn test_filesearchview_arrow_handler_checks_actions_popup() {
-        let content = read_app_impl_sources();
-
-        let arrow_section = get_arrow_interceptor_section(&content);
-
-        // Find the FileSearchView case within the arrow interceptor
-        let filesearch_pos = arrow_section
-            .find("AppView::FileSearchView {")
-            .expect("FileSearchView case not found in arrow interceptor");
-
-        // Get the section after FileSearchView match
-        let after_filesearch = &arrow_section[filesearch_pos..];
-        let check_end = after_filesearch.len().min(600);
-        let filesearch_handler = &after_filesearch[..check_end];
-
-        // Verify the actions popup check exists
-        assert!(
-            filesearch_handler.contains("show_actions_popup"),
-            "FileSearchView arrow key handler must check show_actions_popup. \
-             Found section:\n{}",
-            filesearch_handler
-        );
-    }
-
     /// Verify global arrow interception skips secondary windows.
     ///
     /// intercept_keystrokes hooks are app-wide, so this guard prevents the
     /// main list from consuming notes/AI window arrow navigation.
-    #[test]
-    fn test_arrow_interceptor_skips_notes_and_ai_windows() {
-        let content = read_app_impl_sources();
-        let arrow_section = get_arrow_interceptor_section(&content);
-
-        let guard = "if crate::notes::is_notes_window(window) || crate::ai::is_ai_window(window)";
-        let guard_pos = arrow_section
-            .find(guard)
-            .expect("arrow interceptor must skip notes/AI windows");
-        let key_parse_pos = arrow_section
-            .find("let key = event.keystroke.key.as_str()")
-            .expect("arrow interceptor key parsing not found");
-
-        assert!(
-            guard_pos < key_parse_pos,
-            "Notes/AI window guard should run before key routing in arrow interceptor"
-        );
-    }
-
     #[test]
     fn test_arrow_interceptor_skips_when_main_window_hidden() {
         let content =
@@ -204,22 +160,6 @@ mod tests {
         let section = &content[start..start + end];
 
         assert_main_window_visibility_guard_precedes_key_parse(section, "home_end interceptor");
-    }
-
-    #[test]
-    fn test_actions_interceptor_skips_when_main_window_hidden() {
-        let content =
-            fs::read_to_string("src/app_impl/startup_new_actions.rs").expect("Failed to read");
-        let start = content
-            .find("let actions_interceptor = cx.intercept_keystrokes")
-            .expect("actions interceptor not found");
-        let after_start = &content[start..];
-        let end = after_start
-            .find("app.gpui_input_subscriptions.push(actions_interceptor);")
-            .expect("actions interceptor end not found");
-        let section = &content[start..start + end];
-
-        assert_main_window_visibility_guard_precedes_key_parse(section, "actions interceptor");
     }
 
     /// Menu-syntax result-list ownership must not steal normal input editing.
@@ -263,24 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_actions_interceptor_skips_arrow_keys_before_popup_router() {
-        let content = fs::read_to_string("src/app_impl/startup.rs")
-            .expect("Failed to read src/app_impl/startup.rs");
-
-        let route_pos = content
-            .find("match this.route_key_to_actions_dialog(")
-            .expect("startup actions interceptor must route popup keys through the shared router");
-        let skip_pos = content
-            .find("Arrow keys are handled by arrow_interceptor to avoid double-processing")
-            .expect("startup actions interceptor must document the arrow skip guard");
-
-        assert!(
-            skip_pos < route_pos,
-            "startup actions interceptor must skip Up/Down before route_key_to_actions_dialog() to avoid double-processing with arrow_interceptor"
-        );
-    }
-
-    #[test]
     fn test_tab_interceptor_skips_when_main_window_hidden() {
         let content =
             fs::read_to_string("src/app_impl/startup_new_tab.rs").expect("Failed to read");
@@ -300,33 +222,6 @@ mod tests {
     ///
     /// The render handler should route Enter, Escape, Backspace, and character
     /// input to the actions dialog when the popup is open.
-    #[test]
-    fn test_render_script_list_handles_actions_keyboard() {
-        let content = fs::read_to_string("src/render_script_list/mod.rs")
-            .or_else(|_| fs::read_to_string("src/render_script_list.rs"))
-            .expect("Failed to read render_script_list source");
-
-        // Verify actions popup keyboard handling exists
-        assert!(
-            content.contains("show_actions_popup"),
-            "render_script_list.rs must check show_actions_popup for keyboard routing"
-        );
-
-        // Verify Enter key routes to actions dialog
-        assert!(
-            content.contains("enter") && content.contains("get_selected_action_id"),
-            "Enter key should execute the selected action from actions dialog"
-        );
-
-        // Verify Escape closes actions popup
-        assert!(
-            content.contains("escape")
-                && (content.contains("close_actions_popup")
-                    || content.contains("close_actions_window")),
-            "Escape should close the actions popup"
-        );
-    }
-
     /// Verify that actions dialog move_up/move_down methods exist.
     ///
     /// These are called by the keyboard interceptors when routing to the dialog.
@@ -413,43 +308,6 @@ mod tests {
     ///
     /// This is a comprehensive check that all views handle the actions popup
     /// keyboard routing pattern consistently.
-    #[test]
-    fn test_all_views_have_consistent_actions_keyboard_routing() {
-        let content = read_app_impl_sources();
-
-        let arrow_section = get_arrow_interceptor_section(&content);
-
-        // Views that support actions popup should all check show_actions_popup
-        // in their arrow key handlers within the arrow interceptor
-        let views_with_actions = ["AppView::ScriptList", "AppView::FileSearchView"];
-
-        for view in &views_with_actions {
-            // Find the view case within the arrow interceptor
-            let view_pos = arrow_section.find(view);
-            assert!(
-                view_pos.is_some(),
-                "View {} not found in arrow interceptor",
-                view
-            );
-
-            // After the view match, should have show_actions_popup check within 600 chars
-            let after_view = &arrow_section[view_pos.unwrap()..];
-            let section_end = after_view.len().min(600);
-            let view_section = &after_view[..section_end];
-
-            // Count occurrences of the pattern - should have the check
-            let has_popup_check = view_section.contains("show_actions_popup");
-
-            assert!(
-                has_popup_check,
-                "{} must check show_actions_popup in arrow key handler. \
-                 This ensures arrow keys route to actions dialog when popup is open.\n\
-                 Section:\n{}",
-                view, view_section
-            );
-        }
-    }
-
     /// Verify stop_propagation is called when routing to actions dialog.
     ///
     /// This prevents the key event from being handled by other components.

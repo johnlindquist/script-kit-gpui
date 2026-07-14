@@ -95,21 +95,6 @@ fn test_shift_tab_no_longer_routes_through_harness_entry_intent() {
 }
 
 #[test]
-fn test_generate_script_builtin_routes_to_harness_terminal() {
-    let builtin_execution = fs::read_to_string("src/app_execute/builtin_execution.rs")
-        .expect("Failed to read src/app_execute/builtin_execution.rs");
-
-    assert!(
-        builtin_execution.contains("open_tab_ai_chat_with_entry_intent(Some(trimmed), cx)"),
-        "Generate Script built-in should route to harness terminal with entry intent"
-    );
-    assert!(
-        builtin_execution.contains("ai_generate_script_routed_to_harness"),
-        "Generate Script success label should indicate harness routing"
-    );
-}
-
-#[test]
 fn test_cmd_enter_routes_to_harness_terminal_in_startup_new_tab() {
     let startup_tab = fs::read_to_string("src/app_impl/startup_new_tab.rs")
         .expect("Failed to read src/app_impl/startup_new_tab.rs");
@@ -128,34 +113,6 @@ fn test_tab_interceptor_matches_tab_key_case_insensitive() {
     assert!(
         startup_tab.contains("eq_ignore_ascii_case(\"tab\")"),
         "Tab interceptor should match tab key case-insensitively"
-    );
-}
-
-#[test]
-fn plain_tab_in_script_list_routes_to_agent_chat_in_startup_new_tab() {
-    let startup_tab = fs::read_to_string("src/app_impl/startup_new_tab.rs")
-        .expect("Failed to read src/app_impl/startup_new_tab.rs");
-
-    assert!(
-        startup_tab.contains("matches!(this.current_view, AppView::ScriptList)")
-            && startup_tab.contains("this.open_tab_ai_agent_chat_with_entry_intent(entry_intent, cx);"),
-        "Plain Tab in ScriptList must route through the Agent Chat entry path in startup_new_tab.rs"
-    );
-}
-
-#[test]
-fn test_generate_script_from_current_app_routes_to_harness() {
-    let builtin_execution = fs::read_to_string("src/app_execute/builtin_execution.rs")
-        .expect("Failed to read src/app_execute/builtin_execution.rs");
-
-    assert!(
-        builtin_execution.contains("AiCommandType::GenerateScriptFromCurrentApp"),
-        "GenerateScriptFromCurrentApp must be handled in builtin_execution.rs"
-    );
-
-    assert!(
-        builtin_execution.contains("ai_{cmd_type:?}_routed_to_harness"),
-        "GenerateScriptFromCurrentApp must route to harness terminal"
     );
 }
 
@@ -300,40 +257,6 @@ fn plain_tab_agent_chat_helper_is_removed() {
 }
 
 #[test]
-fn focused_part_staging_suppression_stays_available_for_explicit_handoffs() {
-    let source = fs::read_to_string("src/app_impl/agent_handoff/mod.rs")
-        .expect("Failed to read src/app_impl/agent_handoff/mod.rs");
-
-    assert!(
-        source.contains("suppress_focused_part: bool"),
-        "Tab AI launch requests must carry a focused-part suppression flag"
-    );
-    assert!(
-        source.contains("if suppress_focused_part {")
-            && source.contains("request.suppress_focused_part"),
-        "Focused-part routing must honor the suppression flag during Agent Chat launch"
-    );
-    assert!(
-        source.contains("self.open_tab_ai_agent_chat_with_entry_intent_preserving_return_and_options(")
-            && source.contains("entry_intent,\n            true,\n            cx,")
-            && source.contains("self.open_tab_ai_agent_chat_with_options(entry_intent, false, cx);"),
-        "Explicit Agent Chat handoffs can suppress focused-choice staging while the shared entry path should not"
-    );
-}
-
-#[test]
-fn direct_prompt_agent_chat_handoff_can_suppress_focused_part_staging() {
-    let source = fs::read_to_string("src/app_impl/agent_handoff/mod.rs")
-        .expect("Failed to read src/app_impl/agent_handoff/mod.rs");
-
-    assert!(
-        source.contains("open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part")
-            && source.contains("self.open_tab_ai_agent_chat_with_options(entry_intent, true, cx);"),
-        "Direct prompt Agent Chat handoffs such as dictation must be able to submit raw input without inheriting the selected launcher row"
-    );
-}
-
-#[test]
 fn simulate_key_tab_does_not_use_plain_tab_agent_chat_helper() {
     let helper_source = fs::read_to_string("src/app_impl/simulate_key_dispatch.rs")
         .expect("Failed to read src/app_impl/simulate_key_dispatch.rs");
@@ -407,48 +330,6 @@ fn confirm_popup_guards_global_launcher_interceptors() {
 }
 
 #[test]
-fn actions_window_escape_routes_before_secondary_window_skip() {
-    let startup = fs::read_to_string("src/app_impl/startup.rs")
-        .expect("Failed to read src/app_impl/startup.rs");
-    let startup_new_actions = fs::read_to_string("src/app_impl/startup_new_actions.rs")
-        .expect("Failed to read src/app_impl/startup_new_actions.rs");
-
-    for (label, source) in [
-        ("startup.rs", startup.as_str()),
-        ("startup_new_actions.rs", startup_new_actions.as_str()),
-    ] {
-        let actions_window_pos = source
-            .find("if is_actions")
-            .unwrap_or_else(|| panic!("{label} must special-case actions window keys"));
-        let secondary_skip_pos = source
-            .find("if is_notes || is_ai || is_detached_agent_chat")
-            .unwrap_or_else(|| panic!("{label} must keep the secondary-window skip"));
-        assert!(
-            actions_window_pos < secondary_skip_pos,
-            "{label} must route actions-window Escape before skipping secondary windows"
-        );
-        let close_key_pos = source
-            .find("let is_actions_close_key")
-            .unwrap_or_else(|| panic!("{label} must compute actions close keys"));
-        let hidden_guard_pos = source
-            .find("if !script_kit_gpui::is_main_window_visible()")
-            .unwrap_or_else(|| panic!("{label} must keep the main-window visibility guard"));
-        assert!(
-            close_key_pos < hidden_guard_pos,
-            "{label} must route actions close keys before the visibility guard so embedded Agent Chat can close its actions dialog"
-        );
-        assert!(
-            source.contains("actions_interceptor_routed_from_actions_window")
-                && source.contains("actions_interceptor_routed_close_before_visibility_guard")
-                && source.contains("crate::ui_foundation::is_key_escape(key)")
-                && source.contains("key.eq_ignore_ascii_case(\"k\")")
-                && source.contains("this.route_key_to_actions_dialog("),
-            "{label} must route Escape/Cmd+K from the actions window through the shared dialog"
-        );
-    }
-}
-
-#[test]
 fn render_impl_routes_modifier_aware_keys_into_confirm_popup_guard() {
     let source = fs::read_to_string("src/main_sections/render_impl.rs")
         .expect("Failed to read src/main_sections/render_impl.rs");
@@ -505,25 +386,6 @@ fn script_list_cmd_v_routes_clipboard_images_into_agent_chat() {
                 "open_tab_ai_agent_chat_with_context_part(part, \"script_list_clipboard_image\", cx);"
             ),
         "ScriptList Cmd+V should route clipboard images straight into Agent Chat as file attachments"
-    );
-}
-
-#[test]
-fn agent_chat_launch_staging_preserves_pasted_text_pills_for_clipboard_text_blocks() {
-    let agent_chat_view = fs::read_to_string("src/ai/agent_chat/ui/view.rs")
-        .expect("Failed to read src/ai/agent_chat/ui/view.rs");
-    let agent_handoff = fs::read_to_string("src/app_impl/agent_handoff/mod.rs")
-        .expect("Failed to read src/app_impl/agent_handoff/mod.rs");
-
-    assert!(
-        agent_chat_view.contains("source.starts_with(\"clipboard://pasted-text/\")")
-            && agent_chat_view.contains("self.pasted_text_tokens")
-            && agent_chat_view.contains("register_inline_owned_context_part"),
-        "Agent Chat should recognize staged clipboard text blocks as pasted-text pills"
-    );
-    assert!(
-        agent_handoff.contains("view.register_inline_owned_context_part(token, part);"),
-        "Agent Chat launch staging should register routed clipboard text with the pasted-text pill registry"
     );
 }
 

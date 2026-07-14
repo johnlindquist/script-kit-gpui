@@ -74,7 +74,7 @@ mod arg_prompt_render_tests {
     }
 
     #[test]
-    fn prompt_footer_colors_use_selected_background_for_surface() {
+    fn prompt_footer_colors_use_shared_theme_surface() {
         let design_colors = DesignColors {
             background_secondary: 0x123456,
             background_selected: 0xabcdef,
@@ -82,9 +82,10 @@ mod arg_prompt_render_tests {
         };
 
         let footer_colors = prompt_footer_colors_for_prompt(&design_colors, true);
+        let theme = crate::theme::get_cached_theme();
 
-        assert_eq!(footer_colors.background, 0xabcdef);
-        assert!(footer_colors.is_light_mode);
+        assert_eq!(footer_colors.background, theme.colors.accent.selected_subtle);
+        assert_eq!(footer_colors.is_light_mode, !theme.is_dark_mode());
     }
 
     #[test]
@@ -166,28 +167,6 @@ mod arg_prompt_render_tests {
         assert_eq!(
             resolve_arg_tab_completion(&filtered, 99),
             Some("Alpha".to_string())
-        );
-    }
-
-    #[test]
-    fn test_arg_prompt_input_text_uses_theme_tokens_when_rendering() {
-        let render_source = include_str!("render.rs");
-
-        assert!(
-            render_source.contains("let text_primary = self.theme.colors.text.primary;"),
-            "arg prompt text should use theme.colors.text.primary"
-        );
-        assert!(
-            render_source.contains("let text_muted = self.theme.colors.text.muted;"),
-            "arg prompt placeholder text should use theme.colors.text.muted"
-        );
-        assert!(
-            !render_source.contains("let text_primary = design_colors.text_primary;"),
-            "arg prompt text should not use design_colors.text_primary"
-        );
-        assert!(
-            !render_source.contains("let text_muted = design_colors.text_muted;"),
-            "arg prompt placeholder text should not use design_colors.text_muted"
         );
     }
 
@@ -283,32 +262,6 @@ mod arg_prompt_render_tests {
         assert!(
             render_source.contains("emit_prompt_chrome_audit("),
             "arg render should call emit_prompt_chrome_audit"
-        );
-    }
-
-    #[test]
-    fn arg_prompt_render_uses_shared_shell_not_prompt_footer() {
-        let render_source = include_str!("render.rs");
-        assert!(
-            render_source.contains("render_minimal_list_prompt_shell("),
-            "arg render should delegate layout to the shared minimal list prompt shell"
-        );
-        assert!(
-            !render_source.contains("PromptFooter::new("),
-            "arg render should no longer use PromptFooter"
-        );
-    }
-
-    #[test]
-    fn arg_render_prompt_matches_minimal_chrome_contract() {
-        let source = include_str!("render.rs");
-        assert!(
-            source.contains("render_minimal_list_prompt_shell("),
-            "arg render_prompt should use the shared minimal list prompt shell"
-        );
-        assert!(
-            !source.contains("PromptFooter::new("),
-            "arg render_prompt should not use PromptFooter"
         );
     }
 

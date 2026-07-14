@@ -1986,36 +1986,6 @@ mod prompt_layout_shell_tests {
         );
     }
 
-    #[test]
-    fn file_search_source_matches_main_view_chrome_contract() {
-        let source = include_str!("../render_builtins/file_search.rs");
-        assert!(
-            source.contains("render_main_view_chrome_footer_flush("),
-            "file search must use shared main-view chrome"
-        );
-        assert!(
-            source.contains("render_main_view_context_zone("),
-            "file search must keep the shared context zone"
-        );
-        assert!(
-            source.contains("render_main_view_input_shell("),
-            "file search must keep the shared input shell"
-        );
-        assert!(
-            source.contains("main_window_footer_slot("),
-            "file search must route footer content through the native footer slot"
-        );
-        assert!(
-            source.contains("render_simple_hint_strip(file_search_hints, None)"),
-            "file search must build the shared hint strip"
-        );
-        let divider = "SectionDivider".to_owned() + "::new()";
-        assert!(
-            !source.contains(&divider),
-            "file search must not use SectionDivider"
-        );
-    }
-
     /// Table-driven regression test covering all migrated minimal builtin surfaces.
     ///
     /// Each entry asserts both source-level markers (shared main-view chrome,

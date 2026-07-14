@@ -254,23 +254,14 @@ fn promote_recopy(entry_id: &str, text: &str, now: DateTime<Utc>) -> anyhow::Res
 mod tests {
     use super::*;
     use crate::clipboard_history::database::{
-        add_entry, get_connection, get_entry_sediment_state, init_test_clipboard_db,
+        add_entry, get_entry_sediment_state, init_test_clipboard_db, reset_test_clipboard_db,
+        test_db_lock,
     };
     use crate::clipboard_history::types::ContentType;
     use chrono::TimeZone as _;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        TEST_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
 
     fn unique_temp_paths(test_name: &str) -> (tempfile::TempDir, PathBuf, BrainSubstrate) {
         let nanos = SystemTime::now()
@@ -375,7 +366,7 @@ mod tests {
 
     #[test]
     fn annotate_and_reject_clipboard_entry_round_trip() {
-        let _guard = test_lock();
+        let _guard = test_db_lock();
         let (_dir, db_path, substrate) = unique_temp_paths("annotate-reject");
         init_test_clipboard_db(&db_path).expect("test db");
         set_test_sediment_substrate(substrate.clone());
@@ -398,12 +389,12 @@ mod tests {
         assert!(!day_after_reject.contains(text));
 
         clear_test_sediment_substrate();
-        let _ = get_connection();
+        reset_test_clipboard_db();
     }
 
     #[test]
     fn sediment_behavior_contract() {
-        let _guard = test_lock();
+        let _guard = test_db_lock();
         let (_dir, db_path, substrate) = unique_temp_paths("sediment-contract");
         init_test_clipboard_db(&db_path).expect("test db");
         set_test_sediment_substrate(substrate.clone());
@@ -478,6 +469,6 @@ mod tests {
         );
 
         clear_test_sediment_substrate();
-        let _ = get_connection();
+        reset_test_clipboard_db();
     }
 }

@@ -161,44 +161,38 @@ mod builtin_execution_ai_feedback_tests {
 mod dictation_model_prompt_tests {
     use super::*;
 
-    /// A missing Whisper model must never offer a "download" choice — the
-    /// download pipeline only fetches Parakeet. It offers switching to the
-    /// recommended model instead.
+    /// A missing non-recommended model can be downloaded directly while still
+    /// offering the recommended model as an alternative.
     #[test]
-    fn missing_whisper_model_offers_switch_to_recommended_not_download() {
+    fn missing_whisper_model_offers_download_and_recommended_alternative() {
         let (title, placeholder, choices) = ScriptListApp::build_dictation_model_prompt_for_model(
             crate::dictation::DictationModelStatus::NotDownloaded,
             crate::dictation::DictationModelId::WhisperMedium,
             None,
         );
         assert!(
-            title.contains("not installed"),
-            "title must say the model is not installed, got: {title}"
+            title.contains("Whisper Medium"),
+            "title must name the selected model, got: {title}"
         );
         assert!(
-            placeholder.contains("whisper-medium-q4_1.bin"),
-            "placeholder must name the expected model file, got: {placeholder}"
+            placeholder.contains("local after install"),
+            "placeholder must explain the local install, got: {placeholder}"
         );
-        assert_eq!(choices.len(), 2);
-        assert_eq!(choices[0].value, BUILTIN_DICTATION_MODEL_USE_RECOMMENDED);
+        assert_eq!(choices.len(), 3);
+        assert_eq!(choices[0].value, BUILTIN_DICTATION_MODEL_DOWNLOAD);
+        assert!(choices[0].name.contains("Whisper Medium"));
+        assert_eq!(choices[1].value, BUILTIN_DICTATION_MODEL_USE_RECOMMENDED);
         assert!(
-            choices[0].name.contains("Parakeet"),
+            choices[1].name.contains("Parakeet"),
             "switch choice must name the recommended model, got: {}",
-            choices[0].name
+            choices[1].name
         );
-        assert!(
-            !choices
-                .iter()
-                .any(|choice| choice.value == BUILTIN_DICTATION_MODEL_DOWNLOAD),
-            "missing whisper must not offer the parakeet download under a whisper label"
-        );
-        assert_eq!(choices[1].value, BUILTIN_DICTATION_MODEL_CANCEL);
+        assert_eq!(choices[2].value, BUILTIN_DICTATION_MODEL_CANCEL);
     }
 
-    /// Download-retry copy must name Parakeet (the only downloadable model)
-    /// even when another model is selected in preferences.
+    /// Download-retry copy names the model selected in preferences.
     #[test]
-    fn retry_copy_names_parakeet_even_when_whisper_selected() {
+    fn retry_copy_names_selected_whisper_model() {
         let (_, _, choices) = ScriptListApp::build_dictation_model_prompt_for_model(
             crate::dictation::DictationModelStatus::DownloadFailed("network error".to_string()),
             crate::dictation::DictationModelId::WhisperMedium,
@@ -212,8 +206,8 @@ mod dictation_model_prompt_tests {
             retry
                 .description
                 .as_deref()
-                .is_some_and(|description| description.contains("Parakeet")),
-            "retry description must name Parakeet, got: {:?}",
+                .is_some_and(|description| description.contains("Whisper Medium")),
+            "retry description must name the selected model, got: {:?}",
             retry.description
         );
     }

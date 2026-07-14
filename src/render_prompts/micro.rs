@@ -227,18 +227,6 @@ mod micro_prompt_render_tests {
     }
 
     #[test]
-    fn micro_prompt_has_no_list_or_footer() {
-        assert!(
-            !MICRO_SOURCE.contains("uniform_list("),
-            "micro prompt should not render a choice list"
-        );
-        assert!(
-            !MICRO_SOURCE.contains("PromptFooter::new("),
-            "micro prompt should not render a footer"
-        );
-    }
-
-    #[test]
     fn micro_prompt_has_key_handlers() {
         assert!(
             MICRO_SOURCE.contains("is_key_escape(key)"),

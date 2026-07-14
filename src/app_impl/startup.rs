@@ -707,6 +707,7 @@ impl ScriptListApp {
         // thread; without this hook an idle open window never repaints when
         // flows appear. The generation poll in filtering_cache stays as the
         // fallback for the same signal.
+        #[cfg(not(test))]
         {
             let (roster_tx, roster_rx) = async_channel::bounded::<()>(4);
             crate::flows::catalog::flow_catalog().set_notify_hook(move || {

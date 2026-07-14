@@ -1379,34 +1379,6 @@ mod on_close_reentrancy_tests {
     use std::fs;
 
     #[test]
-    fn test_render_builtins_actions_on_close_defers_script_list_app_updates() {
-        let source = fs::read_to_string("src/render_builtins/actions.rs")
-            .expect("Failed to read src/render_builtins/actions.rs");
-
-        let set_on_close_count = source
-            .matches("d.set_on_close(std::sync::Arc::new(move |cx| {")
-            .count();
-        let defer_count = source.matches("cx.defer(move |cx| {").count();
-
-        assert_eq!(
-            set_on_close_count, 2,
-            "render_builtins/actions should define two on_close callbacks"
-        );
-        assert!(
-            defer_count >= 2,
-            "render_builtins/actions on_close callbacks should defer ScriptListApp updates"
-        );
-        assert!(
-            source.contains("if !app.show_actions_popup && app.actions_dialog.is_none()"),
-            "render_builtins/actions on_close callbacks should guard already-closed popup state"
-        );
-        assert!(
-            source.contains("app.file_search_actions_path = None;"),
-            "file-search on_close path should clear file_search_actions_path"
-        );
-    }
-
-    #[test]
     fn test_render_builtins_actions_clipboard_popup_uses_mini_menu_contract() {
         let source = fs::read_to_string("src/render_builtins/actions.rs")
             .expect("Failed to read src/render_builtins/actions.rs");

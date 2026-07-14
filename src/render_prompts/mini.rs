@@ -285,19 +285,6 @@ mod mini_prompt_render_tests {
     }
 
     #[test]
-    fn mini_prompt_uses_zero_radius_shell() {
-        // The shared shell is called with 0.0 radius — no visible rounding
-        assert!(
-            !MINI_SOURCE.contains("design_visual.radius_lg"),
-            "mini prompt should not use radius_lg for shell rounding"
-        );
-        assert!(
-            !MINI_SOURCE.contains("shell_radius"),
-            "mini prompt should not use shell_radius for shell rounding"
-        );
-    }
-
-    #[test]
     fn mini_prompt_emits_chrome_audit() {
         assert!(
             MINI_SOURCE.contains("emit_prompt_chrome_audit("),

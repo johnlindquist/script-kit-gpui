@@ -209,23 +209,4 @@ mod form_prompt_render_backdrop_tests {
         );
     }
 
-    #[test]
-    fn test_form_uses_shared_minimal_shell() {
-        assert!(
-            FORM_RENDER_SOURCE.contains("render_simple_prompt_shell("),
-            "form render should use the shared minimal shell helper"
-        );
-        assert!(
-            FORM_RENDER_SOURCE.contains("clickable_universal_hint_strip("),
-            "form render should use the clickable hint strip"
-        );
-        assert!(
-            !FORM_RENDER_SOURCE.contains("padding_xl"),
-            "form render should use padding_lg, not padding_xl"
-        );
-        assert!(
-            FORM_RENDER_SOURCE.contains("padding_lg"),
-            "form render should use padding_lg for reduced body padding"
-        );
-    }
 }

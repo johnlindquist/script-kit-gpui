@@ -1017,26 +1017,28 @@ pub fn init_test_clipboard_db(path: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(test)]
+static TEST_DB_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn test_db_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_DB_MUTEX
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_clipboard_db() {
+    set_test_db_path(None);
+    if let Ok(mut guard) = TEST_DB_CONNECTION.lock() {
+        *guard = None;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
-
-    static TEST_DB_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn test_db_lock() -> std::sync::MutexGuard<'static, ()> {
-        TEST_DB_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-    }
-
-    fn reset_test_db() {
-        set_test_db_path(None);
-        if let Ok(mut guard) = TEST_DB_CONNECTION.lock() {
-            *guard = None;
-        }
-    }
 
     #[test]
     fn test_db_path_format() {
@@ -1051,14 +1053,14 @@ mod tests {
     #[test]
     fn test_db_path_with_override() {
         let _guard = test_db_lock();
-        reset_test_db();
+        reset_test_clipboard_db();
         let temp_path = PathBuf::from("/tmp/test-clipboard.db");
         set_test_db_path(Some(temp_path.clone()));
 
         let retrieved = get_test_db_path();
         assert_eq!(retrieved, Some(temp_path));
 
-        reset_test_db();
+        reset_test_clipboard_db();
     }
 
     #[test]
@@ -1161,6 +1163,6 @@ mod tests {
         assert!(get_entry_by_id(&brain_id).is_some());
         assert!(get_entry_by_id(&pinned_id).is_some());
 
-        reset_test_db();
+        reset_test_clipboard_db();
     }
 }

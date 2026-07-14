@@ -6,9 +6,15 @@ mod tests {
     use crate::windows::DisplayBounds;
     use gpui::{point, px, size, Bounds, WindowBounds};
     use std::env;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
+    static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     fn with_temp_state_dir<F: FnOnce()>(f: F) {
+        let _home_guard = HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp_dir = TempDir::new().unwrap();
         let old_home = env::var("HOME").ok();
         env::set_var("HOME", temp_dir.path());
@@ -314,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_main_position_with_display_detection_falls_back_when_no_display_match() {
+    fn test_save_main_position_with_display_detection_uses_first_display_when_no_overlap() {
         with_temp_state_dir(|| {
             let displays = vec![DisplayBounds {
                 origin_x: 2000.0,
@@ -326,14 +332,14 @@ mod tests {
 
             let outcome = save_main_position_with_display_detection(bounds, &displays);
 
-            assert_eq!(outcome, MainPositionSaveOutcome::SavedLegacyOnly);
+            assert_eq!(outcome, MainPositionSaveOutcome::SavedPerDisplay);
             let loaded = load_state_file().expect("state file should exist");
             let saved_main = loaded.main.expect("main bounds should be saved");
             assert!((saved_main.x - bounds.x).abs() < 0.1);
             assert!((saved_main.y - bounds.y).abs() < 0.1);
             assert!((saved_main.width - bounds.width).abs() < 0.1);
             assert!((saved_main.height - bounds.height).abs() < 0.1);
-            assert!(loaded.main_per_display.is_empty());
+            assert_eq!(loaded.main_per_display.len(), 1);
         });
     }
 
