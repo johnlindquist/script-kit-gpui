@@ -1688,11 +1688,17 @@ fn append_recent_root_file_section(
 
     let loaded_recent_files = recent_file_results
         .iter()
-        .filter(|file| crate::file_search::root_global_file_result_is_eligible(file))
+        .filter(|file| {
+            crate::file_search::root_global_file_result_is_eligible(file)
+                && file.file_type != crate::file_search::FileType::Directory
+        })
         .count();
     let eligible_recent_files = recent_file_results
         .iter()
-        .filter(|file| crate::file_search::root_global_file_result_is_eligible(file))
+        .filter(|file| {
+            crate::file_search::root_global_file_result_is_eligible(file)
+                && file.file_type != crate::file_search::FileType::Directory
+        })
         .take(
             options
                 .source_filter_browse_target_visible_rows
@@ -5883,9 +5889,14 @@ mod advanced_query_tests {
     }
 
     #[test]
-    fn empty_root_recent_files_filter_app_bundle_contents() {
+    fn recent_files_grouping_filters_directories_and_app_bundle_contents() {
         let frecency_store = FrecencyStore::new();
         let recent_files = vec![
+            root_file_with_type(
+                "/Users/example/Desktop/example-folder",
+                "example-folder",
+                FileType::Directory,
+            ),
             root_file_with_type(
                 "/Applications/Zed.app/Contents/Info.plist",
                 "Info.plist",
@@ -5924,7 +5935,7 @@ mod advanced_query_tests {
         assert_eq!(
             rendered_paths,
             vec!["/Users/example/Desktop/design-notes.md"],
-            "empty-root Recent Files should filter app bundle internals"
+            "Recent Files should filter directories and app bundle internals"
         );
     }
 

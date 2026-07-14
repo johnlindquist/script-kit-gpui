@@ -222,11 +222,6 @@ impl ScriptListApp {
         }
         if self.computed_filter_text != value {
             let update_start = std::time::Instant::now();
-            let selection_before = if matches!(self.current_view, AppView::ScriptList) {
-                Some(self.main_menu_selection_snapshot())
-            } else {
-                None
-            };
             self.filter_coalescer.reset();
             self.computed_filter_text = value.clone();
             if crate::menu_syntax::active_filter_head_owns_main_list(&value) {
@@ -240,11 +235,6 @@ impl ScriptListApp {
             self.maybe_start_root_browser_tabs_refresh_for_query(&value, cx);
             self.maybe_start_root_browser_history_refresh_for_query(&value, cx);
             self.reconcile_script_list_after_filter_change("filter_immediate", cx);
-            if let Some(snapshot) = selection_before.as_ref() {
-                if self.restore_root_file_handoff_selection_from_snapshot(snapshot) {
-                    self.scroll_to_selected_if_needed("filter_immediate_restore_root_file_handoff");
-                }
-            }
             self.rebuild_main_window_preflight_if_needed();
             if self.filter_change_can_affect_window_size() {
                 self.update_window_size();
@@ -1436,7 +1426,7 @@ impl ScriptListApp {
 
 #[cfg(test)]
 mod tests {
-    use super::menu_syntax_filter_only_escape_should_clear;
+    use super::{menu_syntax_filter_only_escape_should_clear, *};
 
     fn should_clear(raw: &str) -> bool {
         let mode = crate::menu_syntax::MenuSyntaxMode::from_input(raw);
@@ -1464,6 +1454,54 @@ mod tests {
         assert!(!should_clear("type:script git"));
         assert!(!should_clear("plain search"));
         assert!(!should_clear(""));
+    }
+
+    #[gpui::test]
+    fn query_change_discards_root_file_handoff_selection(cx: &mut gpui::TestAppContext) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            let old_query = "zzlauncherhandoffprobe";
+            let new_query = "zzlauncherhandoffprobe reset";
+            let handoff_key = "fallback/root-file-search-handoff/global";
+
+            app.scripts = vec![main_menu_selection_test_script(
+                "zzlauncherhandoffprobe reset first",
+            )];
+            app.scriptlets.clear();
+            app.skills.clear();
+            app.apps.clear();
+            app.computed_filter_text = old_query.to_string();
+            app.filter_text = old_query.to_string();
+            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(old_query);
+            app.root_search.root_file_search_mode =
+                Some(crate::file_search::RootFileSectionMode::GlobalQuery);
+            app.root_search.root_file_search_query = old_query.to_string();
+            app.root_search.root_file_search_loading = true;
+            app.root_search.root_file_provider_loading = true;
+            app.invalidate_grouped_cache();
+            app.get_grouped_results_cached();
+
+            app.selected_index = app
+                .main_menu_result_caches
+                .grouped_index_for_stable_selection_key(handoff_key)
+                .expect("old query should include the Search Files handoff");
+            app.mark_main_menu_selection_user_moved();
+
+            app.filter_text = new_query.to_string();
+            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(new_query);
+            app.apply_filter_compute_now(new_query.to_string(), cx);
+
+            let selected_key = selected_main_menu_stable_key(app);
+            let first_key = first_selectable_main_menu_stable_key(app);
+            assert_eq!(app.computed_filter_text, new_query);
+            assert!(!app.main_menu_selection_user_moved);
+            assert_eq!(selected_key, first_key);
+            assert_ne!(selected_key.as_deref(), Some(handoff_key));
+            assert!(app
+                .main_menu_result_caches
+                .search_result_for_grouped_item(app.selected_index)
+                .is_some());
+        });
     }
 }
 

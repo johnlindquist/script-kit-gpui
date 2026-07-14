@@ -96,13 +96,14 @@ fn resize_to_view_sync_uses_width_aware_path() {
 fn lifecycle_resets_restore_full_main_window_mode_on_close_and_go_back() {
     let lifecycle = read("src/app_impl/lifecycle_reset.rs");
     let close_start = lifecycle
-        .find("fn close_and_reset_window(")
-        .expect("Expected close_and_reset_window helper");
-    let close_body = &lifecycle[close_start..lifecycle.len().min(close_start + 900)];
+        .find("fn prepare_main_window_close(")
+        .expect("Expected shared main-window close preparation helper");
+    let close_body = &lifecycle[close_start..lifecycle.len().min(close_start + 1400)];
     assert!(
-        close_body.contains(
-            "self.set_main_window_mode_state_only(MainWindowMode::Full, cx, \"close_and_reset_window\");"
-        ),
+        close_body.contains("if normalize_mode_before_hide")
+            && close_body.contains(
+                "self.set_main_window_mode_state_only(MainWindowMode::Full, cx, reason);"
+            ),
         "close_and_reset_window must restore MainWindowMode::Full"
     );
 

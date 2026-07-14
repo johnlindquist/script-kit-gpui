@@ -56,6 +56,11 @@ __skgpui_cwd_sync\r",
     )
 }
 
+fn recent_file_result_from_existing_path(path: &str) -> Option<crate::file_search::FileResult> {
+    crate::file_search::file_result_from_existing_path(path)
+        .filter(|file| file.file_type != crate::file_search::FileType::Directory)
+}
+
 impl ScriptListApp {
     pub(crate) fn sync_spine_cwd_from_quick_terminal(
         &mut self,
@@ -95,7 +100,7 @@ impl ScriptListApp {
                 if !seen.insert(path.clone()) {
                     return None;
                 }
-                crate::file_search::file_result_from_existing_path(&path).map(|file| (file, score))
+                recent_file_result_from_existing_path(&path).map(|file| (file, score))
             })
             .collect();
 
@@ -986,6 +991,19 @@ mod utility_views_file_search_tests {
             modified: 0,
             file_type: FileType::File,
         }
+    }
+
+    #[test]
+    fn recent_files_hydration_skips_existing_directories() {
+        let directory = std::env::temp_dir().join(format!(
+            "script-kit-recent-files-dir-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("create temp directory");
+
+        assert!(recent_file_result_from_existing_path(&directory.to_string_lossy()).is_none());
+
+        std::fs::remove_dir_all(directory).ok();
     }
 
     #[test]

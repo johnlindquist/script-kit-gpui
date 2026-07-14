@@ -1,3 +1,4 @@
+use super::render::root_file_display_path;
 use super::*;
 
 #[test]
@@ -389,6 +390,28 @@ fn test_search_accessories_hide_source_hint_during_filtering() {
         accessories.source_hint, None,
         "source/category metadata should be hidden during filtering"
     );
+}
+
+#[test]
+fn recent_files_row_presentation_is_concise_and_nonredundant() {
+    let home = dirs::home_dir().expect("test HOME");
+    let path = home.join("Documents/report.pdf");
+    let path = path.to_string_lossy().into_owned();
+    assert_eq!(root_file_display_path(&path), "~/Documents/report.pdf");
+
+    let result = SearchResult::File(crate::scripts::FileMatch {
+        file: crate::file_search::FileResult {
+            path,
+            name: "report.pdf".to_string(),
+            size: 0,
+            modified: 0,
+            file_type: crate::file_search::FileType::Document,
+        },
+        score: 1,
+    });
+    let accessories = resolve_search_accessories(&result, "files:");
+    assert!(accessories.type_accessory.is_none());
+    assert!(accessories.source_hint.is_none());
 }
 
 #[test]

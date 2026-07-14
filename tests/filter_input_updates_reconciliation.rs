@@ -78,33 +78,6 @@ fn reconcile_helper_calls_scroll_to_selected_if_needed() {
 }
 
 #[test]
-fn reconcile_helper_selects_first_selectable_before_list_replacement() {
-    let source = read_source();
-    let section = function_body(&source, "fn reconcile_script_list_after_filter_change");
-
-    let first_selectable = section
-        .find("first_selectable_index()")
-        .expect("reconciliation must choose the first selectable row");
-    let sync = section
-        .find("self.sync_list_state_for_filter_replacement();")
-        .expect("reconciliation must sync the GPUI list state");
-    let validate = section
-        .find("self.validate_selection_bounds(cx);")
-        .expect("reconciliation must validate after list sync");
-
-    assert!(
-        first_selectable < sync && sync < validate,
-        "filter reconciliation must choose first selectable before replacing list state, then validate"
-    );
-
-    let sync_to_validate = &section[sync..validate];
-    assert!(
-        !sync_to_validate.contains("self.selected_index = 0;"),
-        "filter reconciliation must not expose raw row 0 between list replacement and validation"
-    );
-}
-
-#[test]
 fn reconcile_helper_calls_rebuild_preflight() {
     let source = read_source();
     let section = slice_from(

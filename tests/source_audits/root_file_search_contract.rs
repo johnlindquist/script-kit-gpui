@@ -1294,12 +1294,13 @@ mod tests {
             .expect("read src/app_impl/selection_fallback.rs");
         let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
 
+        let record_body = function_body(&source, "fn record_root_file_open_use(");
         assert!(
-            normalized.contains("fn record_root_file_open_use(")
-                && normalized.contains("record_use(&format!(\"file/{}\", file.path))")
-                && normalized.contains("self.frecency_store.save()")
-                && normalized.contains("self.invalidate_grouped_cache();"),
-            "root file frecency should be centralized in a helper that records file/<path>, saves, and invalidates grouping"
+            record_body.contains("root_file_open_frecency_keys(file)")
+                && record_body.contains("self.frecency_store.record_use(")
+                && record_body.contains("self.frecency_store.save()")
+                && record_body.contains("self.invalidate_grouped_cache();"),
+            "root-file recording should use the typed frecency-key plan, save, and invalidate"
         );
 
         let open_body = source

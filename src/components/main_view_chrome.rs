@@ -26,6 +26,7 @@ const DEFAULT_CONTEXT_EDGE_OUTSET_X: f32 = 8.0;
 pub(crate) const MAIN_VIEW_HEADER_DIVIDER_ID: &str = "main-view-header-divider";
 #[allow(dead_code)]
 pub(crate) const MAIN_VIEW_MAIN_ID: &str = "main-view-main";
+pub(crate) const MAIN_VIEW_OVERLAY_CLIP_ID: &str = "main-view-overlay-clip";
 #[allow(dead_code)] // Used by the binary target through include!-merged built-in render code.
 pub(crate) const MAIN_VIEW_SCROLL_FLOW_ID: &str = "main-view-scroll-flow";
 
@@ -410,9 +411,7 @@ fn render_main_view_chrome_with_options(
             let header_height =
                 main_view_header_metrics(def, Some(def.search.height)).header_height;
             root = root
-                .child(render_main_view_main_slot_with_bottom_inset(
-                    def, main, false,
-                ))
+                .child(render_main_view_overlay_main_slot(def, main, header_height))
                 .child(div().absolute().top_0().left_0().right_0().child(
                     render_main_view_header_with_context_outset(
                         header,
@@ -875,6 +874,44 @@ fn render_main_view_main_slot_with_bottom_inset(
         .into_any_element()
 }
 
+fn render_main_view_overlay_main_slot(
+    def: MainMenuThemeDef,
+    main: AnyElement,
+    header_height: f32,
+) -> AnyElement {
+    div()
+        .flex_1()
+        .min_h(px(0.))
+        .w_full()
+        .relative()
+        .overflow_hidden()
+        .child(
+            div()
+                .id(MAIN_VIEW_OVERLAY_CLIP_ID)
+                .debug_selector(|| MAIN_VIEW_OVERLAY_CLIP_ID.to_string())
+                .absolute()
+                .top(px(header_height))
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(-header_height))
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .flex_col()
+                        .child(render_main_view_main_slot_with_bottom_inset(
+                            def, main, false,
+                        )),
+                ),
+        )
+        .into_any_element()
+}
+
 fn resolved_main_view_main_bottom_inset(def: MainMenuThemeDef, include_bottom_inset: bool) -> f32 {
     if include_bottom_inset {
         def.shell.content_inset_bottom
@@ -1039,6 +1076,8 @@ pub(crate) fn render_main_view_input_shell_with_height(
 
 #[cfg(test)]
 mod tests {
+    use gpui::{AppContext as _, InteractiveElement as _, IntoElement as _, Styled as _};
+
     use super::{
         main_view_content_frame, main_view_flow_spacing, main_view_header_metrics,
         main_view_multiline_input_height, resolved_main_view_input_height,
@@ -1147,5 +1186,125 @@ mod tests {
         assert!(flow.inset_x > 0.0);
         assert!(flow.inset_y > 0.0);
         assert!(flow.section_gap > flow.inset_y);
+    }
+
+    struct TestMainViewOverlay;
+
+    impl gpui::Render for TestMainViewOverlay {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let def = crate::designs::MainMenuThemeVariant::default().def();
+            let theme = crate::theme::Theme::default();
+
+            let chrome = super::MainViewChrome {
+                header: super::MainViewHeaderChrome::canonical(
+                    def,
+                    gpui::div().into_any_element(),
+                    gpui::div().into_any_element(),
+                ),
+                divider: super::MainViewDividerChrome {
+                    margin_x: 0.0,
+                    height: 1.0,
+                    visible: true,
+                },
+                main: gpui::div()
+                    .id("test-main-content")
+                    .debug_selector(|| "test-main-content".to_string())
+                    .size_full()
+                    .into_any_element(),
+                footer: None,
+                overlays: vec![],
+            };
+
+            let root = super::render_main_view_shell();
+            super::render_main_view_chrome_header_overlay_footer_flush(root, &theme, def, chrome)
+        }
+    }
+
+    #[gpui::test]
+    fn test_main_view_overlay_main_slot_clip_bounds(cx: &mut gpui::TestAppContext) {
+        use gpui::px;
+
+        let def = crate::designs::MainMenuThemeVariant::default().def();
+        let header_height = main_view_header_metrics(def, Some(def.search.height)).header_height;
+
+        // Test at window height 600
+        let window_600 = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(800.0), px(600.0)),
+            )));
+            cx.open_window(options, |_, cx| cx.new(|_| TestMainViewOverlay))
+                .unwrap()
+        });
+
+        cx.run_until_parked();
+
+        window_600
+            .update(cx, |_, window, _| {
+                let bounds_entries = window.debug_bounds_entries();
+
+                let clip_entry = bounds_entries
+                    .iter()
+                    .find(|entry| entry.selector == super::MAIN_VIEW_OVERLAY_CLIP_ID)
+                    .expect("clip div should be rendered");
+
+                let main_entry = bounds_entries
+                    .iter()
+                    .find(|entry| entry.selector == super::MAIN_VIEW_MAIN_ID)
+                    .expect("main view main slot should be rendered");
+
+                assert_eq!(main_entry.bounds.size.height, px(600.0));
+                assert_eq!(clip_entry.bounds.origin.y, px(header_height));
+                assert_eq!(clip_entry.bounds.size.height, px(600.0 - header_height));
+                assert_eq!(main_entry.clip_bounds.origin.y, px(header_height));
+                assert_eq!(
+                    main_entry.clip_bounds.size.height,
+                    px(600.0 - header_height)
+                );
+            })
+            .unwrap();
+
+        // Test at window height 800 (validates responsive layout after resize/size change)
+        let window_800 = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(800.0), px(800.0)),
+            )));
+            cx.open_window(options, |_, cx| cx.new(|_| TestMainViewOverlay))
+                .unwrap()
+        });
+
+        cx.run_until_parked();
+
+        window_800
+            .update(cx, |_, window, _| {
+                let bounds_entries = window.debug_bounds_entries();
+
+                let clip_entry = bounds_entries
+                    .iter()
+                    .find(|entry| entry.selector == super::MAIN_VIEW_OVERLAY_CLIP_ID)
+                    .expect("clip div should be rendered");
+
+                let main_entry = bounds_entries
+                    .iter()
+                    .find(|entry| entry.selector == super::MAIN_VIEW_MAIN_ID)
+                    .expect("main view main slot should be rendered");
+
+                assert_eq!(main_entry.bounds.size.height, px(800.0));
+                assert_eq!(clip_entry.bounds.origin.y, px(header_height));
+                assert_eq!(clip_entry.bounds.size.height, px(800.0 - header_height));
+                assert_eq!(main_entry.clip_bounds.origin.y, px(header_height));
+                assert_eq!(
+                    main_entry.clip_bounds.size.height,
+                    px(800.0 - header_height)
+                );
+            })
+            .unwrap();
     }
 }

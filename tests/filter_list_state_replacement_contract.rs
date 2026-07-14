@@ -87,15 +87,4 @@ fn script_list_filter_reconciliation_still_validates_and_reveals() {
             "script-list filter reconciliation must keep `{needle}` after list-state sync"
         );
     }
-
-    let select_ix = reconcile_body
-        .find("first_selectable_index()")
-        .expect("script-list filter reconciliation must select the first selectable row");
-    let sync_ix = reconcile_body
-        .find("self.sync_list_state_for_filter_replacement();")
-        .expect("script-list filter reconciliation must sync list state");
-    assert!(
-        select_ix < sync_ix,
-        "script-list filter reconciliation must select the first selectable row before list-state replacement"
-    );
 }

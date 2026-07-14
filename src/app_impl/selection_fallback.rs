@@ -947,16 +947,12 @@ impl ScriptListApp {
     }
 
     fn record_root_file_open_use(&mut self, file: &crate::file_search::FileResult) {
-        self.frecency_store
-            .record_use(&format!("file/{}", file.path));
-        if file.file_type == crate::file_search::FileType::Directory {
-            self.frecency_store
-                .record_use(&format!("dir/{}", file.path));
-        } else if let Some(parent) = std::path::Path::new(&file.path).parent() {
-            if let Some(parent_str) = parent.to_str() {
-                self.frecency_store
-                    .record_use(&format!("dir/{}", parent_str));
-            }
+        let keys = root_file_open_frecency_keys(file);
+        for key in [keys.file.as_deref(), keys.directory.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            self.frecency_store.record_use(key);
         }
         if let Err(error) = self.frecency_store.save() {
             tracing::warn!(
@@ -1556,6 +1552,31 @@ impl ScriptListApp {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RootFileOpenFrecencyKeys {
+    file: Option<String>,
+    directory: Option<String>,
+}
+
+fn root_file_open_frecency_keys(file: &crate::file_search::FileResult) -> RootFileOpenFrecencyKeys {
+    let is_directory = file.file_type == crate::file_search::FileType::Directory;
+    let file_key = (!is_directory && crate::file_search::root_global_file_result_is_eligible(file))
+        .then(|| format!("file/{}", file.path));
+    let directory_key = if is_directory {
+        Some(format!("dir/{}", file.path))
+    } else {
+        std::path::Path::new(&file.path)
+            .parent()
+            .and_then(|parent| parent.to_str())
+            .map(|parent| format!("dir/{parent}"))
+    };
+
+    RootFileOpenFrecencyKeys {
+        file: file_key,
+        directory: directory_key,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1651,6 +1672,33 @@ mod tests {
             modified: 0,
             file_type,
         }
+    }
+
+    #[test]
+    fn recent_files_frecency_plan_separates_files_and_directories() {
+        let directory = root_file_result(
+            "/tmp/example-folder",
+            crate::file_search::FileType::Directory,
+        );
+        assert_eq!(
+            root_file_open_frecency_keys(&directory),
+            RootFileOpenFrecencyKeys {
+                file: None,
+                directory: Some("dir//tmp/example-folder".to_string()),
+            }
+        );
+
+        let document = root_file_result(
+            "/tmp/example-folder/report.pdf",
+            crate::file_search::FileType::Document,
+        );
+        assert_eq!(
+            root_file_open_frecency_keys(&document),
+            RootFileOpenFrecencyKeys {
+                file: Some("file//tmp/example-folder/report.pdf".to_string()),
+                directory: Some("dir//tmp/example-folder".to_string()),
+            }
+        );
     }
 
     #[test]

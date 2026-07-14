@@ -638,7 +638,7 @@ fn root_file_visible_loading_decision(
 
 #[cfg(test)]
 mod loading_decision_tests {
-    use super::root_file_visible_loading_decision;
+    use super::{root_file_visible_loading_decision, *};
     use crate::file_search::RootFileSectionMode;
 
     /// A passive global cache warm (no `files:` filter) must not surface
@@ -711,6 +711,59 @@ mod loading_decision_tests {
                 "case: {visible_empty} {provider} {query_matches} {mode:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn same_query_root_file_publish_preserves_user_moved_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            let query = "zzlauncherrefreshprobe";
+            let handoff_key = "fallback/root-file-search-handoff/global";
+            app.scripts = vec![main_menu_selection_test_script(
+                "zzlauncherrefreshprobe first",
+            )];
+            app.scriptlets.clear();
+            app.skills.clear();
+            app.apps.clear();
+            app.computed_filter_text = query.to_string();
+            app.filter_text = query.to_string();
+            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(query);
+            app.root_search.root_file_search_generation = 41;
+            app.root_search.root_file_search_mode =
+                Some(crate::file_search::RootFileSectionMode::GlobalQuery);
+            app.root_search.root_file_search_query = query.to_string();
+            app.root_search.root_file_search_loading = true;
+            app.root_search.root_file_provider_loading = true;
+            app.invalidate_grouped_cache();
+            app.get_grouped_results_cached();
+            app.selected_index = app
+                .main_menu_result_caches
+                .grouped_index_for_stable_selection_key(handoff_key)
+                .expect("same query should include the Search Files handoff");
+            app.mark_main_menu_selection_user_moved();
+            let selected_before = selected_main_menu_stable_key(app);
+
+            app.apply_root_file_search_results_for_generation(
+                41,
+                vec![crate::file_search::FileResult {
+                    path: "/tmp/zzlauncherrefreshprobe.txt".to_string(),
+                    name: "zzlauncherrefreshprobe.txt".to_string(),
+                    size: 1,
+                    modified: 1,
+                    file_type: crate::file_search::FileType::File,
+                }],
+                false,
+                true,
+                cx,
+            );
+
+            let selected_after = selected_main_menu_stable_key(app);
+            assert_eq!(selected_before.as_deref(), Some(handoff_key));
+            assert_eq!(selected_after, selected_before);
+            assert_ne!(selected_after, first_selectable_main_menu_stable_key(app));
+        });
     }
 }
 

@@ -37,6 +37,10 @@ pub(crate) fn root_file_type_svg_icon(file_type: crate::file_search::FileType) -
     }
 }
 
+pub(crate) fn root_file_display_path(path: &str) -> String {
+    crate::file_search::shorten_path(path)
+}
+
 pub(crate) fn ai_vault_provider_svg_icon(provider: &str, display_name: &str) -> &'static str {
     let normalized_provider = provider
         .chars()
@@ -75,7 +79,7 @@ pub(crate) fn resolve_search_accessories(
     if filter_text.is_empty() {
         return SearchAccessories::default();
     }
-    if matches!(result, SearchResult::AiVault(_)) {
+    if matches!(result, SearchResult::AiVault(_) | SearchResult::File(_)) {
         return SearchAccessories::default();
     }
 
@@ -263,7 +267,7 @@ pub fn render_design_item(
                 }
                 SearchResult::File(fm) => (
                     fm.file.name.clone(),
-                    Some(fm.file.path.clone()),
+                    Some(root_file_display_path(&fm.file.path)),
                     None,
                     Some(IconKind::Svg(
                         root_file_type_svg_icon(fm.file.file_type).to_string(),

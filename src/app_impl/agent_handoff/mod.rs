@@ -62,15 +62,18 @@ impl ScriptListApp {
             let close_app = app_entity.clone();
             view.set_on_close_requested(move |window, cx| {
                 close_app.update(cx, |app, cx| {
-                    app.close_tab_ai_harness_terminal_with_window(window, cx);
+                    if app.opened_from_main_menu {
+                        app.close_tab_ai_harness_terminal_with_window(window, cx);
+                    } else {
+                        app.close_agent_chat_main_window_state_first(cx);
+                    }
                 });
             });
 
             let close_window_app = app_entity.clone();
-            view.set_on_close_window_requested(move |window, cx| {
+            view.set_on_close_window_requested(move |_window, cx| {
                 close_window_app.update(cx, |app, cx| {
-                    app.close_tab_ai_harness_terminal_with_window(window, cx);
-                    app.close_and_reset_window(cx);
+                    app.close_agent_chat_main_window_state_first(cx);
                 });
             });
 
@@ -3510,11 +3513,17 @@ impl ScriptListApp {
                 self.schedule_tab_ai_harness_prewarm(std::time::Duration::from_millis(250), cx);
             }
 
-            self.close_and_reset_window(cx);
+            if closing_agent_chat {
+                self.close_agent_chat_and_reset_window_after_native_hide(cx);
+            } else {
+                self.close_and_reset_window(cx);
+            }
             if let Some(lease) = pending_warm_lease {
                 self.dismiss_agent_chat_warm_lease_background(lease);
             }
-            cx.notify();
+            if closing_quick_terminal {
+                cx.notify();
+            }
             return;
         }
 
@@ -3605,6 +3614,9 @@ impl ScriptListApp {
     }
 
     pub(crate) fn close_agent_chat_main_window_state_first(&mut self, cx: &mut Context<Self>) {
+        // Direct hide lands on launcher root after the native hide barrier.
+        // Consume the origin flag now so it cannot swallow the next Escape.
+        self.opened_from_main_menu = false;
         self.close_tab_ai_harness_terminal_impl(
             None,
             TabAiHarnessCloseDisposition::CloseMainWindowStateFirst,
