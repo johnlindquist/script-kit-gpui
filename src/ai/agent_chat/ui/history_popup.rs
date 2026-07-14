@@ -1090,7 +1090,8 @@ mod tests {
     use super::{
         bucket_history_entries, history_date_bucket, history_popup_key_intent, popup_bounds,
         popup_height, AgentChatHistoryDateBucket, AgentChatHistoryPopupEntry,
-        AgentChatHistoryPopupKeyIntent, AgentChatHistoryPopupSnapshot, HISTORY_POPUP_MAX_WIDTH,
+        AgentChatHistoryPopupKeyIntent, AgentChatHistoryPopupSnapshot, HISTORY_POPUP_BOTTOM_INSET,
+        HISTORY_POPUP_MAX_WIDTH, HISTORY_POPUP_TOP_INSET,
     };
     use crate::ai::agent_chat::ui::history::{
         AgentChatHistoryEntry, AgentChatHistorySearchField, AgentChatHistorySearchHit,
@@ -1162,7 +1163,11 @@ mod tests {
         let bounds = popup_bounds(parent, &snapshot);
         assert_eq!(f32::from(bounds.size.width), HISTORY_POPUP_MAX_WIDTH);
         assert!(f32::from(bounds.origin.x) > 100.0);
-        assert!(f32::from(bounds.origin.y) >= 96.0);
+        assert!(f32::from(bounds.origin.y) >= f32::from(parent.origin.y) + HISTORY_POPUP_TOP_INSET);
+        assert!(
+            f32::from(bounds.origin.y + bounds.size.height)
+                <= f32::from(parent.origin.y + parent.size.height) - HISTORY_POPUP_BOTTOM_INSET
+        );
     }
 
     #[test]

@@ -278,23 +278,27 @@ mod tests {
     #[test]
     fn test_close_and_reset_window_checks_secondary_windows() {
         let content = read_source_file("app_impl/lifecycle_reset.rs");
+        let prepare_start = content
+            .find("fn prepare_main_window_close")
+            .expect("prepare_main_window_close should exist");
+        let close_start = content
+            .find("fn close_and_reset_window")
+            .expect("close_and_reset_window should exist");
+        let prepare_body = &content[prepare_start..close_start];
+        assert!(
+            prepare_body.contains("notes::is_notes_window_open()")
+                && prepare_body.contains("ai::is_ai_window_open()"),
+            "the shared main-window close preparation must inspect Notes and AI window state"
+        );
 
-        // Find the function and check if it checks Notes/AI windows
-        if let Some(start) = content.find("fn close_and_reset_window") {
-            // Get a reasonable chunk after the function signature
-            // Use 3000 chars to account for child window cleanup (actions + confirm)
-            let function_chunk = &content[start..std::cmp::min(start + 3000, content.len())];
-            let has_notes_check = function_chunk.contains("is_notes_window_open");
-            let has_ai_check = function_chunk.contains("is_ai_window_open");
-
-            assert!(
-                has_notes_check && has_ai_check,
-                "close_and_reset_window() must check both Notes and AI window state. Notes check: {}, AI check: {}",
-                has_notes_check, has_ai_check
-            );
-        } else {
-            panic!("close_and_reset_window() function not found in app_impl/lifecycle_reset.rs");
-        }
+        let close_body = content[close_start..]
+            .split("/// Agent Chat's strict close barrier")
+            .next()
+            .expect("close_and_reset_window body should have a boundary");
+        assert!(
+            close_body.contains("prepare_main_window_close("),
+            "close_and_reset_window must route through the shared secondary-window-aware preparation"
+        );
     }
 
     #[test]

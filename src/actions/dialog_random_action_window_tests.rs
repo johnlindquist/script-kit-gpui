@@ -543,37 +543,27 @@ fn notes_no_selection_disables_edit_copy_export() {
 fn notes_auto_sizing_toggled_all_permutations() {
     for &sel in &[false, true] {
         for &trash in &[false, true] {
-            // auto=false => show enable_auto_sizing
-            let off_ids: Vec<String> = get_notes_command_bar_actions(&NotesInfo {
+            let off_actions = get_notes_command_bar_actions(&NotesInfo {
                 has_selection: sel,
                 is_trash_view: trash,
                 auto_sizing_enabled: false,
-            })
-            .iter()
-            .map(|a| a.id.clone())
-            .collect();
-            assert!(
-                off_ids.contains(&"enable_auto_sizing".to_string()),
-                "Missing enable_auto_sizing for sel={}, trash={}, auto=false",
-                sel,
-                trash
-            );
+            });
+            let off_toggle = off_actions
+                .iter()
+                .find(|action| action.id == "toggle_auto_sizing")
+                .expect("missing toggle_auto_sizing when disabled");
+            assert_eq!(off_toggle.title, "Enable Auto-Sizing");
 
-            // auto=true => no enable_auto_sizing
-            let on_ids: Vec<String> = get_notes_command_bar_actions(&NotesInfo {
+            let on_actions = get_notes_command_bar_actions(&NotesInfo {
                 has_selection: sel,
                 is_trash_view: trash,
                 auto_sizing_enabled: true,
-            })
-            .iter()
-            .map(|a| a.id.clone())
-            .collect();
-            assert!(
-                !on_ids.contains(&"enable_auto_sizing".to_string()),
-                "Unexpected enable_auto_sizing for sel={}, trash={}, auto=true",
-                sel,
-                trash
-            );
+            });
+            let on_toggle = on_actions
+                .iter()
+                .find(|action| action.id == "toggle_auto_sizing")
+                .expect("missing toggle_auto_sizing when enabled");
+            assert_eq!(on_toggle.title, "Disable Auto-Sizing");
         }
     }
 }

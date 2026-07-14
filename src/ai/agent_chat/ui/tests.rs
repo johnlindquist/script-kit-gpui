@@ -841,7 +841,9 @@ fn agent_chat_history_migration_uses_popup_window_instead_of_inline_layer() {
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
                 .contains("super::popup_window::configure_popup_window")
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("super::popup_window::set_popup_window_bounds"),
+                .contains("let bounds = popup_bounds(parent_bounds, &snapshot);")
+            && AGENT_CHAT_HISTORY_POPUP_SOURCE
+                .contains("popup_window_options(bounds, display_id)"),
         "Agent Chat history picker should render through a popup window entity using shared popup mechanics"
     );
     assert!(

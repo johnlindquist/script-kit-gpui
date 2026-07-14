@@ -1108,8 +1108,7 @@ fn test_notes_no_selection_no_trash() {
     assert!(!ids.contains(&"find_in_note"));
     assert!(!ids.contains(&"format"));
     assert!(!ids.contains(&"copy_note_as"));
-    // Auto-sizing should be offered when disabled
-    assert!(ids.contains(&"enable_auto_sizing"));
+    assert!(ids.contains(&"toggle_auto_sizing"));
 }
 
 #[test]
@@ -1132,8 +1131,7 @@ fn test_notes_with_selection_not_trash() {
     assert!(ids.contains(&"copy_deeplink"));
     assert!(ids.contains(&"create_quicklink"));
     assert!(ids.contains(&"export"));
-    // Auto-sizing already enabled -> should NOT show enable action
-    assert!(!ids.contains(&"enable_auto_sizing"));
+    assert!(ids.contains(&"toggle_auto_sizing"));
 }
 
 #[test]

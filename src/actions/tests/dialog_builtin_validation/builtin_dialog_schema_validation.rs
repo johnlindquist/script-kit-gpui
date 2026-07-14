@@ -168,22 +168,6 @@ mod from_dialog_builtin_action_validation_tests {
         }
     }
 
-    #[test]
-    fn notes_command_bar_built_in_actions_have_has_action_false() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        for action in &get_notes_command_bar_actions(&info) {
-            assert!(
-                !action.has_action,
-                "Notes action '{}' should have has_action=false",
-                action.id
-            );
-        }
-    }
-
     // =========================================================================
     // 3. Built-in actions have no value field (value is for SDK routing)
     // =========================================================================
@@ -332,28 +316,6 @@ mod from_dialog_builtin_action_validation_tests {
             assert!(
                 known.contains(&section),
                 "Unknown AI section label: '{}' in action '{}'",
-                section,
-                action.id
-            );
-        }
-    }
-
-    #[test]
-    fn notes_command_bar_section_labels_are_known() {
-        let known = [
-            "Notes", "Edit", "Copy", "Export", "AI", "Settings", "Window",
-        ];
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        for action in &actions {
-            let section = action.section.as_deref().unwrap();
-            assert!(
-                known.contains(&section),
-                "Unknown Notes section label: '{}' in action '{}'",
                 section,
                 action.id
             );
@@ -590,25 +552,6 @@ mod from_dialog_builtin_action_validation_tests {
             headers.is_empty(),
             "Separators style should have no headers"
         );
-    }
-
-    #[test]
-    fn notes_actions_grouped_header_count_matches_section_count() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let filtered: Vec<usize> = (0..actions.len()).collect();
-
-        let header_count_from_fn = count_section_headers(&actions, &filtered);
-        let grouped = build_grouped_items_static(&actions, &filtered, SectionStyle::Headers);
-        let header_count_from_grouped = grouped
-            .iter()
-            .filter(|i| matches!(i, GroupedActionItem::SectionHeader(_)))
-            .count();
-        assert_eq!(header_count_from_fn, header_count_from_grouped);
     }
 
     // =========================================================================
@@ -1374,30 +1317,6 @@ mod from_dialog_builtin_action_validation_tests {
     // 29. Notes — minimum actions for every permutation
     // =========================================================================
 
-    #[test]
-    fn notes_all_eight_permutations_have_at_least_two_actions() {
-        for sel in [false, true] {
-            for trash in [false, true] {
-                for auto in [false, true] {
-                    let info = NotesInfo {
-                        has_selection: sel,
-                        is_trash_view: trash,
-                        auto_sizing_enabled: auto,
-                    };
-                    let count = get_notes_command_bar_actions(&info).len();
-                    assert!(
-                        count >= 2,
-                        "Notes permutation sel={}, trash={}, auto={} has only {} actions",
-                        sel,
-                        trash,
-                        auto,
-                        count
-                    );
-                }
-            }
-        }
-    }
-
     // =========================================================================
     // 30. Action with_section chains correctly
     // =========================================================================
@@ -1558,22 +1477,6 @@ mod from_dialog_builtin_action_validation_tests_2 {
         assert!(
             has_duplicates(&ids).is_none(),
             "Duplicate action ID in AI command bar: {:?}",
-            has_duplicates(&ids)
-        );
-    }
-
-    #[test]
-    fn notes_command_bar_action_ids_are_unique() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let ids = action_ids(&actions);
-        assert!(
-            has_duplicates(&ids).is_none(),
-            "Duplicate action ID in notes command bar: {:?}",
             has_duplicates(&ids)
         );
     }
@@ -1813,168 +1716,11 @@ mod from_dialog_builtin_action_validation_tests_2 {
     // 7. Notes conditional actions — selection + non-trash required
     // =========================================================================
 
-    #[test]
-    fn notes_duplicate_only_when_selected_and_not_trash() {
-        // has_selection=true, is_trash_view=false → duplicate present
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_1 = get_notes_command_bar_actions(&info);
-        let ids = action_ids(&actions_1);
-        assert!(
-            ids.contains(&"duplicate_note"),
-            "Should have duplicate_note with selection + non-trash"
-        );
-
-        // has_selection=false → no duplicate
-        let info_no_sel = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_2 = get_notes_command_bar_actions(&info_no_sel);
-        let ids_no_sel = action_ids(&actions_2);
-        assert!(
-            !ids_no_sel.contains(&"duplicate_note"),
-            "Should NOT have duplicate_note without selection"
-        );
-
-        // is_trash_view=true → no duplicate
-        let info_trash = NotesInfo {
-            has_selection: true,
-            is_trash_view: true,
-            auto_sizing_enabled: false,
-        };
-        let actions_3 = get_notes_command_bar_actions(&info_trash);
-        let ids_trash = action_ids(&actions_3);
-        assert!(
-            !ids_trash.contains(&"duplicate_note"),
-            "Should NOT have duplicate_note in trash view"
-        );
-    }
-
-    #[test]
-    fn notes_find_in_note_only_when_selected_and_not_trash() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_1 = get_notes_command_bar_actions(&info);
-        let ids = action_ids(&actions_1);
-        assert!(ids.contains(&"find_in_note"));
-
-        let info_no_sel = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_2 = get_notes_command_bar_actions(&info_no_sel);
-        let ids_no_sel = action_ids(&actions_2);
-        assert!(!ids_no_sel.contains(&"find_in_note"));
-    }
-
     // --- merged from part_02.rs ---
-
-    #[test]
-    fn notes_format_only_when_selected_and_not_trash() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_1 = get_notes_command_bar_actions(&info);
-        let ids = action_ids(&actions_1);
-        assert!(ids.contains(&"format"));
-
-        let info_trash = NotesInfo {
-            has_selection: true,
-            is_trash_view: true,
-            auto_sizing_enabled: false,
-        };
-        let actions_2 = get_notes_command_bar_actions(&info_trash);
-        let ids_trash = action_ids(&actions_2);
-        assert!(!ids_trash.contains(&"format"));
-    }
-
-    #[test]
-    fn notes_copy_section_only_when_selected_and_not_trash() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_1 = get_notes_command_bar_actions(&info);
-        let ids = action_ids(&actions_1);
-        assert!(ids.contains(&"copy_note_as"));
-        assert!(ids.contains(&"copy_deeplink"));
-        assert!(ids.contains(&"create_quicklink"));
-
-        let info_no_sel = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_2 = get_notes_command_bar_actions(&info_no_sel);
-        let ids_no_sel = action_ids(&actions_2);
-        assert!(!ids_no_sel.contains(&"copy_note_as"));
-        assert!(!ids_no_sel.contains(&"copy_deeplink"));
-        assert!(!ids_no_sel.contains(&"create_quicklink"));
-    }
-
-    #[test]
-    fn notes_export_only_when_selected_and_not_trash() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_1 = get_notes_command_bar_actions(&info);
-        let ids = action_ids(&actions_1);
-        assert!(ids.contains(&"export"));
-
-        let info_no_sel = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_2 = get_notes_command_bar_actions(&info_no_sel);
-        let ids_no_sel = action_ids(&actions_2);
-        assert!(!ids_no_sel.contains(&"export"));
-    }
 
     // =========================================================================
     // 8. Notes auto-sizing toggle — only when disabled
     // =========================================================================
-
-    #[test]
-    fn notes_auto_sizing_only_when_disabled() {
-        let info_disabled = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions_1 = get_notes_command_bar_actions(&info_disabled);
-        let ids_disabled = action_ids(&actions_1);
-        assert!(
-            ids_disabled.contains(&"enable_auto_sizing"),
-            "Should show enable_auto_sizing when disabled"
-        );
-
-        let info_enabled = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: true,
-        };
-        let actions_2 = get_notes_command_bar_actions(&info_enabled);
-        let ids_enabled = action_ids(&actions_2);
-        assert!(
-            !ids_enabled.contains(&"enable_auto_sizing"),
-            "Should NOT show enable_auto_sizing when already enabled"
-        );
-    }
 
     // =========================================================================
     // 9. Chat conditional actions — copy_response / clear_conversation
@@ -2875,26 +2621,6 @@ mod from_dialog_builtin_action_validation_tests_2 {
     // 24. Coerce selection on notes grouped actions
     // =========================================================================
 
-    #[test]
-    fn coerce_selection_on_notes_grouped_finds_valid_item() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let filtered: Vec<usize> = (0..actions.len()).collect();
-        let grouped = build_grouped_items_static(&actions, &filtered, SectionStyle::Headers);
-        let result = coerce_action_selection(&grouped, 0);
-        assert!(
-            result.is_some(),
-            "Should find valid item in notes grouped actions"
-        );
-        if let Some(idx) = result {
-            assert!(matches!(grouped[idx], GroupedActionItem::Item(_)));
-        }
-    }
-
     // =========================================================================
     // 25. title_lower correctness for AI and notes contexts
     // =========================================================================
@@ -2906,23 +2632,6 @@ mod from_dialog_builtin_action_validation_tests_2 {
                 action.title_lower,
                 action.title.to_lowercase(),
                 "title_lower mismatch for AI action '{}'",
-                action.id
-            );
-        }
-    }
-
-    #[test]
-    fn title_lower_matches_title_for_all_notes_actions() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        for action in &get_notes_command_bar_actions(&info) {
-            assert_eq!(
-                action.title_lower,
-                action.title.to_lowercase(),
-                "title_lower mismatch for notes action '{}'",
                 action.id
             );
         }
@@ -3284,54 +2993,6 @@ mod from_dialog_builtin_action_validation_tests_2 {
     // 34. Notes new_note always present across all permutations
     // =========================================================================
 
-    #[test]
-    fn notes_new_note_always_present() {
-        for sel in [false, true] {
-            for trash in [false, true] {
-                for auto in [false, true] {
-                    let info = NotesInfo {
-                        has_selection: sel,
-                        is_trash_view: trash,
-                        auto_sizing_enabled: auto,
-                    };
-                    let actions_tmp = get_notes_command_bar_actions(&info);
-                    let ids = action_ids(&actions_tmp);
-                    assert!(
-                        ids.contains(&"new_note"),
-                        "new_note should always be present (sel={}, trash={}, auto={})",
-                        sel,
-                        trash,
-                        auto
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn notes_browse_notes_always_present() {
-        for sel in [false, true] {
-            for trash in [false, true] {
-                for auto in [false, true] {
-                    let info = NotesInfo {
-                        has_selection: sel,
-                        is_trash_view: trash,
-                        auto_sizing_enabled: auto,
-                    };
-                    let actions_tmp = get_notes_command_bar_actions(&info);
-                    let ids = action_ids(&actions_tmp);
-                    assert!(
-                        ids.contains(&"browse_notes"),
-                        "browse_notes should always be present (sel={}, trash={}, auto={})",
-                        sel,
-                        trash,
-                        auto
-                    );
-                }
-            }
-        }
-    }
-
     // =========================================================================
     // 35. Fuzzy match on real action IDs across contexts
     // =========================================================================
@@ -3353,19 +3014,6 @@ mod from_dialog_builtin_action_validation_tests_2 {
             .find(|a| a.id == "clip:clipboard_paste_keep_open")
             .unwrap();
         assert!(ActionsDialog::fuzzy_match(&paste_keep.title_lower, "pke"));
-    }
-
-    #[test]
-    fn fuzzy_match_on_notes_action_titles() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let new_note = actions.iter().find(|a| a.id == "new_note").unwrap();
-        // "nn" matches "new note" → n at 0, n at 4
-        assert!(ActionsDialog::fuzzy_match(&new_note.title_lower, "nn"));
     }
 
     // =========================================================================
@@ -3626,20 +3274,6 @@ mod from_dialog_builtin_action_validation_tests_3 {
         assert_eq!(ids_1, ids_2);
     }
 
-    #[test]
-    fn notes_command_bar_ordering_is_deterministic() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let a1 = get_notes_command_bar_actions(&info);
-        let a2 = get_notes_command_bar_actions(&info);
-        let ids_1 = action_ids(&a1);
-        let ids_2 = action_ids(&a2);
-        assert_eq!(ids_1, ids_2);
-    }
-
     // =========================================================================
     // 3. Cross-context action exclusivity
     // =========================================================================
@@ -3828,76 +3462,7 @@ mod from_dialog_builtin_action_validation_tests_3 {
     // 6. Notes command bar section ordering: Notes > Edit > Copy > Export > AI > Settings
     // =========================================================================
 
-    #[test]
-    fn notes_command_bar_section_order_full() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let sections = sections_in_order(&actions);
-        assert_eq!(
-            sections,
-            vec![
-                "Notes", "Edit", "Copy", "Export", "AI", "Settings", "Window"
-            ],
-            "Notes command bar sections should be in correct order"
-        );
-    }
-
     // --- merged from part_02.rs ---
-
-    #[test]
-    fn notes_command_bar_section_order_no_selection() {
-        // Without selection, only Notes and Settings sections should appear
-        let info = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let sections = sections_in_order(&actions);
-        assert_eq!(
-            sections,
-            vec!["Notes", "Settings", "Window"],
-            "Notes without selection should only have Notes, Settings, and Window"
-        );
-    }
-
-    #[test]
-    fn notes_command_bar_section_order_trash_view() {
-        // In trash view, even with selection, only Notes appears (plus Settings if not auto-sizing)
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: true,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let sections = sections_in_order(&actions);
-        assert_eq!(
-            sections,
-            vec!["Notes", "Trash", "Notes", "Settings", "Window"],
-            "Notes in trash view should match the current section sequence"
-        );
-    }
-
-    #[test]
-    fn notes_command_bar_auto_sizing_enabled_hides_settings() {
-        // With auto-sizing already enabled, Settings section should be absent
-        let info = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: true,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let sections = sections_in_order(&actions);
-        assert_eq!(
-            sections,
-            vec!["Notes", "Window"],
-            "With auto-sizing on and no selection, only Notes and Window sections"
-        );
-    }
 
     // =========================================================================
     // 7. New chat section ordering: Last Used Settings > Presets > Models
@@ -4781,77 +4346,6 @@ mod from_dialog_builtin_action_validation_tests_3 {
     //     (has_selection × is_trash × auto_sizing)
     // =========================================================================
 
-    #[test]
-    fn notes_8_permutations_action_counts() {
-        let bools = [false, true];
-        for &sel in &bools {
-            for &trash in &bools {
-                for &auto in &bools {
-                    let info = NotesInfo {
-                        has_selection: sel,
-                        is_trash_view: trash,
-                        auto_sizing_enabled: auto,
-                    };
-                    let actions = get_notes_command_bar_actions(&info);
-
-                    // new_note and browse_notes always present
-                    assert!(
-                        actions.iter().any(|a| a.id == "new_note"),
-                        "new_note always present (sel={}, trash={}, auto={})",
-                        sel,
-                        trash,
-                        auto
-                    );
-                    assert!(
-                        actions.iter().any(|a| a.id == "browse_notes"),
-                        "browse_notes always present (sel={}, trash={}, auto={})",
-                        sel,
-                        trash,
-                        auto
-                    );
-
-                    // Conditional: duplicate, find, format, copy, export
-                    // only when has_selection && !is_trash_view
-                    let has_conditionals = sel && !trash;
-                    let conditional_ids = [
-                        "duplicate_note",
-                        "find_in_note",
-                        "format",
-                        "copy_note_as",
-                        "copy_deeplink",
-                        "create_quicklink",
-                        "export",
-                    ];
-                    for id in &conditional_ids {
-                        assert_eq!(
-                            actions.iter().any(|a| a.id == *id),
-                            has_conditionals,
-                            "Action '{}' should {} when sel={}, trash={}, auto={}",
-                            id,
-                            if has_conditionals {
-                                "be present"
-                            } else {
-                                "be absent"
-                            },
-                            sel,
-                            trash,
-                            auto
-                        );
-                    }
-
-                    // enable_auto_sizing only when auto_sizing_enabled is false
-                    assert_eq!(
-                        actions.iter().any(|a| a.id == "enable_auto_sizing"),
-                        !auto,
-                        "enable_auto_sizing should {} when auto={}",
-                        if !auto { "be present" } else { "be absent" },
-                        auto
-                    );
-                }
-            }
-        }
-    }
-
     // =========================================================================
     // 19. CommandBarConfig notes_style specifics
     // =========================================================================
@@ -5209,38 +4703,6 @@ mod from_dialog_builtin_action_validation_tests_3 {
     // 26. Notes command bar conditional icons
     // =========================================================================
 
-    #[test]
-    fn notes_command_bar_all_have_icons_when_full() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        for a in &get_notes_command_bar_actions(&info) {
-            assert!(
-                a.icon.is_some(),
-                "Notes action '{}' should have an icon",
-                a.id
-            );
-        }
-    }
-
-    #[test]
-    fn notes_command_bar_all_have_sections_when_full() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        for a in &get_notes_command_bar_actions(&info) {
-            assert!(
-                a.section.is_some(),
-                "Notes action '{}' should have a section",
-                a.id
-            );
-        }
-    }
-
     // =========================================================================
     // 27. Clipboard attach_to_ai action present
     // =========================================================================
@@ -5579,23 +5041,6 @@ mod from_dialog_builtin_action_validation_tests_3 {
     #[test]
     fn ai_command_bar_all_actions_are_script_context_category() {
         for a in &get_ai_command_bar_actions() {
-            assert_eq!(
-                a.category,
-                ActionCategory::ScriptContext,
-                "Action '{}' should be ScriptContext",
-                a.id
-            );
-        }
-    }
-
-    #[test]
-    fn notes_command_bar_all_actions_are_script_context_category() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        for a in &get_notes_command_bar_actions(&info) {
             assert_eq!(
                 a.category,
                 ActionCategory::ScriptContext,
@@ -6158,74 +5603,6 @@ mod from_dialog_builtin_action_validation_tests_4 {
     // =========================================================================
     // 7. Notes section labels exhaustive for full-feature permutation
     // =========================================================================
-
-    #[test]
-    fn notes_full_feature_has_all_five_sections() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let secs = sections_in_order(&actions);
-        assert!(secs.contains(&"Notes"), "Missing Notes section");
-        assert!(secs.contains(&"Edit"), "Missing Edit section");
-        assert!(secs.contains(&"Copy"), "Missing Copy section");
-        assert!(secs.contains(&"Export"), "Missing Export section");
-        assert!(secs.contains(&"Settings"), "Missing Settings section");
-    }
-
-    #[test]
-    fn notes_no_selection_only_has_notes_section() {
-        let info = NotesInfo {
-            has_selection: false,
-            is_trash_view: false,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let secs: Vec<&str> = actions
-            .iter()
-            .filter_map(|a| a.section.as_deref())
-            .collect();
-        // Should have Notes and Settings
-        assert!(secs.contains(&"Notes"));
-        assert!(secs.contains(&"Settings"));
-        // Should not have Edit, Copy, Export (require selection + not trash)
-        assert!(!secs.contains(&"Edit"));
-        assert!(!secs.contains(&"Copy"));
-        assert!(!secs.contains(&"Export"));
-    }
-
-    #[test]
-    fn notes_trash_view_has_limited_sections() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: true,
-            auto_sizing_enabled: false,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let secs: Vec<&str> = actions
-            .iter()
-            .filter_map(|a| a.section.as_deref())
-            .collect();
-        // Even with selection, trash view suppresses Edit/Copy/Export
-        assert!(secs.contains(&"Notes"));
-        assert!(!secs.contains(&"Edit"));
-        assert!(!secs.contains(&"Copy"));
-        assert!(!secs.contains(&"Export"));
-    }
-
-    #[test]
-    fn notes_auto_sizing_enabled_hides_settings() {
-        let info = NotesInfo {
-            has_selection: true,
-            is_trash_view: false,
-            auto_sizing_enabled: true,
-        };
-        let actions = get_notes_command_bar_actions(&info);
-        let ids = action_ids(&actions);
-        assert!(!ids.contains(&"enable_auto_sizing"));
-    }
 
     // =========================================================================
     // 8. AI command bar icon-per-section coverage
@@ -9056,19 +8433,6 @@ mod from_dialog_builtin_action_validation_tests_5 {
         }
 
         // --- merged from tests_part_03.rs ---
-        #[test]
-        fn notes_new_note_description_mentions_create() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let new_note = actions.iter().find(|a| a.id == "new_note").unwrap();
-            let desc = new_note.description.as_ref().unwrap().to_lowercase();
-            assert!(desc.contains("create") || desc.contains("new"));
-        }
-
         // =========================================================================
         // 9. Score_action with cached lowercase fields
         // =========================================================================
@@ -9747,102 +9111,6 @@ mod from_dialog_builtin_action_validation_tests_5 {
         // 16. Notes command bar conditional logic
         // =========================================================================
 
-        #[test]
-        fn notes_no_selection_no_trash_no_auto() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(ids.contains(&"new_note"));
-            assert!(ids.contains(&"browse_notes"));
-            assert!(ids.contains(&"enable_auto_sizing"));
-            assert!(!ids.contains(&"duplicate_note"));
-            assert!(!ids.contains(&"find_in_note"));
-            assert!(!ids.contains(&"format"));
-            assert!(!ids.contains(&"export"));
-        }
-
-        #[test]
-        fn notes_with_selection_not_trash_auto_disabled() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(ids.contains(&"new_note"));
-            assert!(ids.contains(&"duplicate_note"));
-            assert!(ids.contains(&"browse_notes"));
-            assert!(ids.contains(&"find_in_note"));
-            assert!(ids.contains(&"format"));
-            assert!(ids.contains(&"copy_note_as"));
-            assert!(ids.contains(&"copy_deeplink"));
-            assert!(ids.contains(&"create_quicklink"));
-            assert!(ids.contains(&"export"));
-            assert!(ids.contains(&"enable_auto_sizing"));
-        }
-
-        #[test]
-        fn notes_with_selection_in_trash_hides_edit_copy_export() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: true,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(ids.contains(&"new_note"));
-            assert!(ids.contains(&"browse_notes"));
-            assert!(!ids.contains(&"duplicate_note"));
-            assert!(!ids.contains(&"find_in_note"));
-            assert!(!ids.contains(&"format"));
-            assert!(!ids.contains(&"copy_note_as"));
-            assert!(!ids.contains(&"export"));
-        }
-
-        #[test]
-        fn notes_auto_sizing_enabled_hides_enable_action() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(!ids.contains(&"enable_auto_sizing"));
-        }
-
-        #[test]
-        fn notes_full_feature_action_count() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // new_note, duplicate, delete, browse, find, format, move_list_item_up,
-            // move_list_item_down, copy_note_as, copy_deeplink, create_quicklink,
-            // copy_backlinks, export, send_to_ai, enable_auto_sizing,
-            // reset_window_position = 16
-            assert_eq!(actions.len(), 16);
-        }
-
-        #[test]
-        fn notes_minimal_action_count() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // new_note + browse_notes + reset_window_position = 3
-            assert_eq!(actions.len(), 3);
-        }
-
         // =========================================================================
         // 17. to_deeplink_name comprehensive
         // =========================================================================
@@ -10285,20 +9553,6 @@ mod from_dialog_builtin_action_validation_tests_5 {
             };
             let actions_1 = get_clipboard_history_context_actions(&entry);
             let actions_2 = get_clipboard_history_context_actions(&entry);
-            let a1 = action_ids(&actions_1);
-            let a2 = action_ids(&actions_2);
-            assert_eq!(a1, a2);
-        }
-
-        #[test]
-        fn notes_actions_deterministic() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions_1 = get_notes_command_bar_actions(&info);
-            let actions_2 = get_notes_command_bar_actions(&info);
             let a1 = action_ids(&actions_1);
             let a2 = action_ids(&actions_2);
             assert_eq!(a1, a2);
@@ -10813,130 +10067,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         // =========================================================================
         // 6. Notes info systematic boolean combos with section labels
         // =========================================================================
-
-        #[test]
-        fn notes_all_false_has_new_note_browse_and_auto_sizing() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(ids.contains(&"new_note"));
-            assert!(ids.contains(&"browse_notes"));
-            assert!(ids.contains(&"enable_auto_sizing"));
-            assert!(!ids.contains(&"duplicate_note"));
-            assert!(!ids.contains(&"find_in_note"));
-        }
-
-        #[test]
-        fn notes_selection_no_trash_no_auto_has_full_set() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(ids.contains(&"new_note"));
-            assert!(ids.contains(&"duplicate_note"));
-            assert!(ids.contains(&"browse_notes"));
-            assert!(ids.contains(&"find_in_note"));
-            assert!(ids.contains(&"format"));
-            assert!(ids.contains(&"copy_note_as"));
-            assert!(ids.contains(&"copy_deeplink"));
-            assert!(ids.contains(&"create_quicklink"));
-            assert!(ids.contains(&"export"));
-            assert!(ids.contains(&"enable_auto_sizing"));
-        }
-
-        #[test]
-        fn notes_selection_no_trash_auto_enabled_hides_auto_sizing() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(!ids.contains(&"enable_auto_sizing"));
-            // Everything else present
-            assert!(ids.contains(&"duplicate_note"));
-            assert!(ids.contains(&"export"));
-        }
-
-        #[test]
-        fn notes_selection_trash_hides_conditional_actions() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: true,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            // Trash view hides selection-dependent actions
-            assert!(!ids.contains(&"duplicate_note"));
-            assert!(!ids.contains(&"find_in_note"));
-            assert!(!ids.contains(&"format"));
-            assert!(!ids.contains(&"copy_note_as"));
-            assert!(!ids.contains(&"export"));
-            // These are always present
-            assert!(ids.contains(&"new_note"));
-            assert!(ids.contains(&"browse_notes"));
-        }
-
-        #[test]
-        fn notes_no_selection_trash_minimal_actions() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: true,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // Only new_note, browse_notes, reset_window_position (auto_sizing_enabled=true hides that)
-            assert_eq!(actions.len(), 3);
-            assert_eq!(actions[0].id, "new_note");
-            assert_eq!(actions[1].id, "browse_notes");
-            assert_eq!(actions[2].id, "reset_window_position");
-        }
-
-        #[test]
-        fn notes_section_labels_present_for_full_set() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // Verify section labels
-            let sections: Vec<&str> = actions
-                .iter()
-                .filter_map(|a| a.section.as_deref())
-                .collect();
-            assert!(sections.contains(&"Notes"));
-            assert!(sections.contains(&"Edit"));
-            assert!(sections.contains(&"Copy"));
-            assert!(sections.contains(&"Export"));
-            assert!(sections.contains(&"Settings"));
-        }
-
-        #[test]
-        fn notes_icons_present_for_all_actions() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            for action in &actions {
-                assert!(
-                    action.icon.is_some(),
-                    "Action '{}' should have an icon",
-                    action.id
-                );
-            }
-        }
 
         // =========================================================================
         // 7. Note switcher mixed pinned/unpinned section assignment
@@ -12411,20 +11541,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
         }
 
         #[test]
-        fn notes_actions_deterministic() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let a1 = get_notes_command_bar_actions(&info);
-            let a2 = get_notes_command_bar_actions(&info);
-            let ids1 = action_ids(&a1);
-            let ids2 = action_ids(&a2);
-            assert_eq!(ids1, ids2);
-        }
-
-        #[test]
         fn path_actions_deterministic() {
             let info = PathInfo {
                 path: "/test/dir".into(),
@@ -12517,23 +11633,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
                 assert!(
                     !action.has_action,
                     "AI action '{}' should have has_action=false",
-                    action.id
-                );
-            }
-        }
-
-        #[test]
-        fn notes_command_bar_all_has_action_false() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            for action in &actions {
-                assert!(
-                    !action.has_action,
-                    "Notes action '{}' should have has_action=false",
                     action.id
                 );
             }
@@ -12689,19 +11788,6 @@ mod from_dialog_builtin_action_validation_tests_6 {
             let ids = action_ids(&actions);
             let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
             assert_eq!(ids.len(), unique.len(), "AI IDs should be unique");
-        }
-
-        #[test]
-        fn notes_command_bar_ids_unique() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
-            assert_eq!(ids.len(), unique.len(), "Notes IDs should be unique");
         }
 
         // =========================================================================
@@ -13378,40 +12464,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
         // 6. Notes command bar icon presence
         // ============================================================
 
-        #[test]
-        fn notes_all_actions_have_icons() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            for action in &actions {
-                assert!(
-                    action.icon.is_some(),
-                    "Notes action '{}' should have an icon",
-                    action.id
-                );
-            }
-        }
-
-        #[test]
-        fn notes_all_actions_have_sections() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            for action in &actions {
-                assert!(
-                    action.section.is_some(),
-                    "Notes action '{}' should have a section",
-                    action.id
-                );
-            }
-        }
-
         // ============================================================
         // 7. New chat action ordering within each section
         // ============================================================
@@ -13777,27 +12829,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
         // ============================================================
         // 12. Notes command bar shortcut uniqueness
         // ============================================================
-
-        #[test]
-        fn notes_command_bar_shortcuts_unique() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let shortcuts: Vec<&str> = actions
-                .iter()
-                .filter_map(|a| a.shortcut.as_deref())
-                .collect();
-            let unique: HashSet<&str> = shortcuts.iter().copied().collect();
-            assert_eq!(
-                shortcuts.len(),
-                unique.len(),
-                "Notes command bar shortcuts should be unique: {:?}",
-                shortcuts
-            );
-        }
 
         // ============================================================
         // 13. Path context action ordering
@@ -14306,78 +13337,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
         // 23. Notes command bar action count bounds per flag state
         // ============================================================
 
-        #[test]
-        fn notes_minimal_count() {
-            // No selection, no auto-sizing disabled → only new_note + browse_notes + enable_auto_sizing
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // new_note + browse_notes + enable_auto_sizing + reset_window_position = 4
-            assert_eq!(
-                actions.len(),
-                4,
-                "Minimal notes actions: {:?}",
-                action_ids(&actions)
-            );
-        }
-
-        #[test]
-        fn notes_minimal_auto_sizing_enabled() {
-            // No selection, auto-sizing already enabled
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // new_note + browse_notes + reset_window_position = 3
-            assert_eq!(
-                actions.len(),
-                3,
-                "Minimal with auto: {:?}",
-                action_ids(&actions)
-            );
-        }
-
-        #[test]
-        fn notes_full_feature_count() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // new_note + duplicate + delete + browse_notes + find + format + move_list_item_up
-            // + move_list_item_down + copy_note_as + copy_deeplink + create_quicklink
-            // + copy_backlinks + export + send_to_ai + enable_auto_sizing
-            // + reset_window_position = 16
-            assert_eq!(
-                actions.len(),
-                16,
-                "Full feature: {:?}",
-                action_ids(&actions)
-            );
-        }
-
-        #[test]
-        fn notes_trash_hides_editing() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: true,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            assert!(!ids.contains(&"duplicate_note"));
-            assert!(!ids.contains(&"find_in_note"));
-            assert!(!ids.contains(&"format"));
-            assert!(!ids.contains(&"copy_note_as"));
-            assert!(!ids.contains(&"export"));
-        }
-
         // ============================================================
         // 24. Chat model display_name in title
         // ============================================================
@@ -14579,29 +13538,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
             );
         }
 
-        #[test]
-        fn ai_ids_not_in_notes_context() {
-            let ai_actions = get_ai_command_bar_actions();
-            let ai_ids: HashSet<&str> = action_ids(&ai_actions).into_iter().collect();
-            let notes_info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let notes_actions = get_notes_command_bar_actions(&notes_info);
-            let notes_ids: HashSet<&str> = action_ids(&notes_actions).into_iter().collect();
-            // copy_deeplink can exist in both contexts, but the rest should not overlap
-            // Actually checking: AI actions should be distinct from notes actions
-            let overlap: Vec<&&str> = ai_ids.intersection(&notes_ids).collect();
-            // copy_deeplink exists in notes. Let's check what AI has - it has copy_response, copy_chat etc.
-            // They should not overlap
-            assert!(
-                overlap.is_empty(),
-                "AI and notes IDs should not overlap: {:?}",
-                overlap
-            );
-        }
-
         // ============================================================
         // 30. Action title_lower invariant across all builder functions
         // ============================================================
@@ -14636,23 +13572,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
         #[test]
         fn title_lower_matches_title_for_ai() {
             for action in &get_ai_command_bar_actions() {
-                assert_eq!(
-                    action.title_lower,
-                    action.title.to_lowercase(),
-                    "title_lower mismatch for '{}'",
-                    action.id
-                );
-            }
-        }
-
-        #[test]
-        fn title_lower_matches_title_for_notes() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            for action in &get_notes_command_bar_actions(&info) {
                 assert_eq!(
                     action.title_lower,
                     action.title.to_lowercase(),
@@ -14927,20 +13846,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
         }
 
         #[test]
-        fn ordering_determinism_notes() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions_1 = get_notes_command_bar_actions(&info);
-            let ids1 = action_ids(&actions_1);
-            let actions_2 = get_notes_command_bar_actions(&info);
-            let ids2 = action_ids(&actions_2);
-            assert_eq!(ids1, ids2, "Notes actions should be deterministic");
-        }
-
-        #[test]
         fn ordering_determinism_path() {
             let path = PathInfo {
                 path: "/test".to_string(),
@@ -15012,22 +13917,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
             let actions = get_file_context_actions(&file);
             let ids: HashSet<&str> = action_ids(&actions).into_iter().collect();
             assert_eq!(ids.len(), actions.len(), "File action IDs should be unique");
-        }
-
-        #[test]
-        fn id_uniqueness_notes() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids: HashSet<&str> = action_ids(&actions).into_iter().collect();
-            assert_eq!(
-                ids.len(),
-                actions.len(),
-                "Notes action IDs should be unique"
-            );
         }
 
         // ============================================================
@@ -15104,22 +13993,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
         }
 
         #[test]
-        fn has_action_false_for_notes() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            for action in &get_notes_command_bar_actions(&info) {
-                assert!(
-                    !action.has_action,
-                    "Built-in action '{}' should have has_action=false",
-                    action.id
-                );
-            }
-        }
-
-        #[test]
         fn has_action_false_for_chat() {
             let info = ChatPromptInfo {
                 current_model: None,
@@ -15169,19 +14042,6 @@ mod from_dialog_builtin_action_validation_tests_7 {
         #[test]
         fn nonempty_title_id_ai() {
             for action in &get_ai_command_bar_actions() {
-                assert!(!action.id.is_empty());
-                assert!(!action.title.is_empty());
-            }
-        }
-
-        #[test]
-        fn nonempty_title_id_notes() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            for action in &get_notes_command_bar_actions(&info) {
                 assert!(!action.id.is_empty());
                 assert!(!action.title.is_empty());
             }
@@ -16060,98 +14920,6 @@ mod from_dialog_builtin_action_validation_tests_8 {
         // 8. Notes command bar section label transitions
         // ============================================================
 
-        #[test]
-        fn notes_full_feature_sections() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let sections: Vec<_> = actions.iter().filter_map(|a| a.section.as_ref()).collect();
-            // Should have Notes, Edit, Copy, Export, Settings sections
-            assert!(sections.contains(&&"Notes".to_string()));
-            assert!(sections.contains(&&"Edit".to_string()));
-            assert!(sections.contains(&&"Copy".to_string()));
-            assert!(sections.contains(&&"Export".to_string()));
-            assert!(sections.contains(&&"Settings".to_string()));
-        }
-
-        #[test]
-        fn notes_minimal_sections() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let sections: Vec<_> = actions
-                .iter()
-                .filter_map(|a| a.section.as_ref())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            // Only Notes + the always-present Window section (reset_window_position);
-            // no selection means no Edit/Copy/Export/Settings
-            assert_eq!(
-                sections.len(),
-                2,
-                "Minimal config should have 2 sections, got {:?}",
-                sections
-            );
-        }
-
-        #[test]
-        fn notes_trash_view_hides_edit_actions() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: true,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids = action_ids(&actions);
-            // Trash view should hide editing actions even with selection
-            assert!(!ids.contains(&"duplicate_note"));
-            assert!(!ids.contains(&"find_in_note"));
-            assert!(!ids.contains(&"format"));
-            assert!(!ids.contains(&"copy_note_as"));
-            assert!(!ids.contains(&"export"));
-        }
-
-        #[test]
-        fn notes_all_actions_have_icons() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            for action in &actions {
-                assert!(
-                    action.icon.is_some(),
-                    "Notes action '{}' should have an icon",
-                    action.id
-                );
-            }
-        }
-
-        #[test]
-        fn notes_all_actions_have_sections() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            for action in &actions {
-                assert!(
-                    action.section.is_some(),
-                    "Notes action '{}' should have a section",
-                    action.id
-                );
-            }
-        }
-
         // ============================================================
         // 9. New chat duplicate providers
         // ============================================================
@@ -16882,60 +15650,6 @@ mod from_dialog_builtin_action_validation_tests_8 {
         // 20. Notes info all-true/all-false edge cases
         // ============================================================
 
-        #[test]
-        fn notes_all_true_max_actions() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // Should be the maximum action count
-            assert!(
-                actions.len() >= 10,
-                "Full features should have >= 10 actions, got {}",
-                actions.len()
-            );
-        }
-
-        #[test]
-        fn notes_all_false_min_actions() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // Minimal: new_note + browse_notes + reset_window_position
-            assert_eq!(
-                actions.len(),
-                3,
-                "Minimal should have exactly 3 actions, got {}",
-                actions.len()
-            );
-        }
-
-        #[test]
-        fn notes_auto_sizing_disabled_adds_one() {
-            let with_auto = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let without_auto = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let with_actions = get_notes_command_bar_actions(&with_auto);
-            let without_actions = get_notes_command_bar_actions(&without_auto);
-            assert_eq!(
-                without_actions.len(),
-                with_actions.len() + 1,
-                "Disabled auto-sizing adds exactly 1 action"
-            );
-        }
-
         // ============================================================
         // 21. ScriptInfo agent flag interactions with frecency chaining
         // ============================================================
@@ -17569,20 +16283,6 @@ mod from_dialog_builtin_action_validation_tests_8 {
         }
 
         // --- merged from tests_part_06.rs ---
-        #[test]
-        fn notes_actions_deterministic() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions1 = get_notes_command_bar_actions(&info);
-            let actions2 = get_notes_command_bar_actions(&info);
-            let a1 = action_ids(&actions1);
-            let a2 = action_ids(&actions2);
-            assert_eq!(a1, a2, "Notes actions should be deterministic");
-        }
-
         // ============================================================
         // Cross-cutting: non-empty titles and IDs
         // ============================================================
@@ -18306,98 +17006,6 @@ mod from_dialog_builtin_action_validation_tests_9 {
         // ============================================================
         // 8. Notes command bar conditional section groups
         // ============================================================
-
-        #[test]
-        fn notes_command_bar_full_feature_sections() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let sections: HashSet<_> = actions.iter().filter_map(|a| a.section.as_ref()).collect();
-            assert!(sections.contains(&"Notes".to_string()));
-            assert!(sections.contains(&"Edit".to_string()));
-            assert!(sections.contains(&"Copy".to_string()));
-            assert!(sections.contains(&"Export".to_string()));
-            assert!(sections.contains(&"Settings".to_string()));
-        }
-
-        #[test]
-        fn notes_command_bar_trash_view_no_edit_section() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: true,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let sections: HashSet<_> = actions.iter().filter_map(|a| a.section.as_ref()).collect();
-            assert!(
-                !sections.contains(&"Edit".to_string()),
-                "Trash view should not have Edit section"
-            );
-            assert!(
-                !sections.contains(&"Copy".to_string()),
-                "Trash view should not have Copy section"
-            );
-            assert!(
-                !sections.contains(&"Export".to_string()),
-                "Trash view should not have Export section"
-            );
-        }
-
-        #[test]
-        fn notes_command_bar_no_selection_minimal() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            // Notes section (new_note, browse_notes) plus the always-present
-            // Window section (reset_window_position)
-            assert_eq!(
-                actions.len(),
-                3,
-                "No selection + auto_sizing should give 3 actions"
-            );
-            for action in &actions {
-                if action.id == "reset_window_position" {
-                    assert_eq!(action.section.as_deref(), Some("Window"));
-                } else {
-                    assert_eq!(action.section.as_deref(), Some("Notes"));
-                }
-            }
-        }
-
-        #[test]
-        fn notes_command_bar_auto_sizing_disabled_adds_setting() {
-            let info_disabled = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let info_enabled = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions_disabled = get_notes_command_bar_actions(&info_disabled);
-            let actions_enabled = get_notes_command_bar_actions(&info_enabled);
-            assert_eq!(
-                actions_disabled.len(),
-                actions_enabled.len() + 1,
-                "Disabled auto_sizing should add one more action"
-            );
-            assert!(
-                find_action(&actions_disabled, "enable_auto_sizing").is_some(),
-                "Should have enable_auto_sizing when disabled"
-            );
-            assert!(
-                find_action(&actions_enabled, "enable_auto_sizing").is_none(),
-                "Should NOT have enable_auto_sizing when enabled"
-            );
-        }
 
         // ============================================================
         // 9. ScriptInfo mixed agent+scriptlet flag precedence
@@ -19152,47 +17760,6 @@ mod from_dialog_builtin_action_validation_tests_9 {
         // 23. Notes command bar icon name validation
         // ============================================================
 
-        #[test]
-        fn notes_command_bar_all_actions_have_icons() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            for action in &actions {
-                assert!(
-                    action.icon.is_some(),
-                    "Notes action '{}' should have an icon",
-                    action.id
-                );
-            }
-        }
-
-        #[test]
-        fn notes_command_bar_new_note_has_plus_icon() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let new_note = find_action(&actions, "new_note").unwrap();
-            assert_eq!(new_note.icon, Some(IconName::Plus));
-        }
-
-        #[test]
-        fn notes_command_bar_browse_notes_has_folder_icon() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let browse = find_action(&actions, "browse_notes").unwrap();
-            assert_eq!(browse.icon, Some(IconName::FolderOpen));
-        }
-
         // ============================================================
         // 24. Cross-context action count stability
         // ============================================================
@@ -19427,22 +17994,6 @@ mod from_dialog_builtin_action_validation_tests_9 {
             }
         }
 
-        #[test]
-        fn notes_command_bar_all_has_action_false() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            for action in &get_notes_command_bar_actions(&info) {
-                assert!(
-                    !action.has_action,
-                    "Notes builtin '{}' should have has_action=false",
-                    action.id
-                );
-            }
-        }
-
         // ============================================================
         // 30. ID uniqueness across contexts
         // ============================================================
@@ -19473,27 +18024,6 @@ mod from_dialog_builtin_action_validation_tests_9 {
             let actions = get_path_context_actions(&path);
             let ids: HashSet<_> = actions.iter().map(|a| a.id.as_str()).collect();
             assert_eq!(ids.len(), actions.len());
-        }
-
-        #[test]
-        fn ai_command_bar_ids_no_overlap_with_notes() {
-            let ai_actions = get_ai_command_bar_actions();
-            let notes_info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let notes_actions = get_notes_command_bar_actions(&notes_info);
-            let ai_ids: HashSet<_> = ai_actions.iter().map(|a| a.id.as_str()).collect();
-            let notes_ids: HashSet<_> = notes_actions.iter().map(|a| a.id.as_str()).collect();
-            let overlap: Vec<_> = ai_ids.intersection(&notes_ids).collect();
-            // copy_deeplink appears in both — that's expected, it's the same action concept
-            // But most should be unique
-            assert!(
-                overlap.len() <= 1,
-                "AI and Notes should have minimal ID overlap, found: {:?}",
-                overlap
-            );
         }
 
         // ============================================================
@@ -20072,103 +18602,7 @@ mod from_dialog_builtin_action_validation_tests_10 {
         // 5. Notes command bar exact icons (8 tests)
         // ========================================
 
-        #[test]
-        fn notes_cmd_bar_new_note_icon_plus() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "new_note").unwrap();
-            assert_eq!(a.icon, Some(IconName::Plus));
-        }
-
-        #[test]
-        fn notes_cmd_bar_duplicate_note_icon_copy() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "duplicate_note").unwrap();
-            assert_eq!(a.icon, Some(IconName::Copy));
-        }
-
-        #[test]
-        fn notes_cmd_bar_browse_notes_icon_folder_open() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "browse_notes").unwrap();
-            assert_eq!(a.icon, Some(IconName::FolderOpen));
-        }
-
-        #[test]
-        fn notes_cmd_bar_find_in_note_icon_magnifying_glass() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "find_in_note").unwrap();
-            assert_eq!(a.icon, Some(IconName::MagnifyingGlass));
-        }
-
-        #[test]
-        fn notes_cmd_bar_format_icon_code() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "format").unwrap();
-            assert_eq!(a.icon, Some(IconName::Code));
-        }
-
-        #[test]
-        fn notes_cmd_bar_copy_deeplink_icon_arrow_right() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "copy_deeplink").unwrap();
-            assert_eq!(a.icon, Some(IconName::ArrowRight));
-        }
-
         // --- merged from tests_part_02.rs ---
-        #[test]
-        fn notes_cmd_bar_create_quicklink_icon_star() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "create_quicklink").unwrap();
-            assert_eq!(a.icon, Some(IconName::Star));
-        }
-
-        #[test]
-        fn notes_cmd_bar_enable_auto_sizing_icon_settings() {
-            let info = NotesInfo {
-                has_selection: false,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "enable_auto_sizing").unwrap();
-            assert_eq!(a.icon, Some(IconName::Settings));
-        }
-
         // ========================================
         // 6. Path context exact shortcut values (7 tests)
         // ========================================
@@ -21031,79 +19465,7 @@ mod from_dialog_builtin_action_validation_tests_10 {
         // 19. Notes command bar exact shortcuts (6 tests)
         // ========================================
 
-        #[test]
-        fn notes_cmd_bar_new_note_shortcut() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "new_note").unwrap();
-            assert_eq!(a.shortcut.as_deref(), Some("⌘N"));
-        }
-
         // --- merged from tests_part_04.rs ---
-        #[test]
-        fn notes_cmd_bar_duplicate_note_shortcut() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "duplicate_note").unwrap();
-            assert_eq!(a.shortcut.as_deref(), Some("⌘D"));
-        }
-
-        #[test]
-        fn notes_cmd_bar_browse_notes_shortcut() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "browse_notes").unwrap();
-            assert_eq!(a.shortcut.as_deref(), Some("⌘P"));
-        }
-
-        #[test]
-        fn notes_cmd_bar_find_in_note_shortcut() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "find_in_note").unwrap();
-            assert_eq!(a.shortcut.as_deref(), Some("⌘F"));
-        }
-
-        #[test]
-        fn notes_cmd_bar_copy_note_as_shortcut() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "copy_note_as").unwrap();
-            assert_eq!(a.shortcut.as_deref(), Some("⇧⌘C"));
-        }
-
-        #[test]
-        fn notes_cmd_bar_export_shortcut() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "export").unwrap();
-            assert_eq!(a.shortcut.as_deref(), Some("⇧⌘E"));
-        }
-
         // ========================================
         // 20. Note switcher complex scenarios (5 tests)
         // ========================================
@@ -21488,69 +19850,9 @@ mod from_dialog_builtin_action_validation_tests_10 {
         // ========================================
 
         // --- merged from tests_part_05.rs ---
-        #[test]
-        fn notes_cmd_bar_new_note_section_notes() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "new_note").unwrap();
-            assert_eq!(a.section.as_deref(), Some("Notes"));
-        }
-
-        #[test]
-        fn notes_cmd_bar_find_in_note_section_edit() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "find_in_note").unwrap();
-            assert_eq!(a.section.as_deref(), Some("Edit"));
-        }
-
-        #[test]
-        fn notes_cmd_bar_copy_note_as_section_copy() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "copy_note_as").unwrap();
-            assert_eq!(a.section.as_deref(), Some("Copy"));
-        }
-
-        #[test]
-        fn notes_cmd_bar_export_section_export() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: true,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let a = find_action(&actions, "export").unwrap();
-            assert_eq!(a.section.as_deref(), Some("Export"));
-        }
-
         // ========================================
         // 29. ID uniqueness and non-empty invariants (6 tests)
         // ========================================
-
-        #[test]
-        fn notes_cmd_bar_ids_unique() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let actions = get_notes_command_bar_actions(&info);
-            let ids: HashSet<_> = actions.iter().map(|a| a.id.as_str()).collect();
-            assert_eq!(ids.len(), actions.len());
-        }
 
         #[test]
         fn chat_context_ids_unique() {
@@ -21643,18 +19945,6 @@ mod from_dialog_builtin_action_validation_tests_10 {
         // ========================================
         // 30. Ordering determinism (4 tests)
         // ========================================
-
-        #[test]
-        fn notes_cmd_bar_ordering_deterministic() {
-            let info = NotesInfo {
-                has_selection: true,
-                is_trash_view: false,
-                auto_sizing_enabled: false,
-            };
-            let a = get_notes_command_bar_actions(&info);
-            let b = get_notes_command_bar_actions(&info);
-            assert_eq!(action_ids(&a), action_ids(&b));
-        }
 
         #[test]
         fn chat_context_ordering_deterministic() {

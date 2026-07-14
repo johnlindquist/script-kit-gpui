@@ -134,17 +134,23 @@ pub fn advance_footer_tip() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn with_temp_kit(contents: Option<&str>, test: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_utils::SK_PATH_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os(crate::setup::SK_PATH_ENV);
         std::env::set_var("SK_PATH", dir.path());
         if let Some(value) = contents {
             std::fs::write(dir.path().join("tips.json"), value).unwrap();
         }
         test();
-        std::env::remove_var("SK_PATH");
+        match previous {
+            Some(value) => std::env::set_var(crate::setup::SK_PATH_ENV, value),
+            None => std::env::remove_var(crate::setup::SK_PATH_ENV),
+        }
     }
     #[test]
     fn missing_file_uses_embedded_defaults() {

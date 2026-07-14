@@ -304,12 +304,15 @@ mod tests {
 
     #[test]
     fn test_shortcut_hint_covers_all_actions() {
-        // Every action except CopyBacklinks and PermanentlyDeleteNote has a
-        // shortcut hint.
+        // Destructive/navigation toggles without a stable global chord remain
+        // CommandBar-only; every other catalog action has a shortcut hint.
         for action in NotesAction::all() {
             if !matches!(
                 action,
-                NotesAction::CopyBacklinks | NotesAction::PermanentlyDeleteNote
+                NotesAction::OpenTrash
+                    | NotesAction::EmptyTrash
+                    | NotesAction::BackToNotes
+                    | NotesAction::CopyBacklinks
             ) {
                 assert!(
                     action.shortcut_hint().is_some(),
@@ -323,19 +326,31 @@ mod tests {
     #[test]
     fn test_notes_action_all() {
         let all = NotesAction::all();
-        assert_eq!(all.len(), 13);
-        assert!(all.contains(&NotesAction::NewNote));
-        assert!(all.contains(&NotesAction::DuplicateNote));
-        assert!(all.contains(&NotesAction::BrowseNotes));
-        assert!(all.contains(&NotesAction::FindInNote));
-        assert!(all.contains(&NotesAction::CopyNoteAs));
-        assert!(all.contains(&NotesAction::CopyDeeplink));
-        assert!(all.contains(&NotesAction::CreateQuicklink));
-        assert!(all.contains(&NotesAction::Export));
-        assert!(all.contains(&NotesAction::MoveListItemUp));
-        assert!(all.contains(&NotesAction::MoveListItemDown));
-        assert!(all.contains(&NotesAction::Format));
-        assert!(all.contains(&NotesAction::DeleteNote));
+        assert_eq!(
+            all,
+            &[
+                NotesAction::NewNote,
+                NotesAction::DuplicateNote,
+                NotesAction::BrowseNotes,
+                NotesAction::TogglePreview,
+                NotesAction::CycleSortMode,
+                NotesAction::OpenTrash,
+                NotesAction::EmptyTrash,
+                NotesAction::BackToNotes,
+                NotesAction::HistoryBack,
+                NotesAction::HistoryForward,
+                NotesAction::FindInNote,
+                NotesAction::CopyNoteAs,
+                NotesAction::CopyDeeplink,
+                NotesAction::CreateQuicklink,
+                NotesAction::CopyBacklinks,
+                NotesAction::Export,
+                NotesAction::MoveListItemUp,
+                NotesAction::MoveListItemDown,
+                NotesAction::Format,
+                NotesAction::DeleteNote,
+            ]
+        );
     }
 
     #[test]

@@ -796,11 +796,11 @@ fn notes_command_bar_auto_sizing_toggle() {
         auto_sizing_enabled: false,
     };
     let actions = get_notes_command_bar_actions(&disabled);
-    let ids = action_ids(&actions);
-    assert!(
-        ids.contains(&"enable_auto_sizing"),
-        "Should show enable_auto_sizing when disabled"
-    );
+    let toggle = actions
+        .iter()
+        .find(|action| action.id == "toggle_auto_sizing")
+        .expect("auto-sizing toggle should always be present");
+    assert_eq!(toggle.title, "Enable Auto-Sizing");
 
     let enabled = NotesInfo {
         has_selection: false,
@@ -808,11 +808,11 @@ fn notes_command_bar_auto_sizing_toggle() {
         auto_sizing_enabled: true,
     };
     let actions = get_notes_command_bar_actions(&enabled);
-    let ids = action_ids(&actions);
-    assert!(
-        !ids.contains(&"enable_auto_sizing"),
-        "Should NOT show enable_auto_sizing when already enabled"
-    );
+    let toggle = actions
+        .iter()
+        .find(|action| action.id == "toggle_auto_sizing")
+        .expect("auto-sizing toggle should always be present");
+    assert_eq!(toggle.title, "Disable Auto-Sizing");
 }
 
 // ============================================================

@@ -5668,8 +5668,8 @@ mod advanced_query_tests {
         assert!(
             grouped
                 .iter()
-                .any(|item| matches!(item, GroupedListItem::SectionHeader(label, None) if label == "Files")),
-            "directory path queries should append a Files section"
+                .any(|item| matches!(item, GroupedListItem::SectionHeader(label, None) if label == "Files · Folder")),
+            "directory path queries should append the folder-specific Files section"
         );
         assert!(
             flat.iter().any(|result| matches!(

@@ -239,11 +239,15 @@ fn partial_trigger_snapshot(
         // "Daily note" ('t' inside "note"), "Social draft" ('t' inside
         // "draft"), "Tagged link" ('t' in "tagged"). Users typing the
         // start of a target name expect slug-prefix semantics.
-        row.token
+        let token_prefix_matches = row
+            .token
             .as_deref()
             .and_then(|t| t.strip_prefix(canonical_token_trigger).or(Some(t)))
             .map(|slug| slug.to_lowercase().starts_with(&needle))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let colon_title_prefix_matches =
+            trigger_char == ':' && row.title.to_lowercase().starts_with(&needle);
+        token_prefix_matches || colon_title_prefix_matches
     });
 
     let all_footers = snapshot.rows.iter().all(|row| {

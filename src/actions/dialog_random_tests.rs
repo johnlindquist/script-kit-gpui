@@ -927,10 +927,8 @@ fn notes_edit_actions_only_when_selected_and_not_trash() {
 
 #[test]
 fn notes_auto_sizing_toggle() {
-    // auto_sizing disabled → show enable action
-    assert!(notes_action_ids(false, false, false).contains(&"enable_auto_sizing".to_string()));
-    // auto_sizing enabled → no enable action
-    assert!(!notes_action_ids(false, false, true).contains(&"enable_auto_sizing".to_string()));
+    assert!(notes_action_ids(false, false, false).contains(&"toggle_auto_sizing".to_string()));
+    assert!(notes_action_ids(false, false, true).contains(&"toggle_auto_sizing".to_string()));
 }
 
 #[test]

@@ -611,21 +611,24 @@ fn notes_command_bar_sections_are_correct() {
 
     let auto_size = actions
         .iter()
-        .find(|a| a.id == "enable_auto_sizing")
+        .find(|a| a.id == "toggle_auto_sizing")
         .unwrap();
     assert_eq!(auto_size.section.as_deref(), Some("Settings"));
 }
 
 #[test]
-fn notes_command_bar_auto_sizing_enabled_hides_toggle() {
+fn notes_command_bar_auto_sizing_enabled_shows_disable_toggle() {
     let info = NotesInfo {
         has_selection: true,
         is_trash_view: false,
         auto_sizing_enabled: true,
     };
     let actions = get_notes_command_bar_actions(&info);
-    let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
-    assert!(!ids.contains(&"enable_auto_sizing"));
+    let toggle = actions
+        .iter()
+        .find(|action| action.id == "toggle_auto_sizing")
+        .expect("auto-sizing toggle should always be present");
+    assert_eq!(toggle.title, "Disable Auto-Sizing");
 }
 
 // ============================================================================

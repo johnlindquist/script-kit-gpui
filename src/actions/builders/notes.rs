@@ -294,7 +294,6 @@ pub fn get_notes_command_bar_actions(info: &NotesInfo) -> Vec<Action> {
                 Some("Shows deleted notes".to_string()),
                 ActionCategory::ScriptContext,
             )
-            .with_shortcut("⇧⌘T")
             .with_icon(IconName::Trash)
             .with_section("Trash"),
         );
@@ -596,6 +595,228 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|action| action.id == "permanently_delete_note"));
+    }
+
+    #[test]
+    fn test_get_notes_command_bar_actions_matches_the_eight_state_contract() {
+        let cases = [
+            (
+                false,
+                false,
+                false,
+                vec![
+                    "new_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "cycle_sort_mode",
+                    "open_trash",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+            (
+                false,
+                false,
+                true,
+                vec![
+                    "new_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "cycle_sort_mode",
+                    "open_trash",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+            (
+                true,
+                false,
+                false,
+                vec![
+                    "new_note",
+                    "duplicate_note",
+                    "delete_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "cycle_sort_mode",
+                    "open_trash",
+                    "find_in_note",
+                    "format",
+                    "move_list_item_up",
+                    "move_list_item_down",
+                    "copy_note_as",
+                    "copy_deeplink",
+                    "create_quicklink",
+                    "copy_backlinks",
+                    "export",
+                    "send_to_ai",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+            (
+                true,
+                false,
+                true,
+                vec![
+                    "new_note",
+                    "duplicate_note",
+                    "delete_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "cycle_sort_mode",
+                    "open_trash",
+                    "find_in_note",
+                    "format",
+                    "move_list_item_up",
+                    "move_list_item_down",
+                    "copy_note_as",
+                    "copy_deeplink",
+                    "create_quicklink",
+                    "copy_backlinks",
+                    "export",
+                    "send_to_ai",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+            (
+                false,
+                true,
+                false,
+                vec![
+                    "new_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "back_to_notes",
+                    "empty_trash",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+            (
+                false,
+                true,
+                true,
+                vec![
+                    "new_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "back_to_notes",
+                    "empty_trash",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+            (
+                true,
+                true,
+                false,
+                vec![
+                    "new_note",
+                    "restore_note",
+                    "permanently_delete_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "back_to_notes",
+                    "empty_trash",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+            (
+                true,
+                true,
+                true,
+                vec![
+                    "new_note",
+                    "restore_note",
+                    "permanently_delete_note",
+                    "browse_notes",
+                    "toggle_preview",
+                    "history_back",
+                    "history_forward",
+                    "back_to_notes",
+                    "empty_trash",
+                    "toggle_auto_sizing",
+                    "reset_window_position",
+                ],
+            ),
+        ];
+
+        for (has_selection, is_trash_view, auto_sizing_enabled, expected_ids) in cases {
+            let actions = get_notes_command_bar_actions(&NotesInfo {
+                has_selection,
+                is_trash_view,
+                auto_sizing_enabled,
+            });
+            let ids: Vec<&str> = actions.iter().map(|action| action.id.as_str()).collect();
+            assert_eq!(ids, expected_ids, "unexpected action plan for selection={has_selection}, trash={is_trash_view}, auto_sizing={auto_sizing_enabled}");
+
+            let toggle = actions
+                .iter()
+                .find(|action| action.id == "toggle_auto_sizing")
+                .expect("every state must expose the auto-sizing toggle");
+            assert_eq!(
+                toggle.title,
+                if auto_sizing_enabled {
+                    "Disable Auto-Sizing"
+                } else {
+                    "Enable Auto-Sizing"
+                }
+            );
+            assert_eq!(toggle.section.as_deref(), Some("Settings"));
+            assert_eq!(toggle.icon, Some(IconName::Settings));
+
+            let mut ids_seen = std::collections::HashSet::new();
+            let mut shortcuts_seen = std::collections::HashSet::new();
+            for action in &actions {
+                assert!(
+                    ids_seen.insert(action.id.as_str()),
+                    "duplicate action id: {}",
+                    action.id
+                );
+                if let Some(shortcut) = action.shortcut.as_deref() {
+                    assert!(
+                        shortcuts_seen.insert(shortcut),
+                        "duplicate shortcut: {shortcut}"
+                    );
+                }
+                assert!(
+                    matches!(
+                        action.section.as_deref(),
+                        Some(
+                            "Notes"
+                                | "Trash"
+                                | "Navigation"
+                                | "Edit"
+                                | "Copy"
+                                | "Export"
+                                | "AI"
+                                | "Settings"
+                                | "Window"
+                        )
+                    ),
+                    "unknown section for {}: {:?}",
+                    action.id,
+                    action.section
+                );
+            }
+        }
     }
 
     #[test]

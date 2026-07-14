@@ -344,7 +344,7 @@ fn notes_no_selection_no_trash_no_autosizing() {
 
     assert!(ids.contains(&"new_note"));
     assert!(ids.contains(&"browse_notes"));
-    assert!(ids.contains(&"enable_auto_sizing"));
+    assert!(ids.contains(&"toggle_auto_sizing"));
     // No selection → no edit/copy/export actions
     assert!(!ids.contains(&"duplicate_note"));
     assert!(!ids.contains(&"find_in_note"));
@@ -371,7 +371,7 @@ fn notes_with_selection_no_trash_no_autosizing() {
     assert!(ids.contains(&"copy_deeplink"));
     assert!(ids.contains(&"create_quicklink"));
     assert!(ids.contains(&"export"));
-    assert!(ids.contains(&"enable_auto_sizing"));
+    assert!(ids.contains(&"toggle_auto_sizing"));
 }
 
 #[test]
@@ -384,8 +384,7 @@ fn notes_with_selection_no_trash_with_autosizing() {
     let actions = get_notes_command_bar_actions(&info);
     let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
 
-    // Auto-sizing already enabled → no enable action
-    assert!(!ids.contains(&"enable_auto_sizing"));
+    assert!(ids.contains(&"toggle_auto_sizing"));
     // Still has all selection actions
     assert!(ids.contains(&"duplicate_note"));
     assert!(ids.contains(&"find_in_note"));
@@ -429,7 +428,7 @@ fn notes_no_selection_trash_view() {
     assert!(ids.contains(&"new_note"));
     assert!(ids.contains(&"browse_notes"));
     assert!(!ids.contains(&"duplicate_note"));
-    assert!(!ids.contains(&"enable_auto_sizing")); // auto-sizing already enabled
+    assert!(ids.contains(&"toggle_auto_sizing"));
 }
 
 #[test]
