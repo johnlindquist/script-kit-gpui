@@ -13,13 +13,37 @@ fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
     &source[..end_index]
 }
 
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing function signature: {signature}"));
+    let after_start = &source[start..];
+    let open = after_start
+        .find('{')
+        .unwrap_or_else(|| panic!("missing function body for: {signature}"));
+    let mut depth = 0usize;
+    for (offset, ch) in after_start[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &after_start[..open + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated function body: {signature}");
+}
+
 #[test]
 fn transcript_list_state_starts_with_existing_messages() {
     let body = source_between(TRANSCRIPT_SOURCE, "pub fn new(", "\n    pub fn list_state(");
 
     assert!(
-        body.contains("let total = messages.len();"),
-        "AgentChatTranscript::new must size the virtual list from existing messages"
+        body.contains("let total = messages.len() + 1;"),
+        "AgentChatTranscript::new must size the virtual list from existing messages plus its permanent tail row"
     );
     assert!(
         body.contains("ListState::new(total, ListAlignment::Bottom"),
@@ -36,9 +60,8 @@ fn streaming_activity_row_is_a_single_idempotent_tail_row() {
     // Decision (2026-06-10, supersedes the footer-only rule): while a turn is
     // streaming with no assistant text yet, the transcript renders one
     // synthetic "Thinking…" tail row so submit gives immediate visible
-    // feedback. The churn-safety invariants that motivated the old rule are
-    // kept: the setter must be idempotent (no reset/notify when unchanged)
-    // and the list row count must only change through row_count().
+    // feedback. The tail row is now permanent, so the setter must be
+    // idempotent and must not reset the measured list when visibility changes.
     let setter_body = source_between(
         TRANSCRIPT_SOURCE,
         "pub fn set_show_activity_row(",
@@ -49,10 +72,9 @@ fn streaming_activity_row_is_a_single_idempotent_tail_row() {
             && setter_body.contains("return;"),
         "set_show_activity_row must early-return when the flag is unchanged to avoid reset/notify churn"
     );
-    assert!(
-        setter_body.contains("self.list_state.reset(self.row_count())"),
-        "set_show_activity_row must resize the virtual list via row_count() so the tail row is reachable"
-    );
+    let row_count_body = function_body(TRANSCRIPT_SOURCE, "fn row_count(&self)");
+    assert!(row_count_body.contains("self.messages.len() + 1"));
+    assert!(!setter_body.contains("self.list_state.reset("));
     assert!(
         TRANSCRIPT_SOURCE.contains("fn render_activity_row(")
             && TRANSCRIPT_SOURCE.contains("ix == visible_indices.len()"),
@@ -77,11 +99,7 @@ fn footer_snapshot_carries_streaming_status_next_to_model_name() {
 
 #[test]
 fn transcript_render_does_not_reset_list_state_each_frame() {
-    let body = source_between(
-        TRANSCRIPT_SOURCE,
-        "impl Render for AgentChatTranscript",
-        "\n}",
-    );
+    let body = function_body(TRANSCRIPT_SOURCE, "impl Render for AgentChatTranscript");
 
     assert!(
         !body.contains("self.list_state.reset("),
@@ -96,7 +114,7 @@ fn transcript_render_does_not_reset_list_state_each_frame() {
     assert!(
         body.contains(".size_full()")
             && body.contains(".with_sizing_behavior(ListSizingBehavior::Auto)")
-            && body.contains(".vertical_scrollbar(&self.list_state)"),
+            && body.contains(".vertical_scrollbar_with_fidelity_scope("),
         "AgentChatTranscript render must size the virtualized list and keep transcript scrolling wired"
     );
 }
