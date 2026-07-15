@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+/// <reference types="bun-types" />
 // Probe: reproduce Agent Chat scroll lag on a SHORT conversation whose
 // markdown rows are below the heavy-markdown preview threshold (the case the
 // user reported), drive REAL scroll-wheel events over the window, and profile

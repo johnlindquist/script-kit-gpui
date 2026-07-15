@@ -3027,17 +3027,14 @@ impl ScriptListApp {
         }
     }
 
-    /// Startup prewarm: respects `warmOnStartup=false`.
+    /// Startup prewarm is opt-in so idle Pi workers cannot starve UI frames.
     pub(crate) fn warm_agent_chat_on_startup(&mut self, _cx: &mut Context<Self>) {
-        if std::env::var("SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
+        if !Self::agent_chat_hot_prewarm_enabled() {
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_hot_prewarm_skipped",
                 correlation_id = "agent_chat_hot_prewarm",
-                reason = "disabled_by_env",
+                reason = "disabled_by_default",
             );
             return;
         }

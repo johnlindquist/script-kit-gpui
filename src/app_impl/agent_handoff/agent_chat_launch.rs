@@ -37,6 +37,16 @@ impl crate::ai::agent_chat::runtime::AgentChatConnection
     }
 }
 
+fn agent_chat_hot_prewarm_enabled_from(disabled: Option<&str>, enabled: Option<&str>) -> bool {
+    let truthy = |value: Option<&str>| {
+        value
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    };
+
+    !truthy(disabled) && truthy(enabled)
+}
+
 impl ScriptListApp {
     /// Open a deterministic, provider-free standard Agent Chat surface for
     /// DevTools and visual smoke tests. This intentionally bypasses Pi warm-up.
@@ -655,10 +665,18 @@ impl ScriptListApp {
         }
     }
 
+    pub(crate) fn agent_chat_hot_prewarm_enabled() -> bool {
+        let disabled = std::env::var("SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM").ok();
+        let enabled = std::env::var("SCRIPT_KIT_ENABLE_AGENT_CHAT_HOT_PREWARM").ok();
+        agent_chat_hot_prewarm_enabled_from(disabled.as_deref(), enabled.as_deref())
+    }
+
     /// Start warming a Pi Agent Chat session for the current Spine cwd so a
     /// later Cmd+Enter acquires a ready warm session with the correct working
     /// directory instead of missing (which would surface the "try again"
-    /// toast). Invoked when the user picks a cwd.
+    /// toast). Invoked when the user picks a cwd and hot prewarm is explicitly
+    /// enabled; idle Pi workers are otherwise deferred until first use because
+    /// they can consume multiple CPU cores and starve GPUI frame delivery.
     pub(crate) fn prewarm_agent_chat_for_spine_cwd(&self, cx: &mut Context<Self>) {
         let _ = cx;
         let ai_preferences = crate::config::load_user_preferences().ai;
@@ -673,6 +691,16 @@ impl ScriptListApp {
         ai_preferences: &crate::config::AiPreferences,
         source: &'static str,
     ) {
+        if !Self::agent_chat_hot_prewarm_enabled() {
+            tracing::info!(
+                target: "script_kit::spine",
+                event = "prewarm_selected_agent_chat_profile_skipped",
+                source,
+                reason = "disabled_by_default",
+            );
+            return;
+        }
+
         let profile_ctx = crate::ai::agent_chat::profiles::AgentChatProfileContext::from_setup();
         match crate::ai::agent_chat::launch::resolve_selected_pi_launch_with_cwd_override(
             ai_preferences,
@@ -710,5 +738,22 @@ impl ScriptListApp {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hot_prewarm_tests {
+    use super::agent_chat_hot_prewarm_enabled_from;
+
+    #[test]
+    fn hot_prewarm_is_opt_in_and_disable_wins() {
+        assert!(!agent_chat_hot_prewarm_enabled_from(None, None));
+        assert!(!agent_chat_hot_prewarm_enabled_from(None, Some("0")));
+        assert!(agent_chat_hot_prewarm_enabled_from(None, Some("true")));
+        assert!(agent_chat_hot_prewarm_enabled_from(None, Some("1")));
+        assert!(!agent_chat_hot_prewarm_enabled_from(
+            Some("true"),
+            Some("true")
+        ));
     }
 }
