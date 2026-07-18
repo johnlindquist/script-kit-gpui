@@ -323,20 +323,18 @@ try {
 
       await harvestViolations();
 
-      // Escape recovery. KNOWN papercut (battery 08): sessionless
-      // protocol-injected div/path prompts route Escape into submit()/cancel
-      // on a dead script channel and never dismiss — real script prompts
-      // reset via PromptMessage::ScriptExit, so users can't reach this.
-      // Record it, force-recover via mainList, and only FAIL if recovery
-      // itself fails.
+      // Escape recovery — LOCK for the OF-5 fix (battery 16 follow-up):
+      // sessionless prompts must dismiss on Escape via the direct-reset
+      // guard in simulate_key_dispatch.rs (current_script_pid.is_none()).
+      // A stuck view is a FAIL; hide→show recovery below is only cleanup.
       let after = await escapeToIdle();
       row.afterEscape = after.promptType ?? null;
       if (after.__dead) note("FAIL", p.id, `${label}:escape`, { dead: after.__dead });
       else if (!IDLE_VIEWS.has(after.promptType ?? "") && after.windowVisible !== false) {
         row.escapeStuckSessionless = true;
-        note("PAPERCUT", p.id, `${label}:escape`, {
+        note("FAIL", p.id, `${label}:escape`, {
           stuckIn: after.promptType,
-          note: "sessionless prompt swallowed Escape (dead script channel); recovering via mainList",
+          note: "sessionless prompt swallowed Escape (OF-5 regression)",
         });
         // triggerBuiltin mainList is ALSO refused while a prompt view is up
         // (second receipt for the papercut) — the working recovery is the

@@ -642,12 +642,13 @@ impl ScriptListApp {
                                 }
                             }
                             "up" | "arrowup" => {
-                                // Use move_selection_up to properly skip section headers
-                                view.move_selection_up(ctx);
+                                // History-aware arrow (A8 contract) — parity
+                                // with the real-key paths; skips headers via
+                                // move_selection_* when not recalling.
+                                view.main_menu_arrow_key_with_history(true, window, ctx);
                             }
                             "down" | "arrowdown" => {
-                                // Use move_selection_down to properly skip section headers
-                                view.move_selection_down(ctx);
+                                view.main_menu_arrow_key_with_history(false, window, ctx);
                             }
                             "enter" => {
                                 if view.menu_syntax_object_selector_owns_main_keyboard() {
@@ -1275,6 +1276,12 @@ impl ScriptListApp {
                         &format!("SimulateKey: Dispatching '{}' to PathPrompt", key_lower),
                     );
                     let entity_clone = entity.clone();
+                    // Sessionless (stdin/devtools-injected) prompts have no
+                    // script to consume the cancel and advance the view —
+                    // without a direct reset, Escape submits into a dead
+                    // channel and the prompt is undismissable (chaos-13 OF-5).
+                    let sessionless = view.current_script_pid.is_none();
+                    let mut cancelled = false;
                     entity_clone.update(ctx, |path_prompt: &mut PathPrompt, path_cx| {
                         if has_cmd && key_lower == "k" {
                             path_prompt.toggle_actions(path_cx);
@@ -1283,7 +1290,10 @@ impl ScriptListApp {
                                 "up" | "arrowup" => path_prompt.move_up(path_cx),
                                 "down" | "arrowdown" => path_prompt.move_down(path_cx),
                                 "enter" => path_prompt.handle_enter(path_cx),
-                                "escape" => path_prompt.submit_cancel(),
+                                "escape" => {
+                                    path_prompt.submit_cancel();
+                                    cancelled = true;
+                                }
                                 "left" | "arrowleft" => path_prompt.navigate_to_parent(path_cx),
                                 "right" | "arrowright" => {
                                     path_prompt.navigate_into_selected(path_cx)
@@ -1300,6 +1310,13 @@ impl ScriptListApp {
                             }
                         }
                     });
+                    if sessionless && cancelled {
+                        logging::log(
+                            "STDIN",
+                            "SimulateKey: sessionless PathPrompt cancelled — direct reset",
+                        );
+                        view.reset_to_script_list(ctx);
+                    }
                 }
                 AppView::DivPrompt { id, entity } => {
                     // Div prompts have one keyboard affordance: Enter/Escape
@@ -1321,10 +1338,22 @@ impl ScriptListApp {
                             logging::log("BRAIN", "Brain memory preview closed via simulateKey");
                             view.reset_to_script_list(ctx);
                         } else {
+                            let sessionless = view.current_script_pid.is_none();
                             entity_clone.update(ctx, |div_prompt, div_cx| {
                                 div_prompt.submit();
                                 div_cx.notify();
                             });
+                            if sessionless {
+                                // Same contract as the brain-preview case:
+                                // with no script to consume the submit, the
+                                // div would otherwise stay up forever
+                                // (chaos-13 OF-5).
+                                logging::log(
+                                    "STDIN",
+                                    "SimulateKey: sessionless DivPrompt submitted — direct reset",
+                                );
+                                view.reset_to_script_list(ctx);
+                            }
                         }
                     }
                 }
