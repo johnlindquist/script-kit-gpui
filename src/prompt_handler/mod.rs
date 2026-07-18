@@ -3588,8 +3588,11 @@ impl ScriptListApp {
                             Some("theme-chooser".to_string()),
                             None,
                             filter.clone(),
-                            filtered.len(),
+                            // choice_count = total dataset, visible_choice_count = filter-aware
+                            // (same contract as the EmojiPickerView arm below; these were
+                            // swapped, so visibleChoiceCount froze at the catalog total).
                             catalog.len(),
+                            filtered.len(),
                             *selected_index as i32,
                             selected_name,
                         )
@@ -4335,7 +4338,7 @@ impl ScriptListApp {
                             "acceptsTab": p.accepts_tab(),
                         })
                     }),
-                    Some(self.flow_ux_automation_snapshot()),
+                    Some(self.flow_ux_automation_snapshot(cx)),
                 );
 
                 tracing::info!(

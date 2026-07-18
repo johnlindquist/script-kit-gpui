@@ -474,10 +474,12 @@ impl ScriptListApp {
         // Enter records usage, copies the emoji, and pastes it into the
         // previous app — "Paste" is the truthful primary verb (same precedent
         // as clipboard history), not the universal "Run".
-        let gpui_footer = crate::components::render_simple_hint_strip(
-            crate::components::universal_prompt_hints_with_primary_label("Paste"),
-            None,
-        );
+        let emoji_hints = crate::components::universal_prompt_hints_with_primary_label("Paste");
+        // Runtime receipt that the relabeled `↵ Paste` anatomy stays universal
+        // (chaos battery 06/OF-3): every peer list builtin emits this audit;
+        // the emoji picker was the one surface with no is_universal receipt.
+        crate::components::emit_prompt_hint_audit("emoji_picker", &emoji_hints);
+        let gpui_footer = crate::components::render_simple_hint_strip(emoji_hints, None);
         let footer = self.main_window_footer_slot(gpui_footer);
         let menu_def = self.current_main_menu_theme.def();
         let shell = menu_def.shell;
