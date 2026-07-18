@@ -142,7 +142,17 @@ impl Render for PathPrompt {
         );
 
         let hints = path_prompt_hints();
-        crate::components::emit_prompt_hint_audit("prompts::path", &hints);
+        // Two surface-owned hints (`↵ Select | ⌘K Actions`), inside the
+        // three-affordance budget: a script-owned file picker has no agent
+        // handoff, so the universal `⌘↵ Agent` slot would advertise a verb
+        // Enter's context can't honor. Routing this through the universal
+        // audit channel logged a false prompt_hint_contract_violation on
+        // every path prompt activation (chaos battery 08).
+        crate::components::emit_surface_prompt_hint_audit(
+            "prompts::path",
+            &hints,
+            "path picker: Select + Actions only; no agent handoff in a script-owned file picker",
+        );
 
         tracing::info!(
             target: "script_kit::prompt_chrome",
