@@ -4,6 +4,30 @@ enum DictationHistoryEmptyState {
     NoFilteredMatches,
 }
 
+const DICTATION_HISTORY_ROW_SELECTOR_PREFIX: &str = "dictation-history-row-";
+
+fn dictation_history_row_selector(entry_id: &str) -> String {
+    format!("{DICTATION_HISTORY_ROW_SELECTOR_PREFIX}{entry_id}")
+}
+
+fn render_dictation_history_row(
+    display_index: usize,
+    entry: &crate::dictation::DictationHistoryEntry,
+    list_colors: ListItemColors,
+    selected: bool,
+) -> impl IntoElement {
+    let selector = dictation_history_row_selector(&entry.id);
+    let item = ListItem::new(entry.preview.clone(), list_colors)
+        .description_opt(Some(ScriptListApp::dictation_history_meta(entry)))
+        .selected(selected)
+        .with_accent_bar(true);
+
+    div()
+        .id(gpui::ElementId::Integer(display_index as u64))
+        .debug_selector(move || selector)
+        .child(item)
+}
+
 impl DictationHistoryEmptyState {
     fn from_filter(filter: &str) -> Self {
         if filter.is_empty() {
@@ -293,14 +317,12 @@ impl ScriptListApp {
                     .iter()
                     .enumerate()
                     .map(|(display_ix, entry)| {
-                        let item = ListItem::new(entry.preview.clone(), list_colors)
-                            .description_opt(Some(Self::dictation_history_meta(entry)))
-                            .selected(display_ix == selected)
-                            .with_accent_bar(true);
-
-                        div()
-                            .id(gpui::ElementId::Integer(display_ix as u64))
-                            .child(item)
+                        render_dictation_history_row(
+                            display_ix,
+                            entry,
+                            list_colors,
+                            display_ix == selected,
+                        )
                     }),
             )
         };
@@ -538,5 +560,65 @@ mod dictation_history_scroll_contract {
             source.contains("toggle_dictation_history_actions"),
             "dictation history should expose a dedicated actions menu"
         );
+    }
+}
+
+#[cfg(test)]
+mod dictation_history_paint_tests {
+    use super::*;
+
+    const TEST_ENTRY_ID: &str = "paint-probe-entry";
+
+    struct TestDictationHistoryRow;
+
+    impl gpui::Render for TestDictationHistoryRow {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let entry = crate::dictation::DictationHistoryEntry {
+                id: TEST_ENTRY_ID.to_string(),
+                timestamp: "2026-07-18T12:00:00Z".to_string(),
+                transcript: "A rendered dictation history row".to_string(),
+                preview: "A rendered dictation history row".to_string(),
+                target: "Agent Chat".to_string(),
+                audio_duration_ms: 1_250,
+            };
+            let colors = ListItemColors::from_theme(&crate::theme::Theme::default());
+
+            render_dictation_history_row(0, &entry, colors, true)
+        }
+    }
+
+    #[gpui::test]
+    fn rendered_dictation_row_records_non_zero_paint_bounds(cx: &mut gpui::TestAppContext) {
+        use gpui::px;
+
+        let window = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(480.0), px(120.0)),
+            )));
+            cx.open_window(options, |_, cx| cx.new(|_| TestDictationHistoryRow))
+                .expect("dictation paint test window should open")
+        });
+
+        cx.run_until_parked();
+
+        let expected_selector = dictation_history_row_selector(TEST_ENTRY_ID);
+        window
+            .update(cx, |_, window, _| {
+                let measurement = window
+                    .debug_bounds_entries()
+                    .iter()
+                    .find(|entry| entry.selector == expected_selector)
+                    .expect("dictation history row wrapper should record paint bounds");
+
+                assert!(measurement.bounds.size.width > px(0.0));
+                assert!(measurement.bounds.size.height > px(0.0));
+            })
+            .expect("dictation paint test window should remain available");
     }
 }

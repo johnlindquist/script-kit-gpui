@@ -2,6 +2,7 @@ fn paint_measurement_component_type(stable_id: &str) -> protocol::LayoutComponen
     use protocol::LayoutComponentType;
 
     if stable_id.contains("transcript-row-")
+        || stable_id.starts_with("dictation-history-row-")
         || stable_id.starts_with("chat-transcript-user-")
         || stable_id.starts_with("chat-transcript-response-")
     {
@@ -27,6 +28,17 @@ fn paint_measurement_component_type(stable_id: &str) -> protocol::LayoutComponen
             LayoutComponentType::Container
         }
         _ => LayoutComponentType::Other,
+    }
+}
+
+#[cfg(test)]
+mod paint_measurement_component_type_tests {
+    #[test]
+    fn dictation_history_row_selectors_are_list_items() {
+        assert_eq!(
+            super::paint_measurement_component_type("dictation-history-row-entry-123"),
+            crate::protocol::LayoutComponentType::ListItem
+        );
     }
 }
 

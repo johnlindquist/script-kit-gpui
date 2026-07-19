@@ -2,6 +2,10 @@ const FILE_SEARCH_PREVIEW_THUMBNAIL_MAX_BYTES: u64 = 20 * 1024 * 1024;
 const FILE_SEARCH_PREVIEW_THUMBNAIL_MAX_DIMENSION: u32 = 8_000;
 const FILE_SEARCH_PREVIEW_THUMBNAIL_MAX_SIDE_PX: f32 = 280.0;
 
+fn file_search_list_pane_top_inset(spacing: crate::designs::DesignSpacing) -> f32 {
+    spacing.padding_xs
+}
+
 static FILE_SEARCH_NATIVE_DRAG_AWAITING_APP_REACTIVATE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -1503,6 +1507,7 @@ impl ScriptListApp {
             .h_full()
             .flex()
             .flex_col()
+            .pt(px(file_search_list_pane_top_inset(design_spacing)))
             .child(
                 crate::components::builtin_leading_separator::render_builtin_leading_separator(
                     if query.trim().is_empty() {
@@ -1736,5 +1741,75 @@ mod file_search_chrome_audit {
             !source.contains("h(px(52.)") && !source.contains("h(px(52.0)"),
             "file_search must not hardcode taller 52px rows"
         );
+    }
+}
+
+#[cfg(test)]
+mod file_search_list_pane_paint_tests {
+    use super::*;
+
+    const PANE_SELECTOR: &str = "file-search-list-pane-inset-test";
+    const CONTENT_SELECTOR: &str = "file-search-list-pane-content-test";
+
+    struct TestFileSearchListPaneInset;
+
+    impl gpui::Render for TestFileSearchListPaneInset {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let spacing = crate::designs::DesignSpacing::default();
+            div()
+                .debug_selector(|| PANE_SELECTOR.to_string())
+                .w_full()
+                .h_full()
+                .pt(px(file_search_list_pane_top_inset(spacing)))
+                .child(
+                    div()
+                        .debug_selector(|| CONTENT_SELECTOR.to_string())
+                        .w_full()
+                        .h(px(32.0)),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn file_search_list_pane_top_inset_tracks_padding_xs(cx: &mut gpui::TestAppContext) {
+        use gpui::px;
+
+        let window = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(480.0), px(120.0)),
+            )));
+            cx.open_window(options, |_, cx| cx.new(|_| TestFileSearchListPaneInset))
+                .expect("file-search inset paint test window should open")
+        });
+
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, _| {
+                let pane = window
+                    .debug_bounds()
+                    .get(PANE_SELECTOR)
+                    .copied()
+                    .expect("file search list pane should paint");
+                let content = window
+                    .debug_bounds()
+                    .get(CONTENT_SELECTOR)
+                    .copied()
+                    .expect("file search list pane content should paint");
+                let spacing = crate::designs::DesignSpacing::default();
+
+                assert_eq!(
+                    content.origin.y - pane.origin.y,
+                    px(spacing.padding_xs),
+                    "the painted top inset must derive from DesignSpacing.padding_xs"
+                );
+            })
+            .expect("file-search inset paint test window should remain available");
     }
 }
