@@ -139,23 +139,23 @@ pub fn parse_mdflow_profile(stem: &str, content: &str) -> Result<ResolvedAgentCh
         .as_mapping()
         .ok_or_else(|| "frontmatter must be a YAML mapping".to_string())?;
 
-    let get_str = |key: &str| -> Option<String> {
-        mapping
-            .get(serde_yaml::Value::String(key.to_string()))
-            .and_then(value_to_string)
-            .filter(|value| !value.trim().is_empty())
-    };
-    let get_bool = |key: &str| -> Option<bool> {
-        mapping
-            .get(serde_yaml::Value::String(key.to_string()))
-            .and_then(serde_yaml::Value::as_bool)
-    };
-
-    let name = get_str("name").unwrap_or_else(|| title_case_stem(stem));
+    let name = optional_string(mapping, "name")?.unwrap_or_else(|| title_case_stem(stem));
+    let raw_model = optional_string(mapping, "model")?;
+    let explicit_provider = optional_string(mapping, "provider")?;
+    let icon_name = optional_string(mapping, "icon")?;
+    let system_prompt = optional_string(mapping, "system-prompt")?;
+    let cwd = optional_string(mapping, "cwd")?;
+    let fallback_cwd = optional_string(mapping, "_cwd")?;
+    let thinking = optional_string(mapping, "thinking")?;
+    let tools = optional_string_list(mapping, "tools")?;
+    let disable_extensions = optional_bool(mapping, "no-extensions")?;
+    let disable_skills = optional_bool(mapping, "no-skills")?;
+    let disable_prompt_templates = optional_bool(mapping, "no-prompt-templates")?;
+    let disable_context_files = optional_bool(mapping, "no-context-files")?;
+    let no_session = optional_bool(mapping, "no-session")?;
 
     // `model` accepts mdflow/pi's "provider/id" shorthand; an explicit
     // `provider:` key wins over the shorthand prefix.
-    let raw_model = get_str("model");
     let (shorthand_provider, model) = match raw_model {
         Some(raw) => match raw.split_once('/') {
             Some((provider, model)) if !provider.trim().is_empty() && !model.trim().is_empty() => (
@@ -166,11 +166,7 @@ pub fn parse_mdflow_profile(stem: &str, content: &str) -> Result<ResolvedAgentCh
         },
         None => (None, None),
     };
-    let provider = get_str("provider").or(shorthand_provider);
-
-    let tools = mapping
-        .get(serde_yaml::Value::String("tools".to_string()))
-        .map(value_to_string_list);
+    let provider = explicit_provider.or(shorthand_provider);
 
     let body = body.trim();
     let append_system_prompt = if body.is_empty() {
@@ -183,16 +179,16 @@ pub fn parse_mdflow_profile(stem: &str, content: &str) -> Result<ResolvedAgentCh
         source: AgentChatProfileSource::Mdflow,
         id: stem.to_string(),
         name,
-        icon_name: get_str("icon"),
+        icon_name,
         backend: AgentChatBackend::Pi,
         pi_binary: None,
         agent: None,
         provider,
         model,
-        system_prompt: get_str("system-prompt"),
+        system_prompt,
         append_system_prompt,
-        cwd: get_str("cwd")
-            .or_else(|| get_str("_cwd"))
+        cwd: cwd
+            .or(fallback_cwd)
             .map(|value| crate::ai::agent_chat::pi::binary::expand_tilde_path(&value)),
         tool_policy: tools.as_ref().map(|tools| AgentChatToolPolicyConfig {
             allow: Some(tools.clone()),
@@ -200,15 +196,15 @@ pub fn parse_mdflow_profile(stem: &str, content: &str) -> Result<ResolvedAgentCh
         tools,
         path_policy: None,
         blocked_action_message: None,
-        disable_extensions: get_bool("no-extensions"),
-        disable_skills: get_bool("no-skills"),
-        disable_prompt_templates: get_bool("no-prompt-templates"),
-        disable_context_files: get_bool("no-context-files"),
+        disable_extensions,
+        disable_skills,
+        disable_prompt_templates,
+        disable_context_files,
         hide_cwd_in_prompt: None,
-        thinking: get_str("thinking"),
+        thinking,
         extension_policy: None,
         session_dir: None,
-        no_session: get_bool("no-session"),
+        no_session,
         session_durability: None,
     })
 }
@@ -237,33 +233,55 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str), String> {
     Err("frontmatter is missing its closing `---`".to_string())
 }
 
-fn value_to_string(value: &serde_yaml::Value) -> Option<String> {
+fn optional_string(mapping: &serde_yaml::Mapping, key: &str) -> Result<Option<String>, String> {
+    let Some(value) = mapping.get(serde_yaml::Value::String(key.to_string())) else {
+        return Ok(None);
+    };
     match value {
-        serde_yaml::Value::String(text) => Some(text.clone()),
-        serde_yaml::Value::Number(number) => Some(number.to_string()),
-        serde_yaml::Value::Bool(flag) => Some(flag.to_string()),
-        _ => None,
+        serde_yaml::Value::String(text) => {
+            Ok(Some(text.clone()).filter(|text| !text.trim().is_empty()))
+        }
+        _ => Err(format!("frontmatter key `{key}` must be a YAML string")),
     }
 }
 
-/// Tools accept both a YAML list and pi's comma-separated string form.
-fn value_to_string_list(value: &serde_yaml::Value) -> Vec<String> {
+fn optional_bool(mapping: &serde_yaml::Mapping, key: &str) -> Result<Option<bool>, String> {
+    let Some(value) = mapping.get(serde_yaml::Value::String(key.to_string())) else {
+        return Ok(None);
+    };
     match value {
+        serde_yaml::Value::Bool(flag) => Ok(Some(*flag)),
+        _ => Err(format!("frontmatter key `{key}` must be a YAML boolean")),
+    }
+}
+
+/// Tools accept both a YAML list of strings and pi's comma-separated string form.
+fn optional_string_list(
+    mapping: &serde_yaml::Mapping,
+    key: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = mapping.get(serde_yaml::Value::String(key.to_string())) else {
+        return Ok(None);
+    };
+    let invalid_type =
+        || format!("frontmatter key `{key}` must be a YAML string or list of strings");
+    let values = match value {
         serde_yaml::Value::Sequence(items) => items
             .iter()
-            .filter_map(value_to_string)
-            .map(|item| item.trim().to_string())
-            .filter(|item| !item.is_empty())
-            .collect(),
-        other => value_to_string(other)
-            .map(|text| {
-                text.split(',')
-                    .map(|item| item.trim().to_string())
-                    .filter(|item| !item.is_empty())
-                    .collect()
+            .map(|item| match item {
+                serde_yaml::Value::String(text) => Ok(text.trim().to_string()),
+                _ => Err(invalid_type()),
             })
-            .unwrap_or_default(),
-    }
+            .collect::<Result<Vec<_>, _>>()?,
+        serde_yaml::Value::String(text) => text
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .collect(),
+        _ => return Err(invalid_type()),
+    };
+    Ok(Some(
+        values.into_iter().filter(|item| !item.is_empty()).collect(),
+    ))
 }
 
 fn title_case_stem(stem: &str) -> String {
@@ -373,6 +391,46 @@ mod tests {
         .expect("profile parses");
         assert_eq!(profile.provider.as_deref(), Some("google-antigravity"));
         assert_eq!(profile.model.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn wrong_typed_name_mapping_invalidates_profile() {
+        let error = parse_mdflow_profile("bad-name", "---\nname:\n  nested: value\n---\nBody.\n")
+            .expect_err("a present mapping-valued name must invalidate the profile");
+        assert!(error.contains("name"), "unexpected error: {error}");
+        assert!(error.contains("string"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn wrong_typed_model_mapping_invalidates_profile() {
+        let error =
+            parse_mdflow_profile("bad-model", "---\nmodel:\n  provider: openai\n---\nBody.\n")
+                .expect_err("a present mapping-valued model must invalidate the profile");
+        assert!(error.contains("model"), "unexpected error: {error}");
+        assert!(error.contains("string"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn wrong_typed_tool_item_mapping_invalidates_profile() {
+        let error = parse_mdflow_profile(
+            "bad-tool",
+            "---\ntools:\n  - web_search\n  - nested: value\n---\nBody.\n",
+        )
+        .expect_err("a present mapping-valued tool item must invalidate the profile");
+        assert!(error.contains("tools"), "unexpected error: {error}");
+        assert!(
+            error.contains("string or list of strings"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn wrong_typed_no_session_string_invalidates_profile() {
+        let error =
+            parse_mdflow_profile("bad-no-session", "---\nno-session: \"true\"\n---\nBody.\n")
+                .expect_err("a present string-valued no-session must invalidate the profile");
+        assert!(error.contains("no-session"), "unexpected error: {error}");
+        assert!(error.contains("boolean"), "unexpected error: {error}");
     }
 
     #[test]
