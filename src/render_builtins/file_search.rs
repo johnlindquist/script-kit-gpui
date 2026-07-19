@@ -540,7 +540,6 @@ impl ScriptListApp {
 
         // Color values for use in closures
         let ui_border = self.theme.colors.ui.border;
-        let accent_color = self.theme.colors.accent.selected;
         let list_colors = crate::list_item::ListItemColors::from_theme(&self.theme);
         let text_primary = self.theme.colors.text.primary;
         let text_muted = self.theme.colors.text.muted;
@@ -1454,25 +1453,7 @@ impl ScriptListApp {
             visible: false,
         };
 
-        // List pane: loading/empty/results with scrollbar overlay
-        let loading_badge = div()
-            .px(px(9.0))
-            .py(px(4.0))
-            .rounded(px(999.0))
-            .border_1()
-            .border_color(rgba(crate::ui_foundation::hex_to_rgba_with_opacity(
-                accent_color,
-                crate::theme::opacity::OPACITY_SUBTLE,
-            )))
-            .bg(rgba(crate::ui_foundation::hex_to_rgba_with_opacity(
-                accent_color,
-                crate::theme::opacity::OPACITY_GHOST,
-            )))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(text_dimmed))
-            .child("Indexing files");
-
+        // List pane: loading/empty/results with scrollbar overlay.
         let list_pane = if is_loading && filtered_len == 0 {
             tracing::info!(
                 target: "script_kit::prompt_chrome",
@@ -1486,16 +1467,6 @@ impl ScriptListApp {
                 .h_full()
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .w_full()
-                        .px(px(12.0))
-                        .pt(px(8.0))
-                        .pb(px(2.0))
-                        .flex()
-                        .justify_end()
-                        .child(loading_badge),
-                )
                 .child(list_element)
         } else if filtered_len == 0 {
             tracing::info!(
@@ -1527,6 +1498,23 @@ impl ScriptListApp {
                 .child(list_element)
                 .child(list_scrollbar)
         };
+        let list_pane = div()
+            .w_full()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                crate::components::builtin_leading_separator::render_builtin_leading_separator(
+                    if query.trim().is_empty() {
+                        "Files"
+                    } else {
+                        "Results"
+                    },
+                    is_loading.then_some("Indexing files"),
+                    list_colors,
+                ),
+            )
+            .child(div().relative().flex_1().min_h(px(0.0)).child(list_pane));
 
         // Preview pane: file detail or placeholder
         let preview_pane = preview_content;

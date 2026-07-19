@@ -313,6 +313,8 @@ impl ScriptListApp {
                 return;
             }
 
+            let sessionless_mini = view.current_script_pid.is_none()
+                && matches!(view.current_view, AppView::MiniPrompt { .. });
             match &view.current_view {
                 AppView::ConfirmPrompt { .. } => match key_lower.as_str() {
                     "tab" => {
@@ -973,8 +975,20 @@ impl ScriptListApp {
                                     view.close_attachment_portal_cancel(ctx);
                                     return;
                                 }
-                                logging::log("STDIN", "SimulateKey: Escape - close FileSearchView");
-                                view.close_and_reset_window(ctx);
+                                // Mirror the live FileSearch escape ladder
+                                // (render_builtins/file_search.rs): clear the
+                                // query first; when already empty,
+                                // go_back_or_close honors the entry origin
+                                // (launcher → back, direct → close). The
+                                // previous unconditional close_and_reset_window
+                                // diverged on both rungs (chaos-20 F2).
+                                logging::log(
+                                    "STDIN",
+                                    "SimulateKey: Escape - FileSearchView filter rung / go_back_or_close",
+                                );
+                                if !view.clear_builtin_view_filter(ctx) {
+                                    view.go_back_or_close(window, ctx);
+                                }
                             }
                             _ => {
                                 logging::log(
@@ -1367,6 +1381,12 @@ impl ScriptListApp {
                         ),
                     );
 
+                    // Sessionless Mini prompts have no script to consume a
+                    // submit/cancel and advance the view. Mirror Path/Div's
+                    // OF-5 direct-reset contract after Enter or Escape.
+                    let direct_reset =
+                        sessionless_mini && matches!(key_lower.as_str(), "enter" | "escape");
+
                     // Check for Cmd+K to toggle actions popup
                     if has_cmd && key_lower == "k" {
                         logging::log("STDIN", "SimulateKey: Cmd+K - toggle arg actions");
@@ -1483,6 +1503,13 @@ impl ScriptListApp {
                                 );
                             }
                         }
+                    }
+                    if direct_reset {
+                        logging::log(
+                            "STDIN",
+                            "SimulateKey: sessionless MiniPrompt completed — direct reset",
+                        );
+                        view.reset_to_script_list(ctx);
                     }
                 }
                 AppView::FormPrompt { entity, id } => {

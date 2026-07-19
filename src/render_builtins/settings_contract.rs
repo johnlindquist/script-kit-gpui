@@ -89,19 +89,19 @@ pub fn get_settings_items_for(has_custom_positions: bool) -> Vec<SettingsItem> {
             action: SettingsAction::SetupPermissions,
         },
         SettingsItem {
-            name: "Accessibility Permission Assistant",
+            name: "Open Accessibility Assistant",
             description: "Open the Permission Assistant for Accessibility",
-            icon: "accessibility",
+            icon: "shield-check",
             action: SettingsAction::AllowAccessibility,
         },
         SettingsItem {
-            name: "Screen Recording Permission Assistant",
+            name: "Open Screen Recording Assistant",
             description: "Open the Permission Assistant for Screen Recording",
-            icon: "monitor-check",
+            icon: "shield-check",
             action: SettingsAction::AllowScreenRecording,
         },
         SettingsItem {
-            name: "Request Accessibility Permission",
+            name: "Request Accessibility Access",
             description: "Prompt macOS to grant Script Kit accessibility access",
             icon: "key-round",
             action: SettingsAction::RequestAccessibilityPermission,
@@ -115,7 +115,7 @@ pub fn get_settings_items_for(has_custom_positions: bool) -> Vec<SettingsItem> {
     ];
 
     items.push(SettingsItem {
-        name: "Configure Snap Mode",
+        name: "Choose Window Snap Mode",
         description: "Choose a snapping grid density or disable drag snapping",
         icon: "square-split-horizontal",
         action: SettingsAction::ConfigureSnapMode,
@@ -269,13 +269,13 @@ mod settings_hub_contract_behavior {
         let with = settings_hub_contract_facts(true);
         assert_eq!(with.row_count, 12);
         assert_eq!(with.authored_icon_hint_rows, 12);
-        assert_eq!(with.distinct_authored_icon_hints, 11);
+        assert_eq!(with.distinct_authored_icon_hints, 10);
         assert_eq!(with.resolved_icon_rows, 0);
 
         let without = settings_hub_contract_facts(false);
         assert_eq!(without.row_count, 11);
         assert_eq!(without.authored_icon_hint_rows, 11);
-        assert_eq!(without.distinct_authored_icon_hints, 10);
+        assert_eq!(without.distinct_authored_icon_hints, 9);
         assert_eq!(without.resolved_icon_rows, 0);
     }
 

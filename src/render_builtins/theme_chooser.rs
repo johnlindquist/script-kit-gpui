@@ -1640,11 +1640,7 @@ impl ScriptListApp {
                 }
                 "w" => {
                     if let Some(original) = self.theme_before_chooser.take() {
-                        self.restore_theme_chooser_theme(
-                            original,
-                            "theme_chooser_close_undo",
-                            cx,
-                        );
+                        self.restore_theme_chooser_theme(original, "theme_chooser_close_undo", cx);
                     }
                     self.clear_theme_chooser_controls();
                     self.close_and_reset_window(cx);
@@ -1659,11 +1655,7 @@ impl ScriptListApp {
                 // a pure cancel restores the opening snapshot in memory only.
                 if !self.clear_builtin_view_filter(cx) {
                     if let Some(original) = self.theme_before_chooser.take() {
-                        self.restore_theme_chooser_theme(
-                            original,
-                            "theme_chooser_escape_undo",
-                            cx,
-                        );
+                        self.restore_theme_chooser_theme(original, "theme_chooser_escape_undo", cx);
                     }
                     self.clear_theme_chooser_controls();
                     self.go_back_or_close(window, cx);
@@ -2684,12 +2676,17 @@ impl ScriptListApp {
             .into_any_element()
     }
 
-    /// Truthful footer hint strip for the theme chooser
+    /// Truthful footer hint strip for the theme chooser.
+    ///
+    /// Capped at the three-affordance budget (`.impeccable.md`: footer ≤3
+    /// keys, discovery lives in ⌘K). ⌘E Customize and ⌘J Remix still work as
+    /// shortcuts and are discoverable in the ⌘K actions dialog
+    /// (`theme_chooser_toggle_customize` / `theme_chooser_remix` in
+    /// `render_builtins/actions.rs`); they no longer occupy footer slots
+    /// (chaos OF-7: five hints shipped under a comment claiming three).
     fn theme_chooser_hint_items() -> Vec<gpui::SharedString> {
         vec![
             gpui::SharedString::from("↵ Done"),
-            gpui::SharedString::from("⌘E Customize"),
-            gpui::SharedString::from("⌘J Remix"),
             gpui::SharedString::from("⌘K Actions"),
             gpui::SharedString::from("Esc Undo"),
         ]
@@ -3146,7 +3143,10 @@ impl ScriptListApp {
                 self.cycle_theme_chooser_gradient("theme_chooser_action_gradient_cycle", cx);
             }
             "theme_chooser_gradient_layer_add" => {
-                self.add_theme_chooser_gradient_layer("theme_chooser_action_gradient_layer_add", cx);
+                self.add_theme_chooser_gradient_layer(
+                    "theme_chooser_action_gradient_layer_add",
+                    cx,
+                );
             }
             "theme_chooser_gradient_layer_remove" => {
                 let layer_count = self
@@ -4159,8 +4159,11 @@ impl ScriptListApp {
                 )
             })
             .collect::<Vec<_>>();
-        let material_row =
-            Self::render_theme_chooser_segmented_row("Vibrancy Material", material_segments, &chrome);
+        let material_row = Self::render_theme_chooser_segmented_row(
+            "Vibrancy Material",
+            material_segments,
+            &chrome,
+        );
 
         let opacity_section = Self::render_theme_chooser_customize_section(
             "OPACITY & VIBRANCY",
@@ -4685,16 +4688,13 @@ impl ScriptListApp {
                 panel.child(facts_card).child(
                     // Launcher-style live preview fills the remaining space in
                     // Preview mode so theme browsing reads like the real shell.
-                    div()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .flex()
-                        .flex_col()
-                        .child(self.render_theme_chooser_live_preview(
+                    div().flex_1().min_h(px(0.0)).flex().flex_col().child(
+                        self.render_theme_chooser_live_preview(
                             &selected_preset_name,
                             accent_name_str,
                             &chrome,
-                        )),
+                        ),
+                    ),
                 )
             })
             // ── Semantic status chips + contrast audit (summary only) ──
@@ -4702,22 +4702,26 @@ impl ScriptListApp {
             .child(contrast_line)
             // ── Compact launcher-style live preview while editing ──
             .when(is_customize, |panel| {
-                panel
-                    .child(div().h(px(1.0)).bg(divider_bg))
-                    .child(self.render_theme_chooser_live_preview(
+                panel.child(div().h(px(1.0)).bg(divider_bg)).child(
+                    self.render_theme_chooser_live_preview(
                         &selected_preset_name,
                         accent_name_str,
                         &chrome,
-                    ))
+                    ),
+                )
             });
 
-        // ── Footer: canonical three-key hint strip per .impeccable.md ──
+        // ── Footer: three-affordance hint strip per .impeccable.md (Done /
+        // Actions / Undo; Customize + Remix discovery lives in ⌘K) ──
+        let hints = Self::theme_chooser_hint_items();
+        crate::components::emit_surface_prompt_hint_audit(
+            "theme_chooser",
+            &hints,
+            "done_actions_undo_footer",
+        );
         let uses_native_footer = self.main_window_uses_native_footer();
         let footer = self.main_window_footer_slot(
-            crate::components::prompt_layout_shell::render_simple_hint_strip(
-                Self::theme_chooser_hint_items(),
-                None,
-            ),
+            crate::components::prompt_layout_shell::render_simple_hint_strip(hints, None),
         );
         let native_footer_hover_blocker = uses_native_footer.then(|| {
             crate::components::prompt_layout_shell::render_native_main_window_footer_hover_blocker()
@@ -4763,11 +4767,19 @@ impl ScriptListApp {
             .flex()
             .flex_row()
             .child(
-                div().w_1_2().h_full().py(px(4.0)).child(
-                    div()
+                div().w_1_2().h_full().py(px(4.0)).flex().flex_col()
+                    .child(
+                        crate::components::builtin_leading_separator::render_builtin_leading_separator(
+                            if filter.trim().is_empty() { "Themes" } else { "Results" },
+                            None,
+                            list_colors,
+                        ),
+                    )
+                    .child(div()
                         .relative()
+                        .flex_1()
+                        .min_h(px(0.0))
                         .w_full()
-                        .h_full()
                         .child(list)
                         .vertical_scrollbar(&self.theme_chooser_list_state),
                 ),
@@ -4821,12 +4833,36 @@ mod theme_chooser_chrome_audit {
             source.contains("render_simple_hint_strip("),
             "theme_chooser should use render_simple_hint_strip"
         );
-        for label in ["↵ Done", "Esc Undo", "⌘J Remix", "⌘K Actions", "⌘E Customize"] {
+        for label in ["↵ Done", "⌘K Actions", "Esc Undo"] {
             assert!(
                 source.contains(&format!("SharedString::from(\"{label}\")")),
                 "theme_chooser footer should advertise truthful '{label}' hint"
             );
         }
+        // Chaos OF-7: the footer is capped at the three-affordance budget
+        // (.impeccable.md); Customize/Remix moved to ⌘K discovery. Their
+        // shortcut labels must NOT reappear as footer hints.
+        for banished in [
+            "SharedString::from(\"⌘E Customize\")",
+            "SharedString::from(\"⌘J Remix\")",
+        ] {
+            assert!(
+                !source.contains(banished),
+                "footer is capped at 3 affordances; {banished} belongs in the ⌘K actions dialog"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_chooser_footer_holds_three_affordance_budget() {
+        // Behavior-rung lock for the same OF-7 decision: the hint items
+        // themselves stay within the .impeccable.md footer budget.
+        let hints = crate::ScriptListApp::theme_chooser_hint_items();
+        assert_eq!(
+            hints.len(),
+            3,
+            "footer ≤3 affordances; discovery lives in ⌘K"
+        );
     }
 
     #[test]
@@ -4922,10 +4958,17 @@ mod theme_chooser_filter_tests {
             },
         );
 
-        let by_slug = ScriptListApp::theme_chooser_catalog_filtered_indices("night-shift", &catalog);
-        assert!(by_slug.contains(&0), "user themes must stay findable by slug");
+        let by_slug =
+            ScriptListApp::theme_chooser_catalog_filtered_indices("night-shift", &catalog);
+        assert!(
+            by_slug.contains(&0),
+            "user themes must stay findable by slug"
+        );
         let by_kind = ScriptListApp::theme_chooser_catalog_filtered_indices("custom", &catalog);
-        assert!(by_kind.contains(&0), "user themes must match the 'custom' keyword");
+        assert!(
+            by_kind.contains(&0),
+            "user themes must match the 'custom' keyword"
+        );
     }
 
     #[test]
@@ -5023,7 +5066,11 @@ mod theme_chooser_actions_dialog_sync_tests {
         let restore_fn = source
             .split("fn restore_theme_chooser_theme(")
             .nth(1)
-            .and_then(|section| section.split("fn preview_theme_chooser_catalog_entry(").next())
+            .and_then(|section| {
+                section
+                    .split("fn preview_theme_chooser_catalog_entry(")
+                    .next()
+            })
             .expect("missing restore_theme_chooser_theme");
 
         assert!(

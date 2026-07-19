@@ -401,3 +401,88 @@ mod dictation_model_prompt_tests {
         assert_eq!(choices[0].value, BUILTIN_DICTATION_MODEL_HIDE);
     }
 }
+
+#[cfg(test)]
+mod origin_flag_propagation_tests {
+    use super::*;
+
+    /// F1 (chaos-20): builtin open helpers must propagate the entry-marked
+    /// launch origin and never stamp `opened_from_main_menu` themselves —
+    /// protocol/tray/hotkey opens must CLOSE on Esc, per the intent comment
+    /// at src/app_impl/trigger_builtin_dispatch.rs ("Opened via protocol
+    /// command — ESC must close the window, NOT return to the main menu").
+    /// Launcher opens (execute_selected marks main-menu first) must GO BACK.
+    /// Red pre-fix: every helper unconditionally stamped the flag true.
+    #[gpui::test]
+    fn direct_launch_origin_survives_builtin_open_helpers(cx: &mut gpui::TestAppContext) {
+        let app = crate::main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            app.mark_opened_directly("test_direct");
+
+            // open_builtin_filterable_view arm (theme chooser, settings, …)
+            app.open_theme_chooser_view(cx);
+            assert!(
+                !app.opened_from_main_menu,
+                "theme chooser open clobbered direct origin (open_builtin_filterable_view)"
+            );
+
+            // open_builtin_filterable_view_with_filter arm
+            app.open_builtin_filterable_view_with_filter(
+                AppView::ClipboardHistoryView {
+                    filter: "x".to_string(),
+                    selected_index: 0,
+                },
+                "x",
+                "Search clipboard history...",
+                true,
+                cx,
+            );
+            assert!(
+                !app.opened_from_main_menu,
+                "with-filter open clobbered direct origin (open_builtin_filterable_view_with_filter)"
+            );
+
+            // open_file_search_view_with_result_transition arm
+            app.open_file_search(String::new(), cx);
+            assert!(
+                !app.opened_from_main_menu,
+                "file search open clobbered direct origin (filter_input_core result-transition)"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn main_menu_launch_origin_survives_builtin_open_helpers(cx: &mut gpui::TestAppContext) {
+        let app = crate::main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            app.mark_opened_from_main_menu("test_menu");
+
+            app.open_theme_chooser_view(cx);
+            assert!(
+                app.opened_from_main_menu,
+                "theme chooser open must preserve launcher origin (go-back contract)"
+            );
+
+            app.open_builtin_filterable_view_with_filter(
+                AppView::ClipboardHistoryView {
+                    filter: "x".to_string(),
+                    selected_index: 0,
+                },
+                "x",
+                "Search clipboard history...",
+                true,
+                cx,
+            );
+            assert!(
+                app.opened_from_main_menu,
+                "with-filter open must preserve launcher origin (go-back contract)"
+            );
+
+            app.open_file_search(String::new(), cx);
+            assert!(
+                app.opened_from_main_menu,
+                "file search open must preserve launcher origin (go-back contract)"
+            );
+        });
+    }
+}

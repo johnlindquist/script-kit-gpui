@@ -27,6 +27,7 @@
 
 pub mod alias_input;
 pub(crate) mod braille_loading;
+pub(crate) mod builtin_leading_separator;
 pub mod button;
 pub(crate) mod confirm_modal_shell;
 #[cfg(test)]

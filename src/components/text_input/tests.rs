@@ -261,3 +261,21 @@ fn test_set_cursor_clamps_to_text_length() {
     assert_eq!(input.cursor(), 5);
     assert!(input.selection().is_empty());
 }
+
+#[test]
+fn programmatic_set_and_insert_normalize_multiline_text_at_single_line_boundary() {
+    let constructed = TextInputState::with_text("alpha\r\nbeta\ngamma\rdelta");
+    assert_eq!(constructed.text(), "alphabetagammadelta");
+
+    let mut input = TextInputState::new();
+    input.set_text("one\r\ntwo\nthree\rfour");
+    assert_eq!(input.text(), "onetwothreefour");
+    assert!(!input.text().chars().any(|ch| matches!(ch, '\n' | '\r')));
+
+    input.move_to_end(false);
+    input.insert_str("\nfive\r\nsix\r");
+    input.insert_char('\n');
+    input.insert_char('\r');
+    assert_eq!(input.text(), "onetwothreefourfivesix");
+    assert_eq!(input.cursor(), input.text().chars().count());
+}

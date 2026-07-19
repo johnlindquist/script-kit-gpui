@@ -1,8 +1,15 @@
 fn paint_measurement_component_type(stable_id: &str) -> protocol::LayoutComponentType {
     use protocol::LayoutComponentType;
 
-    if stable_id.contains("transcript-row-") {
+    if stable_id.contains("transcript-row-")
+        || stable_id.starts_with("chat-transcript-user-")
+        || stable_id.starts_with("chat-transcript-response-")
+    {
         return LayoutComponentType::ListItem;
+    }
+
+    if stable_id == crate::components::builtin_leading_separator::BUILTIN_LEADING_SEPARATOR_ID {
+        return LayoutComponentType::Header;
     }
 
     match stable_id {
@@ -13,7 +20,7 @@ fn paint_measurement_component_type(stable_id: &str) -> protocol::LayoutComponen
         | "main-view-input-body"
         | "focused-text-mini-input-row"
         | "focused-text-mini-scope-row" => LayoutComponentType::Input,
-        "agent-chat-transcript-viewport" => LayoutComponentType::List,
+        "agent-chat-transcript-viewport" | "chat-transcript-viewport" => LayoutComponentType::List,
         "native-main-window-footer-spacer" => LayoutComponentType::Panel,
         "main-view-header" => LayoutComponentType::Header,
         "main-view-shell" | "main-view-context-zone" | "main-view-main" => {

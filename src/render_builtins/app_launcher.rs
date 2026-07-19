@@ -407,7 +407,7 @@ impl ScriptListApp {
                 // menu's "Results" header, 4d76327b8): the label may swap but
                 // the row never appears or disappears, so filtering can't
                 // shift the rows below it.
-                crate::list_item::render_section_header(
+                crate::components::builtin_leading_separator::render_builtin_leading_separator(
                     if filter.trim().is_empty() {
                         "Apps"
                     } else {
@@ -415,7 +415,6 @@ impl ScriptListApp {
                     },
                     None,
                     list_colors,
-                    true,
                 ),
             )
             .child(

@@ -436,11 +436,16 @@ impl ScriptListApp {
                             // Portal mode: attach the selected entry's content to Agent Chat chat.
                             if in_portal {
                                 if let Some((_, entry)) = filtered_entries.get(current_selected) {
-                                    let label = if entry.text_preview.len() > 40 {
-                                        format!("Clipboard: {}…", &entry.text_preview[..40])
-                                    } else {
-                                        format!("Clipboard: {}", entry.text_preview)
-                                    };
+                                    // `cap_preview` floors the cut to a char
+                                    // boundary; `&entry.text_preview[..40]` panicked
+                                    // on multibyte clipboard content at byte 40.
+                                    let label = format!(
+                                        "Clipboard: {}",
+                                        crate::context_snapshot::launcher_context::cap_preview(
+                                            &entry.text_preview,
+                                            40
+                                        )
+                                    );
                                     let part =
                                         crate::ai::message_parts::AiContextPart::ResourceUri {
                                             uri: format!("kit://clipboard-history?id={}", entry.id),
@@ -756,7 +761,7 @@ impl ScriptListApp {
                 // menu's "Results" header, 4d76327b8): the label may swap but
                 // the row never appears or disappears, so filtering can't
                 // shift the rows below it.
-                crate::list_item::render_section_header(
+                crate::components::builtin_leading_separator::render_builtin_leading_separator(
                     if filter.trim().is_empty() {
                         "Clipboard"
                     } else {
@@ -764,7 +769,6 @@ impl ScriptListApp {
                     },
                     None,
                     list_colors,
-                    true,
                 ),
             )
             .child(

@@ -963,6 +963,23 @@ impl ScriptListApp {
             return buttons;
         }
 
+        if let AppView::SelectPrompt { entity, .. } = &self.current_view {
+            use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+            let has_safe_submission = cx.is_some_and(|cx| {
+                let prompt = entity.read(cx);
+                crate::prompts::select_submission_is_allowed(prompt.multiple, prompt.selected.len())
+            });
+            let run = if has_safe_submission {
+                FooterButtonConfig::new(FooterAction::Run, "↵", "Run")
+                    .enabled(!self.main_window_footer_buttons_blocked())
+            } else {
+                FooterButtonConfig::new(FooterAction::Run, "↵", "Select one")
+                    .disabled_reason("no_selection")
+            };
+            return vec![run];
+        }
+
         // Flow session (Threadline): the footer mirrors the chat grammar —
         // Send + Actions, with Send honestly disabled while a turn runs.
         if let AppView::FlowSessionView { session_id } = self.current_view {
@@ -2010,7 +2027,11 @@ impl ScriptListApp {
             AppView::DivPrompt { .. } => Some((ViewType::DivPrompt, 0)),
             AppView::FormPrompt { .. } => Some((ViewType::DivPrompt, 0)), // Use DivPrompt size for forms
             AppView::EditorPrompt { .. } => Some((ViewType::EditorPrompt, 0)),
-            AppView::SelectPrompt { .. } => Some((ViewType::ArgPromptWithChoices, 0)),
+            AppView::SelectPrompt { entity, .. } => Some((
+                ViewType::SelectPrompt,
+                cx.map(|cx| entity.read(cx).filtered_choices.len())
+                    .unwrap_or(1),
+            )),
             AppView::PathPrompt { .. } => Some((ViewType::DivPrompt, 0)),
             AppView::EnvPrompt { .. } => Some((ViewType::DivPrompt, 0)),
             AppView::DropPrompt { .. } => Some((ViewType::DivPrompt, 0)), // Drop prompt uses div size for drop zone
@@ -2660,6 +2681,8 @@ impl ScriptListApp {
         if !self.can_accept_dictation_into_main_filter() {
             return false;
         }
+
+        let text = crate::components::text_input::core::normalize_single_line_text(text);
 
         tracing::info!(
             category = "DICTATION",

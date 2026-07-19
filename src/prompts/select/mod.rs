@@ -35,5 +35,6 @@ mod tests;
 mod types;
 
 pub use prompt::SelectPrompt;
+pub(crate) use search::select_submission_is_allowed;
 use search::*;
 use types::*;

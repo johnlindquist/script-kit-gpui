@@ -78,6 +78,8 @@ pub struct SelectPrompt {
     pub(super) choice_index: Vec<SelectChoiceIndex>,
     /// Indices of selected choices
     pub selected: HashSet<usize>,
+    /// Visible guidance after a blocked zero-selection submit.
+    pub submission_hint: Option<String>,
     /// Filtered choice indices (for display)
     pub filtered_choices: Vec<usize>,
     /// Currently focused index in filtered list
@@ -134,6 +136,7 @@ impl SelectPrompt {
             choices,
             choice_index,
             selected: HashSet::new(),
+            submission_hint: None,
             filtered_choices,
             focused_index: 0,
             hovered_index: None,
@@ -199,13 +202,19 @@ impl SelectPrompt {
     pub(super) fn toggle_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(&choice_idx) = self.filtered_choices.get(self.focused_index) {
             if toggle_choice_selection(&mut self.selected, choice_idx, self.multiple) {
+                self.submission_hint = None;
                 cx.notify();
             }
         }
     }
 
     /// Submit selected items as JSON array
-    pub(super) fn submit(&mut self) {
+    pub(super) fn submit(&mut self, cx: &mut Context<Self>) -> bool {
+        if !select_submission_is_allowed(self.multiple, self.selected.len()) {
+            self.submission_hint = Some("Select at least one item".to_string());
+            cx.notify();
+            return false;
+        }
         let mut selected_indices: Vec<usize> = self.selected.iter().copied().collect();
         selected_indices.sort_unstable();
         let focused_choice_index = self.filtered_choices.get(self.focused_index).copied();
@@ -219,6 +228,7 @@ impl SelectPrompt {
 
         let json_str = serde_json::to_string(&selected_values).unwrap_or_else(|_| "[]".to_string());
         (self.on_submit)(self.id.clone(), Some(json_str));
+        true
     }
 
     /// Cancel - submit None

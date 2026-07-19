@@ -1361,7 +1361,7 @@ impl ScriptListApp {
     pub(crate) fn handle_stdin_protocol_message(
         &mut self,
         message: crate::protocol::Message,
-        window: &gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(prompt_message) = prompt_message_from_protocol_message(message.clone()) {
@@ -1966,7 +1966,7 @@ impl ScriptListApp {
     fn handle_prompt_message_in_window(
         &mut self,
         msg: PromptMessage,
-        window: &gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
         self.handle_prompt_message_with_window(msg, Some(window), cx);
@@ -1976,7 +1976,7 @@ impl ScriptListApp {
     fn handle_prompt_message_with_window(
         &mut self,
         msg: PromptMessage,
-        current_window: Option<&gpui::Window>,
+        mut current_window: Option<&mut gpui::Window>,
         cx: &mut Context<Self>,
     ) {
         let route = classify_prompt_message_route(&msg);
@@ -5020,6 +5020,7 @@ impl ScriptListApp {
 
                 // Build layout info from current window state
                 let actual_window_size = current_window
+                    .as_deref()
                     .map(|window| {
                         let size = window.viewport_size();
                         (f32::from(size.width), f32::from(size.height))
@@ -5032,7 +5033,7 @@ impl ScriptListApp {
                             .map(|bounds| (bounds.width as f32, bounds.height as f32))
                     });
                 let mut layout_info = self.build_layout_info(actual_window_size, cx);
-                if let Some(window) = current_window {
+                if let Some(window) = current_window.as_deref() {
                     Self::append_paint_measurements(&mut layout_info, window);
                 } else if let Some(main_window) = crate::get_main_window_handle() {
                     if let Err(error) = main_window.update(cx, |_root, window, _cx| {
@@ -8433,13 +8434,9 @@ impl ScriptListApp {
                 self.focused_input = FocusedInput::None; // SelectPrompt has its own focus handling
                 self.pending_focus = Some(FocusTarget::SelectPrompt);
 
-                // Resize window based on number of choices
-                let view_type = if choice_count == 0 {
-                    ViewType::ArgPromptNoChoices
-                } else {
-                    ViewType::ArgPromptWithChoices
-                };
-                resize_to_view_sync(view_type, choice_count);
+                // Select owns both the main context header and its internal
+                // search/selection header, so it needs a distinct sizing lane.
+                resize_to_view_sync(ViewType::SelectPrompt, choice_count);
                 cx.notify();
             }
             PromptMessage::ShowConfirm {
@@ -8504,32 +8501,39 @@ impl ScriptListApp {
 
                 self.prepare_window_for_prompt("UI", "confirm", "");
 
-                let (confirm_tx, confirm_rx) = async_channel::bounded::<bool>(1);
-                self.open_confirm_prompt(
-                    crate::confirm::ParentConfirmOptions {
-                        title: "Confirm".into(),
-                        body: gpui::SharedString::from(message),
-                        confirm_text: confirm_text
-                            .map(gpui::SharedString::from)
-                            .unwrap_or("OK".into()),
-                        cancel_text: cancel_text
-                            .map(gpui::SharedString::from)
-                            .unwrap_or("Cancel".into()),
-                        ..Default::default()
-                    },
-                    confirm_tx,
-                    cx,
-                );
+                let options = crate::confirm::ParentConfirmOptions {
+                    title: "Confirm".into(),
+                    body: gpui::SharedString::from(message),
+                    confirm_text: confirm_text
+                        .map(gpui::SharedString::from)
+                        .unwrap_or("OK".into()),
+                    cancel_text: cancel_text
+                        .map(gpui::SharedString::from)
+                        .unwrap_or("Cancel".into()),
+                    ..Default::default()
+                };
 
-                cx.spawn(async move |_this, _cx| {
-                    let confirmed = confirm_rx.recv().await.unwrap_or(false);
-                    if confirmed {
-                        send_confirm(true);
-                    } else {
-                        send_cancel(false);
-                    }
-                })
-                .detach();
+                if let Some(window) = current_window.as_deref_mut() {
+                    crate::confirm::open_parent_confirm_dialog(
+                        window,
+                        cx,
+                        options,
+                        move |_window, _cx| send_confirm(true),
+                        move |_window, _cx| send_cancel(false),
+                    );
+                } else {
+                    let (confirm_tx, confirm_rx) = async_channel::bounded::<bool>(1);
+                    self.open_confirm_prompt(options, confirm_tx, cx);
+                    cx.spawn(async move |_this, _cx| {
+                        let confirmed = confirm_rx.recv().await.unwrap_or(false);
+                        if confirmed {
+                            send_confirm(true);
+                        } else {
+                            send_cancel(false);
+                        }
+                    })
+                    .detach();
+                }
 
                 cx.notify();
             }

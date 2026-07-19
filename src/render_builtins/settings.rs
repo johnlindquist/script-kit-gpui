@@ -152,7 +152,7 @@ impl ScriptListApp {
 
                 let entry = crate::builtins::BuiltInEntry {
                     id: crate::config::canonical_builtin_command_id("builtin/clear-suggested"),
-                    name: "Clear Suggested".to_string(),
+                    name: "Clear Suggested Items".to_string(),
                     description: "Clear all items from Suggested / Recently Used".to_string(),
                     keywords: vec![
                         "clear".to_string(),
@@ -202,7 +202,7 @@ impl ScriptListApp {
             SettingsAction::AllowAccessibility => {
                 let entry = crate::builtins::BuiltInEntry {
                     id: crate::config::canonical_builtin_command_id("builtin/allow-accessibility"),
-                    name: "Accessibility Permission Assistant".to_string(),
+                    name: "Open Accessibility Assistant".to_string(),
                     description: "Open the Permission Assistant for Accessibility".to_string(),
                     keywords: vec![
                         "allow".to_string(),
@@ -214,7 +214,7 @@ impl ScriptListApp {
                     feature: crate::builtins::BuiltInFeature::PermissionCommand(
                         crate::builtins::PermissionCommandType::AllowAccessibility,
                     ),
-                    icon: Some("accessibility".to_string()),
+                    icon: Some("shield-check".to_string()),
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
@@ -225,7 +225,7 @@ impl ScriptListApp {
                     id: crate::config::canonical_builtin_command_id(
                         "builtin/allow-screen-recording",
                     ),
-                    name: "Screen Recording Permission Assistant".to_string(),
+                    name: "Open Screen Recording Assistant".to_string(),
                     description: "Open the Permission Assistant for Screen Recording".to_string(),
                     keywords: vec![
                         "allow".to_string(),
@@ -238,7 +238,7 @@ impl ScriptListApp {
                     feature: crate::builtins::BuiltInFeature::PermissionCommand(
                         crate::builtins::PermissionCommandType::AllowScreenRecording,
                     ),
-                    icon: Some("monitor-check".to_string()),
+                    icon: Some("shield-check".to_string()),
                     group: crate::builtins::BuiltInGroup::Core,
                 };
 
@@ -249,7 +249,7 @@ impl ScriptListApp {
                     id: crate::config::canonical_builtin_command_id(
                         "builtin/request-accessibility",
                     ),
-                    name: "Request Accessibility Permission".to_string(),
+                    name: "Request Accessibility Access".to_string(),
                     description:
                         "Request accessibility permission for Script Kit in System Settings"
                             .to_string(),
@@ -555,7 +555,7 @@ impl ScriptListApp {
                 // menu's "Results" header, 4d76327b8): the label may swap but
                 // the row never appears or disappears, so filtering can't
                 // shift the rows below it.
-                crate::list_item::render_section_header(
+                crate::components::builtin_leading_separator::render_builtin_leading_separator(
                     if filter.trim().is_empty() {
                         SETTINGS_HUB_EMPTY_FILTER_SECTION_LABEL
                     } else {
@@ -563,7 +563,6 @@ impl ScriptListApp {
                     },
                     None,
                     list_colors,
-                    true,
                 ),
             )
             .child(div().relative().flex_1().min_h(px(0.)).child(list_element));

@@ -43,11 +43,8 @@ impl ScriptListApp {
             return false;
         };
 
-        let display = crate::emoji::display_ordered_emojis(
-            filter,
-            *selected_category,
-            &frequent_snapshot,
-        );
+        let display =
+            crate::emoji::display_ordered_emojis(filter, *selected_category, &frequent_snapshot);
         if display.emojis.is_empty() {
             *selected_index = 0;
             self.hovered_index = None;
@@ -286,8 +283,8 @@ impl ScriptListApp {
                 empty_text_color,
                 &empty_font_family,
             )
-                .icon(crate::designs::icon_variations::IconName::Star)
-                .into_element()
+            .icon(crate::designs::icon_variations::IconName::Star)
+            .into_element()
         } else {
             let row_height = crate::emoji::GRID_ROW_HEIGHT;
             let selected_outline = rgba((self.theme.colors.accent.selected << 8) | 0x80);
@@ -450,6 +447,7 @@ impl ScriptListApp {
 
         let list_scrollbar =
             self.builtin_uniform_list_scrollbar(&self.emoji_scroll_handle, rows.len(), 8);
+        let list_colors = crate::list_item::ListItemColors::from_theme(&self.theme);
 
         let content = div()
             .flex_1()
@@ -457,6 +455,17 @@ impl ScriptListApp {
             .w_full()
             .overflow_hidden()
             .py(px(design_spacing.padding_xs))
+            .child(
+                crate::components::builtin_leading_separator::render_builtin_leading_separator(
+                    if filter.trim().is_empty() {
+                        "Emoji"
+                    } else {
+                        "Results"
+                    },
+                    None,
+                    list_colors,
+                ),
+            )
             .child(
                 div()
                     .relative()
@@ -494,9 +503,11 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(format!("{} emojis", filtered_len)),
-                ], cx),
+                header: self.render_builtin_main_input_header(
+                    vec![self
+                        .render_builtin_main_input_count_label(format!("{} emojis", filtered_len))],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,

@@ -3356,8 +3356,17 @@ impl ScriptListApp {
     /// Open a filterable main-window builtin view with a consistent UX contract.
     ///
     /// Every filterable builtin should go through this helper so that focus,
-    /// placeholder, filter reset, hover clearing, resize, and opened-from-menu
-    /// state are always set the same way.
+    /// placeholder, filter reset, hover clearing, and resize are always set
+    /// the same way.
+    ///
+    /// Launch origin is owned by the ENTRY POINT, never by this helper:
+    /// `execute_selected` marks main-menu, protocol/tray/shortcut/deeplink
+    /// entries mark direct, and this helper must propagate whichever origin
+    /// is already set (chaos-20 F1 — the unconditional stamp here sent
+    /// direct-opened builtins BACK to the launcher on Esc, defeating the
+    /// `mark_opened_directly` contract documented at
+    /// `trigger_builtin_dispatch.rs`: "ESC must close the window, NOT return
+    /// to the main menu").
     ///
     /// `expanded` picks the window sizing contract: `false` matches the main
     /// window's 480px height for light-weight pickers like
@@ -3377,7 +3386,8 @@ impl ScriptListApp {
         self.builtin_row_stack_scroll_handle.scroll_to_item(0);
         self.current_view = view;
         self.hovered_index = None;
-        self.opened_from_main_menu = true;
+        // opened_from_main_menu intentionally NOT set here — see the doc
+        // comment above (origin is propagated from the entry point).
         if expanded {
             self.set_main_window_mode_state_only(
                 MainWindowMode::Full,
@@ -3519,7 +3529,8 @@ impl ScriptListApp {
         self.pending_placeholder = Some(placeholder.to_string());
         self.current_view = view;
         self.hovered_index = None;
-        self.opened_from_main_menu = true;
+        // opened_from_main_menu intentionally NOT set here — the entry point
+        // owns launch origin (see open_builtin_filterable_view's doc comment).
         if expanded {
             self.set_main_window_mode_state_only(
                 MainWindowMode::Full,

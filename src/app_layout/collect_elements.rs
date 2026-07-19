@@ -1738,6 +1738,87 @@ impl ScriptListApp {
             }
         };
 
+        if include_headers {
+            let leading = match &self.current_view {
+                AppView::AppLauncherView { filter, .. } => Some((
+                    "app-launcher",
+                    if filter.trim().is_empty() {
+                        "Apps"
+                    } else {
+                        "Results"
+                    },
+                    None,
+                )),
+                AppView::ClipboardHistoryView { filter, .. } => Some((
+                    "clipboard-history",
+                    if filter.trim().is_empty() {
+                        "Clipboard"
+                    } else {
+                        "Results"
+                    },
+                    None,
+                )),
+                AppView::DictationHistoryView { filter, .. } => Some((
+                    "dictation-history",
+                    if filter.trim().is_empty() {
+                        "Transcripts"
+                    } else {
+                        "Results"
+                    },
+                    None,
+                )),
+                AppView::EmojiPickerView { filter, .. } => Some((
+                    "emoji-picker",
+                    if filter.trim().is_empty() {
+                        "Emoji"
+                    } else {
+                        "Results"
+                    },
+                    None,
+                )),
+                AppView::FileSearchView { query, .. } => Some((
+                    "file-search",
+                    if query.trim().is_empty() {
+                        "Files"
+                    } else {
+                        "Results"
+                    },
+                    self.file_search_loading.then_some("Indexing files"),
+                )),
+                AppView::SettingsView { filter, .. } => Some((
+                    "settings",
+                    if filter.trim().is_empty() {
+                        "Settings"
+                    } else {
+                        "Results"
+                    },
+                    None,
+                )),
+                AppView::ThemeChooserView { filter, .. } => Some((
+                    "theme-chooser",
+                    if filter.trim().is_empty() {
+                        "Themes"
+                    } else {
+                        "Results"
+                    },
+                    None,
+                )),
+                _ => None,
+            };
+            if let Some((surface, label, status)) = leading {
+                outcome.total_count += 1;
+                if limit > 0 {
+                    outcome.elements.insert(
+                        0,
+                        crate::components::builtin_leading_separator::builtin_leading_separator_element(
+                            surface, label, status,
+                        ),
+                    );
+                    outcome.elements.truncate(limit);
+                }
+            }
+        }
+
         self.append_footer_elements(&mut outcome, limit, cx);
         outcome
     }

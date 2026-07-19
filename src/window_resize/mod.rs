@@ -524,6 +524,10 @@ pub mod layout {
     pub const ARG_LIST_PADDING_Y: f32 = 8.0;
     /// Divider thickness (matches default design border_thin)
     pub const ARG_DIVIDER_HEIGHT: f32 = 1.0;
+    /// Main-window context chrome measured by the shared layout contract.
+    pub const SELECT_CONTEXT_HEADER_HEIGHT: f32 = 30.0;
+    /// Painted shell/footer boundary consumed outside the logical row budget.
+    pub const SELECT_SHELL_FOOTER_BOUNDARY: f32 = 1.0;
     /// Input row text height (cursor height + margins)
     pub const ARG_INPUT_LINE_HEIGHT: f32 = CURSOR_HEIGHT_LG + (CURSOR_MARGIN_Y * 2.0);
     /// Footer height (matches PromptFooter)
@@ -604,7 +608,13 @@ fn height_for_view_with_layout(
                 is_empty: item_count == 0,
             };
             let height = height_for_main_window(sizing);
-            warn!(
+            // Flat calls are behavior-identical to content-aware sizing while
+            // `height_for_main_window` returns a fixed height, and builtin
+            // filterable lists route here once per keystroke — a WARN would
+            // fire constantly and train readers to ignore real violations
+            // (chaos battery 11).  Structured telemetry below still records
+            // every flat-path resize under ResizeReason::FlatFallback.
+            debug!(
                 target: "MAIN_WINDOW",
                 item_count,
                 "flat sizing fallback used; content-aware sizing should be preferred"
@@ -632,6 +642,21 @@ fn height_for_view_with_layout(
             let list_height =
                 (visible_items * LIST_ITEM_HEIGHT) + ARG_LIST_PADDING_Y + ARG_DIVIDER_HEIGHT;
             let total_height = ARG_HEADER_HEIGHT + list_height + WINDOW_BORDER_Y;
+            clamp_height(px(total_height))
+        }
+        ViewType::SelectPrompt => {
+            // Select uses the shared prompt header/footer budget plus the
+            // main-window context header. Routing it through Arg sizing
+            // omitted that 30px context row and clipped the first 40px
+            // Comfortable choice row at small choice counts (OF-13).
+            let visible_items = item_count.max(1) as f32;
+            let list_height =
+                (visible_items * LIST_ITEM_HEIGHT) + ARG_LIST_PADDING_Y + ARG_DIVIDER_HEIGHT;
+            let total_height = ARG_HEADER_HEIGHT
+                + SELECT_CONTEXT_HEADER_HEIGHT
+                + list_height
+                + SELECT_SHELL_FOOTER_BOUNDARY
+                + WINDOW_BORDER_Y;
             clamp_height(px(total_height))
         }
         ViewType::MiniPrompt => {
@@ -665,6 +690,8 @@ pub enum ViewType {
     FocusedTextMini,
     /// Arg prompt with choices - dynamic height based on item count
     ArgPromptWithChoices,
+    /// Select prompt with a main-window context header plus an internal search header.
+    SelectPrompt,
     /// Arg prompt without choices (input only) - compact height
     ArgPromptNoChoices,
     /// Div prompt (HTML display) - full height
@@ -1098,6 +1125,26 @@ mod resize_tests {
             height_for_view_with_layout(ViewType::ArgPromptWithChoices, 100, &layout),
             layout::STANDARD_HEIGHT
         );
+    }
+
+    #[test]
+    fn test_select_one_choice_reserves_context_header_and_one_full_row() {
+        let layout = default_layout();
+        let height = f32::from(height_for_view_with_layout(
+            ViewType::SelectPrompt,
+            1,
+            &layout,
+        ));
+        let required = layout::ARG_HEADER_HEIGHT
+            + layout::SELECT_CONTEXT_HEADER_HEIGHT
+            + LIST_ITEM_HEIGHT
+            + layout::ARG_LIST_PADDING_Y
+            + layout::ARG_DIVIDER_HEIGHT
+            + layout::SELECT_SHELL_FOOTER_BOUNDARY
+            + layout::WINDOW_BORDER_Y;
+
+        assert_eq!(height, required);
+        assert!(height >= 149.0, "Select must retain one complete 40px row");
     }
 
     #[test]

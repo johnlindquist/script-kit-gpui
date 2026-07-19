@@ -422,7 +422,10 @@ impl ScriptListApp {
         };
         self.rekey_main_automation_surface_from_current_view();
         self.hovered_index = None;
-        self.opened_from_main_menu = true;
+        // opened_from_main_menu intentionally NOT set here — the entry point
+        // owns launch origin (chaos-20 F1: protocol/tray opens must CLOSE on
+        // Esc, not return to the launcher; see trigger_builtin_dispatch.rs
+        // intent comment and open_builtin_filterable_view's doc comment).
 
         self.pending_focus = Some(FocusTarget::MainFilter);
         self.focused_input = FocusedInput::MainFilter;

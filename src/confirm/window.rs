@@ -47,8 +47,8 @@ const CONFIRM_PADDING_Y: f32 = 20.0;
 const CONFIRM_SECTION_GAP: f32 = 10.0;
 const CONFIRM_TITLE_LINE_HEIGHT: f32 = 16.0;
 const CONFIRM_MIN_HEIGHT: f32 = 132.0;
-const CONFIRM_MAX_HEIGHT: f32 = 196.0;
-const CONFIRM_BODY_MAX_LINES: usize = 3;
+const CONFIRM_MAX_HEIGHT: f32 = 240.0;
+const CONFIRM_BODY_MAX_LINES: usize = 5;
 /// The body renders with `.text_xs()` — 0.75rem at the default 16px rem.
 const CONFIRM_BODY_FONT_SIZE: f32 = 12.0;
 const CONFIRM_LIFECYCLE_POLL_MS: u64 = 120;
@@ -57,8 +57,10 @@ const NS_WINDOW_ABOVE: i64 = 1;
 
 static CONFIRM_WINDOW: OnceLock<Mutex<Option<WindowHandle<ConfirmPopupWindow>>>> = OnceLock::new();
 static CONFIRM_PARENT_WINDOW: OnceLock<Mutex<Option<AnyWindowHandle>>> = OnceLock::new();
-static CONFIRM_RESULT_TX: OnceLock<Mutex<Option<async_channel::Sender<bool>>>> = OnceLock::new();
+static CONFIRM_RESULT_TX: OnceLock<Mutex<Option<async_channel::Sender<ParentDialogResult>>>> =
+    OnceLock::new();
 static CONFIRM_FOCUSED_BUTTON: OnceLock<Mutex<FocusedButton>> = OnceLock::new();
+static CONFIRM_HAS_SECONDARY: OnceLock<Mutex<bool>> = OnceLock::new();
 
 const CONFIRM_POPUP_AUTOMATION_ID: &str = "confirm-popup";
 
@@ -77,13 +79,23 @@ pub(crate) struct ConfirmWindowOptions {
     pub body: SharedString,
     pub confirm_text: SharedString,
     pub cancel_text: SharedString,
+    pub secondary_text: Option<SharedString>,
     pub confirm_variant: ConfirmButtonVariant,
     pub width: Pixels,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParentDialogResult {
+    Primary,
+    Secondary,
+    Dismiss,
+    ProgrammaticClose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusedButton {
     Cancel,
+    Secondary,
     Confirm,
 }
 
@@ -92,6 +104,7 @@ enum ConfirmWindowKeyIntent {
     FocusNext,
     FocusPrev,
     ActivateFocused,
+    ActivateSecondary,
     Cancel,
 }
 
@@ -105,6 +118,9 @@ fn confirm_window_key_intent(
     key: &str,
     modifiers: &gpui::Modifiers,
 ) -> Option<ConfirmWindowKeyIntent> {
+    if key.eq_ignore_ascii_case("i") && modifiers.platform && !modifiers.control && !modifiers.alt {
+        return Some(ConfirmWindowKeyIntent::ActivateSecondary);
+    }
     if is_key_escape(key) {
         return Some(ConfirmWindowKeyIntent::Cancel);
     }
@@ -408,35 +424,44 @@ pub(crate) fn consume_main_window_key_while_confirm_open(
                 event = "route_key_confirm_cancel",
                 "Routing Escape to confirm popup → cancel"
             );
-            send_confirm_result(false);
-            // Defer window close so is_confirm_window_open() remains true
-            // for the rest of this event processing cycle, blocking
-            // PressEnter and other handlers from also firing.
-            defer_close_confirm_window(cx);
+            resolve_confirm_window_from_parent(ParentDialogResult::Dismiss, cx);
             true
         }
         Some(ConfirmWindowKeyIntent::ActivateFocused) => {
             let focused = get_confirm_focused_button();
-            let confirmed = matches!(focused, FocusedButton::Confirm);
+            let result = match focused {
+                FocusedButton::Confirm => ParentDialogResult::Primary,
+                FocusedButton::Secondary => ParentDialogResult::Secondary,
+                FocusedButton::Cancel => ParentDialogResult::Dismiss,
+            };
             tracing::info!(
                 target: "script_kit::confirm",
                 event = "route_key_confirm_enter",
-                confirmed,
+                result = ?result,
                 focused_button = ?focused,
                 "Routing Enter to confirm popup → activate focused"
             );
-            send_confirm_result(confirmed);
-            defer_close_confirm_window(cx);
+            resolve_confirm_window_from_parent(result, cx);
+            true
+        }
+        Some(ConfirmWindowKeyIntent::ActivateSecondary) => {
+            if CONFIRM_HAS_SECONDARY
+                .get()
+                .and_then(|state| state.lock().ok())
+                .is_some_and(|state| *state)
+            {
+                resolve_confirm_window_from_parent(ParentDialogResult::Secondary, cx);
+            }
             true
         }
         Some(ConfirmWindowKeyIntent::FocusNext) => {
-            toggle_confirm_focused_button();
+            cycle_confirm_focused_button(false);
             // Notify the confirm window to re-render with updated focus
             notify_confirm_window(cx);
             true
         }
         Some(ConfirmWindowKeyIntent::FocusPrev) => {
-            toggle_confirm_focused_button();
+            cycle_confirm_focused_button(true);
             notify_confirm_window(cx);
             true
         }
@@ -458,40 +483,64 @@ pub(crate) fn route_key_to_confirm_popup(key: &str, cx: &mut App) -> bool {
 }
 
 pub(crate) fn send_confirm_result(confirmed: bool) {
+    send_parent_dialog_result(if confirmed {
+        ParentDialogResult::Primary
+    } else {
+        ParentDialogResult::Dismiss
+    });
+}
+
+pub(crate) fn send_parent_dialog_result(result: ParentDialogResult) {
     if let Some(storage) = CONFIRM_RESULT_TX.get() {
         if let Ok(mut guard) = storage.lock() {
             if let Some(tx) = guard.take() {
-                let _ = tx.try_send(confirmed);
+                let _ = tx.try_send(result);
             }
         }
     }
 }
 
+/// Close an action dialog after its owner has completed without treating the
+/// close as a user dismissal. This resolves the parent task but invokes none
+/// of the primary, secondary, or dismiss callbacks.
+pub(crate) fn close_parent_action_dialog_programmatically(cx: &mut App) {
+    send_parent_dialog_result(ParentDialogResult::ProgrammaticClose);
+    close_confirm_window(cx);
+}
+
 /// Select and activate a confirm dialog button by value for batch automation.
 ///
-/// Accepts `"confirm"` or `"cancel"` as the value. Sends the result and closes
-/// the dialog. Returns `Some(value)` on success, `None` if the value is invalid
-/// or no confirm dialog is open.
+/// Accepts `"confirm"`, `"secondary"`, or `"cancel"` as the value. Sends the
+/// result and closes the dialog. Returns `Some(value)` on success, `None` if
+/// the value is invalid or no confirm dialog is open.
 #[allow(dead_code)]
 pub(crate) fn batch_select_confirm_button_by_value(value: &str, cx: &mut App) -> Option<String> {
-    let confirmed = match value {
-        "confirm" => true,
-        "cancel" => false,
+    let result = match value {
+        "confirm" => ParentDialogResult::Primary,
+        "secondary" => {
+            let has_secondary = CONFIRM_HAS_SECONDARY
+                .get()
+                .and_then(|state| state.lock().ok())
+                .is_some_and(|state| *state);
+            if !has_secondary {
+                return None;
+            }
+            ParentDialogResult::Secondary
+        }
+        "cancel" => ParentDialogResult::Dismiss,
         _ => return None,
     };
-    // Verify a confirm window is actually open
     if !is_confirm_window_open() {
         return None;
     }
-    send_confirm_result(confirmed);
+    send_parent_dialog_result(result);
     close_confirm_window(cx);
     Some(value.to_string())
 }
 
-/// Select and activate a confirm dialog button by semantic ID.
-///
-/// Accepts `"button:0:confirm"` or `"button:1:cancel"`. Returns the semantic ID
-/// on success.
+/// Select and activate a confirm dialog button by semantic ID. Three-action
+/// dialogs insert `button:1:secondary` and move cancel to `button:2:cancel`;
+/// legacy two-action dialogs retain `button:1:cancel`.
 #[allow(dead_code)]
 pub(crate) fn batch_select_confirm_button_by_semantic_id(
     semantic_id: &str,
@@ -499,7 +548,8 @@ pub(crate) fn batch_select_confirm_button_by_semantic_id(
 ) -> Option<String> {
     let value = match semantic_id {
         "button:0:confirm" => "confirm",
-        "button:1:cancel" => "cancel",
+        "button:1:secondary" => "secondary",
+        "button:1:cancel" | "button:2:cancel" => "cancel",
         _ => return None,
     };
     batch_select_confirm_button_by_value(value, cx)?;
@@ -513,12 +563,32 @@ fn get_confirm_focused_button() -> FocusedButton {
         .map_or(FocusedButton::Confirm, |g| *g)
 }
 
-fn toggle_confirm_focused_button() {
-    let next = match get_confirm_focused_button() {
-        FocusedButton::Cancel => FocusedButton::Confirm,
-        FocusedButton::Confirm => FocusedButton::Cancel,
-    };
+fn cycle_confirm_focused_button(reverse: bool) {
+    let has_secondary = CONFIRM_HAS_SECONDARY
+        .get()
+        .and_then(|state| state.lock().ok())
+        .is_some_and(|state| *state);
+    let next = next_confirm_focused_button(get_confirm_focused_button(), reverse, has_secondary);
     set_confirm_focused_button(next);
+}
+
+fn next_confirm_focused_button(
+    current: FocusedButton,
+    reverse: bool,
+    has_secondary: bool,
+) -> FocusedButton {
+    match (current, reverse, has_secondary) {
+        (FocusedButton::Confirm, false, true) => FocusedButton::Secondary,
+        (FocusedButton::Secondary, false, true) => FocusedButton::Cancel,
+        (FocusedButton::Cancel, false, _) => FocusedButton::Confirm,
+        (FocusedButton::Confirm, true, _) => FocusedButton::Cancel,
+        (FocusedButton::Cancel, true, true) => FocusedButton::Secondary,
+        (FocusedButton::Secondary, true, true) => FocusedButton::Confirm,
+        (FocusedButton::Confirm, _, false) => FocusedButton::Cancel,
+        (FocusedButton::Cancel, _, false) | (FocusedButton::Secondary, _, false) => {
+            FocusedButton::Confirm
+        }
+    }
 }
 
 fn set_confirm_focused_button(next: FocusedButton) {
@@ -533,10 +603,16 @@ fn set_confirm_focused_button(next: FocusedButton) {
 /// `is_confirm_window_open()` remains true for the rest of the current
 /// event processing cycle. This prevents PressEnter and other handlers
 /// from also processing the same Enter keystroke.
-fn defer_close_confirm_window(cx: &mut App) {
-    cx.defer(|cx| {
-        close_confirm_window(cx);
-    });
+fn resolve_confirm_window_from_parent(result: ParentDialogResult, cx: &mut App) {
+    if let Some(storage) = CONFIRM_WINDOW.get() {
+        if let Ok(guard) = storage.lock() {
+            if let Some(handle) = guard.as_ref() {
+                let _ = handle.update(cx, |confirm, window, cx| {
+                    confirm.resolve_and_close(result, window, cx);
+                });
+            }
+        }
+    }
 }
 
 fn notify_confirm_window(cx: &mut App) {
@@ -577,6 +653,7 @@ pub(crate) struct ConfirmPopupSnapshot {
     pub(crate) body: String,
     pub(crate) confirm_text: String,
     pub(crate) cancel_text: String,
+    pub(crate) secondary_text: Option<String>,
     pub(crate) focused_button: &'static str,
 }
 
@@ -592,6 +669,7 @@ pub(crate) fn get_confirm_popup_snapshot(cx: &gpui::App) -> Option<ConfirmPopupS
         .read_with(cx, |popup, _cx| {
             let focused_button = match popup.focused_button {
                 FocusedButton::Confirm => "confirm",
+                FocusedButton::Secondary => "secondary",
                 FocusedButton::Cancel => "cancel",
             };
             ConfirmPopupSnapshot {
@@ -599,6 +677,7 @@ pub(crate) fn get_confirm_popup_snapshot(cx: &gpui::App) -> Option<ConfirmPopupS
                 body: popup.body.to_string(),
                 confirm_text: popup.confirm_text.to_string(),
                 cancel_text: popup.cancel_text.to_string(),
+                secondary_text: popup.secondary_text.as_ref().map(ToString::to_string),
                 focused_button,
             }
         })
@@ -670,15 +749,19 @@ unsafe fn nswindow_title_string(window: cocoa::base::id) -> Option<String> {
     if window == nil {
         return None;
     }
-    let title: cocoa::base::id = msg_send![window, title];
+    let title: cocoa::base::id = unsafe { msg_send![window, title] };
     if title == nil {
         return None;
     }
-    let title_cstr: *const std::os::raw::c_char = msg_send![title, UTF8String];
+    let title_cstr: *const std::os::raw::c_char = unsafe { msg_send![title, UTF8String] };
     if title_cstr.is_null() {
         return None;
     }
-    Some(CStr::from_ptr(title_cstr).to_string_lossy().into_owned())
+    Some(
+        unsafe { CStr::from_ptr(title_cstr) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn automation_bounds_from_gpui(bounds: Bounds<Pixels>) -> crate::protocol::AutomationWindowBounds {
@@ -695,7 +778,7 @@ pub(crate) fn open_confirm_popup_window(
     parent_window: ConfirmPopupParentWindow,
     options: ConfirmWindowOptions,
     keep_open_while: Rc<dyn Fn() -> bool>,
-    result_tx: async_channel::Sender<bool>,
+    result_tx: async_channel::Sender<ParentDialogResult>,
 ) -> anyhow::Result<WindowHandle<ConfirmPopupWindow>> {
     let parent_automation_id = resolve_confirm_popup_parent_automation_id(
         parent_window.handle,
@@ -716,6 +799,13 @@ pub(crate) fn open_confirm_popup_window(
         "open_confirm_popup_window: opening native confirm popup"
     );
     close_confirm_window(cx);
+    let has_secondary = options.secondary_text.is_some();
+    if let Ok(mut state) = CONFIRM_HAS_SECONDARY
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+    {
+        *state = has_secondary;
+    }
 
     let theme = get_cached_theme();
     let is_dark_vibrancy = theme.should_use_dark_vibrancy();
@@ -1172,11 +1262,12 @@ pub(crate) struct ConfirmPopupWindow {
     body: SharedString,
     confirm_text: SharedString,
     cancel_text: SharedString,
+    secondary_text: Option<SharedString>,
     confirm_variant: ConfirmButtonVariant,
     focus_handle: FocusHandle,
     focused_button: FocusedButton,
     keep_open_while: Rc<dyn Fn() -> bool>,
-    result_tx: async_channel::Sender<bool>,
+    result_tx: async_channel::Sender<ParentDialogResult>,
     lifecycle_task: Option<Task<()>>,
     did_request_focus: bool,
     resolved: bool,
@@ -1186,7 +1277,7 @@ impl ConfirmPopupWindow {
     fn new(
         options: ConfirmWindowOptions,
         keep_open_while: Rc<dyn Fn() -> bool>,
-        result_tx: async_channel::Sender<bool>,
+        result_tx: async_channel::Sender<ParentDialogResult>,
         cx: &mut Context<Self>,
     ) -> Self {
         tracing::info!(
@@ -1203,6 +1294,7 @@ impl ConfirmPopupWindow {
             body: options.body,
             confirm_text: options.confirm_text,
             cancel_text: options.cancel_text,
+            secondary_text: options.secondary_text,
             confirm_variant: options.confirm_variant,
             focus_handle: cx.focus_handle(),
             focused_button: FocusedButton::Confirm,
@@ -1215,11 +1307,14 @@ impl ConfirmPopupWindow {
     }
 
     fn shift_focus(&mut self, reverse: bool, cx: &mut Context<Self>) {
-        self.focused_button = match (self.focused_button, reverse) {
-            (FocusedButton::Cancel, false) => FocusedButton::Confirm,
-            (FocusedButton::Confirm, false) => FocusedButton::Cancel,
-            (FocusedButton::Cancel, true) => FocusedButton::Confirm,
-            (FocusedButton::Confirm, true) => FocusedButton::Cancel,
+        self.focused_button = match (self.focused_button, reverse, self.secondary_text.is_some()) {
+            (FocusedButton::Confirm, false, true) => FocusedButton::Secondary,
+            (FocusedButton::Secondary, false, true) => FocusedButton::Cancel,
+            (FocusedButton::Cancel, false, _) => FocusedButton::Confirm,
+            (FocusedButton::Confirm, true, _) => FocusedButton::Cancel,
+            (FocusedButton::Cancel, true, true) => FocusedButton::Secondary,
+            (FocusedButton::Secondary, true, true) => FocusedButton::Confirm,
+            (_, _, false) => FocusedButton::Confirm,
         };
         set_confirm_focused_button(self.focused_button);
         cx.notify();
@@ -1277,7 +1372,7 @@ impl ConfirmPopupWindow {
                             "Auto-cancelling confirm (lifecycle predicate false)"
                         );
                         this.resolved = true;
-                        let _ = result_tx.try_send(false);
+                        let _ = result_tx.try_send(ParentDialogResult::Dismiss);
                     }
                 });
 
@@ -1296,12 +1391,17 @@ impl ConfirmPopupWindow {
     // itself. Instead we rely on the lifecycle polling task and explicit
     // user actions (confirm/cancel/escape) to close the window.
 
-    fn resolve_and_close(&mut self, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn resolve_and_close(
+        &mut self,
+        result: ParentDialogResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.resolved {
             tracing::debug!(
                 target: "script_kit::confirm",
                 event = "resolve_and_close_already_resolved",
-                confirmed,
+                result = ?result,
                 "resolve_and_close: already resolved, ignoring"
             );
             return;
@@ -1310,12 +1410,12 @@ impl ConfirmPopupWindow {
         tracing::info!(
             target: "script_kit::confirm",
             event = "resolve_and_close",
-            confirmed,
+            result = ?result,
             "resolve_and_close: sending result and closing window"
         );
 
         self.resolved = true;
-        let _ = self.result_tx.try_send(confirmed);
+        let _ = self.result_tx.try_send(result);
 
         window.defer(cx, |window, _cx| {
             tracing::info!(
@@ -1410,18 +1510,27 @@ impl Render for ConfirmPopupWindow {
                         event = "confirm_popup_escape",
                         "User pressed Escape — cancelling"
                     );
-                    this.resolve_and_close(false, window, cx);
+                    this.resolve_and_close(ParentDialogResult::Dismiss, window, cx);
                 }
                 Some(ConfirmWindowKeyIntent::ActivateFocused) => {
-                    let confirmed = matches!(this.focused_button, FocusedButton::Confirm);
+                    let result = match this.focused_button {
+                        FocusedButton::Confirm => ParentDialogResult::Primary,
+                        FocusedButton::Secondary => ParentDialogResult::Secondary,
+                        FocusedButton::Cancel => ParentDialogResult::Dismiss,
+                    };
                     tracing::info!(
                         target: "script_kit::confirm",
                         event = "confirm_popup_enter",
-                        confirmed,
+                        result = ?result,
                         focused_button = ?this.focused_button,
                         "User pressed Enter — activating focused button"
                     );
-                    this.resolve_and_close(confirmed, window, cx);
+                    this.resolve_and_close(result, window, cx);
+                }
+                Some(ConfirmWindowKeyIntent::ActivateSecondary) => {
+                    if this.secondary_text.is_some() {
+                        this.resolve_and_close(ParentDialogResult::Secondary, window, cx);
+                    }
                 }
                 Some(ConfirmWindowKeyIntent::FocusNext) => {
                     this.shift_focus(false, cx);
@@ -1456,11 +1565,13 @@ impl Render for ConfirmPopupWindow {
 
         let current_focused = self.focused_button;
         let cancel_focused = current_focused == FocusedButton::Cancel;
+        let secondary_focused = current_focused == FocusedButton::Secondary;
         let confirm_focused = current_focused == FocusedButton::Confirm;
 
         let entity = cx.entity();
         let cancel_entity = entity.clone();
         let confirm_entity = entity.clone();
+        let secondary_entity = entity.clone();
 
         let title_row = confirm_modal_header(self.title.clone(), accent_color, title_color);
 
@@ -1468,41 +1579,57 @@ impl Render for ConfirmPopupWindow {
         // leads and the Esc action trails, matching the native footer strips
         // ("Run ↵ … Actions ⌘K", Quick Terminal's trailing Close, and the
         // in-window SDK confirm's Apply ↵ / Close Esc).
+        let mut action_buttons = vec![ModalActionRowButton {
+            id: "confirm-ok-button",
+            label: self.confirm_text.clone(),
+            key: "↵".into(),
+            slot_width_px: confirm_slot_width,
+            height_px: action_button_height,
+            selected: confirm_focused,
+            enabled: true,
+            layout: action_button_layout,
+            on_click: Box::new(move |_, window, cx| {
+                confirm_entity.update(cx, |this: &mut Self, cx| {
+                    this.resolve_and_close(ParentDialogResult::Primary, window, cx);
+                });
+            }),
+        }];
+        if let Some(label) = self.secondary_text.clone() {
+            action_buttons.push(ModalActionRowButton {
+                id: "confirm-secondary-button",
+                label,
+                key: "".into(),
+                slot_width_px: cancel_slot_width,
+                height_px: action_button_height,
+                selected: secondary_focused,
+                enabled: true,
+                layout: action_button_layout,
+                on_click: Box::new(move |_, window, cx| {
+                    secondary_entity.update(cx, |this: &mut Self, cx| {
+                        this.resolve_and_close(ParentDialogResult::Secondary, window, cx);
+                    });
+                }),
+            });
+        }
+        action_buttons.push(ModalActionRowButton {
+            id: "confirm-cancel-button",
+            label: self.cancel_text.clone(),
+            key: "Esc".into(),
+            slot_width_px: cancel_slot_width,
+            height_px: action_button_height,
+            selected: cancel_focused,
+            enabled: true,
+            layout: action_button_layout,
+            on_click: Box::new(move |_, window, cx| {
+                cancel_entity.update(cx, |this: &mut Self, cx| {
+                    this.resolve_and_close(ParentDialogResult::Dismiss, window, cx);
+                });
+            }),
+        });
         let action_row = modal_action_row(
             "confirm-modal-action-row",
             confirm_action_button_gap(),
-            vec![
-                ModalActionRowButton {
-                    id: "confirm-ok-button",
-                    label: self.confirm_text.clone(),
-                    key: "↵".into(),
-                    slot_width_px: confirm_slot_width,
-                    height_px: action_button_height,
-                    selected: confirm_focused,
-                    enabled: true,
-                    layout: action_button_layout,
-                    on_click: Box::new(move |_, window, cx| {
-                        confirm_entity.update(cx, |this: &mut Self, cx| {
-                            this.resolve_and_close(true, window, cx);
-                        });
-                    }),
-                },
-                ModalActionRowButton {
-                    id: "confirm-cancel-button",
-                    label: self.cancel_text.clone(),
-                    key: "Esc".into(),
-                    slot_width_px: cancel_slot_width,
-                    height_px: action_button_height,
-                    selected: cancel_focused,
-                    enabled: true,
-                    layout: action_button_layout,
-                    on_click: Box::new(move |_, window, cx| {
-                        cancel_entity.update(cx, |this: &mut Self, cx| {
-                            this.resolve_and_close(false, window, cx);
-                        });
-                    }),
-                },
-            ],
+            action_buttons,
             &theme,
         );
 
@@ -1573,6 +1700,10 @@ mod tests {
             shift: true,
             ..Default::default()
         };
+        let command_mods = gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        };
 
         assert_eq!(
             confirm_window_key_intent("escape", &no_mods),
@@ -1581,6 +1712,10 @@ mod tests {
         assert_eq!(
             confirm_window_key_intent("Enter", &no_mods),
             Some(ConfirmWindowKeyIntent::ActivateFocused)
+        );
+        assert_eq!(
+            confirm_window_key_intent("i", &command_mods),
+            Some(ConfirmWindowKeyIntent::ActivateSecondary)
         );
         assert_eq!(
             confirm_window_key_intent("tab", &no_mods),
@@ -1628,12 +1763,14 @@ mod tests {
         let no_body = confirm_window_height_from_body_lines(false, 0);
         let one_line = confirm_window_height_from_body_lines(true, 1);
         let three_lines = confirm_window_height_from_body_lines(true, 3);
+        let max_lines = confirm_window_height_from_body_lines(true, CONFIRM_BODY_MAX_LINES);
         let many_lines = confirm_window_height_from_body_lines(true, 40);
 
         assert!(one_line >= no_body);
         assert!(three_lines > one_line);
+        assert!(max_lines >= three_lines);
         assert_eq!(
-            many_lines, three_lines,
+            many_lines, max_lines,
             "body lines must clamp at CONFIRM_BODY_MAX_LINES"
         );
         assert!(many_lines <= CONFIRM_MAX_HEIGHT);
@@ -1710,15 +1847,37 @@ mod tests {
 
     #[test]
     fn confirm_focus_global_state_tracks_native_popup_focus_changes() {
+        if let Ok(mut state) = CONFIRM_HAS_SECONDARY
+            .get_or_init(|| Mutex::new(false))
+            .lock()
+        {
+            *state = false;
+        }
         let _ = CONFIRM_FOCUSED_BUTTON.get_or_init(|| Mutex::new(FocusedButton::Confirm));
         set_confirm_focused_button(FocusedButton::Confirm);
         assert_eq!(get_confirm_focused_button(), FocusedButton::Confirm);
 
-        toggle_confirm_focused_button();
+        cycle_confirm_focused_button(false);
         assert_eq!(get_confirm_focused_button(), FocusedButton::Cancel);
 
         set_confirm_focused_button(FocusedButton::Confirm);
         assert_eq!(get_confirm_focused_button(), FocusedButton::Confirm);
+    }
+
+    #[test]
+    fn action_dialog_focus_cycles_through_optional_secondary_action() {
+        assert_eq!(
+            next_confirm_focused_button(FocusedButton::Confirm, false, true),
+            FocusedButton::Secondary
+        );
+        assert_eq!(
+            next_confirm_focused_button(FocusedButton::Secondary, false, true),
+            FocusedButton::Cancel
+        );
+        assert_eq!(
+            next_confirm_focused_button(FocusedButton::Cancel, true, true),
+            FocusedButton::Secondary
+        );
     }
 
     #[test]

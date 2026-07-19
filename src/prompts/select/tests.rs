@@ -193,6 +193,13 @@ fn test_select_prompt_submit_uses_explicit_selection_in_multiple_mode() {
 }
 
 #[test]
+fn test_select_prompt_zero_selection_is_blocked_only_in_multiple_mode() {
+    assert!(!select_submission_is_allowed(true, 0));
+    assert!(select_submission_is_allowed(true, 1));
+    assert!(select_submission_is_allowed(false, 0));
+}
+
+#[test]
 fn test_select_prompt_cmd_a_toggles_only_when_all_filtered_items_are_selected() {
     let mut selected_indices = std::collections::HashSet::from([1, 7]);
     let filtered_indices = vec![1, 2, 3];

@@ -8,7 +8,7 @@
 //!
 
 #[path = "text_input/core.rs"]
-mod core;
+pub(crate) mod core;
 #[path = "text_input/render.rs"]
 mod render;
 #[cfg(test)]
@@ -16,9 +16,12 @@ mod render;
 mod tests;
 
 pub use core::{TextInputState, TextSelection};
+// OF-17 boundary: callers in app_impl reach the sanitizer through this module
+// path; removing this re-export breaks the bin target (E0364 lineage).
+pub(crate) use core::normalize_single_line_text;
 #[allow(unused_imports)]
 pub(crate) use render::{
-    pulse_cursor_bar, render_compact_search_text, render_text_input_cursor_selection,
-    CompactSearchTextConfig, TextHighlightRange, TextInlinePillRange, TextInputRenderConfig,
-    TextInputRenderIndicator,
+    placeholder_cursor_anchor, pulse_cursor_bar, render_compact_search_text,
+    render_text_input_cursor_selection, CompactSearchTextConfig, TextHighlightRange,
+    TextInlinePillRange, TextInputRenderConfig, TextInputRenderIndicator,
 };

@@ -13,6 +13,14 @@ pub struct TextSelection {
 
 const TEXT_INPUT_UNDO_STACK_LIMIT: usize = 100;
 
+/// Normalize arbitrary text before it reaches a GPUI single-line layout.
+pub(crate) fn normalize_single_line_text(text: impl Into<String>) -> String {
+    text.into()
+        .chars()
+        .filter(|character| !matches!(character, '\n' | '\r'))
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 struct TextSnapshot {
     text: String,
@@ -88,7 +96,7 @@ impl TextInputState {
 
     #[allow(dead_code)]
     pub fn with_text(text: impl Into<String>) -> Self {
-        let text = text.into();
+        let text = normalize_single_line_text(text);
         let len = text.chars().count();
         Self {
             text,
@@ -159,7 +167,7 @@ impl TextInputState {
     // === Setters ===
 
     pub fn set_text(&mut self, text: impl Into<String>) {
-        let new_text = text.into();
+        let new_text = normalize_single_line_text(text);
         let len = new_text.chars().count();
         let new_selection = TextSelection::caret(len.min(self.selection.cursor));
         if self.text == new_text && self.selection == new_selection {
@@ -211,6 +219,9 @@ impl TextInputState {
 
     /// Insert a character at cursor, replacing selection if any
     pub fn insert_char(&mut self, ch: char) {
+        if matches!(ch, '\n' | '\r') {
+            return;
+        }
         self.record_edit_snapshot();
         self.delete_selection();
         let byte_pos = self.char_to_byte(self.selection.cursor);
@@ -220,14 +231,15 @@ impl TextInputState {
 
     /// Insert a string at cursor, replacing selection if any
     pub fn insert_str(&mut self, s: &str) {
-        if s.is_empty() && self.selection.is_empty() {
+        let single_line = normalize_single_line_text(s);
+        if single_line.is_empty() && self.selection.is_empty() {
             return;
         }
         self.record_edit_snapshot();
         self.delete_selection();
         let byte_pos = self.char_to_byte(self.selection.cursor);
-        self.text.insert_str(byte_pos, s);
-        let inserted_chars = s.chars().count();
+        self.text.insert_str(byte_pos, &single_line);
+        let inserted_chars = single_line.chars().count();
         self.selection = TextSelection::caret(self.selection.cursor + inserted_chars);
     }
 
@@ -443,10 +455,7 @@ impl TextInputState {
     pub fn paste<T: Render>(&mut self, cx: &mut Context<T>) {
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
-                // Filter to single line (no newlines)
-                let single_line: String =
-                    text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-                self.insert_str(&single_line);
+                self.insert_str(&text);
             }
         }
     }

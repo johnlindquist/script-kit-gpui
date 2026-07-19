@@ -223,6 +223,10 @@ pub(super) fn resolve_submission_indices(
     Vec::new()
 }
 
+pub(crate) fn select_submission_is_allowed(is_multiple: bool, selected_count: usize) -> bool {
+    !is_multiple || selected_count > 0
+}
+
 pub(super) fn resolve_search_box_bg_hex(
     theme: &theme::Theme,
     design_variant: DesignVariant,

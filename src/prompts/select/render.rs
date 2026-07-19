@@ -159,6 +159,7 @@ fn render_select_search_header(
     placeholder: &str,
     multiple: bool,
     selected_count: usize,
+    submission_hint: Option<&str>,
     chrome: &AppChromeColors,
 ) -> impl IntoElement {
     let input_display = if filter_text.is_empty() {
@@ -189,7 +190,10 @@ fn render_select_search_header(
                 div()
                     .text_xs()
                     .text_color(rgba(chrome.text_hint_rgba))
-                    .child(format!("{} selected", selected_count)),
+                    .child(
+                        submission_hint
+                            .map_or_else(|| format!("{} selected", selected_count), str::to_string),
+                    ),
             )
         })
 }
@@ -219,6 +223,7 @@ impl Render for SelectPrompt {
             &placeholder,
             self.multiple,
             self.selected.len(),
+            self.submission_hint.as_deref(),
             &chrome,
         );
 
@@ -284,14 +289,13 @@ impl Render for SelectPrompt {
                                                 icon_kind_from_choice(choice),
                                             ))
                                         };
-                                        let subtitle = if is_focused {
-                                            indexed_choice
-                                                .metadata
-                                                .subtitle_text()
-                                                .map(TextContent::plain)
-                                        } else {
-                                            None
-                                        };
+                                        // Keep row anatomy stable as focus moves; the main-menu
+                                        // row language does not add/remove its metadata line on
+                                        // selection changes.
+                                        let subtitle = indexed_choice
+                                            .metadata
+                                            .subtitle_text()
+                                            .map(TextContent::plain);
                                         let title = highlighted_choice_title(
                                             &choice.name,
                                             &this.filter_text,
@@ -350,7 +354,7 @@ impl Render for SelectPrompt {
                                                         if this.multiple {
                                                             this.toggle_selection(cx);
                                                         } else {
-                                                            this.submit();
+                                                            this.submit(cx);
                                                         }
                                                     },
                                                 ),
@@ -435,7 +439,9 @@ impl Render for SelectPrompt {
                     ) {
                         SelectKeyIntent::MoveUp => this.move_up(cx),
                         SelectKeyIntent::MoveDown => this.move_down(cx),
-                        SelectKeyIntent::Submit => this.submit(),
+                        SelectKeyIntent::Submit => {
+                            this.submit(cx);
+                        }
                         SelectKeyIntent::Backspace => this.handle_backspace(cx),
                         SelectKeyIntent::Append(ch) => this.handle_char(ch, cx),
                         SelectKeyIntent::ToggleFocusedSelection => this.toggle_selection(cx),
@@ -679,7 +685,7 @@ mod tests {
         );
         assert!(
             render_code.contains("this.toggle_selection(cx)")
-                && render_code.contains("this.submit()"),
+                && render_code.contains("this.submit(cx)"),
             "select row mouse activation should toggle multi-select rows and submit single-select rows"
         );
     }

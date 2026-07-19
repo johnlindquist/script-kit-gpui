@@ -108,8 +108,7 @@ impl ScriptListApp {
                 selected_index,
                 &self.dictation_history_scroll_handle,
                 filtered_len,
-            )
-        {
+            ) {
             tracing::info!(
                 target: "script_kit::scroll",
                 event = "builtin_selection_resynced_from_scrollbar",
@@ -290,19 +289,19 @@ impl ScriptListApp {
             crate::components::scrollbar::render_tracked_scroll_column(
                 "dictation-history-list",
                 &self.dictation_history_scroll_handle,
-                    filtered_entries
-                        .iter()
-                        .enumerate()
-                        .map(|(display_ix, entry)| {
-                            let item = ListItem::new(entry.preview.clone(), list_colors)
-                                .description_opt(Some(Self::dictation_history_meta(entry)))
-                                .selected(display_ix == selected)
-                                .with_accent_bar(true);
+                filtered_entries
+                    .iter()
+                    .enumerate()
+                    .map(|(display_ix, entry)| {
+                        let item = ListItem::new(entry.preview.clone(), list_colors)
+                            .description_opt(Some(Self::dictation_history_meta(entry)))
+                            .selected(display_ix == selected)
+                            .with_accent_bar(true);
 
-                            div()
-                                .id(gpui::ElementId::Integer(display_ix as u64))
-                                .child(item)
-                        }),
+                        div()
+                            .id(gpui::ElementId::Integer(display_ix as u64))
+                            .child(item)
+                    }),
             )
         };
 
@@ -415,7 +414,7 @@ impl ScriptListApp {
                 // menu's "Results" header, 4d76327b8): the label may swap but
                 // the row never appears or disappears, so filtering can't
                 // shift the rows below it.
-                crate::list_item::render_section_header(
+                crate::components::builtin_leading_separator::render_builtin_leading_separator(
                     if filter.trim().is_empty() {
                         "Transcripts"
                     } else {
@@ -423,7 +422,6 @@ impl ScriptListApp {
                     },
                     None,
                     list_colors,
-                    true,
                 ),
             )
             .child(div().relative().flex_1().min_h(px(0.)).child(list_element));
@@ -456,10 +454,8 @@ impl ScriptListApp {
             all_entries.len(),
             if all_entries.len() == 1 { "" } else { "s" }
         );
-        let main = self.render_builtin_split_main_content(
-            list_pane.into_any_element(),
-            preview_panel,
-        );
+        let main =
+            self.render_builtin_split_main_content(list_pane.into_any_element(), preview_panel);
 
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
             crate::components::main_view_chrome::render_main_view_shell()
@@ -471,9 +467,10 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(count_label),
-                ], cx),
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(count_label)],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,

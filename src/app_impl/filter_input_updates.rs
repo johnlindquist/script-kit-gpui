@@ -324,11 +324,7 @@ impl ScriptListApp {
         // The filter input is single-line; GPUI's text shaper panics on
         // newlines (`vendor/gpui/src/text_system.rs:414`). Sanitize early so
         // pasted multi-line content cannot crash the app.
-        let text = if text.chars().any(|c| matches!(c, '\n' | '\r')) {
-            text.replace("\r\n", " ").replace(['\n', '\r'], " ")
-        } else {
-            text
-        };
+        let text = crate::components::text_input::normalize_single_line_text(text);
 
         // Token-atomic delete parity with the Agent Chat composer: a single
         // backspace inside an alias-registered `@file:` token (any keyboard
