@@ -57,6 +57,7 @@ impl ScriptListApp {
         let search_text =
             crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, query).to_string();
         let trimmed = search_text.trim();
+        let search_needle = super::filtering_cache::root_passive_search_needle(trimmed);
         let advanced_query_owned = self.menu_syntax_mode.advanced_query_for(query).cloned();
         let source_filters = advanced_query_owned
             .as_ref()
@@ -75,7 +76,7 @@ impl ScriptListApp {
         let explicit_brain =
             source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Brain);
         let brain_plan = crate::brain::root_brain_query_plan(
-            trimmed,
+            search_needle,
             explicit_brain,
             advanced_predicate_active,
             source_filters.allows(crate::menu_syntax::RootUnifiedSourceFilter::Brain),
@@ -88,8 +89,9 @@ impl ScriptListApp {
                 .menu_syntax_mode
                 .capture_composer_owns_input_for(trimmed)
             && !self.menu_syntax_mode.command_owns_input_for(trimmed);
-        let eligible =
-            can_collect && brain_options.max_results > 0 && matches!(&brain_plan, crate::brain::RootBrainQueryPlan::Search(_));
+        let eligible = can_collect
+            && brain_options.max_results > 0
+            && matches!(&brain_plan, crate::brain::RootBrainQueryPlan::Search(_));
 
         if !eligible {
             tracing::debug!(

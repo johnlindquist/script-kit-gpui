@@ -2,6 +2,14 @@ use super::*;
 
 const INLINE_CALCULATOR_SECTION_LABEL: &str = "Calculator";
 const INLINE_CALCULATOR_RESULT_INDEX: usize = usize::MAX;
+const ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS: usize = 256;
+
+pub(super) fn root_passive_search_needle(query: &str) -> &str {
+    query
+        .char_indices()
+        .nth(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS)
+        .map_or(query, |(byte_index, _)| &query[..byte_index])
+}
 
 fn timed_root_passive_source<T>(
     source: &'static str,
@@ -550,6 +558,8 @@ impl ScriptListApp {
             return frame;
         }
 
+        let search_needle = root_passive_search_needle(search_text);
+
         let explicit_brain =
             source_filters.includes(crate::menu_syntax::RootUnifiedSourceFilter::Brain);
         let explicit_notes =
@@ -590,7 +600,7 @@ impl ScriptListApp {
         // can never drift. `RecentsOnly` covers the armed bare `brain:` case
         // (audit F6): show the most recent memories instead of a blank panel.
         let brain_plan = crate::brain::root_brain_query_plan(
-            search_text,
+            search_needle,
             explicit_brain,
             advanced_query_active,
             allow_brain,
@@ -610,122 +620,135 @@ impl ScriptListApp {
             _ => None,
         };
         let brain_hits =
-            timed_root_passive_source("brain", search_text, explicit_brain, || match &brain_plan {
-                crate::brain::RootBrainQueryPlan::Skip => Vec::new(),
-                crate::brain::RootBrainQueryPlan::RecentsOnly => {
-                    crate::brain::recent_root_brain_hits(brain_options.max_results)
-                }
-                crate::brain::RootBrainQueryPlan::Search(brain_query) => brain_semantic_hits
-                    .unwrap_or_else(|| {
-                        crate::brain::search_root_brain_direct(brain_query, &brain_options)
-                    }),
-            });
+            timed_root_passive_source(
+                "brain",
+                search_needle,
+                explicit_brain,
+                || match &brain_plan {
+                    crate::brain::RootBrainQueryPlan::Skip => Vec::new(),
+                    crate::brain::RootBrainQueryPlan::RecentsOnly => {
+                        crate::brain::recent_root_brain_hits(brain_options.max_results)
+                    }
+                    crate::brain::RootBrainQueryPlan::Search(brain_query) => brain_semantic_hits
+                        .unwrap_or_else(|| {
+                            crate::brain::search_root_brain_direct(brain_query, &brain_options)
+                        }),
+                },
+            );
 
-        let note_hits = timed_root_passive_source("notes", search_text, explicit_notes, || {
+        let note_hits = timed_root_passive_source("notes", search_needle, explicit_notes, || {
             if !advanced_query_active
                 && allow_notes
-                && crate::notes::root_notes_query_is_eligible(search_text, notes_options)
+                && crate::notes::root_notes_query_is_eligible(search_needle, notes_options)
             {
                 if explicit_notes {
-                    crate::notes::search_root_notes_meta_direct(search_text, notes_options)
+                    crate::notes::search_root_notes_meta_direct(search_needle, notes_options)
                 } else {
-                    crate::notes::search_root_notes_meta_cached(search_text, notes_options)
+                    crate::notes::search_root_notes_meta_cached(search_needle, notes_options)
                 }
             } else {
                 Vec::new()
             }
         });
 
-        let todo_hits = timed_root_passive_source("todo", search_text, explicit_todos, || {
+        let todo_hits = timed_root_passive_source("todo", search_needle, explicit_todos, || {
             if (!advanced_query_active || explicit_todos)
                 && allow_todos
-                && crate::menu_syntax::root_todo_query_is_eligible(search_text, todo_options)
+                && crate::menu_syntax::root_todo_query_is_eligible(search_needle, todo_options)
             {
                 if explicit_todos {
-                    crate::menu_syntax::search_root_todos_direct(search_text, todo_options)
+                    crate::menu_syntax::search_root_todos_direct(search_needle, todo_options)
                 } else {
                     // Implicit typing path: nonblocking snapshot filter. The
                     // day-page file scan happens on a detached refresh
                     // thread (self-guarded, at most once per TTL), never on
                     // the keystroke path.
                     crate::menu_syntax::ensure_root_todos_snapshot_refresh();
-                    crate::menu_syntax::search_root_todos_cached(search_text, todo_options)
+                    crate::menu_syntax::search_root_todos_cached(search_needle, todo_options)
                 }
             } else {
                 Vec::new()
             }
         });
 
-        let clipboard_history_hits =
-            timed_root_passive_source("clipboard_history", search_text, explicit_clipboard, || {
+        let clipboard_history_hits = timed_root_passive_source(
+            "clipboard_history",
+            search_needle,
+            explicit_clipboard,
+            || {
                 if !advanced_query_active
                     && allow_clipboard
                     && crate::clipboard_history::root_clipboard_history_query_is_eligible(
-                        search_text,
+                        search_needle,
                         clipboard_history_options,
                     )
                 {
                     if explicit_clipboard {
                         crate::clipboard_history::search_root_clipboard_history_meta_direct(
-                            search_text,
+                            search_needle,
                             clipboard_history_options,
                         )
                     } else {
                         crate::clipboard_history::search_root_clipboard_history_meta_cached(
-                            search_text,
+                            search_needle,
                             clipboard_history_options,
                         )
                     }
                 } else {
                     Vec::new()
                 }
-            });
+            },
+        );
 
-        let dictation_history_hits =
-            timed_root_passive_source("dictation_history", search_text, explicit_dictation, || {
+        let dictation_history_hits = timed_root_passive_source(
+            "dictation_history",
+            search_needle,
+            explicit_dictation,
+            || {
                 if !advanced_query_active
                     && allow_dictation
                     && crate::dictation::root_dictation_history_query_is_eligible(
-                        search_text,
+                        search_needle,
                         dictation_history_options,
                     )
                 {
                     if explicit_dictation {
                         crate::dictation::search_root_dictation_history_direct(
-                            search_text,
+                            search_needle,
                             dictation_history_options,
                         )
                     } else {
                         crate::dictation::search_root_dictation_history_cached(
-                            search_text,
+                            search_needle,
                             dictation_history_options,
                         )
                     }
                 } else {
                     Vec::new()
                 }
-            });
+            },
+        );
 
         let agent_chat_history_hits = timed_root_passive_source(
             "agent_chat_history",
-            search_text,
+            search_needle,
             explicit_conversations,
             || {
                 if !advanced_query_active
                     && allow_conversations
                     && crate::ai::agent_chat::ui::history::root_agent_chat_history_query_is_eligible(
-                        search_text,
+                        search_needle,
                         agent_chat_history_options,
                     )
                 {
                     if explicit_conversations {
                         crate::ai::agent_chat::ui::history::search_history_direct(
-                            search_text,
+                            search_needle,
                             agent_chat_history_options.max_results,
                         )
                     } else {
                         crate::ai::agent_chat::ui::history::search_history_cached(
-                            search_text,
+                            search_needle,
                             agent_chat_history_options.max_results,
                         )
                     }
@@ -736,38 +759,38 @@ impl ScriptListApp {
         );
 
         let ai_vault_hits =
-            timed_root_passive_source("ai_vault", search_text, explicit_ai_vault, || {
+            timed_root_passive_source("ai_vault", search_needle, explicit_ai_vault, || {
                 if explicit_ai_vault
                     && !advanced_query_active
                     && allow_ai_vault
                     && crate::ai_vault::root_ai_vault_query_is_eligible(
-                        search_text,
+                        search_needle,
                         &ai_vault_options,
                     )
                 {
-                    crate::ai_vault::search_root_ai_vault_direct(search_text, ai_vault_options)
+                    crate::ai_vault::search_root_ai_vault_direct(search_needle, ai_vault_options)
                 } else {
                     Vec::new()
                 }
             });
 
         let browser_tab_hits =
-            timed_root_passive_source("browser_tabs", search_text, explicit_browser_tabs, || {
+            timed_root_passive_source("browser_tabs", search_needle, explicit_browser_tabs, || {
                 if !advanced_query_active
                     && allow_browser_tabs
                     && crate::browser_tabs::root_browser_tabs_query_is_eligible(
-                        search_text,
+                        search_needle,
                         browser_tabs_options.clone(),
                     )
                 {
                     if explicit_browser_tabs {
                         crate::browser_tabs::search_root_browser_tabs_meta_direct(
-                            search_text,
+                            search_needle,
                             browser_tabs_options.clone(),
                         )
                     } else {
                         crate::browser_tabs::search_root_browser_tabs_meta_cached(
-                            search_text,
+                            search_needle,
                             browser_tabs_options.clone(),
                         )
                     }
@@ -778,19 +801,19 @@ impl ScriptListApp {
 
         let browser_history_hits = timed_root_passive_source(
             "browser_history",
-            search_text,
+            search_needle,
             explicit_browser_history,
             || {
                 if !advanced_query_active
                     && allow_browser_history
                     && crate::browser_history::root_browser_history_query_is_eligible(
-                        search_text,
+                        search_needle,
                         browser_history_options.clone(),
                     )
                 {
                     if explicit_browser_history {
                         crate::browser_history::search_root_browser_history_meta_direct(
-                            search_text,
+                            search_needle,
                             browser_history_options.clone(),
                         )
                     } else {
@@ -800,7 +823,7 @@ impl ScriptListApp {
                         // refresh thread, preserving the 13a417737 latency
                         // fix while letting history participate passively.
                         crate::browser_history::search_root_browser_history_meta_cached(
-                            search_text,
+                            search_needle,
                             browser_history_options.clone(),
                         )
                     }
@@ -2871,6 +2894,56 @@ impl ScriptListApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_passive_search_needle_preserves_under_boundary_query() {
+        let query = "a".repeat(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS - 1);
+
+        assert_eq!(root_passive_search_needle(&query), query);
+    }
+
+    #[test]
+    fn root_passive_search_needle_preserves_exact_boundary_query() {
+        let query = "a".repeat(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS);
+
+        assert_eq!(root_passive_search_needle(&query), query);
+    }
+
+    #[test]
+    fn root_passive_search_needle_clamps_over_boundary_ascii_query() {
+        let query = "a".repeat(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS + 1);
+        let needle = root_passive_search_needle(&query);
+
+        assert_eq!(needle, "a".repeat(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS));
+        assert_eq!(needle.chars().count(), ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS);
+    }
+
+    #[test]
+    fn root_passive_search_needle_clamps_at_multibyte_scalar_boundary() {
+        let query = format!(
+            "{}🦀trailing",
+            "a".repeat(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS - 1)
+        );
+        let needle = root_passive_search_needle(&query);
+
+        assert!(needle.ends_with('🦀'));
+        assert_eq!(needle.chars().count(), ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS);
+        assert_eq!(needle, &query[..needle.len()]);
+    }
+
+    #[test]
+    fn root_passive_search_needle_leaves_original_full_string_unchanged() {
+        let query = format!(
+            "{}full-tail",
+            "界".repeat(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS)
+        );
+        let original = query.clone();
+        let needle = root_passive_search_needle(&query).to_string();
+
+        assert_eq!(query, original);
+        assert_eq!(needle, "界".repeat(ROOT_PASSIVE_SEARCH_NEEDLE_MAX_CHARS));
+        assert!(query.ends_with("full-tail"));
+    }
 
     fn calculator_result() -> crate::calculator::CalculatorInlineResult {
         crate::calculator::CalculatorInlineResult {
