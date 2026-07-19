@@ -555,6 +555,25 @@ impl DayPageDocumentSession {
             return Ok(None);
         }
 
+        // The bound file vanished (deleted or renamed away externally) while
+        // the buffer is clean: the editor now holds the only copy. Same
+        // divergence philosophy as `save_content` — the editor buffer wins —
+        // so re-dirty the session and let the next autosave recreate the file.
+        // Without this, the session silently tracks a missing path and the
+        // next re-bind discards the buffer by creating an empty day file.
+        if mtime.is_none() && !path.exists() {
+            if self.disk_content.trim().is_empty() {
+                return Ok(None);
+            }
+            self.dirty = true;
+            tracing::warn!(
+                target: "script_kit::brain",
+                path = %path.display(),
+                "bound day page file vanished while clean; keeping the editor buffer and re-dirtying so autosave recreates it"
+            );
+            return Ok(None);
+        }
+
         let content = fs::read_to_string(&path)
             .with_context(|| format!("re-reading day page {}", path.display()))?;
         self.disk_content = content.clone();
@@ -1007,6 +1026,39 @@ mod tests {
             .expect("refresh")
             .expect("should refresh");
         assert!(refreshed.contains("buy milk"));
+    }
+
+    /// Chaos-09 lock: deleting/renaming the bound day file while the buffer is
+    /// clean must NOT leave the session silently tracking a missing path — the
+    /// editor buffer is the only copy, so the poll re-dirties the session and
+    /// the next save recreates the file. Red before the fix: the poll errored
+    /// silently forever and a later re-bind clobbered the buffer with a fresh
+    /// empty day file (observed via notes-editor-hostile-chaos-probe.ts).
+    #[test]
+    fn vanished_bound_file_while_clean_re_dirties_for_resurrection() {
+        let (_dir, mut session) = test_session();
+        let now = utc("2026-07-18T10:00:00Z");
+        session.bind_today(now).expect("bind");
+        session.apply_editor_content("precious buffer line");
+        session.save(now).expect("save");
+        assert!(!session.is_dirty());
+
+        let path = session.path().expect("bound path").clone();
+        fs::remove_file(&path).expect("vanish the bound file");
+
+        let refreshed = session
+            .maybe_refresh_from_disk()
+            .expect("poll must not error on a vanished file");
+        assert!(refreshed.is_none());
+        assert!(
+            session.is_dirty(),
+            "vanished bound file must re-dirty the clean buffer"
+        );
+
+        session.save(now).expect("resave recreates the file");
+        let disk = fs::read_to_string(&path).expect("recreated file");
+        assert!(disk.contains("precious buffer line"));
+        assert!(!session.is_dirty());
     }
 
     #[test]
