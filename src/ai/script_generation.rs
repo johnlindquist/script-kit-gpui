@@ -2461,4 +2461,101 @@ await div("hello");
 "#;
         assert!(extract_current_app_recipe_from_script(script).is_none());
     }
+
+    #[test]
+    fn chaos_nn29_hostile_generated_artifact_stays_in_scratch_and_is_never_executed() {
+        let temp = tempdir().expect("create NN29 scratch workspace");
+        let kit_path = temp.path().join(".scriptkit");
+        std::fs::create_dir_all(&kit_path).expect("create scratch SK_PATH");
+        let original_sk_path = std::env::var_os("SK_PATH");
+        // SAFETY: this focused test runs alone in the NN29 probe invocation and
+        // restores the process environment before returning.
+        unsafe { std::env::set_var("SK_PATH", &kit_path) };
+
+        let execution_canary = temp.path().join("generated-script-executed");
+        let canary_literal = serde_json::to_string(&execution_canary.display().to_string())
+            .expect("encode canary path as a TypeScript string");
+        let raw_response = format!(
+            r#"```typescript
+export const metadata = {{
+  name: "../../../../tmp/NN29 👩🏽‍💻 مرحبا",
+  description: "Hostile path and Unicode must remain inert",
+}};
+
+await Bun.write({canary_literal}, "NN29_EXECUTED");
+await div("NN29_INERT_CANARY Z̴̙̓͗a̷̻͒l̵͎͋g̶̯͗o̴̰̕");
+```"#
+        );
+
+        let script_path = save_generated_script_from_response(
+            "Create an inert NN29 script with hostile metadata",
+            &raw_response,
+        )
+        .expect("save generated script through the real contract pipeline");
+        let scripts_dir = kit_path.join("plugins/main/scripts");
+        let canonical_script = script_path
+            .canonicalize()
+            .expect("canonicalize generated script");
+        let canonical_scripts_dir = scripts_dir
+            .canonicalize()
+            .expect("canonicalize scratch scripts directory");
+        assert!(
+            canonical_script.starts_with(&canonical_scripts_dir),
+            "generated path escaped scratch scripts dir: {}",
+            canonical_script.display()
+        );
+        assert_eq!(
+            script_path.extension().and_then(|value| value.to_str()),
+            Some("ts")
+        );
+        assert!(!script_path.to_string_lossy().contains(".."));
+
+        let source = std::fs::read_to_string(&script_path).expect("read generated artifact");
+        assert!(source.contains("NN29_INERT_CANARY"));
+        assert!(source.contains("Hostile path and Unicode must remain inert"));
+        assert!(
+            !execution_canary.exists(),
+            "generated script ran during save"
+        );
+
+        let receipt_path = generated_script_receipt_path(&script_path);
+        let mut final_verification = None;
+        for _ in 0..200 {
+            if let Ok(body) = std::fs::read_to_string(&receipt_path) {
+                if let Ok(receipt) = serde_json::from_str::<GeneratedScriptReceipt>(&body) {
+                    if receipt.verification.status != GeneratedScriptVerificationStatus::Skipped {
+                        final_verification = Some(receipt.verification.status);
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            final_verification.is_some(),
+            "bounded Bun-build verification never finalized"
+        );
+        assert!(
+            !execution_canary.exists(),
+            "generated script executed instead of being build-verified only"
+        );
+
+        match original_sk_path {
+            Some(value) => unsafe { std::env::set_var("SK_PATH", value) },
+            None => unsafe { std::env::remove_var("SK_PATH") },
+        }
+    }
+
+    #[test]
+    fn chaos_nn29_unavailable_generation_fails_before_artifact_work_with_context() {
+        let registry = ProviderRegistry::new();
+        let error = match select_generation_model(&registry) {
+            Ok(_) => panic!("an empty provider registry must reject generation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "No AI models available in provider registry"
+        );
+    }
 }
