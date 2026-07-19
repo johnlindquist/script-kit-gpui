@@ -1369,12 +1369,19 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
             move |request_frame_options| {
-                let thermal_state = handle
-                    .update(&mut cx, |_, _, cx| cx.thermal_state())
-                    .log_err();
+                // Script Kit vendor patch (chaos OF-4/OF-6): frame callbacks can fire
+                // while the window is mid-close or the AppCell is borrowed by the
+                // programmatic hide/show path that requested them. Unlike on_resize's
+                // bounds_changed (which must retry or the geometry is lost), a skipped
+                // frame is re-requested at the next vsync — so bail out quietly instead
+                // of ERROR-logging a routine lifecycle race. handle.update() only errors
+                // on those access failures; draw errors are not Results and still surface.
+                let Ok(thermal_state) = handle.update(&mut cx, |_, _, cx| cx.thermal_state())
+                else {
+                    return;
+                };
 
-                if thermal_state == Some(ThermalState::Serious)
-                    || thermal_state == Some(ThermalState::Critical)
+                if thermal_state == ThermalState::Serious || thermal_state == ThermalState::Critical
                 {
                     let now = Instant::now();
                     let last_frame_time = last_frame_time.replace(Some(now));
@@ -1388,13 +1395,14 @@ impl Window {
 
                 let next_frame_callbacks = next_frame_callbacks.take();
                 if !next_frame_callbacks.is_empty() {
+                    // See lifecycle-race note above: access failure here is transient.
                     handle
                         .update(&mut cx, |_, window, cx| {
                             for callback in next_frame_callbacks {
                                 callback(window, cx);
                             }
                         })
-                        .log_err();
+                        .ok();
                 }
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
@@ -1412,19 +1420,17 @@ impl Window {
                                 window.present();
                                 arena_clear_needed.clear();
                             })
-                            .log_err();
+                            .ok();
                     })
                 } else if needs_present {
-                    handle
-                        .update(&mut cx, |_, window, _| window.present())
-                        .log_err();
+                    handle.update(&mut cx, |_, window, _| window.present()).ok();
                 }
 
                 handle
                     .update(&mut cx, |_, window, _| {
                         window.complete_frame();
                     })
-                    .log_err();
+                    .ok();
             }
         }));
         platform_window.on_resize(Box::new({
