@@ -17,7 +17,9 @@ mod tests;
 
 pub use core::{TextInputState, TextSelection};
 // OF-17 boundary: callers in app_impl reach the sanitizer through this module
-// path; removing this re-export breaks the bin target (E0364 lineage).
+// path; removing this re-export breaks the bin target (E0364 lineage). The
+// allow attribute keeps unused-import autofixers from deleting it again.
+#[allow(unused_imports)]
 pub(crate) use core::normalize_single_line_text;
 #[allow(unused_imports)]
 pub(crate) use render::{

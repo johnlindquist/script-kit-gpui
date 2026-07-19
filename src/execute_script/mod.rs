@@ -2219,147 +2219,24 @@ impl ScriptListApp {
                                         continue;
                                     }
 
+                                    let msg = match convert_protocol_prompt_message(
+                                        msg,
+                                        PromptConversionSource::InteractiveSession,
+                                    ) {
+                                        Ok(prompt_message) => {
+                                            if tx.send_blocking(prompt_message).is_err() {
+                                                tracing::info!(
+                                                    category = "EXEC",
+                                                    "Prompt channel closed, reader exiting"
+                                                );
+                                                break;
+                                            }
+                                            continue;
+                                        }
+                                        Err(msg) => msg,
+                                    };
+
                                     let prompt_msg = match msg {
-                                        Message::Arg {
-                                            id,
-                                            placeholder,
-                                            choices,
-                                            actions,
-                                        } => Some(PromptMessage::ShowArg {
-                                            id,
-                                            placeholder,
-                                            choices,
-                                            actions,
-                                        }),
-                                        Message::Div {
-                                            id,
-                                            html,
-                                            container_classes,
-                                            actions,
-                                            placeholder,
-                                            hint,
-                                            footer,
-                                            container_bg,
-                                            container_padding,
-                                            opacity,
-                                        } => Some(PromptMessage::ShowDiv {
-                                            id,
-                                            html,
-                                            container_classes,
-                                            actions,
-                                            placeholder,
-                                            hint,
-                                            footer,
-                                            container_bg,
-                                            container_padding,
-                                            opacity,
-                                        }),
-                                        Message::Form { id, html, actions } => {
-                                            Some(PromptMessage::ShowForm { id, html, actions })
-                                        }
-                                        Message::Fields { id, fields, .. } => {
-                                            Some(PromptMessage::FieldsComingSoon {
-                                                id,
-                                                field_count: fields.len(),
-                                            })
-                                        }
-                                        Message::Term {
-                                            id,
-                                            command,
-                                            actions,
-                                        } => Some(PromptMessage::ShowTerm {
-                                            id,
-                                            command,
-                                            actions,
-                                        }),
-                                        Message::Editor {
-                                            id,
-                                            content,
-                                            language,
-                                            template,
-                                            actions,
-                                            ..
-                                        } => Some(PromptMessage::ShowEditor {
-                                            id,
-                                            content,
-                                            language,
-                                            template,
-                                            actions,
-                                        }),
-                                        // New prompt types (scaffolding)
-                                        Message::Path {
-                                            id,
-                                            start_path,
-                                            hint,
-                                        } => Some(PromptMessage::ShowPath {
-                                            id,
-                                            start_path,
-                                            hint,
-                                        }),
-                                        Message::Env {
-                                            id,
-                                            key,
-                                            prompt,
-                                            title,
-                                            secret,
-                                        } => Some(PromptMessage::ShowEnv {
-                                            id,
-                                            key,
-                                            prompt,
-                                            title,
-                                            secret: secret.unwrap_or(false),
-                                        }),
-                                        Message::Drop { id } => Some(PromptMessage::ShowDrop {
-                                            id,
-                                            placeholder: None,
-                                            hint: None,
-                                        }),
-                                        Message::Hotkey { id, placeholder } => {
-                                            Some(PromptMessage::ShowHotkey { id, placeholder })
-                                        }
-                                        Message::Template { id, template } => {
-                                            Some(PromptMessage::ShowTemplate { id, template })
-                                        }
-                                        Message::Select {
-                                            id,
-                                            placeholder,
-                                            choices,
-                                            multiple,
-                                        } => Some(PromptMessage::ShowSelect {
-                                            id,
-                                            placeholder: Some(placeholder),
-                                            choices,
-                                            multiple: multiple.unwrap_or(false),
-                                        }),
-                                        Message::Mini {
-                                            id,
-                                            placeholder,
-                                            choices,
-                                        } => Some(PromptMessage::ShowMini {
-                                            id,
-                                            placeholder,
-                                            choices,
-                                        }),
-                                        Message::Micro {
-                                            id,
-                                            placeholder,
-                                            choices,
-                                        } => Some(PromptMessage::ShowMicro {
-                                            id,
-                                            placeholder,
-                                            choices,
-                                        }),
-                                        Message::Confirm {
-                                            id,
-                                            message,
-                                            confirm_text,
-                                            cancel_text,
-                                        } => Some(PromptMessage::ShowConfirm {
-                                            id,
-                                            message,
-                                            confirm_text,
-                                            cancel_text,
-                                        }),
                                         Message::Exit { .. } => Some(PromptMessage::ScriptExit),
                                         Message::ForceSubmit { value } => {
                                             Some(PromptMessage::ForceSubmit { value })

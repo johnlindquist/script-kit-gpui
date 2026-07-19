@@ -13,16 +13,23 @@ fn classify_prompt_message_route(message: &PromptMessage) -> PromptMessageRoute 
     }
 }
 
-fn prompt_message_from_protocol_message(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptConversionSource {
+    InteractiveSession,
+    Sessionless,
+}
+
+fn convert_protocol_prompt_message(
     message: crate::protocol::Message,
-) -> Option<PromptMessage> {
+    source: PromptConversionSource,
+) -> Result<PromptMessage, crate::protocol::Message> {
     match message {
         Message::Arg {
             id,
             placeholder,
             choices,
             actions,
-        } => Some(PromptMessage::ShowArg {
+        } => Ok(PromptMessage::ShowArg {
             id,
             placeholder,
             choices,
@@ -39,7 +46,7 @@ fn prompt_message_from_protocol_message(
             container_bg,
             container_padding,
             opacity,
-        } => Some(PromptMessage::ShowDiv {
+        } => Ok(PromptMessage::ShowDiv {
             id,
             html,
             container_classes,
@@ -51,21 +58,27 @@ fn prompt_message_from_protocol_message(
             container_padding,
             opacity,
         }),
-        Message::Form { id, html, actions } => Some(PromptMessage::ShowForm { id, html, actions }),
+        Message::Form { id, html, actions } => Ok(PromptMessage::ShowForm { id, html, actions }),
         Message::Fields {
             id,
             fields,
             actions,
-        } => Some(PromptMessage::ShowFields {
-            id,
-            fields,
-            actions,
-        }),
+        } => match source {
+            PromptConversionSource::InteractiveSession => Ok(PromptMessage::FieldsComingSoon {
+                id,
+                field_count: fields.len(),
+            }),
+            PromptConversionSource::Sessionless => Ok(PromptMessage::ShowFields {
+                id,
+                fields,
+                actions,
+            }),
+        },
         Message::Term {
             id,
             command,
             actions,
-        } => Some(PromptMessage::ShowTerm {
+        } => Ok(PromptMessage::ShowTerm {
             id,
             command,
             actions,
@@ -78,7 +91,7 @@ fn prompt_message_from_protocol_message(
             on_init: _,
             on_submit: _,
             actions,
-        } => Some(PromptMessage::ShowEditor {
+        } => Ok(PromptMessage::ShowEditor {
             id,
             content,
             language,
@@ -89,7 +102,7 @@ fn prompt_message_from_protocol_message(
             id,
             start_path,
             hint,
-        } => Some(PromptMessage::ShowPath {
+        } => Ok(PromptMessage::ShowPath {
             id,
             start_path,
             hint,
@@ -100,40 +113,74 @@ fn prompt_message_from_protocol_message(
             prompt,
             title,
             secret,
-        } => Some(PromptMessage::ShowEnv {
+        } => Ok(PromptMessage::ShowEnv {
             id,
             key,
             prompt,
             title,
             secret: secret.unwrap_or(false),
         }),
-        Message::Drop { id } => Some(PromptMessage::ShowDrop {
+        Message::Drop { id } => Ok(PromptMessage::ShowDrop {
             id,
             placeholder: None,
             hint: None,
         }),
-        Message::Hotkey { id, placeholder } => Some(PromptMessage::ShowHotkey { id, placeholder }),
-        Message::Template { id, template } => Some(PromptMessage::ShowTemplate { id, template }),
+        Message::Hotkey { id, placeholder } => Ok(PromptMessage::ShowHotkey { id, placeholder }),
+        Message::Template { id, template } => Ok(PromptMessage::ShowTemplate { id, template }),
         Message::Select {
             id,
             placeholder,
             choices,
             multiple,
-        } => Some(PromptMessage::ShowSelect {
+        } => Ok(PromptMessage::ShowSelect {
             id,
             placeholder: Some(placeholder),
             choices,
             multiple: multiple.unwrap_or(false),
         }),
-        Message::Micro {
+        Message::Mini {
             id,
             placeholder,
             choices,
-        } => Some(PromptMessage::ShowMicro {
+        } => Ok(PromptMessage::ShowMini {
             id,
             placeholder,
             choices,
         }),
+        Message::Micro {
+            id,
+            placeholder,
+            choices,
+        } => Ok(PromptMessage::ShowMicro {
+            id,
+            placeholder,
+            choices,
+        }),
+        Message::Confirm {
+            id,
+            message,
+            confirm_text,
+            cancel_text,
+        } => Ok(PromptMessage::ShowConfirm {
+            id,
+            message,
+            confirm_text,
+            cancel_text,
+        }),
+        other => Err(other),
+    }
+}
+
+fn prompt_message_from_protocol_message(
+    message: crate::protocol::Message,
+) -> Option<PromptMessage> {
+    let message =
+        match convert_protocol_prompt_message(message, PromptConversionSource::Sessionless) {
+            Ok(prompt_message) => return Some(prompt_message),
+            Err(message) => message,
+        };
+
+    match message {
         Message::Chat {
             id,
             placeholder,
