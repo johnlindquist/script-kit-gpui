@@ -990,18 +990,26 @@ pub(crate) fn render_universal_footer_action_buttons(
         .into_any_element()
 }
 
-/// Returns `true` only when `hints` matches the canonical three-key set in exact order.
+/// Returns `true` when `hints` matches the canonical three-key ANATOMY in
+/// exact order: an `↵`-primary (any truthful verb — `Run`, `Paste`,
+/// `Open App`… — the blessed `universal_prompt_hints_with_primary_label`
+/// variants), then `⌘K Actions`, then the Agent hint. A different primary
+/// KEY (`⌘↵ Submit`, `⇥ Next Field`) or any other slot change is not
+/// universal and belongs in `emit_surface_prompt_hint_audit`. Chaos battery
+/// 06: the exact-literal check false-flagged every blessed relabel
+/// (clipboard history's `↵ Paste`) as a contract violation on activation.
 #[allow(dead_code)]
 #[inline]
 pub(crate) fn is_universal_prompt_hints(hints: &[SharedString]) -> bool {
-    let expected = universal_prompt_hints();
-    if hints.len() != expected.len() {
+    if hints.len() != UNIVERSAL_PROMPT_HINT_COUNT {
         return false;
     }
-    hints
-        .iter()
-        .zip(expected.iter())
-        .all(|(a, b)| a.as_ref() == b.as_ref())
+    let primary = hints[0].as_ref();
+    primary
+        .strip_prefix("↵ ")
+        .is_some_and(|label| !label.trim().is_empty())
+        && hints[1].as_ref() == "⌘K Actions"
+        && hints[2].as_ref() == crate::ai::agent_chat::ui::labels::AGENT_CHAT_CMD_ENTER_HINT
 }
 
 /// Structured audit record for a prompt surface's footer hints.
@@ -2249,12 +2257,31 @@ mod prompt_layout_shell_tests {
         let canonical = super::universal_prompt_hints();
         assert!(super::is_universal_prompt_hints(&canonical));
 
+        // Blessed primary-label variants share the universal anatomy.
+        for label in ["Paste", "Open App", "Capture Photo"] {
+            let relabeled = super::universal_prompt_hints_with_primary_label(label);
+            assert!(
+                super::is_universal_prompt_hints(&relabeled),
+                "↵ {label} | ⌘K Actions | Agent must count as universal anatomy"
+            );
+        }
+
+        // A non-Agent third slot is not universal.
         let non_canonical = vec![
             gpui::SharedString::from("↵ Paste"),
             gpui::SharedString::from("⌘K Actions"),
             gpui::SharedString::from("Esc Back"),
         ];
         assert!(!super::is_universal_prompt_hints(&non_canonical));
+
+        // A different primary key is not universal.
+        let cmd_enter_primary =
+            super::universal_prompt_hints_with_primary_key_label("⌘↵", "Submit");
+        assert!(!super::is_universal_prompt_hints(&cmd_enter_primary));
+
+        // An empty primary label is not universal.
+        let empty_label = super::universal_prompt_hints_with_primary_label("");
+        assert!(!super::is_universal_prompt_hints(&empty_label));
 
         // Wrong length
         let too_short = vec![gpui::SharedString::from("↵ Run")];
