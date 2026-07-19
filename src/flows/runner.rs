@@ -20,6 +20,7 @@ use super::model::{
     parse_event_line, EngagementMode, EventStreamValidator, FlowUxVariant, RunPhase,
 };
 use super::run_registry::flow_run_registry;
+use super::session::{resolve_mdflow_turn_arg, MdflowTurnArg};
 
 /// Bounded SIGTERM→SIGKILL escalation window (protocol §3).
 const CANCEL_ESCALATION: Duration = Duration::from_secs(2);
@@ -61,12 +62,64 @@ pub fn launch_flow(
     let cwd = cwd.to_string();
     std::thread::Builder::new()
         .name(format!("flow-run-{local_id}"))
-        .spawn(move || run_flow_process(local_id, &flow_path, &cwd, &input_overrides))
+        .spawn(move || {
+            run_flow_process(
+                local_id,
+                &flow_path,
+                &cwd,
+                &input_overrides,
+                capture_conversation,
+            )
+        })
         .ok();
     local_id
 }
 
-fn run_flow_process(local_id: u64, flow_path: &str, cwd: &str, overrides: &[(String, String)]) {
+fn build_flow_command(
+    binary: &str,
+    flow_path: &str,
+    cwd: &str,
+    overrides: &[(String, String)],
+    turn_arg: Option<&MdflowTurnArg>,
+) -> Command {
+    let mut command = Command::new(binary);
+    command.arg(flow_path);
+    match turn_arg {
+        Some(MdflowTurnArg::Positional(prompt)) => {
+            command.arg(prompt);
+        }
+        Some(MdflowTurnArg::NamedTask(prompt)) => {
+            command.arg("--_task").arg(prompt);
+        }
+        None => {}
+    }
+    command
+        .arg("--events")
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        // stderr is out-of-band diagnostics (protocol §3) — captured, never
+        // discarded: a flow crashing with only a stderr message must leave a
+        // visible trace (2026-07-11 audit).
+        .stderr(Stdio::piped());
+    for (name, value) in overrides {
+        // A Threadline turn arrives through the legacy `task` override slot;
+        // its resolved positional/named shape was already appended above.
+        if turn_arg.is_some() && name == "task" {
+            continue;
+        }
+        command.arg(format!("--_{name}")).arg(value);
+    }
+    command
+}
+
+fn run_flow_process(
+    local_id: u64,
+    flow_path: &str,
+    cwd: &str,
+    overrides: &[(String, String)],
+    capture_conversation: bool,
+) {
     let registry = flow_run_registry();
     // Cancel-before-spawn: a run cancelled while still queued must never
     // spawn a process at all (a leaked process here would be invisible to
@@ -82,20 +135,23 @@ fn run_flow_process(local_id: u64, flow_path: &str, cwd: &str, overrides: &[(Str
         return;
     };
 
-    let mut command = Command::new(binary);
-    command
-        .arg(flow_path)
-        .arg("--events")
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        // stderr is out-of-band diagnostics (protocol §3) — captured, never
-        // discarded: a flow crashing with only a stderr message must leave a
-        // visible trace (2026-07-11 audit).
-        .stderr(Stdio::piped());
-    for (name, value) in overrides {
-        command.arg(format!("--_{name}")).arg(value);
-    }
+    let turn_arg = if capture_conversation {
+        let Some((_, prompt)) = overrides.iter().find(|(name, _)| name == "task") else {
+            registry.mark_failed(local_id, "Threadline run missing its turn prompt");
+            return;
+        };
+        match resolve_mdflow_turn_arg(binary, flow_path, cwd, prompt) {
+            Ok(arg) => Some(arg),
+            Err(err) => {
+                registry.mark_failed(local_id, &err);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut command = build_flow_command(binary, flow_path, cwd, overrides, turn_arg.as_ref());
     // Own process group so cancel can kill the full descendant tree without
     // touching sibling runs.
     command.process_group(0);
@@ -354,6 +410,35 @@ mod tests {
         assert_eq!(registry.get(id).unwrap().phase, RunPhase::Cancelled);
         cancel_run(id); // idempotent on terminal runs
         assert_eq!(registry.get(id).unwrap().phase, RunPhase::Cancelled);
+    }
+
+    fn command_args(turn_arg: MdflowTurnArg) -> Vec<String> {
+        build_flow_command(
+            "/tmp/md",
+            "flows/example.md",
+            "/tmp",
+            &[("task".to_string(), "ignored legacy slot".to_string())],
+            Some(&turn_arg),
+        )
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    #[test]
+    fn threadline_ordinary_flow_passes_prompt_as_first_positional_arg() {
+        assert_eq!(
+            command_args(MdflowTurnArg::Positional("hello ordinary".into())),
+            ["flows/example.md", "hello ordinary", "--events"]
+        );
+    }
+
+    #[test]
+    fn threadline_named_task_flow_uses_task_flag_only_when_resolved() {
+        assert_eq!(
+            command_args(MdflowTurnArg::NamedTask("hello named".into())),
+            ["flows/example.md", "--_task", "hello named", "--events"]
+        );
     }
 
     #[test]

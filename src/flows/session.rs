@@ -10,9 +10,10 @@
 //!   resolved mission (`resolve_flow_mission`); the protocol thread holds
 //!   context, so later turns send the raw message.
 //! - [`SessionTransport::MdflowTurns`] (second-class, non-codex engines):
-//!   each user message launches one `md <flow> --_task "<prompt>" --events`
-//!   run whose streamed stdout fills the assistant bubble. mdflow runs are
-//!   stateless, so context rides inside the task prompt as a rolled-up
+//!   each user message launches one `md <flow> <prompt> --events` run (or
+//!   `--_task <prompt>` only when an engine-free `md explain` proves that
+//!   named contract). Streamed stdout fills the assistant bubble. mdflow runs
+//!   are stateless, so context rides inside the turn prompt as a rolled-up
 //!   transcript (`build_turn_task`).
 //!
 //! Contract (Conversation Desk):
@@ -62,7 +63,7 @@ pub struct SessionTurn {
 pub enum SessionTransport {
     /// Native `codex app-server` thread (codex-engine flows).
     CodexThread,
-    /// One `md <flow> --_task … --events` registry run per turn.
+    /// One engine-free-resolved `md <flow> <turn-input> --events` registry run.
     MdflowTurns,
 }
 
@@ -173,9 +174,9 @@ impl FlowSessionMeta {
 /// off first; the newest message always survives intact.
 const HISTORY_CHAR_BUDGET: usize = 8_000;
 
-/// Build the `--_task` prompt for one turn: prior transcript (newest-biased,
-/// budgeted) then the new message. First turn passes the message verbatim so
-/// simple one-shot flows behave exactly like the CLI.
+/// Build the mdflow turn prompt: prior transcript (newest-biased, budgeted)
+/// then the new message. First turn passes the message verbatim so simple
+/// one-shot flows behave exactly like the CLI.
 pub fn build_turn_task(turns: &[SessionTurn], message: &str) -> String {
     if turns.is_empty() {
         return message.to_string();
@@ -196,6 +197,69 @@ pub fn build_turn_task(turns: &[SessionTurn], message: &str) -> String {
         history.join("\n\n"),
         message
     )
+}
+
+/// The one user-prompt argument for a non-Codex Threadline turn.
+///
+/// Positional `_1` is mdflow's ordinary/public flow contract. `NamedTask` is
+/// selected only after positional explain fails and a second, engine-free
+/// explain proves that the flow consumes `{{ _task }}`. This prevents an
+/// unused `--_task` flag from starving required `_1` before engine launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdflowTurnArg {
+    Positional(String),
+    NamedTask(String),
+}
+
+/// Resolve the turn argument shape without launching the flow's engine.
+/// Prefer the public positional contract; fall back to `--_task` only when
+/// `md explain` accepts that named input. If neither shape resolves, fail
+/// closed rather than risk launching an engine with a guessed prompt shape.
+pub fn resolve_mdflow_turn_arg(
+    binary: &str,
+    flow_path: &str,
+    cwd: &str,
+    prompt: &str,
+) -> Result<MdflowTurnArg, String> {
+    let explain = |named_task: bool| {
+        let mut command = std::process::Command::new(binary);
+        command.arg("explain").arg(flow_path);
+        if named_task {
+            command.arg("--_task").arg(prompt);
+        } else {
+            command.arg(prompt);
+        }
+        command
+            .arg("--json")
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+
+    let positional = explain(false)
+        .map_err(|err| format!("mdflow explain failed to spawn for positional input: {err}"))?;
+    if positional.status.success() {
+        return Ok(MdflowTurnArg::Positional(prompt.to_string()));
+    }
+
+    let named = explain(true)
+        .map_err(|err| format!("mdflow explain failed to spawn for --_task input: {err}"))?;
+    if named.status.success() {
+        return Ok(MdflowTurnArg::NamedTask(prompt.to_string()));
+    }
+
+    let diagnostic = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("mdflow explain rejected the input")
+            .to_string()
+    };
+    Err(format!(
+        "mdflow explain rejected both Threadline input shapes (positional: {}; --_task: {})",
+        diagnostic(&positional),
+        diagnostic(&named)
+    ))
 }
 
 /// Resolve a flow's mission for the FIRST codex-thread turn: frontmatter
@@ -409,12 +473,10 @@ pub fn persist_conversation_to(
     };
     std::fs::create_dir_all(dir)?;
     let path = dir.join(conversation_file_name(flow_id, flow_path));
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(&snapshot).map_err(std::io::Error::other)?,
-    )?;
-    std::fs::rename(&tmp, &path)
+    // Unique-temp atomic write (see src/atomic_file.rs): a fixed temp path let
+    // concurrent savers corrupt the persisted conversation.
+    let bytes = serde_json::to_vec_pretty(&snapshot).map_err(std::io::Error::other)?;
+    crate::atomic_file::write_atomic(&path, &bytes)
 }
 
 pub fn load_persisted_conversation_from(
