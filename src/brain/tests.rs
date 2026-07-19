@@ -618,16 +618,40 @@ fn load_embeddings_excludes_short_content_docs() {
 
 #[test]
 fn signal_recording_and_aggregation() {
+    // Hermeticity (OF-9): the brain DB is ONE shared per-process sqlite, and
+    // other tests in this same test binary (input-history selection signals,
+    // protocol ingress, MCP resources) record signals concurrently without
+    // this module's lock. Assertions must therefore only ever depend on rows
+    // this test wrote itself: a unique topic, a read window far wider than
+    // any realistic concurrent burst, and aggregation over the filtered rows
+    // (global aggregation truncates to a top-16 that foreign tests can
+    // crowd). The strictly-newer foreign burst below deterministically
+    // simulates the full-suite race that flaked the old recent_signals(50)
+    // shape — reverting to a narrow window or global aggregation fails it.
     let _db = init_test_db();
-    store::record_signal("script kit", 2, "ask").unwrap();
-    store::record_signal("Script Kit", 1, "chat").unwrap();
-    store::record_signal("", 5, "ask").unwrap(); // ignored
-    let signals = store::recent_signals(50).unwrap();
-    let aggregated = aggregate_signals(&signals);
-    let entry = aggregated.iter().find(|(t, _)| t == "script kit");
+    let nonce = format!("of9 signal topic {}", std::process::id());
+    store::record_signal(&nonce, 2, "ask").unwrap();
+    store::record_signal(&nonce.to_uppercase(), 1, "chat").unwrap();
+    store::record_signal("", 5, "ask").unwrap(); // ignored by design
+    let future = chrono::Utc::now().timestamp() + 60;
+    for i in 0..60 {
+        store::record_signal_at(&format!("foreign burst {i}"), 1, "ask", future).unwrap();
+    }
+    let signals = store::recent_signals(500).unwrap();
+    assert!(
+        !signals.iter().any(|s| s.topic.is_empty()),
+        "empty-topic signals must never be recorded"
+    );
+    let ours: Vec<_> = signals
+        .iter()
+        .filter(|s| s.topic == nonce)
+        .cloned()
+        .collect();
+    let aggregated = aggregate_signals(&ours);
+    let entry = aggregated.iter().find(|(t, _)| t == &nonce);
     assert!(
         entry.is_some_and(|(_, w)| *w >= 3),
-        "weights accumulate case-insensitively"
+        "weights accumulate case-insensitively (record_signal lowercases)"
     );
 }
 

@@ -1154,6 +1154,31 @@ pub fn record_signal(topic: &str, weight: i64, source: &str) -> Result<()> {
 }
 
 /// Recent signals (newest first), for ranking boosts and the focus view.
+/// Test-only: record a signal with an explicit `created_at`, so tests can
+/// deterministically simulate signals that arrive strictly later (the
+/// second-granularity default timestamp makes same-second ordering under
+/// `recent_signals`' LIMIT window implementation-defined).
+#[cfg(test)]
+pub(crate) fn record_signal_at(
+    topic: &str,
+    weight: i64,
+    source: &str,
+    created_at: i64,
+) -> Result<()> {
+    let topic = topic.trim().to_lowercase();
+    if topic.is_empty() {
+        return Ok(());
+    }
+    let db = get_db()?;
+    let conn = db.lock().map_err(|_| anyhow!("brain db lock poisoned"))?;
+    conn.execute(
+        "INSERT INTO brain_signals (topic, weight, source, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![topic, weight, source, created_at],
+    )
+    .context("record brain signal at explicit time")?;
+    Ok(())
+}
+
 pub fn recent_signals(limit: usize) -> Result<Vec<BrainSignal>> {
     with_read_conn(|conn| {
         let mut stmt = conn.prepare(
