@@ -14,18 +14,51 @@ fn render_dictation_history_row(
     display_index: usize,
     entry: &crate::dictation::DictationHistoryEntry,
     list_colors: ListItemColors,
+    main_menu_theme: crate::designs::MainMenuThemeVariant,
+    slot_width: f32,
+    chrome_edge_inset: f32,
     selected: bool,
 ) -> impl IntoElement {
     let selector = dictation_history_row_selector(&entry.id);
+    let metrics = crate::list_item::ListItemMetricsOverride::from_main_menu_theme(main_menu_theme);
     let item = ListItem::new(entry.preview.clone(), list_colors)
         .description_opt(Some(ScriptListApp::dictation_history_meta(entry)))
         .selected(selected)
+        .main_menu_theme(main_menu_theme)
         .with_accent_bar(true);
 
     div()
         .id(gpui::ElementId::Integer(display_index as u64))
         .debug_selector(move || selector)
+        .ml(px(
+            (metrics.row_outer_padding_x - chrome_edge_inset).max(0.0)
+        ))
+        .w(px(slot_width))
+        .h(px(metrics.item_height))
         .child(item)
+}
+
+fn render_dictation_history_leading_slot(
+    label: &str,
+    list_colors: ListItemColors,
+    main_menu_theme: crate::designs::MainMenuThemeVariant,
+    top_inset: f32,
+    chrome_edge_inset: f32,
+) -> impl IntoElement {
+    let metrics = crate::list_item::ListItemMetricsOverride::from_main_menu_theme(main_menu_theme);
+
+    div()
+        .w_full()
+        .h(px(metrics.item_height))
+        .mt(px(-chrome_edge_inset))
+        .pt(px(top_inset + chrome_edge_inset))
+        .child(
+            crate::components::builtin_leading_separator::render_builtin_leading_separator(
+                label,
+                None,
+                list_colors,
+            ),
+        )
 }
 
 impl DictationHistoryEmptyState {
@@ -303,6 +336,9 @@ impl ScriptListApp {
         );
 
         let list_colors = ListItemColors::from_theme(&self.theme);
+        let main_menu_theme = self.current_main_menu_theme;
+        let slot_width = crate::window_resize::MAIN_WINDOW_WIDTH * 0.5;
+        let chrome_edge_inset = crate::window_resize::layout::WINDOW_BORDER_Y * 0.5;
         let list_element: AnyElement = if filtered_len == 0 {
             let state = DictationHistoryEmptyState::from_filter(&filter);
             crate::list_item::EmptyState::new(state.message(), empty_text_color, &empty_font_family)
@@ -321,6 +357,9 @@ impl ScriptListApp {
                             display_ix,
                             entry,
                             list_colors,
+                            main_menu_theme,
+                            slot_width,
+                            chrome_edge_inset,
                             display_ix == selected,
                         )
                     }),
@@ -373,7 +412,6 @@ impl ScriptListApp {
             .w_full()
             .h_full()
             .min_h(px(0.))
-            .py(px(design_spacing.padding_xs))
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
                     let view_state = if let AppView::DictationHistoryView {
@@ -436,14 +474,16 @@ impl ScriptListApp {
                 // menu's "Results" header, 4d76327b8): the label may swap but
                 // the row never appears or disappears, so filtering can't
                 // shift the rows below it.
-                crate::components::builtin_leading_separator::render_builtin_leading_separator(
+                render_dictation_history_leading_slot(
                     if filter.trim().is_empty() {
                         "Transcripts"
                     } else {
                         "Results"
                     },
-                    None,
                     list_colors,
+                    main_menu_theme,
+                    design_spacing.padding_xs,
+                    chrome_edge_inset,
                 ),
             )
             .child(div().relative().flex_1().min_h(px(0.)).child(list_element));
@@ -587,7 +627,59 @@ mod dictation_history_paint_tests {
             };
             let colors = ListItemColors::from_theme(&crate::theme::Theme::default());
 
-            render_dictation_history_row(0, &entry, colors, true)
+            render_dictation_history_row(
+                0,
+                &entry,
+                colors,
+                crate::designs::MainMenuThemeVariant::default(),
+                crate::window_resize::MAIN_WINDOW_WIDTH * 0.5,
+                0.0,
+                true,
+            )
+        }
+    }
+
+    struct TestDictationHistorySlotAnatomy;
+
+    impl gpui::Render for TestDictationHistorySlotAnatomy {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let entry = crate::dictation::DictationHistoryEntry {
+                id: TEST_ENTRY_ID.to_string(),
+                timestamp: "2026-07-18T12:00:00Z".to_string(),
+                transcript: "A rendered dictation history row".to_string(),
+                preview: "A rendered dictation history row".to_string(),
+                target: "Agent Chat".to_string(),
+                audio_duration_ms: 1_250,
+            };
+            let colors = ListItemColors::from_theme(&crate::theme::Theme::default());
+            let main_menu_theme = crate::designs::MainMenuThemeVariant::default();
+            let spacing = get_tokens(crate::designs::DesignVariant::default()).spacing();
+            let chrome_edge_inset = crate::window_resize::layout::WINDOW_BORDER_Y * 0.5;
+
+            div()
+                .w(px(crate::window_resize::MAIN_WINDOW_WIDTH * 0.5))
+                .flex()
+                .flex_col()
+                .child(render_dictation_history_leading_slot(
+                    "Transcripts",
+                    colors,
+                    main_menu_theme,
+                    spacing.padding_xs,
+                    chrome_edge_inset,
+                ))
+                .child(render_dictation_history_row(
+                    0,
+                    &entry,
+                    colors,
+                    main_menu_theme,
+                    crate::window_resize::MAIN_WINDOW_WIDTH * 0.5,
+                    chrome_edge_inset,
+                    true,
+                ))
         }
     }
 
@@ -620,5 +712,77 @@ mod dictation_history_paint_tests {
                 assert!(measurement.bounds.size.height > px(0.0));
             })
             .expect("dictation paint test window should remain available");
+    }
+
+    #[gpui::test]
+    fn dictation_split_portal_row_uses_shared_slot_geometry(cx: &mut gpui::TestAppContext) {
+        use gpui::px;
+
+        let main_menu_theme = crate::designs::MainMenuThemeVariant::default();
+        let metrics =
+            crate::list_item::ListItemMetricsOverride::from_main_menu_theme(main_menu_theme);
+        let top_inset = get_tokens(crate::designs::DesignVariant::default())
+            .spacing()
+            .padding_xs;
+        let split_width = crate::window_resize::MAIN_WINDOW_WIDTH * 0.5;
+        let chrome_edge_inset = crate::window_resize::layout::WINDOW_BORDER_Y * 0.5;
+
+        let window = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(crate::window_resize::MAIN_WINDOW_WIDTH), px(160.0)),
+            )));
+            cx.open_window(options, |_, cx| cx.new(|_| TestDictationHistorySlotAnatomy))
+                .expect("dictation slot geometry test window should open")
+        });
+
+        cx.run_until_parked();
+
+        let expected_row_selector = dictation_history_row_selector(TEST_ENTRY_ID);
+        window
+            .update(cx, |_, window, _| {
+                let entries = window.debug_bounds_entries();
+                let separator = entries
+                    .iter()
+                    .find(|entry| {
+                        entry.selector
+                            == crate::components::builtin_leading_separator::BUILTIN_LEADING_SEPARATOR_ID
+                    })
+                    .expect("dictation leading separator should record paint bounds");
+                let row = entries
+                    .iter()
+                    .find(|entry| entry.selector == expected_row_selector)
+                    .expect("dictation first row wrapper should record paint bounds");
+
+                assert_eq!(
+                    row.bounds.origin.x,
+                    px(metrics.row_outer_padding_x - chrome_edge_inset)
+                );
+                assert_eq!(
+                    row.bounds.origin.y,
+                    px(metrics.item_height - chrome_edge_inset)
+                );
+                assert_eq!(row.bounds.size.width, px(split_width));
+                assert_eq!(row.bounds.size.height, px(metrics.item_height));
+                assert_eq!(separator.bounds.origin.y, px(top_inset));
+                // The shared separator's painted wrapper is the accepted 26px
+                // chrome inside the theme-resolved 44px leading slot.
+                assert_eq!(separator.bounds.size.height, px(26.0));
+                assert_eq!(
+                    row.bounds.origin.x - separator.bounds.origin.x,
+                    px(metrics.row_outer_padding_x - chrome_edge_inset)
+                );
+                assert_eq!(
+                    row.bounds.origin.y - separator.bounds.origin.y,
+                    px(metrics.item_height - top_inset - chrome_edge_inset)
+                );
+                assert_eq!(
+                    row.bounds.origin.y - separator.bounds.bottom(),
+                    px(metrics.item_height - top_inset - chrome_edge_inset)
+                        - separator.bounds.size.height
+                );
+            })
+            .expect("dictation slot geometry test window should remain available");
     }
 }
