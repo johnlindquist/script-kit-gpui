@@ -186,6 +186,27 @@ async function state(): Promise<any> {
   }
 }
 
+const MAIN_TARGET = { type: "main" } as const;
+const CONFIRM_TARGET = { type: "id", id: "confirm-popup" } as const;
+
+async function ownerReceipt(promptId: string): Promise<any> {
+  const windowsResult: any = await d.listAutomationWindows({ timeoutMs: 5000 }).catch((error) => ({ error: String(error) }));
+  const windows: any[] = windowsResult?.windows ?? [];
+  const target = promptId === "confirm" ? CONFIRM_TARGET : MAIN_TARGET;
+  const targetState = await d.request(
+    { type: "getState", target },
+    { expect: "stateResult", timeoutMs: 5000 },
+  ).catch((error) => ({ error: String(error) }));
+  const targetElements = await d.getElements(
+    { target },
+    { timeoutMs: 5000 },
+  ).catch((error) => ({ error: String(error) }));
+  const owningWindow = promptId === "confirm"
+    ? windows.find((window) => window.id === "confirm-popup")
+    : windows.find((window) => window.id === "main");
+  return { target, windows, owningWindow: owningWindow ?? null, targetState, targetElements };
+}
+
 async function errorSet(): Promise<Set<string>> {
   try {
     const r = await d.getLogs({ level: "error", limit: 300 }, { timeoutMs: 5000 });
@@ -256,27 +277,53 @@ try {
       const errBefore = await errorSet();
       const row: any = { prompt: p.id, case: label };
       let st: any = null;
+      let owner: any = null;
       let opened = false;
       for (let attempt = 1; attempt <= 3 && !opened; attempt++) {
         await ensureShown();
         const t0 = performance.now();
         d.send(msg as any);
-        await Bun.sleep(250);
-        await d.waitForSettle({ timeoutMs: 5000 }).catch(() => {});
-        st = await state();
+        if (p.id === "mini" || p.id === "confirm") {
+          await d.waitForSettle({
+            timeoutMs: 5000,
+            probe: () => p.id === "confirm" ? d.listAutomationWindows() : d.getState(),
+          }).catch(() => {});
+          owner = await ownerReceipt(p.id);
+          st = owner.targetState;
+        } else {
+          await Bun.sleep(250);
+          await d.waitForSettle({ timeoutMs: 5000 }).catch(() => {});
+          st = await state();
+        }
         row.openMs = Math.round(performance.now() - t0);
         row.view = st.promptType ?? null;
         row.visibleChoiceCount = st.visibleChoiceCount ?? null;
         row.attempts = attempt;
-        opened = !st.__dead && (st.promptType ?? "") === p.view;
+        row.owner = owner;
+        opened = p.id === "confirm"
+          ? owner?.owningWindow?.id === "confirm-popup"
+            && (owner?.targetElements?.elements ?? []).some((element: any) => element.semanticId === "panel:confirm-dialog")
+          : !st.__dead && (st.promptType ?? "") === p.view;
         if (!opened && !st.__dead) await Bun.sleep(300); // likely evicted by a parallel instance
       }
       if (EXPLORE)
         console.error(`[explore] ${p.id}/${label} view=${st.promptType} vis=${st.visibleChoiceCount} ms=${row.openMs} tries=${row.attempts}`);
 
       if (st.__dead) note("FAIL", p.id, `${label}:open`, { dead: st.__dead });
-      else if (!opened)
-        note("ENV", p.id, `${label}:open`, { expectedView: p.view, got: st.promptType, note: "off-surface after 3 attempts — likely parallel-instance panel eviction" });
+      else if (!opened) {
+        const unsupported = await d.getLogs(
+          { level: "warn", contains: `message_type=${p.id}`, limit: 50 },
+          { timeoutMs: 5000 },
+        ).catch(() => ({ entries: [] })) as any;
+        note("FAIL", p.id, `${label}:open`, {
+          expectedView: p.view,
+          got: st.promptType,
+          owningWindow: owner?.owningWindow ?? null,
+          targetError: owner?.targetState?.promptId ?? owner?.targetState?.error ?? null,
+          unsupported: (unsupported.entries ?? []).map((entry: any) => entry.message),
+          note: "sessionless protocol prompt was parsed but opened no owning window/state",
+        });
+      }
       else if (row.openMs > 6000) note("SLOW", p.id, `${label}:open`, { ms: row.openMs });
 
       if (!opened) { rows.push(row); continue; }
@@ -327,7 +374,25 @@ try {
       // sessionless prompts must dismiss on Escape via the direct-reset
       // guard in simulate_key_dispatch.rs (current_script_pid.is_none()).
       // A stuck view is a FAIL; hide→show recovery below is only cleanup.
-      let after = await escapeToIdle();
+      let after: any;
+      if (p.id === "confirm") {
+        d.simulateKey("escape");
+        let confirmStillOpen = true;
+        for (let attempt = 0; attempt < 20 && confirmStillOpen; attempt++) {
+          await Bun.sleep(100);
+          const listed: any = await d.listAutomationWindows({ timeoutMs: 3000 }).catch(() => ({ windows: [] }));
+          confirmStillOpen = (listed.windows ?? []).some((window: any) => window.id === "confirm-popup");
+        }
+        after = await state();
+        row.confirmPopupAfterEscape = confirmStillOpen;
+        if (confirmStillOpen) {
+          note("FAIL", p.id, `${label}:escape`, {
+            note: "sessionless confirm-popup remained registered after Escape",
+          });
+        }
+      } else {
+        after = await escapeToIdle();
+      }
       row.afterEscape = after.promptType ?? null;
       if (after.__dead) note("FAIL", p.id, `${label}:escape`, { dead: after.__dead });
       else if (!IDLE_VIEWS.has(after.promptType ?? "") && after.windowVisible !== false) {

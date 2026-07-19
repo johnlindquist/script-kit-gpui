@@ -62,6 +62,188 @@ mod prompt_handler_message_tests {
     }
 
     #[test]
+    fn sessionless_prompt_conversion_covers_every_session_prompt_constructor() {
+        use crate::protocol::Message;
+
+        fn converted_kind(message: Message) -> &'static str {
+            match prompt_message_from_protocol_message(message) {
+                Some(PromptMessage::ShowArg { .. }) => "arg",
+                Some(PromptMessage::ShowDiv { .. }) => "div",
+                Some(PromptMessage::ShowForm { .. }) => "form",
+                Some(PromptMessage::ShowFields { .. }) => "fields",
+                Some(PromptMessage::ShowTerm { .. }) => "term",
+                Some(PromptMessage::ShowEditor { .. }) => "editor",
+                Some(PromptMessage::ShowPath { .. }) => "path",
+                Some(PromptMessage::ShowEnv { .. }) => "env",
+                Some(PromptMessage::ShowDrop { .. }) => "drop",
+                Some(PromptMessage::ShowHotkey { .. }) => "hotkey",
+                Some(PromptMessage::ShowTemplate { .. }) => "template",
+                Some(PromptMessage::ShowSelect { .. }) => "select",
+                Some(PromptMessage::ShowMini { .. }) => "mini",
+                Some(PromptMessage::ShowMicro { .. }) => "micro",
+                Some(PromptMessage::ShowConfirm { .. }) => "confirm",
+                Some(PromptMessage::ShowChat { .. }) => "chat",
+                Some(other) => panic!("unexpected conversion: {other:?}"),
+                None => panic!("sessionless conversion dropped a session prompt constructor"),
+            }
+        }
+
+        let id = || "parity-id".to_string();
+        let cases = vec![
+            (
+                "arg",
+                Message::Arg {
+                    id: id(),
+                    placeholder: String::new(),
+                    choices: vec![],
+                    actions: None,
+                },
+            ),
+            (
+                "div",
+                Message::Div {
+                    id: id(),
+                    html: String::new(),
+                    container_classes: None,
+                    actions: None,
+                    placeholder: None,
+                    hint: None,
+                    footer: None,
+                    container_bg: None,
+                    container_padding: None,
+                    opacity: None,
+                },
+            ),
+            (
+                "form",
+                Message::Form {
+                    id: id(),
+                    html: String::new(),
+                    actions: None,
+                },
+            ),
+            (
+                "fields",
+                Message::Fields {
+                    id: id(),
+                    fields: vec![],
+                    actions: None,
+                },
+            ),
+            (
+                "term",
+                Message::Term {
+                    id: id(),
+                    command: None,
+                    actions: None,
+                },
+            ),
+            (
+                "editor",
+                Message::Editor {
+                    id: id(),
+                    content: None,
+                    language: None,
+                    template: None,
+                    on_init: None,
+                    on_submit: None,
+                    actions: None,
+                },
+            ),
+            (
+                "path",
+                Message::Path {
+                    id: id(),
+                    start_path: None,
+                    hint: None,
+                },
+            ),
+            (
+                "env",
+                Message::Env {
+                    id: id(),
+                    key: String::new(),
+                    prompt: None,
+                    title: None,
+                    secret: None,
+                },
+            ),
+            ("drop", Message::Drop { id: id() }),
+            (
+                "hotkey",
+                Message::Hotkey {
+                    id: id(),
+                    placeholder: None,
+                },
+            ),
+            (
+                "template",
+                Message::Template {
+                    id: id(),
+                    template: String::new(),
+                },
+            ),
+            (
+                "select",
+                Message::Select {
+                    id: id(),
+                    placeholder: String::new(),
+                    choices: vec![],
+                    multiple: None,
+                },
+            ),
+            (
+                "mini",
+                Message::Mini {
+                    id: id(),
+                    placeholder: String::new(),
+                    choices: vec![],
+                },
+            ),
+            (
+                "micro",
+                Message::Micro {
+                    id: id(),
+                    placeholder: String::new(),
+                    choices: vec![],
+                },
+            ),
+            (
+                "confirm",
+                Message::Confirm {
+                    id: id(),
+                    message: String::new(),
+                    confirm_text: None,
+                    cancel_text: None,
+                },
+            ),
+            (
+                "chat",
+                Message::Chat {
+                    id: id(),
+                    placeholder: None,
+                    messages: vec![],
+                    hint: None,
+                    footer: None,
+                    actions: None,
+                    model: None,
+                    models: vec![],
+                    save_history: false,
+                    use_builtin_ai: false,
+                },
+            ),
+        ];
+
+        for (expected, message) in cases {
+            assert_eq!(
+                converted_kind(message),
+                expected,
+                "{expected} conversion drifted"
+            );
+        }
+    }
+
+    #[test]
     fn test_unhandled_message_warning_includes_recovery_guidance() {
         let message = unhandled_message_warning("widget");
         assert!(message.contains("'widget'"));
