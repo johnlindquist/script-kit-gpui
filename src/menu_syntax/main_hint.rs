@@ -3266,6 +3266,32 @@ mod tests {
             .contains("not run a shell"));
     }
 
+    /// The grammar pivot removed `!` as a command sigil, so a bang-prefixed
+    /// fuzzy query must expose the same hint classification as plain text.
+    #[test]
+    fn removed_bang_sigil_matches_plain_text_hint_classification() {
+        fn hint_kind(raw: &str) -> Option<MenuSyntaxMainHintKind> {
+            let mode = MenuSyntaxMode::from_input(raw);
+            build_menu_syntax_main_hint(MenuSyntaxMainHintContext {
+                raw_filter_text: raw,
+                mode: &mode,
+                picker_snapshot: None,
+                picker_selected_row_id: None,
+                scripts: &[],
+                scriptlets: &[],
+                advanced_query_results_empty: has_active_head(raw),
+                menu_syntax_ai_proposal: None,
+            })
+            .map(|hint| hint.kind)
+        }
+
+        let plain = hint_kind("x");
+        let bang_prefixed = hint_kind("!x");
+
+        assert_eq!(bang_prefixed, plain);
+        assert_eq!(plain, None, "plain fuzzy text currently has no main hint");
+    }
+
     #[test]
     fn duplicate_command_warns() {
         let raw = ">ps-dupe";
