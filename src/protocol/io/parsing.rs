@@ -97,6 +97,36 @@ fn json_value_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Build a request-correlated response for a malformed JSON protocol payload.
+///
+/// Deserialization can fail after the JSON envelope has already supplied a
+/// usable `requestId` (for example, a `simulateGpuiEvent` with a missing
+/// field). Preserve that id so RPC clients fail immediately instead of
+/// waiting for a timeout. Syntax errors and envelopes without a string id
+/// remain log-only.
+pub(crate) fn malformed_request_error(
+    line: &str,
+    error: impl std::fmt::Display,
+) -> Option<Message> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let request_id = value.get("requestId")?.as_str()?.to_string();
+    if request_id.is_empty() {
+        return None;
+    }
+    let command = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("protocol")
+        .to_string();
+    Some(Message::external_command_result(
+        request_id,
+        command,
+        false,
+        Some("invalid_payload".to_string()),
+        Some(error.to_string()),
+    ))
+}
+
 /// Result type for graceful message parsing
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]

@@ -1177,6 +1177,32 @@ pub(crate) fn extract_request_id_lenient(line: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+fn extract_command_type_lenient(line: &str) -> Option<String> {
+    let marker = "\"type\"";
+    let start = line.find(marker)?;
+    let after_key = &line[start + marker.len()..];
+    let colon = after_key.find(':')?;
+    let inner = after_key[colon + 1..].trim_start().strip_prefix('"')?;
+    let end = inner.find('"')?;
+    let command = &inner[..end];
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+fn oversized_request_error(raw: &str, raw_len: usize) -> Option<crate::protocol::Message> {
+    let request_id = extract_request_id_lenient(raw)?;
+    let command = extract_command_type_lenient(raw).unwrap_or_else(|| "protocol".to_string());
+    Some(crate::protocol::Message::external_command_result(
+        request_id,
+        command,
+        false,
+        Some("line_too_long".to_string()),
+        Some(format!(
+            "stdin JSONL line exceeds {MAX_STDIN_COMMAND_BYTES} bytes (received {raw_len} bytes; retained {} bytes)",
+            raw.len()
+        )),
+    ))
+}
+
 /// Start a thread that listens on stdin for external JSONL commands.
 /// Returns an async_channel::Receiver that can be awaited without polling.
 ///
@@ -1190,7 +1216,9 @@ pub(crate) fn extract_request_id_lenient(line: &str) -> Option<String> {
 /// Spawns a background thread that reads stdin line-by-line. When the channel
 /// is closed (receiver dropped), the thread will exit gracefully.
 #[tracing::instrument(skip_all)]
-pub fn start_stdin_listener() -> async_channel::Receiver<StdinCommandEnvelope> {
+pub fn start_stdin_listener(
+    response_sender: Option<mpsc::SyncSender<crate::protocol::Message>>,
+) -> async_channel::Receiver<StdinCommandEnvelope> {
     // P1-6: Use bounded channel to prevent unbounded memory growth
     // Capacity of 100 is generous for stdin commands (typically < 10/sec)
     let (tx, rx) = async_channel::bounded(100);
@@ -1280,11 +1308,28 @@ pub fn start_stdin_listener() -> async_channel::Receiver<StdinCommandEnvelope> {
                                 correlation_id = %correlation_id,
                                 "Failed to parse external command"
                             );
+                            if let (Some(sender), Some(response)) = (
+                                response_sender.as_ref(),
+                                crate::protocol::malformed_request_error(trimmed, &e),
+                            ) {
+                                if sender.try_send(response).is_err() {
+                                    tracing::warn!(
+                                        category = "STDIN",
+                                        event_type = "stdin_parse_error_response_dropped",
+                                        correlation_id = %correlation_id,
+                                        "Failed to enqueue malformed-payload response"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
                 Ok(StdinLineRead::TooLong { raw, raw_len }) => {
-                    let correlation_id = format!("stdin:oversize:{}", Uuid::new_v4());
+                    let request_id = extract_request_id_lenient(&raw);
+                    let correlation_id = request_id
+                        .as_deref()
+                        .map(|id| format!("stdin:req:{id}"))
+                        .unwrap_or_else(|| format!("stdin:oversize:{}", Uuid::new_v4()));
                     let _guard = logging::set_correlation_id(correlation_id.clone());
                     let summary = logging::summarize_payload(&raw);
                     tracing::warn!(
@@ -1296,6 +1341,19 @@ pub fn start_stdin_listener() -> async_channel::Receiver<StdinCommandEnvelope> {
                         correlation_id = %correlation_id,
                         "Skipping oversized external command"
                     );
+                    if let (Some(sender), Some(response)) = (
+                        response_sender.as_ref(),
+                        oversized_request_error(&raw, raw_len),
+                    ) {
+                        if sender.try_send(response).is_err() {
+                            tracing::warn!(
+                                category = "STDIN",
+                                event_type = "stdin_line_too_long_response_dropped",
+                                correlation_id = %correlation_id,
+                                "Failed to enqueue oversized-line response"
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     let correlation_id = format!("stdin:read:{}", Uuid::new_v4());
@@ -1547,6 +1605,60 @@ mod tests {
             _ => panic!("Expected second line to be a valid command"),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_line_with_early_request_id_builds_typed_error() -> anyhow::Result<()> {
+        let input = format!(
+            "{{\"requestId\":\"of19-early\",\"type\":\"setInput\",\"text\":\"{}\"}}\n",
+            "x".repeat(20_000)
+        );
+        let mut reader = Cursor::new(input);
+        let mut byte_buffer = Vec::new();
+        let read = read_stdin_line_bounded(&mut reader, &mut byte_buffer, MAX_STDIN_COMMAND_BYTES)?;
+        let StdinLineRead::TooLong { raw, raw_len } = read else {
+            panic!("expected oversized line");
+        };
+        assert_eq!(raw.len(), MAX_STDIN_COMMAND_BYTES);
+
+        let response = oversized_request_error(&raw, raw_len)
+            .expect("early requestId must survive in the retained prefix");
+        match response {
+            crate::protocol::Message::ExternalCommandResult {
+                request_id,
+                command,
+                ok,
+                error_code,
+                error_message,
+            } => {
+                assert_eq!(request_id, "of19-early");
+                assert_eq!(command, "setInput");
+                assert!(!ok);
+                assert_eq!(error_code.as_deref(), Some("line_too_long"));
+                let message = error_message.expect("length diagnostic");
+                assert!(message.contains("16384"));
+                assert!(message.contains(&raw_len.to_string()));
+            }
+            other => panic!("expected externalCommandResult, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_line_with_late_request_id_remains_log_only() -> anyhow::Result<()> {
+        let input = format!(
+            "{{\"type\":\"setInput\",\"text\":\"{}\",\"requestId\":\"of19-late\"}}\n",
+            "x".repeat(20_000)
+        );
+        let mut reader = Cursor::new(input);
+        let mut byte_buffer = Vec::new();
+        let read = read_stdin_line_bounded(&mut reader, &mut byte_buffer, MAX_STDIN_COMMAND_BYTES)?;
+        let StdinLineRead::TooLong { raw, raw_len } = read else {
+            panic!("expected oversized line");
+        };
+        assert!(!raw.contains("of19-late"));
+        assert!(oversized_request_error(&raw, raw_len).is_none());
         Ok(())
     }
 

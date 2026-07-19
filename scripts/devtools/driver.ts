@@ -38,7 +38,6 @@
 import {
   mkdirSync,
   existsSync,
-  rmSync,
   rmdirSync,
   statSync,
   symlinkSync,
@@ -109,8 +108,22 @@ export interface GpuiScrollWheelEvent {
   deltaX: number;
   deltaY: number;
   phase: "started" | "moved" | "ended";
-  directPhase?: "none" | "mayBegin" | "began" | "changed" | "stationary" | "ended" | "cancelled";
-  momentumPhase?: "none" | "mayBegin" | "began" | "changed" | "stationary" | "ended" | "cancelled";
+  directPhase?:
+    | "none"
+    | "mayBegin"
+    | "began"
+    | "changed"
+    | "stationary"
+    | "ended"
+    | "cancelled";
+  momentumPhase?:
+    | "none"
+    | "mayBegin"
+    | "began"
+    | "changed"
+    | "stationary"
+    | "ended"
+    | "cancelled";
   timestampSeconds?: number;
 }
 
@@ -191,6 +204,7 @@ interface Pending {
   resolve: (value: Json) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  expectedType: string | null;
 }
 
 /**
@@ -205,6 +219,11 @@ export abstract class ProtocolCore {
     unmatchedResponses: 0,
     readyWaitMs: 0,
   };
+  readonly matchedResponses: Array<{
+    requestId: string;
+    expectedType: string | null;
+    responseType: string | null;
+  }> = [];
 
   protected pending = new Map<string, Pending>();
   protected requestCounter = 0;
@@ -246,7 +265,8 @@ export abstract class ProtocolCore {
       typeof command.requestId === "string" && command.requestId.length > 0
         ? command.requestId
         : `${this.requestIdPrefix}-${process.pid}-${++this.requestCounter}`;
-    const payload: Json = { ...command, requestId };
+    const { requestId: _callerRequestId, ...commandWithoutRequestId } = command;
+    const payload: Json = { requestId, ...commandWithoutRequestId };
     const timeoutMs = opts.timeoutMs ?? this.defaultTimeoutMs;
 
     return new Promise<Json>((resolvePromise, rejectPromise) => {
@@ -262,6 +282,7 @@ export abstract class ProtocolCore {
         resolve: resolvePromise,
         reject: rejectPromise,
         timer,
+        expectedType: opts.expect ?? null,
       });
       this.stats.requestsSent += 1;
       try {
@@ -269,7 +290,9 @@ export abstract class ProtocolCore {
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);
-        rejectPromise(error instanceof Error ? error : new Error(String(error)));
+        rejectPromise(
+          error instanceof Error ? error : new Error(String(error)),
+        );
       }
     });
   }
@@ -285,6 +308,26 @@ export abstract class ProtocolCore {
     this.pending.delete(requestId);
     clearTimeout(pending.timer);
     this.stats.responsesMatched += 1;
+    this.matchedResponses.push({
+      requestId,
+      expectedType: pending.expectedType,
+      responseType:
+        typeof parsed.responseType === "string"
+          ? parsed.responseType
+          : typeof parsed.type === "string"
+            ? parsed.type
+            : null,
+    });
+    if (parsed.type === "externalCommandResult" && parsed.ok === false) {
+      const code =
+        typeof parsed.errorCode === "string" ? ` [${parsed.errorCode}]` : "";
+      const message =
+        typeof parsed.errorMessage === "string"
+          ? parsed.errorMessage
+          : "Protocol request failed";
+      pending.reject(new Error(`${message}${code}`));
+      return;
+    }
     pending.resolve(parsed);
   }
 
@@ -299,15 +342,30 @@ export abstract class ProtocolCore {
   // --- typed helpers ---------------------------------------------------------
 
   getState(opts: { timeoutMs?: number } = {}): Promise<Json> {
-    return this.request({ type: "getState" }, { expect: "stateResult", ...opts });
+    return this.request(
+      { type: "getState" },
+      { expect: "stateResult", ...opts },
+    );
   }
 
-  getElements(extra: Json = {}, opts: { timeoutMs?: number } = {}): Promise<Json> {
-    return this.request({ type: "getElements", ...extra }, opts);
+  getElements(
+    extra: Json = {},
+    opts: { timeoutMs?: number } = {},
+  ): Promise<Json> {
+    return this.request(
+      { type: "getElements", ...extra },
+      { expect: "elementsResult", ...opts },
+    );
   }
 
-  getLayoutInfo(extra: Json = {}, opts: { timeoutMs?: number } = {}): Promise<Json> {
-    return this.request({ type: "getLayoutInfo", ...extra }, opts);
+  getLayoutInfo(
+    extra: Json = {},
+    opts: { timeoutMs?: number } = {},
+  ): Promise<Json> {
+    return this.request(
+      { type: "getLayoutInfo", ...extra },
+      { expect: "layoutInfoResult", ...opts },
+    );
   }
 
   setFilter(text: string): void {
@@ -335,10 +393,7 @@ export abstract class ProtocolCore {
     event: GpuiScrollWheelEvent,
     opts: { target?: Json; timeoutMs?: number } = {},
   ): Promise<Json> {
-    return this.simulateGpuiEvent(
-      { ...event, type: "scrollWheel" },
-      opts,
-    );
+    return this.simulateGpuiEvent({ ...event, type: "scrollWheel" }, opts);
   }
 
   async simulateGpuiClick(
@@ -406,7 +461,12 @@ export abstract class ProtocolCore {
       /** Custom probe; defaults to getState. Must return comparable JSON. */
       probe?: () => Promise<Json>;
     } = {},
-  ): Promise<{ settled: boolean; elapsedMs: number; probes: number; lastState: Json }> {
+  ): Promise<{
+    settled: boolean;
+    elapsedMs: number;
+    probes: number;
+    lastState: Json;
+  }> {
     const required = Math.max(2, opts.samples ?? 3);
     const intervalMs = opts.intervalMs ?? 100;
     const timeoutMs = opts.timeoutMs ?? 5000;
@@ -472,7 +532,10 @@ export abstract class ProtocolCore {
   }
 
   listAutomationWindows(opts: { timeoutMs?: number } = {}): Promise<Json> {
-    return this.request({ type: "listAutomationWindows" }, opts);
+    return this.request(
+      { type: "listAutomationWindows" },
+      { expect: "automationWindowListResult", ...opts },
+    );
   }
 
   /**
@@ -482,7 +545,12 @@ export abstract class ProtocolCore {
    * on log content without reading files off disk.
    */
   getLogs(
-    filters: { limit?: number; level?: string; target?: string; contains?: string } = {},
+    filters: {
+      limit?: number;
+      level?: string;
+      target?: string;
+      contains?: string;
+    } = {},
     opts: { timeoutMs?: number } = {},
   ): Promise<Json> {
     return this.request(
@@ -530,10 +598,17 @@ export class Driver extends ProtocolCore {
   private readyResolve: (() => void) | null = null;
   private exited = false;
   private exitError: Error | null = null;
+  private streamConsumers: Promise<void>[] = [];
+  private streamError: Error | null = null;
+  private closePromise: Promise<void> | null = null;
+  private streamsDrained = false;
+  private logWriterClosed = false;
 
   private constructor(
     proc: Subprocess<"pipe", "pipe", "pipe">,
-    opts: Required<Pick<DriverOptions, "sessionName" | "sessionDir" | "defaultTimeoutMs">>,
+    opts: Required<
+      Pick<DriverOptions, "sessionName" | "sessionDir" | "defaultTimeoutMs">
+    >,
   ) {
     super(opts.defaultTimeoutMs, "drv");
     this.proc = proc;
@@ -567,7 +642,11 @@ export class Driver extends ProtocolCore {
         "/tmp/sk-driver-sessions",
         options.sessionName ? `${sessionName}-${launchId}` : sessionName,
       );
-    rmSync(sessionDir, { recursive: true, force: true });
+    if (existsSync(sessionDir)) {
+      throw new Error(
+        `Driver session directory must be fresh and absent: ${sessionDir}`,
+      );
+    }
     mkdirSync(sessionDir, { recursive: true });
 
     const env: Record<string, string> = {
@@ -602,7 +681,11 @@ export class Driver extends ProtocolCore {
       }
       if (options.seedAgentAuth) {
         const seed = Bun.spawnSync(
-          ["bash", join(PROJECT_ROOT, "scripts/agentic/seed-sandbox-home.sh"), home],
+          [
+            "bash",
+            join(PROJECT_ROOT, "scripts/agentic/seed-sandbox-home.sh"),
+            home,
+          ],
           { stdout: "pipe", stderr: "pipe" },
         );
         if (seed.exitCode !== 0) {
@@ -631,8 +714,15 @@ export class Driver extends ProtocolCore {
     const readyPromise = new Promise<void>((resolveReady) => {
       driver.readyResolve = resolveReady;
     });
-    driver.consumeStream(proc.stdout, true);
-    driver.consumeStream(proc.stderr, false);
+    const consume = (stream: ReadableStream<Uint8Array>, isStdout: boolean) =>
+      driver.consumeStream(stream, isStdout).catch((error) => {
+        driver.streamError =
+          error instanceof Error ? error : new Error(String(error));
+      });
+    driver.streamConsumers = [
+      consume(proc.stdout, true),
+      consume(proc.stderr, false),
+    ];
     proc.exited.then((code) => {
       driver.exited = true;
       driver.exitError = new Error(
@@ -650,17 +740,21 @@ export class Driver extends ProtocolCore {
     ]);
     driver.stats.readyWaitMs = Math.round(performance.now() - readyStart);
     if (driver.exited) {
-      throw driver.exitError ?? new Error("App process exited during startup");
+      const startupError =
+        driver.exitError ?? new Error("App process exited during startup");
+      await driver.close();
+      throw startupError;
     }
     if (timedOut) {
       // Marker not seen — fall back to a protocol probe before giving up.
       try {
         await driver.request({ type: "getState" }, { timeoutMs: 2000 });
       } catch {
-        await driver.close();
-        throw new Error(
+        const startupError = new Error(
           `App did not become ready within ${readyTimeoutMs}ms — see ${driver.logPath}`,
         );
+        await driver.close();
+        throw startupError;
       }
     }
     return driver;
@@ -687,7 +781,24 @@ export class Driver extends ProtocolCore {
     return this.proc.pid;
   }
 
-  async close(): Promise<void> {
+  get finalization(): {
+    processExited: boolean;
+    streamsDrained: boolean;
+    logWriterClosed: boolean;
+  } {
+    return {
+      processExited: this.exited,
+      streamsDrained: this.streamsDrained,
+      logWriterClosed: this.logWriterClosed,
+    };
+  }
+
+  close(): Promise<void> {
+    this.closePromise ??= this.closeInternal();
+    return this.closePromise;
+  }
+
+  private async closeInternal(): Promise<void> {
     this.failAllPending(new Error("Driver closed"));
     if (!this.exited) {
       try {
@@ -705,11 +816,25 @@ export class Driver extends ProtocolCore {
         await Promise.race([this.proc.exited, Bun.sleep(1000)]);
       }
     }
-    try {
-      await this.logWriter.flush();
-      await this.logWriter.end();
-    } catch {
-      // log writer may already be closed
+    if (!this.exited) {
+      throw new Error(
+        `Driver process ${this.proc.pid} survived TERM/KILL finalization`,
+      );
+    }
+    const outcomes = await Promise.allSettled(this.streamConsumers);
+    const rejected = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === "rejected",
+    );
+    this.streamsDrained = rejected === undefined && this.streamError === null;
+    await this.logWriter.flush();
+    await this.logWriter.end();
+    this.logWriterClosed = true;
+    const streamFailure = this.streamError ?? rejected?.reason;
+    if (streamFailure) {
+      throw streamFailure instanceof Error
+        ? streamFailure
+        : new Error(String(streamFailure));
     }
   }
 
@@ -721,20 +846,17 @@ export class Driver extends ProtocolCore {
   ): Promise<void> {
     const decoder = new TextDecoder();
     let buffer = "";
-    try {
-      for await (const chunk of stream) {
-        buffer += decoder.decode(chunk, { stream: true });
-        let newlineIndex = buffer.indexOf("\n");
-        while (newlineIndex >= 0) {
-          const line = buffer.slice(0, newlineIndex);
-          buffer = buffer.slice(newlineIndex + 1);
-          this.handleLine(line, isStdout);
-          newlineIndex = buffer.indexOf("\n");
-        }
+    for await (const chunk of stream) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        this.handleLine(line, isStdout);
+        newlineIndex = buffer.indexOf("\n");
       }
-    } catch {
-      // stream closed with the process
     }
+    buffer += decoder.decode();
     if (buffer.length > 0) {
       this.handleLine(buffer, isStdout);
     }
@@ -783,7 +905,11 @@ export class AttachedDriver extends ProtocolCore {
   private closed = false;
   private lineBuffer = "";
 
-  private constructor(opts: { sessionName: string; sessionDir: string; defaultTimeoutMs: number }) {
+  private constructor(opts: {
+    sessionName: string;
+    sessionDir: string;
+    defaultTimeoutMs: number;
+  }) {
     super(opts.defaultTimeoutMs, "atd");
     this.sessionName = opts.sessionName;
     this.sessionDir = opts.sessionDir;
@@ -793,7 +919,10 @@ export class AttachedDriver extends ProtocolCore {
 
   static async attach(options: AttachOptions = {}): Promise<AttachedDriver> {
     const sessionName = options.session ?? "default";
-    const root = options.sessionsRoot ?? process.env.SCRIPT_KIT_SESSION_DIR ?? "/tmp/sk-agentic-sessions";
+    const root =
+      options.sessionsRoot ??
+      process.env.SCRIPT_KIT_SESSION_DIR ??
+      "/tmp/sk-agentic-sessions";
     const sessionDir = join(root, sessionName);
     const fifoPath = join(sessionDir, "input");
     const pidPath = join(sessionDir, "pid");
@@ -826,7 +955,10 @@ export class AttachedDriver extends ProtocolCore {
     if (options.verify !== false) {
       const readyStart = performance.now();
       try {
-        await attached.request({ type: "getState" }, { timeoutMs: options.defaultTimeoutMs ?? 5000 });
+        await attached.request(
+          { type: "getState" },
+          { timeoutMs: options.defaultTimeoutMs ?? 5000 },
+        );
       } catch (error) {
         await attached.close();
         throw new Error(
@@ -886,7 +1018,11 @@ export class AttachedDriver extends ProtocolCore {
     this.pollTimer = setInterval(() => {
       if (!this.watcher) {
         try {
-          this.watcher = watch(this.responsesPath, { persistent: false }, drain);
+          this.watcher = watch(
+            this.responsesPath,
+            { persistent: false },
+            drain,
+          );
         } catch {
           // still missing
         }
@@ -947,7 +1083,9 @@ export class AttachedDriver extends ProtocolCore {
   get alive(): boolean {
     if (this.closed) return false;
     try {
-      const pid = Number(readFileSync(join(this.sessionDir, "pid"), "utf8").trim() || "0");
+      const pid = Number(
+        readFileSync(join(this.sessionDir, "pid"), "utf8").trim() || "0",
+      );
       return Boolean(pid) && processAlive(pid);
     } catch {
       return false;
@@ -1047,7 +1185,9 @@ if (import.meta.main) {
       ),
     );
   } else {
-    console.error("Usage: bun scripts/devtools/driver.ts smoke | attach-smoke [session]");
+    console.error(
+      "Usage: bun scripts/devtools/driver.ts smoke | attach-smoke [session]",
+    );
     process.exit(2);
   }
 }

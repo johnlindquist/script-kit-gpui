@@ -173,33 +173,24 @@ mod tests {
         let dir = temp_dir("env");
         let path = dir.join("explicit.gguf");
         std::fs::write(&path, b"GGUF").expect("write");
-        // Safe in a single-threaded test: set, resolve, restore.
-        let prev = std::env::var_os(ENV_MODEL_PATH);
-        std::env::set_var(ENV_MODEL_PATH, &path);
-        let resolved =
-            resolve_ghost_model(&crate::config::Config::default()).expect("env path resolves");
-        assert_eq!(resolved.path, path);
-        match prev {
-            Some(v) => std::env::set_var(ENV_MODEL_PATH, v),
-            None => std::env::remove_var(ENV_MODEL_PATH),
-        }
+        temp_env::with_var(ENV_MODEL_PATH, Some(&path), || {
+            let resolved =
+                resolve_ghost_model(&crate::config::Config::default()).expect("env path resolves");
+            assert_eq!(resolved.path, path);
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn resolver_returns_none_when_env_points_at_missing_file() {
-        let prev = std::env::var_os(ENV_MODEL_PATH);
         let missing = std::env::temp_dir().join("script-kit-ghost-does-not-exist.gguf");
         let _ = std::fs::remove_file(&missing);
-        std::env::set_var(ENV_MODEL_PATH, &missing);
-        // The env path is missing; only a real on-disk model elsewhere could
-        // satisfy resolution. This asserts the env miss does not panic and the
-        // resolved model (if any) is never the missing file.
-        let resolved = resolve_ghost_model(&crate::config::Config::default());
-        assert!(resolved.as_ref().map(|m| &m.path) != Some(&missing));
-        match prev {
-            Some(v) => std::env::set_var(ENV_MODEL_PATH, v),
-            None => std::env::remove_var(ENV_MODEL_PATH),
-        }
+        temp_env::with_var(ENV_MODEL_PATH, Some(&missing), || {
+            // The env path is missing; only a real on-disk model elsewhere could
+            // satisfy resolution. This asserts the env miss does not panic and the
+            // resolved model (if any) is never the missing file.
+            let resolved = resolve_ghost_model(&crate::config::Config::default());
+            assert!(resolved.as_ref().map(|m| &m.path) != Some(&missing));
+        });
     }
 }

@@ -59,7 +59,10 @@ pub fn matches_state_spec(snapshot: &UiStateSnapshot, spec: &StateMatchSpec) -> 
 
 fn matches_state(snapshot: &UiStateSnapshot, spec: &StateMatchSpec) -> bool {
     if let Some(ref expected) = spec.input_value {
-        if snapshot.input_value.as_deref() != Some(expected.as_str()) {
+        // UI snapshots omit an empty input as `None`, while automation clients
+        // express a wait-for-empty predicate as `Some("")`. Treat both wire
+        // representations as the same visible state.
+        if snapshot.input_value.as_deref().unwrap_or("") != expected {
             return false;
         }
     }
@@ -79,6 +82,27 @@ fn matches_state(snapshot: &UiStateSnapshot, spec: &StateMatchSpec) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod state_match_tests {
+    use super::*;
+
+    #[test]
+    fn expected_empty_input_matches_none_and_some_empty_snapshots() {
+        let spec = StateMatchSpec {
+            input_value: Some(String::new()),
+            ..StateMatchSpec::default()
+        };
+
+        for input_value in [None, Some(String::new())] {
+            let snapshot = UiStateSnapshot {
+                input_value,
+                ..UiStateSnapshot::default()
+            };
+            assert!(matches_state_spec(&snapshot, &spec));
+        }
+    }
 }
 
 fn unsupported_wait_condition(condition: &WaitCondition) -> Option<TransactionError> {
