@@ -208,6 +208,43 @@ impl HotkeyRoutes {
     }
 }
 
+/// Byte budget for one route-summary log line's message content. The
+/// timestamp/level/cid prefix adds ~60-80 bytes; keeping content under this
+/// keeps the full emitted line below the 2048-byte log-hygiene cap that
+/// root-typing-lag-benchmark enforces (oversized single lines break
+/// line-oriented log tooling).
+const ROUTE_SUMMARY_LINE_BUDGET: usize = 1900;
+
+/// Split the hotkey route summary into a header line plus
+/// `GLOBAL_HOTKEY_ROUTE_DETAIL` continuation lines, each within
+/// [`ROUTE_SUMMARY_LINE_BUDGET`] bytes of content.
+fn route_summary_lines(header: String, details: &[String]) -> Vec<String> {
+    let mut lines = vec![header];
+    let mut chunk: Vec<&str> = Vec::new();
+    let mut chunk_len = 0usize;
+    let flush = |chunk: &mut Vec<&str>, chunk_len: &mut usize, lines: &mut Vec<String>| {
+        if !chunk.is_empty() {
+            lines.push(format!(
+                "GLOBAL_HOTKEY_ROUTE_DETAIL routes=[{}]",
+                chunk.join(",")
+            ));
+            chunk.clear();
+            *chunk_len = 0;
+        }
+    };
+    for detail in details {
+        // +1 for the joining comma; ~40 bytes for the detail-line scaffold.
+        let projected = chunk_len + detail.len() + 1 + 40;
+        if !chunk.is_empty() && projected > ROUTE_SUMMARY_LINE_BUDGET {
+            flush(&mut chunk, &mut chunk_len, &mut lines);
+        }
+        chunk_len += detail.len() + 1;
+        chunk.push(detail.as_str());
+    }
+    flush(&mut chunk, &mut chunk_len, &mut lines);
+    lines
+}
+
 fn hotkey_action_label(action: &HotkeyAction) -> String {
     match action {
         HotkeyAction::Main => "Main launcher".to_string(),
@@ -1810,7 +1847,10 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
             &format!("Registered {} script/scriptlet shortcuts", script_count),
         );
 
-        // Log routing table summary
+        // Log routing table summary. Route details are chunked across
+        // continuation lines: a single line enumerating every route breaches
+        // the 2048-byte log-hygiene budget once builtin + script hotkeys add
+        // up (root-typing-lag-benchmark maxLogLineBytes gate).
         {
             let routes_guard = routes().read();
             let route_details = routes_guard
@@ -1824,23 +1864,22 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
                         hotkey_action_label(&entry.action)
                     )
                 })
-                .collect::<Vec<_>>()
-                .join(",");
-            logging::log(
-                "KEY_SETUP",
-                &format!(
-                    "GLOBAL_HOTKEY_ROUTE_SUMMARY main={:?} notes={:?} ai={:?} logs={:?} dictation={:?} inline_ai={:?} rewrite={:?} scripts={} routes=[{}]",
-                    routes_guard.main_id,
-                    routes_guard.notes_id,
-                    routes_guard.ai_id,
-                    routes_guard.logs_id,
-                    routes_guard.dictation_id,
-                    routes_guard.inline_ai_id,
-                    routes_guard.rewrite_id,
-                    routes_guard.script_paths.len(),
-                    route_details
-                ),
+                .collect::<Vec<_>>();
+            let header = format!(
+                "GLOBAL_HOTKEY_ROUTE_SUMMARY main={:?} notes={:?} ai={:?} logs={:?} dictation={:?} inline_ai={:?} rewrite={:?} scripts={} routes={}",
+                routes_guard.main_id,
+                routes_guard.notes_id,
+                routes_guard.ai_id,
+                routes_guard.logs_id,
+                routes_guard.dictation_id,
+                routes_guard.inline_ai_id,
+                routes_guard.rewrite_id,
+                routes_guard.script_paths.len(),
+                route_details.len(),
             );
+            for line in route_summary_lines(header, &route_details) {
+                logging::log("KEY_SETUP", &line);
+            }
         }
 
         drop(manager_guard);
@@ -2112,6 +2151,37 @@ mod tests {
     // =============================================================================
     mod routing_table_tests {
         use super::*;
+
+        #[test]
+        fn route_summary_lines_stay_under_log_hygiene_budget() {
+            // Why: a single GLOBAL_HOTKEY_ROUTE_SUMMARY line enumerating every
+            // route crossed 2048 bytes (2136 observed 2026-07-18) and failed
+            // the typing-lag benchmark's maxLogLineBytes gate. Details must
+            // chunk across lines while preserving every route entry.
+            let details: Vec<String> = (0..200)
+                .map(|i| format!("{i}:cmd+alt+shift+f{}=>script:/Users/example/.scriptkit/scripts/some-long-script-name-{i}.ts", i % 12))
+                .collect();
+            let lines = route_summary_lines(
+                "GLOBAL_HOTKEY_ROUTE_SUMMARY scripts=200 routes=200".to_string(),
+                &details,
+            );
+            assert!(lines.len() > 1, "long route sets must chunk");
+            for line in &lines {
+                assert!(
+                    line.len() <= ROUTE_SUMMARY_LINE_BUDGET,
+                    "line exceeds budget ({} bytes): {}",
+                    line.len(),
+                    &line[..80.min(line.len())]
+                );
+            }
+            let joined = lines.join("\n");
+            for detail in &details {
+                assert!(
+                    joined.contains(detail.as_str()),
+                    "route entry dropped: {detail}"
+                );
+            }
+        }
 
         #[test]
         fn test_hotkey_routes_new() {
