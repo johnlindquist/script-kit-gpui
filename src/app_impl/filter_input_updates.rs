@@ -165,17 +165,17 @@ impl ScriptListApp {
             MainMenuRefreshSelectionPolicy::RestoreIdentity => {
                 self.restore_main_menu_selection_from_snapshot(selection_before)
             }
-            MainMenuRefreshSelectionPolicy::SnapToFirst => {
-                self.snap_main_menu_selection_to_first();
-                tracing::debug!(
-                    target: "script_kit::selection",
-                    event = "main_menu_refresh_snap_to_first_untouched_selection",
-                    reason,
-                    selected_index = self.selected_index,
-                );
-                false
-            }
+            MainMenuRefreshSelectionPolicy::SnapToFirst => false,
         };
+        if !restored {
+            self.snap_main_menu_selection_to_first();
+            tracing::debug!(
+                target: "script_kit::selection",
+                event = "main_menu_refresh_snap_to_first_missing_identity",
+                reason,
+                selected_index = self.selected_index,
+            );
+        }
         if restored {
             tracing::debug!(
                 target: "script_kit::selection",

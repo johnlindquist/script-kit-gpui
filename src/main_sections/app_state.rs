@@ -501,13 +501,12 @@ pub(crate) enum MainMenuRefreshSelectionPolicy {
 }
 
 pub(crate) fn main_menu_refresh_selection_policy(
-    user_moved_selection: bool,
+    _user_moved_selection: bool,
 ) -> MainMenuRefreshSelectionPolicy {
-    if user_moved_selection {
-        MainMenuRefreshSelectionPolicy::RestoreIdentity
-    } else {
-        MainMenuRefreshSelectionPolicy::SnapToFirst
-    }
+    // Once a row has been painted, provider timing must not change what Enter
+    // runs. Query changes reset selection through the separate filter-change
+    // path; same-query result refreshes preserve the painted stable identity.
+    MainMenuRefreshSelectionPolicy::RestoreIdentity
 }
 
 impl ScriptListApp {
@@ -615,7 +614,6 @@ impl ScriptListApp {
         self.last_scrolled_index = None;
         true
     }
-
 }
 
 #[cfg(test)]
@@ -633,9 +631,7 @@ impl gpui::Render for MainMenuSelectionTestHost {
 }
 
 #[cfg(test)]
-fn main_menu_selection_test_app(
-    cx: &mut gpui::TestAppContext,
-) -> gpui::Entity<ScriptListApp> {
+fn main_menu_selection_test_app(cx: &mut gpui::TestAppContext) -> gpui::Entity<ScriptListApp> {
     use gpui::AppContext as _;
 
     let flow_cwd = crate::flows::resolve_flow_cwd(
@@ -657,9 +653,7 @@ fn main_menu_selection_test_app(
             let mut built_ins = config.get_builtins();
             built_ins.app_launcher = false;
             config.built_ins = Some(built_ins);
-            let entity = cx.new(|cx| {
-                ScriptListApp::new(config, false, window, cx)
-            });
+            let entity = cx.new(|cx| ScriptListApp::new(config, false, window, cx));
             *app_for_window.lock().expect("lock selection test app") = Some(entity);
             cx.new(|_| MainMenuSelectionTestHost)
         })
@@ -784,8 +778,8 @@ pub(crate) struct ScriptListApp {
         Option<crate::menu_bar::current_app_commands::CurrentAppCommandsSession>,
     selected_index: usize,
     /// True after the user deliberately moves the launcher selection for the
-    /// current filter. Async provider refreshes preserve row identity only in
-    /// that case; untouched auto-selection stays pinned to the first row.
+    /// current filter. Retained as refresh diagnostics; same-query provider
+    /// updates preserve every painted row identity regardless of this flag.
     main_menu_selection_user_moved: bool,
     /// Main menu filter text (mirrors gpui-component input state)
     filter_text: String,
@@ -1456,10 +1450,10 @@ mod app_state_selection_tests {
     use super::{main_menu_refresh_selection_policy, MainMenuRefreshSelectionPolicy};
 
     #[test]
-    fn async_refresh_snaps_untouched_selection_and_restores_user_selection() {
+    fn async_refresh_always_restores_painted_selection_identity() {
         assert_eq!(
             main_menu_refresh_selection_policy(false),
-            MainMenuRefreshSelectionPolicy::SnapToFirst
+            MainMenuRefreshSelectionPolicy::RestoreIdentity
         );
         assert_eq!(
             main_menu_refresh_selection_policy(true),
