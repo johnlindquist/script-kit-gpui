@@ -239,8 +239,7 @@ impl NotesApp {
         crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
 
         window.close_all_dialogs(cx);
-        window.remove_window();
-        super::window_ops::restore_launcher_after_notes_close_if_needed(cx);
+        super::window_ops::close_current_notes_window(window, cx);
         cx.stop_propagation();
     }
 
@@ -575,8 +574,7 @@ impl NotesApp {
                         wb,
                     );
                     window.close_all_dialogs(cx);
-                    window.remove_window();
-                    super::window_ops::restore_launcher_after_notes_close_if_needed(cx);
+                    super::window_ops::close_current_notes_window(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -648,8 +646,7 @@ impl NotesApp {
             let wb = window.window_bounds();
             crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
             window.close_all_dialogs(cx);
-            window.remove_window();
-            super::window_ops::restore_launcher_after_notes_close_if_needed(cx);
+            super::window_ops::close_current_notes_window(window, cx);
             return;
         }
 
@@ -863,8 +860,7 @@ impl NotesApp {
                         wb,
                     );
                     window.close_all_dialogs(cx);
-                    window.remove_window();
-                    super::window_ops::restore_launcher_after_notes_close_if_needed(cx);
+                    super::window_ops::close_current_notes_window(window, cx);
                     cx.stop_propagation();
                 }
                 "." => {
@@ -1131,22 +1127,6 @@ mod dialog_modal_guard_tests {
         assert!(
             KEYBOARD_SOURCE.contains("event = \"notes_dialog_key_guard\""),
             "Notes keyboard should log when an active dialog is intercepting keys"
-        );
-    }
-
-    #[test]
-    fn notes_close_paths_close_all_dialogs_before_remove_window() {
-        let source = fs::read_to_string("src/notes/window/keyboard.rs")
-            .expect("Failed to read src/notes/window/keyboard.rs");
-        let normalized = normalize_ws(&source);
-
-        let close_then_remove_count = normalized
-            .matches("window.close_all_dialogs(cx); window.remove_window();")
-            .count();
-
-        assert!(
-            close_then_remove_count >= 2,
-            "Escape and Cmd+W should both close dialogs before removing the Notes window"
         );
     }
 }

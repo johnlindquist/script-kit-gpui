@@ -631,14 +631,9 @@ fn open_notes_window_with_close_behavior(
                 target: "script_kit::keyboard",
                 event = "notes_toggle_off_restore_launcher_requested"
             );
-            // Clear the stored handle
-            let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
-            if let Ok(mut g) = slot.lock() {
-                *g = None;
-            }
-            crate::windows::remove_automation_window("notes");
-            crate::windows::remove_runtime_window_handle("notes");
-
+            retire_notes_window_registrations(notes_window_close_transition(
+                NotesWindowCloseOrigin::CurrentWindow,
+            ));
             restore_launcher_after_notes_close_if_needed(cx);
             return Ok(());
         }
@@ -762,6 +757,15 @@ fn open_notes_window_with_close_behavior(
     // Focus the editor input in the Notes window
     // Release lock before calling update
     let notes_app_entity = notes_app_holder.lock().ok().and_then(|mut g| g.take());
+    if notes_app_entity.is_none() {
+        // Chaos-15 diagnosability: the open_window closure should have filled
+        // the holder synchronously; an empty holder here leaves the global
+        // entity slot stale/empty and breaks every protocol notes target.
+        tracing::warn!(
+            target: "script_kit::automation",
+            "notes_open_holder_empty_after_open_window"
+        );
+    }
     if let Some(notes_app) = notes_app_entity {
         // Store the entity globally for quick_capture access
         {
@@ -769,6 +773,12 @@ fn open_notes_window_with_close_behavior(
             if let Ok(mut g) = slot.lock() {
                 *g = Some(notes_app.clone());
             }
+            tracing::info!(
+                target: "script_kit::automation",
+                entity_slot_addr = format!("{:p}", &NOTES_APP_ENTITY),
+                window_slot_addr = format!("{:p}", &NOTES_WINDOW),
+                "notes_entity_stored_after_open"
+            );
         }
 
         let _ = update_notes_window_detached(handle, cx, |window, cx| {
@@ -1062,6 +1072,94 @@ pub fn inject_text_into_notes(cx: &mut App, text: &str) -> Result<serde_json::Va
 }
 
 /// Close the notes window
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotesWindowCloseOrigin {
+    /// The close began inside the live Notes window, so its global handle is
+    /// still registered and must be taken without trying to lease it again.
+    CurrentWindow,
+    /// The outside close helper already took the handle to avoid a re-entrant
+    /// Root lease while it updates the window.
+    StoredHandleAlreadyTaken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotesWindowCloseTransition {
+    take_window_handle: bool,
+    take_app_entity: bool,
+    remove_automation_registration: bool,
+    remove_runtime_handle: bool,
+    restore_launcher_after_removal: bool,
+}
+
+const fn notes_window_close_transition(
+    origin: NotesWindowCloseOrigin,
+) -> NotesWindowCloseTransition {
+    NotesWindowCloseTransition {
+        take_window_handle: matches!(origin, NotesWindowCloseOrigin::CurrentWindow),
+        take_app_entity: true,
+        remove_automation_registration: true,
+        remove_runtime_handle: true,
+        restore_launcher_after_removal: true,
+    }
+}
+
+fn retire_notes_window_registrations(transition: NotesWindowCloseTransition) {
+    if transition.take_window_handle {
+        let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
+        if let Ok(mut guard) = slot.lock() {
+            guard.take();
+        }
+    }
+    if transition.take_app_entity {
+        let entity = {
+            let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
+            slot.lock().ok().and_then(|mut guard| guard.take())
+        };
+        // Release the slot lock before dropping the entity: NotesApp::drop
+        // clears these same lifecycle globals when this is the current instance.
+        drop(entity);
+    }
+    if transition.remove_automation_registration {
+        crate::windows::remove_automation_window("notes");
+    }
+    if transition.remove_runtime_handle {
+        crate::windows::remove_runtime_window_handle("notes");
+    }
+}
+
+fn run_current_notes_window_close_sequence(
+    transition: NotesWindowCloseTransition,
+    retire: impl FnOnce(NotesWindowCloseTransition),
+    restore_launcher: impl FnOnce(),
+    schedule_window_release: impl FnOnce(),
+) {
+    retire(transition);
+    if transition.restore_launcher_after_removal {
+        restore_launcher();
+    }
+    schedule_window_release();
+}
+
+/// Finish a close initiated from inside the live Notes window.
+///
+/// Calling `close_notes_window` here would try to lease the same GPUI window
+/// recursively. Retire the same-crate globals and registries directly, hand
+/// focus back while GPUI can still service the native active-status callback,
+/// then release the window once on the next frame. Removing it before the
+/// focus handoff makes GPUI's callback log `window not found`.
+pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
+    let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
+    run_current_notes_window_close_sequence(
+        transition,
+        retire_notes_window_registrations,
+        || restore_launcher_after_notes_close_if_needed(cx),
+        || {
+            window.on_next_frame(|window, _cx| window.remove_window());
+            window.request_animation_frame();
+        },
+    );
+}
+
 pub fn close_notes_window(cx: &mut App) {
     // SAFETY: Release lock BEFORE calling handle.update() to prevent deadlock
     // If handle.update() causes Drop to fire synchronously and tries to acquire
@@ -1070,8 +1168,9 @@ pub fn close_notes_window(cx: &mut App) {
         let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
         slot.lock().ok().and_then(|mut g| g.take())
     };
-    crate::windows::remove_automation_window("notes");
-    crate::windows::remove_runtime_window_handle("notes");
+    let transition =
+        notes_window_close_transition(NotesWindowCloseOrigin::StoredHandleAlreadyTaken);
+    retire_notes_window_registrations(transition);
 
     if let Some(handle) = handle {
         match update_notes_window_detached(handle, cx, |window, cx| {
@@ -1088,7 +1187,9 @@ pub fn close_notes_window(cx: &mut App) {
                     target: "script_kit::keyboard",
                     event = "notes_helper_close_restore_launcher_requested"
                 );
-                restore_launcher_after_notes_close_if_needed(cx);
+                if transition.restore_launcher_after_removal {
+                    restore_launcher_after_notes_close_if_needed(cx);
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -1321,13 +1422,29 @@ pub fn get_notes_editor_runtime_info(
 pub fn get_notes_app_entity_and_handle() -> Option<(Entity<NotesApp>, gpui::WindowHandle<Root>)> {
     let entity = {
         let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok()?.clone()?
+        slot.lock().ok().and_then(|g| g.clone())
     };
     let handle = {
         let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok()?.as_ref().copied()?
+        slot.lock().ok().and_then(|g| *g)
     };
-    Some((entity, handle))
+    match (entity, handle) {
+        (Some(entity), Some(handle)) => Some((entity, handle)),
+        (entity, handle) => {
+            // Diagnosability for the chaos-15 reopen bug: report WHICH slot is
+            // empty, plus the statics' addresses — if a store site logs a
+            // different address, the lib/bin dual-crate static trap is in play.
+            tracing::warn!(
+                target: "script_kit::automation",
+                entity_present = entity.is_some(),
+                handle_present = handle.is_some(),
+                entity_slot_addr = format!("{:p}", &NOTES_APP_ENTITY),
+                window_slot_addr = format!("{:p}", &NOTES_WINDOW),
+                "notes_entity_handle_lookup_failed"
+            );
+            None
+        }
+    }
 }
 
 /// Handle the current Notes ghost autocomplete prediction through the live
@@ -1498,4 +1615,76 @@ pub fn toggle_notes_popup_for_automation(
 /// proof. New callers should use `handle_notes_ghost_key_for_automation`.
 pub fn accept_notes_ghost_for_automation(cx: &mut App) -> Result<serde_json::Value, String> {
     handle_notes_ghost_key_for_automation(cx, "tab")
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::{
+        notes_window_close_transition, run_current_notes_window_close_sequence,
+        NotesWindowCloseOrigin,
+    };
+    use std::cell::RefCell;
+
+    #[test]
+    fn current_window_close_retires_every_registration_before_launcher_restore() {
+        let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
+
+        assert!(transition.take_window_handle);
+        assert!(transition.take_app_entity);
+        assert!(transition.remove_automation_registration);
+        assert!(transition.remove_runtime_handle);
+        assert!(transition.restore_launcher_after_removal);
+    }
+
+    #[test]
+    fn current_window_close_focus_handoff_precedes_single_window_release() {
+        #[derive(Debug)]
+        struct FakeLifecycle {
+            gpui_window_exists: bool,
+            release_count: usize,
+            error_logs: Vec<&'static str>,
+            events: Vec<&'static str>,
+        }
+
+        let lifecycle = RefCell::new(FakeLifecycle {
+            gpui_window_exists: true,
+            release_count: 0,
+            error_logs: Vec::new(),
+            events: Vec::new(),
+        });
+        let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
+
+        run_current_notes_window_close_sequence(
+            transition,
+            |_| lifecycle.borrow_mut().events.push("retire"),
+            || {
+                let mut lifecycle = lifecycle.borrow_mut();
+                lifecycle.events.push("restore_launcher");
+                if !lifecycle.gpui_window_exists {
+                    lifecycle.error_logs.push("window not found");
+                }
+            },
+            || {
+                let mut lifecycle = lifecycle.borrow_mut();
+                lifecycle.events.push("schedule_window_release");
+                lifecycle.gpui_window_exists = false;
+                lifecycle.release_count += 1;
+            },
+        );
+
+        let lifecycle = lifecycle.into_inner();
+        assert_eq!(
+            lifecycle.events,
+            ["retire", "restore_launcher", "schedule_window_release"]
+        );
+        assert_eq!(
+            lifecycle.release_count, 1,
+            "window release must be exactly once"
+        );
+        assert!(
+            lifecycle.error_logs.is_empty(),
+            "focus callbacks must not touch an already-released GPUI handle: {:?}",
+            lifecycle.error_logs
+        );
+    }
 }

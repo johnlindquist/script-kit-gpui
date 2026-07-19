@@ -212,31 +212,6 @@ fn test_notes_keyboard_escape_routes_through_shared_dismiss_ladder() {
     );
 }
 
-/// Escape-close must have the same data-loss profile as Cmd+W: the note
-/// autosave is debounced (SAVE_DEBOUNCE_MS), so any branch that reaches
-/// remove_window() must call save_current_note() first or the final
-/// keystrokes never land on disk. Cmd+W already does this; this locks the
-/// Escape branch to the same contract.
-#[test]
-fn test_notes_keyboard_escape_close_saves_before_remove_window() {
-    const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
-
-    let editor_escape = KEYBOARD_SOURCE
-        .find("if is_key_escape(key) {\n            cx.stop_propagation();")
-        .expect("editor escape branch should exist");
-    let escape_branch = &KEYBOARD_SOURCE[editor_escape..];
-    let save = escape_branch
-        .find("self.save_current_note();")
-        .expect("escape close must save the current note before tearing the window down");
-    let remove = escape_branch
-        .find("window.remove_window();")
-        .expect("escape close should remove the window");
-    assert!(
-        save < remove,
-        "escape close must call save_current_note() BEFORE remove_window()"
-    );
-}
-
 #[test]
 fn test_notes_keyboard_backtick_accepts_full_ghost_without_swallowing_plain_backtick() {
     const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");

@@ -18,8 +18,10 @@
 //!         let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
 //!         slot.lock().ok().and_then(|mut g| g.take())
 //!     };
-//!     crate::windows::remove_automation_window("notes");
-//!     crate::windows::remove_runtime_window_handle("notes");
+//!     let transition = notes_window_close_transition(
+//!         NotesWindowCloseOrigin::StoredHandleAlreadyTaken,
+//!     );
+//!     retire_notes_window_registrations(transition);
 //!
 //!     if let Some(handle) = handle {
 //!         /* handle.update(...) → save bounds, close dialogs, remove_window */
@@ -27,14 +29,12 @@
 //! }
 //! ```
 //!
-//! Why this Pin exists. `close_notes_window` is the SOLE dispatcher of
-//! `WindowCommand::CloseNotesWindow` at
-//! `src/window_orchestrator/executor.rs:99`. Other notes-close paths
-//! (traffic light, Cmd+W, toggle — see the comment at
-//! `src/notes/window.rs:337`) DO NOT route through this function; they
-//! have their own close logic. So the invariants here apply to the
-//! orchestrator-dispatched close path specifically, which is the path
-//! invoked from the keyboard shortcut handler and programmatic close.
+//! Why this Pin exists. `close_notes_window` is the orchestrator dispatcher
+//! for `WindowCommand::CloseNotesWindow`, while in-window Escape/Cmd+W and the
+//! toggle path cannot recursively lease that same GPUI window. All paths now
+//! converge on `retire_notes_window_registrations`; this contract follows that
+//! helper so extracting the shared lifecycle step cannot force duplicated
+//! registry cleanup back into each caller.
 //!
 //! Five load-bearing details:
 //!
@@ -59,11 +59,11 @@
 //!      `handle.update()` would collapse the scope and hold the lock
 //!      across the update — silently reintroducing the deadlock.
 //!
-//!   3. **Pair of registry clears** — BOTH
-//!      `crate::windows::remove_automation_window("notes")` AND
-//!      `crate::windows::remove_runtime_window_handle("notes")` fire,
-//!      unconditionally, between the static `.take()` and the
-//!      `handle.update()`. Dropping either half leaves one registry
+//!   3. **Pair of registry clears** — the shared retirement helper contains
+//!      BOTH `crate::windows::remove_automation_window("notes")` AND
+//!      `crate::windows::remove_runtime_window_handle("notes")`, and
+//!      `close_notes_window` calls that helper unconditionally between the
+//!      static `.take()` and `handle.update()`. Dropping either half leaves one registry
 //!      shard stale (same failure shape as the Run 9 Pass #28
 //!      actions-dialog regression — `listAutomationWindows` reports a
 //!      ghost entry while `inspectAutomationWindow` fails with
@@ -110,6 +110,9 @@
 
 const SOURCE: &str = include_str!("../src/notes/window/window_ops.rs");
 const FN_SIGNATURE: &str = "pub fn close_notes_window(cx: &mut App)";
+const RETIRE_FN_SIGNATURE: &str =
+    "fn retire_notes_window_registrations(transition: NotesWindowCloseTransition)";
+const RETIRE_CALL: &str = "retire_notes_window_registrations(transition)";
 const STATIC_TAKE_MARKER: &str = "NOTES_WINDOW.get_or_init";
 const HANDLE_TAKE_MARKER: &str = ".take()";
 const REMOVE_AUTO: &str = "crate::windows::remove_automation_window(\"notes\")";
@@ -119,13 +122,13 @@ const SAFETY_DEADLOCK: &str = "deadlock";
 
 /// Extract the body of `close_notes_window` — everything between the
 /// `{` opening the function and the matching `}`. Panics on malformed source.
-fn extract_function_body(source: &str) -> &str {
+fn extract_named_function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let fn_start = source
-        .find(FN_SIGNATURE)
-        .expect("close_notes_window function not found at source level");
+        .find(signature)
+        .unwrap_or_else(|| panic!("{signature} function not found at source level"));
     let body_open = source[fn_start..]
         .find('{')
-        .expect("opening brace of close_notes_window not found")
+        .unwrap_or_else(|| panic!("opening brace of {signature} not found"))
         + fn_start;
     let body_bytes = source.as_bytes();
     let mut depth: i32 = 0;
@@ -143,7 +146,15 @@ fn extract_function_body(source: &str) -> &str {
         }
         i += 1;
     }
-    panic!("no matching closing brace found for close_notes_window body");
+    panic!("no matching closing brace found for {signature} body");
+}
+
+fn extract_function_body(source: &str) -> &str {
+    extract_named_function_body(source, FN_SIGNATURE)
+}
+
+fn extract_retirement_body(source: &str) -> &str {
+    extract_named_function_body(source, RETIRE_FN_SIGNATURE)
 }
 
 #[test]
@@ -188,68 +199,46 @@ fn close_notes_window_takes_handle_via_scoped_lock_block() {
          call would see Some(invalid_handle) and attempt to update a \
          destroyed window. Body follows:\n{body}"
     );
-    // The SAFETY block's scope introducer (`let handle = {`) must appear
-    // BEFORE the registry clears — verifies the lock-release ordering.
+    // The scoped take must finish before the shared retirement helper runs.
     let handle_block_pos = body
         .find("let handle = {")
         .expect("expected `let handle = {` as the opening of the lock-release-before-update block");
-    let remove_auto_pos = body
-        .find(REMOVE_AUTO)
-        .expect("expected the automation-registry clear to appear in the body");
+    let retire_call_pos = body
+        .find(RETIRE_CALL)
+        .expect("expected the shared Notes retirement helper call in the body");
     assert!(
-        handle_block_pos < remove_auto_pos,
-        "`let handle = {{` (opening the lock-release scope) MUST appear \
-         BEFORE `{REMOVE_AUTO}` — the lock must be released as the block \
-         exits, BEFORE any external state mutation. A refactor that \
-         moves the registry clears inside the lock-scoped block, or that \
-         reorders them before the `.take()`, breaks the discipline. \
-         handle_block_pos={handle_block_pos} remove_auto_pos={remove_auto_pos}"
+        handle_block_pos < retire_call_pos,
+        "`let handle = {{` MUST appear before `{RETIRE_CALL}` so the slot \
+         lock is released before shared registry/entity retirement. \
+         handle_block_pos={handle_block_pos} retire_call_pos={retire_call_pos}"
     );
 }
 
 #[test]
 fn close_notes_window_clears_both_registry_shards() {
     let body = extract_function_body(SOURCE);
+    let retirement = extract_retirement_body(SOURCE);
     assert!(
-        body.contains(REMOVE_AUTO),
-        "`close_notes_window` body MUST contain `{REMOVE_AUTO}` — one \
-         half of the two-shard registry clear. Dropping this half \
-         leaves `listAutomationWindows` reporting a stale \
-         `{{id:\"notes\"}}` entry even though the NSWindow is gone \
-         (same failure shape as Run 9 Pass #28 for actions-dialog). \
-         Body follows:\n{body}"
+        retirement.contains(REMOVE_AUTO),
+        "shared Notes retirement MUST contain `{REMOVE_AUTO}`; otherwise \
+         listAutomationWindows reports a stale notes entry. Body follows:\n{retirement}"
     );
     assert!(
-        body.contains(REMOVE_RUNTIME),
-        "`close_notes_window` body MUST contain `{REMOVE_RUNTIME}` — \
-         the second half of the two-shard registry clear. Dropping \
-         this half leaves the runtime window-handle registry with a \
-         dead reference; a subsequent window-bookkeeping query \
-         (runtime introspection, Cmd+W dispatch, focus restore) \
-         sees a ghost entry. Body follows:\n{body}"
+        retirement.contains(REMOVE_RUNTIME),
+        "shared Notes retirement MUST contain `{REMOVE_RUNTIME}`; otherwise \
+         the runtime-handle shard retains a dead reference. Body follows:\n{retirement}"
     );
-    // Both clears should appear BEFORE the `if let Some(handle) = handle`
-    // branch — the registry state must be consistent before the async
-    // `handle.update()` fires, because the Drop inside the update might
-    // itself query the registry.
-    let remove_auto_pos = body
-        .find(REMOVE_AUTO)
-        .expect("automation registry clear missing");
-    let remove_runtime_pos = body
-        .find(REMOVE_RUNTIME)
-        .expect("runtime registry clear missing");
+    let retire_call_pos = body
+        .find(RETIRE_CALL)
+        .expect("shared Notes retirement call missing from close_notes_window");
     let update_branch_pos = body
         .find("if let Some(handle) = handle")
         .expect("expected `if let Some(handle) = handle` update branch in body");
     assert!(
-        remove_auto_pos < update_branch_pos && remove_runtime_pos < update_branch_pos,
-        "Both registry clears MUST appear BEFORE the `if let Some(handle) = handle` \
-         update branch. Moving either clear inside (or after) the update branch \
-         would gate the registry clear on `handle.is_some()` and skip it when \
-         the static held None — leaving stale registry entries from a prior \
-         open that didn't populate the static cleanly. \
-         remove_auto_pos={remove_auto_pos} remove_runtime_pos={remove_runtime_pos} \
-         update_branch_pos={update_branch_pos}"
+        retire_call_pos < update_branch_pos,
+        "`{RETIRE_CALL}` MUST run before the optional handle update so stale \
+         registries clear even when the static handle is absent. \
+         retire_call_pos={retire_call_pos} update_branch_pos={update_branch_pos}"
     );
 }
 
