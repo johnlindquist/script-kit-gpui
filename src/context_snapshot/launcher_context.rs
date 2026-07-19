@@ -238,11 +238,19 @@ fn looks_like_sensitive(s: &str) -> bool {
     patterns.iter().any(|p| s.contains(p))
 }
 
-fn cap_preview(s: &str, max: usize) -> String {
+/// Truncate `s` to at most `max` bytes for a preview, appending `…` when cut.
+///
+/// Floors the cut to a UTF-8 char boundary: a naive `&s[..max]` panicked when a
+/// multibyte char straddled byte `max` (the value is external clipboard text).
+pub(crate) fn cap_preview(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        let mut end = max.min(s.len());
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }
 
@@ -335,6 +343,27 @@ pub fn context_boost_for_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_preview_survives_multibyte_at_cut_boundary() {
+        // Regression: `&s[..max]` byte-sliced under a byte-length guard; clipboard
+        // text with a multibyte char straddling byte `max` panicked.
+        let s = format!("{}{}", "a".repeat(159), "é"); // byte 160 is inside 'é'
+        let out = cap_preview(&s, 160);
+        assert!(out.ends_with('…'));
+        assert_eq!(&out[..159], "a".repeat(159));
+        // 'é' at the boundary is dropped rather than split; no panic, valid UTF-8.
+        assert!(!out.contains('\u{fffd}'));
+
+        // Emoji straddling the cut.
+        let s = format!("{}{}", "x".repeat(158), "🌊🌊");
+        let out = cap_preview(&s, 160);
+        assert!(out.ends_with('…'));
+        assert!(out.is_char_boundary(out.len()));
+
+        // Short input is returned unchanged, no ellipsis.
+        assert_eq!(cap_preview("héllo", 160), "héllo");
+    }
 
     #[test]
     fn detect_url() {

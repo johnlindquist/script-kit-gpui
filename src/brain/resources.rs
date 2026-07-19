@@ -41,9 +41,11 @@ fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        // Decode over raw bytes, never `&value[i + 1..i + 3]`: a `%` followed by a
+        // multibyte UTF-8 char put `i + 3` mid-char and panicked on the `str` slice.
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&value[i + 1..i + 3], 16) {
-                out.push(byte);
+            if let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
                 i += 3;
                 continue;
             }
@@ -52,6 +54,16 @@ fn percent_decode(value: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Value of a single ASCII hex digit (case-insensitive), or `None` if not hex.
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_source(value: &str) -> Result<DocSource, String> {
@@ -353,5 +365,25 @@ mod tests {
             Some("a b&c")
         );
         assert_eq!(query_param("kit://brain/recall", "q"), None);
+    }
+
+    #[test]
+    fn percent_decode_survives_multibyte_after_percent() {
+        // Regression: `&value[i + 1..i + 3]` was byte-sliced after only a
+        // byte-length guard (`i + 2 < bytes.len()`). A `%` immediately followed by
+        // a 3+ byte UTF-8 char (e.g. `€` = E2 82 AC) makes `i + 3` land mid-char and
+        // panicked ("byte index is not a char boundary"). An invalid escape must
+        // pass through untouched instead of crashing.
+        assert_eq!(percent_decode("%€"), "%€");
+        assert_eq!(percent_decode("a%€b"), "a%€b");
+        assert_eq!(percent_decode("%🌊%20x"), "%🌊 x");
+        // Valid escapes still decode (case-insensitive), unchanged behavior.
+        assert_eq!(percent_decode("a%20b%26c"), "a b&c");
+        assert_eq!(percent_decode("%2f%2F"), "//");
+        // Reached through the real MCP resource query-param path.
+        assert_eq!(
+            query_param("kit://brain/recall?q=%€", "q").as_deref(),
+            Some("%€")
+        );
     }
 }

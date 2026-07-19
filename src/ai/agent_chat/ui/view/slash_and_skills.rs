@@ -13,9 +13,13 @@ pub(super) fn parse_skill_description(content: &str) -> Option<String> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("description:") {
             let desc = rest.trim().trim_matches('"').trim_matches('\'');
-            // Truncate long descriptions for the menu
-            if desc.len() > 80 {
-                return Some(format!("{}\u{2026}", &desc[..77]));
+            // Truncate long descriptions for the menu, counting *characters* so a
+            // multibyte char straddling byte 77 can't panic `&desc[..77]`. Mirrors
+            // the char-based truncation in `SlashCommandEntry::plugin_skill`.
+            let desc_chars: Vec<char> = desc.chars().collect();
+            if desc_chars.len() > 80 {
+                let truncated: String = desc_chars.into_iter().take(77).collect();
+                return Some(format!("{truncated}\u{2026}"));
             }
             return Some(desc.to_string());
         }
@@ -213,6 +217,30 @@ pub(crate) fn build_skill_context_part(
 /// Owner label marking a staged flow (the `-` flow search); switches the
 /// staged-prompt wording in `build_staged_skill_prompt` from skill to flow.
 pub(crate) const FLOW_OWNER_LABEL: &str = "Flow";
+
+#[cfg(test)]
+mod skill_description_tests {
+    use super::parse_skill_description;
+
+    #[test]
+    fn parse_skill_description_truncates_multibyte_without_panicking() {
+        // Regression: `&desc[..77]` byte-sliced a description guarded only by a
+        // byte-length check (`desc.len() > 80`). A multibyte char straddling byte
+        // 77 panicked ("byte index is not a char boundary").
+        let long = "🌊".repeat(100); // 100 chars, 400 bytes
+        let content = format!("---\ndescription: {long}\n---\n");
+        let out = parse_skill_description(&content).expect("description present");
+        assert!(out.ends_with('\u{2026}'));
+        assert_eq!(out.chars().count(), 78); // 77 chars + ellipsis
+        assert!(!out.contains('\u{fffd}')); // no mangling into replacement chars
+
+        // Long in bytes but short in characters → shown in full, no panic.
+        let medium = "é".repeat(41); // 41 chars, 82 bytes
+        let content = format!("---\ndescription: {medium}\n---\n");
+        let out = parse_skill_description(&content).expect("description present");
+        assert_eq!(out, medium);
+    }
+}
 
 /// Build the attached flow context part for the `-` flow search — skill
 /// parity: the composer keeps a compact `-name` token while the submitted

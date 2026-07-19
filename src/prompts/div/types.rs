@@ -59,6 +59,13 @@ impl ContainerOptions {
 fn parse_hex_color(hex: &str) -> Option<Hsla> {
     let hex = hex.trim_start_matches('#');
 
+    // A hex color is ASCII-only. Reject non-ASCII up front so the byte-length
+    // `match` below and its fixed-offset slices (`&hex[0..1]`, `&hex[0..2]`, …)
+    // can never land inside a multibyte char and panic.
+    if !hex.is_ascii() {
+        return None;
+    }
+
     match hex.len() {
         // #RGB -> #RRGGBB
         3 => {
@@ -155,5 +162,39 @@ impl RenderContext {
             hr_color: colors.ui.border,
             on_link_click: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod hex_color_tests {
+    use super::{parse_hex_color, ContainerOptions};
+
+    #[test]
+    fn parse_hex_color_rejects_multibyte_without_panicking() {
+        // Regression: `match hex.len()` used the *byte* length, then sliced by
+        // fixed byte offsets (`&hex[0..1]`, `&hex[0..2]`, …). A single 3-byte char
+        // like `€` has `len() == 3`, hit the `#RGB` arm, and `&hex[0..1]` sliced
+        // inside `€` → "byte index 1 is not a char boundary" panic. Non-ASCII must
+        // just fail to parse (None), never crash.
+        assert_eq!(parse_hex_color("€"), None); // 3 bytes, 1 char
+        assert_eq!(parse_hex_color("#€"), None);
+        assert_eq!(parse_hex_color("é€a"), None); // 6 bytes, mid-char at offset 2/4
+        assert_eq!(parse_hex_color("€€"), None); // 6 bytes
+        assert_eq!(parse_hex_color("aé€aa"), None); // 8 bytes
+                                                    // Valid hex still parses.
+        assert!(parse_hex_color("#fff").is_some());
+        assert!(parse_hex_color("#ff0000").is_some());
+        assert!(parse_hex_color("#ff000080").is_some());
+        assert!(parse_hex_color("nothex").is_none());
+    }
+
+    #[test]
+    fn parse_background_survives_multibyte_hex() {
+        // Reached from a script-supplied container background string.
+        let options = ContainerOptions {
+            background: Some("#€".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(options.parse_background(), None);
     }
 }

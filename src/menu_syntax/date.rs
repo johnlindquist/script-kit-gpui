@@ -670,8 +670,11 @@ fn resolve_time_range(source: &str, clock: &MenuSyntaxClock) -> Option<ResolvedD
     // Find the trailing time token in `left` — everything after the last
     // whitespace. Anything before is treated as a date prefix.
     let left = left.trim_end();
-    let (date_prefix, start_tok) = match left.rfind(char::is_whitespace) {
-        Some(i) => (left[..i].trim(), left[i + 1..].trim()),
+    // `rsplit_once` is char-boundary-safe: it splits on the whole matched
+    // whitespace char, so a multibyte whitespace (e.g. NBSP `\u{00A0}`) cannot
+    // land a byte offset mid-char the way `rfind(..)` + `left[i + 1..]` did.
+    let (date_prefix, start_tok) = match left.rsplit_once(char::is_whitespace) {
+        Some((prefix, tok)) => (prefix.trim(), tok.trim()),
         None => ("", left.trim()),
     };
     if start_tok.is_empty() {
@@ -836,6 +839,12 @@ fn parse_numeric_offset_to_etc(tok: &str) -> Option<Tz> {
         b'-' => (-1, &tok[1..]),
         _ => return None,
     };
+    // A numeric timezone offset is ASCII digits (optionally with `:`). Rejecting
+    // non-ASCII here prevents the `rest.len() == 4` byte-length branch below from
+    // slicing `&rest[..2]` inside a multibyte char (e.g. `aéb`) and panicking.
+    if !rest.is_ascii() {
+        return None;
+    }
     let (h_str, m_str) = if let Some(idx) = rest.find(':') {
         (&rest[..idx], &rest[idx + 1..])
     } else if rest.len() == 4 {
@@ -1516,5 +1525,34 @@ mod tests {
         assert_eq!(infer_granularity("next Friday"), DateGranularity::Date);
         assert_eq!(infer_granularity("noon"), DateGranularity::Minute);
         assert_eq!(infer_granularity("15:30 tomorrow"), DateGranularity::Minute);
+    }
+
+    // -------- Multibyte-input panic regressions (chaos-monkey) --------
+
+    #[test]
+    fn resolve_time_range_survives_multibyte_whitespace_before_range() {
+        // Regression: `left.rfind(char::is_whitespace)` returns the byte index of
+        // a multibyte whitespace char (e.g. NBSP U+00A0 = bytes C2 A0); slicing
+        // `left[i + 1..]` then landed inside the continuation byte and panicked
+        // with "byte index is not a char boundary". Must not panic.
+        let clock = denver("2026-07-17T12:00:00");
+        // NBSP between `x` and the `9-10am` range.
+        let _ = resolve_time_range("x\u{00A0}9-10am", &clock);
+        // The public dispatch reaches this resolver before the ASCII guard, so a
+        // user typing a date phrase with a pasted NBSP must not crash the app.
+        let _ = resolve_date_phrase("x\u{00A0}9-10am", &clock);
+    }
+
+    #[test]
+    fn parse_numeric_offset_rejects_non_ascii_four_byte_remainder() {
+        // Regression: `rest.len() == 4` is a *byte* check; `&rest[..2]` / `&rest[2..]`
+        // sliced mid-char for a 4-byte non-ASCII remainder like `aéb`
+        // (61 C3 A9 62), where byte 2 is a UTF-8 continuation byte. Must return
+        // None, not panic.
+        assert_eq!(parse_numeric_offset_to_etc("+aéb"), None);
+        assert_eq!(parse_numeric_offset_to_etc("-aéb"), None);
+        // Reached through the public dispatch as a `<phrase> <tz>` suffix.
+        let clock = denver("2026-07-17T12:00:00");
+        let _ = resolve_date_phrase("tomorrow +aéb", &clock);
     }
 }

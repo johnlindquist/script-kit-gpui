@@ -1,5 +1,5 @@
 // External command listener - receives commands via stdin (event-driven, no polling)
-let stdin_rx = start_stdin_listener();
+let stdin_rx = start_stdin_listener(None);
 let window_for_stdin = window;
 let app_entity_for_stdin = app_entity.clone();
 
@@ -1054,11 +1054,10 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                         let summaries: Vec<String> = snapshots
                                             .iter()
                                             .map(|s| {
-                                                let preview = if s.text.len() > 100 {
-                                                    format!("{}...", &s.text[..100])
-                                                } else {
-                                                    s.text.clone()
-                                                };
+                                                // Char-boundary-safe: `&s.text[..100]`
+                                                // panicked on multibyte field text.
+                                                let preview =
+                                                    crate::logging::truncate_for_log(&s.text, 100);
                                                 format!(
                                                     "[{}] {} ({}) sel={} len={}: {}",
                                                     s.index, s.label, s.status.state_id(),
@@ -1149,6 +1148,22 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                             )
                                         })
                                     }
+                                    AppView::FlowSessionView { session_id } => view
+                                        .flow_sessions
+                                        .iter()
+                                        .find(|(meta, _)| meta.id == *session_id)
+                                        .map(|(_, entity)| entity.clone())
+                                        .ok_or_else(|| "FlowSession entity is not active".to_string())
+                                        .and_then(|entity| {
+                                            entity.update(ctx, |chat, cx| {
+                                                chat.apply_transcript_geometry_fixture(
+                                                    phase,
+                                                    user_text.clone(),
+                                                    assistant_text.clone(),
+                                                    cx,
+                                                )
+                                            })
+                                        }),
                                     _ => Err("Agent Chat view is not active".to_string()),
                                 };
                                 match &result {
@@ -1210,6 +1225,19 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                             chat.scroll_test_transcript_to(item_ix, offset_px, cx)
                                         })
                                     }
+                                    AppView::FlowSessionView { session_id } => view
+                                        .flow_sessions
+                                        .iter()
+                                        .find(|(meta, _)| meta.id == *session_id)
+                                        .map(|(_, entity)| entity.clone())
+                                        .ok_or_else(|| "FlowSession entity is not active".to_string())
+                                        .map(|entity| {
+                                            entity.update(ctx, |chat, cx| {
+                                                chat.set_transcript_geometry_scroll(
+                                                    item_ix, offset_px, cx,
+                                                );
+                                            });
+                                        }),
                                     _ => Err("Agent Chat view is not active".to_string()),
                                 };
                                 if let Some(rid) = request_id_value {

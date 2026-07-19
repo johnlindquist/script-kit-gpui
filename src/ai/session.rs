@@ -597,12 +597,11 @@ impl ClaudeSessionManager {
                     Ok(line) => {
                         line_count += 1;
                         if line_count <= 3 {
-                            // Log first few lines to understand protocol init
-                            let preview = if line.len() > 200 {
-                                format!("{}...", &line[..200])
-                            } else {
-                                line.clone()
-                            };
+                            // Log first few lines to understand protocol init.
+                            // Use the char-boundary-safe truncator: `&line[..200]`
+                            // panicked when byte 200 fell inside a multibyte char in
+                            // the subprocess output.
+                            let preview = crate::logging::truncate_for_log(&line, 200);
                             tracing::info!(
                                 session_id = %session_id_clone,
                                 line_num = line_count,

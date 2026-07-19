@@ -929,6 +929,23 @@ pub fn execute_paste(_content: &str) -> Result<ScriptletResult, String> {
     Err("Paste scriptlets are only supported on macOS".to_string())
 }
 
+/// Build the AppleScript that types `text` via System Events.
+///
+/// The structural quotes around the application name and the `keystroke`
+/// argument MUST be real `"` characters. A previous raw-string literal emitted
+/// literal backslash-quote (`\"`) sequences, which AppleScript rejects with
+/// `syntax error … (-2741)` — so `type` scriptlets silently never typed
+/// anything. Payload quotes are AppleScript-escaped (`\"`) via
+/// `escape_applescript_string`, which is the only place a backslash-quote should
+/// legitimately appear.
+#[cfg(target_os = "macos")]
+fn type_keystroke_applescript(text: &str) -> String {
+    format!(
+        r#"tell application "System Events" to keystroke "{}""#,
+        crate::utils::escape_applescript_string(text)
+    )
+}
+
 /// Execute type command (simulate keyboard typing)
 #[cfg(target_os = "macos")]
 pub fn execute_type(content: &str) -> Result<ScriptletResult, String> {
@@ -937,10 +954,7 @@ pub fn execute_type(content: &str) -> Result<ScriptletResult, String> {
     let text = content.trim();
 
     // Use AppleScript to simulate typing
-    let script = format!(
-        r#"tell application \"System Events\" to keystroke \"{}\""#,
-        crate::utils::escape_applescript_string(text)
-    );
+    let script = type_keystroke_applescript(text);
 
     let mut cmd = Command::new("osascript");
     cmd.arg("-e").arg(&script);
@@ -998,4 +1012,38 @@ pub fn execute_submit(content: &str) -> Result<ScriptletResult, String> {
 #[cfg(not(target_os = "macos"))]
 pub fn execute_submit(_content: &str) -> Result<ScriptletResult, String> {
     Err("Submit scriptlets are only supported on macOS".to_string())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod type_keystroke_tests {
+    use super::type_keystroke_applescript;
+
+    #[test]
+    fn type_keystroke_applescript_uses_real_structural_quotes() {
+        // Regression: the builder used a raw-string literal with escaped quotes
+        // (`\"`), producing `tell application \"System Events\" to keystroke \"hi\"`
+        // — which AppleScript rejects with syntax error (-2741), so `type`
+        // scriptlets silently typed nothing. With a payload that has no quotes,
+        // the generated script must contain NO literal backslash-quote at all.
+        let script = type_keystroke_applescript("hi");
+        assert!(
+            !script.contains("\\\""),
+            "structural quotes must be real, not escaped: {script}"
+        );
+        assert_eq!(
+            script,
+            r#"tell application "System Events" to keystroke "hi""#
+        );
+    }
+
+    #[test]
+    fn type_keystroke_applescript_escapes_payload_quotes() {
+        // A quote *inside* the typed text is the one place a backslash-quote is
+        // correct — it is the AppleScript escape for an embedded `"`.
+        let script = type_keystroke_applescript(r#"a"b"#);
+        assert_eq!(
+            script,
+            r#"tell application "System Events" to keystroke "a\"b""#
+        );
+    }
 }

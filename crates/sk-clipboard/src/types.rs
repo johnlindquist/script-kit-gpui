@@ -100,7 +100,11 @@ impl ClipboardEntryMeta {
             }
             ContentType::Text | ContentType::Link | ContentType::File | ContentType::Color => {
                 let sanitized = self.text_preview.replace(['\n', '\r'], " ");
-                if sanitized.len() > 50 {
+                // Gate the ellipsis on the *character* count, not the byte length:
+                // `chars().take(50)` truncates by characters, so using `len()` (bytes)
+                // here appended a "…" to short multibyte text (emoji/CJK) that was
+                // never actually truncated.
+                if sanitized.chars().count() > 50 {
                     format!("{}…", sanitized.chars().take(50).collect::<String>())
                 } else {
                     sanitized
@@ -188,6 +192,32 @@ mod tests {
         entry.image_width = Some(1440);
         entry.image_height = Some(900);
         assert_eq!(entry.display_preview(), "1440×900 image");
+    }
+
+    #[test]
+    fn display_preview_does_not_add_ellipsis_for_short_multibyte_text() {
+        // Regression: the truncation threshold used `sanitized.len()` (bytes) while
+        // the truncation itself used `chars().take(50)`. A short-but-multibyte
+        // preview (e.g. 30 two-byte chars = 60 bytes) tripped the byte threshold and
+        // got a "…" appended even though nothing was actually cut.
+        let text = "é".repeat(30); // 30 chars, 60 bytes
+        let entry = meta(ContentType::Text, &text);
+        let preview = entry.display_preview();
+        assert!(
+            !preview.ends_with('…'),
+            "no ellipsis when nothing is truncated, got: {preview:?}"
+        );
+        assert_eq!(preview.chars().count(), 30);
+    }
+
+    #[test]
+    fn display_preview_truncates_long_multibyte_text_to_50_chars() {
+        // 60 multibyte chars > 50-char limit → truncate to exactly 50 chars + "…".
+        let text = "🌊".repeat(60);
+        let entry = meta(ContentType::Text, &text);
+        let preview = entry.display_preview();
+        assert!(preview.ends_with('…'));
+        assert_eq!(preview.chars().count(), 51); // 50 content chars + ellipsis
     }
 
     #[test]

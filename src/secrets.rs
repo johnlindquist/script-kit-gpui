@@ -344,15 +344,35 @@ fn load_secrets_from_disk() -> Result<HashMap<String, SecretEntry>, SecretStoreE
     result
 }
 
-/// Encrypt and save the secrets store
+/// Encrypt and save the secrets store to the default path.
 fn save_secrets(secrets: &HashMap<String, SecretEntry>) -> Result<(), String> {
     let path = secrets_path().map_err(|e| format!("Failed to resolve secrets path: {e}"))?;
+    save_secrets_to_path(secrets, &path)
+}
 
+/// Encrypt and atomically persist the secrets store to `path`.
+///
+/// The encrypted bytes are written to a sibling temp file (created 0o600 on
+/// Unix) and then renamed over the destination. This matters for two reasons:
+///
+/// 1. **Atomicity.** A crash or SIGKILL during a direct in-place `truncate` +
+///    `write_all` could leave `secrets.age` truncated and undecryptable —
+///    losing *every* stored secret. A temp-file rename is a same-filesystem
+///    atomic replace, so an interrupted save leaves the previous store intact.
+/// 2. **Permission enforcement.** `OpenOptions::mode(0o600)` is ignored when the
+///    destination already exists, so the previous in-place write silently left a
+///    pre-existing loose-permission file untouched. A fresh temp file is created
+///    0o600 every time and then replaces the destination, so the secrets file is
+///    always owner-only after a save.
+fn save_secrets_to_path(
+    secrets: &HashMap<String, SecretEntry>,
+    path: &std::path::Path,
+) -> Result<(), String> {
     // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create secrets directory: {}", e))?;
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Secrets path has no parent directory: {}", path.display()))?;
+    fs::create_dir_all(parent).map_err(|e| format!("Failed to create secrets directory: {}", e))?;
 
     let json =
         serde_json::to_vec(secrets).map_err(|e| format!("Failed to serialize secrets: {}", e))?;
@@ -375,30 +395,47 @@ fn save_secrets(secrets: &HashMap<String, SecretEntry>) -> Result<(), String> {
         .finish()
         .map_err(|e| format!("Failed to finish encryption: {}", e))?;
 
+    // Encrypt into a sibling temp file, then atomically rename it over the
+    // destination.
+    let mut temp_file = tempfile::Builder::new()
+        .prefix(".secrets-")
+        .suffix(".age.tmp")
+        .tempfile_in(parent)
+        .map_err(|e| format!("Failed to create temp secrets file: {}", e))?;
+
     // Write secrets file with restrictive permissions (0o600 - owner read/write only)
     #[cfg(unix)]
     {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .and_then(|mut file| file.write_all(&encrypted))
-            .map_err(|e| format!("Failed to write secrets file: {}", e))?;
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = temp_file
+            .as_file()
+            .metadata()
+            .map_err(|e| format!("Failed to read temp secrets metadata: {}", e))?
+            .permissions();
+        perms.set_mode(0o600);
+        temp_file.as_file().set_permissions(perms).map_err(|e| {
+            format!(
+                "Failed to set secure permissions on temp secrets file: {}",
+                e
+            )
+        })?;
     }
 
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, &encrypted).map_err(|e| format!("Failed to write secrets file: {}", e))?;
-    }
+    temp_file
+        .write_all(&encrypted)
+        .map_err(|e| format!("Failed to write encrypted secrets to temp file: {}", e))?;
+    temp_file
+        .as_file()
+        .sync_all()
+        .map_err(|e| format!("Failed to sync temp secrets file: {}", e))?;
+
+    temp_file
+        .persist(path)
+        .map_err(|e| format!("Failed to atomically replace secrets file: {}", e.error))?;
 
     logging::log(
         "SECRETS",
-        &format!("Saved {} secrets to {:?}", secrets.len(), path),
+        &format!("Saved {} secrets to {:?} (atomic)", secrets.len(), path),
     );
     Ok(())
 }
@@ -665,6 +702,83 @@ mod tests {
             file_perms, 0o600,
             "Secrets file should have 0o600 permissions, got 0o{:o}",
             file_perms
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_secrets_to_path_is_atomic_and_reenforces_0600_on_existing_file() {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("secrets.age");
+
+        // Simulate a stale / loose pre-existing store (e.g. written by an older
+        // build, or chmod'd by the user). Then empirically characterize the bug
+        // the fix addresses: re-opening an *existing* file with `mode(0o600)`
+        // does NOT tighten it — which is exactly what the previous in-place
+        // `save_secrets` did, silently leaving loose permissions in place.
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(&path)
+            .unwrap()
+            .write_all(b"stale")
+            .unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(b"still-loose")
+            .unwrap();
+        let leftover = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            leftover, 0o644,
+            "characterization: OpenOptions::mode is ignored on an existing file (the bug)"
+        );
+
+        // The fixed save must re-establish 0o600 and round-trip the contents.
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "API_KEY".to_string(),
+            SecretEntry {
+                value: "sk-secret".to_string(),
+                modified_at: Utc::now(),
+            },
+        );
+        save_secrets_to_path(&secrets, &path).expect("atomic save should succeed");
+
+        // (a) Permissions are re-tightened to 0o600 even though the destination
+        // already existed at 0o644. Fails if the fix regresses to an in-place write.
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "secrets file must be 0o600 after save, got 0o{mode:o}"
+        );
+
+        // (b) Contents decrypt through the real load path.
+        let loaded = load_secrets_from_path(&path).expect("saved store must decrypt");
+        assert_eq!(
+            loaded.get("API_KEY").map(|entry| entry.value.as_str()),
+            Some("sk-secret")
+        );
+
+        // (c) The atomic rename leaves no temp file litter behind.
+        let leftovers: Vec<String> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "secrets.age")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp files should remain after atomic save, found: {leftovers:?}"
         );
     }
 
