@@ -218,6 +218,49 @@ struct ThemeChooserContrastSnapshot {
     worst_ratio: f32,
 }
 
+fn render_theme_chooser_browser_main(
+    filter: &str,
+    filtered_count: usize,
+    results_body: gpui::AnyElement,
+    empty_body: gpui::AnyElement,
+    preview_panel: gpui::AnyElement,
+    list_colors: crate::list_item::ListItemColors,
+) -> gpui::AnyElement {
+    let browser_body = if filtered_count == 0 {
+        empty_body
+    } else {
+        results_body
+    };
+
+    div()
+        .flex_1()
+        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .child(
+            div()
+                .w_1_2()
+                .h_full()
+                .py(px(4.0))
+                .flex()
+                .flex_col()
+                .child(
+                    crate::components::builtin_leading_separator::render_builtin_leading_separator(
+                        if filter.trim().is_empty() {
+                            "Themes"
+                        } else {
+                            "Results"
+                        },
+                        None,
+                        list_colors,
+                    ),
+                )
+                .child(browser_body),
+        )
+        .child(preview_panel)
+        .into_any_element()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum ThemeChooserCatalogKind {
     BuiltIn(usize),
@@ -4730,62 +4773,24 @@ impl ScriptListApp {
         let menu_def = self.current_main_menu_theme.def();
         let shell = menu_def.shell;
 
-        // ── Empty state when filter has no matches ─────────────────
-        if filtered_count == 0 {
-            return crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
-                crate::components::main_view_chrome::render_main_view_shell()
-                    .text_color(rgb(text_primary))
-                    .font_family(self.theme_font_family())
-                    .key_context("theme_chooser")
-                    .track_focus(&self.focus_handle)
-                    .on_key_down(handle_key),
-                &self.theme,
-                menu_def,
-                crate::components::main_view_chrome::MainViewChrome {
-                    header: self.render_builtin_main_input_header(
-                        vec![self.render_builtin_main_input_count_label(header_count_label)],
-                        cx,
-                    ),
-                    divider: crate::components::main_view_chrome::MainViewDividerChrome {
-                        margin_x: shell.divider_margin_x,
-                        height: shell.divider_height,
-                        visible: shell.divider_height > 0.0,
-                    },
-                    main: self
-                        .render_theme_chooser_empty_state_body(filter, summary, &chrome)
-                        .into_any_element(),
-                    footer,
-                    overlays: native_footer_hover_blocker.into_iter().collect(),
-                },
-            );
-        }
-
-        // ── Main layout: list + preview panel ──────────────────────
-        let main = div()
+        // ── Main layout: shared list region + preview panel ──────────────
+        let results_body = div()
+            .relative()
             .flex_1()
-            .overflow_hidden()
-            .flex()
-            .flex_row()
-            .child(
-                div().w_1_2().h_full().py(px(4.0)).flex().flex_col()
-                    .child(
-                        crate::components::builtin_leading_separator::render_builtin_leading_separator(
-                            if filter.trim().is_empty() { "Themes" } else { "Results" },
-                            None,
-                            list_colors,
-                        ),
-                    )
-                    .child(div()
-                        .relative()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .w_full()
-                        .child(list)
-                        .vertical_scrollbar(&self.theme_chooser_list_state),
-                ),
-            )
-            .child(preview_panel)
+            .min_h(px(0.0))
+            .w_full()
+            .child(list)
+            .vertical_scrollbar(&self.theme_chooser_list_state)
             .into_any_element();
+        let empty_body = self.render_theme_chooser_empty_state_body(filter, summary, &chrome);
+        let main = render_theme_chooser_browser_main(
+            filter,
+            filtered_count,
+            results_body,
+            empty_body,
+            preview_panel.into_any_element(),
+            list_colors,
+        );
 
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
             crate::components::main_view_chrome::render_main_view_shell()
@@ -4811,6 +4816,72 @@ impl ScriptListApp {
                 overlays: native_footer_hover_blocker.into_iter().collect(),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod theme_chooser_zero_match_paint_tests {
+    use super::*;
+    use gpui::AppContext;
+
+    struct TestThemeChooserZeroMatch;
+
+    impl gpui::Render for TestThemeChooserZeroMatch {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let list_colors =
+                crate::list_item::ListItemColors::from_theme(&crate::theme::Theme::default());
+
+            render_theme_chooser_browser_main(
+                "definitely-no-theme-matches",
+                0,
+                div().child("unexpected result row").into_any_element(),
+                div()
+                    .flex_1()
+                    .child("No matching themes")
+                    .into_any_element(),
+                div().w_1_2().child("Theme Preview").into_any_element(),
+                list_colors,
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn zero_match_renders_builtin_leading_separator_with_non_zero_paint_bounds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::px;
+
+        let window = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(748.0), px(320.0)),
+            )));
+            cx.open_window(options, |_, cx| cx.new(|_| TestThemeChooserZeroMatch))
+                .expect("theme chooser zero-match paint test window should open")
+        });
+
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, _| {
+                let measurement = window
+                    .debug_bounds_entries()
+                    .iter()
+                    .find(|entry| {
+                        entry.selector
+                            == crate::components::builtin_leading_separator::BUILTIN_LEADING_SEPARATOR_ID
+                    })
+                    .expect("zero-match theme chooser should paint the shared leading separator");
+
+                assert!(measurement.bounds.size.width > px(0.0));
+                assert!(measurement.bounds.size.height > px(0.0));
+            })
+            .expect("theme chooser zero-match paint test window should remain available");
     }
 }
 
