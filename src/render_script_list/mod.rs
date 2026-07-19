@@ -752,6 +752,92 @@ fn selected_index_for_script_list_render(
 }
 
 impl ScriptListApp {
+    /// Main-menu Up/Down with the A8 input-history contract (2026-06-09):
+    /// recall only ENTERS from an empty input at the top of the list, but once
+    /// in history, Up keeps walking older entries and Down past the newest
+    /// clears back to the live filter.
+    ///
+    /// This is the SimulateKey-parity twin of the real-key handlers in
+    /// `app_impl/startup.rs` (legacy key path) and
+    /// `app_impl/startup_new_arrow.rs` (arrow interceptor). Battery 13 found
+    /// the protocol dispatch (`simulate_key_dispatch.rs`) called bare
+    /// move_selection_up/down, making history recall unreachable from
+    /// automation — a story the probe fleet could never see.
+    pub(crate) fn main_menu_arrow_key_with_history(
+        &mut self,
+        is_up: bool,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        // Key-repeat coalescing: a recalled filter that has not rendered yet
+        // means further history steps must wait (same guard as the real-key
+        // path).
+        if self.history_filter_render_pending.is_some() {
+            tracing::info!(
+                target: "script_kit::input_history",
+                event = "history_key_repeat_coalesced_until_render_simulate",
+                is_up,
+            );
+            return;
+        }
+
+        let source_filter_mode = self.source_filter_mode_blocks_input_history_recall();
+        let filter_has_text =
+            !self.filter_text.is_empty() || !self.computed_filter_text.is_empty();
+        let (grouped_items, _) = self.get_grouped_results_cached();
+        let first_item_position = grouped_items
+            .iter()
+            .position(|item| matches!(item, crate::list_item::GroupedListItem::Item(_)));
+        let at_top_of_list = first_item_position
+            .map(|position| self.selected_index <= position)
+            .unwrap_or(true);
+        let in_history = self.input_history.current_index().is_some();
+
+        if is_up {
+            // A8: a filled input at the top of the list is a no-op — Up must
+            // not clobber typed text with history.
+            if !source_filter_mode && filter_has_text && at_top_of_list && !in_history {
+                return;
+            }
+            if !source_filter_mode && (in_history || at_top_of_list) {
+                if let Some(text) = self.input_history.navigate_up() {
+                    tracing::info!(
+                        target: "script_kit::input_history",
+                        event = "history_recalled",
+                        direction = "up",
+                        source = "simulate_key",
+                        recalled_len = text.len(),
+                        history_index = ?self.input_history.current_index(),
+                    );
+                    self.history_filter_render_pending = Some(text.clone());
+                    self.set_filter_text_immediate(text, window, cx);
+                }
+                return;
+            }
+            self.move_selection_up(cx);
+        } else {
+            if !source_filter_mode && in_history {
+                if let Some(text) = self.input_history.navigate_down() {
+                    tracing::info!(
+                        target: "script_kit::input_history",
+                        event = "history_recalled",
+                        direction = "down",
+                        source = "simulate_key",
+                        recalled_len = text.len(),
+                        history_index = ?self.input_history.current_index(),
+                    );
+                    self.history_filter_render_pending = Some(text.clone());
+                    self.set_filter_text_immediate(text, window, cx);
+                } else {
+                    self.input_history.reset_navigation();
+                    self.clear_filter(window, cx);
+                }
+                return;
+            }
+            self.move_selection_down(cx);
+        }
+    }
+
     fn should_preempt_empty_script_list_escape_close(
         &self,
         event: &gpui::KeyDownEvent,
@@ -1345,7 +1431,6 @@ impl ScriptListApp {
                                                             cx,
                                                         );
                                                         cx.stop_propagation();
-                                                        return;
                                                     }
                                                 } else {
                                                     logging::log(
@@ -1899,8 +1984,8 @@ impl ScriptListApp {
                             cx.stop_propagation();
                             return;
                         }
-                    } else if sk_is_key_escape(key_str) {
-                        if this.try_apply_pending_menu_syntax_ai_proposal(
+                    } else if sk_is_key_escape(key_str)
+                        && this.try_apply_pending_menu_syntax_ai_proposal(
                             crate::menu_syntax_ai_apply::ProposalApplyAction::Dismiss,
                             window,
                             cx,
@@ -1908,7 +1993,6 @@ impl ScriptListApp {
                             cx.stop_propagation();
                             return;
                         }
-                    }
                 }
 
                 // ── Spine projection Enter intercept ──────────────
@@ -1921,12 +2005,10 @@ impl ScriptListApp {
                     && !event.keystroke.modifiers.shift
                     && !event.keystroke.modifiers.alt
                     && !event.keystroke.modifiers.control
-                {
-                    if this.try_handle_spine_enter(window, cx) {
+                    && this.try_handle_spine_enter(window, cx) {
                         cx.stop_propagation();
                         return;
                     }
-                }
 
                 // Normal script list navigation
                 // NOTE: Arrow keys are now handled by the arrow_interceptor in app_impl.rs
@@ -1964,15 +2046,14 @@ impl ScriptListApp {
                         ) {
                             return;
                         }
-                        if this.menu_syntax_object_selector_owns_main_keyboard() {
-                            if this.apply_menu_syntax_object_selector_intent(
+                        if this.menu_syntax_object_selector_owns_main_keyboard()
+                            && this.apply_menu_syntax_object_selector_intent(
                                 crate::menu_syntax::InlinePickerKeyIntent::Close,
                                 window,
                                 cx,
                             ) {
                                 return;
                             }
-                        }
                         if this.menu_syntax_trigger_picker_owns_main_keyboard() {
                             if this.menu_syntax_filter_only_escape_should_clear() {
                                 this.clear_filter(window, cx);
