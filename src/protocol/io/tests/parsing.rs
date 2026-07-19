@@ -164,3 +164,47 @@ fn test_parse_message_graceful_classifies_invalid_enum_payload_as_invalid_payloa
         other => panic!("Expected ParseResult::InvalidPayload, got {:?}", other),
     }
 }
+
+#[test]
+fn malformed_payload_with_request_id_builds_typed_error_response() {
+    let json = r#"{"type":"simulateGpuiEvent","requestId":"req-malformed","event":{"type":"scrollWheel","x":120,"y":220,"deltaY":-12,"phase":"began"}}"#;
+    let serde_error = serde_json::from_str::<Message>(json).unwrap_err();
+    let response = malformed_request_error(json, &serde_error)
+        .expect("valid JSON carrying a string requestId must produce a response");
+
+    match response {
+        Message::ExternalCommandResult {
+            request_id,
+            command,
+            ok,
+            error_code,
+            error_message,
+        } => {
+            assert_eq!(request_id, "req-malformed");
+            assert_eq!(command, "simulateGpuiEvent");
+            assert!(!ok);
+            assert_eq!(error_code.as_deref(), Some("invalid_payload"));
+            let message = error_message.expect("serde diagnostic");
+            assert!(
+                message.contains("began") && message.contains("started"),
+                "diagnostic should preserve the serde enum-field error: {message}"
+            );
+        }
+        other => panic!("expected typed externalCommandResult, got {other:?}"),
+    }
+}
+
+#[test]
+fn malformed_or_unidentified_payload_remains_log_only() {
+    assert!(malformed_request_error("not json", "syntax error").is_none());
+    assert!(malformed_request_error(
+        r#"{"type":"simulateGpuiEvent","event":{"type":"scrollWheel"}}"#,
+        "missing field",
+    )
+    .is_none());
+    assert!(malformed_request_error(
+        r#"{"type":"simulateGpuiEvent","requestId":42,"event":{}}"#,
+        "wrong request id type",
+    )
+    .is_none());
+}
