@@ -286,18 +286,34 @@ fn classify_sigil_segment(sigil: char, rest: &str) -> SpineSegmentKind {
                 }
             }
         }
-        '/' => SpineSegmentKind::SlashCommand {
-            command: rest.to_string(),
-        },
+        '/' => {
+            // A second slash means a filesystem path (`/tmp/`, `/Users/me/notes`),
+            // never a slash command — command names contain no `/`. Fall through to
+            // free text so the launcher's directory-browse grammar owns the input.
+            if rest.contains('/') {
+                SpineSegmentKind::FreeText
+            } else {
+                SpineSegmentKind::SlashCommand {
+                    command: rest.to_string(),
+                }
+            }
+        }
         '-' => SpineSegmentKind::Flow {
             query: rest.to_string(),
         },
         '|' => SpineSegmentKind::Profile {
             profile_id: rest.to_string(),
         },
-        '.' => SpineSegmentKind::Style {
-            style_id: rest.to_string(),
-        },
+        '.' => {
+            // `./…` and `../…` are relative-path browses, not style ids.
+            if rest.starts_with('/') || rest.starts_with("./") {
+                SpineSegmentKind::FreeText
+            } else {
+                SpineSegmentKind::Style {
+                    style_id: rest.to_string(),
+                }
+            }
+        }
         ';' => {
             let first_space = rest.find(' ');
             match first_space {
@@ -393,6 +409,59 @@ mod tests {
         assert_eq!(parse.segments.len(), 1);
         assert!(matches!(parse.segments[0].kind, SpineSegmentKind::FreeText));
         assert_eq!(parse.segments[0].raw, "hello world");
+    }
+
+    /// Chaos battery 05 (2026-07-18): `/tmp/` was classified as
+    /// `SlashCommand { command: "tmp/" }`, so the spine's Commands section
+    /// hijacked the main list while root directory browse loaded rows the UI
+    /// could never render. A second `/` is path syntax — command names never
+    /// contain slashes — and must stay free text for the launcher to own.
+    #[test]
+    fn absolute_path_with_second_slash_is_free_text() {
+        for input in ["/tmp/", "/tmp/chaos", "/Users/me/dev/"] {
+            let parse = parse_spine(input);
+            assert_eq!(parse.segments.len(), 1, "input {input:?}");
+            assert!(
+                matches!(parse.segments[0].kind, SpineSegmentKind::FreeText),
+                "input {input:?} must be free text, got {:?}",
+                parse.segments[0].kind
+            );
+            assert_eq!(parse.segments[0].raw, input);
+        }
+    }
+
+    #[test]
+    fn single_slash_prefix_is_still_a_slash_command() {
+        let parse = parse_spine("/rew");
+        assert_eq!(parse.segments.len(), 1);
+        assert!(matches!(
+            &parse.segments[0].kind,
+            SpineSegmentKind::SlashCommand { command } if command == "rew"
+        ));
+    }
+
+    /// `./…` and `../…` are relative directory browses, not `.style` ids.
+    #[test]
+    fn relative_path_prefixes_are_free_text() {
+        for input in ["./scripts", "../sibling/dir"] {
+            let parse = parse_spine(input);
+            assert_eq!(parse.segments.len(), 1, "input {input:?}");
+            assert!(
+                matches!(parse.segments[0].kind, SpineSegmentKind::FreeText),
+                "input {input:?} must be free text, got {:?}",
+                parse.segments[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn style_sigil_without_path_shape_is_still_style() {
+        let parse = parse_spine(".formal");
+        assert_eq!(parse.segments.len(), 1);
+        assert!(matches!(
+            &parse.segments[0].kind,
+            SpineSegmentKind::Style { style_id } if style_id == "formal"
+        ));
     }
 
     #[test]

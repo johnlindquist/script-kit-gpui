@@ -221,21 +221,21 @@ impl ScriptListApp {
         self.invalidate_grouped_cache();
         if matches!(self.current_view, AppView::ScriptList) {
             self.sync_list_state_for_filter_replacement();
-            match main_menu_refresh_selection_policy(self.main_menu_selection_user_moved) {
-                MainMenuRefreshSelectionPolicy::RestoreIdentity => {
-                    if let Some(snapshot) = selection_before {
-                        self.restore_main_menu_selection_from_snapshot(snapshot);
-                    }
-                }
-                MainMenuRefreshSelectionPolicy::SnapToFirst => {
-                    self.snap_main_menu_selection_to_first();
-                    tracing::debug!(
-                        target: "script_kit::selection",
-                        event = "main_menu_refresh_snap_to_first_untouched_selection",
-                        reason = "root_file_results_publish",
-                        selected_index = self.selected_index,
-                    );
-                }
+            let restored =
+                match main_menu_refresh_selection_policy(self.main_menu_selection_user_moved) {
+                    MainMenuRefreshSelectionPolicy::RestoreIdentity => selection_before
+                        .map(|snapshot| self.restore_main_menu_selection_from_snapshot(snapshot))
+                        .unwrap_or(false),
+                    MainMenuRefreshSelectionPolicy::SnapToFirst => false,
+                };
+            if !restored {
+                self.snap_main_menu_selection_to_first();
+                tracing::debug!(
+                    target: "script_kit::selection",
+                    event = "main_menu_refresh_snap_to_first_missing_identity",
+                    reason = "root_file_results_publish",
+                    selected_index = self.selected_index,
+                );
             }
             self.validate_selection_bounds(cx);
             self.schedule_main_list_selection_reveal_above_footer(
@@ -463,7 +463,12 @@ impl ScriptListApp {
                 query,
                 directory,
                 show_hidden,
-            } if self.active_root_directory_browse_source_matches(directory, *show_hidden) => {
+            } if self.active_root_directory_browse_source_matches(directory, *show_hidden)
+                && root_directory_browse_listing_is_fresh(
+                    self.root_search.root_file_browse_listed_at,
+                    std::time::Instant::now(),
+                ) =>
+            {
                 if self.root_search.root_file_search_query != *query {
                     self.root_search.root_file_search_query = query.clone();
                     self.refresh_root_file_grouping_after_query_only_change(cx);
@@ -480,6 +485,9 @@ impl ScriptListApp {
         let generation = self.root_search.root_file_search_generation;
         self.root_search.root_file_search_query = request.query().to_string();
         self.root_search.root_file_search_mode = Some(mode);
+        self.root_search.root_file_browse_listed_at =
+            matches!(&request, RootFileSearchRequest::DirectoryBrowse { .. })
+                .then(std::time::Instant::now);
         let cached_results = self.cached_root_file_results_for_request(&request);
         self.root_search.root_file_results = cached_results;
         self.root_search.root_file_search_loading = self.root_search.root_file_results.is_empty();
@@ -611,6 +619,22 @@ fn root_file_result_fingerprint(files: &[crate::file_search::FileResult]) -> Vec
     files.iter().map(|file| file.path.as_str()).collect()
 }
 
+/// How long a same-directory browse may serve its cached readdir listing
+/// before a repeat request re-runs the provider. Fragment typing inside one
+/// directory stays on the fast path; the listing still tracks live
+/// create/delete churn within this bound (chaos battery 05: deleted files
+/// stayed listed and selectable forever while browsing the same directory).
+const ROOT_FILE_BROWSE_REFRESH_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Pure freshness gate for the same-directory browse fast path. `None`
+/// (never listed this browse) is stale so the provider always runs once.
+fn root_directory_browse_listing_is_fresh(
+    listed_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    listed_at.is_some_and(|at| now.saturating_duration_since(at) < ROOT_FILE_BROWSE_REFRESH_TTL)
+}
+
 /// Pure core of [`ScriptListApp::visible_root_file_search_loading`].
 ///
 /// Both flags are required on purpose: `visible_batch_empty` (the section
@@ -640,6 +664,21 @@ fn root_file_visible_loading_decision(
 mod loading_decision_tests {
     use super::{root_file_visible_loading_decision, *};
     use crate::file_search::RootFileSectionMode;
+
+    /// Chaos battery 05: same-directory fragment typing must reuse the cached
+    /// readdir listing only within the refresh TTL; a never-listed browse and
+    /// an aged listing must both re-run the provider so live filesystem
+    /// create/delete churn (deleted rows staying selectable) stays bounded.
+    #[test]
+    fn directory_browse_listing_freshness_gate() {
+        let now = std::time::Instant::now();
+        assert!(!root_directory_browse_listing_is_fresh(None, now));
+        assert!(root_directory_browse_listing_is_fresh(Some(now), now));
+        let aged = now + ROOT_FILE_BROWSE_REFRESH_TTL;
+        assert!(!root_directory_browse_listing_is_fresh(Some(now), aged));
+        let within = now + ROOT_FILE_BROWSE_REFRESH_TTL / 2;
+        assert!(root_directory_browse_listing_is_fresh(Some(now), within));
+    }
 
     /// A passive global cache warm (no `files:` filter) must not surface
     /// the main-list loading treatment.
@@ -713,10 +752,67 @@ mod loading_decision_tests {
         }
     }
 
+    /// OF-32: a provider result arriving after paint must not replace the
+    /// selected row merely because the user has not moved selection yet.
+    /// Enter resolves the live grouped cache, so changing this identity races
+    /// the action the user saw before pressing the key.
     #[gpui::test]
-    fn same_query_root_file_publish_preserves_user_moved_selection(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn same_query_root_file_publish_preserves_painted_selection(cx: &mut gpui::TestAppContext) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            let query = "zzlauncherrefreshprobe";
+            let painted_key = "fallback/root-file-search-handoff/global";
+            app.scripts = vec![main_menu_selection_test_script(
+                "zzlauncherrefreshprobe first",
+            )];
+            app.scriptlets.clear();
+            app.skills.clear();
+            app.apps.clear();
+            app.computed_filter_text = query.to_string();
+            app.filter_text = query.to_string();
+            app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(query);
+            app.root_search.root_file_search_generation = 40;
+            app.root_search.root_file_search_mode =
+                Some(crate::file_search::RootFileSectionMode::GlobalQuery);
+            app.root_search.root_file_search_query = query.to_string();
+            app.root_search.root_file_search_loading = true;
+            app.root_search.root_file_provider_loading = true;
+            app.invalidate_grouped_cache();
+            app.get_grouped_results_cached();
+            app.selected_index = app
+                .main_menu_result_caches
+                .grouped_index_for_stable_selection_key(painted_key)
+                .expect("same query should include the painted Search Files handoff");
+            assert!(!app.main_menu_selection_user_moved);
+            assert_eq!(
+                selected_main_menu_stable_key(app).as_deref(),
+                Some(painted_key)
+            );
+
+            app.apply_root_file_search_results_for_generation(
+                40,
+                vec![crate::file_search::FileResult {
+                    path: "/tmp/zzlauncherrefreshprobe.txt".to_string(),
+                    name: "zzlauncherrefreshprobe.txt".to_string(),
+                    size: 1,
+                    modified: 1,
+                    file_type: crate::file_search::FileType::File,
+                }],
+                false,
+                true,
+                cx,
+            );
+
+            assert_eq!(
+                selected_main_menu_stable_key(app).as_deref(),
+                Some(painted_key),
+                "late same-query results must preserve the row identity painted before Enter"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn same_query_root_file_publish_preserves_user_moved_selection(cx: &mut gpui::TestAppContext) {
         let app = main_menu_selection_test_app(cx);
         app.update(cx, |app, cx| {
             let query = "zzlauncherrefreshprobe";

@@ -39,6 +39,9 @@ pub(crate) struct RootSearchStore {
         std::collections::VecDeque<(String, Vec<crate::file_search::FileResult>)>,
     /// Source mode currently backing `root_file_results`.
     pub(crate) root_file_search_mode: Option<crate::file_search::RootFileSectionMode>,
+    /// When the active directory-browse listing last (re)ran readdir. Bounds
+    /// how stale same-directory fragment typing can leave the file rows.
+    pub(crate) root_file_browse_listed_at: Option<std::time::Instant>,
     /// Frecency-backed file rows shown on the empty root launcher.
     pub(crate) root_recent_file_results: Vec<crate::file_search::FileResult>,
     /// Frecency revision currently backing `root_recent_file_results`.
@@ -83,6 +86,7 @@ impl Default for RootSearchStore {
             root_file_results: Vec::new(),
             root_file_result_cache: std::collections::VecDeque::new(),
             root_file_search_mode: None,
+            root_file_browse_listed_at: None,
             root_recent_file_results: Vec::new(),
             root_recent_file_revision: u64::MAX,
             root_file_search_query: String::new(),
