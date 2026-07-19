@@ -17,6 +17,23 @@ impl Drop for NotesApp {
             tracing::error!("Failed to save unsaved changes on Notes window close");
         }
 
+        // GPUI releases entities lazily: when the Notes window is reopened, the
+        // OLD NotesApp's Drop runs on a later effect flush — AFTER the new
+        // instance has stored fresh global handles. An unconditional clear here
+        // wiped the new instance's NOTES_WINDOW/NOTES_APP_ENTITY slots and its
+        // embedded-AI automation registration, breaking every protocol notes
+        // target after a toggle-reopen (chaos-15). Only the CURRENT instance
+        // may clear the globals.
+        let current = CURRENT_NOTES_INSTANCE.load(std::sync::atomic::Ordering::SeqCst);
+        if current != self.instance_id {
+            debug!(
+                dropped_instance = self.instance_id,
+                current_instance = current,
+                "Stale NotesApp dropped after replacement - leaving globals for the live instance"
+            );
+            return;
+        }
+
         let _ = crate::windows::remove_automation_window(
             crate::notes::window::NOTES_EMBEDDED_AI_AUTOMATION_ID,
         );

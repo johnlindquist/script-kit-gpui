@@ -51,6 +51,13 @@ static NOTES_WINDOW: std::sync::OnceLock<std::sync::Mutex<Option<gpui::WindowHan
 static NOTES_APP_ENTITY: std::sync::OnceLock<std::sync::Mutex<Option<Entity<NotesApp>>>> =
     std::sync::OnceLock::new();
 
+/// Monotonic id distinguishing NotesApp instances. GPUI releases entities
+/// lazily (on a later effect flush), so a replaced instance's Drop can run
+/// AFTER a new window has already stored fresh globals; Drop must only clear
+/// globals its own instance still owns (see `impl Drop for NotesApp`).
+static NOTES_INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CURRENT_NOTES_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub type NotesRunCommandExecutor = fn(command_id: &str, cx: &mut App) -> Result<bool, String>;
 
 static NOTES_RUN_COMMAND_EXECUTOR: std::sync::OnceLock<NotesRunCommandExecutor> =
@@ -446,6 +453,9 @@ pub struct NotesApp {
 
     /// Debounce: Whether the current note has unsaved changes
     has_unsaved_changes: bool,
+
+    /// Which NotesApp generation this is; guards Drop's global cleanup.
+    instance_id: u64,
 
     /// Debounce: Last time we saved (to avoid too-frequent saves)
     last_save_time: Option<Instant>,

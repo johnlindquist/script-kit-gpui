@@ -5,6 +5,10 @@ use crate::components::notes_editor::{NotesEditor, NotesEditorLayout, NotesEdito
 impl NotesApp {
     /// Create a new NotesApp
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let instance_id =
+            NOTES_INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        CURRENT_NOTES_INSTANCE.store(instance_id, std::sync::atomic::Ordering::SeqCst);
+
         // Initialize storage
         if let Err(e) = storage::init_notes_db() {
             tracing::error!(error = %e, "Failed to initialize notes database");
@@ -182,6 +186,7 @@ impl NotesApp {
             active_day_binding: None,
             pending_day_editor_reconcile: None,
             has_unsaved_changes: false,
+            instance_id,
             last_save_time: None,
             last_persisted_bounds: None,
             last_bounds_save: Instant::now(),
