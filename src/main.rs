@@ -46,6 +46,7 @@ mod actions_button_visibility_tests;
 mod agents;
 mod ai;
 mod aliases;
+mod atomic_file;
 mod brain;
 mod branding;
 pub mod calculator;

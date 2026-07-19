@@ -106,10 +106,10 @@ pub fn save_emoji_usage_to_path(
     }
 
     let json = serde_json::to_string_pretty(store).context("Failed to serialize emoji usage")?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).with_context(|| format!("Failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), path.display()))?;
+    // Unique-temp atomic write (see src/atomic_file.rs): a fixed temp path let
+    // concurrent savers corrupt the file.
+    crate::atomic_file::write_atomic(path, json.as_bytes())
+        .with_context(|| format!("Failed to atomically write {}", path.display()))?;
     Ok(())
 }
 

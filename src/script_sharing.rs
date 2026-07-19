@@ -274,12 +274,13 @@ pub fn install_share_bundle(bundle: &ScriptShareBundle) -> Result<ShareInstallOu
     };
     let manifest_json = serde_json::to_string_pretty(&plugin_manifest)
         .context("Failed to serialize plugin manifest")?;
-    fs::write(plugin_root.join("plugin.json"), manifest_json).with_context(|| {
-        format!(
-            "Failed to write plugin manifest {}",
-            plugin_root.join("plugin.json").display()
-        )
-    })?;
+    crate::atomic_file::write_atomic(&plugin_root.join("plugin.json"), manifest_json.as_bytes())
+        .with_context(|| {
+            format!(
+                "Failed to write plugin manifest {}",
+                plugin_root.join("plugin.json").display()
+            )
+        })?;
 
     for file in &bundle.files {
         let relative_path = validate_share_relative_path(&file.path)?;

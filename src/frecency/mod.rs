@@ -248,8 +248,34 @@ impl FrecencyStore {
             format!("Failed to read frecency file: {}", self.file_path.display())
         })?;
 
-        let data: FrecencyData =
-            serde_json::from_str(&content).with_context(|| "Failed to parse frecency JSON")?;
+        let data: FrecencyData = match serde_json::from_str(&content) {
+            Ok(data) => data,
+            Err(parse_err) => {
+                // Battery 13 (2026-07-18): a corrupt file used to be silently
+                // clobbered — startup `.ok()`s this error, starts fresh, and
+                // the next save overwrites the user's entire frecency history.
+                // Preserve the bad bytes in a sidecar so the data stays
+                // recoverable; still return Err so callers keep their
+                // fresh-start behavior.
+                let rescue_path = PathBuf::from(format!("{}.corrupt", self.file_path.display()));
+                match std::fs::rename(&self.file_path, &rescue_path) {
+                    Ok(()) => warn!(
+                        path = %self.file_path.display(),
+                        rescue = %rescue_path.display(),
+                        error = %parse_err,
+                        "Frecency file is corrupt; preserved as sidecar and starting fresh"
+                    ),
+                    Err(rename_err) => warn!(
+                        path = %self.file_path.display(),
+                        error = %parse_err,
+                        rescue_error = %rename_err,
+                        "Frecency file is corrupt and could not be preserved"
+                    ),
+                }
+                return Err(anyhow::Error::from(parse_err))
+                    .with_context(|| "Failed to parse frecency JSON");
+            }
+        };
 
         self.entries = data.entries;
 
@@ -291,20 +317,13 @@ impl FrecencyStore {
         })
         .context("Failed to serialize frecency data")?;
 
-        // Atomic write: write to temp file, then rename
-        let temp_path = self.file_path.with_extension("json.tmp");
-
-        // Write to temp file
-        std::fs::write(&temp_path, &json).with_context(|| {
+        // Atomic write via a UNIQUE temp file + rename. A fixed temp path let
+        // concurrent savers corrupt the file; `write_atomic` isolates each write.
+        crate::atomic_file::write_atomic(&self.file_path, json.as_bytes()).with_context(|| {
             format!(
-                "Failed to write temp frecency file: {}",
-                temp_path.display()
+                "Failed to atomically write frecency file: {}",
+                self.file_path.display()
             )
-        })?;
-
-        // Atomic rename (on Unix, this is atomic; on Windows, it's best-effort)
-        std::fs::rename(&temp_path, &self.file_path).with_context(|| {
-            format!("Failed to rename temp file to {}", self.file_path.display())
         })?;
 
         info!(
@@ -1686,6 +1705,65 @@ mod tests {
         assert_eq!(pruned, 0, "Empty store should prune nothing");
         assert!(!store.is_dirty(), "Empty store should not be marked dirty");
 
+        cleanup_temp_file(&path);
+    }
+
+    /// Battery 13 lock: a corrupt frecency file must be preserved as a
+    /// `.corrupt` sidecar by the failed load, so the caller's fresh-start
+    /// save cannot silently destroy the user's history.
+    #[test]
+    fn test_corrupt_frecency_rescued_to_sidecar_before_fresh_start() {
+        let (_, path) = create_test_store();
+        let corrupt = "{\"entries\":{\"script/foo.ts\":{\"count\":5,\"last_used\":175";
+        fs::write(&path, corrupt).unwrap();
+
+        let mut store = FrecencyStore::with_path(path.clone());
+        assert!(store.load().is_err(), "corrupt load must still surface Err");
+        assert!(store.is_empty());
+
+        let rescue = PathBuf::from(format!("{}.corrupt", path.display()));
+        assert!(rescue.exists(), "corrupt file must be preserved as sidecar");
+        assert_eq!(fs::read_to_string(&rescue).unwrap(), corrupt);
+        assert!(
+            !path.exists(),
+            "original path must be clear for a fresh start"
+        );
+
+        // The fresh-start save must not touch the sidecar.
+        store.record_use("script/new.ts");
+        store.save().unwrap();
+        assert!(path.exists());
+        assert_eq!(fs::read_to_string(&rescue).unwrap(), corrupt);
+
+        cleanup_temp_file(&path);
+        cleanup_temp_file(&rescue);
+    }
+
+    /// Battery 13: interleaved saves from independent stores sharing one path
+    /// (two-app-instances shape) must always leave one writer's COMPLETE
+    /// output — never torn JSON (write_atomic contract, exercised end-to-end).
+    #[test]
+    fn test_concurrent_frecency_saves_never_tear() {
+        let (_, path) = create_test_store();
+        let _ = fs::remove_file(&path);
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut store = FrecencyStore::with_path(path);
+                for i in 0..25 {
+                    store.record_use(&format!("script/t{}-{}.ts", t, i));
+                    store.save().unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let content = fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .expect("final frecency file must be complete valid JSON");
+        assert!(parsed.get("entries").is_some());
         cleanup_temp_file(&path);
     }
 }

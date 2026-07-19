@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 /// Maximum number of entries to store in history
 const MAX_ENTRIES: usize = 100;
 /// Input history with navigation state
@@ -101,8 +101,31 @@ impl InputHistory {
         })?;
 
         // Deserialize just the entries array
-        let data: InputHistoryData =
-            serde_json::from_str(&content).with_context(|| "Failed to parse input history JSON")?;
+        let data: InputHistoryData = match serde_json::from_str(&content) {
+            Ok(data) => data,
+            Err(parse_err) => {
+                // Battery 13 (2026-07-18): preserve corrupt history in a
+                // sidecar before the caller's fresh-start save can overwrite
+                // it (same rescue as FrecencyStore::load).
+                let rescue_path = PathBuf::from(format!("{}.corrupt", self.file_path.display()));
+                match std::fs::rename(&self.file_path, &rescue_path) {
+                    Ok(()) => warn!(
+                        path = %self.file_path.display(),
+                        rescue = %rescue_path.display(),
+                        error = %parse_err,
+                        "Input history file is corrupt; preserved as sidecar and starting fresh"
+                    ),
+                    Err(rename_err) => warn!(
+                        path = %self.file_path.display(),
+                        error = %parse_err,
+                        rescue_error = %rename_err,
+                        "Input history file is corrupt and could not be preserved"
+                    ),
+                }
+                return Err(anyhow::Error::from(parse_err))
+                    .with_context(|| "Failed to parse input history JSON");
+            }
+        };
 
         self.entries = data.entries;
         self.selected_results = data.selected_results;
@@ -140,19 +163,15 @@ impl InputHistory {
         let json =
             serde_json::to_string_pretty(&data).context("Failed to serialize input history")?;
 
-        // Atomic write: write to temp file, then rename
-        let temp_path = self.file_path.with_extension("json.tmp");
-
-        std::fs::write(&temp_path, &json).with_context(|| {
+        // Atomic write via a UNIQUE temp file + rename. A fixed temp path let
+        // two concurrent savers (e.g. two app instances sharing $HOME) interleave
+        // writes and corrupt the file; `write_atomic` gives each write its own
+        // temp, so the result is always one writer's complete output.
+        crate::atomic_file::write_atomic(&self.file_path, json.as_bytes()).with_context(|| {
             format!(
-                "Failed to write temp input history file: {}",
-                temp_path.display()
+                "Failed to atomically write input history file: {}",
+                self.file_path.display()
             )
-        })?;
-
-        // Atomic rename
-        std::fs::rename(&temp_path, &self.file_path).with_context(|| {
-            format!("Failed to rename temp file to {}", self.file_path.display())
         })?;
 
         info!(
@@ -786,5 +805,37 @@ mod tests {
         assert_eq!(history.current_index(), Some(0));
 
         cleanup_temp_file(&path);
+    }
+
+    /// Battery 13 lock: a corrupt input-history file must be preserved as a
+    /// `.corrupt` sidecar by the failed load (same contract as FrecencyStore).
+    #[test]
+    fn test_corrupt_history_rescued_to_sidecar_before_fresh_start() {
+        let (_, path) = create_test_history();
+        let corrupt = "{\"entries\":[\"partial";
+        fs::write(&path, corrupt).unwrap();
+
+        let mut history = InputHistory::with_path(path.clone());
+        assert!(
+            history.load().is_err(),
+            "corrupt load must still surface Err"
+        );
+        assert!(history.is_empty());
+
+        let rescue = PathBuf::from(format!("{}.corrupt", path.display()));
+        assert!(rescue.exists(), "corrupt file must be preserved as sidecar");
+        assert_eq!(fs::read_to_string(&rescue).unwrap(), corrupt);
+        assert!(
+            !path.exists(),
+            "original path must be clear for a fresh start"
+        );
+
+        history.add_entry("fresh entry");
+        history.save().unwrap();
+        assert!(path.exists());
+        assert_eq!(fs::read_to_string(&rescue).unwrap(), corrupt);
+
+        cleanup_temp_file(&path);
+        cleanup_temp_file(&rescue);
     }
 }

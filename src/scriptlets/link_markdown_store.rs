@@ -323,13 +323,10 @@ fn fence_for(parts: &[&str]) -> String {
 }
 
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Create link dir failed: {error}"))?;
-    }
-    let tmp = path.with_extension("md.tmp");
-    std::fs::write(&tmp, contents).map_err(|error| format!("Write links.md failed: {error}"))?;
-    std::fs::rename(&tmp, path).map_err(|error| format!("Replace links.md failed: {error}"))
+    // Unique-temp atomic write: a fixed temp path let concurrent savers corrupt
+    // the store (torn interleaved writes). See src/atomic_file.rs.
+    crate::atomic_file::write_atomic(path, contents.as_bytes())
+        .map_err(|error| format!("Write links.md failed: {error}"))
 }
 
 fn derive_title_from_url(url: &str) -> String {

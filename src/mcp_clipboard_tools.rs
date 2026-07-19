@@ -393,3 +393,44 @@ fn envelope_tool_result(envelope: ClipboardMutationEnvelope) -> ToolResult {
         is_error: None,
     }
 }
+
+#[cfg(test)]
+mod mcp_clipboard_fuzz_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The clipboard MCP handler's parse layer must never panic on hostile input
+    /// (Battery A — parse only; never the apply layer that touches the clipboard).
+    #[test]
+    fn parse_clipboard_requests_never_panic_on_hostile_args() {
+        let tools = [
+            CLIPBOARD_COPY_TOOL,
+            CLIPBOARD_PIN_TOOL,
+            CLIPBOARD_UNPIN_TOOL,
+            CLIPBOARD_DELETE_TOOL,
+            CLIPBOARD_CLEAR_UNPINNED_TOOL,
+        ];
+        let hostile_args = vec![
+            json!(null),
+            json!(42),
+            json!("nope"),
+            json!([]),
+            json!({}),
+            json!({ "id": 123 }),
+            json!({ "id": null }),
+            json!({ "id": "" }),
+            json!({ "id": "   " }),
+            json!({ "id": "x", "unexpected": true }), // deny_unknown_fields
+            json!({ "id": "x", "confirm": "yes" }),   // confirm wrong type
+            json!({ "id": { "a": 1 } }),
+            json!({ "id": "🎉\u{0000}../../etc" }),
+            json!({ "id": "x".repeat(1_000_000) }),
+            json!({ "confirm": 1 }),
+        ];
+        for tool in tools {
+            for args in &hostile_args {
+                let _ = parse_clipboard_mutation_request(tool, args.clone());
+            }
+        }
+    }
+}

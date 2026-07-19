@@ -87,17 +87,13 @@ pub fn save_presets(presets: &[SavedAiPreset]) -> Result<()> {
     let json =
         serde_json::to_string_pretty(presets).context("Failed to serialize presets to JSON")?;
 
-    // Atomic write: write to temp file in same directory, then rename
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)
-        .with_context(|| format!("Failed to write temp presets file: {}", tmp_path.display()))?;
-
-    std::fs::rename(&tmp_path, &path).with_context(|| {
-        // Clean up temp file on rename failure
-        if let Err(e) = std::fs::remove_file(&tmp_path) {
-            warn!(path = %tmp_path.display(), error = %e, "Failed to clean up temp presets file");
-        }
-        format!("Failed to rename temp file to: {}", path.display())
+    // Atomic write via a UNIQUE temp file + rename (see src/atomic_file.rs): a
+    // fixed temp path let concurrent savers corrupt the file.
+    crate::atomic_file::write_atomic(&path, json.as_bytes()).with_context(|| {
+        format!(
+            "Failed to atomically write presets file: {}",
+            path.display()
+        )
     })?;
 
     info!(
@@ -194,18 +190,9 @@ pub fn export_presets_to_file(path: &std::path::Path) -> Result<usize> {
     let json =
         serde_json::to_string_pretty(&presets).context("Failed to serialize presets to JSON")?;
 
-    // Atomic write: write to temp file in same directory, then rename
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)
-        .with_context(|| format!("Failed to write temp export file: {}", tmp_path.display()))?;
-
-    std::fs::rename(&tmp_path, path).with_context(|| {
-        // Clean up temp file on rename failure
-        if let Err(e) = std::fs::remove_file(&tmp_path) {
-            warn!(path = %tmp_path.display(), error = %e, "Failed to clean up temp export file");
-        }
-        format!("Failed to rename temp file to: {}", path.display())
-    })?;
+    // Atomic write via a UNIQUE temp file + rename (see src/atomic_file.rs).
+    crate::atomic_file::write_atomic(path, json.as_bytes())
+        .with_context(|| format!("Failed to atomically write export file: {}", path.display()))?;
 
     info!(
         count = count,

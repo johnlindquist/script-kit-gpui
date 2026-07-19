@@ -72,7 +72,9 @@ fn save_kit_registry_to_path(kits: &[InstalledKit], path: &Path) -> Result<()> {
         )
     })?;
 
-    fs::write(path, content)
+    // Atomic write (see src/atomic_file.rs): a raw fs::write left the installed-kit
+    // registry corruptible by a crash mid-write or a concurrent writer.
+    crate::atomic_file::write_atomic(path, content.as_bytes())
         .with_context(|| format!("Failed to write kit store registry: {}", path.display()))
 }
 

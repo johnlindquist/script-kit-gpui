@@ -241,17 +241,14 @@ pub fn save_state_file(state: &WindowStateFile) -> bool {
             return false;
         }
     };
-    let tmp_path = path.with_extension("json.tmp");
-    if let Err(e) = fs::write(&tmp_path, &json) {
-        logging::log("WINDOW_STATE", &format!("Failed to write temp file: {}", e));
-        return false;
-    }
-    if let Err(e) = fs::rename(&tmp_path, &path) {
+    // Atomic write via a UNIQUE temp file + rename. Window saves are not
+    // serialized (multiple windows / instances can save concurrently), and a
+    // fixed temp path let those interleave into a corrupt file.
+    if let Err(e) = crate::atomic_file::write_atomic(&path, json.as_bytes()) {
         logging::log(
             "WINDOW_STATE",
-            &format!("Failed to rename temp file: {}", e),
+            &format!("Failed to atomically write window state: {}", e),
         );
-        let _ = fs::remove_file(&tmp_path);
         return false;
     }
     logging::log("WINDOW_STATE", "Window state saved successfully");

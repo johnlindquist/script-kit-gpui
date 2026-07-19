@@ -603,3 +603,96 @@ fn envelope_tool_result(envelope: ScriptsMutationEnvelope) -> ToolResult {
         is_error: None,
     }
 }
+
+#[cfg(test)]
+mod mcp_scripts_fuzz_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The scripts MCP handler's parse layer must never panic on hostile input,
+    /// and the path guard must never let a name escape the scripts directory.
+    /// (Battery A — empirical fuzz of the prime MCP input boundary; parse/path
+    /// only, never the spawning/writing apply_* layer.)
+    #[test]
+    fn parse_scripts_requests_never_panic_on_hostile_args() {
+        let tools = [
+            SCRIPTS_CREATE_TOOL,
+            SCRIPTS_UPDATE_TOOL,
+            SCRIPTS_DELETE_TOOL,
+            SCRIPTS_RUN_TOOL,
+        ];
+        let hostile_args = vec![
+            json!(null),
+            json!(42),
+            json!("a string, not an object"),
+            json!([]),
+            json!({}),              // missing required
+            json!({ "name": 123 }), // wrong type
+            json!({ "name": null, "body": null }),
+            json!({ "name": "x", "body": 999 }), // body wrong type
+            json!({ "name": "x", "body": "y", "unexpected": true }), // deny_unknown_fields
+            json!({ "name": "x", "body": "x".repeat(2_000_000) }), // oversized body
+            json!({ "name": "x", "confirm": "yes" }), // confirm wrong type
+            json!({ "name": "x", "timeoutMs": -5 }),
+            json!({ "name": "x", "timeoutMs": 999999999999i64 }),
+            json!({ "name": "x", "args": "not-an-array" }),
+            json!({ "name": "x", "env": [1, 2, 3] }),
+            json!({ "name": "🎉\u{0000}", "body": "z" }),
+            json!({ "name": { "nested": "object" }, "body": "z" }),
+        ];
+        for tool in tools {
+            for args in &hostile_args {
+                // Must return Ok/Err, never panic.
+                let _ = parse_scripts_mutation_request(tool, args.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn script_path_for_name_never_escapes_scripts_dir() {
+        let scripts_dir = crate::script_creation::scripts_dir();
+        let hostile_names = [
+            "",
+            ".",
+            "..",
+            "../..",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "/../../../../etc/shadow",
+            "foo/bar",
+            "foo\\bar",
+            "a/../../b",
+            "....//....//etc",
+            "a\u{0000}b",
+            "..\u{2044}..\u{2044}etc", // unicode fraction slash
+            "\u{202e}gpj.exe",         // RTL override
+            "con",
+            "PRN",
+            &"a".repeat(50_000),
+            "  ../../  ",
+            "🎉../../🎉",
+            "文件/../../secret",
+        ];
+        for name in hostile_names {
+            match script_path_for_name(name) {
+                Ok(path) => {
+                    // If a path is produced, it MUST live directly inside the
+                    // scripts dir — never an ancestor / sibling / absolute escape.
+                    assert_eq!(
+                        path.parent(),
+                        Some(scripts_dir.as_path()),
+                        "name {name:?} produced an out-of-tree path: {}",
+                        path.display()
+                    );
+                    // And the file name must be the sanitized stem + .ts (no separators).
+                    let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                    assert!(
+                        !fname.contains('/') && !fname.contains('\\') && !fname.contains(".."),
+                        "name {name:?} produced a traversal filename: {fname:?}"
+                    );
+                }
+                Err(_) => { /* rejected (e.g. empty after sanitize) — also fine */ }
+            }
+        }
+    }
+}

@@ -13,6 +13,7 @@ pub mod actions;
 pub mod agentic_protocol_bus;
 
 pub mod about;
+pub mod atomic_file;
 pub mod brain;
 pub mod branding;
 pub mod calculator;

@@ -452,13 +452,10 @@ fn fence_for(parts: &[&str]) -> String {
 }
 
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Create snippet dir failed: {error}"))?;
-    }
-    let tmp = path.with_extension("md.tmp");
-    std::fs::write(&tmp, contents).map_err(|error| format!("Write snippets.md failed: {error}"))?;
-    std::fs::rename(&tmp, path).map_err(|error| format!("Replace snippets.md failed: {error}"))
+    // Unique-temp atomic write: a fixed temp path let concurrent savers corrupt
+    // the store (torn interleaved writes). See src/atomic_file.rs.
+    crate::atomic_file::write_atomic(path, contents.as_bytes())
+        .map_err(|error| format!("Write snippets.md failed: {error}"))
 }
 
 fn legacy_jsonl_candidates(sk_path: &Path) -> Vec<ObjectSelectorCandidate> {
