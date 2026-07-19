@@ -1,5 +1,35 @@
 use crate::ui_foundation::{is_key_down, is_key_enter, is_key_escape, is_key_space, is_key_up};
 
+pub(crate) fn render_builtin_split_main_content_layout(
+    list_pane: gpui::AnyElement,
+    preview_pane: gpui::AnyElement,
+) -> gpui::AnyElement {
+    gpui::div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_h(gpui::px(0.))
+        .w_full()
+        .overflow_hidden()
+        .child(
+            gpui::div()
+                .flex_1()
+                .h_full()
+                .min_w(gpui::px(0.))
+                .min_h(gpui::px(0.))
+                .child(list_pane),
+        )
+        .child(
+            gpui::div()
+                .flex_1()
+                .h_full()
+                .min_h(gpui::px(0.))
+                .overflow_hidden()
+                .child(preview_pane),
+        )
+        .into_any_element()
+}
+
 impl ScriptListApp {
     /// Available vibrancy material presets for the theme customizer
     const VIBRANCY_MATERIALS: &[(theme::VibrancyMaterial, &str)] = &[
@@ -183,30 +213,7 @@ impl ScriptListApp {
         list_pane: gpui::AnyElement,
         preview_pane: gpui::AnyElement,
     ) -> gpui::AnyElement {
-        gpui::div()
-            .flex()
-            .flex_row()
-            .flex_1()
-            .min_h(gpui::px(0.))
-            .w_full()
-            .overflow_hidden()
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .h_full()
-                    .min_h(gpui::px(0.))
-                    .overflow_hidden()
-                    .child(list_pane),
-            )
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .h_full()
-                    .min_h(gpui::px(0.))
-                    .overflow_hidden()
-                    .child(preview_pane),
-            )
-            .into_any_element()
+        render_builtin_split_main_content_layout(list_pane, preview_pane)
     }
 
     /// Emit a structured scroll log line for builtin views.

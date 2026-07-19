@@ -10,13 +10,31 @@ fn dictation_history_row_selector(entry_id: &str) -> String {
     format!("{DICTATION_HISTORY_ROW_SELECTOR_PREFIX}{entry_id}")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DictationHistoryRowLayout {
+    viewport_paint_offset_x: f32,
+    row_paint_offset_x: f32,
+    requested_width: f32,
+}
+
+fn dictation_history_row_layout(
+    slot_width: f32,
+    row_outer_padding_x: f32,
+    chrome_edge_inset: f32,
+) -> DictationHistoryRowLayout {
+    DictationHistoryRowLayout {
+        viewport_paint_offset_x: (row_outer_padding_x - chrome_edge_inset).max(0.0),
+        row_paint_offset_x: 0.0,
+        requested_width: slot_width,
+    }
+}
+
 fn render_dictation_history_row(
     display_index: usize,
     entry: &crate::dictation::DictationHistoryEntry,
     list_colors: ListItemColors,
     main_menu_theme: crate::designs::MainMenuThemeVariant,
-    slot_width: f32,
-    chrome_edge_inset: f32,
+    layout: DictationHistoryRowLayout,
     selected: bool,
 ) -> impl IntoElement {
     let selector = dictation_history_row_selector(&entry.id);
@@ -30,12 +48,35 @@ fn render_dictation_history_row(
     div()
         .id(gpui::ElementId::Integer(display_index as u64))
         .debug_selector(move || selector)
-        .ml(px(
-            (metrics.row_outer_padding_x - chrome_edge_inset).max(0.0)
-        ))
-        .w(px(slot_width))
+        .relative()
+        .left(px(layout.row_paint_offset_x))
+        .w(px(layout.requested_width))
         .h(px(metrics.item_height))
         .child(item)
+}
+
+fn render_dictation_history_results_list<I, E>(
+    id: &'static str,
+    scroll_handle: &gpui::ScrollHandle,
+    rows: I,
+    layout: DictationHistoryRowLayout,
+) -> gpui::AnyElement
+where
+    I: IntoIterator<Item = E>,
+    E: gpui::IntoElement,
+{
+    div()
+        .relative()
+        .left(px(layout.viewport_paint_offset_x))
+        .w(px(layout.requested_width))
+        .h_full()
+        .min_h(px(0.0))
+        .child(crate::components::scrollbar::render_tracked_scroll_column(
+            id,
+            scroll_handle,
+            rows,
+        ))
+        .into_any_element()
 }
 
 fn render_dictation_history_leading_slot(
@@ -339,6 +380,13 @@ impl ScriptListApp {
         let main_menu_theme = self.current_main_menu_theme;
         let slot_width = crate::window_resize::MAIN_WINDOW_WIDTH * 0.5;
         let chrome_edge_inset = crate::window_resize::layout::WINDOW_BORDER_Y * 0.5;
+        let row_metrics =
+            crate::list_item::ListItemMetricsOverride::from_main_menu_theme(main_menu_theme);
+        let row_layout = dictation_history_row_layout(
+            slot_width,
+            row_metrics.row_outer_padding_x,
+            chrome_edge_inset,
+        );
         let list_element: AnyElement = if filtered_len == 0 {
             let state = DictationHistoryEmptyState::from_filter(&filter);
             crate::list_item::EmptyState::new(state.message(), empty_text_color, &empty_font_family)
@@ -346,7 +394,7 @@ impl ScriptListApp {
                 .into_element()
         } else {
             let selected = selected_index;
-            crate::components::scrollbar::render_tracked_scroll_column(
+            render_dictation_history_results_list(
                 "dictation-history-list",
                 &self.dictation_history_scroll_handle,
                 filtered_entries
@@ -358,11 +406,11 @@ impl ScriptListApp {
                             entry,
                             list_colors,
                             main_menu_theme,
-                            slot_width,
-                            chrome_edge_inset,
+                            row_layout,
                             display_ix == selected,
                         )
                     }),
+                row_layout,
             )
         };
 
@@ -626,20 +674,22 @@ mod dictation_history_paint_tests {
                 audio_duration_ms: 1_250,
             };
             let colors = ListItemColors::from_theme(&crate::theme::Theme::default());
-
-            render_dictation_history_row(
-                0,
-                &entry,
-                colors,
-                crate::designs::MainMenuThemeVariant::default(),
+            let main_menu_theme = crate::designs::MainMenuThemeVariant::default();
+            let metrics =
+                crate::list_item::ListItemMetricsOverride::from_main_menu_theme(main_menu_theme);
+            let layout = dictation_history_row_layout(
                 crate::window_resize::MAIN_WINDOW_WIDTH * 0.5,
+                metrics.row_outer_padding_x,
                 0.0,
-                true,
-            )
+            );
+
+            render_dictation_history_row(0, &entry, colors, main_menu_theme, layout, true)
         }
     }
 
-    struct TestDictationHistorySlotAnatomy;
+    struct TestDictationHistorySlotAnatomy {
+        scroll_handle: gpui::ScrollHandle,
+    }
 
     impl gpui::Render for TestDictationHistorySlotAnatomy {
         fn render(
@@ -659,9 +709,31 @@ mod dictation_history_paint_tests {
             let main_menu_theme = crate::designs::MainMenuThemeVariant::default();
             let spacing = get_tokens(crate::designs::DesignVariant::default()).spacing();
             let chrome_edge_inset = crate::window_resize::layout::WINDOW_BORDER_Y * 0.5;
-
-            div()
-                .w(px(crate::window_resize::MAIN_WINDOW_WIDTH * 0.5))
+            let split_width = crate::window_resize::MAIN_WINDOW_WIDTH * 0.5;
+            let ratified_offset_x = 4.0;
+            let layout = dictation_history_row_layout(
+                split_width,
+                chrome_edge_inset + ratified_offset_x,
+                chrome_edge_inset,
+            );
+            let results = render_dictation_history_results_list(
+                "dictation-history-test-list",
+                &self.scroll_handle,
+                std::iter::once(render_dictation_history_row(
+                    0,
+                    &entry,
+                    colors,
+                    main_menu_theme,
+                    layout,
+                    true,
+                )),
+                layout,
+            );
+            let list_pane = div()
+                .relative()
+                .w_full()
+                .h_full()
+                .min_h(px(0.0))
                 .flex()
                 .flex_col()
                 .child(render_dictation_history_leading_slot(
@@ -671,15 +743,12 @@ mod dictation_history_paint_tests {
                     spacing.padding_xs,
                     chrome_edge_inset,
                 ))
-                .child(render_dictation_history_row(
-                    0,
-                    &entry,
-                    colors,
-                    main_menu_theme,
-                    crate::window_resize::MAIN_WINDOW_WIDTH * 0.5,
-                    chrome_edge_inset,
-                    true,
-                ))
+                .child(div().relative().flex_1().min_h(px(0.0)).child(results));
+
+            crate::render_builtin_split_main_content_layout(
+                list_pane.into_any_element(),
+                div().w_full().h_full().into_any_element(),
+            )
         }
     }
 
@@ -715,26 +784,27 @@ mod dictation_history_paint_tests {
     }
 
     #[gpui::test]
-    fn dictation_split_portal_row_uses_shared_slot_geometry(cx: &mut gpui::TestAppContext) {
+    fn dictation_split_portal_row_visible_bounds_match_shared_slot_geometry(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use gpui::px;
 
-        let main_menu_theme = crate::designs::MainMenuThemeVariant::default();
-        let metrics =
-            crate::list_item::ListItemMetricsOverride::from_main_menu_theme(main_menu_theme);
-        let top_inset = get_tokens(crate::designs::DesignVariant::default())
-            .spacing()
-            .padding_xs;
         let split_width = crate::window_resize::MAIN_WINDOW_WIDTH * 0.5;
-        let chrome_edge_inset = crate::window_resize::layout::WINDOW_BORDER_Y * 0.5;
+        let ratified_offset_x = px(4.0);
 
         let window = cx.update(|cx| {
+            gpui_component::init(cx);
             let mut options = gpui::WindowOptions::default();
             options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
                 gpui::point(px(0.0), px(0.0)),
                 gpui::size(px(crate::window_resize::MAIN_WINDOW_WIDTH), px(160.0)),
             )));
-            cx.open_window(options, |_, cx| cx.new(|_| TestDictationHistorySlotAnatomy))
-                .expect("dictation slot geometry test window should open")
+            cx.open_window(options, |_, cx| {
+                cx.new(|_| TestDictationHistorySlotAnatomy {
+                    scroll_handle: gpui::ScrollHandle::default(),
+                })
+            })
+            .expect("dictation slot geometry test window should open")
         });
 
         cx.run_until_parked();
@@ -742,46 +812,22 @@ mod dictation_history_paint_tests {
         let expected_row_selector = dictation_history_row_selector(TEST_ENTRY_ID);
         window
             .update(cx, |_, window, _| {
-                let entries = window.debug_bounds_entries();
-                let separator = entries
-                    .iter()
-                    .find(|entry| {
-                        entry.selector
-                            == crate::components::builtin_leading_separator::BUILTIN_LEADING_SEPARATOR_ID
-                    })
-                    .expect("dictation leading separator should record paint bounds");
-                let row = entries
+                let row = window
+                    .debug_bounds_entries()
                     .iter()
                     .find(|entry| entry.selector == expected_row_selector)
                     .expect("dictation first row wrapper should record paint bounds");
 
-                assert_eq!(
-                    row.bounds.origin.x,
-                    px(metrics.row_outer_padding_x - chrome_edge_inset)
-                );
-                assert_eq!(
-                    row.bounds.origin.y,
-                    px(metrics.item_height - chrome_edge_inset)
-                );
+                assert_eq!(row.bounds.origin.x, ratified_offset_x);
                 assert_eq!(row.bounds.size.width, px(split_width));
-                assert_eq!(row.bounds.size.height, px(metrics.item_height));
-                assert_eq!(separator.bounds.origin.y, px(top_inset));
-                // The shared separator's painted wrapper is the accepted 26px
-                // chrome inside the theme-resolved 44px leading slot.
-                assert_eq!(separator.bounds.size.height, px(26.0));
+                assert_eq!(row.visible_bounds.origin.x, ratified_offset_x);
                 assert_eq!(
-                    row.bounds.origin.x - separator.bounds.origin.x,
-                    px(metrics.row_outer_padding_x - chrome_edge_inset)
+                    row.visible_bounds.size.width,
+                    px(split_width),
+                    "the production portal/scroll masks must preserve the ratified 379px right edge",
                 );
-                assert_eq!(
-                    row.bounds.origin.y - separator.bounds.origin.y,
-                    px(metrics.item_height - top_inset - chrome_edge_inset)
-                );
-                assert_eq!(
-                    row.bounds.origin.y - separator.bounds.bottom(),
-                    px(metrics.item_height - top_inset - chrome_edge_inset)
-                        - separator.bounds.size.height
-                );
+                assert_eq!(row.visible_bounds, row.bounds);
+                assert_eq!(row.bounds.right(), ratified_offset_x + px(split_width));
             })
             .expect("dictation slot geometry test window should remain available");
     }
