@@ -23,14 +23,31 @@ unsafe fn configure_window_vibrancy_common(
         ),
     );
 
-    // Use windowBackgroundColor for semi-opaque background.
-    let window_bg_color: id = msg_send![class!(NSColor), windowBackgroundColor];
+    // Use windowBackgroundColor for semi-opaque background — except in glass
+    // mode, where that base renders UNDER the NSGlassEffectView backdrop and
+    // dims the whole material; use the near-clear base instead (0.0001 alpha
+    // keeps the window shadow machinery alive, unlike clearColor).
+    let glass_mode =
+        tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled();
+    let window_bg_color: id = if glass_mode {
+        msg_send![
+            class!(NSColor),
+            colorWithSRGBRed: 0.0f64 green: 0.0f64 blue: 0.0f64 alpha: 0.0001f64
+        ]
+    } else {
+        msg_send![class!(NSColor), windowBackgroundColor]
+    };
     let _: () = msg_send![window, setBackgroundColor: window_bg_color];
     logging::log(
         log_target,
         &format!(
-            "{}: Set backgroundColor to windowBackgroundColor (semi-opaque)",
-            window_name
+            "{}: Set backgroundColor ({} base)",
+            window_name,
+            if glass_mode {
+                "glass near-clear"
+            } else {
+                "windowBackgroundColor semi-opaque"
+            }
         ),
     );
 

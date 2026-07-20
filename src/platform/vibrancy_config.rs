@@ -82,9 +82,20 @@ pub fn configure_window_vibrancy_material_for_appearance(
         // ║ windowBackgroundColor provides the native ~1px border around the window.  ║
         // ║ Using clearColor removes the border but allows more blur.                 ║
         // ║ This setting was tested against Raycast/Spotlight appearance.             ║
-        // ║ See: /Users/johnlindquist/dev/mac-panel-window/panel-window.mm           ║
+        // ║ Glass mode: near-clear instead — the semi-opaque base renders UNDER the   ║
+        // ║ NSGlassEffectView backdrop and dims the whole material.                   ║
         // ╚════════════════════════════════════════════════════════════════════════════╝
-        let window_bg_color: id = msg_send![class!(NSColor), windowBackgroundColor];
+        let glass_mode = tahoe_liquid_glass_available() && theme.is_vibrancy_enabled();
+        let window_bg_color: id = if glass_mode {
+            // Matches the gpui fork's Transparent path (0.0001 alpha keeps
+            // the window shadow machinery alive, unlike clearColor).
+            msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: 0.0f64 green: 0.0f64 blue: 0.0f64 alpha: 0.0001f64
+            ]
+        } else {
+            msg_send![class!(NSColor), windowBackgroundColor]
+        };
         let _: () = msg_send![window, setBackgroundColor: window_bg_color];
 
         // Enable shadow for native depth perception (Raycast/Spotlight have shadows)
