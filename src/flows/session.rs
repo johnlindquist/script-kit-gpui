@@ -22,6 +22,10 @@
 //!   restores the SAME transcript entity.
 //! - Stop cancels the in-flight turn only; the conversation survives.
 
+use std::time::Instant;
+
+use super::explain_cache::{run_md_explain_with_deadline, MdExplainOutput, MD_EXPLAIN_DEADLINE};
+
 /// Coarse session state, following Orca's attention model. Working while a
 /// turn's events run is in flight; NeedsYou when the agent has replied and
 /// the composer waits on the user.
@@ -221,35 +225,55 @@ pub fn resolve_mdflow_turn_arg(
     cwd: &str,
     prompt: &str,
 ) -> Result<MdflowTurnArg, String> {
-    let explain = |named_task: bool| {
-        let mut command = std::process::Command::new(binary);
-        command.arg("explain").arg(flow_path);
-        if named_task {
-            command.arg("--_task").arg(prompt);
-        } else {
-            command.arg(prompt);
-        }
-        command
-            .arg("--json")
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::null())
-            .output()
+    resolve_mdflow_turn_arg_with_deadline(
+        binary,
+        flow_path,
+        cwd,
+        prompt,
+        Instant::now() + MD_EXPLAIN_DEADLINE,
+    )
+}
+
+fn resolve_mdflow_turn_arg_with_deadline(
+    binary: &str,
+    flow_path: &str,
+    cwd: &str,
+    prompt: &str,
+    deadline: Instant,
+) -> Result<MdflowTurnArg, String> {
+    let resolves_all_template_vars = |result: &MdExplainOutput| {
+        result.output.status.success()
+            && result
+                .explain
+                .as_ref()
+                .is_some_and(|explain| explain.missing_template_vars.is_empty())
     };
 
-    let positional = explain(false)
-        .map_err(|err| format!("mdflow explain failed to spawn for positional input: {err}"))?;
-    if positional.status.success() {
+    let positional_args = [prompt];
+    let positional =
+        run_md_explain_with_deadline(binary, flow_path, cwd, &positional_args, deadline)
+            .map_err(|err| format!("mdflow explain failed for positional input: {err}"))?;
+    if resolves_all_template_vars(&positional) {
         return Ok(MdflowTurnArg::Positional(prompt.to_string()));
     }
 
-    let named = explain(true)
-        .map_err(|err| format!("mdflow explain failed to spawn for --_task input: {err}"))?;
-    if named.status.success() {
+    let named_args = ["--_task", prompt];
+    let named = run_md_explain_with_deadline(binary, flow_path, cwd, &named_args, deadline)
+        .map_err(|err| format!("mdflow explain failed for --_task input: {err}"))?;
+    if resolves_all_template_vars(&named) {
         return Ok(MdflowTurnArg::NamedTask(prompt.to_string()));
     }
 
-    let diagnostic = |output: &std::process::Output| {
-        String::from_utf8_lossy(&output.stderr)
+    let diagnostic = |result: &MdExplainOutput| {
+        if let Some(explain) = &result.explain {
+            if !explain.missing_template_vars.is_empty() {
+                return format!(
+                    "unresolved template variables: {}",
+                    explain.missing_template_vars.join(", ")
+                );
+            }
+        }
+        String::from_utf8_lossy(&result.output.stderr)
             .lines()
             .find(|line| !line.trim().is_empty())
             .unwrap_or("mdflow explain rejected the input")
@@ -610,6 +634,106 @@ mod tests {
             build_turn_task(&[], "what did vercel email me?"),
             "what did vercel email me?"
         );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_md(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, body).expect("write fake md");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake md metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("make fake md executable");
+    }
+
+    #[cfg(unix)]
+    mod of38 {
+        use super::*;
+        use std::time::Duration;
+
+        #[test]
+        fn turn_arg_resolution_uses_one_deadline_for_both_shapes() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let binary = dir.path().join("md");
+            let attempts = dir.path().join("of38-attempts.txt");
+            let named_overbudget = dir.path().join("of38-named-overbudget.txt");
+            write_fake_md(
+            &binary,
+            "#!/bin/sh\nprintf '%s %s\\n' \"$$\" \"$3\" >> of38-attempts.txt\nif [ \"$3\" != \"--_task\" ]; then\n  sleep 0.02\n  printf 'positional rejected\\n' >&2\n  exit 1\nfi\nsleep 300 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" >> of38-attempts.txt\n(sleep 0.04; touch of38-named-overbudget.txt) &\nwait \"$child\"\n",
+        );
+
+            let started = Instant::now();
+            let result = resolve_mdflow_turn_arg_with_deadline(
+                binary.to_str().expect("utf8 binary"),
+                "flow.md",
+                dir.path().to_str().expect("utf8 cwd"),
+                "hello",
+                started + Duration::from_millis(50),
+            );
+
+            assert!(result.is_err(), "the named fallback must time out");
+            assert!(started.elapsed() < Duration::from_secs(1));
+            let attempt_log = std::fs::read_to_string(attempts).expect("both attempts logged");
+            assert!(
+                attempt_log.contains(" hello"),
+                "positional shape was attempted"
+            );
+            assert!(
+                attempt_log.contains(" --_task"),
+                "named shape was attempted"
+            );
+            assert!(
+                !named_overbudget.exists(),
+                "named fallback received a fresh deadline instead of the remaining total budget"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    mod of39 {
+        use super::*;
+
+        #[test]
+        fn turn_arg_resolution_uses_parsed_missing_template_vars() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let binary = dir.path().join("md");
+            let calls = dir.path().join("of39-calls.txt");
+            write_fake_md(
+                &binary,
+                "#!/bin/sh\nprintf '%s %s\\n' \"$2\" \"$3\" >> of39-calls.txt\nif [ \"$2\" = \"ordinary.md\" ]; then\n  printf '%s\\n' '{\"protocolVersion\":1,\"flowId\":\"project:ordinary\",\"path\":\"ordinary.md\",\"engine\":\"pi\",\"command\":\"pi\",\"args\":[],\"cwd\":\".\",\"prompt\":\"ok\",\"promptTokensEstimate\":1,\"inputs\":[],\"warnings\":[],\"configFingerprint\":\"sha256:ordinary\",\"templateVars\":[\"_1\"],\"missingTemplateVars\":[]}'\n  exit 0\nfi\nif [ \"$3\" = \"--_task\" ]; then\n  missing='[]'\nelse\n  missing='[\"_task\"]'\nfi\nprintf '%s\\n' \"{\\\"protocolVersion\\\":1,\\\"flowId\\\":\\\"project:named\\\",\\\"path\\\":\\\"named.md\\\",\\\"engine\\\":\\\"pi\\\",\\\"command\\\":\\\"pi\\\",\\\"args\\\":[],\\\"cwd\\\":\\\".\\\",\\\"prompt\\\":\\\"ok\\\",\\\"promptTokensEstimate\\\":1,\\\"inputs\\\":[],\\\"warnings\\\":[],\\\"configFingerprint\\\":\\\"sha256:named\\\",\\\"templateVars\\\":[\\\"_task\\\"],\\\"missingTemplateVars\\\":$missing}\"\n",
+            );
+
+            let ordinary = resolve_mdflow_turn_arg(
+                binary.to_str().expect("utf8 binary"),
+                "ordinary.md",
+                dir.path().to_str().expect("utf8 cwd"),
+                "hello ordinary",
+            )
+            .expect("ordinary positional input resolves");
+            assert_eq!(ordinary, MdflowTurnArg::Positional("hello ordinary".into()));
+
+            let named = resolve_mdflow_turn_arg(
+                binary.to_str().expect("utf8 binary"),
+                "named.md",
+                dir.path().to_str().expect("utf8 cwd"),
+                "hello named",
+            )
+            .expect("named input resolves through fallback");
+            assert_eq!(named, MdflowTurnArg::NamedTask("hello named".into()));
+
+            let calls = std::fs::read_to_string(calls).expect("explain calls logged");
+            assert_eq!(
+                calls.lines().collect::<Vec<_>>(),
+                [
+                    "ordinary.md hello ordinary",
+                    "named.md hello named",
+                    "named.md --_task",
+                ],
+                "ordinary resolves once; named tries positional then --_task"
+            );
+        }
     }
 
     const GMAIL_PATH: &str = "/pkg/flows/flow-gog-gmail.codex.md";

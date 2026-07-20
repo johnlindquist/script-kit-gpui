@@ -7,7 +7,9 @@
 //! revalidated with `md explain`; Script Kit never reimplements its hashing.
 
 use std::collections::HashMap;
-use std::process::Command;
+use std::io::Read;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +24,12 @@ const EXPLAIN_CACHE_CAPACITY: usize = 8;
 /// A flow file's mtime cannot observe `.mdflow.yaml` changes. Revalidate the
 /// selected preview so mdflow's authoritative fingerprint can invalidate it.
 const EXPLAIN_REVALIDATE_AFTER: Duration = Duration::from_secs(5);
+/// Hard deadline shared by preview and turn-argument explain calls. Ten
+/// seconds matches roster fetching, but remains unratified pending human
+/// sign-off (OF-38).
+pub(crate) const MD_EXPLAIN_DEADLINE: Duration = Duration::from_secs(10);
+const MD_EXPLAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const MD_EXPLAIN_TERMINATE_GRACE: Duration = Duration::from_millis(50);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ExplainBaseKey {
@@ -278,26 +286,181 @@ fn replace_mru_key_in_place(mru: &mut Vec<ExplainKey>, previous: &ExplainKey, la
     });
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MdExplainJson {
+    #[serde(flatten)]
+    pub(crate) info: ExplainInfo,
+    #[serde(default)]
+    pub(crate) template_vars: Vec<String>,
+    #[serde(default)]
+    pub(crate) missing_template_vars: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct MdExplainOutput {
+    pub(crate) output: std::process::Output,
+    pub(crate) explain: Option<MdExplainJson>,
+}
+
+/// Run one engine-free `md explain` under an absolute deadline.
+///
+/// The child owns a fresh process group so timeout cleanup reaches mdflow's
+/// descendants. Both output pipes are drained concurrently; timeout returns
+/// only after the direct child is reaped and the readers have observed EOF.
+pub(crate) fn run_md_explain_with_deadline(
+    binary: &str,
+    flow_path: &str,
+    cwd: &str,
+    explain_args: &[&str],
+    deadline: Instant,
+) -> std::io::Result<MdExplainOutput> {
+    if Instant::now() >= deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "mdflow explain deadline exhausted before spawn",
+        ));
+    }
+
+    let mut command = Command::new(binary);
+    command
+        .arg("explain")
+        .arg(flow_path)
+        .args(explain_args)
+        .arg("--json")
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.process_group(0);
+    let mut child = command.spawn()?;
+    let pgid = child.id() as libc::pid_t;
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    });
+
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let mut cleanup_notes = Vec::new();
+                let term_result = unsafe { libc::killpg(pgid, libc::SIGTERM) };
+                if term_result != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        cleanup_notes.push(format!("SIGTERM failed: {error}"));
+                    }
+                }
+
+                let grace_deadline = Instant::now() + MD_EXPLAIN_TERMINATE_GRACE;
+                while Instant::now() < grace_deadline {
+                    if unsafe { libc::killpg(pgid, 0) } != 0
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                    {
+                        break;
+                    }
+                    std::thread::sleep(MD_EXPLAIN_POLL_INTERVAL);
+                }
+
+                let group_alive = unsafe { libc::killpg(pgid, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+                if group_alive {
+                    let kill_result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    if kill_result != 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::ESRCH) {
+                            cleanup_notes.push(format!("SIGKILL failed: {error}"));
+                            let _ = child.kill();
+                        }
+                    }
+                }
+                if let Err(error) = child.wait() {
+                    cleanup_notes.push(format!("wait failed: {error}"));
+                }
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+
+                let suffix = if cleanup_notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", cleanup_notes.join("; "))
+                };
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("mdflow explain exceeded deadline{suffix}"),
+                ));
+            }
+            None => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(MD_EXPLAIN_POLL_INTERVAL.min(remaining));
+            }
+        }
+    };
+
+    let output = std::process::Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    };
+    let explain = if output.status.success() {
+        Some(
+            serde_json::from_slice::<MdExplainJson>(&output.stdout).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("mdflow explain returned invalid JSON: {error}"),
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    Ok(MdExplainOutput { output, explain })
+}
+
 fn fetch_explain_blocking(path: &str, cwd: &str) -> ExplainState {
     let Some(binary) = mdflow_binary() else {
         return ExplainState::Failed("mdflow CLI not found on PATH".to_string());
     };
-    let output = Command::new(binary)
-        .arg("explain")
-        .arg(path)
-        .arg("--json")
-        .current_dir(cwd)
-        .output();
-    let output = match output {
+    let output = match run_md_explain_with_deadline(
+        binary,
+        path,
+        cwd,
+        &[],
+        Instant::now() + MD_EXPLAIN_DEADLINE,
+    ) {
         Ok(output) => output,
-        Err(err) => return ExplainState::Failed(format!("explain failed to spawn: {err}")),
+        Err(err) => return ExplainState::Failed(format!("explain failed: {err}")),
     };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.output.stderr);
         let first = stderr.lines().next().unwrap_or("explain failed");
         return ExplainState::Failed(first.to_string());
     }
-    parse_explain_output(&String::from_utf8_lossy(&output.stdout))
+    let Some(explain) = output.explain else {
+        return ExplainState::Failed("explain returned no parsed JSON".to_string());
+    };
+    if explain.info.protocol_version == FLOW_UX_PROTOCOL_VERSION {
+        ExplainState::Ready(Arc::new(explain.info))
+    } else {
+        ExplainState::Failed(format!(
+            "unsupported explain protocol version {}",
+            explain.info.protocol_version
+        ))
+    }
 }
 
 fn parse_explain_output(stdout: &str) -> ExplainState {
@@ -351,6 +514,144 @@ mod tests {
                 "configFingerprint": "{config_fingerprint}"
             }}"#
         ))
+    }
+
+    #[cfg(unix)]
+    fn write_fake_md(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, body).expect("write fake md");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake md metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("make fake md executable");
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: i32) -> bool {
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    #[cfg(unix)]
+    fn read_fixture_pids(path: &std::path::Path) -> Vec<i32> {
+        std::fs::read_to_string(path)
+            .expect("fake md should persist parent and descendant pids")
+            .split_whitespace()
+            .map(|pid| pid.parse::<i32>().expect("numeric pid"))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    mod of38 {
+        use super::*;
+
+        #[test]
+        fn explain_deadline_kills_process_group_and_reaps_output() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let binary = dir.path().join("md");
+            let pid_file = dir.path().join("of38-pids.txt");
+            write_fake_md(
+            &binary,
+            "#!/bin/sh\nsleep 300 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > of38-pids.txt\nprintf 'partial stdout\\n'\nprintf 'partial stderr\\n' >&2\nwait \"$child\"\n",
+        );
+
+            let started = Instant::now();
+            let error = run_md_explain_with_deadline(
+                binary.to_str().expect("utf8 binary"),
+                "flow.md",
+                dir.path().to_str().expect("utf8 cwd"),
+                &[],
+                started + Duration::from_millis(50),
+            )
+            .expect_err("hanging explain must time out");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            let pids = read_fixture_pids(&pid_file);
+            assert_eq!(pids.len(), 2);
+            assert!(
+                pids.into_iter().all(|pid| !process_exists(pid)),
+                "the direct child and its descendant must both be gone after return"
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn timed_out_explain_clears_refresh_in_flight_and_allows_retry() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let binary = dir.path().join("md");
+            write_fake_md(
+            &binary,
+            "#!/bin/sh\nsleep 300 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" > of38-pids.txt\nwait \"$child\"\n",
+        );
+
+            let cache = ExplainCache::default();
+            let base = ExplainBaseKey {
+                path: "flow.md".into(),
+                mtime_ms: 42,
+                cwd: dir.path().to_string_lossy().into_owned(),
+            };
+            let first_check = Instant::now();
+            assert!(cache.lookup(&base, first_check).2);
+            let timeout = run_md_explain_with_deadline(
+                binary.to_str().expect("utf8 binary"),
+                &base.path,
+                &base.cwd,
+                &[],
+                Instant::now() + Duration::from_millis(50),
+            )
+            .expect_err("first explain should time out");
+            let timeout_completed_at = Instant::now();
+            cache.complete_fetch(
+                base.clone(),
+                ExplainState::Failed(timeout.to_string()),
+                timeout_completed_at,
+            );
+            cache.notify();
+            assert!(
+                !cache
+                    .current
+                    .lock()
+                    .get(&base)
+                    .expect("current slot")
+                    .refresh_in_flight
+            );
+
+            let retry_at =
+                timeout_completed_at + EXPLAIN_REVALIDATE_AFTER + Duration::from_millis(1);
+            let (_, failed, should_retry) = cache.lookup(&base, retry_at);
+            assert!(matches!(failed, ExplainState::Failed(_)));
+            assert!(should_retry, "a completed timeout must permit revalidation");
+
+            write_fake_md(
+            &binary,
+            "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":1,\"flowId\":\"project:retry\",\"path\":\"flow.md\",\"engine\":\"pi\",\"command\":\"pi\",\"args\":[],\"cwd\":\".\",\"prompt\":\"ok\",\"promptTokensEstimate\":1,\"inputs\":[],\"warnings\":[],\"configFingerprint\":\"sha256:retry\",\"templateVars\":[\"_1\"],\"missingTemplateVars\":[]}'\n",
+        );
+            let output = run_md_explain_with_deadline(
+                binary.to_str().expect("utf8 binary"),
+                &base.path,
+                &base.cwd,
+                &[],
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("retry explain succeeds");
+            let explain = output
+                .explain
+                .expect("successful explain returns parsed JSON");
+            assert_eq!(explain.template_vars, ["_1"]);
+            assert!(explain.missing_template_vars.is_empty());
+            cache.complete_fetch(
+                base.clone(),
+                ExplainState::Ready(Arc::new(explain.info)),
+                retry_at,
+            );
+            cache.notify();
+            let (_, retried, should_retry_again) = cache.lookup(&base, retry_at);
+            assert!(!should_retry_again);
+            assert!(matches!(retried, ExplainState::Ready(info) if info.engine == "pi"));
+        }
     }
 
     #[test]
