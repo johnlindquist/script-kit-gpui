@@ -1,9 +1,10 @@
 use gpui::{
-    div, px, rgba, AnyElement, ClickEvent, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled,
+    div, px, rgb, rgba, AnyElement, ClickEvent, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled,
 };
+use gpui_component::{input::Input, Sizable as _, Size};
 
-use crate::designs::MainMenuThemeDef;
+use crate::designs::{MainMenuSearchTokens, MainMenuThemeDef};
 
 pub(crate) const MAIN_VIEW_SHELL_ID: &str = "main-view-shell";
 pub(crate) const MAIN_VIEW_INPUT_SHELL_ID: &str = "main-view-input-shell";
@@ -110,6 +111,224 @@ pub(crate) fn selection_hint_snippet(text: &str, max_chars: usize) -> String {
 pub(crate) struct MainViewInputChrome {
     pub(crate) body: AnyElement,
     pub(crate) trailing: Vec<AnyElement>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptSearchInputKind {
+    EntityBacked,
+    ControllerOwned,
+    PathPrefix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PromptSearchInputGeometry {
+    height: f32,
+    font_size: f32,
+    radius: f32,
+    text_inset_x: f32,
+}
+
+impl PromptSearchInputGeometry {
+    fn from_main_menu(search: MainMenuSearchTokens) -> Self {
+        Self {
+            height: search.height,
+            font_size: search.font_size,
+            radius: search.radius,
+            text_inset_x: search.text_inset_x,
+        }
+    }
+}
+
+enum PromptSearchInputContent {
+    #[allow(dead_code)] // Constructed by binary-only include!-merged Arg/Mini renderers.
+    EntityBacked { input: Input },
+    ControllerOwned {
+        semantic_id: &'static str,
+        text: SharedString,
+        placeholder: SharedString,
+    },
+    PathPrefix {
+        semantic_id: &'static str,
+        prefix: SharedString,
+        text: SharedString,
+        placeholder: SharedString,
+    },
+}
+
+impl PromptSearchInputContent {
+    fn kind(&self) -> PromptSearchInputKind {
+        match self {
+            Self::EntityBacked { .. } => PromptSearchInputKind::EntityBacked,
+            Self::ControllerOwned { .. } => PromptSearchInputKind::ControllerOwned,
+            Self::PathPrefix { .. } => PromptSearchInputKind::PathPrefix,
+        }
+    }
+}
+
+pub(crate) struct PromptSearchInputChrome {
+    content: PromptSearchInputContent,
+    trailing: Vec<AnyElement>,
+}
+
+impl PromptSearchInputChrome {
+    #[allow(dead_code)] // Called by binary-only include!-merged Arg/Mini renderers.
+    pub(crate) fn entity_backed(input: Input) -> Self {
+        Self {
+            content: PromptSearchInputContent::EntityBacked { input },
+            trailing: Vec::new(),
+        }
+    }
+
+    pub(crate) fn controller_owned(
+        semantic_id: &'static str,
+        text: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            content: PromptSearchInputContent::ControllerOwned {
+                semantic_id,
+                text: text.into(),
+                placeholder: placeholder.into(),
+            },
+            trailing: Vec::new(),
+        }
+    }
+
+    pub(crate) fn path_prefix(
+        semantic_id: &'static str,
+        prefix: impl Into<SharedString>,
+        text: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            content: PromptSearchInputContent::PathPrefix {
+                semantic_id,
+                prefix: prefix.into(),
+                text: text.into(),
+                placeholder: placeholder.into(),
+            },
+            trailing: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_trailing(mut self, trailing: AnyElement) -> Self {
+        self.trailing.push(trailing);
+        self
+    }
+}
+
+fn prompt_search_input_geometry(
+    search: MainMenuSearchTokens,
+    _kind: PromptSearchInputKind,
+) -> PromptSearchInputGeometry {
+    PromptSearchInputGeometry::from_main_menu(search)
+}
+
+/// Adapt prompt-owned input state or text into the main menu's canonical
+/// search shell without transferring editing behavior to the launcher.
+pub(crate) fn render_prompt_search_input(
+    theme: &crate::theme::Theme,
+    def: MainMenuThemeDef,
+    chrome: PromptSearchInputChrome,
+) -> AnyElement {
+    let search = def.search;
+    let geometry = prompt_search_input_geometry(search, chrome.content.kind());
+    let colors = crate::theme::AppChromeColors::from_theme(theme);
+
+    let body = match chrome.content {
+        PromptSearchInputContent::EntityBacked { input } => input
+            .w_full()
+            .h(px(geometry.height))
+            .line_height(px(geometry.height))
+            .font_weight(search.font_weight)
+            .px(px(0.0))
+            .py(px(0.0))
+            .with_size(Size::Size(px(geometry.font_size)))
+            .appearance(false)
+            .bordered(false)
+            .focus_bordered(false)
+            .into_any_element(),
+        PromptSearchInputContent::ControllerOwned {
+            semantic_id,
+            text,
+            placeholder,
+        } => {
+            let is_empty = text.is_empty();
+            div()
+                .id(semantic_id)
+                .w_full()
+                .h(px(geometry.height))
+                .min_w(px(0.0))
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(geometry.font_size))
+                .font_weight(search.font_weight)
+                .line_height(px(geometry.height))
+                .text_color(if is_empty {
+                    rgba(colors.placeholder_text_rgba)
+                } else {
+                    rgb(colors.text_primary_hex)
+                })
+                .child(if is_empty { placeholder } else { text })
+                .into_any_element()
+        }
+        PromptSearchInputContent::PathPrefix {
+            semantic_id,
+            prefix,
+            text,
+            placeholder,
+        } => {
+            let is_empty = text.is_empty();
+            div()
+                .id(semantic_id)
+                .w_full()
+                .h(px(geometry.height))
+                .min_w(px(0.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .overflow_hidden()
+                .text_size(px(geometry.font_size))
+                .font_weight(search.font_weight)
+                .line_height(px(geometry.height))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_color(rgba(colors.text_hint_rgba))
+                        .child(prefix),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_color(if is_empty {
+                            rgba(colors.placeholder_text_rgba)
+                        } else {
+                            rgb(colors.text_primary_hex)
+                        })
+                        .child(if is_empty { placeholder } else { text }),
+                )
+                .into_any_element()
+        }
+    };
+
+    render_main_view_input_shell(
+        theme,
+        def,
+        MainViewInputChrome {
+            body,
+            trailing: chrome.trailing,
+        },
+    )
 }
 
 pub(crate) struct MainViewHeaderChrome {
@@ -1083,6 +1302,29 @@ mod tests {
         main_view_multiline_input_height, resolved_main_view_input_height,
         resolved_main_view_main_bottom_inset, selection_hint_snippet,
     };
+
+    #[test]
+    fn prompt_search_modes_resolve_main_menu_search_geometry() {
+        let search = crate::designs::MainMenuThemeVariant::default().def().search;
+        let expected = super::PromptSearchInputGeometry::from_main_menu(search);
+        let cases = [
+            ("ArgPrompt", super::PromptSearchInputKind::EntityBacked),
+            ("MiniPrompt", super::PromptSearchInputKind::EntityBacked),
+            (
+                "SelectPrompt",
+                super::PromptSearchInputKind::ControllerOwned,
+            ),
+            ("PathPrompt", super::PromptSearchInputKind::PathPrefix),
+        ];
+
+        for (surface, kind) in cases {
+            assert_eq!(
+                super::prompt_search_input_geometry(search, kind),
+                expected,
+                "{surface} must resolve height/font/radius/text inset from MainMenuSearchTokens"
+            );
+        }
+    }
 
     #[test]
     fn canonical_and_context_only_headers_share_one_theme_derived_geometry_model() {

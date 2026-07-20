@@ -193,7 +193,7 @@ fn test_form_fields_use_shared_metrics_for_layout_tokens() {
     );
     assert!(
         text_field_render_source.contains("FormFieldMetrics::from_colors")
-            && text_field_render_source.contains("metrics.text_input_min_height_rems")
+            && text_field_render_source.contains("prompt_single_line_control_surface")
             && text_field_render_source.contains("metrics.field_gap_px")
             && text_field_render_source.contains("metrics.cursor_width_px")
             && text_field_render_source.contains("metrics.cursor_height_rems"),
@@ -228,18 +228,22 @@ fn test_form_fields_use_shared_metrics_for_layout_tokens() {
 }
 
 #[test]
-fn test_arg_prompt_header_uses_design_token_large_input_size() {
+/// OF-58 (user layout-parity contract): the arg prompt header must resolve its
+/// geometry from the shared prompt-search adapter (main-menu search tokens),
+/// never from a renderer-local size system. Behavior coverage lives in
+/// `components::main_view_chrome::tests::prompt_search_modes_resolve_main_menu_search_geometry`;
+/// this audit only guards against reintroducing a local sizing path.
+fn test_arg_prompt_header_uses_shared_prompt_search_adapter() {
     let source = std::fs::read_to_string("src/render_prompts/arg/render.rs")
         .expect("failed to read src/render_prompts/arg/render.rs");
 
     assert!(
-        source.contains(".with_size(Size::Size(px(")
-            && source.contains("typography_resolver.font_size_xl()"),
-        "arg prompt header input should use TypographyResolver via the shared Input component size"
+        source.contains("render_prompt_search_input("),
+        "arg prompt header must render through the shared prompt-search adapter"
     );
     assert!(
-        !source.contains(".text_xl()"),
-        "arg prompt header should avoid hardcoded text_xl() sizing"
+        !source.contains("font_size_xl") && !source.contains(".text_xl()"),
+        "arg prompt header must not reintroduce renderer-local input sizing"
     );
 }
 

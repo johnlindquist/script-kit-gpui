@@ -22,8 +22,7 @@ impl ScriptListApp {
         let render_context = PromptRenderContext::new(self.theme.as_ref(), self.current_design);
         let theme = render_context.theme;
         let design_typography = render_context.design_typography;
-        let typography_resolver =
-            crate::theme::TypographyResolver::new(self.theme.as_ref(), self.current_design);
+        let menu_def = self.current_main_menu_theme.def();
 
         let text_primary = theme.colors.text.primary;
         let text_muted = theme.colors.text.muted;
@@ -99,40 +98,16 @@ impl ScriptListApp {
         );
 
         crate::components::emit_prompt_chrome_audit(
-            &crate::components::PromptChromeAudit::minimal_list(
-                "render_prompts::mini",
-                false,
-            ),
+            &crate::components::PromptChromeAudit::minimal_list("render_prompts::mini", false),
         );
 
-        // Build header — use the same Input component as the main menu
-        let input_height = CURSOR_HEIGHT_LG + (CURSOR_MARGIN_Y * 2.0);
-        let header = div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div().flex_1().flex().flex_row().items_center().child(
-                            Input::new(&self.gpui_input_state)
-                                .w_full()
-                                .h(px(input_height))
-                                .px(px(0.))
-                                .py(px(0.))
-                                .with_size(Size::Size(px(
-                                    typography_resolver.font_size_xl()
-                                )))
-                                .appearance(false)
-                                .bordered(false)
-                                .focus_bordered(false),
-                        ),
-                    ),
-            );
+        let header = crate::components::main_view_chrome::render_prompt_search_input(
+            theme,
+            menu_def,
+            crate::components::main_view_chrome::PromptSearchInputChrome::entity_backed(
+                Input::new(&self.gpui_input_state),
+            ),
+        );
 
         // Compact choice list for mini prompt (e.g. mic picker)
         let content = if choices.is_empty() {
@@ -177,9 +152,7 @@ impl ScriptListApp {
                                                 .index(ix),
                                             )
                                         } else {
-                                            div()
-                                                .id(ix)
-                                                .h(px(crate::list_item::LIST_ITEM_HEIGHT))
+                                            div().id(ix).h(px(crate::list_item::LIST_ITEM_HEIGHT))
                                         }
                                     })
                                     .collect()

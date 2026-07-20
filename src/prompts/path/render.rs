@@ -21,6 +21,7 @@ impl Render for PathPrompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Use ListItemColors for consistent theming - always use theme
         let list_colors = ListItemColors::from_theme(&self.theme);
+        let menu_def = crate::designs::current_main_menu_theme().def();
 
         // Clone cached render rows (Arc clone — no per-render allocation)
         let render_rows = self.render_rows.clone();
@@ -63,54 +64,28 @@ impl Render for PathPrompt {
 
         let text = crate::components::prompt_text_palette(&self.theme);
 
-        // Minimal chrome header: path prefix (muted) + filter text (primary), no buttons
-        let path_prefix = self.path_prefix.clone();
-        let filter_text = self.filter_text.clone();
-        let filter_is_empty = filter_text.is_empty();
-
-        let header = div()
-            .id(gpui::ElementId::Name("input:path-filter".into()))
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(gpui::px(8.0))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .text_size(gpui::px(16.0))
-                    .overflow_x_hidden()
-                    .child(
-                        div()
-                            .text_color(text.help)
-                            .flex_shrink_0()
-                            .max_w(gpui::px(200.0))
-                            .overflow_x_hidden()
-                            .child(gpui::SharedString::from(path_prefix)),
-                    )
-                    .child(
-                        div()
-                            .text_color(if filter_is_empty {
-                                text.placeholder
-                            } else {
-                                text.primary
-                            })
-                            .child(if filter_is_empty {
-                                gpui::SharedString::from("Type to filter...")
-                            } else {
-                                gpui::SharedString::from(filter_text)
-                            }),
-                    ),
+        let header = crate::components::main_view_chrome::render_prompt_search_input(
+            &self.theme,
+            menu_def,
+            crate::components::main_view_chrome::PromptSearchInputChrome::path_prefix(
+                "input:path-filter",
+                self.path_prefix.clone(),
+                self.filter_text.clone(),
+                "Type to filter...",
             )
-            .child(
+            .with_trailing(
                 div()
-                    .flex_shrink_0()
-                    .text_xs()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .pr(gpui::px(menu_def.search.text_inset_x))
+                    .text_size(gpui::px(menu_def.typography.desc_font_size))
+                    .line_height(gpui::px(menu_def.typography.desc_line_height))
+                    .font_weight(menu_def.typography.desc_weight)
                     .text_color(text.help)
-                    .child(format!("{filtered_count} items")),
-            );
+                    .child(format!("{filtered_count} items"))
+                    .into_any_element(),
+            ),
+        );
 
         // Content wrapper
         let content = div()
@@ -119,7 +94,7 @@ impl Render for PathPrompt {
             .flex_col()
             .flex_1()
             .w_full()
-            .px(gpui::px(8.0))
+            .px(gpui::px(menu_def.shell.content_inset_x))
             .when(filtered_count == 0, |d| {
                 d.child(
                     div()

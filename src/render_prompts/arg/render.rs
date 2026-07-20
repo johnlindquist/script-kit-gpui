@@ -86,8 +86,7 @@ impl ScriptListApp {
         let design_typography = render_context.design_typography;
         let actions_dialog_top = render_context.actions_dialog_top;
         let actions_dialog_right = render_context.actions_dialog_right;
-        let typography_resolver =
-            crate::theme::TypographyResolver::new(self.theme.as_ref(), self.current_design);
+        let menu_def = self.current_main_menu_theme.def();
         let _filtered = self.filtered_arg_choices();
         #[allow(clippy::unnecessary_map_or)]
         let has_actions = actions
@@ -215,35 +214,13 @@ impl ScriptListApp {
             .into_any_element()
         };
 
-        // Use the same Input component as the main menu
-        let input_height = CURSOR_HEIGHT_LG + (CURSOR_MARGIN_Y * 2.0);
-        let header = div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(HEADER_GAP))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div().flex_1().flex().flex_row().items_center().child(
-                            Input::new(&self.gpui_input_state)
-                                .w_full()
-                                .h(px(input_height))
-                                .px(px(0.))
-                                .py(px(0.))
-                                .with_size(Size::Size(px(
-                                    typography_resolver.font_size_xl()
-                                )))
-                                .appearance(false)
-                                .bordered(false)
-                                .focus_bordered(false),
-                        ),
-                    ),
-            );
+        let header = crate::components::main_view_chrome::render_prompt_search_input(
+            theme,
+            menu_def,
+            crate::components::main_view_chrome::PromptSearchInputChrome::entity_backed(
+                Input::new(&self.gpui_input_state),
+            ),
+        );
 
         let content = if has_choices {
             div()
@@ -266,10 +243,7 @@ impl ScriptListApp {
         );
 
         crate::components::emit_prompt_chrome_audit(
-            &crate::components::PromptChromeAudit::minimal_list(
-                "render_prompts::arg",
-                has_actions,
-            ),
+            &crate::components::PromptChromeAudit::minimal_list("render_prompts::arg", has_actions),
         );
 
         let gpui_footer = crate::components::render_simple_hint_strip(

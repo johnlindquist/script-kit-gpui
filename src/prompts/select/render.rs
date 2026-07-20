@@ -160,42 +160,35 @@ fn render_select_search_header(
     multiple: bool,
     selected_count: usize,
     submission_hint: Option<&str>,
-    chrome: &AppChromeColors,
-) -> impl IntoElement {
-    let input_display = if filter_text.is_empty() {
-        SharedString::from(placeholder.to_string())
-    } else {
-        SharedString::from(filter_text.to_string())
-    };
+    theme: &crate::theme::Theme,
+    def: crate::designs::MainMenuThemeDef,
+) -> AnyElement {
+    let mut input = crate::components::main_view_chrome::PromptSearchInputChrome::controller_owned(
+        "input:select-filter",
+        filter_text.to_string(),
+        placeholder.to_string(),
+    );
 
-    div()
-        .id(gpui::ElementId::Name("input:select-filter".into()))
-        .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
-        .child(
+    if multiple {
+        let chrome = AppChromeColors::from_theme(theme);
+        input = input.with_trailing(
             div()
-                .flex_1()
-                .text_size(px(16.0))
-                .text_color(if filter_text.is_empty() {
-                    rgba(chrome.placeholder_text_rgba)
-                } else {
-                    rgb(chrome.text_primary_hex)
-                })
-                .child(input_display),
-        )
-        .when(multiple, |container| {
-            container.child(
-                div()
-                    .text_xs()
-                    .text_color(rgba(chrome.text_hint_rgba))
-                    .child(
-                        submission_hint
-                            .map_or_else(|| format!("{} selected", selected_count), str::to_string),
-                    ),
-            )
-        })
+                .flex_none()
+                .whitespace_nowrap()
+                .pr(px(def.search.text_inset_x))
+                .text_size(px(def.typography.desc_font_size))
+                .line_height(px(def.typography.desc_line_height))
+                .font_weight(def.typography.desc_weight)
+                .text_color(rgba(chrome.text_hint_rgba))
+                .child(
+                    submission_hint
+                        .map_or_else(|| format!("{} selected", selected_count), str::to_string),
+                )
+                .into_any_element(),
+        );
+    }
+
+    crate::components::main_view_chrome::render_prompt_search_input(theme, def, input)
 }
 
 impl Focusable for SelectPrompt {
@@ -207,6 +200,7 @@ impl Focusable for SelectPrompt {
 impl Render for SelectPrompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let chrome = AppChromeColors::from_theme(&self.theme);
+        let menu_def = crate::designs::current_main_menu_theme().def();
         let tokens = get_tokens(self.design_variant);
         let spacing = tokens.spacing();
 
@@ -224,7 +218,8 @@ impl Render for SelectPrompt {
             self.multiple,
             self.selected.len(),
             self.submission_hint.as_deref(),
-            &chrome,
+            &self.theme,
+            menu_def,
         );
 
         // Choices list
@@ -541,8 +536,9 @@ mod tests {
             "select prompt render path should call the prompt-owned shared-header helper"
         );
         assert!(
-            render_code.contains(".id(gpui::ElementId::Name(\"input:select-filter\".into()))"),
-            "select prompt search header must preserve the automation input semantic id"
+            render_code.contains("PromptSearchInputChrome::controller_owned(")
+                && render_code.contains("\"input:select-filter\""),
+            "select prompt must hand its automation input semantic id to shared search chrome"
         );
         assert!(
             !render_code.contains("render_search_input(")
