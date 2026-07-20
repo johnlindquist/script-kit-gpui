@@ -31,8 +31,9 @@ pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.0;
 /// spring-bezier glide; Spotlight's enter reads at roughly a quarter second.
 pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.26;
 /// Default start outset (fraction of each dimension) of the glass appear
-/// morph: how much larger than final the window starts. Subtle by default.
-pub const GLASS_MORPH_DEFAULT_INSET: f32 = 0.04;
+/// morph: how much larger than final the window starts. Only slightly
+/// bigger than final — the recoil in the timing curve carries the feel.
+pub const GLASS_MORPH_DEFAULT_INSET: f32 = 0.02;
 /// Softer ghost-tier background opacity for barely-there fills (0.03–0.06 range).
 #[allow(dead_code)]
 pub const OPACITY_GHOST_SOFT: f32 = 0.03;

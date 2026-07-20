@@ -824,10 +824,11 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
     let _: () = msg_send![ctx, setDuration: duration];
     let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
-    // Gentle attack, small continuous overshoot past final (~10% of the
-    // travel), long soft tail — the closest single-curve match to an Apple
-    // spring. Falls back to easeOut if the control-point call fails.
-    let spring = timing_function_with_control_points(0.32, 1.10, 0.35, 1.0);
+    // Ease-out-back: gentle attack, then a VISIBLE recoil past the final
+    // size (~55% of the travel) that springs back — Spotlight's bounce.
+    // With the small start outset the recoil stays a few pixels deep.
+    // Falls back to easeOut if the control-point call fails.
+    let spring = timing_function_with_control_points(0.34, 1.56, 0.64, 1.0);
     if spring != nil {
         let _: () = msg_send![ctx, setTimingFunction: spring];
     } else if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
