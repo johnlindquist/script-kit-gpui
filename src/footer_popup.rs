@@ -1853,6 +1853,18 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     let _: () = msg_send![footer_view, setAutoresizingMask: NSViewWidthSizable];
     let _: () = msg_send![footer_view, setWantsLayer: YES];
 
+    // Glass mode: this host is an NSVisualEffectView whose blur band would
+    // composite on top of the Tahoe glass backdrop. The vibrancy configure
+    // pass hides VEVs, but it has already run by the time this host is
+    // (re)created on each window show — first open looked right, reopen
+    // brought the band back. Start hidden so every recreation matches the
+    // configured glass-mode state.
+    if crate::platform::tahoe_liquid_glass_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled()
+    {
+        let _: () = msg_send![footer_view, setHidden: YES];
+    }
+
     let divider_view: id = msg_send![class!(NSView), alloc];
     let divider_view: id = msg_send![
         divider_view,

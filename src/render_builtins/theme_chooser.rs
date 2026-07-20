@@ -13,6 +13,8 @@ enum ThemeChooserSliderBinding {
     SurfaceOpacity,
     SecondaryTextOpacity,
     FocusedBackgroundOpacity,
+    GlassVeilOpacity,
+    GlassTintOpacity,
     UiFontSize,
     GradientAngle { layer_index: Option<usize> },
     GradientOpacity { layer_index: Option<usize> },
@@ -82,6 +84,8 @@ pub(crate) struct ThemeChooserControls {
     surface_opacity: Entity<SliderState>,
     secondary_text_opacity: Entity<SliderState>,
     focused_background_opacity: Entity<SliderState>,
+    glass_veil_opacity: Entity<SliderState>,
+    glass_tint_opacity: Entity<SliderState>,
     ui_font_size: Entity<SliderState>,
     gradient_base: ThemeChooserGradientControls,
     gradient_layers: Vec<ThemeChooserGradientControls>,
@@ -560,6 +564,28 @@ impl ScriptListApp {
                 cx,
                 &mut subscriptions,
             );
+            let glass_veil_opacity = self.new_theme_chooser_slider(
+                ThemeChooserSliderBinding::GlassVeilOpacity,
+                0.0,
+                1.0,
+                0.01,
+                opacity
+                    .glass_veil_opacity
+                    .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP),
+                window,
+                cx,
+                &mut subscriptions,
+            );
+            let glass_tint_opacity = self.new_theme_chooser_slider(
+                ThemeChooserSliderBinding::GlassTintOpacity,
+                0.0,
+                1.0,
+                0.01,
+                opacity.glass_tint_opacity.unwrap_or(0.0),
+                window,
+                cx,
+                &mut subscriptions,
+            );
             let ui_font_size = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::UiFontSize,
                 12.0,
@@ -603,6 +629,8 @@ impl ScriptListApp {
                 surface_opacity,
                 secondary_text_opacity,
                 focused_background_opacity,
+                glass_veil_opacity,
+                glass_tint_opacity,
                 ui_font_size,
                 gradient_base,
                 gradient_layers,
@@ -676,6 +704,30 @@ impl ScriptListApp {
                 self.apply_theme_chooser_slider_theme(
                     next,
                     "theme_chooser_surface_opacity_slider",
+                    mode,
+                    cx,
+                );
+            }
+            ThemeChooserSliderBinding::GlassVeilOpacity => {
+                let next = Self::apply_glass_veil_opacity_preset(
+                    self.theme.as_ref(),
+                    value.clamp(0.0, 1.0),
+                );
+                self.apply_theme_chooser_slider_theme(
+                    next,
+                    "theme_chooser_glass_veil_opacity_slider",
+                    mode,
+                    cx,
+                );
+            }
+            ThemeChooserSliderBinding::GlassTintOpacity => {
+                let next = Self::apply_glass_tint_opacity_preset(
+                    self.theme.as_ref(),
+                    value.clamp(0.0, 1.0),
+                );
+                self.apply_theme_chooser_slider_theme(
+                    next,
+                    "theme_chooser_glass_tint_opacity_slider",
                     mode,
                     cx,
                 );
@@ -895,6 +947,20 @@ impl ScriptListApp {
             "surface-opacity" => {
                 self.apply_theme_chooser_slider_change(
                     ThemeChooserSliderBinding::SurfaceOpacity,
+                    SliderValue::Single(float_value()?),
+                    cx,
+                );
+            }
+            "glass-veil-opacity" => {
+                self.apply_theme_chooser_slider_change(
+                    ThemeChooserSliderBinding::GlassVeilOpacity,
+                    SliderValue::Single(float_value()?),
+                    cx,
+                );
+            }
+            "glass-tint-opacity" => {
+                self.apply_theme_chooser_slider_change(
+                    ThemeChooserSliderBinding::GlassTintOpacity,
                     SliderValue::Single(float_value()?),
                     cx,
                 );
@@ -1235,6 +1301,20 @@ impl ScriptListApp {
             cx,
         );
         Self::sync_slider_entity_value(&controls.surface_opacity, opacity.main, window, cx);
+        Self::sync_slider_entity_value(
+            &controls.glass_veil_opacity,
+            opacity
+                .glass_veil_opacity
+                .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP),
+            window,
+            cx,
+        );
+        Self::sync_slider_entity_value(
+            &controls.glass_tint_opacity,
+            opacity.glass_tint_opacity.unwrap_or(0.0),
+            window,
+            cx,
+        );
         Self::sync_slider_entity_value(
             &controls.secondary_text_opacity,
             opacity.text_placeholder,
@@ -3270,6 +3350,28 @@ impl ScriptListApp {
         next
     }
 
+    fn apply_glass_veil_opacity_preset(
+        theme: &crate::theme::Theme,
+        value: f32,
+    ) -> crate::theme::Theme {
+        let mut next = theme.clone();
+        let mut opacity = next.get_opacity();
+        opacity.glass_veil_opacity = Some(value);
+        next.opacity = Some(opacity);
+        next
+    }
+
+    fn apply_glass_tint_opacity_preset(
+        theme: &crate::theme::Theme,
+        value: f32,
+    ) -> crate::theme::Theme {
+        let mut next = theme.clone();
+        let mut opacity = next.get_opacity();
+        opacity.glass_tint_opacity = Some(value);
+        next.opacity = Some(opacity);
+        next
+    }
+
     fn apply_text_opacity_preset(theme: &crate::theme::Theme, value: f32) -> crate::theme::Theme {
         let mut next = theme.clone();
         let mut opacity = next.get_opacity();
@@ -4113,6 +4215,28 @@ impl ScriptListApp {
             &controls.focused_background_opacity,
             &chrome,
         );
+        let glass_slider_rows = crate::platform::tahoe_liquid_glass_available().then(|| {
+            (
+                Self::render_theme_chooser_slider_row(
+                    "Glass Veil Opacity",
+                    format!(
+                        "{:.0}%",
+                        opacity
+                            .glass_veil_opacity
+                            .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP)
+                            * 100.0
+                    ),
+                    &controls.glass_veil_opacity,
+                    &chrome,
+                ),
+                Self::render_theme_chooser_slider_row(
+                    "Glass Tint Opacity",
+                    format!("{:.0}%", opacity.glass_tint_opacity.unwrap_or(0.0) * 100.0),
+                    &controls.glass_tint_opacity,
+                    &chrome,
+                ),
+            )
+        });
 
         let vibrancy_enabled = self
             .theme
@@ -4206,17 +4330,22 @@ impl ScriptListApp {
             &chrome,
         );
 
+        let mut opacity_section_rows = vec![
+            main_opacity_slider_row,
+            text_opacity_slider_row,
+            focused_opacity_slider_row,
+        ];
+        if let Some((glass_veil_row, glass_tint_row)) = glass_slider_rows {
+            opacity_section_rows.push(glass_veil_row);
+            opacity_section_rows.push(glass_tint_row);
+        }
+        opacity_section_rows.push(vibrancy_row);
+        opacity_section_rows.push(material_row);
         let opacity_section = Self::render_theme_chooser_customize_section(
             "OPACITY & VIBRANCY",
             Some("Vibrancy blend and layer transparency"),
             &chrome,
-            vec![
-                main_opacity_slider_row,
-                text_opacity_slider_row,
-                focused_opacity_slider_row,
-                vibrancy_row,
-                material_row,
-            ],
+            opacity_section_rows,
         );
 
         // APPEARANCE SECTION — auto/light/dark resolution for the theme

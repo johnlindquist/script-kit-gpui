@@ -479,17 +479,41 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
-    // Demo-parity: leave the glass untinted (the liquid-glass-demo bin uses a
-    // plain NSGlassEffectView and reads correctly). The themed veil GPUI
-    // paints above already carries the theme hue; tinting the glass as well
-    // double-darkens the material — the tint was tuned for the blur era.
+    // Glass tint follows the theme's glass_tint_opacity slider (theme
+    // background hue at that alpha). 0.0/None = untinted demo-parity glass.
+    let tint_theme = crate::theme::get_cached_theme();
+    let tint_alpha = f64::from(
+        tint_theme
+            .get_opacity()
+            .glass_tint_opacity
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0),
+    );
     let tint_applied = {
         let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
         if responds {
-            let nil_color: id = nil;
-            let _: () = msg_send![glass_view, setTintColor: nil_color];
+            if tint_alpha > 0.004 {
+                let hex = tint_theme.colors.background.main;
+                let red = f64::from((hex >> 16) & 0xff) / 255.0;
+                let green = f64::from((hex >> 8) & 0xff) / 255.0;
+                let blue = f64::from(hex & 0xff) / 255.0;
+                let color: id = msg_send![
+                    class!(NSColor),
+                    colorWithCalibratedRed: red
+                    green: green
+                    blue: blue
+                    alpha: tint_alpha
+                ];
+                let _: () = msg_send![glass_view, setTintColor: color];
+                true
+            } else {
+                let nil_color: id = nil;
+                let _: () = msg_send![glass_view, setTintColor: nil_color];
+                false
+            }
+        } else {
+            false
         }
-        false
     };
 
     let corner_radius = tahoe_content_corner_radius(content_view);

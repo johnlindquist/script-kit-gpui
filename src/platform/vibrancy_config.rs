@@ -18,7 +18,7 @@
 /// Uses Objective-C message sending internally.
 #[cfg(target_os = "macos")]
 static LAST_MAIN_WINDOW_VIBRANCY_SIGNATURE: std::sync::Mutex<
-    Option<(usize, bool, crate::theme::VibrancyMaterial, u32)>,
+    Option<(usize, bool, crate::theme::VibrancyMaterial, u32, u32)>,
 > = std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
@@ -53,7 +53,19 @@ pub fn configure_window_vibrancy_material_for_appearance(
 
         let theme = crate::theme::get_cached_theme();
         let background_tint = crate::ui_foundation::main_window_matched_background_rgba(&theme);
-        let signature = (window as usize, is_dark, material, background_tint);
+        // Fold the glass sliders in so theme-designer tweaks re-run this pass.
+        let opacity_settings = theme.get_opacity();
+        let glass_bits = ((opacity_settings.glass_veil_opacity.unwrap_or(-1.0) * 1000.0) as i32
+            as u32)
+            .wrapping_shl(16)
+            ^ ((opacity_settings.glass_tint_opacity.unwrap_or(-1.0) * 1000.0) as i32 as u32);
+        let signature = (
+            window as usize,
+            is_dark,
+            material,
+            background_tint,
+            glass_bits,
+        );
         {
             let mut guard = LAST_MAIN_WINDOW_VIBRANCY_SIGNATURE
                 .lock()

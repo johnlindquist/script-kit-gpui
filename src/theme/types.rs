@@ -134,6 +134,15 @@ pub struct BackgroundOpacity {
     /// Default: 0.50
     #[serde(default)]
     pub vibrancy_background: Option<f32>,
+    /// Glass mode (macOS 26 Tahoe): themed veil painted over the native
+    /// NSGlassEffectView backdrop. 0.0 = bare glass (demo look).
+    /// None -> OPACITY_GLASS_MODE_VEIL_CAP.
+    #[serde(default)]
+    pub glass_veil_opacity: Option<f32>,
+    /// Glass mode: NSGlassEffectView tintColor alpha (theme background hue).
+    /// 0.0/None = untinted glass.
+    #[serde(default)]
+    pub glass_tint_opacity: Option<f32>,
 
     // ── Text grading tiers (Raycast-style) ──────────────────────────────
     // All text elements use text_primary (white on dark) as the base color.
@@ -270,6 +279,8 @@ impl BackgroundOpacity {
             // vibrancy material (menu) carries legibility over bright
             // backdrops; a heavy tint here greys out backdrop color.
             vibrancy_background: Some(crate::theme::opacity::OPACITY_VIBRANCY_BACKGROUND),
+            glass_veil_opacity: None,
+            glass_tint_opacity: None,
             // Text grading (all applied to text_primary)
             text_name: default_text_name(),
             text_strong: default_text_strong(),
@@ -305,6 +316,8 @@ impl BackgroundOpacity {
             // Match dark mode: thin theme veil; the material carries
             // legibility (see dark_default).
             vibrancy_background: Some(crate::theme::opacity::OPACITY_VIBRANCY_BACKGROUND),
+            glass_veil_opacity: None,
+            glass_tint_opacity: None,
             // Text grading (same defaults for light mode)
             text_name: default_text_name(),
             text_strong: default_text_strong(),
@@ -332,6 +345,8 @@ impl BackgroundOpacity {
         self.border_inactive = self.border_inactive.clamp(0.0, 1.0);
         self.border_active = self.border_active.clamp(0.0, 1.0);
         self.vibrancy_background = self.vibrancy_background.map(|value| value.clamp(0.0, 1.0));
+        self.glass_veil_opacity = self.glass_veil_opacity.map(|value| value.clamp(0.0, 1.0));
+        self.glass_tint_opacity = self.glass_tint_opacity.map(|value| value.clamp(0.0, 1.0));
         // Text grading tiers
         self.text_name = self.text_name.clamp(0.0, 1.0);
         self.text_strong = self.text_strong.clamp(0.0, 1.0);
@@ -1320,6 +1335,8 @@ impl Theme {
             border_inactive: base.border_inactive,
             border_active: base.border_active,
             vibrancy_background: base.vibrancy_background,
+            glass_veil_opacity: base.glass_veil_opacity,
+            glass_tint_opacity: base.glass_tint_opacity,
             // Text grading: keep unchanged on opacity offset
             text_name: base.text_name,
             text_strong: base.text_strong,

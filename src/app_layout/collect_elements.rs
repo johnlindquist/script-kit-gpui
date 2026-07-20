@@ -1079,6 +1079,27 @@ impl ScriptListApp {
                     format!("{:.2}", opacity.main),
                     "surface-opacity",
                 );
+                if crate::platform::tahoe_liquid_glass_available() {
+                    push_theme_control(
+                        "control:theme-chooser:glass-veil-opacity".to_string(),
+                        protocol::ElementType::Slider,
+                        "Glass Veil Opacity",
+                        format!(
+                            "{:.2}",
+                            opacity
+                                .glass_veil_opacity
+                                .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP)
+                        ),
+                        "glass-veil-opacity",
+                    );
+                    push_theme_control(
+                        "control:theme-chooser:glass-tint-opacity".to_string(),
+                        protocol::ElementType::Slider,
+                        "Glass Tint Opacity",
+                        format!("{:.2}", opacity.glass_tint_opacity.unwrap_or(0.0)),
+                        "glass-tint-opacity",
+                    );
+                }
                 push_theme_control(
                     "control:theme-chooser:secondary-text-opacity".to_string(),
                     protocol::ElementType::Slider,

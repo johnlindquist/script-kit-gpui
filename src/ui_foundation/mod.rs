@@ -137,11 +137,14 @@ fn resolve_window_vibrancy_opacity(theme: &Theme) -> f32 {
             VIBRANCY_LIGHT_OPACITY
         })
         .clamp(0.0, 1.0);
-    // Glass mode: the NSGlassEffectView backdrop frosts on its own, and the
-    // glass tint reuses this resolved value — without the cap the two layers
-    // stack into a nearly opaque veil (see OPACITY_GLASS_MODE_VEIL_CAP).
+    // Glass mode: the NSGlassEffectView backdrop frosts on its own, so the
+    // veil is the theme's glass_veil_opacity (a theme-designer slider),
+    // defaulting to the bare-glass cap.
     if theme.is_vibrancy_enabled() && crate::platform::tahoe_liquid_glass_available() {
-        alpha.min(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP)
+        opacity
+            .glass_veil_opacity
+            .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP)
+            .clamp(0.0, 1.0)
     } else {
         alpha
     }
