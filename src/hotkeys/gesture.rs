@@ -78,6 +78,8 @@ enum ClassifierState {
     },
     TapPending {
         released_at: Instant,
+        /// `TapPreview` may hide the window before the double-tap window closes.
+        window_hidden: bool,
     },
 }
 
@@ -116,21 +118,33 @@ impl GestureClassifier {
     /// Keeps gesture state aligned so the next hotkey press does not re-emit
     /// `ShowImmediate` while the window is already on screen.
     pub fn sync_window_shown(&mut self) {
-        if matches!(self.state, ClassifierState::Closed) {
-            self.state = ClassifierState::Open;
-        }
+        self.state = match self.state {
+            ClassifierState::Closed => ClassifierState::Open,
+            ClassifierState::TapPending { released_at, .. } => ClassifierState::TapPending {
+                released_at,
+                window_hidden: false,
+            },
+            state => state,
+        };
     }
 
-    /// Window was dismissed — return to the closed steady state.
+    /// Window was dismissed — return to the closed steady state unless a
+    /// `TapPreview` hide is still waiting for its double-tap deadline.
     pub fn sync_window_hidden(&mut self) {
-        self.state = ClassifierState::Closed;
+        self.state = match self.state {
+            ClassifierState::TapPending { released_at, .. } => ClassifierState::TapPending {
+                released_at,
+                window_hidden: true,
+            },
+            _ => ClassifierState::Closed,
+        };
     }
 
     /// Next instant at which `poll` may emit `HoldStart` or `Tap`. `None` when idle.
     pub fn next_deadline(&self) -> Option<Instant> {
         match self.state {
             ClassifierState::Pressed { down_at, .. } => Some(down_at + self.config.hold_duration()),
-            ClassifierState::TapPending { released_at } => {
+            ClassifierState::TapPending { released_at, .. } => {
                 Some(released_at + self.config.double_duration())
             }
             ClassifierState::Closed
@@ -141,10 +155,23 @@ impl GestureClassifier {
 
     /// Handle a key-down or key-up event. Time-based events require `poll`.
     pub fn handle_input(&mut self, input: GestureInput) -> Vec<GestureEvent> {
-        match input {
+        let at = match input {
+            GestureInput::KeyDown(at) | GestureInput::KeyUp(at) => at,
+        };
+        let mut events = Vec::new();
+        // The receiver may win its race with the deadline timer. Settle only
+        // strictly overdue transitions first so the exact double-tap boundary
+        // remains inclusive for the physical input.
+        if self.next_deadline().is_some_and(|deadline| deadline < at) {
+            if let Some(event) = self.poll(at) {
+                events.push(event);
+            }
+        }
+        events.extend(match input {
             GestureInput::KeyDown(at) => self.on_key_down(at),
             GestureInput::KeyUp(at) => self.on_key_up(at),
-        }
+        });
+        events
     }
 
     /// Advance time-based transitions: `HoldStart` while pressed, `Tap` after double window.
@@ -162,9 +189,16 @@ impl GestureClassifier {
                     None
                 }
             }
-            ClassifierState::TapPending { released_at } => {
+            ClassifierState::TapPending {
+                released_at,
+                window_hidden,
+            } => {
                 if now >= released_at + self.config.double_duration() {
-                    self.state = ClassifierState::Open;
+                    self.state = if window_hidden {
+                        ClassifierState::Closed
+                    } else {
+                        ClassifierState::Open
+                    };
                     Some(GestureEvent::Tap)
                 } else {
                     None
@@ -194,7 +228,7 @@ impl GestureClassifier {
                 };
                 Vec::new()
             }
-            ClassifierState::TapPending { released_at } => {
+            ClassifierState::TapPending { released_at, .. } => {
                 if at <= released_at + self.config.double_duration() {
                     self.state = ClassifierState::Pressed {
                         down_at: at,
@@ -230,7 +264,10 @@ impl GestureClassifier {
                 }
                 let elapsed = at.saturating_duration_since(down_at);
                 if elapsed < self.config.hold_duration() {
-                    self.state = ClassifierState::TapPending { released_at: at };
+                    self.state = ClassifierState::TapPending {
+                        released_at: at,
+                        window_hidden: false,
+                    };
                     if began_closed {
                         Vec::new()
                     } else {
@@ -351,24 +388,136 @@ mod tests {
     }
 
     #[test]
-    fn double_tap_after_preview_still_promotes_to_double_tap() {
+    fn of40_double_tap_matrix_preserves_preview_across_hide() {
+        struct Case {
+            name: &'static str,
+            starts_closed: bool,
+            second_down_after_release_ms: u64,
+        }
+
+        let cases = [
+            Case {
+                name: "closed-clean-chat-control",
+                starts_closed: true,
+                second_down_after_release_ms: 60,
+            },
+            Case {
+                name: "open-preview-hide-60ms",
+                starts_closed: false,
+                second_down_after_release_ms: 60,
+            },
+            Case {
+                name: "open-preview-hide-299ms",
+                starts_closed: false,
+                second_down_after_release_ms: 299,
+            },
+            Case {
+                name: "open-preview-hide-inclusive-300ms",
+                starts_closed: false,
+                second_down_after_release_ms: 300,
+            },
+        ];
+
+        for case in cases {
+            let mut classifier = GestureClassifier::with_defaults();
+            let origin = base();
+            if !case.starts_closed {
+                classifier.sync_window_shown();
+            }
+
+            let first_down = classifier.handle_input(GestureInput::KeyDown(at(origin, 0)));
+            assert_eq!(
+                first_down,
+                if case.starts_closed {
+                    vec![GestureEvent::ShowImmediate]
+                } else {
+                    Vec::new()
+                },
+                "{}: first down",
+                case.name
+            );
+
+            let first_up = classifier.handle_input(GestureInput::KeyUp(at(origin, 40)));
+            if case.starts_closed {
+                assert!(first_up.is_empty(), "{}: first up", case.name);
+            } else {
+                assert_eq!(
+                    first_up,
+                    vec![GestureEvent::TapPreview],
+                    "{}: first up",
+                    case.name
+                );
+                classifier.sync_window_hidden();
+            }
+
+            let second_down_at = 40 + case.second_down_after_release_ms;
+            assert_eq!(
+                classifier.handle_input(GestureInput::KeyDown(at(origin, second_down_at))),
+                vec![GestureEvent::DoubleTap],
+                "{}: second down must deepen the opening gesture",
+                case.name
+            );
+            assert!(classifier
+                .handle_input(GestureInput::KeyUp(at(origin, second_down_at + 40)))
+                .is_empty());
+            assert!(
+                drain_until(&mut classifier, origin, 1_000).is_empty(),
+                "{}: completed double tap must have no delayed fallback",
+                case.name
+            );
+            assert!(classifier.is_open(), "{}: completed double tap", case.name);
+        }
+    }
+
+    #[test]
+    fn of40_preview_hide_expiry_rearms_fresh_opening_tap() {
         let mut classifier = GestureClassifier::with_defaults();
         let origin = base();
 
         classifier.sync_window_shown();
-        classifier.handle_input(GestureInput::KeyDown(at(origin, 0)));
+        assert!(classifier
+            .handle_input(GestureInput::KeyDown(at(origin, 0)))
+            .is_empty());
         assert_eq!(
             classifier.handle_input(GestureInput::KeyUp(at(origin, 40))),
             vec![GestureEvent::TapPreview]
         );
+        classifier.sync_window_hidden();
 
         assert_eq!(
-            classifier.handle_input(GestureInput::KeyDown(at(origin, 120))),
-            vec![GestureEvent::DoubleTap]
+            poll_at(&mut classifier, origin, 340),
+            Some(GestureEvent::Tap)
+        );
+        assert!(classifier.is_closed());
+        assert_eq!(
+            classifier.handle_input(GestureInput::KeyDown(at(origin, 400))),
+            vec![GestureEvent::ShowImmediate]
+        );
+    }
+
+    #[test]
+    fn of40_hold_and_tap_boundaries_use_exact_injected_instants() {
+        let origin = base();
+
+        let mut held = GestureClassifier::with_defaults();
+        assert_eq!(
+            held.handle_input(GestureInput::KeyDown(at(origin, 0))),
+            vec![GestureEvent::ShowImmediate]
+        );
+        assert!(poll_at(&mut held, origin, 249).is_none());
+        assert_eq!(held.next_deadline(), Some(at(origin, 250)));
+        assert_eq!(
+            held.handle_input(GestureInput::KeyUp(at(origin, 250))),
+            vec![GestureEvent::HoldStart, GestureEvent::HoldEnd]
         );
 
-        classifier.handle_input(GestureInput::KeyUp(at(origin, 160)));
-        assert!(poll_at(&mut classifier, origin, 500).is_none());
+        let mut tapped = GestureClassifier::with_defaults();
+        tapped.handle_input(GestureInput::KeyDown(at(origin, 0)));
+        assert!(tapped
+            .handle_input(GestureInput::KeyUp(at(origin, 249)))
+            .is_empty());
+        assert!(poll_at(&mut tapped, origin, 548).is_none());
+        assert_eq!(poll_at(&mut tapped, origin, 549), Some(GestureEvent::Tap));
     }
 
     #[test]
@@ -417,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn tap_then_late_tap_produces_two_taps_not_double() {
+    fn adjacent_late_second_down_delivers_expired_tap_before_fresh_press() {
         let mut classifier = GestureClassifier::with_defaults();
         let origin = base();
 
@@ -425,16 +574,21 @@ mod tests {
             classifier.handle_input(GestureInput::KeyDown(at(origin, 0))),
             vec![GestureEvent::ShowImmediate]
         );
-        classifier.handle_input(GestureInput::KeyUp(at(origin, 40)));
-        assert_eq!(
-            poll_at(&mut classifier, origin, 340),
-            Some(GestureEvent::Tap)
-        );
+        assert!(classifier
+            .handle_input(GestureInput::KeyUp(at(origin, 40)))
+            .is_empty());
 
-        classifier.handle_input(GestureInput::KeyDown(at(origin, 700)));
-        classifier.handle_input(GestureInput::KeyUp(at(origin, 740)));
         assert_eq!(
-            poll_at(&mut classifier, origin, 1040),
+            classifier.handle_input(GestureInput::KeyDown(at(origin, 341))),
+            vec![GestureEvent::Tap],
+            "a +301ms receiver event must first deliver the overdue opening Tap"
+        );
+        assert_eq!(
+            classifier.handle_input(GestureInput::KeyUp(at(origin, 381))),
+            vec![GestureEvent::TapPreview]
+        );
+        assert_eq!(
+            poll_at(&mut classifier, origin, 681),
             Some(GestureEvent::Tap)
         );
     }
