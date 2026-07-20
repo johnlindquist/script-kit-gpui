@@ -675,6 +675,9 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
 /// # Safety
 /// `window` must be a valid NSWindow on the main thread.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Reverted from the main hide path: deferring orderOut
+                    // livelocked the hotkey gesture listener. Kept for a future exit animation
+                    // that runs above the synchronous hide layer.
 unsafe fn animate_tahoe_glass_disappearance(
     window: id,
     log_target: &str,

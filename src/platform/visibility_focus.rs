@@ -79,14 +79,11 @@ fn hide_main_window_with_geometry_trace(cycle_id: Option<u64>) {
             trace_main_window_native_geometry("before_order_out", cycle_id, None, None);
         }
 
-        // Glass mode: Spotlight-style exit — a very fast fade with slight
-        // growth; orderOut: runs 130ms later on the raw run loop (outside any
-        // GPUI borrow, the same safety property this path documents).
-        if animate_tahoe_glass_disappearance(window, "PANEL", "Main window") {
-            logging::log("PANEL", "Main window hiding via glass exit fade");
-            return;
-        }
-
+        // NOTE: an animated exit (deferred orderOut:) was tried here and
+        // reverted — delaying the native hide livelocked the hotkey gesture
+        // listener under rapid toggling. The hide must stay synchronous; a
+        // future exit animation needs to run ABOVE this layer (before the
+        // hide is requested), not by deferring orderOut:.
         // orderOut: removes the window from the screen without affecting other windows
         // nil sender means the action is programmatic, not from a menu item
         let _: () = msg_send![window, orderOut:nil];
