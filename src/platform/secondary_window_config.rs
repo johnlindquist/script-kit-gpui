@@ -436,12 +436,12 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
     let _: () = msg_send![glass_view, release];
 }
 
-/// Two-phase bounce settle target: (window ptr, final frame x/y/w/h).
-/// Written by `animate_tahoe_glass_appearance`, consumed by the glass
-/// subclass's `settleOwnWindowFrame` selector. Single-slot is fine: the
-/// re-entry guard serializes morphs.
+/// Two-phase bounce settle target: (window ptr, final frame x/y/w/h,
+/// settle duration seconds). Written by `animate_tahoe_glass_appearance`,
+/// consumed by the glass subclass's `settleOwnWindowFrame` selector.
+/// Single-slot is fine: the re-entry guard serializes morphs.
 #[cfg(target_os = "macos")]
-static GLASS_MORPH_SETTLE_TARGET: std::sync::Mutex<Option<(usize, f64, f64, f64, f64)>> =
+static GLASS_MORPH_SETTLE_TARGET: std::sync::Mutex<Option<(usize, f64, f64, f64, f64, f64)>> =
     std::sync::Mutex::new(None);
 
 /// Phase 2 of the appear bounce: ease the window from its overshoot
@@ -461,7 +461,7 @@ extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc:
             .lock()
             .ok()
             .and_then(|mut guard| guard.take());
-        let Some((window_ptr, x, y, w, h)) = target else {
+        let Some((window_ptr, x, y, w, h, settle_duration)) = target else {
             return;
         };
         if window_ptr != window as usize {
@@ -470,7 +470,7 @@ extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc:
         let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-        let _: () = msg_send![ctx, setDuration: 0.10f64];
+        let _: () = msg_send![ctx, setDuration: settle_duration];
         let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
         if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
             let name = tahoe_ns_string("easeOut");
@@ -513,6 +513,8 @@ extern "C" fn tahoe_glass_backdrop_order_out_window(
 /// through a typed `objc_msgSend` cast. Control points with y outside 0..1
 /// give a smooth overshoot (spring feel) in a single continuous animation.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Kept for curve experiments; the appear morph now uses
+                    // explicit squish/rebound keyframes instead of a single overshoot curve.
 unsafe fn timing_function_with_control_points(c1x: f32, c1y: f32, c2x: f32, c2y: f32) -> id {
     #[link(name = "objc")]
     extern "C" {
@@ -820,19 +822,43 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         std::sync::atomic::Ordering::Relaxed,
     );
 
+    // Squish target: compress BELOW the final size — the released-elastic
+    // physics the Spotlight enter has. Visible (~1.5% of each dimension),
+    // scaled off the start outset.
+    let squish_fraction = (inset_fraction * 0.75).clamp(0.012, 0.03);
+    let squish_x = final_frame.size.width * squish_fraction;
+    let squish_y = final_frame.size.height * squish_fraction;
+    let squish = NSRect::new(
+        NSPoint::new(
+            final_frame.origin.x + squish_x,
+            final_frame.origin.y + squish_y,
+        ),
+        NSSize::new(
+            final_frame.size.width - squish_x * 2.0,
+            final_frame.size.height - squish_y * 2.0,
+        ),
+    );
+
+    // Phase 1: wide -> squished-under-final, soft on both ends (the window
+    // momentarily comes to rest at max compression — physically natural,
+    // unlike the old snap that handed off at full velocity).
+    let phase1 = duration * 0.62;
+    let phase2 = (duration - phase1).max(0.08);
+
+    // Cancel any pending settle from an interrupted previous morph.
+    let _: () = msg_send![
+        class!(NSObject),
+        cancelPreviousPerformRequestsWithTarget: glass_view
+        selector: sel!(settleOwnWindowFrame)
+        object: nil
+    ];
+
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: duration];
+    let _: () = msg_send![ctx, setDuration: phase1];
     let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
-    // Ease-out-back: gentle attack, then a VISIBLE recoil past the final
-    // size (~55% of the travel) that springs back — Spotlight's bounce.
-    // With the small start outset the recoil stays a few pixels deep.
-    // Falls back to easeOut if the control-point call fails.
-    let spring = timing_function_with_control_points(0.34, 1.56, 0.64, 1.0);
-    if spring != nil {
-        let _: () = msg_send![ctx, setTimingFunction: spring];
-    } else if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeOut");
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeInEaseOut");
         if name != nil {
             let timing: id = msg_send![timing_class, functionWithName: name];
             if timing != nil {
@@ -841,19 +867,40 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         }
     }
     let animator: id = msg_send![window, animator];
-    let _: () = msg_send![animator, setFrame: final_frame display: true];
+    let _: () = msg_send![animator, setFrame: squish display: true];
     let _: () = msg_send![animator, setAlphaValue: 1.0f64];
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+    // Phase 2: rebound out to the natural size (settle selector, run-loop
+    // scheduled, ease-out over the remaining duration).
+    if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGET.lock() {
+        *guard = Some((
+            window as usize,
+            final_frame.origin.x,
+            final_frame.origin.y,
+            final_frame.size.width,
+            final_frame.size.height,
+            phase2,
+        ));
+    }
+    let _: () = msg_send![
+        glass_view,
+        performSelector: sel!(settleOwnWindowFrame)
+        withObject: nil
+        afterDelay: phase1
+    ];
 
     logging::log(
         log_target,
         &format!(
-            "{}: spotlight morph started ({:.2}s spring-bezier, outset {:.2}, {}x{} -> {}x{})",
+            "{}: spotlight morph started ({:.2}s squish-rebound, outset {:.2}, {}x{} -> {}x{} -> {}x{})",
             window_name,
             duration,
             inset_fraction,
             start.size.width as i64,
             start.size.height as i64,
+            squish.size.width as i64,
+            squish.size.height as i64,
             final_frame.size.width as i64,
             final_frame.size.height as i64,
         ),
