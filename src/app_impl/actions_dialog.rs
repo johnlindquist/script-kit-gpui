@@ -795,6 +795,34 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // The global actions interceptor runs before AgentChatView's focused
+        // key handler. When the embedded composer's Spine owns the list, bare
+        // Enter must reach that existing acceptance path before this helper's
+        // non-ScriptList inactive-context bypass returns control to a route
+        // that never delivers the key to the child view.
+        if !self.show_actions_popup
+            && !modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && crate::ui_foundation::is_key_enter(key)
+        {
+            if let AppView::AgentChatView { entity } = &self.current_view {
+                let entity = entity.clone();
+                let spine_consumed = entity.update(cx, |chat, cx| {
+                    chat.agent_chat_spine_owns_list()
+                        && chat.accept_agent_chat_spine_projection_row(window, cx)
+                });
+                if spine_consumed {
+                    logging::log(
+                        "KEY_ROUTE",
+                        "Agent Chat Spine accepted Enter before main-list displayed shortcut routing",
+                    );
+                    return true;
+                }
+            }
+        }
+
         // Bare navigation keys can never be displayed action shortcuts: the
         // arrow/home-end interceptors consume them before the actions
         // interceptor on the live keyboard path. Skip the O(actions) routing
@@ -2004,6 +2032,195 @@ mod actions_dialog_wiring_regression_tests {
         assert!(
             !source.contains("if this.show_actions_popup {"),
             "render_script_list must not contain a duplicate inline popup key handler"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_chat_spine_dispatch_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct DispatchTestConnection;
+
+    impl crate::ai::agent_chat::runtime::AgentChatConnection for DispatchTestConnection {
+        fn start_turn(
+            &self,
+            _request: crate::ai::agent_chat::runtime::AgentChatTurnRequest,
+        ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
+            anyhow::bail!("OF-35b dispatch test must not submit")
+        }
+
+        fn cancel_turn(&self, _ui_thread_id: String) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn prepare_session(
+            &self,
+            _ui_thread_id: String,
+            _cwd: std::path::PathBuf,
+        ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
+            let (_tx, rx) = async_channel::bounded(1);
+            Ok(rx)
+        }
+    }
+
+    /// OF-35b: bare Enter from the main-window actions interceptor must reach
+    /// the embedded Agent Chat Spine before the inactive-main-list shortcut
+    /// bypass. This exercises the real dispatcher with a live AgentChatView;
+    /// it must accept the selected profile without submitting the transcript.
+    #[gpui::test]
+    fn embedded_agent_chat_profile_spine_enter_reaches_existing_acceptance_path(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let catalog = crate::flows::catalog::flow_catalog();
+        catalog.set_notify_hook(|| {});
+        catalog.prime_ready_for_test(&crate::flows::resolve_flow_cwd(None));
+
+        let app_slot = Arc::new(Mutex::new(None));
+        let app_slot_for_window = Arc::clone(&app_slot);
+        let window = cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.open_window(Default::default(), |window, cx| {
+                let mut config = crate::config::Config::default();
+                let mut built_ins = config.get_builtins();
+                built_ins.app_launcher = false;
+                config.built_ins = Some(built_ins);
+                let app = cx.new(|cx| ScriptListApp::new(config, false, window, cx));
+                *app_slot_for_window.lock().expect("store OF-35b test app") = Some(app);
+                cx.new(|_| crate::MainMenuSelectionTestHost)
+            })
+            .expect("open OF-35b dispatch test window")
+        });
+        let app = app_slot
+            .lock()
+            .expect("read OF-35b test app")
+            .take()
+            .expect("OF-35b test app initialized");
+
+        let selected_profiles = Arc::new(Mutex::new(Vec::<String>::new()));
+        let selected_profiles_for_callback = Arc::clone(&selected_profiles);
+        let (handled, before, after) = cx.update(|cx| {
+            window
+                .update(cx, |_host, window, cx| {
+                    app.update(cx, |app, cx| {
+                    let (_broker, permission_rx) =
+                        crate::ai::agent_chat::ui::AgentChatPermissionBroker::new();
+                    let thread = cx.new(|cx| {
+                        crate::ai::agent_chat::ui::AgentChatThread::new(
+                            Arc::new(DispatchTestConnection),
+                            permission_rx,
+                            crate::ai::agent_chat::ui::AgentChatThreadInit {
+                                ui_thread_id: "of35b-dispatch-test".to_string(),
+                                cwd: std::env::temp_dir().join("of35b-dispatch-test"),
+                                initial_input: None,
+                                initial_context_parts: Vec::new(),
+                                display_name: "OF-35b Test".into(),
+                                profile_id: crate::ai::agent_chat::profiles::BUILTIN_GENERAL_PROFILE_ID
+                                    .to_string(),
+                                profile_display_name: Some("OF-35b Test".into()),
+                                profile_icon_name: None,
+                                selected_agent: None,
+                                available_agents: Vec::new(),
+                                launch_requirements:
+                                    crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
+                                available_models: Vec::new(),
+                                selected_model_id: None,
+                            },
+                            cx,
+                        )
+                    });
+                    thread.update(cx, |thread, cx| {
+                        thread.mark_context_bootstrap_ready(cx);
+                        thread
+                            .apply_test_fixture(
+                                "assistantText",
+                                Some("OF-35b user message".to_string()),
+                                Some("OF-35b assistant message".to_string()),
+                                None,
+                                cx,
+                            )
+                            .expect("seed OF-35b transcript");
+                    });
+                    let entity = cx.new(|cx| {
+                        crate::ai::agent_chat::ui::AgentChatView::new(thread, cx)
+                    });
+                    app.current_view = AppView::AgentChatView {
+                        entity: entity.clone(),
+                    };
+                    entity.update(cx, |chat, cx| {
+                        let thread = chat.thread().expect("fixture must have a live thread");
+                        let mut draft = thread.read(cx).draft_snapshot();
+                        draft.pending_context_parts = vec![
+                            crate::ai::message_parts::AiContextPart::SkillFile {
+                                path: "/tmp/of35b-context.md".to_string(),
+                                label: "OF-35b context".to_string(),
+                                skill_name: "of35b-context".to_string(),
+                                owner_label: "test".to_string(),
+                                slash_name: "of35b-context".to_string(),
+                            },
+                        ];
+                        thread.update(cx, |thread, cx| {
+                            thread.restore_draft_snapshot(draft, cx);
+                        });
+                        chat.set_on_profile_selected(move |profile_id, _cx| {
+                            selected_profiles_for_callback
+                                .lock()
+                                .expect("record selected profile")
+                                .push(profile_id);
+                        });
+                        // The GPUI test platform has no native display handle;
+                        // opening the same profile trigger without popup geometry
+                        // produces the identical Spine projection used by dispatch.
+                        chat.open_profile_trigger_picker(cx);
+                        chat.set_input("|text".to_string(), cx);
+                        chat.refresh_agent_chat_spine_from_composer(cx);
+                    });
+
+                    let before = entity.read(cx).collect_agent_chat_state_snapshot(cx);
+                    let spine = before
+                        .spine
+                        .as_ref()
+                        .expect("exact profile query must project through Spine");
+                    assert!(spine.owns_list);
+                    assert_eq!(spine.active_segment_kind, "profile");
+                    assert_eq!(spine.row_count, 1);
+                    assert_eq!(spine.selectable_row_count, 1);
+                    assert_eq!(spine.selected_index, 0);
+                    assert_eq!(before.message_count, 2);
+                    assert_eq!(before.context_chip_count, 1);
+
+                    let handled = app.try_execute_main_list_action_shortcut_from_display(
+                        "enter",
+                        &gpui::Modifiers::default(),
+                        window,
+                        cx,
+                    );
+                    let after = entity.read(cx).collect_agent_chat_state_snapshot(cx);
+                    (handled, before, after)
+                    })
+                })
+                .expect("update OF-35b dispatch test window")
+        });
+        cx.run_until_parked();
+
+        assert!(handled, "the interceptor must consume Spine profile Enter");
+        assert_eq!(
+            selected_profiles
+                .lock()
+                .expect("read selected profiles")
+                .as_slice(),
+            ["text"]
+        );
+        assert_eq!(after.input_text, "", "profile trigger must clear exactly");
+        assert!(
+            !after.spine.as_ref().is_some_and(|spine| spine.owns_list),
+            "accepted profile must release Spine list ownership"
+        );
+        assert_eq!(after.message_count, before.message_count, "must not submit");
+        assert_eq!(
+            after.context_chip_count, before.context_chip_count,
+            "profile acceptance must preserve staged context"
         );
     }
 }
