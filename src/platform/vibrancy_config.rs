@@ -225,13 +225,19 @@ unsafe fn configure_visual_effect_views_recursive(
         // Light mode without emphasis matches POC's cleaner look
         let _: () = msg_send![view, setEmphasized: is_dark];
 
-        // Debug-only: hide the effect view to measure what the layers beneath
-        // it (e.g. the Tahoe glass backdrop) actually contribute on screen.
-        if std::env::var("SCRIPT_KIT_DEBUG_HIDE_VEV").is_ok() {
-            let _: () = msg_send![view, setHidden: true];
+        // Glass mode: the Tahoe NSGlassEffectView backdrop is the window
+        // material. Header/footer NSVisualEffectViews would composite their
+        // own blur bands on top of the glass, so hide them entirely (and
+        // restore them whenever glass mode is unavailable or vibrancy is off).
+        // SCRIPT_KIT_DEBUG_HIDE_VEV keeps forcing the hide for measurement.
+        let glass_mode = tahoe_liquid_glass_available()
+            && crate::theme::get_cached_theme().is_vibrancy_enabled();
+        let hide_vev = glass_mode || std::env::var("SCRIPT_KIT_DEBUG_HIDE_VEV").is_ok();
+        let _: () = msg_send![view, setHidden: hide_vev];
+        if hide_vev {
             logging::log(
                 "VIBRANCY",
-                "DEBUG: NSVisualEffectView hidden via SCRIPT_KIT_DEBUG_HIDE_VEV",
+                "NSVisualEffectView hidden (glass mode or SCRIPT_KIT_DEBUG_HIDE_VEV)",
             );
         }
 

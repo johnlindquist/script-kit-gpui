@@ -23,7 +23,10 @@ pub const OPACITY_VIBRANCY_BACKGROUND: f32 = 0.30;
 /// its own frost AND receives a theme tint derived from this same resolved
 /// value, so the blur-era veil double-stacks: 0.30 veil + 0.30 glass tint
 /// reads nearly opaque. In glass mode both layers resolve through this cap.
-pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.15;
+/// 0.0 = bare glass, exactly like the liquid-glass-demo bin: the material
+/// alone carries the frost and content sits directly on it. Raise this to
+/// restore a themed tint over the glass (0.15 was the previous value).
+pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.0;
 /// Softer ghost-tier background opacity for barely-there fills (0.03–0.06 range).
 #[allow(dead_code)]
 pub const OPACITY_GHOST_SOFT: f32 = 0.03;
