@@ -59,8 +59,57 @@ interface ProtocolBusEnvelope {
   response?: unknown;
 }
 
-function printResult(result: RpcResult): void {
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+async function printResult(result: RpcResult): Promise<void> {
+  const output = `${JSON.stringify(result)}\n`;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settle = (error?: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      };
+      const onError = (error: Error): void => {
+        settle(error);
+      };
+
+      // A failed Writable write can invoke the callback and subsequently emit
+      // "error". Keep a temporary listener so EPIPE cannot become an unhandled
+      // stream error.
+      process.stdout.once("error", onError);
+      try {
+        process.stdout.write(output, (error) => {
+          if (!error) {
+            process.stdout.off("error", onError);
+          }
+          // On error, leave the once-listener installed long enough to consume
+          // the corresponding stream "error" event.
+          settle(error);
+        });
+      } catch (error) {
+        process.stdout.off("error", onError);
+        settle(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error))
+      .replace(/\s+/g, " ")
+      .slice(0, 200);
+
+    // stdout cannot carry the result, so do not attempt another JSON envelope
+    // there. stderr is diagnostic-only and deliberately best effort.
+    try {
+      process.stderr.write(`[await-response] stdout_write_failed: ${message}\n`);
+    } catch {
+      // stderr may also be closed.
+    }
+    process.exit(2);
+  }
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -310,7 +359,7 @@ if (!requestId) {
     "missing_request_id",
     "Usage: await-response.ts --request-id ID [--expect TYPE] [--timeout MS]",
   );
-  printResult(result);
+  await printResult(result);
   process.exit(2);
 }
 
@@ -326,7 +375,7 @@ if (!existsSync(sdir)) {
     "no_session",
     `Session '${sessionName}' not found at ${sdir}`,
   );
-  printResult(result);
+  await printResult(result);
   process.exit(2);
 }
 
@@ -351,7 +400,7 @@ while (Date.now() < deadline) {
         "parse_error",
         errMsg,
       );
-      printResult(parseErr);
+      await printResult(parseErr);
       process.exit(PARSE_ERROR_EXIT_CODE);
     }
   }
@@ -373,7 +422,7 @@ while (Date.now() < deadline) {
       responseType: busType ?? "unknown",
       response: busFound,
     };
-    printResult(result);
+    await printResult(result);
     process.exit(0);
   }
 
@@ -395,7 +444,7 @@ while (Date.now() < deadline) {
         responseType: responseType ?? "unknown",
         response: found,
       };
-      printResult(result);
+      await printResult(result);
       process.exit(0);
     }
   }
@@ -409,5 +458,5 @@ const result = errorResult(
   "response_timeout",
   `No response matching requestId '${requestId}'${expect ? ` and type '${expect}'` : ""} within ${timeout}ms`,
 );
-printResult(result);
+await printResult(result);
 process.exit(1);

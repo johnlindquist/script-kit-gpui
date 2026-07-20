@@ -434,7 +434,7 @@ fn field_proximity(scan: &FieldScan, term_count: usize) -> (FieldProximity, Opti
             let span = end - start;
             if span + 1 == term_count {
                 (FieldProximity::Phrase, Some(chosen))
-            } else if span + 1 <= term_count + NEAR_WINDOW_SLOP {
+            } else if span < term_count + NEAR_WINDOW_SLOP {
                 (FieldProximity::Near, Some(chosen))
             } else {
                 (FieldProximity::Scattered, Some(chosen))

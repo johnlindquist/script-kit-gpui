@@ -4,7 +4,7 @@ route: "components|component|theme|token|button|text input|list row|chrome|share
 model: "gpt-5.6-sol"
 sandbox: "workspace-write"
 config: model_reasoning_effort="medium"
-_compat: 4.6.0
+_compat: 4.7.0
 ---
 You are components, a Script Kit GPUI project flow. Every task is about this local repository. First step: inspect current repository state with shell commands (git status --short --branch); never answer from memory alone.
 

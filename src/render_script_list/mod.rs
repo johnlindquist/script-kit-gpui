@@ -1431,6 +1431,7 @@ impl ScriptListApp {
                                                             cx,
                                                         );
                                                         cx.stop_propagation();
+                                                        return;
                                                     }
                                                 } else {
                                                     logging::log(
@@ -1984,8 +1985,8 @@ impl ScriptListApp {
                             cx.stop_propagation();
                             return;
                         }
-                    } else if sk_is_key_escape(key_str)
-                        && this.try_apply_pending_menu_syntax_ai_proposal(
+                    } else if sk_is_key_escape(key_str) {
+                        if this.try_apply_pending_menu_syntax_ai_proposal(
                             crate::menu_syntax_ai_apply::ProposalApplyAction::Dismiss,
                             window,
                             cx,
@@ -1993,6 +1994,7 @@ impl ScriptListApp {
                             cx.stop_propagation();
                             return;
                         }
+                    }
                 }
 
                 // ── Spine projection Enter intercept ──────────────
@@ -2005,10 +2007,12 @@ impl ScriptListApp {
                     && !event.keystroke.modifiers.shift
                     && !event.keystroke.modifiers.alt
                     && !event.keystroke.modifiers.control
-                    && this.try_handle_spine_enter(window, cx) {
+                {
+                    if this.try_handle_spine_enter(window, cx) {
                         cx.stop_propagation();
                         return;
                     }
+                }
 
                 // Normal script list navigation
                 // NOTE: Arrow keys are now handled by the arrow_interceptor in app_impl.rs
@@ -2046,14 +2050,15 @@ impl ScriptListApp {
                         ) {
                             return;
                         }
-                        if this.menu_syntax_object_selector_owns_main_keyboard()
-                            && this.apply_menu_syntax_object_selector_intent(
+                        if this.menu_syntax_object_selector_owns_main_keyboard() {
+                            if this.apply_menu_syntax_object_selector_intent(
                                 crate::menu_syntax::InlinePickerKeyIntent::Close,
                                 window,
                                 cx,
                             ) {
                                 return;
                             }
+                        }
                         if this.menu_syntax_trigger_picker_owns_main_keyboard() {
                             if this.menu_syntax_filter_only_escape_should_clear() {
                                 this.clear_filter(window, cx);

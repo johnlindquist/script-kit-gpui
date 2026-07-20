@@ -316,6 +316,24 @@ pub struct ConversationTurn {
     pub user_image: Option<Arc<RenderImage>>,
 }
 
+pub(super) fn conversation_turn_pending_indicator_visible(turn: &ConversationTurn) -> bool {
+    turn.error.is_none()
+        && turn.streaming
+        && turn
+            .assistant_response
+            .as_deref()
+            .is_none_or(|response| response.trim().is_empty())
+}
+
+pub(super) fn conversation_turn_streaming_copy_available(turn: &ConversationTurn) -> bool {
+    turn.error.is_none()
+        && turn.streaming
+        && turn
+            .assistant_response
+            .as_deref()
+            .is_some_and(|response| !response.trim().is_empty())
+}
+
 /// Conversation starter suggestion
 #[derive(Clone, Debug)]
 pub struct ConversationStarter {

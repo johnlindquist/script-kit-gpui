@@ -189,6 +189,11 @@ pub fn map_scriptkit_to_gpui_theme(sk_theme: &Theme, is_dark: bool) -> ThemeColo
 
     theme_color.background = main_bg;
     theme_color.foreground = hex_to_hsla(colors.text.primary);
+    // Keep markdown links foreground-like at rest, then use the same accent hover
+    // language as notes-editor deeplinks. Preserve these mappings during vendor syncs.
+    theme_color.link = hex_to_hsla(colors.text.primary);
+    theme_color.link_hover = hex_to_hsla(colors.accent.selected);
+    theme_color.link_active = hex_to_hsla(colors.accent.selected);
 
     // Accent colors (Script Kit yellow/gold) - keep opaque for visibility
     let accent_foreground_hex = best_contrast_of_two(
@@ -853,6 +858,15 @@ mod tests {
         let mapped = map_scriptkit_to_gpui_theme(&theme, true);
         assert_hsla_close(mapped.foreground, hex_to_hsla(focused_colors.text.primary));
         assert_hsla_close(mapped.accent, hex_to_hsla(focused_colors.accent.selected));
+        assert_hsla_close(mapped.link, hex_to_hsla(focused_colors.text.primary));
+        assert_hsla_close(
+            mapped.link_hover,
+            hex_to_hsla(focused_colors.accent.selected),
+        );
+        assert_hsla_close(
+            mapped.link_active,
+            hex_to_hsla(focused_colors.accent.selected),
+        );
     }
 
     #[test]

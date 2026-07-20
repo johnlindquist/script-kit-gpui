@@ -295,22 +295,23 @@ fn build_mdquery(user_query: &str) -> String {
 /// Build the provider query used by root-launcher global file search.
 ///
 /// Plain single-term queries keep the existing literal filename contains shape.
-/// Safe multi-word queries keep that phrase branch and add an all-terms filename
-/// branch so Spotlight can recall separator-token files such as
-/// `client-design-notes.md` for `design notes`.
+/// Safe multi-word and separator-token queries keep that phrase branch and add
+/// an all-terms filename branch so Spotlight can recall separator-token files
+/// such as `client-design-notes.md` for `design notes` or `egghead.svg`.
 pub fn root_file_provider_query_for_user_query(user_query: &str) -> String {
     let q = user_query.trim();
     if looks_like_advanced_mdquery(q) {
         return q.to_string();
     }
 
-    let terms = root_file_query_terms(q);
-    if terms.len() < 2 || terms.iter().any(|term| term.chars().count() < 2) {
+    let query_terms = root_file_query_terms(q);
+    let filename_terms = root_file_filename_query_terms(q);
+    if filename_terms.len() < 2 || filename_terms.iter().any(|term| term.chars().count() < 2) {
         return q.to_string();
     }
 
     let phrase = escape_md_string(q);
-    let filename_terms_query = terms
+    let filename_terms_query = filename_terms
         .iter()
         .map(|term| format!(r#"kMDItemFSName == "*{}*"c"#, escape_md_string(term)))
         .collect::<Vec<_>>()
@@ -320,7 +321,7 @@ pub fn root_file_provider_query_for_user_query(user_query: &str) -> String {
         format!(r#"kMDItemFSName == "*{}*"c"#, phrase),
         format!("({})", filename_terms_query),
     ];
-    branches.extend(root_file_path_context_mdquery_branches(&terms));
+    branches.extend(root_file_path_context_mdquery_branches(&query_terms));
 
     format!("({})", branches.join(" || "))
 }
@@ -500,14 +501,15 @@ pub fn root_file_inline_match_mode_for_query(
         return None;
     }
 
-    let terms = root_file_query_terms(q);
-    if terms.len() == 1 {
+    let query_terms = root_file_query_terms(q);
+    let filename_terms = root_file_filename_query_terms(q);
+    if filename_terms.len() == 1 {
         return Some(RootFileInlineMatchMode::SingleTerm);
     }
-    if terms.len() >= 2 && terms.iter().any(|term| term.chars().count() < 2) {
+    if filename_terms.len() >= 2 && filename_terms.iter().any(|term| term.chars().count() < 2) {
         return Some(RootFileInlineMatchMode::Phrase);
     }
-    if terms.len() >= 2 {
+    if query_terms.len() >= 2 || filename_terms.len() >= 2 {
         return Some(RootFileInlineMatchMode::FilenameWords);
     }
     None
@@ -686,6 +688,7 @@ pub fn root_directory_file_matches(
 const ROOT_FILE_TEXT_TIER_MULTIPLIER: i32 = 20_000;
 const ROOT_FILE_PATH_CONTEXT_TIER: i32 = 3;
 const ROOT_FILE_PATH_CONTEXT_MAX_TERMS: usize = 4;
+const ROOT_FILE_KNOWN_EXTENSIONS: &str = "app png jpg jpeg gif bmp webp svg ico tiff heic heif pdf doc docx xls xlsx ppt pptx txt rtf odt ods odp pages numbers key mp3 wav aac flac ogg wma m4a aiff mp4 mov avi mkv wmv flv webm m4v mpeg mpg md rs json toml yaml yml js jsx ts tsx html css xml csv sh zsh py rb";
 
 fn root_file_name_relevance_tier(name: &str, query: &str, name_matched: bool) -> i32 {
     let name_lc = name.to_lowercase();
@@ -699,6 +702,9 @@ fn root_file_name_relevance_tier(name: &str, query: &str, name_matched: bool) ->
         return 6;
     }
     if name_lc.starts_with(query) || stem_lc.starts_with(query) {
+        return 5;
+    }
+    if root_file_name_separator_prefix_matches_query(name, query) {
         return 5;
     }
     if root_file_name_token_matches_query(name, query) {
@@ -715,8 +721,37 @@ fn root_file_name_relevance_tier(name: &str, query: &str, name_matched: bool) ->
 
 /// Return true when a root file query is a high-confidence filename-token match.
 pub fn root_file_name_token_matches_query(name: &str, query: &str) -> bool {
-    let terms = root_file_query_terms(query);
-    root_file_filename_terms_match(name, &terms)
+    let query_terms = root_file_query_terms(query);
+    let terms = root_file_filename_query_terms(query);
+    root_file_filename_terms_match_with_extension(name, &terms, terms != query_terms)
+}
+
+fn root_file_name_separator_prefix_matches_query(name: &str, query: &str) -> bool {
+    let query_terms = root_file_query_terms(query);
+    let terms = root_file_filename_query_terms(query);
+    if terms == query_terms || terms.len() < 2 {
+        return false;
+    }
+
+    let Some(extension_term) = terms
+        .last()
+        .filter(|term| root_file_query_term_is_known_extension(term))
+    else {
+        return false;
+    };
+    let path = Path::new(name);
+    let extension_matches = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(extension_term));
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(name);
+
+    extension_matches
+        && stem.to_lowercase().starts_with(&terms[0])
+        && root_file_text_matches_terms_in_order(stem, &terms)
 }
 
 pub fn root_file_name_exact_or_stem_matches_query(name: &str, query: &str) -> bool {
@@ -736,6 +771,14 @@ pub fn root_file_name_exact_or_stem_matches_query(name: &str, query: &str) -> bo
 }
 
 fn root_file_filename_terms_match(name: &str, terms: &[String]) -> bool {
+    root_file_filename_terms_match_with_extension(name, terms, false)
+}
+
+fn root_file_filename_terms_match_with_extension(
+    name: &str,
+    terms: &[String],
+    extension_aware: bool,
+) -> bool {
     if terms.is_empty() {
         return false;
     }
@@ -748,10 +791,24 @@ fn root_file_filename_terms_match(name: &str, terms: &[String]) -> bool {
         return false;
     }
 
-    let stem = Path::new(name)
+    let path = Path::new(name);
+    let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or(name);
+
+    if let Some(extension_term) = extension_aware
+        .then(|| terms.last())
+        .flatten()
+        .filter(|term| root_file_query_term_is_known_extension(term))
+    {
+        let extension_matches = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(extension_term));
+        return extension_matches
+            && root_file_text_matches_terms_in_order(stem, &terms[..terms.len() - 1]);
+    }
 
     root_file_text_matches_terms_in_order(name, terms)
         || root_file_text_matches_terms_in_order(stem, terms)
@@ -797,6 +854,25 @@ fn root_file_query_terms(query: &str) -> Vec<String> {
         .filter(|term| !term.is_empty())
         .map(str::to_lowercase)
         .collect()
+}
+
+fn root_file_filename_query_terms(query: &str) -> Vec<String> {
+    root_file_query_terms(query)
+        .into_iter()
+        .flat_map(|term| {
+            term.split(['.', '-', '_'])
+                .map(str::trim)
+                .filter(|subtoken| !subtoken.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn root_file_query_term_is_known_extension(term: &str) -> bool {
+    ROOT_FILE_KNOWN_EXTENSIONS
+        .split_ascii_whitespace()
+        .any(|extension| extension == term)
 }
 
 fn root_file_name_token_matches_single_term(name: &str, query: &str) -> bool {
@@ -1379,6 +1455,14 @@ mod tests {
             Some(SingleTerm)
         );
         assert_eq!(
+            root_file_inline_match_mode_for_query("egghead.svg", RootFileQueryIntent::OrdinaryRoot),
+            Some(FilenameWords)
+        );
+        assert_eq!(
+            root_file_inline_match_mode_for_query("a.b", RootFileQueryIntent::OrdinaryRoot),
+            Some(Phrase)
+        );
+        assert_eq!(
             root_file_inline_match_mode_for_query("~/dev/al", RootFileQueryIntent::OrdinaryRoot),
             Some(Directory)
         );
@@ -1416,6 +1500,29 @@ mod tests {
         assert!(
             word_query.contains(r#"kMDItemFSName == "*why*"c && kMDItemFSName == "*is*"c"#),
             "word mode should include the all-filename-terms provider branch"
+        );
+
+        let separator_query = root_file_provider_query_for_user_query("egghead.svg");
+        assert_eq!(
+            root_file_inline_match_mode_for_query("egghead.svg", RootFileQueryIntent::OrdinaryRoot),
+            Some(RootFileInlineMatchMode::FilenameWords)
+        );
+        assert!(
+            separator_query.contains(r#"kMDItemFSName == "*egghead.svg*"c"#),
+            "separator word mode should retain the exact phrase provider branch"
+        );
+        assert!(
+            separator_query
+                .contains(r#"kMDItemFSName == "*egghead*"c && kMDItemFSName == "*svg*"c"#),
+            "separator word mode should include the all-subtokens provider branch"
+        );
+    }
+
+    #[test]
+    fn root_file_provider_query_expands_safe_filename_separator_queries() {
+        assert_eq!(
+            root_file_provider_query_for_user_query("egghead.svg"),
+            r#"(kMDItemFSName == "*egghead.svg*"c || (kMDItemFSName == "*egghead*"c && kMDItemFSName == "*svg*"c))"#
         );
     }
 
@@ -1467,6 +1574,7 @@ mod tests {
             root_file_provider_query_for_user_query("q report"),
             "q report"
         );
+        assert_eq!(root_file_provider_query_for_user_query("a.b"), "a.b");
     }
 
     #[test]
@@ -1676,6 +1784,17 @@ mod tests {
             !root_file_recent_seed_matches_query(&result, "ai readme"),
             "plain two-letter parent terms should not become recent-seed path context"
         );
+    }
+
+    #[test]
+    fn root_file_recent_seed_accepts_separator_derived_filename_tokens() {
+        let result = file("/tmp/egghead-dark.svg", "egghead-dark.svg", FileType::Image);
+
+        assert!(root_file_recent_seed_matches_query(&result, "egghead.svg"));
+        assert!(!root_file_recent_seed_matches_query(
+            &file("/tmp/egghead-dark.png", "egghead-dark.png", FileType::Image,),
+            "egghead.svg"
+        ));
     }
 
     #[test]
@@ -1974,6 +2093,90 @@ mod tests {
             ranked.first().map(|entry| entry.file.name.as_str()),
             Some("fix-notes.md"),
             "filename prefix should beat separator-boundary contains"
+        );
+    }
+
+    #[test]
+    fn root_file_ranking_tiers_filename_with_extension_results() {
+        let results = vec![
+            file("/tmp/z/egghead.svg", "egghead.svg", FileType::Image),
+            file("/tmp/a/egghead.svg", "egghead.svg", FileType::Image),
+            file(
+                "/tmp/egghead Symbol SVG.svg",
+                "egghead Symbol SVG.svg",
+                FileType::Image,
+            ),
+            file(
+                "/tmp/c/egghead-dark.svg",
+                "egghead-dark.svg",
+                FileType::Image,
+            ),
+            file(
+                "/tmp/a/egghead-dark.svg",
+                "egghead-dark.svg",
+                FileType::Image,
+            ),
+            file(
+                "/tmp/b/egghead-dark.svg",
+                "egghead-dark.svg",
+                FileType::Image,
+            ),
+            file(
+                "/tmp/egghead-light.svg",
+                "egghead-light.svg",
+                FileType::Image,
+            ),
+            file(
+                "/tmp/egghead.some-vector-graphic.png",
+                "egghead.some-vector-graphic.png",
+                FileType::Image,
+            ),
+        ];
+
+        let ranked = rank_root_file_results(&results, "egghead.svg", results.len(), |_| 0.0);
+        let names = ranked
+            .iter()
+            .map(|entry| entry.file.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(&names[..2], &["egghead.svg", "egghead.svg"]);
+        assert_eq!(
+            ranked[..2]
+                .iter()
+                .map(|entry| entry.file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/tmp/a/egghead.svg", "/tmp/z/egghead.svg"],
+            "exact-name ties should remain deterministic by path"
+        );
+        assert_eq!(names[2], "egghead Symbol SVG.svg");
+        assert!(
+            names[3..7]
+                .iter()
+                .all(|name| root_file_name_token_matches_query(name, "egghead.svg")),
+            "separator-derived dash-token matches should follow the stronger prefix-style match"
+        );
+        assert_eq!(
+            names.last().copied(),
+            Some("egghead.some-vector-graphic.png"),
+            "a fuzzy-only different-extension name should rank last"
+        );
+        assert!(
+            ranked[3..7]
+                .iter()
+                .all(|entry| entry.score / ROOT_FILE_TEXT_TIER_MULTIPLIER == 4),
+            "extension-aware separator matches should use token tier 4"
+        );
+        assert_eq!(
+            ranked[2].score / ROOT_FILE_TEXT_TIER_MULTIPLIER,
+            5,
+            "a prefix whose stem also contains the extension token should use prefix tier 5"
+        );
+        assert_eq!(
+            ranked
+                .last()
+                .map(|entry| entry.score / ROOT_FILE_TEXT_TIER_MULTIPLIER),
+            Some(2),
+            "the fuzzy-only name should remain in fuzzy tier 2"
         );
     }
 

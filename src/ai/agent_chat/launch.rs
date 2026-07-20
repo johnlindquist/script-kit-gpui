@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{anyhow, bail, Context as _, Result};
 
 use crate::ai::agent_chat::pi::launch_spec::PiLaunchSpec;
 use crate::ai::agent_chat::pi::{PiRpcLaunchSpec, PiRpcRuntime};
 use crate::ai::agent_chat::profiles::{
     resolve_effective_profile, AgentChatProfileContext, ResolvedAgentChatProfile,
-    BUILTIN_TEXT_PROFILE_ID,
+    BUILTIN_QUICK_AI_PROFILE_ID, BUILTIN_TEXT_PROFILE_ID, QUICK_AI_APPEND_SYSTEM_PROMPT,
+    QUICK_AI_PI_MODEL, QUICK_AI_PI_TOOLS,
 };
 use crate::ai::agent_chat::runtime::AgentChatConnection;
 use crate::ai::agent_chat::ui::config::AgentChatModelEntry;
@@ -26,6 +27,64 @@ pub(crate) struct PiAgentChatLaunch {
     pub cwd: PathBuf,
     pub selected_model_id: Option<String>,
     pub available_models: Vec<AgentChatModelEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CodexQuickAiExecLaunch {
+    pub(crate) profile: ResolvedAgentChatProfile,
+    pub(crate) spec: crate::ai::agent_chat::codex_exec::CodexQuickAiExecSpec,
+    pub(crate) cwd: PathBuf,
+    pub(crate) selected_model_id: Option<String>,
+    pub(crate) available_models: Vec<AgentChatModelEntry>,
+}
+
+impl CodexQuickAiExecLaunch {
+    fn from_builtin_profile(profile: ResolvedAgentChatProfile) -> Result<Self> {
+        let expected_tools: Vec<String> = QUICK_AI_PI_TOOLS
+            .iter()
+            .map(|tool| tool.to_string())
+            .collect();
+        if profile.id != BUILTIN_QUICK_AI_PROFILE_ID
+            || profile.model.as_deref() != Some(QUICK_AI_PI_MODEL)
+            || profile.append_system_prompt.as_deref() != Some(QUICK_AI_APPEND_SYSTEM_PROMPT)
+            || profile.tools.as_ref() != Some(&expected_tools)
+            || profile.thinking.is_some()
+            || profile.no_session != Some(true)
+            || profile.disable_extensions != Some(true)
+            || profile.disable_skills != Some(true)
+            || profile.disable_prompt_templates != Some(true)
+            || profile.disable_context_files != Some(true)
+        {
+            bail!("quick_ai_builtin_exec_contract_mismatch")
+        }
+        let cwd = profile
+            .cwd
+            .clone()
+            .unwrap_or_else(crate::setup::get_kit_path);
+        let selected_model_id =
+            Some(crate::ai::agent_chat::codex_exec::QUICK_AI_SELECTED_MODEL_ID.to_string());
+        let spec = crate::ai::agent_chat::codex_exec::CodexQuickAiExecSpec::from_builtin_contract(
+            cwd.join("codex-exec"),
+        );
+        let available_models = vec![AgentChatModelEntry {
+            id: crate::ai::agent_chat::codex_exec::QUICK_AI_SELECTED_MODEL_ID.to_string(),
+            display_name: Some(QUICK_AI_PI_MODEL.to_string()),
+            context_window: None,
+        }];
+        Ok(Self {
+            profile,
+            spec,
+            cwd,
+            selected_model_id,
+            available_models,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedQuickAiLaunch {
+    CodexExec(CodexQuickAiExecLaunch),
+    Pi(PiAgentChatLaunch),
 }
 
 impl PiAgentChatLaunch {
@@ -196,6 +255,26 @@ pub(crate) fn resolve_quick_ai_pi_launch(
             .or_else(crate::ai::agent_chat::pi::binary::default_pi_binary);
     }
     PiAgentChatLaunch::from_profile(profile)
+}
+
+/// Resolve the hidden built-in Quick AI profile to cold direct Codex exec.
+/// Any explicit Shift+Tab/configured profile remains on the existing Pi path.
+pub(crate) fn resolve_quick_ai_launch(
+    ai: &AiPreferences,
+    ctx: &AgentChatProfileContext,
+) -> Result<ResolvedQuickAiLaunch> {
+    let profile = crate::ai::agent_chat::profiles::resolve_quick_ai_profile(ai, ctx);
+    if profile.id == BUILTIN_QUICK_AI_PROFILE_ID {
+        return CodexQuickAiExecLaunch::from_builtin_profile(profile)
+            .map(ResolvedQuickAiLaunch::CodexExec);
+    }
+    let mut profile = profile;
+    if profile.pi_binary.is_none() {
+        profile.pi_binary = crate::ai::agent_chat::profiles::clean_opt(ai.pi_binary.as_deref())
+            .map(crate::ai::agent_chat::pi::binary::expand_tilde_path)
+            .or_else(crate::ai::agent_chat::pi::binary::default_pi_binary);
+    }
+    PiAgentChatLaunch::from_profile(profile).map(ResolvedQuickAiLaunch::Pi)
 }
 
 fn pi_model_selection_id(profile: &ResolvedAgentChatProfile) -> Option<String> {
@@ -494,6 +573,60 @@ mod tests {
             .collect();
         assert!(!ids
             .contains(&crate::ai::agent_chat::profiles::BUILTIN_QUICK_AI_PROFILE_ID.to_string()));
+    }
+
+    #[test]
+    fn codex_quick_ai_builtin_resolves_to_direct_exec_without_warm_spec() {
+        let ai = AiPreferences {
+            selected_model_id: Some("openai-codex/gpt-5.6-terra".to_string()),
+            ..AiPreferences::default()
+        };
+        let ResolvedQuickAiLaunch::CodexExec(launch) =
+            resolve_quick_ai_launch(&ai, &ctx()).unwrap()
+        else {
+            panic!("hidden built-in Quick AI must use direct Codex exec")
+        };
+        assert_eq!(launch.profile.id, BUILTIN_QUICK_AI_PROFILE_ID);
+        assert_eq!(launch.spec.model, QUICK_AI_PI_MODEL);
+        assert_eq!(
+            launch.spec.developer_instructions,
+            QUICK_AI_APPEND_SYSTEM_PROMPT
+        );
+        assert_eq!(
+            launch.selected_model_id.as_deref(),
+            Some(crate::ai::agent_chat::codex_exec::QUICK_AI_SELECTED_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn codex_quick_ai_explicit_profile_override_resolves_to_pi() {
+        let ai = AiPreferences {
+            pi_binary: Some("/tmp/test-pi".to_string()),
+            quick_ai_profile_id: Some(
+                crate::ai::agent_chat::profiles::BUILTIN_BRAIN_PROFILE_ID.to_string(),
+            ),
+            ..AiPreferences::default()
+        };
+        let ResolvedQuickAiLaunch::Pi(launch) = resolve_quick_ai_launch(&ai, &ctx()).unwrap()
+        else {
+            panic!("explicit Quick AI profile must remain on Pi")
+        };
+        assert_eq!(
+            launch.profile.id,
+            crate::ai::agent_chat::profiles::BUILTIN_BRAIN_PROFILE_ID
+        );
+    }
+
+    #[test]
+    fn codex_quick_ai_stale_profile_fallback_resolves_to_builtin_exec() {
+        let ai = AiPreferences {
+            quick_ai_profile_id: Some("deleted-profile".to_string()),
+            ..AiPreferences::default()
+        };
+        assert!(matches!(
+            resolve_quick_ai_launch(&ai, &ctx()).unwrap(),
+            ResolvedQuickAiLaunch::CodexExec(_)
+        ));
     }
 
     #[test]

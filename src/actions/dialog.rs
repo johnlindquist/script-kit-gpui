@@ -1554,6 +1554,27 @@ impl ActionsDialog {
         self.apply_route_state_from_route(&route);
     }
 
+    /// Prepend host-owned actions to the root route without replacing Agent Chat's
+    /// route stack or drill-down registrations.
+    pub(crate) fn prepend_root_route_actions(&mut self, mut actions: Vec<Action>) {
+        if actions.is_empty() {
+            return;
+        }
+        let root_route = {
+            let Some(root) = self.route_stack.first_mut() else {
+                return;
+            };
+            actions.append(&mut root.route.actions);
+            root.route.actions = actions;
+            root.route.clone()
+        };
+
+        if self.route_stack.len() == 1 {
+            let route = root_route;
+            self.apply_route_state_from_route(&route);
+        }
+    }
+
     /// The ID of the topmost route on the stack, if any.
     pub fn current_route_id(&self) -> Option<&str> {
         self.route_stack.last().map(|s| s.route.id.as_str())

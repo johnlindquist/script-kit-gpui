@@ -870,7 +870,7 @@ impl BoundaryAffordanceState {
             .map(|(current, prior)| current - prior)
             .filter(|dt| dt.is_finite());
         let wall_dt = now.saturating_duration_since(previous.observed_at);
-        let dt = native_dt.unwrap_or_else(|| wall_dt.as_secs_f64());
+        let dt = native_dt.unwrap_or(wall_dt.as_secs_f64());
         if dt == 0.0 {
             if let Some(latest) = self.velocity_samples.back_mut() {
                 *latest = next;

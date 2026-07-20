@@ -389,6 +389,7 @@ impl Render for ChatPrompt {
 
             div()
                 .id("chat-messages")
+                .debug_selector(|| "chat-transcript-viewport".to_string())
                 .relative()
                 .flex_1()
                 .min_h(px(0.))

@@ -1,1284 +1,635 @@
 #!/usr/bin/env bun
-/**
- * scripts/agentic/macos-input.ts
- *
- * Native macOS keyboard and mouse automation for Script Kit GPUI agentic testing.
- * Uses cliclick for input delivery and osascript for activation fallback.
- *
- * Focus enforcement delegates to window.ts — this script does NOT maintain a
- * separate activation path.
- *
- * Usage:
- *   bun scripts/agentic/macos-input.ts key <keyname> [--modifiers cmd,shift,...] [--force-native] [--ensure-focus] [--focus-title SUBSTR] [--session NAME] [--target SURFACE] [--json]
- *   bun scripts/agentic/macos-input.ts type <text> [--ensure-focus] [--focus-title SUBSTR] [--session NAME] [--target SURFACE] [--json]
- *   bun scripts/agentic/macos-input.ts click <x> <y> [--ensure-focus] [--focus-title SUBSTR] [--session NAME] [--target SURFACE] [--json]
- *   bun scripts/agentic/macos-input.ts sequence <json-array> [--ensure-focus] [--focus-title SUBSTR] [--session NAME] [--target SURFACE] [--json]
- *   bun scripts/agentic/macos-input.ts check [--json]
- *
- * All structured output is JSON on stdout. Diagnostics go to stderr as NDJSON.
- */
+/** Fail-closed macOS input helper. Native keyboard delivery is System Events only. */
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { existsSync } from "fs";
+export const SCHEMA_VERSION = 4;
+export const NATIVE_SETTLE_MS = 50;
+const SESSION_SH = fileURLToPath(new URL("./session.sh", import.meta.url));
+const WINDOW_TS = fileURLToPath(new URL("./window.ts", import.meta.url));
+const SOURCE_PATH = realpathSync(fileURLToPath(import.meta.url));
+export const SOURCE_PROVENANCE = Object.freeze({
+  path: SOURCE_PATH,
+  sha256: createHash("sha256").update(readFileSync(SOURCE_PATH)).digest("hex"),
+});
 
-const SCHEMA_VERSION = 3;
-const WINDOW_TS_PATH = new URL("./window.ts", import.meta.url).pathname;
-const DEFAULT_FOCUS_TITLE = "Script Kit";
-const DEFAULT_FOCUS_RETRY = 3;
-const DEFAULT_FOCUS_SETTLE_MS = 200;
+export type CapabilityMethod = "directBatch" | "gpuiDispatch" | "accessibility" | "quartz";
+export type ActualInputMethod =
+  | "protocol.batch.setInput"
+  | "protocol.simulateGpuiEvent.keyDown"
+  | "native.systemEvents.keyCode"
+  | "native.systemEvents.keystroke"
+  | "native.cliclick.click";
+export type DeliveryScope = "injector" | "ingress" | "postcondition";
 
-// ---------------------------------------------------------------------------
-// Capability ladder types
-// ---------------------------------------------------------------------------
-
-/**
- * Methods ordered by preference (highest to lowest).
- * The driver tries each in order and stops at the first success.
- */
-type CapabilityMethod =
-  | "directBatch"      // Protocol-level batch mutation (setInput/selectByValue)
-  | "gpuiDispatch"     // In-process GPUI event simulation (simulateGpuiEvent)
-  | "accessibility"    // macOS Accessibility / osascript System Events
-  | "quartz";          // Quartz event posting / cliclick
-
-/**
- * Machine-readable receipt attached to every action result.
- * Records the target, the method that succeeded, and why higher-priority
- * methods were skipped.
- */
-interface ActionReceipt {
-  /** The automation surface targeted (e.g., "actionsDialog", "main"). */
-  target: string | null;
-  /** The method that actually delivered the action. */
-  chosenMethod: CapabilityMethod;
-  /** Why each skipped method was not used, in ladder order. */
-  fallbackReasons: Array<{ method: CapabilityMethod; reason: string }>;
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface Envelope<T> {
-  schemaVersion: number;
-  status: "ok" | "error";
-  command: string;
-  data?: T;
-  error?: { code: string; message: string };
-}
-
-interface KeyResult {
-  key: string;
-  modifiers: string[];
+export interface DeliveryEvidence {
+  injectorAccepted: boolean;
+  ingressVerified: boolean;
+  postconditionVerified: boolean;
+  deliveryScope: DeliveryScope;
   delivered: boolean;
+  settleMs: number;
+  settleIsProof: false;
+}
+
+export interface FrontmostApplicationIdentity {
+  pid: number;
+  bundleId: string;
+  name: string;
+}
+
+export interface NonactivationEvidence {
+  before: FrontmostApplicationIdentity;
+  after: FrontmostApplicationIdentity;
+  targetPid: number;
+  baselineIsExternal: boolean;
+  unchanged: boolean;
+  verified: boolean;
+}
+
+export interface PassiveKeyboardReadinessInput {
+  expectedPid: number | null;
+  statusPid: number | null;
+  pidFilePid: number | null;
+  expectedGeneration: string | null;
+  generationFile: string | null;
+  requestedKind: string | null;
+  protocolTargetType: string | null;
+  surfaceId: string | null;
+  targetWindowId: number | null;
+  protocolRequestId: string | null;
+  protocolExpectedType: string | null;
+  protocolExactCorrelation: boolean;
+  windowVisible: boolean;
+  protocolFocused: boolean;
+  promptType: string | null;
+  surfaceKind: string | null;
+  automationSemanticSurface: string | null;
+  inputOwnership: string | null;
+  focusPolicy: string | null;
+  keyboardPolicy: string | null;
+  axPid: number | null;
+  axFocusedWindowPresent: boolean;
+  axFocusedWindowId: number | null;
+}
+
+export interface PassiveKeyboardReadiness {
+  ready: boolean;
+  failures: string[];
+  expectedPid: number | null;
+  statusPid: number | null;
+  pidFilePid: number | null;
+  expectedGeneration: string | null;
+  generationFile: string | null;
+  target: {
+    requestedKind: string | null;
+    protocolTargetType: string | null;
+    surfaceId: string | null;
+    windowId: number | null;
+    exact: boolean;
+  };
+  protocol: {
+    requestId: string | null;
+    expectedType: string | null;
+    exactCorrelation: boolean;
+    windowVisible: boolean;
+    isFocused: boolean;
+    promptType: string | null;
+    surfaceKind: string | null;
+    automationSemanticSurface: string | null;
+    inputOwnership: string | null;
+    focusPolicy: string | null;
+    keyboardPolicy: string | null;
+  };
+  accessibility: {
+    pid: number | null;
+    focusedWindowPresent: boolean;
+    focusedWindowId: number | null;
+    targetWindowId: number | null;
+    exactWindowMatch: boolean;
+    requiredForReadiness: false;
+  };
+  osFrontmostRequired: false;
+}
+
+export type NativeKeyPlan =
+  | { kind: "keyCode"; key: string; keyCode: number; modifiers: string[]; actualMethod: "native.systemEvents.keyCode"; script: string }
+  | { kind: "keystroke"; key: string; keyCode: null; modifiers: string[]; actualMethod: "native.systemEvents.keystroke"; script: string };
+
+export interface InputResult extends DeliveryEvidence {
   method: CapabilityMethod;
-  focusEnforced: boolean;
-  /** Machine-readable capability ladder receipt. */
-  receipt?: ActionReceipt;
-  /** Automation surface targeted, if --target was specified. */
-  target?: string;
-  /** Session used for focus, if --session was specified. */
-  session?: string;
-}
-
-interface TypeResult {
-  text: string;
-  delivered: boolean;
-  method: CapabilityMethod;
-  focusEnforced: boolean;
-  receipt?: ActionReceipt;
-  target?: string;
-  session?: string;
-}
-
-interface ClickResult {
-  x: number;
-  y: number;
-  delivered: boolean;
-  focusEnforced: boolean;
-  receipt?: ActionReceipt;
-  target?: string;
-  session?: string;
-}
-
-interface SequenceStep {
-  action: "key" | "type" | "click" | "sleep";
+  capabilityMethod: CapabilityMethod;
+  actualMethod: ActualInputMethod;
+  keyCode: number | null;
   key?: string;
   modifiers?: string[];
   text?: string;
-  x?: number;
-  y?: number;
-  ms?: number;
-}
-
-interface SequenceResult {
-  steps: number;
-  completed: number;
-  focusEnforced: boolean;
-  results: Array<KeyResult | TypeResult | ClickResult | { sleptMs: number }>;
-}
-
-interface CheckResult {
-  cliclick: boolean;
-  cliclickPath: string | null;
-  osascript: boolean;
-  accessibility: boolean | "unknown";
-  windowTsAvailable: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Structured stderr logging
-// ---------------------------------------------------------------------------
-
-function stderrLog(event: string, fields: Record<string, unknown> = {}): void {
-  console.error(JSON.stringify({ event, ts: new Date().toISOString(), ...fields }));
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function envelope<T>(command: string, data: T): Envelope<T> {
-  return { schemaVersion: SCHEMA_VERSION, status: "ok", command, data };
-}
-
-function errorEnvelope(
-  command: string,
-  code: string,
-  message: string
-): Envelope<never> {
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    status: "error",
-    command,
-    error: { code, message },
+  focusCheckRequested: boolean;
+  focusVerified: boolean;
+  focusEnforced: false;
+  activationAttempted: false;
+  focusMutationAttempted: false;
+  focusVerificationMode: "passive" | "not-requested";
+  keyboardReadiness?: PassiveKeyboardReadiness;
+  nonactivation?: NonactivationEvidence;
+  receipt: {
+    target: string | null;
+    chosenMethod: CapabilityMethod;
+    actualMethod: ActualInputMethod;
+    keyCode: number | null;
+    fallbackReasons: Array<{ method: CapabilityMethod; reason: string }>;
+  };
+  focusEvidence?: {
+    focusCheckRequested: boolean;
+    focusVerified: boolean;
+    focusEnforced: false;
+    activationAttempted: false;
+    focusMutationAttempted: false;
+    focusVerificationMode: "passive";
+    keyboardReadiness: PassiveKeyboardReadiness;
+    nonactivation: NonactivationEvidence;
   };
 }
 
-// cliclick key name mapping
-const KEY_MAP: Record<string, string> = {
-  enter: "return",
-  return: "return",
-  tab: "tab",
-  escape: "esc",
-  esc: "esc",
-  space: "space",
-  delete: "delete",
-  backspace: "delete",
-  up: "arrow-up",
-  down: "arrow-down",
-  left: "arrow-left",
-  right: "arrow-right",
-  home: "home",
-  end: "end",
-  pageup: "page-up",
-  pagedown: "page-down",
-  f1: "f1",
-  f2: "f2",
-  f3: "f3",
-  f4: "f4",
-  f5: "f5",
-  f6: "f6",
-  f7: "f7",
-  f8: "f8",
-  f9: "f9",
-  f10: "f10",
-  f11: "f11",
-  f12: "f12",
-};
+export const SYSTEM_EVENTS_KEY_CODES: Readonly<Record<string, number>> = Object.freeze({
+  enter: 36, return: 36, tab: 48, space: 49, delete: 51, backspace: 51,
+  escape: 53, esc: 53, command: 55, cmd: 55, shift: 56, capslock: 57,
+  option: 58, alt: 58, control: 59, ctrl: 59, rightshift: 60,
+  rightoption: 61, rightalt: 61, rightcontrol: 62, function: 63, fn: 63,
+  f17: 64, keypaddecimal: 65, keypadmultiply: 67, keypadplus: 69,
+  keypadclear: 71, volumeup: 72, volumedown: 73, mute: 74,
+  keypaddivide: 75, keypadenter: 76, keypadminus: 78, f18: 79, f19: 80,
+  keypadequals: 81, keypad0: 82, keypad1: 83, keypad2: 84, keypad3: 85,
+  keypad4: 86, keypad5: 87, keypad6: 88, keypad7: 89, f20: 90,
+  keypad8: 91, keypad9: 92, jisyen: 93, jisunderscore: 94, keypadcomma: 95,
+  f5: 96, f6: 97, f7: 98, f3: 99, f8: 100, f9: 101, jiseisu: 102,
+  f11: 103, jiskana: 104, f13: 105, f16: 106, f14: 107, f10: 109,
+  f12: 111, f15: 113, help: 114, home: 115, pageup: 116,
+  forwarddelete: 117, f4: 118, end: 119, f2: 120, pagedown: 121,
+  f1: 122, left: 123, right: 124, down: 125, up: 126,
+});
 
-// osascript key code mapping for keys that need it
-const OSASCRIPT_KEY_CODES: Record<string, number> = {
-  enter: 36,
-  return: 36,
-  tab: 48,
-  escape: 53,
-  esc: 53,
-  space: 49,
-  delete: 51,
-  backspace: 51,
-  up: 126,
-  down: 125,
-  left: 123,
-  right: 124,
-};
+const MODIFIER_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  cmd: "command down", command: "command down", shift: "shift down",
+  alt: "option down", option: "option down", ctrl: "control down", control: "control down",
+});
 
-function findCliclick(): string | null {
-  const paths = ["/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"];
-  for (const p of paths) {
-    if (existsSync(p)) return p;
-  }
-  return null;
+function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-async function runProcess(
-  cmd: string[],
-  label: string
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(cmd, {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+function boundedTail(value: string, limit = 2_000): string {
+  return value.length <= limit ? value : value.slice(-limit);
 }
 
-async function currentFrontmostProcessName(): Promise<string | null> {
-  const result = await runProcess(
-    [
-      "osascript",
-      "-e",
-      'tell application "System Events" to get name of first application process whose frontmost is true',
-    ],
-    "frontmost-process"
-  );
-  if (result.exitCode !== 0) return null;
-  return result.stdout || null;
-}
+export function parseJsonDocuments(raw: string): unknown[] {
+  const trimmed = raw.trim();
+  if (!trimmed) throw new Error("empty_json_output");
+  try {
+    return [JSON.parse(trimmed)];
+  } catch {}
 
-async function assertScriptKitFrontmost(action: string): Promise<void> {
-  if (allowAnyFrontmost) return;
-  const frontmostProcess = await currentFrontmostProcessName();
-  const ok = frontmostProcess
-    ? /^(script-kit-gpui|Script Kit|Script Kit GPUI)$/i.test(frontmostProcess)
-    : false;
-  stderrLog("native_frontmost_check", {
-    action,
-    frontmostProcess,
-    required: "script-kit-gpui",
-    ok,
-  });
-  if (!ok) {
-    throw Object.assign(
-      new Error(
-        `Refusing OS-level ${action}: frontmost app is ${frontmostProcess ?? "unknown"}, not script-kit-gpui. Use --allow-any-frontmost only when intentionally targeting the current frontmost app.`
-      ),
-      { code: "SCRIPT_KIT_NOT_FRONTMOST" }
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Session-aware focus: show window via session.sh then verify with window.ts
-// ---------------------------------------------------------------------------
-
-const SESSION_SH_PATH = new URL("../../scripts/agentic/session.sh", import.meta.url).pathname;
-
-/**
- * Show the app window via session.sh send, then delegate to window.ts focus.
- * This is more reliable than OS-level activation alone because it uses the
- * app's own show protocol to ensure the window is visible before focusing.
- */
-async function ensureFocusViaSession(
-  sessionName: string,
-  targetSurface: string | null,
-  retry: number = DEFAULT_FOCUS_RETRY,
-  settleMs: number = DEFAULT_FOCUS_SETTLE_MS
-): Promise<{ frontmost: boolean; focused: boolean; surfaceId: string | null }> {
-  stderrLog("session_focus_start", { sessionName, targetSurface, retry, settleMs });
-
-  // 1. Send show command via session to ensure window is visible
-  const { exitCode: showCode, stderr: showErr } = await runProcess(
-    ["bash", SESSION_SH_PATH, "send", sessionName, '{"type":"show"}'],
-    "session-show"
-  );
-  if (showCode !== 0) {
-    stderrLog("session_show_failed", { exitCode: showCode, stderr: showErr.slice(0, 200) });
-  }
-
-  // Brief settle for window to appear
-  await Bun.sleep(150);
-
-  // 2. If target surface specified, resolve via window.ts list to find the right title
-  let focusTitle = DEFAULT_FOCUS_TITLE;
-  let resolvedSurfaceId: string | null = null;
-
-  if (targetSurface) {
-    const { stdout: listOut } = await runProcess(
-      ["bun", WINDOW_TS_PATH, "list"],
-      "window-list"
-    );
-    try {
-      const listResult = JSON.parse(listOut);
-      const surfaces = listResult?.data?.surfaces ?? [];
-      const match = surfaces.find(
-        (s: any) => s.surfaceId === targetSurface || s.surfaceId.startsWith(targetSurface + ":")
-      );
-      if (match) {
-        resolvedSurfaceId = match.surfaceId;
-        // Use title for focused targeting if available
-        if (match.title) {
-          focusTitle = match.title;
+  const documents: unknown[] = [];
+  let start = -1;
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]!;
+    if (start < 0) {
+      if (char === "{" || char === "[") {
+        start = index;
+        stack.push(char);
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") stack.push(char);
+    else if (char === "}" || char === "]") {
+      const opening = stack.pop();
+      if ((opening === "{" && char !== "}") || (opening === "[" && char !== "]") || !opening) {
+        throw new Error("invalid_json_document");
+      }
+      if (stack.length === 0) {
+        const source = raw.slice(start, index + 1);
+        try {
+          documents.push(JSON.parse(source));
+        } catch {
+          throw new Error("invalid_json_document");
         }
-      } else {
-        stderrLog("session_focus_target_not_found", {
-          targetSurface,
-          availableSurfaces: surfaces.map((s: any) => s.surfaceId),
-        });
+        start = -1;
+        inString = false;
+        escaped = false;
       }
-    } catch {
-      stderrLog("session_focus_list_parse_error", { stdout: listOut.slice(0, 200) });
     }
   }
-
-  // 3. Delegate actual focus to window.ts
-  const focusResult = await ensureFocusViaWindowTs(focusTitle, retry, settleMs);
-
-  // Emit structured session focus resolution event for autonomous verification
-  stderrLog("session_focus_resolved", {
-    sessionName,
-    targetSurface,
-    resolvedSurfaceId,
-    focusTitle,
-    frontmost: focusResult.frontmost,
-    focused: focusResult.focused,
-  });
-
-  return { ...focusResult, surfaceId: resolvedSurfaceId };
+  if (start >= 0 || stack.length > 0 || inString) throw new Error("truncated_json_document");
+  if (documents.length === 0) throw new Error("no_json_documents");
+  return documents;
 }
 
-// ---------------------------------------------------------------------------
-// Focus delegation to window.ts
-// ---------------------------------------------------------------------------
-
-/**
- * Delegate focus enforcement to window.ts. Returns true if the window was
- * confirmed frontmost, false otherwise. Throws on hard errors.
- */
-async function ensureFocusViaWindowTs(
-  focusTitle: string,
-  retry: number = DEFAULT_FOCUS_RETRY,
-  settleMs: number = DEFAULT_FOCUS_SETTLE_MS
-): Promise<{ frontmost: boolean; focused: boolean }> {
-  stderrLog("focus_delegate_start", { focusTitle, retry, settleMs });
-
-  const { stdout, stderr, exitCode } = await runProcess(
-    [
-      "bun",
-      WINDOW_TS_PATH,
-      "focus",
-      "--title",
-      focusTitle,
-      "--retry",
-      String(retry),
-      "--settle-ms",
-      String(settleMs),
-    ],
-    "window.ts-focus"
-  );
-
-  // Parse the window.ts JSON envelope
-  let parsed: any = null;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    stderrLog("focus_delegate_parse_error", { stdout: stdout.slice(0, 200) });
-  }
-
-  const frontmost = parsed?.data?.frontmost ?? false;
-  const focused = parsed?.data?.focused ?? false;
-  const keyboardReady = parsed?.data?.keyboardReady ?? frontmost;
-  const osFrontmostProcess = parsed?.data?.osFrontmostProcess ?? null;
-
-  stderrLog("focus_delegate_result", {
-    exitCode,
-    frontmost,
-    focused,
-    keyboardReady,
-    osFrontmostProcess,
-    windowId: parsed?.data?.windowId ?? 0,
-  });
-
-  if (exitCode !== 0 && !keyboardReady) {
-    // Non-fatal: we tried but may not be frontmost
-    stderrLog("focus_delegate_warning", {
-      message: "window.ts focus did not confirm keyboard-ready frontmost process",
-    });
-  }
-
-  return { frontmost: keyboardReady, focused };
+export function selectExactlyOne<T>(documents: unknown[], predicate: (document: any) => boolean, label: string): T {
+  const matches = documents.filter(predicate);
+  if (matches.length !== 1) throw new Error(`${label}:${matches.length === 0 ? "no_exact_match" : "ambiguous_exact_match"}`);
+  return matches[0] as T;
 }
 
-// ---------------------------------------------------------------------------
-// Capability ladder: protocol-level input paths
-// ---------------------------------------------------------------------------
-
-/**
- * Try to deliver a text input via direct batch mutation (setInput).
- * This is the highest-priority method — it mutates popup state directly
- * without requiring foreground keyboard focus.
- *
- * Only available when a session is active and a popup target is specified.
- */
-async function tryBatchSetInput(
-  sessionName: string,
-  targetKind: string,
-  text: string
-): Promise<{ ok: boolean; reason?: string }> {
-  if (!sessionName) return { ok: false, reason: "no_session" };
-  if (!targetKind) return { ok: false, reason: "no_target" };
-
-  try {
-    const payload = {
-      type: "batch",
-      requestId: `batch-input-${Date.now()}`,
-      target: { type: "kind", kind: targetKind },
-      commands: [{ type: "setInput", text }],
-      options: { stopOnError: true, timeout: 3000 },
-    };
-    const result = await runProcess(
-      [
-        "bash",
-        SESSION_SH_PATH,
-        "rpc",
-        sessionName,
-        JSON.stringify(payload),
-        "--expect",
-        "batchResult",
-        "--timeout",
-        "4000",
-      ],
-      "batch-set-input"
-    );
-    if (result.exitCode !== 0) {
-      return { ok: false, reason: `rpc_exit_${result.exitCode}` };
-    }
-    const parsed = JSON.parse(result.stdout);
-    const response = parsed?.response ?? parsed;
-    if (response?.success === true) {
-      stderrLog("capability_ladder_batch_ok", { target: targetKind, text: text.slice(0, 50) });
-      return { ok: true };
-    }
-    return { ok: false, reason: response?.error ?? "batch_not_successful" };
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-  }
+export interface SessionRpcResult {
+  requestId: string;
+  expectedType: string;
+  envelope: any;
+  response: any;
+  correlation: {
+    sessionExact: true;
+    outerRequestIdExact: true;
+    outerResponseTypeExact: true;
+    innerRequestIdExact: true;
+    innerTypeExact: true;
+    exact: true;
+  };
 }
 
-/**
- * Try to deliver a key event via GPUI event simulation (simulateGpuiEvent).
- * Second priority — uses the in-process GPUI dispatch which doesn't need
- * foreground OS focus but does need a valid window handle.
- */
-async function tryGpuiKeyDispatch(
-  sessionName: string,
-  targetKind: string | null,
-  key: string,
-  modifiers: string[]
-): Promise<{ ok: boolean; reason?: string }> {
-  if (!sessionName) return { ok: false, reason: "no_session" };
-
-  try {
-    const target = targetKind
-      ? { type: "kind", kind: targetKind }
-      : { type: "main" };
-    const payload = {
-      type: "simulateGpuiEvent",
-      requestId: `gpui-key-${Date.now()}`,
-      target,
-      event: { type: "keyDown", key, modifiers },
-    };
-    const result = await runProcess(
-      [
-        "bash",
-        SESSION_SH_PATH,
-        "rpc",
-        sessionName,
-        JSON.stringify(payload),
-        "--expect",
-        "simulateGpuiEventResult",
-        "--timeout",
-        "3000",
-      ],
-      "gpui-key-dispatch"
-    );
-    if (result.exitCode !== 0) {
-      return { ok: false, reason: `rpc_exit_${result.exitCode}` };
-    }
-    const parsed = JSON.parse(result.stdout);
-    const response = parsed?.response ?? parsed;
-    if (response?.success === true) {
-      stderrLog("capability_ladder_gpui_ok", { target: targetKind, key });
-      return { ok: true };
-    }
-    return { ok: false, reason: response?.errorCode ?? response?.error ?? "gpui_not_successful" };
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-  }
+export function selectExactRpcEnvelope(documents: unknown[], session: string, requestId: string, expectedType: string): SessionRpcResult {
+  const envelope = selectExactlyOne<any>(documents, (candidate) => candidate?.status === "ok"
+    && candidate?.session === session
+    && candidate?.requestId === requestId
+    && candidate?.responseType === expectedType
+    && candidate?.response?.requestId === requestId
+    && candidate?.response?.type === expectedType, "rpc_envelope");
+  return {
+    requestId,
+    expectedType,
+    envelope,
+    response: envelope.response,
+    correlation: {
+      sessionExact: true,
+      outerRequestIdExact: true,
+      outerResponseTypeExact: true,
+      innerRequestIdExact: true,
+      innerTypeExact: true,
+      exact: true,
+    },
+  };
 }
 
-// ---------------------------------------------------------------------------
-// Input delivery
-// ---------------------------------------------------------------------------
-
-async function sendKey(
-  key: string,
-  modifiers: string[],
-  focusEnforced: boolean
-): Promise<KeyResult> {
-  await assertScriptKitFrontmost("key");
-  const cliclick = findCliclick();
-  const keyLower = key.toLowerCase();
-
-  // Try cliclick first for simple keys
-  if (cliclick) {
-    const cliclickKey = KEY_MAP[keyLower] ?? key;
-    const args: string[] = [];
-
-    if (KEY_MAP[keyLower]) {
-      if (modifiers.length > 0) {
-        // cliclick doesn't support modifiers with kp, fall through to osascript
-      } else {
-        args.push(`kp:${cliclickKey}`);
-      }
-    } else if (key.length === 1 && modifiers.length === 0) {
-      args.push(`t:${key}`);
-    }
-
-    if (args.length > 0) {
-      stderrLog("input_key_attempt", { key, modifiers, method: "cliclick" });
-      const { exitCode, stderr } = await runProcess(
-        [cliclick, "-w", "10", ...args],
-        "cliclick-key"
-      );
-      if (exitCode === 0) {
-        return { key, modifiers, delivered: true, method: "cliclick", focusEnforced };
-      }
-      stderrLog("input_key_cliclick_failed", { key, stderr });
-    }
+export function normalizeModifiers(modifiers: string[]): string[] {
+  const normalized: string[] = [];
+  for (const modifier of modifiers) {
+    const value = MODIFIER_ALIASES[modifier.toLowerCase()];
+    if (!value) throw hardError("UNKNOWN_KEY", `Unknown modifier: ${modifier}`);
+    if (!normalized.includes(value)) normalized.push(value);
   }
+  return normalized;
+}
 
-  // Fallback: osascript
-  const keyCode = OSASCRIPT_KEY_CODES[keyLower];
-  let script: string;
-
+export function planNativeKey(key: string, modifiers: string[] = []): NativeKeyPlan {
+  const normalized = key.toLowerCase().replace(/[ _-]/g, "");
+  const usingParts = normalizeModifiers(modifiers);
+  const using = usingParts.length ? ` using {${usingParts.join(", ")}}` : "";
+  const keyCode = SYSTEM_EVENTS_KEY_CODES[normalized];
   if (keyCode !== undefined) {
-    const modParts: string[] = [];
-    for (const m of modifiers) {
-      switch (m.toLowerCase()) {
-        case "cmd":
-        case "command":
-          modParts.push("command down");
-          break;
-        case "shift":
-          modParts.push("shift down");
-          break;
-        case "alt":
-        case "option":
-          modParts.push("option down");
-          break;
-        case "ctrl":
-        case "control":
-          modParts.push("control down");
-          break;
-      }
-    }
-    const using = modParts.length > 0 ? ` using {${modParts.join(", ")}}` : "";
-    script = `tell application "System Events" to key code ${keyCode}${using}`;
-  } else if (key.length === 1) {
-    const modParts: string[] = [];
-    for (const m of modifiers) {
-      switch (m.toLowerCase()) {
-        case "cmd":
-        case "command":
-          modParts.push("command down");
-          break;
-        case "shift":
-          modParts.push("shift down");
-          break;
-        case "alt":
-        case "option":
-          modParts.push("option down");
-          break;
-        case "ctrl":
-        case "control":
-          modParts.push("control down");
-          break;
-      }
-    }
-    const using = modParts.length > 0 ? ` using {${modParts.join(", ")}}` : "";
-    script = `tell application "System Events" to keystroke "${key}"${using}`;
-  } else {
-    throw Object.assign(
-      new Error(`Unknown key: ${key}. Use a single character or named key.`),
-      { code: "UNKNOWN_KEY" }
-    );
+    return { kind: "keyCode", key, keyCode, modifiers: usingParts, actualMethod: "native.systemEvents.keyCode",
+      script: `tell application "System Events" to key code ${keyCode}${using}` };
   }
-
-  stderrLog("input_key_attempt", { key, modifiers, method: "osascript" });
-  const { exitCode, stderr } = await runProcess(
-    ["osascript", "-e", script],
-    "osascript-key"
-  );
-
-  if (exitCode !== 0) {
-    if (
-      stderr.includes("not allowed assistive access") ||
-      stderr.includes("(-1743)")
-    ) {
-      throw Object.assign(new Error(stderr), { code: "ACCESSIBILITY_DENIED" });
-    }
-    throw Object.assign(new Error(`Key send failed: ${stderr}`), {
-      code: "KEY_FAILED",
-    });
+  if ([...key].length === 1) {
+    return { kind: "keystroke", key, keyCode: null, modifiers: usingParts, actualMethod: "native.systemEvents.keystroke",
+      script: `tell application "System Events" to keystroke ${appleScriptString(key)}${using}` };
   }
-
-  return { key, modifiers, delivered: true, method: "osascript", focusEnforced };
+  throw hardError("UNKNOWN_KEY", `Unknown key: ${key}. Use one literal character or a named System Events key.`);
 }
 
-async function sendType(text: string, focusEnforced: boolean): Promise<TypeResult> {
-  await assertScriptKitFrontmost("type");
-  const cliclick = findCliclick();
-
-  if (cliclick) {
-    stderrLog("input_type_attempt", { textLen: text.length, method: "cliclick" });
-    const { exitCode, stderr } = await runProcess(
-      [cliclick, "-w", "10", `t:${text}`],
-      "cliclick-type"
-    );
-    if (exitCode === 0) {
-      return { text, delivered: true, method: "cliclick", focusEnforced };
-    }
-    stderrLog("input_type_cliclick_failed", { stderr });
-  }
-
-  // Fallback: osascript keystroke
-  const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  stderrLog("input_type_attempt", { textLen: text.length, method: "osascript" });
-  const { exitCode, stderr } = await runProcess(
-    [
-      "osascript",
-      "-e",
-      `tell application "System Events" to keystroke "${escaped}"`,
-    ],
-    "osascript-type"
-  );
-
-  if (exitCode !== 0) {
-    if (
-      stderr.includes("not allowed assistive access") ||
-      stderr.includes("(-1743)")
-    ) {
-      throw Object.assign(new Error(stderr), { code: "ACCESSIBILITY_DENIED" });
-    }
-    throw Object.assign(new Error(`Type failed: ${stderr}`), {
-      code: "TYPE_FAILED",
-    });
-  }
-
-  return { text, delivered: true, method: "osascript", focusEnforced };
+export function planInputRoute(command: "key" | "type", forceNative: boolean, hasSession: boolean, hasTarget: boolean): ActualInputMethod[] {
+  if (forceNative) return command === "key"
+    ? ["native.systemEvents.keyCode", "native.systemEvents.keystroke"]
+    : ["native.systemEvents.keystroke"];
+  if (command === "key") return hasSession
+    ? ["protocol.simulateGpuiEvent.keyDown", "native.systemEvents.keyCode", "native.systemEvents.keystroke"]
+    : ["native.systemEvents.keyCode", "native.systemEvents.keystroke"];
+  return hasSession && hasTarget
+    ? ["protocol.batch.setInput", "protocol.simulateGpuiEvent.keyDown", "native.systemEvents.keystroke"]
+    : hasSession ? ["protocol.simulateGpuiEvent.keyDown", "native.systemEvents.keystroke"] : ["native.systemEvents.keystroke"];
 }
 
-async function sendClick(x: number, y: number, focusEnforced: boolean): Promise<ClickResult> {
-  const cliclick = findCliclick();
-
-  if (cliclick) {
-    stderrLog("input_click_attempt", { x, y, method: "cliclick" });
-    const { exitCode, stderr } = await runProcess(
-      [cliclick, `c:${x},${y}`],
-      "cliclick-click"
-    );
-    if (exitCode === 0) {
-      return { x, y, delivered: true, focusEnforced };
-    }
-    stderrLog("input_click_cliclick_failed", { stderr });
-  }
-
-  stderrLog("input_click_attempt", { x, y, method: "osascript" });
-  const { exitCode, stderr } = await runProcess(
-    [
-      "osascript",
-      "-e",
-      `tell application "System Events"
-  click at {${x}, ${y}}
-end tell`,
-    ],
-    "osascript-click"
-  );
-
-  if (exitCode !== 0) {
-    throw Object.assign(new Error(`Click failed: ${stderr}`), {
-      code: "CLICK_FAILED",
-    });
-  }
-
-  return { x, y, delivered: true, focusEnforced };
+export function evaluateDeliveryEvidence(input: Omit<DeliveryEvidence, "delivered" | "settleIsProof">): DeliveryEvidence {
+  return { ...input, delivered: input.injectorAccepted || input.ingressVerified || input.postconditionVerified, settleIsProof: false };
 }
 
-// ---------------------------------------------------------------------------
-// Capability ladder dispatch (tries methods in priority order)
-// ---------------------------------------------------------------------------
+export function evaluateNonactivation(before: FrontmostApplicationIdentity, after: FrontmostApplicationIdentity, targetPid: number): NonactivationEvidence {
+  const baselineIsExternal = before.pid > 0 && before.pid !== targetPid;
+  const unchanged = before.pid === after.pid && before.bundleId === after.bundleId;
+  return { before, after, targetPid, baselineIsExternal, unchanged, verified: baselineIsExternal && unchanged };
+}
 
-/**
- * Deliver a key via the capability ladder.
- * Order: directBatch (N/A for keys) → gpuiDispatch → accessibility → quartz.
- *
- * `gpuiDispatch` is preferred because it dispatches through GPUI's real input
- * pipeline without requiring OS-level keyboard focus. Native/quartz methods
- * are used only as explicit fallback.
- */
-async function sendKeyWithLadder(
-  key: string,
-  modifiers: string[],
-  focusEnforced: boolean,
-  session: string,
-  targetKind: string | null,
-  forceNative: boolean
-): Promise<KeyResult> {
-  const fallbackReasons: ActionReceipt["fallbackReasons"] = [];
-
-  // 1. directBatch — not applicable for raw key events
-  fallbackReasons.push({ method: "directBatch", reason: "not_applicable_for_key_events" });
-
-  // 2. gpuiDispatch — try in-process GPUI key simulation (no OS focus needed)
-  if (forceNative) {
-    fallbackReasons.push({ method: "gpuiDispatch", reason: "force_native_requested" });
-  } else if (session) {
-    const gpui = await tryGpuiKeyDispatch(session, targetKind, key, modifiers);
-    if (gpui.ok) {
-      stderrLog("agentic.input_method_selected", {
-        chosenMethod: "gpuiDispatch",
-        target: targetKind,
-        action: "key",
-        key,
-        modifiers,
-      });
-      return {
-        key, modifiers, delivered: true, method: "gpuiDispatch", focusEnforced,
-        receipt: { target: targetKind, chosenMethod: "gpuiDispatch", fallbackReasons },
-      };
-    }
-    fallbackReasons.push({ method: "gpuiDispatch", reason: gpui.reason ?? "unknown" });
-  } else {
-    fallbackReasons.push({ method: "gpuiDispatch", reason: "no_session" });
-  }
-
-  // 3–4. Fall through to OS-level input (focus-dependent, used only as fallback)
-  stderrLog("agentic.input_method_fallback", {
-    action: "key",
-    target: targetKind,
-    key,
-    modifiers,
-    fallbackReasons,
-  });
-  const result = await sendKey(key, modifiers, focusEnforced);
-  const chosenMethod: CapabilityMethod = result.method === "cliclick" ? "quartz" : "accessibility";
-  if (result.method === "cliclick") {
-    fallbackReasons.push({ method: "accessibility", reason: "cliclick_succeeded_first" });
-  }
-  stderrLog("agentic.input_method_selected", {
-    chosenMethod,
-    target: targetKind,
-    action: "key",
-    key,
-    modifiers,
-    note: "os_level_fallback",
-  });
+export function evaluatePassiveKeyboardReadiness(input: PassiveKeyboardReadinessInput): PassiveKeyboardReadiness {
+  const failures: string[] = [];
+  const targetExact = input.requestedKind === "main" && input.protocolTargetType === "main"
+    && input.surfaceId === "main" && Number.isInteger(input.targetWindowId) && input.targetWindowId! > 0;
+  const protocolExact = input.protocolRequestId != null && input.protocolExpectedType === "stateResult"
+    && input.protocolExactCorrelation && input.windowVisible && input.protocolFocused
+    && input.promptType === "none" && input.surfaceKind === "ScriptList"
+    && input.automationSemanticSurface === "scriptList" && input.inputOwnership === "LauncherFilter"
+    && input.focusPolicy === "LauncherFilterFocus" && input.keyboardPolicy === "LauncherListKeyboard";
+  const exactWindowMatch = input.axPid === input.expectedPid && input.axFocusedWindowPresent
+    && Number.isInteger(input.axFocusedWindowId) && input.axFocusedWindowId! > 0
+    && input.axFocusedWindowId === input.targetWindowId;
+  if (!Number.isInteger(input.expectedPid) || input.expectedPid! <= 0) failures.push("missing_expected_pid");
+  if (input.statusPid !== input.expectedPid || input.pidFilePid !== input.expectedPid) failures.push("pid_mismatch");
+  if (!input.expectedGeneration || input.generationFile !== input.expectedGeneration) failures.push("generation_mismatch");
+  if (!targetExact) failures.push("strict_main_target_required");
+  if (!protocolExact) failures.push("launcher_keyboard_policy_not_exact");
   return {
-    ...result,
-    method: chosenMethod,
-    receipt: { target: targetKind, chosenMethod, fallbackReasons },
+    ready: failures.length === 0,
+    failures,
+    expectedPid: input.expectedPid,
+    statusPid: input.statusPid,
+    pidFilePid: input.pidFilePid,
+    expectedGeneration: input.expectedGeneration,
+    generationFile: input.generationFile,
+    target: { requestedKind: input.requestedKind, protocolTargetType: input.protocolTargetType, surfaceId: input.surfaceId, windowId: input.targetWindowId, exact: targetExact },
+    protocol: {
+      requestId: input.protocolRequestId, expectedType: input.protocolExpectedType, exactCorrelation: input.protocolExactCorrelation,
+      windowVisible: input.windowVisible, isFocused: input.protocolFocused, promptType: input.promptType,
+      surfaceKind: input.surfaceKind, automationSemanticSurface: input.automationSemanticSurface,
+      inputOwnership: input.inputOwnership, focusPolicy: input.focusPolicy, keyboardPolicy: input.keyboardPolicy,
+    },
+    accessibility: {
+      pid: input.axPid, focusedWindowPresent: input.axFocusedWindowPresent, focusedWindowId: input.axFocusedWindowId,
+      targetWindowId: input.targetWindowId, exactWindowMatch, requiredForReadiness: false,
+    },
+    osFrontmostRequired: false,
   };
 }
 
-/**
- * Try to deliver text via GPUI event simulation (one keyDown per character).
- * Second priority for text — uses in-process GPUI dispatch which doesn't need
- * foreground OS focus but requires a valid window handle.
- *
- * Sends each character of `text` as a separate `keyDown` event. This is slower
- * than `directBatch`/`setInput` but works for surfaces that accept key events
- * but don't support the `setInput` batch command (e.g., detached Agent Chat input).
- */
-async function tryGpuiTextDispatch(
-  sessionName: string,
-  targetKind: string | null,
-  text: string
-): Promise<{ ok: boolean; reason?: string }> {
-  if (!sessionName) return { ok: false, reason: "no_session" };
-
-  // Type each character as an individual keyDown event
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    const gpuiResult = await tryGpuiKeyDispatch(sessionName, targetKind, char, []);
-    if (!gpuiResult.ok) {
-      return {
-        ok: false,
-        reason: `gpui_char_failed_at_${i}: ${gpuiResult.reason ?? "unknown"}`,
-      };
-    }
-  }
-  stderrLog("capability_ladder_gpui_text_ok", {
-    target: targetKind,
-    textLen: text.length,
-  });
-  return { ok: true };
+function hardError(code: "ACCESSIBILITY_DENIED" | "UNKNOWN_KEY" | "KEY_INJECTOR_FAILED" | "FOCUS_NOT_CONFIRMED", message: string, evidence?: unknown): Error & { code: string; evidence?: unknown } {
+  return Object.assign(new Error(message), { code, evidence });
 }
 
-/**
- * Deliver text via the capability ladder.
- * Order: directBatch (setInput) → gpuiDispatch (char-at-a-time) → accessibility → quartz.
- *
- * For targets with direct semantic mutation support (detached Agent Chat, ActionsDialog),
- * `directBatch` is preferred because it sets the full input atomically.
- * `gpuiDispatch` is the next focus-independent method, dispatching each character
- * through GPUI's real input pipeline without requiring OS-level keyboard focus.
- * Native/quartz methods are used only as explicit fallback.
- */
-async function sendTypeWithLadder(
-  text: string,
-  focusEnforced: boolean,
-  session: string,
-  targetKind: string | null
-): Promise<TypeResult> {
-  const fallbackReasons: ActionReceipt["fallbackReasons"] = [];
-
-  // 1. directBatch — try protocol-level setInput (highest priority, no focus needed)
-  if (session && targetKind) {
-    const batch = await tryBatchSetInput(session, targetKind, text);
-    if (batch.ok) {
-      stderrLog("agentic.input_method_selected", {
-        chosenMethod: "directBatch",
-        target: targetKind,
-        action: "type",
-        textLen: text.length,
-      });
-      return {
-        text, delivered: true, method: "directBatch", focusEnforced,
-        receipt: { target: targetKind, chosenMethod: "directBatch", fallbackReasons },
-      };
-    }
-    fallbackReasons.push({ method: "directBatch", reason: batch.reason ?? "unknown" });
-  } else {
-    fallbackReasons.push({
-      method: "directBatch",
-      reason: !session ? "no_session" : "no_target",
-    });
-  }
-
-  // 2. gpuiDispatch — type characters one-at-a-time through GPUI input pipeline
-  //    (no OS-level focus needed, but requires a valid window handle)
-  if (session) {
-    const gpui = await tryGpuiTextDispatch(session, targetKind, text);
-    if (gpui.ok) {
-      stderrLog("agentic.input_method_selected", {
-        chosenMethod: "gpuiDispatch",
-        target: targetKind,
-        action: "type",
-        textLen: text.length,
-      });
-      return {
-        text, delivered: true, method: "gpuiDispatch", focusEnforced,
-        receipt: { target: targetKind, chosenMethod: "gpuiDispatch", fallbackReasons },
-      };
-    }
-    fallbackReasons.push({ method: "gpuiDispatch", reason: gpui.reason ?? "unknown" });
-  } else {
-    fallbackReasons.push({ method: "gpuiDispatch", reason: "no_session" });
-  }
-
-  // 3–4. Fall through to OS-level input (focus-dependent, used only as fallback)
-  stderrLog("agentic.input_method_fallback", {
-    action: "type",
-    target: targetKind,
-    textLen: text.length,
-    fallbackReasons,
-  });
-  const result = await sendType(text, focusEnforced);
-  const chosenMethod: CapabilityMethod = result.method === "cliclick" ? "quartz" : "accessibility";
-  if (result.method === "cliclick") {
-    fallbackReasons.push({ method: "accessibility", reason: "cliclick_succeeded_first" });
-  }
-  stderrLog("agentic.input_method_selected", {
-    chosenMethod,
-    target: targetKind,
-    action: "type",
-    textLen: text.length,
-    note: "os_level_fallback",
-  });
-  return {
-    ...result,
-    method: chosenMethod,
-    receipt: { target: targetKind, chosenMethod, fallbackReasons },
-  };
+async function runProcess(command: string[], env = process.env): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", env });
+  const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  return { stdout, stderr, exitCode };
 }
 
-async function runSequence(
-  steps: SequenceStep[],
-  focusEnforced: boolean
-): Promise<SequenceResult> {
-  const results: SequenceResult["results"] = [];
-  let completed = 0;
-
-  for (const step of steps) {
-    switch (step.action) {
-      case "key":
-        results.push(await sendKey(step.key ?? "enter", step.modifiers ?? [], focusEnforced));
-        completed++;
-        break;
-      case "type":
-        results.push(await sendType(step.text ?? "", focusEnforced));
-        completed++;
-        break;
-      case "click":
-        results.push(await sendClick(step.x ?? 0, step.y ?? 0, focusEnforced));
-        completed++;
-        break;
-      case "sleep":
-        await Bun.sleep(step.ms ?? 100);
-        results.push({ sleptMs: step.ms ?? 100 });
-        completed++;
-        break;
-    }
-  }
-
-  return { steps: steps.length, completed, focusEnforced, results };
-}
-
-// ---------------------------------------------------------------------------
-// Preflight checks
-// ---------------------------------------------------------------------------
-
-async function checkPrerequisites(): Promise<CheckResult> {
-  const cliclickPath = findCliclick();
-  const cliclick = cliclickPath !== null;
-  const osascript = existsSync("/usr/bin/osascript");
-  const windowTsAvailable = existsSync(WINDOW_TS_PATH);
-
-  let accessibility: boolean | "unknown" = "unknown";
+let rpcCounter = 0;
+async function sessionRpc(session: string, payload: Record<string, unknown>, expectedType: string): Promise<SessionRpcResult> {
+  if (Object.prototype.hasOwnProperty.call(payload, "requestId")) throw new Error("caller_supplied_request_id_rejected");
+  const requestId = `macos-input-${process.pid}-${++rpcCounter}`;
+  const result = await runProcess(["bash", SESSION_SH, "rpc", session, JSON.stringify({ ...payload, requestId }), "--expect", expectedType, "--timeout", "4000"]);
+  if (result.exitCode !== 0) throw new Error(`session_rpc_failed stdout=${boundedTail(result.stdout)} stderr=${boundedTail(result.stderr)}`);
   try {
-    const { exitCode, stderr } = await runProcess(
-      [
-        "osascript",
-        "-e",
-        'tell application "System Events" to get name of first process whose frontmost is true',
-      ],
-      "ax-check"
-    );
-    if (exitCode === 0) {
-      accessibility = true;
-    } else if (
-      stderr.includes("not allowed assistive access") ||
-      stderr.includes("(-1743)")
-    ) {
-      accessibility = false;
-    }
-  } catch {
-    // unknown
-  }
-
-  return { cliclick, cliclickPath, osascript, accessibility, windowTsAvailable };
-}
-
-// ---------------------------------------------------------------------------
-// CLI argument parsing
-// ---------------------------------------------------------------------------
-
-function hasFlag(args: string[], flag: string): boolean {
-  return args.includes(flag);
-}
-
-function getStringArg(args: string[], flag: string, fallback: string): string {
-  const idx = args.indexOf(flag);
-  if (idx >= 0 && args[idx + 1]) return args[idx + 1];
-  return fallback;
-}
-
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
-
-const args = process.argv.slice(2);
-const command = args[0] ?? "help";
-
-// Global focus flags
-const ensureFocus = hasFlag(args, "--ensure-focus");
-const focusTitle = getStringArg(args, "--focus-title", DEFAULT_FOCUS_TITLE);
-const sessionName = getStringArg(args, "--session", "");
-const targetSurface = getStringArg(args, "--target", "");
-const forceNative = hasFlag(args, "--force-native") || hasFlag(args, "--no-gpui-dispatch");
-const allowAnyFrontmost = hasFlag(args, "--allow-any-frontmost");
-
-function emit(data: Envelope<any>) {
-  console.log(JSON.stringify(data, null, 2));
-}
-
-// Run focus enforcement once before any command if requested
-let focusEnforced = false;
-let resolvedTarget: string | null = null;
-if (ensureFocus && command !== "check" && command !== "help" && command !== "--help") {
-  let frontmost = false;
-  let focused = false;
-
-  if (sessionName) {
-    // Session-aware focus: show via session, then verify with window.ts
-    const result = await ensureFocusViaSession(
-      sessionName,
-      targetSurface || null
-    );
-    frontmost = result.frontmost;
-    focused = result.focused;
-    resolvedTarget = result.surfaceId;
-  } else {
-    // Legacy focus: directly via window.ts
-    const result = await ensureFocusViaWindowTs(focusTitle);
-    frontmost = result.frontmost;
-    focused = result.focused;
-  }
-
-  focusEnforced = true;
-  const focusConfirmed = command === "click" ? focused : frontmost;
-  if (!focusConfirmed) {
-    stderrLog("focus_enforcement_failed", {
-      frontmost,
-      focused,
-      focusConfirmed,
-      focusTitle,
-      sessionName: sessionName || undefined,
-      targetSurface: targetSurface || undefined,
-    });
-    emit({
-      schemaVersion: SCHEMA_VERSION,
-      status: "error",
-      command,
-      error: {
-        code: "FOCUS_NOT_CONFIRMED",
-        message: sessionName
-          ? `Script Kit window was not frontmost after session-based focus (session: ${sessionName}${targetSurface ? `, target: ${targetSurface}` : ""})`
-          : "Script Kit window was not frontmost after focus enforcement",
-      },
-      data: {
-        frontmost,
-        focused,
-        focusTitle,
-        ...(sessionName ? { session: sessionName } : {}),
-        ...(targetSurface ? { target: targetSurface } : {}),
-        ...(resolvedTarget ? { resolvedTarget } : {}),
-      },
-    } as Envelope<any>);
-    process.exit(1);
+    return selectExactRpcEnvelope(parseJsonDocuments(result.stdout), session, requestId, expectedType);
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)} stdout=${boundedTail(result.stdout)} stderr=${boundedTail(result.stderr)}`);
   }
 }
 
-try {
-  switch (command) {
-    case "key": {
-      const keyName = args[1];
-      if (!keyName) {
-        emit(
-          errorEnvelope(
-            "key",
-            "MISSING_KEY",
-            "Usage: macos-input.ts key <keyname> [--modifiers cmd,shift] [--force-native] [--ensure-focus] [--session NAME] [--target SURFACE] [--allow-any-frontmost]"
-          )
-        );
-        process.exit(1);
-        break;
-      }
-      const modIdx = args.indexOf("--modifiers");
-      const modifiers =
-        modIdx >= 0 && args[modIdx + 1]
-          ? args[modIdx + 1].split(",").map((m) => m.trim())
-          : [];
-      // Use capability ladder when session is available
-      const result = sessionName
-        ? await sendKeyWithLadder(keyName, modifiers, focusEnforced, sessionName, targetSurface || null, forceNative)
-        : await sendKey(keyName, modifiers, focusEnforced);
-      if (sessionName) result.session = sessionName;
-      if (resolvedTarget) result.target = resolvedTarget;
-      emit(envelope("key", result));
-      process.exit(result.delivered ? 0 : 1);
-      break;
-    }
-
-    case "type": {
-      const text = args[1];
-      if (!text) {
-        emit(
-          errorEnvelope(
-            "type",
-            "MISSING_TEXT",
-            "Usage: macos-input.ts type <text> [--ensure-focus] [--session NAME] [--target SURFACE] [--allow-any-frontmost]"
-          )
-        );
-        process.exit(1);
-        break;
-      }
-      // Use capability ladder when session is available
-      const result = sessionName
-        ? await sendTypeWithLadder(text, focusEnforced, sessionName, targetSurface || null)
-        : await sendType(text, focusEnforced);
-      if (sessionName) result.session = sessionName;
-      if (resolvedTarget) result.target = resolvedTarget;
-      emit(envelope("type", result));
-      process.exit(result.delivered ? 0 : 1);
-      break;
-    }
-
-    case "click": {
-      const x = parseInt(args[1], 10);
-      const y = parseInt(args[2], 10);
-      if (isNaN(x) || isNaN(y)) {
-        emit(
-          errorEnvelope(
-            "click",
-            "MISSING_COORDS",
-            "Usage: macos-input.ts click <x> <y> [--ensure-focus] [--session NAME] [--target SURFACE]"
-          )
-        );
-        process.exit(1);
-        break;
-      }
-      const result = await sendClick(x, y, focusEnforced);
-      if (sessionName) result.session = sessionName;
-      if (resolvedTarget) result.target = resolvedTarget;
-      emit(envelope("click", result));
-      process.exit(result.delivered ? 0 : 1);
-      break;
-    }
-
-    case "sequence": {
-      const jsonStr = args[1];
-      if (!jsonStr) {
-        emit(
-          errorEnvelope(
-            "sequence",
-            "MISSING_STEPS",
-            'Usage: macos-input.ts sequence \'[{"action":"key","key":"tab"},{"action":"sleep","ms":200},{"action":"key","key":"enter"}]\' [--ensure-focus]'
-          )
-        );
-        process.exit(1);
-        break;
-      }
-      let steps: SequenceStep[];
-      try {
-        steps = JSON.parse(jsonStr);
-      } catch (e) {
-        emit(
-          errorEnvelope(
-            "sequence",
-            "INVALID_JSON",
-            `Failed to parse sequence JSON: ${e}`
-          )
-        );
-        process.exit(1);
-        break;
-      }
-      const result = await runSequence(steps, focusEnforced);
-      emit(envelope("sequence", result));
-      process.exit(result.completed === result.steps ? 0 : 1);
-      break;
-    }
-
-    case "check": {
-      const prereqs = await checkPrerequisites();
-      emit(envelope("check", prereqs));
-      if (!prereqs.cliclick) {
-        stderrLog("check_warning", { message: "cliclick not found. Install: brew install cliclick" });
-      }
-      if (prereqs.accessibility === false) {
-        stderrLog("check_warning", {
-          message: "Accessibility denied. Fix: System Preferences → Privacy & Security → Accessibility → enable terminal/IDE",
-        });
-      }
-      if (!prereqs.windowTsAvailable) {
-        stderrLog("check_warning", { message: "window.ts not found — focus delegation unavailable" });
-      }
-      process.exit(
-        prereqs.cliclick && prereqs.accessibility !== false ? 0 : 1
-      );
-      break;
-    }
-
-    case "help":
-    case "--help": {
-      const jsonFlag = process.argv.includes("--json");
-      if (jsonFlag) {
-        const helpJson = {
-          schemaVersion: 1,
-          script: "macos-input",
-          commands: [
-            { name: "key", description: "Send a keystroke", flags: ["--modifiers", "--force-native", "--no-gpui-dispatch", "--ensure-focus", "--session", "--target", "--allow-any-frontmost", "--json"] },
-            { name: "type", description: "Deliver text input", flags: ["--ensure-focus", "--session", "--target", "--allow-any-frontmost", "--json"] },
-            { name: "click", description: "Click at screen coordinates", flags: ["--ensure-focus", "--session", "--target", "--json"] },
-            { name: "sequence", description: "Run a sequence of actions", flags: ["--ensure-focus", "--session", "--target", "--json"] },
-            { name: "check", description: "Verify prerequisites", flags: ["--json"] },
-          ],
-          contracts: ["no-focus-input-ladder"],
-          receipts: ["dispatchPath", "resolvedWindowId", "inputMethod"],
-        };
-        console.log(JSON.stringify(helpJson, null, 2));
-        process.exit(0);
-      }
-      console.log(`Usage: bun scripts/agentic/macos-input.ts <command> [options]
-
-Commands:
-  key <name> [--modifiers cmd,shift,alt,ctrl]   Send a keystroke
-  type <text>                                     Type text string
-  click <x> <y>                                   Click at screen coordinates
-  sequence '<json-array>'                         Run a sequence of actions
-  check                                           Verify prerequisites
-
-Focus enforcement:
-  --ensure-focus                 Focus Script Kit window before input (delegates to window.ts)
-  --focus-title SUBSTR           Title substring for focus target (default: "${DEFAULT_FOCUS_TITLE}")
-  --session NAME                 Use session.sh to show window before focusing (more reliable)
-  --target SURFACE               Target a specific automation surface (main, agent_chat, actions, notes, ai)
-                                 Requires --ensure-focus. Resolves via window.ts list.
-  --force-native                 For key input with --session, bypass GPUI dispatch and deliver OS-level input.
-  --no-gpui-dispatch             Alias for --force-native.
-  --allow-any-frontmost          Allow OS-level key/type even when Script Kit is not macOS frontmost.
-
-Named keys: enter, tab, escape, space, delete, backspace,
-            up, down, left, right, home, end, pageup, pagedown,
-            f1-f12
-
-Sequence JSON format:
-  [{"action":"key","key":"tab"},
-   {"action":"sleep","ms":200},
-   {"action":"type","text":"hello"},
-   {"action":"key","key":"enter"},
-   {"action":"click","x":100,"y":200}]
-
-Output:
-  Schema version ${SCHEMA_VERSION} JSON envelopes on stdout.
-  Structured NDJSON diagnostics on stderr.
-  Exit 0 = delivered, 1 = failed or missing prerequisites.
-  OS-level key/type fail closed unless macOS reports script-kit-gpui frontmost.
-
-Focus delegation:
-  When --ensure-focus is set, focus is enforced via window.ts (retry 3, settle 200ms).
-  When --session is also set, the window is first shown via session.sh send before focusing.
-  When --target is set, the target automation surface is resolved via window.ts list.
-  The focusEnforced, session, and target fields in the response confirm the focus path used.
-
-Permission requirements:
-  - Accessibility: System Preferences → Privacy & Security → Accessibility
-  - cliclick: brew install cliclick`);
-      process.exit(0);
-      break;
-    }
-
-    default:
-      emit(
-        errorEnvelope(
-          "unknown",
-          "UNKNOWN_COMMAND",
-          `Unknown command: ${command}`
-        )
-      );
-      process.exit(1);
-  }
-} catch (e: any) {
-  const code = e.code ?? "UNKNOWN_ERROR";
-  let message = e.message ?? String(e);
-
-  if (code === "ACCESSIBILITY_DENIED") {
-    message +=
-      "\n\nRemediation: System Preferences → Privacy & Security → Accessibility → enable your terminal/IDE app.";
-  }
-
-  emit(errorEnvelope(command, code, message));
-  process.exit(1);
+function selectSessionEnvelope(raw: string, session: string, statuses: string[]): any {
+  return selectExactlyOne<any>(parseJsonDocuments(raw), (candidate) => candidate?.session === session && statuses.includes(candidate?.status), "session_envelope");
 }
+
+export async function observeFrontmostApplication(): Promise<FrontmostApplicationIdentity> {
+  const script = `ObjC.import('AppKit'); const app=$.NSWorkspace.sharedWorkspace.frontmostApplication; JSON.stringify({pid:Number(app.processIdentifier),bundleId:ObjC.unwrap(app.bundleIdentifier)||'',name:ObjC.unwrap(app.localizedName)||''});`;
+  const result = await runProcess(["osascript", "-l", "JavaScript", "-e", script]);
+  if (result.exitCode !== 0) throw hardError("FOCUS_NOT_CONFIRMED", `frontmost_application_unavailable:${boundedTail(result.stderr)}`);
+  const identity = selectExactlyOne<any>(parseJsonDocuments(result.stdout), (candidate) => Number.isInteger(candidate?.pid)
+    && typeof candidate?.bundleId === "string" && typeof candidate?.name === "string", "frontmost_application");
+  return { pid: identity.pid, bundleId: identity.bundleId, name: identity.name };
+}
+
+async function inspectPassiveKeyboardReadiness(session: string, target: string, expectedPid: number | null, expectedGeneration: string | null): Promise<PassiveKeyboardReadiness> {
+  const statusResult = await runProcess(["bash", SESSION_SH, "status", session]);
+  if (statusResult.exitCode !== 0) throw hardError("FOCUS_NOT_CONFIRMED", `session_status_failed:${boundedTail(statusResult.stderr || statusResult.stdout)}`);
+  const status = selectSessionEnvelope(statusResult.stdout, session, ["ok"]);
+  const sessionRoot = process.env.SCRIPT_KIT_SESSION_DIR ?? "/tmp/script-kit-agent-sessions";
+  const dir = `${sessionRoot}/${session}`;
+  const pidFilePid = existsSync(`${dir}/pid`) ? Number(readFileSync(`${dir}/pid`, "utf8").trim()) : null;
+  const generationFile = existsSync(`${dir}/generation`) ? readFileSync(`${dir}/generation`, "utf8").trim() : null;
+  const stateRpc = await sessionRpc(session, { type: "getState", target: { type: "main" } }, "stateResult");
+  const state = stateRpc.response;
+  const windowsResult = await runProcess(["bun", WINDOW_TS, "list"]);
+  if (windowsResult.exitCode !== 0) throw hardError("FOCUS_NOT_CONFIRMED", `window_list_failed:${boundedTail(windowsResult.stderr || windowsResult.stdout)}`);
+  const windows = selectExactlyOne<any>(parseJsonDocuments(windowsResult.stdout), (candidate) => candidate?.status === "ok" && Array.isArray(candidate?.data?.surfaces), "window_list");
+  const mains = windows.data.surfaces.filter((surface: any) => surface?.surfaceId === "main" && Number.isInteger(Number(surface?.windowId)) && Number(surface.windowId) > 0);
+  const main = mains.length === 1 ? mains[0] : null;
+  const axResult = expectedPid ? await runProcess(["osascript", "-e", `tell application "System Events" to tell first application process whose unix id is ${expectedPid} to get value of attribute "AXWindowNumber" of focused window`])
+    : { exitCode: 1, stdout: "", stderr: "missing pid" };
+  const axWindowId = axResult.exitCode === 0 && Number.isInteger(Number(axResult.stdout.trim())) ? Number(axResult.stdout.trim()) : null;
+  const contract = state.surfaceContract ?? {};
+  return evaluatePassiveKeyboardReadiness({
+    expectedPid,
+    statusPid: Number(status.pid) || null,
+    pidFilePid,
+    expectedGeneration,
+    generationFile,
+    requestedKind: target || null,
+    protocolTargetType: "main",
+    surfaceId: main?.surfaceId ?? null,
+    targetWindowId: main ? Number(main.windowId) : null,
+    protocolRequestId: stateRpc.requestId,
+    protocolExpectedType: stateRpc.expectedType,
+    protocolExactCorrelation: stateRpc.correlation.exact,
+    windowVisible: state.windowVisible === true,
+    protocolFocused: state.isFocused === true,
+    promptType: state.promptType ?? null,
+    surfaceKind: contract.surfaceKind ?? null,
+    automationSemanticSurface: contract.automationSemanticSurface ?? null,
+    inputOwnership: contract.inputOwnership ?? null,
+    focusPolicy: contract.focusPolicy ?? null,
+    keyboardPolicy: contract.keyboardPolicy ?? null,
+    axPid: axResult.exitCode === 0 ? expectedPid : null,
+    axFocusedWindowPresent: axWindowId != null && axWindowId > 0,
+    axFocusedWindowId: axWindowId,
+  });
+}
+
+function accessibilityFailure(stderr: string): boolean {
+  return /not allowed assistive access|-1743|not authorized/i.test(stderr);
+}
+
+async function injectSystemEvents(script: string): Promise<void> {
+  const result = await runProcess(["osascript", "-e", script]);
+  if (result.exitCode !== 0) {
+    if (accessibilityFailure(result.stderr)) throw hardError("ACCESSIBILITY_DENIED", result.stderr || "Accessibility denied");
+    throw hardError("KEY_INJECTOR_FAILED", result.stderr || `osascript exited ${result.exitCode}`);
+  }
+  await Bun.sleep(NATIVE_SETTLE_MS);
+}
+
+function deliveryFor(actualMethod: ActualInputMethod, postconditionVerified = false): DeliveryEvidence {
+  if (actualMethod.startsWith("native.")) return evaluateDeliveryEvidence({ injectorAccepted: true, ingressVerified: false, postconditionVerified: false, deliveryScope: "injector", settleMs: NATIVE_SETTLE_MS });
+  if (actualMethod === "protocol.batch.setInput") return evaluateDeliveryEvidence({ injectorAccepted: false, ingressVerified: true, postconditionVerified, deliveryScope: postconditionVerified ? "postcondition" : "ingress", settleMs: 0 });
+  return evaluateDeliveryEvidence({ injectorAccepted: false, ingressVerified: true, postconditionVerified: false, deliveryScope: "ingress", settleMs: 0 });
+}
+
+export function resultFor(actualMethod: ActualInputMethod, capabilityMethod: CapabilityMethod, fields: Partial<InputResult> = {}, fallbackReasons: InputResult["receipt"]["fallbackReasons"] = [], postconditionVerified = false): InputResult {
+  const keyCode = fields.keyCode ?? null;
+  return {
+    ...deliveryFor(actualMethod, postconditionVerified),
+    method: capabilityMethod,
+    capabilityMethod,
+    actualMethod,
+    keyCode,
+    focusCheckRequested: false,
+    focusVerified: false,
+    focusEnforced: false,
+    activationAttempted: false,
+    focusMutationAttempted: false,
+    focusVerificationMode: "not-requested",
+    receipt: { target: null, chosenMethod: capabilityMethod, actualMethod, keyCode, fallbackReasons },
+    ...fields,
+  } as InputResult;
+}
+
+async function nativeKey(key: string, modifiers: string[], focusFields: Partial<InputResult>): Promise<InputResult> {
+  const plan = planNativeKey(key, modifiers);
+  await injectSystemEvents(plan.script);
+  return resultFor(plan.actualMethod, "accessibility", { key, keyCode: plan.keyCode, modifiers, ...focusFields });
+}
+
+async function nativeType(text: string, focusFields: Partial<InputResult>): Promise<InputResult> {
+  await injectSystemEvents(`tell application "System Events" to keystroke ${appleScriptString(text)}`);
+  return resultFor("native.systemEvents.keystroke", "accessibility", { text, keyCode: null, ...focusFields });
+}
+
+async function nativeClick(x: number, y: number): Promise<InputResult & { x: number; y: number }> {
+  const cliclick = ["/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"].find((path) => existsSync(path));
+  if (!cliclick) throw hardError("KEY_INJECTOR_FAILED", "cliclick is required for pointer delivery");
+  const result = await runProcess([cliclick, `c:${x},${y}`]);
+  if (result.exitCode !== 0) throw hardError("KEY_INJECTOR_FAILED", result.stderr || `cliclick exited ${result.exitCode}`);
+  await Bun.sleep(NATIVE_SETTLE_MS);
+  return resultFor("native.cliclick.click", "quartz", { x, y } as Partial<InputResult>) as InputResult & { x: number; y: number };
+}
+
+function protocolTarget(target: string): Record<string, unknown> {
+  return target === "main" ? { type: "main" } : { type: "kind", kind: target };
+}
+
+async function gpuiKey(session: string, target: string, key: string, modifiers: string[]): Promise<boolean> {
+  const rpc = await sessionRpc(session, { type: "simulateGpuiEvent", target: protocolTarget(target), event: { type: "keyDown", key, modifiers } }, "simulateGpuiEventResult");
+  return rpc.response.success === true;
+}
+
+async function batchType(session: string, target: string, text: string): Promise<{ accepted: boolean; postconditionVerified: boolean }> {
+  const batch = await sessionRpc(session, { type: "batch", target: protocolTarget(target), commands: [{ type: "setInput", text }], options: { stopOnError: true, timeout: 3000 } }, "batchResult");
+  if (batch.response.success !== true) return { accepted: false, postconditionVerified: false };
+  const state = (await sessionRpc(session, { type: "getState", target: protocolTarget(target) }, "stateResult")).response;
+  const diagnostics = state.filterInputDiagnostics ?? {};
+  const postconditionVerified = target === "main" && state.inputValue === text
+    && diagnostics.canonicalFilterText === text && diagnostics.computedFilterText === text
+    && diagnostics.rawVisualInputValue === text && diagnostics.pendingFilterSync === false;
+  return { accepted: true, postconditionVerified };
+}
+
+async function sendKeyWithLadder(key: string, modifiers: string[], session: string, target: string, forceNative: boolean, focusFields: Partial<InputResult>): Promise<InputResult> {
+  if (!forceNative && session && await gpuiKey(session, target, key, modifiers)) {
+    return resultFor("protocol.simulateGpuiEvent.keyDown", "gpuiDispatch", { key, modifiers, keyCode: null, ...focusFields });
+  }
+  const result = await nativeKey(key, modifiers, focusFields);
+  result.receipt.target = target;
+  result.receipt.fallbackReasons = forceNative
+    ? [{ method: "gpuiDispatch", reason: "force_native_requested" }]
+    : [{ method: "gpuiDispatch", reason: session ? "dispatch_rejected" : "no_session" }];
+  return result;
+}
+
+async function sendTypeWithLadder(text: string, session: string, target: string, forceNative: boolean, focusFields: Partial<InputResult>): Promise<InputResult> {
+  if (!forceNative && session && target) {
+    const batch = await batchType(session, target, text);
+    if (batch.accepted) return resultFor("protocol.batch.setInput", "directBatch", { text, keyCode: null, ...focusFields }, [], batch.postconditionVerified);
+  }
+  if (!forceNative && session) {
+    let ok = true;
+    for (const char of text) if (!(await gpuiKey(session, target, char, []))) { ok = false; break; }
+    if (ok) return resultFor("protocol.simulateGpuiEvent.keyDown", "gpuiDispatch", { text, keyCode: null, ...focusFields });
+  }
+  const result = await nativeType(text, focusFields);
+  result.receipt.target = target;
+  result.receipt.fallbackReasons = forceNative
+    ? [{ method: "gpuiDispatch", reason: "force_native_requested" }]
+    : [{ method: "gpuiDispatch", reason: session ? "dispatch_rejected" : "no_session" }];
+  return result;
+}
+
+export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const command = argv[0] ?? "help";
+  const flag = (name: string) => argv.includes(name);
+  const value = (name: string, fallback = "") => { const index = argv.indexOf(name); return index >= 0 ? argv[index + 1] ?? fallback : fallback; };
+  const session = value("--session");
+  const target = value("--target", "main");
+  const forceNative = flag("--force-native") || flag("--no-gpui-dispatch");
+  const ensureFocus = flag("--ensure-focus");
+  const emit = (body: any) => console.log(JSON.stringify({ ...body, source: SOURCE_PROVENANCE }, null, 2));
+  try {
+    let focusFields: Partial<InputResult> = {};
+    let before: FrontmostApplicationIdentity | null = null;
+    let readiness: PassiveKeyboardReadiness | null = null;
+    if (ensureFocus && (command === "key" || command === "type")) {
+      if (!session) throw hardError("FOCUS_NOT_CONFIRMED", "--ensure-focus requires --session for exact ownership verification");
+      const expectedPid = Number(value("--expected-pid")) || null;
+      const expectedGeneration = value("--expected-generation") || null;
+      readiness = await inspectPassiveKeyboardReadiness(session, target, expectedPid, expectedGeneration);
+      before = await observeFrontmostApplication();
+      if (!readiness.ready) throw hardError("FOCUS_NOT_CONFIRMED", readiness.failures.join(","), { keyboardReadiness: readiness, frontmostBefore: before });
+      focusFields = {
+        focusCheckRequested: true, focusVerified: true, focusEnforced: false,
+        activationAttempted: false, focusMutationAttempted: false, focusVerificationMode: "passive",
+        keyboardReadiness: readiness,
+      };
+    }
+
+    let result: InputResult;
+    if (command === "key") {
+      const key = argv[1];
+      if (!key) throw hardError("UNKNOWN_KEY", "Missing key");
+      const modifiers = value("--modifiers").split(",").map((part) => part.trim()).filter(Boolean);
+      result = await sendKeyWithLadder(key, modifiers, session, target, forceNative, focusFields);
+    } else if (command === "type") {
+      const text = argv[1];
+      if (text === undefined) throw hardError("KEY_INJECTOR_FAILED", "Missing text");
+      result = await sendTypeWithLadder(text, session, target, forceNative, focusFields);
+    } else if (command === "click") {
+      const x = Number(argv[1]);
+      const y = Number(argv[2]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) throw hardError("KEY_INJECTOR_FAILED", "click requires numeric x and y");
+      result = await nativeClick(x, y);
+    } else if (command === "check") {
+      emit({ schemaVersion: SCHEMA_VERSION, status: "ok", command, data: { osascript: existsSync("/usr/bin/osascript"), systemEventsOnlyForKeyboard: true } });
+      return 0;
+    } else if (command === "help" || command === "--help") {
+      emit({ schemaVersion: SCHEMA_VERSION, status: "ok", command: "help", data: { commands: ["key", "type", "click", "check"], forceNativeBypassesProtocolFor: ["key", "type"], deliveredMeans: "delivery_proved_at_deliveryScope" } });
+      return 0;
+    } else throw hardError("KEY_INJECTOR_FAILED", `Unknown command: ${command}`);
+
+    if (ensureFocus && before && readiness) {
+      const after = await observeFrontmostApplication();
+      const nonactivation = evaluateNonactivation(before, after, readiness.expectedPid ?? 0);
+      const focusEvidence = {
+        focusCheckRequested: true, focusVerified: true, focusEnforced: false as const,
+        activationAttempted: false as const, focusMutationAttempted: false as const,
+        focusVerificationMode: "passive" as const, keyboardReadiness: readiness, nonactivation,
+      };
+      result.nonactivation = nonactivation;
+      result.focusEvidence = focusEvidence;
+      if (!nonactivation.verified) throw hardError("FOCUS_NOT_CONFIRMED", "nonactivation_not_verified", focusEvidence);
+    }
+    if (session) result.receipt.target = target;
+    emit({ schemaVersion: SCHEMA_VERSION, status: "ok", command, data: result });
+    return result.delivered ? 0 : 1;
+  } catch (error: any) {
+    const code = ["ACCESSIBILITY_DENIED", "UNKNOWN_KEY", "KEY_INJECTOR_FAILED", "FOCUS_NOT_CONFIRMED"].includes(error?.code) ? error.code : "KEY_INJECTOR_FAILED";
+    emit({ schemaVersion: SCHEMA_VERSION, status: "error", command, error: { code, message: error?.message ?? String(error), evidence: error?.evidence ?? null } });
+    return 1;
+  }
+}
+
+if (import.meta.main) process.exit(await main());

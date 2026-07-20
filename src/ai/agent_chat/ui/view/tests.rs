@@ -2,7 +2,10 @@ use super::AgentChatView;
 use crate::ai::agent_chat::ui::permission_broker::{
     AgentChatApprovalPreview, AgentChatApprovalRequest,
 };
-use crate::ai::agent_chat::ui::thread::{AgentChatThreadMessage, AgentChatThreadMessageRole};
+use crate::ai::agent_chat::ui::thread::{
+    AgentChatAuthRecovery, AgentChatCallout, AgentChatCalloutSeverity, AgentChatThreadMessage,
+    AgentChatThreadMessageRole, AgentChatThreadStatus,
+};
 use crate::ai::context_selector::types::{ContextSelectorRow, ContextSelectorRowKind};
 use gpui::{Modifiers, SharedString};
 use std::collections::HashMap;
@@ -77,6 +80,55 @@ fn attached_flow_token_highlights_two_staged_flows() {
 fn inactive_transient_lanes_consume_zero_height() {
     assert_eq!(super::agent_chat_transient_lane_height(156.0, false), 0.0);
     assert_eq!(super::agent_chat_transient_lane_height(84.0, true), 84.0);
+}
+
+fn retryable_callout() -> AgentChatCallout {
+    AgentChatCallout {
+        severity: AgentChatCalloutSeverity::Error,
+        title: "Turn failed".into(),
+        detail: Some("connection lost".into()),
+        raw_detail: Some("raw provider error".into()),
+        can_retry: true,
+        auth_recovery: Some(AgentChatAuthRecovery::AuthenticationRequired),
+    }
+}
+
+#[test]
+fn retryable_error_callout_surfaces_retry_in_footer_contract() {
+    let callout = retryable_callout();
+    let button = AgentChatView::retry_footer_button(AgentChatThreadStatus::Error, Some(&callout))
+        .expect("retryable error callout should add a footer button");
+    assert_eq!(button.action, crate::footer_popup::FooterAction::Retry);
+    assert_eq!(button.key, "⌘⇧R");
+    assert_eq!(button.label, "Retry");
+    assert!(button.enabled);
+    assert!(
+        AgentChatView::retry_footer_button(AgentChatThreadStatus::Idle, Some(&callout)).is_none()
+    );
+}
+
+#[test]
+fn active_callout_render_model_is_passive_content_only() {
+    let callout = retryable_callout();
+    let model = AgentChatView::active_callout_render_model(&callout);
+
+    assert_eq!(model.severity, AgentChatCalloutSeverity::Error);
+    assert_eq!(model.title.as_ref(), "Turn failed");
+    assert_eq!(model.detail.as_ref(), "connection lost");
+
+    let action_ids = AgentChatView::active_callout_action_specs(&callout)
+        .into_iter()
+        .map(|action| action.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        action_ids,
+        vec![
+            super::AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID,
+            super::AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID,
+            super::AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID,
+        ],
+        "callout interactions belong to the actions dialog, not the render model"
+    );
 }
 
 fn cmd_modifiers() -> Modifiers {
@@ -246,6 +298,53 @@ fn agent_chat_spine_accepts_colon_list_filter_projection() {
     assert!(
         AgentChatView::agent_chat_spine_segment_kind_has_context_projection(kind),
         "Agent Chat should not filter ':' out before rendering shared Spine list sections"
+    );
+}
+
+#[test]
+fn profile_spine_acceptance_targets_profile_callback_and_clears_trigger() {
+    let action = crate::spine::list::SpineListAction::ResolveSegment {
+        segment_index: 3,
+        segment_byte_range: 7..26,
+        replacement: SharedString::from("|nn29-switch-target"),
+        resolution_id: SharedString::from("nn29-switch-target"),
+        resolution_label: SharedString::from("NN29 Switch Target"),
+        resolution_source: SharedString::from("profile"),
+        trailing_space: true,
+    };
+
+    let effect = AgentChatView::profile_spine_acceptance_effect(&action)
+        .expect("profile ResolveSegment must route through profile selection acceptance");
+
+    assert_eq!(effect.profile_id, "nn29-switch-target");
+    assert_eq!(effect.segment_index, 3);
+    assert_eq!(effect.segment_byte_range, 7..26);
+    assert_eq!(effect.replacement, "");
+    assert!(!effect.trailing_space);
+}
+
+#[test]
+fn profile_spine_acceptance_preserves_preceding_draft_exactly() {
+    const DRAFT: &str = "NN29 profile accept draft";
+    let draft_with_trigger = format!("{DRAFT} |text");
+    let trigger_start = draft_with_trigger
+        .rfind('|')
+        .expect("fixture must contain the profile trigger");
+    let acceptance_range = AgentChatView::profile_spine_acceptance_range(
+        &draft_with_trigger,
+        trigger_start..draft_with_trigger.len(),
+    );
+    let mut after_acceptance = draft_with_trigger;
+    after_acceptance.replace_range(acceptance_range, "");
+
+    assert_eq!(
+        after_acceptance, DRAFT,
+        "acceptance must strip only the profile trigger and its separator"
+    );
+    assert_eq!(
+        AgentChatView::profile_spine_trigger_input(DRAFT),
+        format!("{DRAFT} |"),
+        "opening the profile Spine must append its trigger without replacing the draft"
     );
 }
 

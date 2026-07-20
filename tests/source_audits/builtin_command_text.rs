@@ -29,7 +29,7 @@ fn agent_chat_destination_builtins_name_agent_chat_not_generic_ai() {
     for (id, expected_name, expected_action) in [
         (
             "builtin/send-screen-to-ai",
-            "Send Screen to Agent Chat",
+            "Send Full Screen to Agent Chat",
             "Send Screen to Agent Chat",
         ),
         (
@@ -39,12 +39,12 @@ fn agent_chat_destination_builtins_name_agent_chat_not_generic_ai() {
         ),
         (
             "builtin/send-selected-text-to-ai",
-            "Send Selected Text to Agent Chat",
+            "Send Selection to Agent Chat",
             "Send Selection to Agent Chat",
         ),
         (
             "builtin/send-browser-tab-to-ai",
-            "Send Focused Browser Tab to Agent Chat",
+            "Send Current Browser Tab to Agent Chat",
             "Send Tab to Agent Chat",
         ),
         (
@@ -218,13 +218,13 @@ fn permission_assistant_commands_do_not_claim_to_grant_permissions() {
     for (id, expected_name, expected_action, expected_description) in [
         (
             "builtin/allow-accessibility",
-            "Accessibility Permission Assistant",
+            "Open Accessibility Assistant",
             "Open Accessibility Assistant",
             "Open the Permission Assistant for Accessibility",
         ),
         (
             "builtin/allow-screen-recording",
-            "Screen Recording Permission Assistant",
+            "Open Screen Recording Assistant",
             "Open Screen Recording Assistant",
             "Open the Permission Assistant for Screen Recording",
         ),
@@ -271,56 +271,56 @@ fn system_settings_builtins_name_the_settings_pane_they_open() {
     for (id, expected_name, expected_action, expected_footer, expected_description) in [
         (
             "builtin/system-preferences",
-            "macOS System Settings",
+            "Open System Settings",
             "Open macOS System Settings",
             "macOS Settings",
             "Open macOS System Settings",
         ),
         (
             "builtin/privacy-settings",
-            "Privacy & Security Settings",
+            "Open Privacy & Security Settings",
             "Open Privacy & Security Settings",
             "Privacy & Security",
             "Open Privacy & Security settings",
         ),
         (
             "builtin/display-settings",
-            "Displays Settings",
+            "Open Displays Settings",
             "Open Displays Settings",
             "Displays",
             "Open Displays settings",
         ),
         (
             "builtin/sound-settings",
-            "Sound Settings",
+            "Open Sound Settings",
             "Open Sound Settings",
             "Sound",
             "Open Sound settings",
         ),
         (
             "builtin/network-settings",
-            "Network Settings",
+            "Open Network Settings",
             "Open Network Settings",
             "Network",
             "Open Network settings",
         ),
         (
             "builtin/keyboard-settings",
-            "Keyboard Settings",
+            "Open Keyboard Settings",
             "Open Keyboard Settings",
             "Keyboard",
             "Open Keyboard settings",
         ),
         (
             "builtin/bluetooth-settings",
-            "Bluetooth Settings",
+            "Open Bluetooth Settings",
             "Open Bluetooth Settings",
             "Bluetooth",
             "Open Bluetooth settings",
         ),
         (
             "builtin/notifications-settings",
-            "Notifications Settings",
+            "Open Notifications Settings",
             "Open Notifications Settings",
             "Notifications",
             "Open Notifications settings",
@@ -355,7 +355,7 @@ fn force_quit_command_text_names_the_dialog_it_opens() {
         .find(|entry| entry.id == "builtin/force-quit")
         .expect("force quit builtin should exist");
 
-    assert_eq!(force_quit.name, "Open Force Quit Apps");
+    assert_eq!(force_quit.name, "Force Quit Applications");
     assert_eq!(force_quit.default_action_text(), "Open Force Quit");
     assert_eq!(
         force_quit.description,

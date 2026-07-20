@@ -2,21 +2,54 @@
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import {
+  buildArtifactLifecycle,
+  claimOutput,
+  commitFinalReceipt,
+  createOwnedStagingDirectory,
+  materializeAtomic,
+  removeOwnedAuxiliaryDirectory,
+  retainLiveSessionArtifacts,
+  validateArtifact,
+  validateOutputTarget,
+  waitForProcessesDead,
+  writeJsonArtifactAtomic,
+  type ArtifactReceipt,
+  type ArtifactSpec,
+  type ProtocolCorrelation,
+  type RetainedArtifact,
+} from "./artifact-lifecycle";
 
 type Json = Record<string, any>;
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const sessionScript = join(repoRoot, "scripts/agentic/session.sh");
-const outputDir = join(repoRoot, ".test-output", "root-delete-key-benchmark");
+const session = argValue(
+  "--session",
+  `root-delete-key-benchmark-${process.pid}-${Date.now()}`,
+);
+const outputDir = resolve(
+  repoRoot,
+  argValue(
+    "--output-dir",
+    join(repoRoot, ".test-output", "root-delete-key-benchmark", session),
+  ),
+);
+const outputPlan = validateOutputTarget({
+  repoRoot,
+  candidate: outputDir,
+  kind: "directory",
+  probeId: "root-delete-key-benchmark",
+});
 const homeDir = join(outputDir, "home");
 const kitDir = join(homeDir, ".scriptkit");
 const dbDir = join(kitDir, "db");
@@ -24,7 +57,6 @@ const sessionRoot = join(outputDir, "sessions");
 const chromeDir = join(homeDir, "Library/Application Support/Google/Chrome/Default");
 const agentBinary = join(repoRoot, "target-agent", "pools", "agent-debug", "debug", "script-kit-gpui");
 
-const session = argValue("--session", "root-delete-key-benchmark");
 const samples = Number(argValue("--samples", "8"));
 const deleteCount = Number(argValue("--delete-count", "24"));
 const cadenceMs = Number(argValue("--cadence", "18"));
@@ -34,13 +66,24 @@ const timeoutMs = Number(argValue("--timeout", "12000"));
 const pollMs = Number(argValue("--poll", "4"));
 const query = argValue("--query", `amazon-delete-${Date.now()}`);
 const enforce = !process.argv.includes("--no-enforce");
+const injectRunFailureBeforeMeasurement = process.argv.includes(
+  "--inject-run-failure-before-measurement",
+);
 
 let sessionStatus: Json | null = null;
+let sessionOwned = false;
+let ownedPid: number | null = null;
+let ownedGeneration: string | null = null;
+const protocolCorrelations: ProtocolCorrelation[] = [];
 
 process.env.HOME = homeDir;
 process.env.SK_PATH = kitDir;
 process.env.SCRIPT_KIT_SESSION_DIR = sessionRoot;
-process.env.SCRIPT_KIT_SESSION_READY_TIMEOUT_MS = "10000";
+process.env.SCRIPT_KIT_SESSION_READY_TIMEOUT_MS = "30000";
+process.env.SCRIPT_KIT_STARTUP_PROFILE = "dev-fast";
+process.env.SCRIPT_KIT_STARTUP_READY_LOG = "1";
+process.env.SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM = "1";
+process.env.SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK = "1";
 if (!process.env.SCRIPT_KIT_GPUI_BINARY && fileExists(agentBinary)) {
   process.env.SCRIPT_KIT_GPUI_BINARY = agentBinary;
 }
@@ -118,6 +161,43 @@ function runSession(args: string[]): Json {
   return parsed;
 }
 
+function stopOwnedSession(): Json {
+  if (!Number.isInteger(ownedPid) || ownedPid! <= 0 || !ownedGeneration) {
+    throw new Error("strict stop ownership is missing");
+  }
+  const args = [
+    "stop",
+    session,
+    "--expected-pid",
+    String(ownedPid),
+    "--expected-generation",
+    ownedGeneration,
+  ];
+  const result = spawnSync(sessionScript, args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: process.env,
+  });
+  const stdout = result.stdout.trim();
+  if (!stdout) throw new Error(`session.sh ${args.join(" ")} produced no stdout`);
+  const envelope = JSON.parse(stdout);
+  const ownershipExact =
+    envelope.status === "ok"
+    && envelope.ownershipVerified === true
+    && envelope.expectedPid === ownedPid
+    && envelope.actualPid === ownedPid
+    && envelope.expectedGeneration === ownedGeneration
+    && envelope.actualGeneration === ownedGeneration;
+  if (result.status !== 0 || !ownershipExact) {
+    const error = new Error(`strict session stop failed: ${stdout}`) as Error & {
+      stopResult?: Json;
+    };
+    error.stopResult = envelope;
+    throw error;
+  }
+  return envelope;
+}
+
 function fileSize(path: string): number {
   try {
     return statSync(path).size;
@@ -132,6 +212,34 @@ function fileExists(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+function selectedBinaryPath(): string | null {
+  const selected = sessionStatus?.binary ?? process.env.SCRIPT_KIT_GPUI_BINARY;
+  return typeof selected === "string" && selected.length > 0
+    ? resolve(repoRoot, selected)
+    : null;
+}
+
+function buildProvenance(): Json {
+  const binary = selectedBinaryPath();
+  const gitSha = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  const gitStatus = spawnSync("git", ["status", "--porcelain"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  return {
+    binary,
+    binarySha256:
+      binary && fileExists(binary)
+        ? createHash("sha256").update(readFileSync(binary)).digest("hex")
+        : null,
+    gitSha: gitSha.status === 0 ? gitSha.stdout.trim() : null,
+    sourceDirty: gitStatus.status === 0 ? gitStatus.stdout.trim().length > 0 : null,
+  };
 }
 
 function readFrom(path: string, offset: number): string {
@@ -160,6 +268,7 @@ function directWrite(command: Json) {
 
 function directRpc(command: Json, expect: string, timeout = timeoutMs): Json {
   command.requestId ??= `root-delete-rpc-${Date.now()}`;
+  protocolCorrelations.push({ requestId: command.requestId, expectedType: expect });
   const responses = String(sessionStatus?.responses ?? "");
   const responseOffset = fileSize(responses);
   const protocolResponses = String(sessionStatus?.protocolResponses ?? "");
@@ -197,6 +306,9 @@ function directRpc(command: Json, expect: string, timeout = timeoutMs): Json {
     }
     return null;
   });
+  if (envelope.kind === "protocolResponse" && envelope.responseType === expect) {
+    return envelope.response;
+  }
   if (envelope.status !== "ok" || envelope.responseType !== expect) {
     throw new Error(`unexpected direct rpc envelope: ${JSON.stringify(envelope)}`);
   }
@@ -258,10 +370,11 @@ function sql(path: string, input: string) {
 }
 
 function seedFixtures() {
-  rmSync(outputDir, { recursive: true, force: true });
   mkdirSync(dbDir, { recursive: true });
   mkdirSync(chromeDir, { recursive: true });
   mkdirSync(join(kitDir, "plugins", "main", "scripts"), { recursive: true });
+  mkdirSync(join(kitDir, "models", "brain"), { recursive: true });
+  writeFileSync(join(kitDir, "models", "brain", ".no-download"), "probe fixture\n");
 
   writeFileSync(
     join(kitDir, "plugins", "main", "scripts", `${query}.ts`),
@@ -499,12 +612,33 @@ function parsePerfLogs(logPath: string) {
   };
 }
 
-async function main() {
+async function runBenchmark() {
+  const beforeStatus = runSession(["status", session]);
+  if (beforeStatus.alive === true || beforeStatus.healthy === true) {
+    throw new Error(`refusing to reuse running session ${JSON.stringify(session)}`);
+  }
   seedFixtures();
-  runSession(["stop", session]);
-  runSession(["start", session]);
-  sessionStatus = runSession(["status", session]);
+  const startStatus = runSession(["start", session]);
+  if (startStatus.resumed === true) {
+    throw new Error(`refusing to claim resumed session ${JSON.stringify(session)}`);
+  }
+  ownedPid = Number(startStatus.pid);
+  ownedGeneration =
+    typeof startStatus.sessionGeneration === "string"
+      ? startStatus.sessionGeneration
+      : null;
+  if (!Number.isInteger(ownedPid) || ownedPid! <= 0 || !ownedGeneration) {
+    throw new Error(`fresh session did not report ownership: ${JSON.stringify(startStatus)}`);
+  }
+  sessionOwned = true;
+  sessionStatus = { ...startStatus, ...runSession(["status", session]) };
+  if (startStatus.ready !== true) {
+    throw new Error(`owned session did not reach protocol readiness: ${JSON.stringify(startStatus)}`);
+  }
 
+  if (injectRunFailureBeforeMeasurement) {
+    throw new Error("injected run failure before delete measurement");
+  }
   setFilter(query, "warm");
 
   const echoReceipts = [];
@@ -524,7 +658,7 @@ async function main() {
     (receipt) =>
       receipt.finalInput !== receipt.expected || receipt.computedSearchText !== receipt.expected,
   ).length;
-  const summary = {
+  const summary: Json = {
     deleteEcho: {
       inputEcho: stats(echoEvents.map((event) => event.inputEchoMs)),
       dispatch: stats(echoEvents.map((event) => event.dispatchMs)),
@@ -542,10 +676,32 @@ async function main() {
       echoWait: stats(burstReceipts.map((receipt) => receipt.echoWaitMs)),
       finalMismatchCount: burstFinalMismatchCount,
     },
-    perfLogs: parsePerfLogs(String(sessionStatus.log)),
   };
 
-  const failures = [];
+  return {
+    schemaVersion: 3,
+    status: "pending-finalization",
+    behavior: { status: "fail", failure: null },
+    query,
+    samples,
+    deleteCount,
+    burstSamples,
+    stateProbeEvery,
+    injectRunFailureBeforeMeasurement,
+    outputDir,
+    provenance: buildProvenance(),
+    session: { name: session },
+    summary,
+    echoReceipts,
+    burstReceipts,
+  };
+}
+
+function evaluateFinalizedBehavior(receipt: Json, durableLogPath: string): void {
+  if (!receipt.summary) return;
+  receipt.summary.perfLogs = parsePerfLogs(durableLogPath);
+  const failures: string[] = [];
+  const summary = receipt.summary;
   if (summary.deleteEcho.inputEcho.p50Ms > 25) failures.push("delete inputEcho p50 > 25ms");
   if (summary.deleteEcho.inputEcho.p95Ms > 75) failures.push("delete inputEcho p95 > 75ms");
   if (summary.deleteEcho.inputEcho.maxMs > 200) failures.push("delete inputEcho max > 200ms");
@@ -559,41 +715,321 @@ async function main() {
   if (summary.deleteBurst.finalMismatchCount !== 0) failures.push("delete burst final mismatch");
   if (summary.perfLogs.handlerSlowCount > 0) failures.push("handler slow logs present");
 
-  const receipt = {
-    schemaVersion: 1,
+  receipt.thresholds = {
+    deleteInputEchoP50Ms: 25,
+    deleteInputEchoP95Ms: 75,
+    deleteInputEchoMaxMs: 200,
+    cadenceOverrunMaxMs: 75,
+    deleteBurstTotalP95Ms: 500,
+    handlerSlowCount: 0,
+    enforced: enforce,
+    failures,
+  };
+  receipt.behavior = {
     status: failures.length === 0 ? "pass" : "fail",
+    failure: failures.length === 0 ? null : failures.join("; "),
+  };
+}
+
+function sessionArtifactSpecs(): ArtifactSpec[] {
+  return [
+    {
+      id: "app-log",
+      sourceName: "app.log",
+      required: true,
+      mediaType: "text/plain",
+      kind: "text",
+      acceptedTextMarkers: ["STARTUP_READY ", "APP_READY|"],
+    },
+    {
+      id: "protocol-responses",
+      sourceName: "protocol-responses.ndjson",
+      required: true,
+      mediaType: "application/x-ndjson",
+      kind: "ndjson",
+      correlations: protocolCorrelations,
+    },
+    {
+      id: "lifecycle",
+      sourceName: "lifecycle.json",
+      required: true,
+      mediaType: "application/json",
+      kind: "json",
+    },
+    {
+      id: "responses",
+      sourceName: "responses.ndjson",
+      required: false,
+      mediaType: "application/x-ndjson",
+      kind: "ndjson",
+      requireNonEmpty: false,
+    },
+    {
+      id: "raw-lifecycle",
+      sourceName: "lifecycle.ndjson",
+      required: false,
+      mediaType: "application/x-ndjson",
+      kind: "ndjson",
+      requireNonEmpty: false,
+    },
+    {
+      id: "app-exit",
+      sourceName: "app-exit.json",
+      required: false,
+      mediaType: "application/json",
+      kind: "json",
+      requireNonEmpty: false,
+    },
+  ];
+}
+
+function readSessionPid(name: "supervisor_pid" | "fwd_pid"): number | null {
+  try {
+    const pid = Number(readFileSync(join(sessionRoot, session, name), "utf8").trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function verifyCurrentOwnership(): Json {
+  const sessionDir = join(sessionRoot, session);
+  const actualPid = Number(readFileSync(join(sessionDir, "pid"), "utf8").trim());
+  const actualGeneration = readFileSync(join(sessionDir, "generation"), "utf8").trim();
+  const exact = actualPid === ownedPid && actualGeneration === ownedGeneration;
+  if (!exact) {
+    throw new Error(`ownership mismatch before retention: ${JSON.stringify({
+      expectedPid: ownedPid,
+      actualPid,
+      expectedGeneration: ownedGeneration,
+      actualGeneration,
+    })}`);
+  }
+  return {
+    expectedPid: ownedPid,
+    actualPid,
+    expectedGeneration: ownedGeneration,
+    actualGeneration,
+    exact,
+  };
+}
+
+async function main() {
+  const claim = claimOutput(outputPlan);
+  let receipt: Json = {
+    schemaVersion: 3,
+    status: "error",
+    behavior: { status: "fail", failure: null },
     query,
     samples,
     deleteCount,
-      burstSamples,
-      stateProbeEvery,
-      thresholds: {
-      deleteInputEchoP50Ms: 25,
-      deleteInputEchoP95Ms: 75,
-      deleteInputEchoMaxMs: 200,
-      cadenceOverrunMaxMs: 75,
-      deleteBurstTotalP95Ms: 500,
-      handlerSlowCount: 0,
-      enforced: enforce,
-      failures,
-    },
-    session: {
-      name: session,
-      logPath: sessionStatus.log,
-      responsesPath: sessionStatus.responses,
-    },
-    summary,
-    echoReceipts,
-    burstReceipts,
+    burstSamples,
+    stateProbeEvery,
+    injectRunFailureBeforeMeasurement,
+    outputDir,
+    provenance: buildProvenance(),
+    session: { name: session },
   };
+  let runError: string | null = null;
+  let cleanupError: string | null = null;
+  let hiddenState: Json | null = null;
+  let stopResult: Json | null = null;
+  let afterStatus: Json | null = null;
+  let stagingDir: string | null = null;
+  let retained: RetainedArtifact[] = [];
+  let writers: Record<string, number | null> = { app: null, supervisor: null, forwarder: null };
+  let writersDead: Record<string, boolean> = {};
+  const specs = sessionArtifactSpecs();
+  const artifacts: ArtifactReceipt[] = [];
 
-  mkdirSync(outputDir, { recursive: true });
-  writeFileSync(join(outputDir, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
-  console.log(JSON.stringify(receipt, null, 2));
-  if (enforce && failures.length > 0) process.exit(1);
+  try {
+    receipt = await runBenchmark();
+  } catch (error) {
+    runError = error instanceof Error ? error.message : String(error);
+    receipt.behavior = { status: "fail", failure: runError };
+  } finally {
+    if (sessionOwned) {
+      try {
+        directRpc(
+          { type: "hide", requestId: `root-delete-cleanup-hide-${Date.now()}` },
+          "windowVisibilityAck",
+        );
+        const hidden = directRpc(
+          {
+            type: "waitFor",
+            requestId: `root-delete-cleanup-hidden-${Date.now()}`,
+            condition: { type: "stateMatch", state: { windowVisible: false } },
+            timeout: timeoutMs,
+            pollInterval: pollMs,
+          },
+          "waitForResult",
+          timeoutMs + 1_000,
+        );
+        if (hidden.success !== true) {
+          throw new Error(`window did not become hidden: ${JSON.stringify(hidden)}`);
+        }
+        hiddenState = getState("cleanup-hidden");
+        if (hiddenState.windowVisible !== false) {
+          throw new Error(`cleanup state remained visible: ${JSON.stringify(hiddenState)}`);
+        }
+      } catch (error) {
+        cleanupError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    if (sessionOwned) {
+      try {
+        receipt.ownershipBeforeStop = verifyCurrentOwnership();
+        writers = {
+          app: ownedPid,
+          supervisor: readSessionPid("supervisor_pid"),
+          forwarder: readSessionPid("fwd_pid"),
+        };
+        stagingDir = createOwnedStagingDirectory(claim);
+        retained = retainLiveSessionArtifacts(
+          claim,
+          join(sessionRoot, session),
+          stagingDir,
+          specs.filter((spec) => spec.id !== "lifecycle"),
+        );
+        stopResult = stopOwnedSession();
+        writersDead = await waitForProcessesDead(writers, { timeoutMs });
+        afterStatus = runSession(["status", session]);
+        if (afterStatus.status !== "not_found" || afterStatus.alive !== false) {
+          throw new Error(`final session status is not not_found: ${JSON.stringify(afterStatus)}`);
+        }
+      } catch (error) {
+        stopResult = (error as Error & { stopResult?: Json }).stopResult ?? stopResult;
+        const stopError = error instanceof Error ? error.message : String(error);
+        cleanupError = cleanupError ? `${cleanupError}; finalization: ${stopError}` : `finalization: ${stopError}`;
+      }
+    }
+
+    const writersFinalized = sessionOwned
+      && stopResult?.status === "ok"
+      && stopResult?.ownershipVerified === true
+      && afterStatus?.status === "not_found"
+      && Object.values(writers).every((pid) => Number.isInteger(pid) && pid! > 0)
+      && writersDead.app === true
+      && writersDead.supervisor === true
+      && writersDead.forwarder === true;
+    if (writersFinalized) {
+      try {
+        for (const retainedArtifact of retained) {
+          const spec = specs.find((candidate) => candidate.id === retainedArtifact.id)!;
+          materializeAtomic(claim, {
+            sourceRoot: stagingDir!,
+            sourceName: spec.destinationName ?? spec.sourceName,
+            destinationName: spec.destinationName ?? spec.sourceName,
+          });
+        }
+        writeJsonArtifactAtomic(
+          claim,
+          "lifecycle.json",
+          {
+            schemaVersion: 1,
+            probeId: "root-delete-key-benchmark",
+            runId: claim.owner.runId,
+            finalizationKind: "strict-session-stop",
+            hidden: hiddenState?.windowVisible === false,
+            app: { pid: writers.app, dead: writersDead.app === true },
+            supervisor: { pid: writers.supervisor, dead: writersDead.supervisor === true },
+            forwarder: { pid: writers.forwarder, dead: writersDead.forwarder === true },
+            ownership: receipt.ownershipBeforeStop,
+            stop: {
+              wasRunning: stopResult.wasRunning,
+              forcedKill: stopResult.forcedKill ?? null,
+              finalStatus: afterStatus.status,
+            },
+            completedAt: new Date().toISOString(),
+          },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        cleanupError = cleanupError ? `${cleanupError}; artifacts: ${message}` : `artifacts: ${message}`;
+      }
+    }
+
+    for (const spec of specs) {
+      artifacts.push(validateArtifact(
+        join(claim.artifactsRoot, spec.destinationName ?? spec.sourceName),
+        spec,
+        claim.artifactsRoot,
+      ));
+    }
+    const durableLog = artifacts.find((artifact) => artifact.id === "app-log");
+    if (!runError && durableLog?.readable) {
+      try {
+        evaluateFinalizedBehavior(receipt, durableLog.path);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        receipt.behavior = { status: "fail", failure: message };
+      }
+    }
+    receipt.artifactLifecycle = buildArtifactLifecycle({
+      claim,
+      finalizationKind: "strict-session-stop",
+      writersFinalized,
+      specs,
+      artifacts,
+    });
+    receipt.cleanup = {
+      attempted: sessionOwned,
+      hidden: hiddenState?.windowVisible === false,
+      hiddenState,
+      stopped: writersFinalized,
+      stopResult,
+      finalStatus: afterStatus?.status ?? null,
+      writers,
+      writersDead,
+      error: cleanupError,
+    };
+    receipt.provenance = buildProvenance();
+    receipt.session = { name: session, pid: ownedPid, generation: ownedGeneration };
+    const lifecycleValid = receipt.artifactLifecycle.allRequiredValid === true
+      && receipt.artifactLifecycle.allRecordedPathsReadable === true;
+    receipt.status = receipt.behavior.status === "pass"
+      && hiddenState?.windowVisible === false
+      && cleanupError === null
+      && lifecycleValid
+      ? "pass"
+      : "error";
+    receipt.failure = [
+      receipt.behavior.failure,
+      cleanupError,
+      lifecycleValid ? null : "artifact lifecycle validation failed",
+    ].filter(Boolean).join("; ") || null;
+    if (receipt.status === "pass" && stagingDir) {
+      try {
+        removeOwnedAuxiliaryDirectory(claim, stagingDir);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        receipt.status = "error";
+        receipt.failure = `staging removal failed: ${message}`;
+      }
+    }
+    if (receipt.status !== "pass") {
+      const paths = [claim.root];
+      if (stagingDir && existsSync(stagingDir)) paths.push(stagingDir);
+      const liveSessionDir = join(sessionRoot, session);
+      if (existsSync(liveSessionDir)) paths.push(liveSessionDir);
+      receipt.failurePreservation = {
+        outputRootPreserved: true,
+        sessionRootPreserved: existsSync(liveSessionDir),
+        stagingPreserved: Boolean(stagingDir && existsSync(stagingDir)),
+        paths,
+        reason: receipt.failure ?? "probe failed",
+      };
+    }
+    commitFinalReceipt(claim, receipt, specs, artifacts);
+    console.log(JSON.stringify(receipt, null, 2));
+    if (receipt.status !== "pass" || (enforce && receipt.behavior.status !== "pass")) {
+      process.exitCode = 1;
+    }
+  }
 }
 
 main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  process.exitCode = 1;
 });

@@ -1459,6 +1459,22 @@ impl ScriptListApp {
             return DispatchOutcome::success();
         }
 
+        if matches!(
+            action_id,
+            crate::ai::agent_chat::ui::view::AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID
+                | crate::ai::agent_chat::ui::view::AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID
+                | crate::ai::agent_chat::ui::view::AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID
+        ) {
+            let handled = entity.update(cx, |view, cx| {
+                view.dispatch_active_callout_action(action_id, cx)
+            });
+            return if handled {
+                DispatchOutcome::success()
+            } else {
+                DispatchOutcome::not_handled()
+            };
+        }
+
         if let Some(model_id) = crate::actions::agent_chat_switch_model_id_from_action(action_id) {
             let Some(model_action) = AgentChatModelSwitchHandlerAction::from_action_id(action_id) else {
                 return DispatchOutcome::not_handled();

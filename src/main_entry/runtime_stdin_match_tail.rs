@@ -549,6 +549,22 @@
                                             )
                                         })
                                     }
+                                    AppView::FlowSessionView { session_id } => view
+                                        .flow_sessions
+                                        .iter()
+                                        .find(|(meta, _)| meta.id == *session_id)
+                                        .map(|(_, entity)| entity.clone())
+                                        .ok_or_else(|| "FlowSession entity is not active".to_string())
+                                        .and_then(|entity| {
+                                            entity.update(ctx, |chat, cx| {
+                                                chat.apply_transcript_geometry_fixture(
+                                                    phase,
+                                                    user_text.clone(),
+                                                    assistant_text.clone(),
+                                                    cx,
+                                                )
+                                            })
+                                        }),
                                     _ => Err("Agent Chat view is not active".to_string()),
                                 };
                                 match &result {
@@ -610,6 +626,19 @@
                                             chat.scroll_test_transcript_to(item_ix, offset_px, cx)
                                         })
                                     }
+                                    AppView::FlowSessionView { session_id } => view
+                                        .flow_sessions
+                                        .iter()
+                                        .find(|(meta, _)| meta.id == *session_id)
+                                        .map(|(_, entity)| entity.clone())
+                                        .ok_or_else(|| "FlowSession entity is not active".to_string())
+                                        .map(|entity| {
+                                            entity.update(ctx, |chat, cx| {
+                                                chat.set_transcript_geometry_scroll(
+                                                    item_ix, offset_px, cx,
+                                                );
+                                            });
+                                        }),
                                     _ => Err("Agent Chat view is not active".to_string()),
                                 };
                                 if let Some(rid) = request_id_value {

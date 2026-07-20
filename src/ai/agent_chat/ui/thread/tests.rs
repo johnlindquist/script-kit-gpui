@@ -211,6 +211,7 @@ fn test_thread_with_profile(
         messages: Vec::new(),
         input: TextInputState::new(),
         status: AgentChatThreadStatus::Idle,
+        context_resolution_id: 0,
         active_callout: None,
         pending_permission: None,
         pending_context_blocks,
@@ -1380,6 +1381,30 @@ fn focused_target_chip_consumed_on_first_submit() {
         1,
         "second turn should only have user input, no context"
     );
+}
+
+#[test]
+fn submit_snapshot_consumes_context_without_resolving_it_on_the_caller() {
+    let mut thread = test_thread(
+        vec![ContentBlock::Text(TextContent::new(
+            "hidden ambient context",
+        ))],
+        false,
+    );
+    thread.add_context_part_test(screenshot_part());
+
+    // This is the exact synchronous seam used by submit_input. If it called
+    // either resolver, the screenshot part would attempt a real screen capture.
+    let job = thread
+        .take_pending_context_for_background_resolution()
+        .expect("staged context should produce a background job");
+
+    assert!(thread.pending_context_consumed);
+    assert!(!thread.pending_ambient_context_enabled);
+    assert!(thread.pending_context_blocks.is_empty());
+    assert_eq!(job.blocks.len(), 1);
+    assert_eq!(job.parts, vec![screenshot_part()]);
+    assert_eq!(job.attachments.len(), 1);
 }
 
 #[test]

@@ -1,3 +1,6 @@
+use super::types::{
+    conversation_turn_pending_indicator_visible, conversation_turn_streaming_copy_available,
+};
 use super::*;
 
 fn normalize_to_png_bytes(raw_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -13,6 +16,194 @@ fn normalize_to_png_bytes(raw_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 impl ChatPrompt {
+    /// Install one deterministic transcript phase without invoking a provider.
+    /// Used by the Agent Chat/FlowSession geometry timeline proof.
+    pub(crate) fn apply_transcript_geometry_fixture(
+        &mut self,
+        phase: &str,
+        user_text: Option<String>,
+        assistant_text: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let user_text = user_text.unwrap_or_else(|| "Geometry fixture user row".to_string());
+        if user_text.trim().is_empty() {
+            return Err("transcript geometry fixture requires non-empty userText".to_string());
+        }
+
+        let user = ChatPromptMessage {
+            id: Some("geometry-fixture-user".to_string()),
+            role: Some(ChatMessageRole::User),
+            content: Some(user_text),
+            text: String::new(),
+            position: ChatMessagePosition::Right,
+            name: None,
+            model: None,
+            streaming: false,
+            error: None,
+            created_at: None,
+            image: None,
+        };
+        let mut messages = vec![user];
+        let default_stream_text = "First token and deterministic follow-up tokens.".to_string();
+        let (assistant, streaming) = match phase {
+            "waitingNoAssistant" | "waiting-no-assistant" => (None, true),
+            "emptyAssistant" | "empty-assistant" => (Some((String::new(), None)), true),
+            "firstToken" | "first-token" => (Some(("First".to_string(), None)), true),
+            "multiTokenStreaming" | "multi-token-streaming" => (
+                Some((
+                    assistant_text.unwrap_or_else(|| default_stream_text.clone()),
+                    None,
+                )),
+                true,
+            ),
+            "completed" => (
+                Some((
+                    assistant_text.unwrap_or_else(|| default_stream_text.clone()),
+                    None,
+                )),
+                false,
+            ),
+            "terminalEmpty" | "terminal-empty" => (Some((String::new(), None)), false),
+            "error" | "provider-error" => (
+                Some((
+                    String::new(),
+                    Some(assistant_text.unwrap_or_else(|| "Fixture provider error".to_string())),
+                )),
+                false,
+            ),
+            other => {
+                return Err(format!(
+                    "unknown transcript geometry fixture phase {other:?}"
+                ));
+            }
+        };
+
+        if let Some((content, error)) = assistant {
+            messages.push(ChatPromptMessage {
+                id: Some("geometry-fixture-assistant".to_string()),
+                role: Some(ChatMessageRole::Assistant),
+                content: Some(content),
+                text: String::new(),
+                position: ChatMessagePosition::Left,
+                name: None,
+                model: self.model.clone(),
+                streaming,
+                error,
+                created_at: None,
+                image: None,
+            });
+        }
+
+        self.messages = messages;
+        self.streaming_message_id = streaming.then_some("geometry-fixture-assistant".to_string());
+        self.builtin_is_streaming = streaming;
+        self.mark_conversation_turns_dirty();
+        self.ensure_conversation_turns_cache();
+        if streaming
+            && self
+                .conversation_turns_cache
+                .last()
+                .is_some_and(|turn| turn.assistant_response.is_none())
+        {
+            let mut turns = self.conversation_turns_cache.as_ref().clone();
+            if let Some(turn) = turns.last_mut() {
+                turn.streaming = true;
+            }
+            self.conversation_turns_cache = Arc::new(turns);
+            self.sync_turns_list_state();
+        }
+        if !self.user_has_scrolled_up {
+            self.turns_list_state.set_follow_tail(true);
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    pub(crate) fn set_transcript_geometry_scroll(
+        &mut self,
+        item_ix: usize,
+        offset_px: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_conversation_turns_cache();
+        self.user_has_scrolled_up = true;
+        self.turns_list_state.set_follow_tail(false);
+        self.turns_list_state.scroll_to(gpui::ListOffset {
+            item_ix: item_ix.min(self.conversation_turns_cache.len().saturating_sub(1)),
+            offset_in_item: px(offset_px.max(0.0)),
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn transcript_geometry_snapshot(&self) -> serde_json::Value {
+        let mut turns = build_conversation_turns(&self.messages, &self.image_render_cache);
+        if self.is_streaming()
+            && turns
+                .last()
+                .is_some_and(|turn| turn.assistant_response.is_none())
+        {
+            if let Some(turn) = turns.last_mut() {
+                turn.streaming = true;
+            }
+        }
+        let logical = self.turns_list_state.logical_scroll_top();
+        let viewport_height = self
+            .turns_list_state
+            .viewport_bounds()
+            .size
+            .height
+            .as_f32()
+            .max(0.0);
+        let max_scroll_top = self
+            .turns_list_state
+            .max_offset_for_scrollbar()
+            .y
+            .as_f32()
+            .max(0.0);
+        let scroll_top = (-self
+            .turns_list_state
+            .scroll_px_offset_for_scrollbar()
+            .y
+            .as_f32())
+        .clamp(0.0, max_scroll_top);
+        let pending_indicator_count = turns
+            .iter()
+            .filter(|turn| conversation_turn_pending_indicator_visible(turn))
+            .count();
+        let streaming_copy_available = turns.iter().any(conversation_turn_streaming_copy_available);
+        let row_semantic_ids = turns
+            .iter()
+            .enumerate()
+            .flat_map(|(index, turn)| {
+                let mut ids = vec![format!("chat-transcript-user-turn-{index}")];
+                if turn.assistant_response.is_some() || turn.streaming || turn.error.is_some() {
+                    ids.push(format!("chat-transcript-response-turn-{index}"));
+                }
+                ids
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::json!({
+            "rowSemanticIds": row_semantic_ids,
+            "viewportHeightPx": viewport_height,
+            "contentHeightPx": viewport_height + max_scroll_top,
+            "scrollAnchor": {
+                "itemIx": logical.item_ix,
+                "offsetPx": logical.offset_in_item.as_f32(),
+                "scrollTopPx": scroll_top,
+            },
+            "followTail": !self.user_has_scrolled_up,
+            "manualScroll": self.user_has_scrolled_up,
+            "selectedText": {
+                "composerHasSelection": !self.input.selection().is_empty(),
+                "transcriptSelectionObserved": false,
+            },
+            "pendingIndicatorCount": pending_indicator_count,
+            "streamingCopyAvailable": streaming_copy_available,
+            "measurementSource": "chatPromptListState",
+        })
+    }
+
     pub(super) fn mark_conversation_turns_dirty(&mut self) {
         self.conversation_turns_dirty = true;
     }

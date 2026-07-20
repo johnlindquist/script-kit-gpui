@@ -1,5 +1,58 @@
 use super::*;
 
+#[derive(Clone)]
+struct AgentChatWarmRetryLaunch {
+    pi_launch: crate::ai::agent_chat::launch::PiAgentChatLaunch,
+    request: TabAiLaunchRequest,
+    capture_rx: TabAiDeferredCaptureRx,
+    focused_part: Option<crate::ai::message_parts::AiContextPart>,
+    use_ask_anything_fallback: bool,
+    explicit_ambient_chip_label: Option<String>,
+    auto_submit: bool,
+    effective_intent: Option<String>,
+    agent_chat_initial_input: Option<String>,
+    permission_rx: async_channel::Receiver<crate::ai::agent_chat::ui::AgentChatApprovalRequest>,
+    source_view: AppView,
+    had_harness_session: bool,
+    pending_script_list_trigger: Option<char>,
+    open_started_at: std::time::Instant,
+}
+
+fn open_agent_chat_recovery_dialog_deferred(
+    cx: &mut Context<ScriptListApp>,
+    options: crate::confirm::ParentActionDialogOptions,
+    on_primary: impl Fn(&mut Window, &mut App) + 'static,
+    on_secondary: impl Fn(&mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let Some(window_handle) = crate::get_main_window_handle() else {
+        tracing::error!(
+            target: "script_kit::tab_ai",
+            event = "agent_chat_recovery_parent_missing",
+        );
+        return;
+    };
+    cx.spawn(async move |_this, cx| {
+        if let Err(error) = cx.update_window(window_handle, move |_, window, cx| {
+            crate::confirm::open_parent_action_dialog(
+                window,
+                cx,
+                options,
+                on_primary,
+                on_secondary,
+                on_dismiss,
+            );
+        }) {
+            tracing::error!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_recovery_modal_open_failed",
+                error = ?error,
+            );
+        }
+    })
+    .detach();
+}
+
 struct StandardAgentChatMockFixtureConnection;
 
 impl crate::ai::agent_chat::runtime::AgentChatConnection
@@ -270,13 +323,76 @@ impl ScriptListApp {
         } else {
             self.spine_cwd_for_agent_chat_launch()
         };
+        if quick_ai {
+            match crate::ai::agent_chat::launch::resolve_quick_ai_launch(
+                &ai_preferences,
+                &profile_ctx,
+            ) {
+                Ok(crate::ai::agent_chat::launch::ResolvedQuickAiLaunch::CodexExec(launch)) => {
+                    self.open_tab_ai_codex_exec_view_from_launch(
+                        launch,
+                        request,
+                        capture_rx,
+                        focused_part,
+                        use_ask_anything_fallback,
+                        explicit_ambient_chip_label,
+                        auto_submit,
+                        agent_chat_initial_input,
+                        permission_rx,
+                        source_view,
+                        had_harness_session,
+                        pending_script_list_trigger,
+                        open_started_at,
+                        cx,
+                    );
+                }
+                Ok(crate::ai::agent_chat::launch::ResolvedQuickAiLaunch::Pi(pi_launch)) => {
+                    self.open_tab_ai_pi_view_from_launch(
+                        pi_launch,
+                        request,
+                        capture_rx,
+                        focused_part,
+                        use_ask_anything_fallback,
+                        explicit_ambient_chip_label,
+                        auto_submit,
+                        effective_intent,
+                        agent_chat_initial_input,
+                        permission_rx,
+                        source_view,
+                        had_harness_session,
+                        pending_script_list_trigger,
+                        open_started_at,
+                        cx,
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "script_kit::tab_ai",
+                        event = "quick_ai_launch_resolution_failed",
+                        error = %error,
+                    );
+                    self.toast_manager.push(
+                        crate::components::toast::Toast::error(
+                            "Quick AI is unavailable",
+                            &self.theme,
+                        )
+                        .duration_ms(Some(TOAST_ERROR_MS)),
+                    );
+                    self.show_pi_agent_chat_unavailable_setup_view(
+                        source_view,
+                        error.to_string(),
+                        cx,
+                    );
+                }
+            }
+            return;
+        }
+
         let pi_launch_result = if focused_text_mini {
             crate::ai::agent_chat::launch::resolve_focused_text_pi_launch(
                 &ai_preferences,
                 &profile_ctx,
             )
-        } else if quick_ai {
-            crate::ai::agent_chat::launch::resolve_quick_ai_pi_launch(&ai_preferences, &profile_ctx)
         } else {
             crate::ai::agent_chat::launch::resolve_selected_pi_launch_with_cwd_override(
                 &ai_preferences,
@@ -332,19 +448,122 @@ impl ScriptListApp {
                         .duration_ms(Some(TOAST_ERROR_MS)),
                     );
                 }
-                if quick_ai {
-                    self.toast_manager.push(
-                        crate::components::toast::Toast::error(
-                            "Quick AI is unavailable",
-                            &self.theme,
-                        )
-                        .duration_ms(Some(TOAST_ERROR_MS)),
-                    );
-                }
                 self.show_pi_agent_chat_unavailable_setup_view(source_view, error.to_string(), cx);
                 return;
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_tab_ai_codex_exec_view_from_launch(
+        &mut self,
+        launch: crate::ai::agent_chat::launch::CodexQuickAiExecLaunch,
+        request: TabAiLaunchRequest,
+        capture_rx: TabAiDeferredCaptureRx,
+        focused_part: Option<crate::ai::message_parts::AiContextPart>,
+        use_ask_anything_fallback: bool,
+        explicit_ambient_chip_label: Option<String>,
+        auto_submit: bool,
+        agent_chat_initial_input: Option<String>,
+        permission_rx: async_channel::Receiver<crate::ai::agent_chat::ui::AgentChatApprovalRequest>,
+        source_view: AppView,
+        had_harness_session: bool,
+        pending_script_list_trigger: Option<char>,
+        open_started_at: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) {
+        if focused_part.is_some()
+            || use_ask_anything_fallback
+            || explicit_ambient_chip_label.is_some()
+        {
+            let error = "quick_ai_zero_context_launch_invariant_violated";
+            tracing::error!(
+                target: "script_kit::quick_ai",
+                event = "quick_ai_zero_context_launch_invariant_violated",
+                has_focused_part = focused_part.is_some(),
+                use_ask_anything_fallback,
+                has_ambient_chip = explicit_ambient_chip_label.is_some(),
+            );
+            drop(capture_rx);
+            self.show_pi_agent_chat_unavailable_setup_view(source_view, error.to_string(), cx);
+            return;
+        }
+        drop(capture_rx);
+
+        let connection = std::sync::Arc::new(
+            crate::ai::agent_chat::codex_exec::CodexQuickAiExecConnection::new(launch.spec.clone()),
+        );
+        let ui_thread_id = format!(
+            "quick-ai-codex-{}-{}",
+            std::process::id(),
+            open_started_at.elapsed().as_nanos()
+        );
+        let thread = cx.new(|cx| {
+            crate::ai::agent_chat::ui::AgentChatThread::new(
+                connection,
+                permission_rx,
+                crate::ai::agent_chat::ui::AgentChatThreadInit {
+                    ui_thread_id,
+                    cwd: launch.cwd.clone(),
+                    initial_input: agent_chat_initial_input,
+                    initial_context_parts: Vec::new(),
+                    display_name: launch.profile.name.clone().into(),
+                    profile_id: launch.profile.id.clone(),
+                    profile_display_name: Some(launch.profile.name.clone().into()),
+                    profile_icon_name: launch.profile.icon_name.clone(),
+                    selected_agent: None,
+                    available_agents: Vec::new(),
+                    launch_requirements:
+                        crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
+                    available_models: launch.available_models.clone(),
+                    selected_model_id: launch.selected_model_id.clone(),
+                },
+                cx,
+            )
+        });
+        let view_entity = cx.new(|cx| {
+            crate::ai::agent_chat::ui::AgentChatView::new(thread.clone(), cx)
+                .with_ui_variant(request.ui_variant)
+        });
+
+        self.active_agent_chat_warm_lease = None;
+        self.wire_embedded_agent_chat_footer_callbacks(&view_entity, cx);
+        self.embedded_agent_chat = Some(view_entity.clone());
+        self.tab_ai_harness_return_view = Some(source_view.clone());
+        self.tab_ai_harness_return_focus_target = Some(self.tab_ai_return_focus_target());
+        self.seed_tab_ai_apply_back_route(&request.source_view, &request.ui_snapshot, None);
+        view_entity.update(cx, |view, _cx| {
+            view.opened_via_transient_trigger = pending_script_list_trigger;
+        });
+        self.enter_embedded_agent_chat_surface(view_entity.clone(), cx);
+        cx.notify();
+
+        let needs_deferred = self.stage_agent_chat_initial_context_parts(
+            None,
+            &view_entity,
+            &thread,
+            None,
+            false,
+            None,
+            auto_submit,
+            pending_script_list_trigger,
+            true,
+            false,
+            &source_view,
+            cx,
+        );
+        debug_assert!(!needs_deferred, "Quick AI must never await context capture");
+        self.schedule_agent_chat_post_paint_harness_teardown(
+            had_harness_session,
+            open_started_at,
+            cx,
+        );
+        tracing::info!(
+            target: "script_kit::quick_ai",
+            event = "quick_ai_codex_view_switched",
+            profile_id = %launch.profile.id,
+            total_ms = open_started_at.elapsed().as_millis() as u64,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -378,7 +597,7 @@ impl ScriptListApp {
         if let Some(snapshot) = manager.snapshot(&pi_launch.warm_key).filter(|snapshot| {
             snapshot.state == crate::ai::agent_chat::warm_session::AgentChatWarmSessionState::Failed
         }) {
-            let error = snapshot.failure_message.unwrap_or_else(|| {
+            let error = snapshot.failure_message.clone().unwrap_or_else(|| {
                 "Pi Agent Chat model warm-up failed. Retry after fixing the provider configuration."
                     .to_string()
             });
@@ -390,7 +609,27 @@ impl ScriptListApp {
                 generation = snapshot.generation,
                 error = %error,
             );
-            self.show_pi_agent_chat_unavailable_setup_view(source_view, error, cx);
+            self.show_agent_chat_warm_recovery(
+                AgentChatWarmRetryLaunch {
+                    pi_launch,
+                    request,
+                    capture_rx,
+                    focused_part,
+                    use_ask_anything_fallback,
+                    explicit_ambient_chip_label,
+                    auto_submit,
+                    effective_intent,
+                    agent_chat_initial_input,
+                    permission_rx,
+                    source_view,
+                    had_harness_session,
+                    pending_script_list_trigger,
+                    open_started_at,
+                },
+                snapshot,
+                0,
+                cx,
+            );
             return;
         }
         let (lease, acquire_origin) = match manager.acquire_ready_or_spawn_cold(warm_spec) {
@@ -489,6 +728,8 @@ impl ScriptListApp {
             auto_submit,
             pending_script_list_trigger,
             request.suppress_focused_part,
+            request.ui_variant
+                != crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
             &source_view,
             cx,
         );
@@ -517,6 +758,281 @@ impl ScriptListApp {
             open_started_at,
             cx,
         );
+    }
+
+    fn show_agent_chat_warm_recovery(
+        &mut self,
+        launch: AgentChatWarmRetryLaunch,
+        snapshot: crate::ai::agent_chat::warm_session::AgentChatWarmSessionSnapshot,
+        attempts: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let detail = snapshot.failure_message.clone().unwrap_or_else(|| {
+            "Pi Agent Chat failed before reporting available models.".to_string()
+        });
+        let failure = crate::ai::agent_chat::agent_chat_recovery::AgentChatWarmFailure::classify(
+            detail.clone(),
+        );
+        let title = if attempts == 0 {
+            "Pi Agent Chat couldn't start"
+        } else {
+            "Pi Agent Chat still couldn't start"
+        };
+        let body = format!("{} Your current screen is unchanged.", failure.summary());
+        let app = cx.entity().downgrade();
+        let retry_launch = launch.clone();
+        let details_launch = launch;
+        let retry_snapshot = snapshot.clone();
+        let details_snapshot = snapshot;
+        open_agent_chat_recovery_dialog_deferred(
+            cx,
+            crate::confirm::ParentActionDialogOptions {
+                title: title.into(),
+                body: body.into(),
+                primary_text: "Retry".into(),
+                secondary_text: Some("Details (⌘I)".into()),
+                dismiss_text: "Back".into(),
+                ..Default::default()
+            },
+                {
+                    let app = app.clone();
+                    move |_window, cx| {
+                        if let Some(app) = app.upgrade() {
+                            let launch = retry_launch.clone();
+                            let snapshot = retry_snapshot.clone();
+                            app.update(cx, |this, cx| {
+                                this.begin_agent_chat_warm_retry(launch, snapshot, attempts, cx);
+                            });
+                        }
+                    }
+                },
+                {
+                    let app = app.clone();
+                    move |_window, cx| {
+                        if let Some(app) = app.upgrade() {
+                            let launch = details_launch.clone();
+                            let snapshot = details_snapshot.clone();
+                            let detail = detail.clone();
+                            app.update(cx, |this, cx| {
+                                this.show_agent_chat_warm_recovery_details(
+                                    launch, snapshot, attempts, detail, cx,
+                                );
+                            });
+                        }
+                    }
+                },
+            |_window, _cx| {},
+        );
+    }
+
+    fn show_agent_chat_warm_recovery_details(
+        &mut self,
+        launch: AgentChatWarmRetryLaunch,
+        snapshot: crate::ai::agent_chat::warm_session::AgentChatWarmSessionSnapshot,
+        attempts: u32,
+        detail: String,
+        cx: &mut Context<Self>,
+    ) {
+        let body = format!(
+            "{detail}\n\nRepair the local helper, then retry:\nbash scripts/agentic/ensure-pi-sidecar.sh --repair"
+        );
+        let app_retry = cx.entity().downgrade();
+        let app_back = app_retry.clone();
+        let retry_launch = launch.clone();
+        let retry_snapshot = snapshot.clone();
+        let back_launch = launch;
+        let back_snapshot = snapshot;
+        open_agent_chat_recovery_dialog_deferred(
+            cx,
+            crate::confirm::ParentActionDialogOptions {
+                title: "Pi Agent Chat details".into(),
+                body: body.into(),
+                primary_text: "Retry".into(),
+                secondary_text: None,
+                dismiss_text: "Back".into(),
+                ..Default::default()
+            },
+                move |_window, cx| {
+                    if let Some(app) = app_retry.upgrade() {
+                        let launch = retry_launch.clone();
+                        let snapshot = retry_snapshot.clone();
+                        app.update(cx, |this, cx| {
+                            this.begin_agent_chat_warm_retry(launch, snapshot, attempts, cx);
+                        });
+                    }
+                },
+                |_window, _cx| {},
+            move |_window, cx| {
+                if let Some(app) = app_back.upgrade() {
+                    let launch = back_launch.clone();
+                    let snapshot = back_snapshot.clone();
+                    app.update(cx, |this, cx| {
+                        this.show_agent_chat_warm_recovery(launch, snapshot, attempts, cx);
+                    });
+                }
+            },
+        );
+    }
+
+    fn begin_agent_chat_warm_retry(
+        &mut self,
+        launch: AgentChatWarmRetryLaunch,
+        failed: crate::ai::agent_chat::warm_session::AgentChatWarmSessionSnapshot,
+        attempts: u32,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ai::agent_chat::warm_session::{
+            AgentChatWarmReprepareResult, AgentChatWarmSessionState,
+        };
+        let manager = crate::ai::agent_chat::launch::warm_session_manager();
+        let retry = manager.reprepare_failed_generation_background(
+            launch.pi_launch.warm_spec(),
+            failed.generation,
+        );
+        let retry_generation = match retry {
+            AgentChatWarmReprepareResult::Started(snapshot)
+            | AgentChatWarmReprepareResult::Current(snapshot) => snapshot.generation,
+            AgentChatWarmReprepareResult::Missing => {
+                tracing::error!(
+                    target: "script_kit::tab_ai",
+                    event = "agent_chat_recovery_failure",
+                    phase = "retry_start",
+                    warm_key = %launch.pi_launch.warm_key,
+                    failed_generation = failed.generation,
+                    reason = "warm_slot_missing",
+                );
+                self.show_agent_chat_warm_recovery(launch, failed, attempts.saturating_add(1), cx);
+                return;
+            }
+        };
+
+        tracing::info!(
+            target: "script_kit::tab_ai",
+            event = "agent_chat_recovery_start",
+            warm_key = %launch.pi_launch.warm_key,
+            failed_generation = failed.generation,
+            retry_generation,
+            attempt = attempts.saturating_add(1),
+        );
+
+        let dismissed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dismissed_primary = dismissed.clone();
+        let dismissed_cancel = dismissed.clone();
+        open_agent_chat_recovery_dialog_deferred(
+            cx,
+            crate::confirm::ParentActionDialogOptions {
+                title: "Retrying Pi Agent Chat…".into(),
+                body: "Checking the Pi sidecar and available models. Your current screen remains open.".into(),
+                primary_text: "Back".into(),
+                secondary_text: None,
+                dismiss_text: "Back".into(),
+                ..Default::default()
+            },
+            move |_window, _cx| {
+                dismissed_primary.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+            |_window, _cx| {},
+            move |_window, _cx| {
+                dismissed_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+
+        let app = cx.entity().downgrade();
+        let warm_key = launch.pi_launch.warm_key.clone();
+        cx.spawn(async move |_this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                if dismissed.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                let Some(snapshot) =
+                    crate::ai::agent_chat::launch::warm_session_manager().snapshot(&warm_key)
+                else {
+                    return;
+                };
+                if snapshot.generation != retry_generation {
+                    tracing::error!(
+                        target: "script_kit::tab_ai",
+                        event = "agent_chat_recovery_failure",
+                        phase = "generation_changed",
+                        warm_key = %warm_key,
+                        retry_generation,
+                        observed_generation = snapshot.generation,
+                    );
+                    return;
+                }
+                if snapshot.state == AgentChatWarmSessionState::Preparing {
+                    continue;
+                }
+                let _ = cx.update(|cx| {
+                    if dismissed.load(std::sync::atomic::Ordering::SeqCst)
+                        || !crate::confirm::is_confirm_window_open()
+                    {
+                        tracing::info!(
+                            target: "script_kit::tab_ai",
+                            event = "agent_chat_recovery_dismissed",
+                            warm_key = %warm_key,
+                            retry_generation,
+                        );
+                        return;
+                    }
+                    crate::confirm::close_parent_action_dialog_programmatically(cx);
+                    let Some(app) = app.upgrade() else {
+                        return;
+                    };
+                    app.update(cx, |this, cx| match snapshot.state {
+                        AgentChatWarmSessionState::Ready => {
+                            tracing::info!(
+                                target: "script_kit::tab_ai",
+                                event = "agent_chat_recovery_success",
+                                warm_key = %warm_key,
+                                retry_generation,
+                                attempt = attempts.saturating_add(1),
+                            );
+                            this.open_tab_ai_pi_view_from_launch(
+                                launch.pi_launch,
+                                launch.request,
+                                launch.capture_rx,
+                                launch.focused_part,
+                                launch.use_ask_anything_fallback,
+                                launch.explicit_ambient_chip_label,
+                                launch.auto_submit,
+                                launch.effective_intent,
+                                launch.agent_chat_initial_input,
+                                launch.permission_rx,
+                                launch.source_view,
+                                launch.had_harness_session,
+                                launch.pending_script_list_trigger,
+                                launch.open_started_at,
+                                cx,
+                            );
+                        }
+                        AgentChatWarmSessionState::Failed => {
+                            tracing::error!(
+                                target: "script_kit::tab_ai",
+                                event = "agent_chat_recovery_failure",
+                                phase = "retry_complete",
+                                warm_key = %warm_key,
+                                retry_generation,
+                                attempt = attempts.saturating_add(1),
+                                error = %snapshot.failure_message.as_deref().unwrap_or("unknown warm retry failure"),
+                            );
+                            this.show_agent_chat_warm_recovery(
+                                launch,
+                                snapshot,
+                                attempts.saturating_add(1),
+                                cx,
+                            );
+                        }
+                        _ => {}
+                    });
+                });
+                return;
+            }
+        })
+        .detach();
     }
 
     /// Defer harness termination to after first paint so the user sees the

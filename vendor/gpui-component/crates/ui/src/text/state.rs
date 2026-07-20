@@ -79,12 +79,20 @@ impl TextViewState {
 
     /// Create a Markdown TextViewState with its initial document parsed inline.
     ///
+    /// Use this when a placeholder must hand off to the first visible text in
+    /// the same frame instead of waiting for the normal streaming debounce.
+    pub fn markdown_immediate(text: &str, cx: &mut Context<Self>) -> Self {
+        Self::new(TextViewFormat::Markdown, text, true, cx)
+    }
+
+    /// Create a Markdown TextViewState with its initial document parsed inline.
+    ///
     /// Fidelity paint tests use this constructor so their first frame does not
     /// depend on the parser's wall-clock debounce timer. Subsequent updates
     /// still use the regular asynchronous parser.
     #[cfg(feature = "fidelity")]
     pub fn markdown_for_fidelity_test(text: &str, cx: &mut Context<Self>) -> Self {
-        Self::new(TextViewFormat::Markdown, text, true, cx)
+        Self::markdown_immediate(text, cx)
     }
 
     /// Create a HTML TextViewState.
@@ -202,6 +210,29 @@ impl TextViewState {
         self.text = text.to_string().into();
         self.parsed_error = None;
         self.increment_update(text, false, cx);
+    }
+
+    /// Set Markdown text and parse it before returning.
+    ///
+    /// This is intentionally separate from [`Self::set_text`], whose debounce
+    /// is desirable for normal streaming updates.
+    pub fn set_markdown_text_immediate(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.text.as_str() == text {
+            return;
+        }
+
+        self.text = text.to_string().into();
+        let options = UpdateOptions {
+            append: false,
+            content: self.parsed_content.clone(),
+            pending_text: text.to_string(),
+            highlight_theme: cx.theme().highlight_theme.clone(),
+            code_block_actions: self.code_block_actions.clone(),
+            text_view_style: self.text_view_style.clone(),
+        };
+        self.parsed_error = parse_content(TextViewFormat::Markdown, &options).err();
+        self.clear_selection();
+        cx.notify();
     }
 
     /// Print parsed blocks for debugging.
@@ -497,6 +528,17 @@ fn selection_bounds(
 mod tests {
     use super::*;
     use gpui::{Bounds, point, px, size};
+
+    #[gpui::test]
+    fn immediate_markdown_update_is_visible_before_return(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let state = cx.new(|cx| TextViewState::markdown_immediate("", cx));
+
+        state.update(cx, |state, cx| {
+            state.set_markdown_text_immediate("First token", cx);
+            assert_eq!(state.source().as_ref(), "First token");
+        });
+    }
 
     #[test]
     fn test_text_view_state_selection_bounds() {

@@ -4,6 +4,16 @@ use gpui::{Pixels, Rems, StyleRefinement, px, rems};
 
 use crate::highlighter::HighlightTheme;
 
+/// Controls how Markdown links are presented without changing their targets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownLinkLabelPolicy {
+    /// Preserve the source-authored visible link text.
+    #[default]
+    Preserve,
+    /// Compact long source-syntax bare HTTP(S) URLs to their authority.
+    CompactLongBareHttp,
+}
+
 /// TextViewStyle used to customize the style for [`TextView`].
 #[derive(Clone)]
 pub struct TextViewStyle {
@@ -24,6 +34,8 @@ pub struct TextViewStyle {
     pub code_block_copy_button: bool,
     /// The style refinement for blockquotes.
     pub blockquote: StyleRefinement,
+    /// Display policy for Markdown link labels. Defaults to preserving source text.
+    pub markdown_link_label_policy: MarkdownLinkLabelPolicy,
     pub is_dark: bool,
 }
 
@@ -39,6 +51,7 @@ impl PartialEq for TextViewStyle {
             && self.code_block == other.code_block
             && self.code_block_copy_button == other.code_block_copy_button
             && self.blockquote == other.blockquote
+            && self.markdown_link_label_policy == other.markdown_link_label_policy
             && self.is_dark == other.is_dark
     }
 }
@@ -53,6 +66,7 @@ impl Default for TextViewStyle {
             code_block: StyleRefinement::default(),
             code_block_copy_button: false,
             blockquote: StyleRefinement::default(),
+            markdown_link_label_policy: MarkdownLinkLabelPolicy::Preserve,
             is_dark: false,
         }
     }
@@ -88,6 +102,12 @@ impl TextViewStyle {
     /// Set style for blockquotes.
     pub fn blockquote(mut self, style: StyleRefinement) -> Self {
         self.blockquote = style;
+        self
+    }
+
+    /// Set the Markdown link-label presentation policy.
+    pub fn markdown_link_label_policy(mut self, policy: MarkdownLinkLabelPolicy) -> Self {
+        self.markdown_link_label_policy = policy;
         self
     }
 }

@@ -74,6 +74,8 @@ pub use path::PathPromptEvent;
 #[allow(unused_imports)]
 pub use path::ShowActionsCallback;
 #[allow(unused_imports)]
+pub(crate) use select::select_submission_is_allowed;
+#[allow(unused_imports)]
 pub use select::SelectPrompt;
 #[allow(unused_imports)]
 pub use template::TemplatePrompt;

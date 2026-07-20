@@ -1172,9 +1172,11 @@ fn collect_confirm_popup_snapshot(cx: &gpui::App) -> Option<SurfaceElementSnapsh
     let snap = crate::confirm::get_confirm_popup_snapshot(cx)?;
 
     let confirm_focused = snap.focused_button == "confirm";
+    let secondary_focused = snap.focused_button == "secondary";
     let cancel_focused = snap.focused_button == "cancel";
+    let has_secondary = snap.secondary_text.is_some();
 
-    let elements = vec![
+    let mut elements = vec![
         element(
             "panel:confirm-dialog",
             ElementType::Panel,
@@ -1193,21 +1195,40 @@ fn collect_confirm_popup_snapshot(cx: &gpui::App) -> Option<SurfaceElementSnapsh
             Some(confirm_focused),
             Some(0),
         ),
-        element(
-            "button:1:cancel",
-            ElementType::Button,
-            Some(snap.cancel_text),
-            Some("cancel".to_string()),
-            None,
-            Some(cancel_focused),
-            Some(1),
-        ),
     ];
+    if let Some(secondary_text) = snap.secondary_text {
+        elements.push(element(
+            "button:1:secondary",
+            ElementType::Button,
+            Some(secondary_text),
+            Some("secondary".to_string()),
+            None,
+            Some(secondary_focused),
+            Some(1),
+        ));
+    }
+    let cancel_index = if has_secondary { 2 } else { 1 };
+    let cancel_semantic_id = if has_secondary {
+        "button:2:cancel"
+    } else {
+        "button:1:cancel"
+    };
+    elements.push(element(
+        cancel_semantic_id,
+        ElementType::Button,
+        Some(snap.cancel_text),
+        Some("cancel".to_string()),
+        None,
+        Some(cancel_focused),
+        Some(cancel_index),
+    ));
 
     let focused_semantic_id = if confirm_focused {
         "button:0:confirm"
+    } else if secondary_focused {
+        "button:1:secondary"
     } else {
-        "button:1:cancel"
+        cancel_semantic_id
     };
 
     Some(SurfaceElementSnapshot {

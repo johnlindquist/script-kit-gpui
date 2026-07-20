@@ -43,6 +43,33 @@ pub(crate) fn pulse_cursor_bar(cursor_bar: Div, id: impl Into<ElementId>) -> imp
     )
 }
 
+/// Zero-width caret anchor for placeholder (empty-input) states.
+///
+/// Mirrors `render_cursor`'s anatomy: the anchor occupies no layout space and
+/// the bar is absolutely positioned, centered on the text-start boundary, so
+/// caret visibility can never shift, clip, or occlude the placeholder that
+/// follows it in the same row.
+pub(crate) fn placeholder_cursor_anchor(
+    cursor_width: f32,
+    cursor_height: f32,
+    color: u32,
+    visible: bool,
+    id: impl Into<ElementId>,
+) -> Div {
+    let anchor = div().relative().w(px(0.0)).h(px(cursor_height));
+    if !visible {
+        return anchor;
+    }
+    let cursor_bar = div()
+        .absolute()
+        .left(px(-(cursor_width / 2.0)))
+        .top(px(0.0))
+        .w(px(cursor_width))
+        .h(px(cursor_height))
+        .bg(rgb(color));
+    anchor.child(pulse_cursor_bar(cursor_bar, id))
+}
+
 /// A character range to render with a specific text color.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TextHighlightRange {

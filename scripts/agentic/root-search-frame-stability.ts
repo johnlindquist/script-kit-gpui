@@ -1,9 +1,20 @@
 #!/usr/bin/env bun
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { Driver } from "../devtools/driver";
+import {
+  buildArtifactLifecycle,
+  claimOutput,
+  commitFinalReceipt,
+  materializeAtomic,
+  validateArtifact,
+  validateOutputTarget,
+  writeJsonArtifactAtomic,
+  type ArtifactReceipt,
+  type ArtifactSpec,
+} from "./artifact-lifecycle";
 
 type Json = Record<string, any>;
 
@@ -44,6 +55,12 @@ if (!binaryArg || !receiptArg) {
 
 const binary = resolve(repoRoot, binaryArg);
 const receiptPath = resolve(repoRoot, receiptArg);
+const outputPlan = validateOutputTarget({
+  repoRoot,
+  candidate: receiptPath,
+  kind: "receipt",
+  probeId: "root-search-frame-stability",
+});
 const sessionLabel = argValue("--session") ?? "root-search-frame-stability";
 const sessionName = `${sessionLabel}-${process.pid}-${Date.now()}`;
 const query = argValue("--query") ?? "zzqxframeproof";
@@ -238,11 +255,13 @@ async function sampleUntilRootFileSettled(
   throw new Error(`root file search did not settle for ${JSON.stringify(query)}`);
 }
 
+const claim = claimOutput(outputPlan);
 const receipt: Json = {
   schemaVersion: 3,
   gateId: "root-frame-stable",
   metricKind: "semantic_frame_identity",
   status: "fail",
+  behavior: { status: "fail", failure: null },
   query,
   injectForbiddenShift,
   receiptPath,
@@ -252,7 +271,7 @@ const receipt: Json = {
     gitSha: git(["rev-parse", "HEAD"]),
     sourceDirty: git(["status", "--porcelain"]).length > 0,
   },
-  session: { name: sessionName, directory: null },
+  session: { name: sessionName, pid: null },
   samples: [],
 };
 
@@ -285,7 +304,7 @@ try {
       }),
     },
   });
-  receipt.session.directory = driver.sessionDir;
+  receipt.session.pid = driver.pid ?? null;
   await driver.setFilterAndWait(query, { timeoutMs });
 
   const before = (await driver.getState({ timeoutMs })) as Json;
@@ -312,26 +331,150 @@ try {
     rootFileSearch: settled.rootFileSearch,
     mainWindowPreflight: settledFrame,
   };
-  receipt.status = "pass";
+  receipt.behavior.status = "pass";
 } catch (error) {
-  receipt.failure = error instanceof Error ? error.message : String(error);
+  receipt.behavior.failure = error instanceof Error ? error.message : String(error);
 } finally {
-  receipt.cleanup = { attempted: driver !== null, closed: false, error: null };
+  receipt.cleanup = {
+    attempted: driver !== null,
+    hidden: false,
+    hiddenState: null,
+    closed: false,
+    error: null,
+  };
   if (driver) {
     try {
-      await driver.close();
-      receipt.cleanup.closed = true;
+      driver.send({ type: "hide", requestId: `root-frame-cleanup-hide-${Date.now()}` });
+      await driver.waitForState(
+        { windowVisible: false },
+        { timeoutMs, pollIntervalMs: pollMs },
+      );
+      const hiddenState = (await driver.getState({ timeoutMs })) as Json;
+      if (hiddenState.windowVisible !== false) {
+        throw new Error(`cleanup state remained visible: ${JSON.stringify(hiddenState)}`);
+      }
+      receipt.cleanup.hidden = true;
+      receipt.cleanup.hiddenState = hiddenState;
     } catch (error) {
       const cleanupError = error instanceof Error ? error.message : String(error);
       receipt.cleanup.error = cleanupError;
-      receipt.status = "fail";
-      receipt.failure = receipt.failure
-        ? `${receipt.failure}; cleanup: ${cleanupError}`
-        : `cleanup: ${cleanupError}`;
+      receipt.behavior.failure ??= `cleanup: ${cleanupError}`;
+    }
+    try {
+      await driver.close();
+      if (driver.alive) {
+        throw new Error(`owned driver process ${driver.pid ?? "unknown"} survived close`);
+      }
+      receipt.cleanup.closed = true;
+    } catch (error) {
+      const closeError = error instanceof Error ? error.message : String(error);
+      receipt.cleanup.error = receipt.cleanup.error
+        ? `${receipt.cleanup.error}; close: ${closeError}`
+        : `close: ${closeError}`;
+      receipt.behavior.failure ??= `close: ${closeError}`;
     }
   }
-  mkdirSync(dirname(receiptPath), { recursive: true });
-  writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  const correlations = driver?.matchedResponses.map(({ requestId, expectedType }) => ({
+    requestId,
+    expectedType: expectedType ?? "__missing_expected_type__",
+  })) ?? [];
+  const specs: ArtifactSpec[] = [
+    {
+      id: "app-log",
+      sourceName: "app.log",
+      required: true,
+      mediaType: "text/plain",
+      kind: "text",
+      acceptedTextMarkers: ["STARTUP_READY ", "APP_READY|"],
+    },
+    {
+      id: "protocol-responses",
+      sourceName: "protocol-responses.ndjson",
+      required: true,
+      mediaType: "application/x-ndjson",
+      kind: "ndjson",
+      correlations,
+    },
+    {
+      id: "lifecycle",
+      sourceName: "lifecycle.json",
+      required: true,
+      mediaType: "application/json",
+      kind: "json",
+    },
+  ];
+  const artifacts: ArtifactReceipt[] = [];
+  const writersFinalized = receipt.cleanup.closed === true
+    && driver?.alive === false
+    && driver.finalization.processExited === true
+    && driver.finalization.streamsDrained === true
+    && driver.finalization.logWriterClosed === true;
+  const lifecycleProof = {
+    schemaVersion: 1,
+    probeId: "root-search-frame-stability",
+    runId: claim.owner.runId,
+    finalizationKind: "driver-close",
+    hidden: receipt.cleanup.hidden === true,
+    processExited: driver?.finalization.processExited ?? false,
+    streamsDrained: driver?.finalization.streamsDrained ?? false,
+    logWriterClosed: driver?.finalization.logWriterClosed ?? false,
+    aliveAfterClose: driver?.alive ?? false,
+    completedAt: new Date().toISOString(),
+  };
+  try {
+    if (driver && driver.alive === false && driver.finalization.logWriterClosed) {
+      materializeAtomic(claim, {
+        sourceRoot: dirname(driver.logPath),
+        sourceName: basename(driver.logPath),
+        destinationName: "app.log",
+      });
+      materializeAtomic(claim, {
+        sourceRoot: driver.sessionDir,
+        sourceName: "protocol-responses.ndjson",
+        destinationName: "protocol-responses.ndjson",
+      });
+    }
+    writeJsonArtifactAtomic(claim, "lifecycle.json", lifecycleProof);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    receipt.cleanup.error = receipt.cleanup.error
+      ? `${receipt.cleanup.error}; artifacts: ${message}`
+      : `artifacts: ${message}`;
+  }
+  for (const spec of specs) {
+    artifacts.push(validateArtifact(
+      join(claim.artifactsRoot, spec.destinationName ?? spec.sourceName),
+      spec,
+      claim.artifactsRoot,
+    ));
+  }
+  receipt.artifactLifecycle = buildArtifactLifecycle({
+    claim,
+    finalizationKind: "driver-close",
+    writersFinalized,
+    specs,
+    artifacts,
+  });
+  const lifecycleValid = receipt.artifactLifecycle.allRequiredValid === true
+    && receipt.artifactLifecycle.allRecordedPathsReadable === true;
+  receipt.status = receipt.behavior.status === "pass"
+    && receipt.cleanup.hidden === true
+    && lifecycleValid
+    ? "pass"
+    : "error";
+  receipt.failure = [receipt.behavior.failure, receipt.cleanup.error]
+    .filter(Boolean)
+    .join("; ") || null;
+  if (receipt.status !== "pass") {
+    receipt.failurePreservation = {
+      outputRootPreserved: true,
+      sessionRootPreserved: Boolean(driver && existsSync(driver.sessionDir)),
+      stagingPreserved: false,
+      paths: [claim.root, ...(driver && existsSync(driver.sessionDir) ? [driver.sessionDir] : [])],
+      reason: receipt.failure ?? "artifact lifecycle validation failed",
+    };
+  }
+  commitFinalReceipt(claim, receipt, specs, artifacts);
 }
 
 console.log(JSON.stringify(receipt, null, 2));

@@ -68,6 +68,7 @@ mod types;
 pub mod version;
 
 #[allow(unused_imports)]
+pub(crate) use io::malformed_request_error;
 pub use io::{serialize_message, JsonlReader, ParseIssueKind};
 #[allow(unused_imports)]
 pub use message::{capabilities, Message};

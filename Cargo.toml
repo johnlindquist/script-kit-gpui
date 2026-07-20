@@ -85,6 +85,11 @@ name = "export_design_tokens"
 path = "src/bin/export_design_tokens.rs"
 test = false  # Behavior is covered by design_contract lib tests
 
+[[bin]]
+name = "liquid-glass-demo"
+path = "src/bin/liquid_glass_demo.rs"
+test = false  # Standalone visual proof-of-concept, no test surface
+
 [dependencies]
 sk-clipboard = { path = "crates/sk-clipboard" }
 sk-protocol = { path = "crates/sk-protocol" }

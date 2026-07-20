@@ -1683,7 +1683,6 @@ impl ScriptListApp {
                                         .icon(icon)
                                         .selected(is_selected)
                                         .hovered(is_hovered)
-                                        .with_accent_bar(true),
                                 )
                         })
                         .collect()
@@ -1947,7 +1946,7 @@ impl ScriptListApp {
     }
 
     /// `flowUx` automation snapshot for getState (protocol §6).
-    pub(crate) fn flow_ux_automation_snapshot(&self) -> serde_json::Value {
+    pub(crate) fn flow_ux_automation_snapshot(&self, cx: &gpui::App) -> serde_json::Value {
         let (desk_active, selected_flow_id) = match &self.current_view {
             AppView::FlowUxView {
                 filter,
@@ -2001,7 +2000,7 @@ impl ScriptListApp {
                 engine: meta.engine.clone(),
             })
             .collect();
-        crate::flows::automation::flow_ux_state(crate::flows::automation::FlowUxSnapshotInputs {
+        let mut snapshot = crate::flows::automation::flow_ux_state(crate::flows::automation::FlowUxSnapshotInputs {
             active_variant: desk_active.then_some(crate::flows::model::FlowUxVariant::Flash),
             selected_flow_id: selected_flow_id.as_deref(),
             roster: Some((&roster_entry, cwd.as_str())),
@@ -2009,7 +2008,17 @@ impl ScriptListApp {
             manager_visible: false,
             manager_focused_run_id: None,
             sessions,
-        })
+        });
+        let active_transcript = match &self.current_view {
+            AppView::FlowSessionView { session_id } => self
+                .flow_sessions
+                .iter()
+                .find(|(meta, _)| meta.id == *session_id)
+                .map(|(_, entity)| entity.read(cx).transcript_geometry_snapshot()),
+            _ => None,
+        };
+        snapshot["activeTranscript"] = active_transcript.unwrap_or(serde_json::Value::Null);
+        snapshot
     }
 }
 

@@ -7,6 +7,7 @@ use markdown::{
 use crate::{
     highlighter::HighlightTheme,
     text::{
+        MarkdownLinkLabelPolicy,
         document::ParsedDocument,
         node::{
             self, BlockNode, CodeBlock, ImageNode, InlineNode, LinkMark, NodeContext, Paragraph,
@@ -14,6 +15,98 @@ use crate::{
         },
     },
 };
+
+const COMPACT_BARE_URL_MIN_CHARS: usize = 80;
+const COMPACT_LINK_LABEL_MAX_CHARS: usize = 64;
+
+fn compact_bare_http_label(
+    source: &str,
+    position: Option<&markdown::unist::Position>,
+    link: &mdast::Link,
+    policy: MarkdownLinkLabelPolicy,
+) -> Option<(usize, String)> {
+    if policy != MarkdownLinkLabelPolicy::CompactLongBareHttp {
+        return None;
+    }
+
+    let position = position?;
+    let raw = source.get(position.start.offset..position.end.offset)?;
+    let has_http_scheme = raw
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || raw
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+    if !has_http_scheme || raw.chars().count() < COMPACT_BARE_URL_MIN_CHARS {
+        return None;
+    }
+
+    let is_plain_url_child = matches!(
+        link.children.as_slice(),
+        [Node::Text(text)] if text.value == raw || text.value == link.url
+    );
+    if !is_plain_url_child {
+        return None;
+    }
+
+    compact_http_authority_label(raw).map(|label| (position.start.offset, label))
+}
+
+fn compact_http_authority_label(raw: &str) -> Option<String> {
+    let (_, after_scheme) = raw.split_once("://")?;
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    let host_port = authority.rsplit('@').next()?;
+    if host_port.is_empty()
+        || host_port
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace() || ch == '\\')
+    {
+        return None;
+    }
+
+    let host_port = if host_port
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
+    {
+        &host_port[4..]
+    } else {
+        host_port
+    };
+    if host_port.is_empty() {
+        return None;
+    }
+
+    let mut label = host_port.to_string();
+    if authority_end < after_scheme.len() {
+        label.push_str("/…");
+    }
+    if label.chars().count() > COMPACT_LINK_LABEL_MAX_CHARS {
+        label = label
+            .chars()
+            .take(COMPACT_LINK_LABEL_MAX_CHARS - 1)
+            .collect();
+        label.push('…');
+    }
+    Some(label)
+}
+
+fn paragraph_needs_link_separator(paragraph: &Paragraph) -> bool {
+    paragraph
+        .children
+        .iter()
+        .rev()
+        .find_map(|child| child.text.chars().next_back())
+        .is_some_and(|ch| {
+            ch != ' '
+                && (ch.is_whitespace()
+                    || ch.is_alphanumeric()
+                    || ch == '_'
+                    || matches!(ch, ')' | ']' | '}'))
+        })
+}
 
 /// Parse Markdown into a tree of nodes.
 ///
@@ -28,12 +121,12 @@ pub(crate) fn parse(
         .map_err(|e| e.to_string().into())
 }
 
-fn parse_table_row(table: &mut Table, node: &mdast::TableRow, cx: &mut NodeContext) {
+fn parse_table_row(source: &str, table: &mut Table, node: &mdast::TableRow, cx: &mut NodeContext) {
     let mut row = TableRow::default();
     node.children.iter().for_each(|c| {
         match c {
             Node::TableCell(cell) => {
-                parse_table_cell(&mut row, cell, cx);
+                parse_table_cell(source, &mut row, cell, cx);
             }
             _ => {}
         };
@@ -41,10 +134,15 @@ fn parse_table_row(table: &mut Table, node: &mdast::TableRow, cx: &mut NodeConte
     table.children.push(row);
 }
 
-fn parse_table_cell(row: &mut node::TableRow, node: &mdast::TableCell, cx: &mut NodeContext) {
+fn parse_table_cell(
+    source: &str,
+    row: &mut node::TableRow,
+    node: &mdast::TableCell,
+    cx: &mut NodeContext,
+) {
     let mut paragraph = Paragraph::default();
     node.children.iter().for_each(|c| {
-        parse_paragraph(&mut paragraph, c, cx);
+        parse_paragraph(source, &mut paragraph, c, cx);
     });
     let table_cell = node::TableCell {
         children: paragraph,
@@ -53,7 +151,12 @@ fn parse_table_cell(row: &mut node::TableRow, node: &mdast::TableCell, cx: &mut 
     row.children.push(table_cell);
 }
 
-fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeContext) -> String {
+fn parse_paragraph(
+    source: &str,
+    paragraph: &mut Paragraph,
+    node: &mdast::Node,
+    cx: &mut NodeContext,
+) -> String {
     let span = node.position().map(|pos| Span {
         start: cx.offset + pos.start.offset,
         end: cx.offset + pos.end.offset,
@@ -67,7 +170,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
     match node {
         Node::Paragraph(val) => {
             val.children.iter().for_each(|c| {
-                text.push_str(&parse_paragraph(paragraph, c, cx));
+                text.push_str(&parse_paragraph(source, paragraph, c, cx));
             });
         }
         Node::Text(val) => {
@@ -77,7 +180,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
         Node::Emphasis(val) => {
             let mut child_paragraph = Paragraph::default();
             for child in val.children.iter() {
-                text.push_str(&parse_paragraph(&mut child_paragraph, &child, cx));
+                text.push_str(&parse_paragraph(source, &mut child_paragraph, &child, cx));
             }
             paragraph.push(
                 InlineNode::new(&text).marks(vec![(0..text.len(), TextMark::default().italic())]),
@@ -86,7 +189,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
         Node::Strong(val) => {
             let mut child_paragraph = Paragraph::default();
             for child in val.children.iter() {
-                text.push_str(&parse_paragraph(&mut child_paragraph, &child, cx));
+                text.push_str(&parse_paragraph(source, &mut child_paragraph, &child, cx));
             }
             paragraph.push(
                 InlineNode::new(&text).marks(vec![(0..text.len(), TextMark::default().bold())]),
@@ -95,7 +198,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
         Node::Delete(val) => {
             let mut child_paragraph = Paragraph::default();
             for child in val.children.iter() {
-                text.push_str(&parse_paragraph(&mut child_paragraph, &child, cx));
+                text.push_str(&parse_paragraph(source, &mut child_paragraph, &child, cx));
             }
             paragraph.push(
                 InlineNode::new(&text)
@@ -109,34 +212,56 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             );
         }
         Node::Link(val) => {
-            let link_mark = Some(LinkMark {
+            let link_mark = LinkMark {
                 url: val.url.clone().into(),
-                title: val.title.clone().map(|s| s.into()),
+                title: val.title.clone().map(Into::into),
                 ..Default::default()
-            });
+            };
 
-            let mut child_paragraph = Paragraph::default();
-            for child in val.children.iter() {
-                text.push_str(&parse_paragraph(&mut child_paragraph, &child, cx));
-            }
-
-            // FIXME: GPUI InteractiveText does not support inline images yet.
-            // So here we push images to the paragraph directly.
-            for child in child_paragraph.children.iter_mut() {
-                if let Some(image) = child.image.as_mut() {
-                    image.link = link_mark.clone();
+            if let Some((_source_start, label)) = compact_bare_http_label(
+                source,
+                node.position(),
+                val,
+                cx.style.markdown_link_label_policy,
+            ) {
+                if paragraph_needs_link_separator(paragraph) {
+                    paragraph.push_str(" ");
+                    text.push(' ');
                 }
-
-                child.marks.push((
-                    0..child.text.len(),
+                let label_len = label.len();
+                text.push_str(&label);
+                paragraph.push(InlineNode::new(label).marks(vec![(
+                    0..label_len,
                     TextMark {
-                        link: link_mark.clone(),
+                        link: Some(link_mark),
                         ..Default::default()
                     },
-                ));
-            }
+                )]));
+            } else {
+                let link_mark = Some(link_mark);
+                let mut child_paragraph = Paragraph::default();
+                for child in val.children.iter() {
+                    text.push_str(&parse_paragraph(source, &mut child_paragraph, child, cx));
+                }
 
-            paragraph.merge(child_paragraph);
+                // FIXME: GPUI InteractiveText does not support inline images yet.
+                // So here we push images to the paragraph directly.
+                for child in child_paragraph.children.iter_mut() {
+                    if let Some(image) = child.image.as_mut() {
+                        image.link = link_mark.clone();
+                    }
+
+                    child.marks.push((
+                        0..child.text.len(),
+                        TextMark {
+                            link: link_mark.clone(),
+                            ..Default::default()
+                        },
+                    ));
+                }
+
+                paragraph.merge(child_paragraph);
+            }
         }
         Node::Image(raw) => {
             paragraph.push_image(ImageNode {
@@ -195,7 +320,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             let mut child_paragraph = Paragraph::default();
             let mut child_text = String::new();
             for child in link.children.iter() {
-                child_text.push_str(&parse_paragraph(&mut child_paragraph, child, cx));
+                child_text.push_str(&parse_paragraph(source, &mut child_paragraph, child, cx));
             }
 
             let link_mark = LinkMark {
@@ -236,7 +361,7 @@ fn ast_to_document(
     let blocks = root
         .children
         .into_iter()
-        .map(|c| ast_to_node(c, cx, highlight_theme))
+        .map(|c| ast_to_node(source, c, cx, highlight_theme))
         .collect();
     ParsedDocument {
         source: source.to_string().into(),
@@ -254,6 +379,7 @@ fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<
 }
 
 fn ast_to_node(
+    source: &str,
     value: mdast::Node,
     cx: &mut NodeContext,
     highlight_theme: &HighlightTheme,
@@ -263,7 +389,7 @@ fn ast_to_node(
         Node::Paragraph(val) => {
             let mut paragraph = Paragraph::default();
             val.children.iter().for_each(|c| {
-                parse_paragraph(&mut paragraph, c, cx);
+                parse_paragraph(source, &mut paragraph, c, cx);
             });
             paragraph.span = new_span(val.position, cx);
             BlockNode::Paragraph(paragraph)
@@ -272,7 +398,7 @@ fn ast_to_node(
             let children = val
                 .children
                 .into_iter()
-                .map(|c| ast_to_node(c, cx, highlight_theme))
+                .map(|c| ast_to_node(source, c, cx, highlight_theme))
                 .collect();
             BlockNode::Blockquote {
                 children,
@@ -283,7 +409,7 @@ fn ast_to_node(
             let children = list
                 .children
                 .into_iter()
-                .map(|c| ast_to_node(c, cx, highlight_theme))
+                .map(|c| ast_to_node(source, c, cx, highlight_theme))
                 .collect();
             BlockNode::List {
                 ordered: list.ordered,
@@ -295,7 +421,7 @@ fn ast_to_node(
             let children = val
                 .children
                 .into_iter()
-                .map(|c| ast_to_node(c, cx, highlight_theme))
+                .map(|c| ast_to_node(source, c, cx, highlight_theme))
                 .collect();
             BlockNode::ListItem {
                 children,
@@ -317,7 +443,7 @@ fn ast_to_node(
         Node::Heading(val) => {
             let mut paragraph = Paragraph::default();
             val.children.iter().for_each(|c| {
-                parse_paragraph(&mut paragraph, c, cx);
+                parse_paragraph(source, &mut paragraph, c, cx);
             });
 
             BlockNode::Heading {
@@ -366,7 +492,7 @@ fn ast_to_node(
         Node::MdxJsxTextElement(val) => {
             let mut paragraph = Paragraph::default();
             val.children.iter().for_each(|c| {
-                parse_paragraph(&mut paragraph, c, cx);
+                parse_paragraph(source, &mut paragraph, c, cx);
             });
             paragraph.span = new_span(val.position, cx);
             BlockNode::Paragraph(paragraph)
@@ -374,7 +500,7 @@ fn ast_to_node(
         Node::MdxJsxFlowElement(val) => {
             let mut paragraph = Paragraph::default();
             val.children.iter().for_each(|c| {
-                parse_paragraph(&mut paragraph, c, cx);
+                parse_paragraph(source, &mut paragraph, c, cx);
             });
             paragraph.span = new_span(val.position, cx);
             BlockNode::Paragraph(paragraph)
@@ -392,7 +518,7 @@ fn ast_to_node(
                 .collect();
             val.children.iter().for_each(|c| {
                 if let Node::TableRow(row) = c {
-                    parse_table_row(&mut table, row, cx);
+                    parse_table_row(source, &mut table, row, cx);
                 }
             });
             table.span = new_span(val.position, cx);
@@ -411,7 +537,7 @@ fn ast_to_node(
             )]));
 
             def.children.iter().for_each(|c| {
-                parse_paragraph(&mut paragraph, c, cx);
+                parse_paragraph(source, &mut paragraph, c, cx);
             });
             paragraph.span = new_span(def.position, cx);
             BlockNode::Paragraph(paragraph)
@@ -439,5 +565,94 @@ fn ast_to_node(
             }
             BlockNode::Unknown
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_with_policy(source: &str, policy: MarkdownLinkLabelPolicy) -> ParsedDocument {
+        let mut cx = NodeContext {
+            style: crate::text::TextViewStyle::default().markdown_link_label_policy(policy),
+            ..NodeContext::default()
+        };
+        let highlight_theme = HighlightTheme::default_light();
+        parse(source, &mut cx, &highlight_theme).expect("markdown should parse")
+    }
+
+    fn first_paragraph(document: &ParsedDocument) -> &Paragraph {
+        match document.blocks.first() {
+            Some(BlockNode::Paragraph(paragraph)) => paragraph,
+            other => panic!("expected a paragraph, got {other:?}"),
+        }
+    }
+
+    fn visible_text(paragraph: &Paragraph) -> String {
+        paragraph
+            .children
+            .iter()
+            .map(|child| child.text.as_ref())
+            .collect()
+    }
+
+    fn visible_links(paragraph: &Paragraph) -> Vec<(String, String)> {
+        paragraph
+            .children
+            .iter()
+            .flat_map(|child| {
+                child.marks.iter().filter_map(move |(_, mark)| {
+                    mark.link
+                        .as_ref()
+                        .map(|link| (child.text.to_string(), link.url.to_string()))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compact_long_bare_http_link_preserves_source_href_and_separator() {
+        let url = "https://news.google.com/rss/articles/CBMikAFBVV95cUxQbGRpMHZ2OHBuOU0tdVU1ZDFaQ29kd2RUNTZxV0VDWGVDeHBrSmxZaI9LZihWMC14T3pwcUt1RHFfUFJ6bDJYMUgyYjFCd293dVlnUndVLXZRS2VkR1AtUVhyZzVraVczVHRNMmNzWGdlNHBO?oc=5";
+        let input = format!("Reuters\n{url}");
+
+        let document = parse_with_policy(&input, MarkdownLinkLabelPolicy::CompactLongBareHttp);
+        let paragraph = first_paragraph(&document);
+
+        assert_eq!(document.source.as_ref(), input);
+        assert_eq!(visible_text(paragraph), "Reuters\n news.google.com/…");
+        assert_eq!(
+            visible_links(paragraph),
+            vec![("news.google.com/…".to_string(), url.to_string())]
+        );
+    }
+
+    #[test]
+    fn compact_policy_defaults_to_preserve() {
+        let url = "https://example.com/a/very/long/path/that/keeps/going/through/many/segments/and/includes?a=long-query-value&b=another";
+        let document = parse_with_policy(url, MarkdownLinkLabelPolicy::Preserve);
+        let paragraph = first_paragraph(&document);
+
+        assert_eq!(visible_text(paragraph), url);
+        assert_eq!(
+            visible_links(paragraph),
+            vec![(url.to_string(), url.to_string())]
+        );
+    }
+
+    #[test]
+    fn compact_policy_preserves_explicit_links_autolinks_and_code() {
+        let url = "https://example.com/a/very/long/path/that/keeps/going/through/many/segments/and/includes?a=long-query-value&b=another";
+        let short_url = "https://example.com/short";
+        let input = format!("[Publisher]({url}) <{url}> `{url}` {short_url}");
+        let document = parse_with_policy(&input, MarkdownLinkLabelPolicy::CompactLongBareHttp);
+        let paragraph = first_paragraph(&document);
+        let links = visible_links(paragraph);
+
+        assert!(visible_text(paragraph).contains("Publisher"));
+        assert!(visible_text(paragraph).contains(url));
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0], ("Publisher".to_string(), url.to_string()));
+        assert_eq!(links[1], (url.to_string(), url.to_string()));
+        assert_eq!(links[2], (short_url.to_string(), short_url.to_string()));
     }
 }

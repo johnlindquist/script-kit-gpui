@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "chaos-32-clipboard-sediment-v1",
+  "limits": {
+    "maxTextBytes": 100000,
+    "rapidEntryCount": 64,
+    "expectedHistoryRows": 80
+  },
+  "tokens": {
+    "keepExplicit": "NN32-KEEP-EXPLICIT-RAW-PRIVATE",
+    "plainSearch": "NN32-FULLTEXT-LIGHTHOUSE",
+    "caseSearch": "NN32-MiXeD-CaSe",
+    "ocrSearch": "NN32-OCR-LIGHTHOUSE",
+    "dedupe": "NN32-DEDUPE-HOT-VALUE",
+    "oversizeRejected": "NN32-OVERSIZE-MUST-NOT-EXIST",
+    "concealedRejected": "NN32-CONCEALED-MUST-NOT-EXIST",
+    "passwordRejected": "ghp_NN32PASSWORDTOKEN12345678901234567890",
+    "passwordSourceRejected": "NN32-PASSWORD-SOURCE-MUST-NOT-EXIST",
+    "urlSediment": "https://example.com/nn32-sediment-fixture",
+    "nonUrlSediment": "NN32-NON-URL-RECOPY-SEDIMENT"
+  },
+  "hostileText": [
+    {
+      "id": "hostile-zalgo",
+      "label": "zalgo-combining",
+      "text": "NN32-ZALGO-z̴̨̀á̀l̀g̀o-́́́́́́́́́́"
+    },
+    {
+      "id": "hostile-rtl",
+      "label": "rtl-bidi",
+      "text": "NN32-RTL-‮reversed‬ العربية"
+    },
+    {
+      "id": "hostile-zwj",
+      "label": "zwj-emoji",
+      "text": "NN32-ZWJ-👩‍👩‍👧‍👦-👨‍👩‍👧‍👦"
+    },
+    {
+      "id": "hostile-control",
+      "label": "ansi-control",
+      "text": "NN32-CONTROL-\u001b[31mred\u001b[0m-\u0001\u0002\u0003-\u0007"
+    },
+    {
+      "id": "hostile-nul",
+      "label": "embedded-nul",
+      "text": "NN32-NUL-before\u0000after"
+    },
+    {
+      "id": "hostile-markup",
+      "label": "markup-literal",
+      "text": "NN32-MARKUP-<script>alert('clip')</script><img src=x onerror=y>"
+    }
+  ],
+  "generatedText": [
+    {
+      "id": "hostile-limit",
+      "label": "exact-100kb-boundary",
+      "prefix": "NN32-LIMIT-",
+      "fill": "H",
+      "byteLength": 100000
+    }
+  ],
+  "binary": [
+    {
+      "id": "image-valid",
+      "label": "valid-1x1-png",
+      "blobKey": "nn32-valid-png",
+      "pngBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=",
+      "width": 1,
+      "height": 1
+    },
+    {
+      "id": "image-corrupt",
+      "label": "corrupt-png-bytes",
+      "blobKey": "nn32-corrupt-png",
+      "pngBase64": "bm90LWEtcG5nLW5uMzI=",
+      "width": 13,
+      "height": 7
+    },
+    {
+      "id": "image-missing",
+      "label": "missing-blob-file",
+      "blobKey": "nn32-missing-png",
+      "pngBase64": null,
+      "width": 9,
+      "height": 9
+    }
+  ],
+  "blockedCaptureCases": [
+    {
+      "rowId": "capture-rejection",
+      "case": "concealed-pasteboard-type",
+      "sourceContract": "org.nspasteboard.ConcealedType is rejected before payload read"
+    },
+    {
+      "rowId": "capture-rejection",
+      "case": "password-manager-source",
+      "sourceContract": "password-manager bundle prefixes are rejected before payload read"
+    },
+    {
+      "rowId": "capture-rejection",
+      "case": "secret-content-pattern",
+      "sourceContract": "AWS/GitHub/PEM/JWT-shaped values are rejected before add_entry"
+    },
+    {
+      "rowId": "auto-sediment",
+      "case": "url-first-copy",
+      "sourceContract": "single-token URL auto-keeps once per local day"
+    },
+    {
+      "rowId": "auto-sediment",
+      "case": "non-url-recopy",
+      "sourceContract": "non-URL promotes when copy_count >= 2"
+    }
+  ]
+}

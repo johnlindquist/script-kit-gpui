@@ -4,7 +4,9 @@ use std::sync::Mutex;
 use gpui::{px, AnyView, App, AppContext as _, Pixels, SharedString, WeakEntity, Window};
 use gpui_component::button::ButtonVariant;
 
-use super::window::{open_confirm_popup_window, ConfirmPopupParentWindow, ConfirmWindowOptions};
+use super::window::{
+    open_confirm_popup_window, ConfirmPopupParentWindow, ConfirmWindowOptions, ParentDialogResult,
+};
 use crate::components::confirm_modal_shell::PARENT_MODAL_WIDTH_PX;
 
 type ConfirmCallback = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -40,6 +42,29 @@ pub(crate) struct ParentConfirmOptions {
     pub cancel_text: SharedString,
     pub confirm_variant: ButtonVariant,
     pub width: Pixels,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ParentActionDialogOptions {
+    pub title: SharedString,
+    pub body: SharedString,
+    pub primary_text: SharedString,
+    pub secondary_text: Option<SharedString>,
+    pub dismiss_text: SharedString,
+    pub width: Pixels,
+}
+
+impl Default for ParentActionDialogOptions {
+    fn default() -> Self {
+        Self {
+            title: "Action required".into(),
+            body: "".into(),
+            primary_text: "Continue".into(),
+            secondary_text: None,
+            dismiss_text: "Back".into(),
+            width: px(PARENT_MODAL_WIDTH_PX),
+        }
+    }
 }
 
 impl std::fmt::Debug for ParentConfirmOptions {
@@ -201,8 +226,10 @@ pub(crate) fn open_parent_confirm_dialog_for_automation_parent(
         options,
         Some(parent_automation_id.into()),
         || true,
-        on_confirm,
-        on_cancel,
+        Rc::new(on_confirm),
+        None,
+        None,
+        Rc::new(on_cancel),
     );
 }
 
@@ -240,8 +267,40 @@ pub(crate) fn open_parent_confirm_dialog_with_lifecycle(
         options,
         None,
         keep_open_while,
-        on_confirm,
-        on_cancel,
+        Rc::new(on_confirm),
+        None,
+        None,
+        Rc::new(on_cancel),
+    );
+}
+
+pub(crate) fn open_parent_action_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    options: ParentActionDialogOptions,
+    on_primary: impl Fn(&mut Window, &mut App) + 'static,
+    on_secondary: impl Fn(&mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let secondary_text = options.secondary_text;
+    let popup = ParentConfirmOptions {
+        title: options.title,
+        body: options.body,
+        confirm_text: options.primary_text,
+        cancel_text: options.dismiss_text,
+        confirm_variant: ButtonVariant::Primary,
+        width: options.width,
+    };
+    open_parent_confirm_dialog_with_lifecycle_and_parent(
+        window,
+        cx,
+        popup,
+        None,
+        || true,
+        Rc::new(on_primary),
+        secondary_text.clone(),
+        secondary_text.map(|_| Rc::new(on_secondary) as ConfirmCallback),
+        Rc::new(on_dismiss),
     );
 }
 
@@ -251,8 +310,10 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
     options: ParentConfirmOptions,
     explicit_parent_automation_id: Option<String>,
     keep_open_while: impl Fn() -> bool + 'static,
-    on_confirm: impl Fn(&mut Window, &mut App) + 'static,
-    on_cancel: impl Fn(&mut Window, &mut App) + 'static,
+    on_confirm: ConfirmCallback,
+    secondary_text: Option<SharedString>,
+    on_secondary: Option<ConfirmCallback>,
+    on_cancel: ConfirmCallback,
 ) {
     let has_lifecycle_predicate = true;
     tracing::info!(
@@ -273,17 +334,15 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
     window.activate_window();
 
     let keep_open_while: Rc<dyn Fn() -> bool> = Rc::new(keep_open_while);
-    let on_confirm: ConfirmCallback = Rc::new(on_confirm);
-    let on_cancel: ConfirmCallback = Rc::new(on_cancel);
-
     let parent_bounds = window.bounds();
     let display_id = window.display(cx).map(|d| d.id());
     let parent_window_handle = window.window_handle();
 
-    let (result_tx, result_rx) = async_channel::bounded::<bool>(1);
+    let (result_tx, result_rx) = async_channel::bounded::<ParentDialogResult>(1);
 
     let on_confirm_for_task = on_confirm.clone();
     let on_cancel_for_task = on_cancel.clone();
+    let on_secondary_for_task = on_secondary.clone();
 
     tracing::info!(
         target: "script_kit::confirm",
@@ -298,12 +357,15 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
             "Result task: waiting for confirm popup result..."
         );
 
-        let confirmed = result_rx.recv().await.unwrap_or(false);
+        let result = result_rx
+            .recv()
+            .await
+            .unwrap_or(ParentDialogResult::Dismiss);
 
         tracing::info!(
             target: "script_kit::confirm",
             event = "parent_confirm_result_received",
-            confirmed,
+            result = ?result,
             "Result task: received result from confirm popup"
         );
 
@@ -311,16 +373,23 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
             tracing::info!(
                 target: "script_kit::confirm",
                 event = "parent_confirm_activating_parent",
-                confirmed,
+                result = ?result,
                 "Result task: re-activating parent window and calling callback"
             );
 
             parent_window.activate_window();
 
-            if confirmed {
-                on_confirm_for_task(parent_window, cx);
-            } else {
-                on_cancel_for_task(parent_window, cx);
+            match result {
+                ParentDialogResult::Primary => on_confirm_for_task(parent_window, cx),
+                ParentDialogResult::Secondary => {
+                    if let Some(callback) = on_secondary_for_task {
+                        callback(parent_window, cx);
+                    } else {
+                        on_cancel_for_task(parent_window, cx);
+                    }
+                }
+                ParentDialogResult::Dismiss => on_cancel_for_task(parent_window, cx),
+                ParentDialogResult::ProgrammaticClose => {}
             }
         });
 
@@ -328,7 +397,7 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
             tracing::error!(
                 target: "script_kit::confirm",
                 event = "parent_confirm_update_window_failed",
-                confirmed,
+                result = ?result,
                 error = ?error,
                 "Result task: failed to update parent window"
             );
@@ -341,6 +410,7 @@ fn open_parent_confirm_dialog_with_lifecycle_and_parent(
         body: options.body,
         confirm_text: options.confirm_text,
         cancel_text: options.cancel_text,
+        secondary_text,
         confirm_variant: options.confirm_variant,
         width: options.width,
     };

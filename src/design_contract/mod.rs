@@ -4453,7 +4453,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
             TokenStage::Resolved,
             Some("--sk-arg-input-caret-height"),
             TokenValue::Length {
-                value: arg_caret_height as f64,
+                value: arg_caret_height,
             },
             None,
             false,

@@ -677,6 +677,19 @@ pub enum ExternalCommand {
         #[serde(default, rename = "requestId")]
         request_id: Option<ExternalCommandRequestId>,
     },
+    /// Inject a synthetic clipboard capture without reading NSPasteboard.
+    /// Large text is supplied by `textFile` under the active sandbox SK_PATH.
+    InjectClipboardCaptureFixture {
+        payload: crate::clipboard_history::ClipboardCaptureFixturePayload,
+        #[serde(default, rename = "sourceBundleId")]
+        source_bundle_id: Option<String>,
+        #[serde(default, rename = "concealedTypes")]
+        concealed_types: Vec<String>,
+        #[serde(rename = "changeGeneration")]
+        change_generation: u64,
+        #[serde(default, rename = "requestId")]
+        request_id: Option<ExternalCommandRequestId>,
+    },
     /// Invoke the Agent Chat composer's `paste_text_from_clipboard` handler directly
     /// on the active `AppView::AgentChatView`, bypassing the OS Cmd+V heuristic
     /// (which routes pastes to the frontmost app — during automation runs
@@ -818,6 +831,7 @@ impl ExternalCommand {
             | Self::ShowShortcutRecorder { request_id, .. }
             | Self::ExecuteFallback { request_id, .. }
             | Self::TriggerAction { request_id, .. }
+            | Self::InjectClipboardCaptureFixture { request_id, .. }
             | Self::PushDictationResult { request_id, .. }
             | Self::OpenDictationOverlayFixture { request_id, .. }
             | Self::GetConfigFingerprint { request_id, .. }
@@ -879,6 +893,7 @@ impl ExternalCommand {
             Self::ShowShortcutRecorder { .. } => "showShortcutRecorder",
             Self::ExecuteFallback { .. } => "executeFallback",
             Self::TriggerAction { .. } => "triggerAction",
+            Self::InjectClipboardCaptureFixture { .. } => "injectClipboardCaptureFixture",
             Self::PasteClipboardIntoAgentChat { .. } => "pasteClipboardIntoAgentChat",
             Self::PushDictationResult { .. } => "pushDictationResult",
             Self::OpenDictationOverlayFixture { .. } => "openDictationOverlayFixture",
@@ -932,6 +947,7 @@ pub const EXTERNAL_COMMAND_VERBS: &[&str] = &[
     "showShortcutRecorder",
     "executeFallback",
     "triggerAction",
+    "injectClipboardCaptureFixture",
     "pasteClipboardIntoAgentChat",
     "pushDictationResult",
     "openDictationOverlayFixture",
@@ -1532,6 +1548,15 @@ mod tests {
                 host: None,
                 request_id: None,
             },
+            ExternalCommand::InjectClipboardCaptureFixture {
+                payload: crate::clipboard_history::ClipboardCaptureFixturePayload::Text {
+                    text: String::new(),
+                },
+                source_bundle_id: None,
+                concealed_types: Vec::new(),
+                change_generation: 0,
+                request_id: None,
+            },
             ExternalCommand::PasteClipboardIntoAgentChat { request_id: None },
             ExternalCommand::PushDictationResult {
                 transcript: String::new(),
@@ -1571,6 +1596,31 @@ mod tests {
             variants.len(),
             "sample list in this test must cover every ExternalCommand verb"
         );
+    }
+
+    #[test]
+    fn inject_clipboard_capture_fixture_deserializes_redacted_metadata_and_file_payload() {
+        let command: ExternalCommand = serde_json::from_str(
+            r#"{"type":"injectClipboardCaptureFixture","payload":{"type":"textFile","path":"/tmp/sandbox/.scriptkit/devtools-fixtures/oversize.txt"},"sourceBundleId":"com.apple.TextEdit","concealedTypes":["org.nspasteboard.ConcealedType"],"changeGeneration":42,"requestId":"clip-fixture-1"}"#,
+        )
+        .expect("clipboard fixture command parses");
+
+        match command {
+            ExternalCommand::InjectClipboardCaptureFixture {
+                payload: crate::clipboard_history::ClipboardCaptureFixturePayload::TextFile { path },
+                source_bundle_id,
+                concealed_types,
+                change_generation,
+                request_id,
+            } => {
+                assert!(path.ends_with("oversize.txt"));
+                assert_eq!(source_bundle_id.as_deref(), Some("com.apple.TextEdit"));
+                assert_eq!(concealed_types, ["org.nspasteboard.ConcealedType"]);
+                assert_eq!(change_generation, 42);
+                assert_eq!(request_id.as_deref(), Some("clip-fixture-1"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

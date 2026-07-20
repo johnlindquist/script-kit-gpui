@@ -53,13 +53,26 @@ impl AgentChatUiVariant {
     pub(crate) fn menu_name(self) -> &'static str {
         match self {
             Self::Standard => "Agent Chat",
-            Self::UserBold => "Agent Chat - Bold User",
-            Self::RoleSplit => "Agent Chat - Left/Right",
-            Self::BottomDock => "Agent Chat - Bottom Input",
-            Self::DenseLog => "Agent Chat - Dense Log",
-            Self::Sidecar => "Agent Chat - Sidecar",
-            Self::FocusedTextMini => "Agent Chat - Focused Text",
+            Self::UserBold => "Agent Chat: Bold User Messages",
+            Self::RoleSplit => "Agent Chat: Split Roles",
+            Self::BottomDock => "Agent Chat: Bottom Composer",
+            Self::DenseLog => "Agent Chat: Compact Transcript",
+            Self::Sidecar => "Agent Chat: State Sidecar",
+            Self::FocusedTextMini => "Agent Chat: Focused Text Editor",
             Self::QuickAi => "Quick AI",
+        }
+    }
+
+    pub(crate) fn menu_icon(self) -> &'static str {
+        match self {
+            Self::Standard => "bot",
+            Self::UserBold => "text-cursor-input",
+            Self::RoleSplit => "layout-grid",
+            Self::BottomDock => "monitor-down",
+            Self::DenseLog => "scroll-text",
+            Self::Sidecar => "app-window",
+            Self::FocusedTextMini => "text-cursor-input",
+            Self::QuickAi => "bot",
         }
     }
 

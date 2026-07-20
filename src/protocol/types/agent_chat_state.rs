@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the Agent Chat state response envelope.
-pub const AGENT_CHAT_STATE_SCHEMA_VERSION: u32 = 4;
+pub const AGENT_CHAT_STATE_SCHEMA_VERSION: u32 = 5;
 
 /// Resolved automation target echoed back in Agent Chat state/probe responses.
 ///
@@ -192,6 +192,11 @@ pub struct AgentChatTranscriptScrollMetrics {
     pub thumb_bottom_px: f32,
     pub thumb_position_ratio: f32,
     pub measurement_source: String,
+    pub follow_tail: bool,
+    pub manual_scroll: bool,
+    pub pending_indicator_count: usize,
+    pub streaming_copy_available: bool,
+    pub row_semantic_ids: Vec<String>,
 }
 
 /// Runtime scroll metrics for the multiline Agent Chat composer input,
@@ -830,6 +835,11 @@ mod tests {
                 thumb_bottom_px: 312.5,
                 thumb_position_ratio: 0.5,
                 measurement_source: "listState".to_string(),
+                follow_tail: false,
+                manual_scroll: true,
+                pending_indicator_count: 0,
+                streaming_copy_available: false,
+                row_semantic_ids: vec!["agent-chat-transcript-row-user-1".to_string()],
             }),
             ..Default::default()
         };

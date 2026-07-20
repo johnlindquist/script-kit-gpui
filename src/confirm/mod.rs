@@ -29,9 +29,9 @@ mod window;
 pub(crate) use crate::components::confirm_modal_shell::PARENT_MODAL_WIDTH_PX;
 #[allow(unused_imports)]
 pub(crate) use parent_dialog::{
-    confirm_with_parent_dialog, open_parent_confirm_dialog,
+    confirm_with_parent_dialog, open_parent_action_dialog, open_parent_confirm_dialog,
     open_parent_confirm_dialog_for_automation_parent, open_parent_confirm_dialog_for_entity,
-    open_parent_confirm_dialog_with_lifecycle, ParentConfirmOptions,
+    open_parent_confirm_dialog_with_lifecycle, ParentActionDialogOptions, ParentConfirmOptions,
 };
 // Design-contract resolvers shared by the in-window confirm renderer and the
 // token exporter (src/design_contract).
@@ -42,6 +42,10 @@ pub(crate) use parent_dialog::{
     CONFIRM_PROMPT_BODY_MAX_WIDTH_PX, CONFIRM_PROMPT_TITLE_FONT_SIZE_PX,
 };
 
+#[allow(unused_imports)]
+pub(crate) use window::close_confirm_window;
+#[allow(unused_imports)]
+pub(crate) use window::close_parent_action_dialog_programmatically;
 #[allow(unused_imports)]
 pub(crate) use window::consume_main_window_key_while_confirm_open;
 #[allow(unused_imports)]

@@ -99,7 +99,45 @@ fn test_get_builtin_entries_all_enabled() {
     assert!(ai_chat.keywords.contains(&"claude".to_string()));
     assert!(ai_chat.keywords.contains(&"gpt".to_string()));
 
-    for variant in crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::EXPERIMENTS {
+    use crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant;
+    for (variant, expected_id, expected_name, expected_icon) in [
+        (
+            AgentChatUiVariant::UserBold,
+            "builtin/ai-chat/user-bold",
+            "Agent Chat: Bold User Messages",
+            "text-cursor-input",
+        ),
+        (
+            AgentChatUiVariant::RoleSplit,
+            "builtin/ai-chat/role-split",
+            "Agent Chat: Split Roles",
+            "layout-grid",
+        ),
+        (
+            AgentChatUiVariant::BottomDock,
+            "builtin/ai-chat/bottom-dock",
+            "Agent Chat: Bottom Composer",
+            "monitor-down",
+        ),
+        (
+            AgentChatUiVariant::DenseLog,
+            "builtin/ai-chat/dense-log",
+            "Agent Chat: Compact Transcript",
+            "scroll-text",
+        ),
+        (
+            AgentChatUiVariant::Sidecar,
+            "builtin/ai-chat/sidecar",
+            "Agent Chat: State Sidecar",
+            "app-window",
+        ),
+        (
+            AgentChatUiVariant::FocusedTextMini,
+            "builtin/ai-chat/focused-text-mini",
+            "Agent Chat: Focused Text Editor",
+            "text-cursor-input",
+        ),
+    ] {
         let entry = entries.iter().find(|entry| entry.id == variant.menu_id());
         assert!(
             entry.is_some(),
@@ -107,7 +145,12 @@ fn test_get_builtin_entries_all_enabled() {
             variant.menu_id()
         );
         let entry = entry.unwrap();
-        assert_eq!(entry.name, variant.menu_name());
+        assert_eq!(variant.menu_id(), expected_id);
+        assert_eq!(variant.menu_name(), expected_name);
+        assert_eq!(variant.menu_icon(), expected_icon);
+        assert_eq!(entry.id, expected_id);
+        assert_eq!(entry.name, expected_name);
+        assert_eq!(entry.icon.as_deref(), Some(expected_icon));
         assert_eq!(entry.feature, BuiltInFeature::AiChatVariant(variant));
     }
 
@@ -886,7 +929,7 @@ fn agent_chat_route_labels_name_agent_chat_not_generic_ai() {
     for (id, expected_name, expected_action) in [
         (
             "builtin/send-screen-to-ai",
-            "Send Screen to Agent Chat",
+            "Send Full Screen to Agent Chat",
             "Send Screen to Agent Chat",
         ),
         (
@@ -896,12 +939,12 @@ fn agent_chat_route_labels_name_agent_chat_not_generic_ai() {
         ),
         (
             "builtin/send-selected-text-to-ai",
-            "Send Selected Text to Agent Chat",
+            "Send Selection to Agent Chat",
             "Send Selection to Agent Chat",
         ),
         (
             "builtin/send-browser-tab-to-ai",
-            "Send Focused Browser Tab to Agent Chat",
+            "Send Current Browser Tab to Agent Chat",
             "Send Tab to Agent Chat",
         ),
         (

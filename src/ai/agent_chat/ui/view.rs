@@ -21,7 +21,7 @@ use gpui_component::tooltip::Tooltip;
 use crate::ai::agent_chat::content::{ContentBlock, TextContent};
 use crate::ai::agent_chat::events::{AgentChatEvent, AgentChatEventRx};
 use crate::components::text_input::{
-    pulse_cursor_bar, render_text_input_cursor_selection, TextHighlightRange, TextInlinePillRange,
+    render_text_input_cursor_selection, TextHighlightRange, TextInlinePillRange,
     TextInputRenderConfig, TextSelection,
 };
 use crate::theme::{self, AppChromeColors, PromptColors};
@@ -605,6 +605,14 @@ impl AgentChatComposerTextStyle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PermissionPreviewChrome {
+    badge: crate::theme::SemanticChipColors,
+    accent_rgba: u32,
+    title_text_rgba: u32,
+    subject_text_rgba: u32,
+}
+
 /// GPUI view entity wrapping an `AgentChatThread` for the Tab AI surface.
 pub(crate) struct AgentChatView {
     /// The Agent Chat session — either a live thread or inline setup state.
@@ -789,6 +797,27 @@ pub(crate) struct AgentChatTestProbe {
 }
 
 use crate::protocol::AGENT_CHAT_TEST_PROBE_MAX_EVENTS;
+
+pub(crate) const AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID: &str = "agent_chat-callout-sign-in";
+pub(crate) const AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID: &str =
+    "agent_chat-callout-switch-account";
+pub(crate) const AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID: &str = "agent_chat-callout-copy-error";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentChatCalloutRenderModel {
+    severity: AgentChatCalloutSeverity,
+    title: SharedString,
+    detail: SharedString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentChatSpineProfileAcceptanceEffect {
+    segment_index: usize,
+    segment_byte_range: std::ops::Range<usize>,
+    profile_id: String,
+    replacement: &'static str,
+    trailing_space: bool,
+}
 
 impl AgentChatView {
     pub(crate) fn with_ui_variant(mut self, ui_variant: AgentChatUiVariant) -> Self {
@@ -1775,6 +1804,11 @@ impl AgentChatView {
                 });
             }
             AgentChatThreadStatus::Idle | AgentChatThreadStatus::Error => {
+                if let Some(retry) =
+                    Self::retry_footer_button(thread.status, thread.active_callout())
+                {
+                    buttons.push(retry);
+                }
                 let input = thread.input.text();
                 let raw_empty = input.is_empty();
                 let blank = input.trim().is_empty();
@@ -1820,6 +1854,28 @@ impl AgentChatView {
         });
 
         buttons
+    }
+
+    fn retryable_callout_active(
+        status: AgentChatThreadStatus,
+        callout: Option<&super::thread::AgentChatCallout>,
+    ) -> bool {
+        matches!(status, AgentChatThreadStatus::Error)
+            && callout.is_some_and(|callout| callout.can_retry)
+    }
+
+    fn retry_footer_button(
+        status: AgentChatThreadStatus,
+        callout: Option<&super::thread::AgentChatCallout>,
+    ) -> Option<AgentChatFooterButtonSpec> {
+        Self::retryable_callout_active(status, callout).then_some(AgentChatFooterButtonSpec {
+            action: crate::footer_popup::FooterAction::Retry,
+            key: "⌘⇧R",
+            label: "Retry",
+            selected: false,
+            enabled: true,
+            disabled_reason: None,
+        })
     }
 
     fn focused_text_visible_footer_buttons(
@@ -5949,11 +6005,13 @@ impl AgentChatView {
     }
 
     pub(crate) fn new(thread: Entity<AgentChatThread>, cx: &mut Context<Self>) -> Self {
-        // Preflight the Agent Chat session so the agent's advertised model list lands
-        // in `thread.available_models` before the user opens the Change Model
-        // picker. Fire-and-forget; `apply_event` handles the resulting
-        // `ModelsAvailable` and `SetupRequired` events.
-        thread.update(cx, |thread, cx| thread.refresh_models(cx));
+        // Preflight only when launch did not already provide a model list. Quick AI
+        // launches with a pinned model and auto-submits immediately; an unnecessary
+        // refresh can queue ahead of that turn and make the following set_model RPC
+        // hit its timeout while dynamic model discovery is still running.
+        if thread.read(cx).available_models().is_empty() {
+            thread.update(cx, |thread, cx| thread.refresh_models(cx));
+        }
 
         // Auto-scroll when thread state changes (new messages, streaming updates).
         let mut thread_observers = std::collections::HashMap::new();
@@ -7552,7 +7610,9 @@ impl AgentChatView {
     }
 
     pub(crate) fn open_profile_trigger_picker(&mut self, cx: &mut Context<Self>) {
-        self.open_picker_trigger(PROFILE_TRIGGER_STR, cx);
+        let current = self.live_thread().read(cx).input.text().to_string();
+        let input = Self::profile_spine_trigger_input(&current);
+        self.open_picker_trigger(&input, cx);
     }
 
     pub(crate) fn refresh_agent_chat_spine_from_composer(&mut self, cx: &mut Context<Self>) {
@@ -8118,12 +8178,74 @@ impl AgentChatView {
         self.apply_agent_chat_spine_action(row.action, window, cx)
     }
 
+    fn profile_spine_acceptance_effect(
+        action: &SpineListAction,
+    ) -> Option<AgentChatSpineProfileAcceptanceEffect> {
+        let SpineListAction::ResolveSegment {
+            segment_index,
+            segment_byte_range,
+            resolution_id,
+            resolution_source,
+            ..
+        } = action
+        else {
+            return None;
+        };
+        if resolution_source.as_ref() != "profile" {
+            return None;
+        }
+        Some(AgentChatSpineProfileAcceptanceEffect {
+            segment_index: *segment_index,
+            segment_byte_range: segment_byte_range.clone(),
+            profile_id: resolution_id.to_string(),
+            replacement: "",
+            trailing_space: false,
+        })
+    }
+
+    fn profile_spine_trigger_input(current: &str) -> String {
+        if current.is_empty() {
+            PROFILE_TRIGGER_STR.to_string()
+        } else {
+            format!("{current} {PROFILE_TRIGGER_STR}")
+        }
+    }
+
+    fn profile_spine_acceptance_range(
+        current: &str,
+        mut segment_byte_range: std::ops::Range<usize>,
+    ) -> std::ops::Range<usize> {
+        if segment_byte_range.start > 0
+            && current.as_bytes().get(segment_byte_range.start - 1) == Some(&b' ')
+        {
+            segment_byte_range.start -= 1;
+        }
+        segment_byte_range
+    }
+
     fn apply_agent_chat_spine_action(
         &mut self,
         action: SpineListAction,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(effect) = Self::profile_spine_acceptance_effect(&action) {
+            let current = self.live_thread().read(cx).input.text().to_string();
+            let acceptance_range =
+                Self::profile_spine_acceptance_range(&current, effect.segment_byte_range);
+            let accepted = self.replace_agent_chat_spine_segment(
+                effect.segment_index,
+                acceptance_range,
+                effect.replacement,
+                effect.trailing_space,
+                cx,
+            );
+            if accepted {
+                self.select_profile_from_popup(&effect.profile_id, cx);
+            }
+            return accepted;
+        }
+
         match action {
             SpineListAction::OpenFileSearchPortal {
                 segment_byte_range,
@@ -8324,7 +8446,11 @@ impl AgentChatView {
         let Some(segment) = self.composer_spine.input.parse.segments.get(segment_index) else {
             return false;
         };
-        if segment.byte_range != segment_byte_range {
+        let includes_leading_separator = replacement.is_empty()
+            && segment_byte_range.end == segment.byte_range.end
+            && segment_byte_range.start.checked_add(1) == Some(segment.byte_range.start)
+            && current.as_bytes().get(segment_byte_range.start) == Some(&b' ');
+        if segment.byte_range != segment_byte_range && !includes_leading_separator {
             return false;
         }
 
@@ -8851,21 +8977,14 @@ impl AgentChatView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .when(cursor_visible, |d| {
-                        d.child(pulse_cursor_bar(
-                            div()
-                                .w(px(crate::panel::CURSOR_WIDTH))
-                                .h(px(crate::panel::CURSOR_HEIGHT_LG))
-                                .bg(rgb(theme.colors.text.primary)),
-                            "agent-chat-input-cursor-pulse",
-                        ))
-                    })
-                    .child(
-                        div()
-                            .ml(px(-crate::panel::CURSOR_WIDTH))
-                            .text_color(placeholder_text)
-                            .child(placeholder_label),
-                    )
+                    .child(crate::components::text_input::placeholder_cursor_anchor(
+                        crate::panel::CURSOR_WIDTH,
+                        crate::panel::CURSOR_HEIGHT_LG,
+                        theme.colors.text.primary,
+                        cursor_visible,
+                        "agent-chat-input-cursor-pulse",
+                    ))
+                    .child(div().text_color(placeholder_text).child(placeholder_label))
                     .into_any_element()
             } else {
                 render_text_input_cursor_selection(TextInputRenderConfig {
@@ -10314,121 +10433,148 @@ impl AgentChatView {
         }
     }
 
-    fn render_active_callout(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (callout, selected_model_id) = {
+    pub(crate) fn active_callout_actions(&self, cx: &App) -> Vec<crate::actions::Action> {
+        let thread = self.live_thread().read(cx);
+        let Some(callout) = thread.active_callout() else {
+            return Vec::new();
+        };
+        Self::active_callout_action_specs(callout)
+    }
+
+    fn active_callout_action_specs(
+        callout: &super::thread::AgentChatCallout,
+    ) -> Vec<crate::actions::Action> {
+        use crate::actions::{Action, ActionCategory};
+        use crate::designs::icon_variations::IconName;
+
+        let mut actions = Vec::new();
+        if callout.auth_recovery.is_some() {
+            actions.extend([
+                Action::new(
+                    AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID,
+                    "Sign in again",
+                    Some("Repair the provider sign-in for this failed turn".to_string()),
+                    ActionCategory::ScriptContext,
+                )
+                .with_icon(IconName::Settings)
+                .with_section("Recovery"),
+                Action::new(
+                    AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID,
+                    "Switch account",
+                    Some("Choose a different provider account for this failed turn".to_string()),
+                    ActionCategory::ScriptContext,
+                )
+                .with_icon(IconName::Settings)
+                .with_section("Recovery"),
+            ]);
+        }
+        if callout.raw_detail.is_some() {
+            actions.push(
+                Action::new(
+                    AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID,
+                    "Copy Error",
+                    Some("Copy the original provider error details".to_string()),
+                    ActionCategory::ScriptContext,
+                )
+                .with_icon(IconName::Copy)
+                .with_section("Recovery"),
+            );
+        }
+        actions
+    }
+
+    fn active_callout_render_model(
+        callout: &super::thread::AgentChatCallout,
+    ) -> AgentChatCalloutRenderModel {
+        AgentChatCalloutRenderModel {
+            severity: callout.severity,
+            title: callout.title.clone(),
+            detail: callout
+                .detail
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| "The provider could not complete this turn.".into()),
+        }
+    }
+
+    pub(crate) fn dispatch_active_callout_action(
+        &mut self,
+        action_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (raw_detail, auth_recovery, selected_model_id) = {
             let thread = self.live_thread().read(cx);
+            let Some(callout) = thread.active_callout() else {
+                return false;
+            };
             (
-                thread.active_callout().cloned(),
+                callout.raw_detail.as_ref().map(ToString::to_string),
+                callout.auth_recovery,
                 thread.selected_model_id().map(str::to_string),
             )
+        };
+
+        if action_id == AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID {
+            let Some(raw_detail) = raw_detail else {
+                return false;
+            };
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(raw_detail));
+            return true;
+        }
+
+        let recovery_action = match action_id {
+            AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID => {
+                crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SignInAgain
+            }
+            AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID => {
+                crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SwitchAccount
+            }
+            _ => return false,
+        };
+        if auth_recovery.is_none() {
+            return false;
+        }
+        let Some(provider) =
+            crate::ai::agent_chat::pi::auth_recovery::resolve_auth_recovery_provider(
+                selected_model_id.as_deref(),
+                raw_detail.as_deref(),
+            )
+        else {
+            return false;
+        };
+        let Some(binary) = crate::ai::agent_chat::pi::binary::default_pi_binary() else {
+            return false;
+        };
+        if let Err(error) = crate::ai::agent_chat::pi::auth_recovery::launch_pi_auth_recovery(
+            binary,
+            provider,
+            recovery_action,
+        ) {
+            tracing::warn!(
+                target: "script_kit::agent_chat",
+                event = "agent_chat_auth_recovery_launch_failed",
+                action_id,
+                error = %error,
+            );
+        }
+        true
+    }
+
+    fn render_active_callout(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let callout = {
+            let thread = self.live_thread().read(cx);
+            thread.active_callout().cloned()
         };
         let Some(callout) = callout else {
             return div().id("agent_chat-callout-empty").into_any_element();
         };
+        let callout = Self::active_callout_render_model(&callout);
 
         let theme = theme::get_cached_theme();
         let colors = PromptColors::from_theme(&theme);
-        let button_colors = crate::components::ButtonColors::from_theme(&theme);
         let accent = match callout.severity {
             AgentChatCalloutSeverity::Error => theme.colors.ui.error,
         };
-        let detail = callout
-            .detail
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| "The provider could not complete this turn.".into());
-        let raw_detail = callout.raw_detail.clone();
-        let show_auth_recovery = callout.auth_recovery.is_some();
-        let auth_provider = show_auth_recovery
-            .then(|| {
-                crate::ai::agent_chat::pi::auth_recovery::resolve_auth_recovery_provider(
-                    selected_model_id.as_deref(),
-                    raw_detail.as_ref().map(|detail| detail.as_ref()),
-                )
-            })
-            .flatten();
-        let pi_binary = crate::ai::agent_chat::pi::binary::default_pi_binary();
-        let weak_view = cx.entity().downgrade();
-
-        let mut actions = div().flex().flex_wrap().items_center().gap(px(6.0));
-        if let (Some(provider), Some(binary)) = (auth_provider.clone(), pi_binary.clone()) {
-            actions = actions.child(
-                crate::components::Button::new("Sign in again", button_colors)
-                    .id("agent_chat-callout-sign-in")
-                    .variant(crate::components::ButtonVariant::Primary)
-                    .on_click(Box::new(move |_event, _window, _cx| {
-                        if let Err(error) = crate::ai::agent_chat::pi::auth_recovery::launch_pi_auth_recovery(
-                            binary.clone(),
-                            provider.clone(),
-                            crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SignInAgain,
-                        ) {
-                            tracing::warn!(
-                                target: "script_kit::agent_chat",
-                                event = "agent_chat_auth_recovery_launch_failed",
-                                action = "sign_in_again",
-                                error = %error,
-                            );
-                        }
-                    })),
-            );
-        }
-        if let (Some(provider), Some(binary)) = (auth_provider, pi_binary) {
-            actions = actions.child(
-                crate::components::Button::new("Switch account", button_colors)
-                    .id("agent_chat-callout-switch-account")
-                    .variant(crate::components::ButtonVariant::Ghost)
-                    .on_click(Box::new(move |_event, _window, _cx| {
-                        if let Err(error) = crate::ai::agent_chat::pi::auth_recovery::launch_pi_auth_recovery(
-                            binary.clone(),
-                            provider.clone(),
-                            crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SwitchAccount,
-                        ) {
-                            tracing::warn!(
-                                target: "script_kit::agent_chat",
-                                event = "agent_chat_auth_recovery_launch_failed",
-                                action = "switch_account",
-                                error = %error,
-                            );
-                        }
-                    })),
-            );
-        }
-        if callout.can_retry {
-            let retry_view = weak_view.clone();
-            actions = actions.child(
-                crate::components::Button::new("Retry", button_colors)
-                    .id("agent_chat-callout-retry")
-                    .variant(crate::components::ButtonVariant::Ghost)
-                    .on_click(Box::new(move |_event, _window, cx| {
-                        if let Some(view) = retry_view.upgrade() {
-                            view.update(cx, |this, cx| this.retry_last_user_turn(cx));
-                        }
-                    })),
-            );
-        }
-        if raw_detail.is_some() {
-            let copy_view = weak_view.clone();
-            actions = actions.child(
-                crate::components::Button::new("Copy Error", button_colors)
-                    .id("agent_chat-callout-copy-error")
-                    .variant(crate::components::ButtonVariant::Ghost)
-                    .on_click(Box::new(move |_event, _window, cx| {
-                        if let Some(view) = copy_view.upgrade() {
-                            if let Some(text) = view
-                                .read(cx)
-                                .live_thread()
-                                .read(cx)
-                                .active_callout()
-                                .and_then(|active| active.raw_detail.as_ref())
-                                .map(ToString::to_string)
-                            {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                            }
-                        }
-                    })),
-            );
-        }
-
         div()
             .id("agent_chat-callout-stack")
             .w_full()
@@ -10458,7 +10604,7 @@ impl AgentChatView {
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text_primary))
-                                    .child(callout.title.clone()),
+                                    .child(callout.title),
                             )
                             .child(
                                 div()
@@ -10483,9 +10629,8 @@ impl AgentChatView {
                             .w_full()
                             .text_xs()
                             .text_color(rgb(colors.text_secondary))
-                            .child(detail),
-                    )
-                    .child(actions),
+                            .child(callout.detail),
+                    ),
             )
             .into_any_element()
     }
@@ -10745,24 +10890,32 @@ impl AgentChatView {
             .into_any_element()
     }
 
+    fn permission_preview_chrome(
+        kind: AgentChatApprovalPreviewKind,
+        theme: &crate::theme::Theme,
+    ) -> PermissionPreviewChrome {
+        let chrome = AppChromeColors::from_theme(theme);
+        let base_hex = match kind {
+            AgentChatApprovalPreviewKind::Read => theme.colors.text.primary,
+            AgentChatApprovalPreviewKind::Write => theme.colors.accent.selected,
+            AgentChatApprovalPreviewKind::Execute => theme.colors.ui.warning,
+            AgentChatApprovalPreviewKind::Generic => theme.colors.ui.border,
+        };
+
+        PermissionPreviewChrome {
+            badge: chrome.semantic_chip_colors(theme, base_hex),
+            accent_rgba: crate::ui_foundation::hex_to_rgba_with_opacity(
+                base_hex,
+                theme.get_opacity().text_strong,
+            ),
+            title_text_rgba: chrome.text_strong_rgba,
+            subject_text_rgba: chrome.text_muted_rgba,
+        }
+    }
+
     fn render_permission_header(preview: &AgentChatApprovalPreview) -> gpui::AnyElement {
         let theme = theme::get_cached_theme();
-
-        let (badge_bg, badge_border) = match preview.kind {
-            AgentChatApprovalPreviewKind::Read => (
-                rgba((theme.colors.text.primary << 8) | 0x10),
-                rgba((theme.colors.ui.border << 8) | 0x30),
-            ),
-            AgentChatApprovalPreviewKind::Write => (
-                rgba((theme.colors.accent.selected << 8) | 0x16),
-                rgba((theme.colors.accent.selected << 8) | 0x38),
-            ),
-            AgentChatApprovalPreviewKind::Execute => (rgba(0xF59E0B18), rgba(0xF59E0B50)),
-            AgentChatApprovalPreviewKind::Generic => (
-                rgba((theme.colors.text.primary << 8) | 0x08),
-                rgba((theme.colors.ui.border << 8) | 0x24),
-            ),
-        };
+        let chrome = Self::permission_preview_chrome(preview.kind, &theme);
 
         div()
             .pt(px(6.0))
@@ -10776,23 +10929,29 @@ impl AgentChatView {
                             .px(px(7.0))
                             .py(px(3.0))
                             .rounded(px(999.0))
-                            .bg(badge_bg)
+                            .bg(rgba(chrome.badge.bg_rgba))
                             .border_1()
-                            .border_color(badge_border)
+                            .border_color(rgba(chrome.badge.border_rgba))
                             .text_xs()
-                            .opacity(0.68)
+                            .text_color(rgb(chrome.badge.text_hex))
                             .child(preview.kind.badge_label()),
                     )
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .opacity(0.92)
+                            .text_color(rgba(chrome.title_text_rgba))
                             .child(preview.tool_title.clone()),
                     ),
             )
             .when_some(preview.subject.clone(), |d, subject| {
-                d.child(div().pt(px(4.0)).text_sm().opacity(0.68).child(subject))
+                d.child(
+                    div()
+                        .pt(px(4.0))
+                        .text_sm()
+                        .text_color(rgba(chrome.subject_text_rgba))
+                        .child(subject),
+                )
             })
             .into_any_element()
     }
@@ -10804,40 +10963,41 @@ impl AgentChatView {
         view: WeakEntity<AgentChatView>,
     ) -> gpui::AnyElement {
         let theme = theme::get_cached_theme();
+        let chrome = AppChromeColors::from_theme(&theme);
+        let deny_colors = crate::theme::DangerActionColors::from_theme(&theme);
         let option_id = option.option_id.clone();
 
         let (accent, bg, hover_bg, caption) = if option.is_reject() {
-            let error = theme.colors.ui.error;
             (
-                rgba((error << 8) | 0xAA),
-                if is_selected {
-                    rgba((error << 8) | 0x18)
+                rgba(deny_colors.border_rgba),
+                rgba(if is_selected {
+                    deny_colors.hover_rgba
                 } else {
-                    rgba((error << 8) | 0x06)
-                },
-                rgba((error << 8) | 0x10),
+                    deny_colors.rest_rgba
+                }),
+                rgba(deny_colors.hover_rgba),
                 "Deny this request",
             )
         } else if option.is_persistent_allow() {
             (
-                rgb(theme.colors.accent.selected),
-                if is_selected {
-                    rgba((theme.colors.accent.selected << 8) | 0x18)
+                rgb(chrome.accent_hex),
+                rgba(if is_selected {
+                    chrome.accent_badge_border_rgba
                 } else {
-                    rgba((theme.colors.accent.selected << 8) | 0x06)
-                },
-                rgba((theme.colors.accent.selected << 8) | 0x10),
+                    chrome.accent_badge_bg_rgba
+                }),
+                rgba(chrome.accent_badge_bg_rgba),
                 "Remember this choice",
             )
         } else {
             (
-                rgb(theme.colors.accent.selected),
-                if is_selected {
-                    rgba((theme.colors.accent.selected << 8) | 0x12)
+                rgb(chrome.accent_hex),
+                rgba(if is_selected {
+                    chrome.accent_badge_bg_rgba
                 } else {
-                    rgba((theme.colors.text.primary << 8) | 0x04)
-                },
-                rgba((theme.colors.text.primary << 8) | 0x08),
+                    chrome.whisper_surface_rgba
+                }),
+                rgba(chrome.hover_rgba),
                 "Approve once",
             )
         };
@@ -10880,11 +11040,17 @@ impl AgentChatView {
                     .child(
                         div()
                             .text_xs()
-                            .opacity(0.34)
+                            .text_color(rgba(chrome.placeholder_text_rgba))
                             .child(format!("{}", index + 1)),
                     ),
             )
-            .child(div().pt(px(2.0)).text_xs().opacity(0.42).child(caption))
+            .child(
+                div()
+                    .pt(px(2.0))
+                    .text_xs()
+                    .text_color(rgba(chrome.placeholder_text_rgba))
+                    .child(caption),
+            )
             .into_any_element()
     }
 
@@ -10916,12 +11082,7 @@ impl AgentChatView {
 
         let accent = preview
             .as_ref()
-            .map(|preview| match preview.kind {
-                AgentChatApprovalPreviewKind::Read => rgba((theme.colors.ui.border << 8) | 0x44),
-                AgentChatApprovalPreviewKind::Write => rgb(theme.colors.accent.selected),
-                AgentChatApprovalPreviewKind::Execute => rgba(0xF59E0BCC),
-                AgentChatApprovalPreviewKind::Generic => rgba((theme.colors.ui.border << 8) | 0x32),
-            })
+            .map(|preview| rgba(Self::permission_preview_chrome(preview.kind, &theme).accent_rgba))
             .unwrap_or_else(|| rgb(theme.colors.accent.selected));
 
         let allow_request = request.clone();
@@ -12733,7 +12894,7 @@ impl AgentChatView {
 
         let ui_variant = self.ui_variant;
         let transcript =
-            cx.new(|cx| AgentChatTranscript::new(messages, cx).with_ui_variant(ui_variant));
+            cx.new(|cx| AgentChatTranscript::new(messages, cx).with_ui_variant(ui_variant, cx));
         transcript.update(cx, |transcript, cx| {
             transcript.set_on_fork_edit_message(fork_handler);
             transcript.set_thread_status(status, cx);
@@ -14083,6 +14244,23 @@ impl AgentChatView {
             if let Some(text) = last {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
+            cx.stop_propagation();
+            return;
+        }
+
+        // ── Cmd+Shift+R → retry an active failed-turn callout ───
+        if self.focused_text.is_none()
+            && modifiers.platform
+            && modifiers.shift
+            && !modifiers.alt
+            && !modifiers.control
+            && key.eq_ignore_ascii_case("r")
+            && {
+                let thread = self.live_thread().read(cx);
+                Self::retryable_callout_active(thread.status, thread.active_callout())
+            }
+        {
+            self.retry_last_user_turn(cx);
             cx.stop_propagation();
             return;
         }
@@ -15449,6 +15627,9 @@ mod composer_sizing_tests {
         combined_agent_model_header_label, composer_visible_line_count, AgentChatComposerTextStyle,
         AgentChatView,
     };
+    use crate::ai::agent_chat::ui::permission_broker::AgentChatApprovalPreviewKind;
+    use crate::theme::{AppChromeColors, Theme};
+    use crate::ui_foundation::hex_to_rgba_with_opacity;
 
     #[test]
     fn visual_line_count_grows_then_clamps_and_expanded_pins_maximum() {
@@ -15483,6 +15664,31 @@ mod composer_sizing_tests {
             AgentChatComposerTextStyle::for_main_window(false),
             AgentChatComposerTextStyle::legacy()
         );
+    }
+
+    #[test]
+    fn permission_execute_chrome_follows_theme_warning_and_text_tiers() {
+        let mut theme = Theme::dark_default();
+        theme.colors.ui.warning = 0x12_34_56;
+        {
+            let opacity = theme.opacity.as_mut().expect("default theme opacity");
+            opacity.text_strong = 0.71;
+            opacity.text_muted_alpha = 0.53;
+        }
+        let opacity = theme.get_opacity();
+
+        let permission =
+            AgentChatView::permission_preview_chrome(AgentChatApprovalPreviewKind::Execute, &theme);
+        let chrome = AppChromeColors::from_theme(&theme);
+        let expected_badge = chrome.semantic_chip_colors(&theme, theme.colors.ui.warning);
+
+        assert_eq!(permission.badge, expected_badge);
+        assert_eq!(
+            permission.accent_rgba,
+            hex_to_rgba_with_opacity(theme.colors.ui.warning, opacity.text_strong)
+        );
+        assert_eq!(permission.title_text_rgba, chrome.text_strong_rgba);
+        assert_eq!(permission.subject_text_rgba, chrome.text_muted_rgba);
     }
 
     #[test]

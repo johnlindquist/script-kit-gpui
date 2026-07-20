@@ -501,12 +501,19 @@ pub(crate) enum MainMenuRefreshSelectionPolicy {
 }
 
 pub(crate) fn main_menu_refresh_selection_policy(
-    _user_moved_selection: bool,
+    user_moved_selection: bool,
 ) -> MainMenuRefreshSelectionPolicy {
-    // Once a row has been painted, provider timing must not change what Enter
-    // runs. Query changes reset selection through the separate filter-change
-    // path; same-query result refreshes preserve the painted stable identity.
-    MainMenuRefreshSelectionPolicy::RestoreIdentity
+    // Hard rule (user, 2026-07-20): until the user moves selection themselves,
+    // the focused row is ALWAYS the first item in the list — a late async
+    // provider (brain, files, generate) injecting rows above the selection
+    // must never leave focus stranded on a non-first row. Once the user has
+    // deliberately moved, provider timing must not change what Enter runs
+    // (OF-32), so the painted stable identity is restored instead.
+    if user_moved_selection {
+        MainMenuRefreshSelectionPolicy::RestoreIdentity
+    } else {
+        MainMenuRefreshSelectionPolicy::SnapToFirst
+    }
 }
 
 impl ScriptListApp {
@@ -1449,11 +1456,14 @@ pub(crate) const ROOT_LAUNCHER_PLACEHOLDER: &str =
 mod app_state_selection_tests {
     use super::{main_menu_refresh_selection_policy, MainMenuRefreshSelectionPolicy};
 
+    /// Hard rule (user, 2026-07-20): no down-arrow → focus pinned to the
+    /// first item even when async results inject rows above it. Deliberate
+    /// user movement keeps the OF-32 identity restore so Enter stays stable.
     #[test]
-    fn async_refresh_always_restores_painted_selection_identity() {
+    fn async_refresh_snaps_untouched_selection_and_restores_user_moved_identity() {
         assert_eq!(
             main_menu_refresh_selection_policy(false),
-            MainMenuRefreshSelectionPolicy::RestoreIdentity
+            MainMenuRefreshSelectionPolicy::SnapToFirst
         );
         assert_eq!(
             main_menu_refresh_selection_policy(true),

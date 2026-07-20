@@ -1,3 +1,6 @@
+use super::types::conversation_turn_pending_indicator_visible;
+#[cfg(test)]
+use super::types::conversation_turn_streaming_copy_available;
 use super::*;
 use std::borrow::Cow;
 
@@ -43,6 +46,10 @@ impl ChatPrompt {
         let error_bg = rgba((error_color << 8) | 0x40); // Theme error with transparency
         let retry_hover_bg = rgba((theme_colors.accent.selected << 8) | 0x40);
         let has_retry_callback = self.on_retry.is_some();
+        let user_fidelity_id = format!("chat-transcript-user-turn-{turn_index}");
+        let response_fidelity_id = format!("chat-transcript-response-turn-{turn_index}");
+        let pending_fidelity_id = format!("chat-transcript-pending-turn-{turn_index}");
+        let copy_fidelity_id = format!("chat-transcript-copy-turn-{turn_index}");
 
         let mut content = div().flex().flex_col().gap(px(6.0)).w_full().min_w_0();
         // Note: removed overflow_hidden() to allow text to wrap naturally
@@ -51,6 +58,7 @@ impl ChatPrompt {
         if !turn.user_prompt.is_empty() {
             content = content.child(
                 div()
+                    .debug_selector(move || user_fidelity_id)
                     .w_full()
                     .min_w_0()
                     .text_sm()
@@ -77,12 +85,19 @@ impl ChatPrompt {
             let error_message = error_type.display_message();
             let can_retry = error_type.can_retry() && has_retry_callback;
 
-            let mut error_row = div().flex().flex_row().items_center().gap(px(8.0)).child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(error_color))
-                    .child(error_message.to_string()),
-            );
+            let error_fidelity_id = response_fidelity_id.clone();
+            let mut error_row = div()
+                .debug_selector(move || error_fidelity_id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(error_color))
+                        .child(error_message.to_string()),
+                );
 
             // Add retry button if applicable
             if can_retry {
@@ -132,7 +147,8 @@ impl ChatPrompt {
             }
         }
         // AI response (only show if no error, or show partial if stream interrupted)
-        else if let Some(ref response) = turn.assistant_response {
+        else if turn.assistant_response.is_some() || turn.streaming {
+            let response = turn.assistant_response.as_deref().unwrap_or("");
             let markdown_response = assistant_response_region_source(
                 self.script_generation_mode,
                 response,
@@ -144,6 +160,7 @@ impl ChatPrompt {
             // the card's fixed trailing slot, so it cannot add a row below it.
             content = content.child(
                 div()
+                    .debug_selector(move || response_fidelity_id)
                     .w_full()
                     .min_w_0()
                     .overflow_x_hidden()
@@ -151,10 +168,10 @@ impl ChatPrompt {
             );
         }
 
-        let show_streaming_indicator =
-            turn.error.is_none() && turn.assistant_response.is_some() && turn.streaming;
+        let show_streaming_indicator = conversation_turn_pending_indicator_visible(turn);
         let trailing_control = div()
             .id(format!("copy-turn-{}", turn_index))
+            .debug_selector(move || copy_fidelity_id)
             .relative()
             .flex()
             .items_center()
@@ -174,6 +191,7 @@ impl ChatPrompt {
             .when(show_streaming_indicator, |slot| {
                 slot.child(
                     div()
+                        .debug_selector(move || pending_fidelity_id)
                         .absolute()
                         .right(px(1.0))
                         .bottom(px(1.0))
@@ -254,7 +272,10 @@ impl ChatPrompt {
 
 #[cfg(test)]
 mod tests {
-    use super::{assistant_response_region_source, truncate_str_chars};
+    use super::{
+        assistant_response_region_source, conversation_turn_pending_indicator_visible,
+        conversation_turn_streaming_copy_available, truncate_str_chars, ConversationTurn,
+    };
     const CHAT_RENDER_TURNS_SOURCE: &str = include_str!("render_turns.rs");
 
     #[test]
@@ -282,6 +303,40 @@ mod tests {
             assistant_response_region_source(false, "First token", true),
             "First token"
         );
+    }
+
+    #[test]
+    fn pending_indicator_hands_off_to_streaming_copy_after_first_visible_text() {
+        let turn = |assistant_response: Option<&str>, streaming: bool, error: Option<&str>| {
+            ConversationTurn {
+                user_prompt: "user".to_string(),
+                assistant_response: assistant_response.map(str::to_string),
+                model: None,
+                streaming,
+                error: error.map(str::to_string),
+                message_id: None,
+                user_image: None,
+            }
+        };
+
+        for pending in [turn(None, true, None), turn(Some(""), true, None)] {
+            assert!(conversation_turn_pending_indicator_visible(&pending));
+            assert!(!conversation_turn_streaming_copy_available(&pending));
+        }
+        for visible in [
+            turn(Some("First"), true, None),
+            turn(Some("First token"), true, None),
+        ] {
+            assert!(!conversation_turn_pending_indicator_visible(&visible));
+            assert!(conversation_turn_streaming_copy_available(&visible));
+        }
+        for terminal in [
+            turn(Some("done"), false, None),
+            turn(None, false, Some("error")),
+        ] {
+            assert!(!conversation_turn_pending_indicator_visible(&terminal));
+            assert!(!conversation_turn_streaming_copy_available(&terminal));
+        }
     }
 
     #[test]

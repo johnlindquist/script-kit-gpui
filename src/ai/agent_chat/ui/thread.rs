@@ -411,6 +411,17 @@ struct PendingContextTurn {
     attachments: Vec<AgentChatMessageAttachment>,
 }
 
+/// Sendable snapshot of one-shot context state captured on the UI thread.
+///
+/// Resolution is deliberately separate: parts in this payload may invoke
+/// subprocesses, resource reads, screenshot capture, PNG encoding, or other
+/// work that must never run from `submit_input` on the GPUI main thread.
+struct PendingContextResolutionJob {
+    blocks: Vec<ContentBlock>,
+    parts: Vec<crate::ai::message_parts::AiContextPart>,
+    attachments: Vec<AgentChatMessageAttachment>,
+}
+
 /// Resolved turn-scoped context blocks plus the receipt describing
 /// resolution outcomes for the current submit.
 struct ResolvedPendingContext {
@@ -488,6 +499,9 @@ pub(crate) struct AgentChatThread {
     pub(crate) input: TextInputState,
     /// Current thread status.
     pub(crate) status: AgentChatThreadStatus,
+    /// Monotonic identity for background submit preparation. A cancellation
+    /// or newer submit invalidates any late resolution result.
+    context_resolution_id: u64,
     /// Active composer callout, rendered above the composer until dismissed or superseded.
     active_callout: Option<AgentChatCallout>,
     /// Pending permission request awaiting user decision.
@@ -703,6 +717,7 @@ impl AgentChatThread {
                 _ => TextInputState::new(),
             },
             status: AgentChatThreadStatus::Idle,
+            context_resolution_id: 0,
             active_callout: None,
             pending_permission: None,
             pending_context_blocks: Vec::new(),
@@ -1173,16 +1188,8 @@ impl AgentChatThread {
             return Ok(());
         }
 
-        let prepared = self.prepare_turn_blocks_with_receipt(trimmed);
-        self.set_context_resolution_note(prepared.receipt.as_ref());
-        self.start_prepared_turn(
-            trimmed.to_string(),
-            prepared.blocks,
-            prepared.attachments,
-            true,
-            true,
-            cx,
-        )
+        let context_job = self.take_pending_context_for_background_resolution();
+        self.submit_captured_turn(trimmed.to_string(), context_job, true, cx)
     }
 
     fn resume_queue_for_manual_submit(&mut self) {
@@ -1242,34 +1249,152 @@ impl AgentChatThread {
         Ok(())
     }
 
+    fn submit_captured_turn(
+        &mut self,
+        display_text: String,
+        context_job: Option<PendingContextResolutionJob>,
+        clear_composer: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let needs_background_preparation =
+            context_job.is_some() || self.should_stage_brain_recall();
+        if !needs_background_preparation {
+            return self.start_prepared_turn(
+                display_text.clone(),
+                vec![ContentBlock::Text(TextContent::new(display_text))],
+                Vec::new(),
+                clear_composer,
+                true,
+                cx,
+            );
+        }
+
+        let attachments = context_job
+            .as_ref()
+            .map(|job| job.attachments.clone())
+            .unwrap_or_default();
+        let msg_id = self.alloc_id();
+        let mut message = AgentChatThreadMessage::new(
+            msg_id,
+            AgentChatThreadMessageRole::User,
+            display_text.clone(),
+        );
+        message.attachments = attachments;
+        self.messages.push(message);
+        self.publish_sdk_new_message(
+            msg_id,
+            AgentChatThreadMessageRole::User,
+            display_text.clone(),
+        );
+        if clear_composer {
+            self.input.clear();
+        }
+        self.status = AgentChatThreadStatus::Streaming;
+        self.active_callout = None;
+        self.setup_state = None;
+        self.context_resolution_id = self.context_resolution_id.wrapping_add(1);
+        let resolution_id = self.context_resolution_id;
+        let transcript_generation = self.transcript_generation;
+        let should_stage_brain_recall = self.should_stage_brain_recall();
+
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::Builder::new()
+            .name("agent-chat-context-resolution".to_string())
+            .spawn({
+                let display_text = display_text.clone();
+                move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::prepare_captured_turn_in_background(
+                            &display_text,
+                            context_job,
+                            should_stage_brain_recall,
+                        )
+                    }))
+                    .map_err(|_| "agent_chat_context_resolution_panicked".to_string());
+                    let _ = tx.send_blocking(result);
+                }
+            })
+            .map_err(|error| {
+                let error = format!("failed to start context resolution: {error}");
+                self.fail_pending_turn_preparation(error.clone(), cx);
+                error
+            })?;
+
+        let entity = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            let result = rx.recv().await.unwrap_or_else(|_| {
+                Err("agent_chat_context_resolution_channel_closed".to_string())
+            });
+            cx.update(|cx| {
+                let Some(entity) = entity.upgrade() else {
+                    return;
+                };
+                entity.update(cx, |this, cx| {
+                    if this.transcript_generation != transcript_generation
+                        || this.context_resolution_id != resolution_id
+                        || !matches!(this.status, AgentChatThreadStatus::Streaming)
+                    {
+                        return;
+                    }
+
+                    match result {
+                        Ok(prepared) => {
+                            this.set_context_resolution_note(prepared.receipt.as_ref());
+                            if let Err(error) = this.start_prepared_turn(
+                                display_text,
+                                prepared.blocks,
+                                Vec::new(),
+                                false,
+                                false,
+                                cx,
+                            ) {
+                                this.fail_pending_turn_preparation(error, cx);
+                            }
+                        }
+                        Err(error) => this.fail_pending_turn_preparation(error, cx),
+                    }
+                });
+            });
+        })
+        .detach();
+        cx.notify();
+        Ok(())
+    }
+
+    fn fail_pending_turn_preparation(&mut self, error: String, cx: &mut Context<Self>) {
+        tracing::warn!(
+            target: "script_kit::tab_ai",
+            event = "agent_chat_context_resolution_failed",
+            error = %error,
+        );
+        let callout = AgentChatCallout::failed(error, true);
+        let transcript_message = callout
+            .detail
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "The context attachments could not be prepared.".to_string());
+        self.active_callout = Some(callout);
+        self.push_message(AgentChatThreadMessageRole::Error, transcript_message);
+        self.status = AgentChatThreadStatus::Error;
+        cx.notify();
+    }
+
     fn submit_queued_message(
         &mut self,
         message: AgentChatQueuedMessage,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let saved_blocks = std::mem::take(&mut self.pending_context_blocks);
-        let saved_consumed = self.pending_context_consumed;
-        let saved_parts = std::mem::replace(&mut self.pending_context_parts, message.context_parts);
-        let saved_ambient = self.pending_ambient_context_enabled;
-
-        self.pending_context_consumed = false;
-        self.pending_ambient_context_enabled = false;
-        let prepared = self.prepare_turn_blocks_with_receipt(&message.text);
-        self.set_context_resolution_note(prepared.receipt.as_ref());
-
-        self.pending_context_blocks = saved_blocks;
-        self.pending_context_consumed = saved_consumed;
-        self.pending_context_parts = saved_parts;
-        self.pending_ambient_context_enabled = saved_ambient;
-
-        self.start_prepared_turn(
-            message.text,
-            prepared.blocks,
-            prepared.attachments,
-            false,
-            true,
-            cx,
-        )
+        let context_job =
+            (!message.context_parts.is_empty()).then(|| PendingContextResolutionJob {
+                attachments: message
+                    .context_parts
+                    .iter()
+                    .map(AgentChatMessageAttachment::from_part)
+                    .collect(),
+                blocks: Vec::new(),
+                parts: message.context_parts,
+            });
+        self.submit_captured_turn(message.text, context_job, false, cx)
     }
 
     fn submit_next_queued_if_ready(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
@@ -1748,6 +1873,104 @@ impl AgentChatThread {
                 failures,
                 prompt_prefix,
             },
+        }
+    }
+
+    /// Snapshot and consume staged context without resolving any part.
+    ///
+    /// This is the only pending-context operation called by `submit_input`;
+    /// the returned job is resolved by `prepare_captured_turn_in_background`.
+    fn take_pending_context_for_background_resolution(
+        &mut self,
+    ) -> Option<PendingContextResolutionJob> {
+        let has_pending_parts = !self.pending_context_parts.is_empty();
+        let has_pending_blocks = !self.pending_context_blocks.is_empty();
+        if self.pending_context_consumed || (!has_pending_parts && !has_pending_blocks) {
+            return None;
+        }
+
+        let blocks = std::mem::take(&mut self.pending_context_blocks);
+        let parts = self.pending_context_parts.clone();
+        let attachments = parts
+            .iter()
+            .map(AgentChatMessageAttachment::from_part)
+            .collect();
+        self.pending_context_consumed = true;
+        self.pending_ambient_context_enabled = false;
+
+        Some(PendingContextResolutionJob {
+            blocks,
+            parts,
+            attachments,
+        })
+    }
+
+    fn prepare_captured_turn_in_background(
+        input: &str,
+        context_job: Option<PendingContextResolutionJob>,
+        should_stage_brain_recall: bool,
+    ) -> PreparedTurnBlocks {
+        let mut blocks = Vec::new();
+        if should_stage_brain_recall {
+            if let Some(recall) = crate::brain::recall_context_block(input).ok().flatten() {
+                tracing::info!(
+                    target: "script_kit::brain",
+                    event = "agent_chat_brain_recall_staged",
+                    chars = recall.len(),
+                );
+                blocks.push(ContentBlock::Text(TextContent::new(recall)));
+            }
+            crate::brain::record_ask_signals(input);
+        }
+
+        if let Some(job) = context_job {
+            let consumed_part_count = job.parts.len();
+            let consumed_hidden_block_count = job.blocks.len();
+            let attachments = job.attachments;
+            blocks.extend(job.blocks);
+            let resolved = Self::resolve_pending_context_parts_with(
+                &job.parts,
+                Self::capture_special_context_block_for_part,
+            );
+            let consumed_special_block_count = resolved.blocks.len();
+            let receipt = resolved.receipt;
+            blocks.extend(resolved.blocks);
+
+            tracing::info!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_pending_context_consumed",
+                consumed_part_count,
+                consumed_hidden_block_count,
+                consumed_special_block_count,
+                resolved_part_count = receipt.resolved,
+                failed_part_count = receipt.failures.len(),
+            );
+            if !receipt.prompt_prefix.is_empty() {
+                blocks.push(ContentBlock::Text(TextContent::new(
+                    receipt.prompt_prefix.clone(),
+                )));
+            }
+            blocks.push(ContentBlock::Text(TextContent::new(format!(
+                "--- USER REQUEST ---\n{input}"
+            ))));
+            return PreparedTurnBlocks {
+                blocks,
+                receipt: Some(receipt),
+                attachments,
+            };
+        }
+
+        if blocks.is_empty() {
+            blocks.push(ContentBlock::Text(TextContent::new(input)));
+        } else {
+            blocks.push(ContentBlock::Text(TextContent::new(format!(
+                "--- USER REQUEST ---\n{input}"
+            ))));
+        }
+        PreparedTurnBlocks {
+            blocks,
+            receipt: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -3402,6 +3625,7 @@ impl AgentChatThread {
         self.pending_permission = None;
         self.active_callout = None;
         self.messages.clear();
+        self.next_message_id = 1;
         self.active_plan_entries.clear();
         self.active_tool_calls.clear();
         self.tool_call_lookup.clear();
@@ -3443,20 +3667,47 @@ impl AgentChatThread {
         } else {
             self.push_message(AgentChatThreadMessageRole::User, user_text.to_string());
             match phase {
-                "awaitingFirstAssistantText" | "awaiting-first-assistant-text" | "awaiting" => {
+                "awaitingFirstAssistantText"
+                | "awaiting-first-assistant-text"
+                | "awaiting"
+                | "waitingNoAssistant"
+                | "waiting-no-assistant" => {
                     self.set_status(AgentChatThreadStatus::Streaming);
                 }
-                "assistantText" | "assistant-text" | "text" => {
+                "emptyAssistant" | "empty-assistant" => {
+                    self.push_message(AgentChatThreadMessageRole::Assistant, String::new());
+                    self.set_status(AgentChatThreadStatus::Streaming);
+                }
+                "assistantText"
+                | "assistant-text"
+                | "text"
+                | "firstToken"
+                | "first-token"
+                | "multiTokenStreaming"
+                | "multi-token-streaming" => {
                     self.push_message(
                         AgentChatThreadMessageRole::Assistant,
-                        assistant_text.unwrap_or_else(|| "Fixture assistant text.".to_string()),
+                        assistant_text.unwrap_or_else(|| {
+                            if matches!(phase, "firstToken" | "first-token") {
+                                "First".to_string()
+                            } else {
+                                "Fixture assistant text with multiple tokens.".to_string()
+                            }
+                        }),
                     );
                     self.set_status(AgentChatThreadStatus::Streaming);
                 }
-                "idle" => {
-                    if let Some(text) = assistant_text {
-                        self.push_message(AgentChatThreadMessageRole::Assistant, text);
-                    }
+                "idle" | "completed" => {
+                    self.push_message(
+                        AgentChatThreadMessageRole::Assistant,
+                        assistant_text.unwrap_or_else(|| {
+                            "Fixture assistant text with multiple tokens.".to_string()
+                        }),
+                    );
+                    self.set_status(AgentChatThreadStatus::Idle);
+                }
+                "terminalEmpty" | "terminal-empty" => {
+                    self.push_message(AgentChatThreadMessageRole::Assistant, String::new());
                     self.set_status(AgentChatThreadStatus::Idle);
                 }
                 "error" | "provider-error" => {
@@ -3475,9 +3726,7 @@ impl AgentChatThread {
                     self.set_status(AgentChatThreadStatus::Error);
                 }
                 other => {
-                    return Err(format!(
-                        "unknown setAgentChatTestFixture phase {other:?}; expected awaitingFirstAssistantText, assistantText, idle, or error"
-                    ));
+                    return Err(format!("unknown setAgentChatTestFixture phase {other:?}"));
                 }
             }
         }
@@ -3601,6 +3850,7 @@ impl AgentChatThread {
         }
         self.flush_streaming_text_buffer();
         self.queue_paused = true;
+        self.context_resolution_id = self.context_resolution_id.wrapping_add(1);
         if let Err(error) = self.connection.cancel_turn(self.ui_thread_id.clone()) {
             tracing::warn!(
                 target: "script_kit::tab_ai",
@@ -3979,6 +4229,7 @@ impl AgentChatThread {
                 _ => TextInputState::new(),
             },
             status: AgentChatThreadStatus::Idle,
+            context_resolution_id: 0,
             active_callout: None,
             pending_permission: None,
             pending_context_blocks: context_blocks,

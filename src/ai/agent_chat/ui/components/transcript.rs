@@ -4,8 +4,9 @@ use gpui::{
     SharedString, StyleRefinement, Window,
 };
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::text::{TextView, TextViewState, TextViewStyle};
+use gpui_component::text::{MarkdownLinkLabelPolicy, TextView, TextViewState, TextViewStyle};
 use gpui_component::tooltip::Tooltip;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -231,6 +232,7 @@ pub struct AgentChatTranscript {
     /// the permanent synthetic tail row so visibility changes do not reset the
     /// whole measured list.
     show_activity_row: bool,
+    follow_tail: Cell<bool>,
 }
 
 impl AgentChatTranscript {
@@ -253,6 +255,7 @@ impl AgentChatTranscript {
             thread_status: AgentChatThreadStatus::Idle,
             ui_variant: AgentChatUiVariant::Standard,
             show_activity_row: false,
+            follow_tail: Cell::new(true),
         };
         transcript.reconcile_message_views(cx);
         transcript
@@ -262,14 +265,20 @@ impl AgentChatTranscript {
         self.messages.len() + 1
     }
 
-    pub fn with_ui_variant(mut self, ui_variant: AgentChatUiVariant) -> Self {
+    pub fn with_ui_variant(
+        mut self,
+        ui_variant: AgentChatUiVariant,
+        cx: &mut Context<Self>,
+    ) -> Self {
         self.ui_variant = ui_variant;
+        self.reconcile_message_views(cx);
         self
     }
 
     pub fn set_ui_variant(&mut self, ui_variant: AgentChatUiVariant, cx: &mut Context<Self>) {
         if self.ui_variant != ui_variant {
             self.ui_variant = ui_variant;
+            self.reconcile_message_views(cx);
             cx.notify();
         }
     }
@@ -317,6 +326,20 @@ impl AgentChatTranscript {
         }
     }
 
+    fn markdown_link_policy_for(
+        ui_variant: AgentChatUiVariant,
+        msg: &AgentChatThreadMessage,
+    ) -> MarkdownLinkLabelPolicy {
+        if ui_variant == AgentChatUiVariant::QuickAi
+            && matches!(msg.role, AgentChatThreadMessageRole::Assistant)
+            && msg.tool_meta.is_none()
+        {
+            MarkdownLinkLabelPolicy::CompactLongBareHttp
+        } else {
+            MarkdownLinkLabelPolicy::Preserve
+        }
+    }
+
     fn should_use_heavy_markdown_preview(
         msg: &AgentChatThreadMessage,
         stats: HeavyMarkdownStats,
@@ -326,6 +349,28 @@ impl AgentChatTranscript {
             AgentChatThreadMessageRole::User | AgentChatThreadMessageRole::Assistant
         ) && msg.tool_meta.is_none()
             && stats.is_scroll_heavy()
+    }
+
+    fn should_use_heavy_markdown_preview_for(
+        ui_variant: AgentChatUiVariant,
+        msg: &AgentChatThreadMessage,
+        stats: HeavyMarkdownStats,
+    ) -> bool {
+        Self::should_use_heavy_markdown_preview(msg, stats)
+            && Self::markdown_link_policy_for(ui_variant, msg) == MarkdownLinkLabelPolicy::Preserve
+    }
+
+    fn should_parse_message_immediately(
+        msg: &AgentChatThreadMessage,
+        previous_text: Option<&str>,
+        display_text: &str,
+        is_latest_message: bool,
+    ) -> bool {
+        matches!(msg.role, AgentChatThreadMessageRole::Assistant)
+            && !display_text.trim().is_empty()
+            && previous_text
+                .map(|text| text.trim().is_empty())
+                .unwrap_or(is_latest_message)
     }
 
     fn heavy_markdown_preview_text(text: &str) -> String {
@@ -345,10 +390,12 @@ impl AgentChatTranscript {
     }
 
     fn reconcile_message_views(&mut self, cx: &mut Context<Self>) {
-        for msg in &self.messages {
+        let message_count = self.messages.len();
+        for (message_index, msg) in self.messages.iter().enumerate() {
             let display_text = Self::display_body(msg);
             let stats = HeavyMarkdownStats::from_text(&display_text);
-            let use_preview = Self::should_use_heavy_markdown_preview(msg, stats);
+            let use_preview =
+                Self::should_use_heavy_markdown_preview_for(self.ui_variant, msg, stats);
             let expanded = self.expanded_heavy_markdown_ids.contains(&msg.id);
 
             self.message_stats.insert(msg.id, stats);
@@ -365,19 +412,38 @@ impl AgentChatTranscript {
                 continue;
             }
 
+            let previous_text = self.message_texts.get(&msg.id).map(String::as_str);
+            let parse_immediately = Self::should_parse_message_immediately(
+                msg,
+                previous_text,
+                &display_text,
+                message_index + 1 == message_count,
+            );
+
             match self.message_views.entry(msg.id) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(cx.new(|cx| TextViewState::markdown(&display_text, cx)));
+                    let parse_initially = parse_immediately
+                        || (matches!(msg.role, AgentChatThreadMessageRole::Assistant)
+                            && display_text.trim().is_empty());
+                    entry.insert(cx.new(|cx| {
+                        if parse_initially {
+                            TextViewState::markdown_immediate(&display_text, cx)
+                        } else {
+                            TextViewState::markdown(&display_text, cx)
+                        }
+                    }));
                     self.message_texts.insert(msg.id, display_text);
                 }
                 std::collections::hash_map::Entry::Occupied(entry) => {
-                    let text_changed = self
-                        .message_texts
-                        .get(&msg.id)
-                        .is_none_or(|last_text| last_text != &display_text);
+                    let text_changed =
+                        previous_text.is_none_or(|last_text| last_text != display_text);
                     if text_changed {
                         entry.get().update(cx, |state, cx| {
-                            state.set_text(&display_text, cx);
+                            if parse_immediately {
+                                state.set_markdown_text_immediate(&display_text, cx);
+                            } else {
+                                state.set_text(&display_text, cx);
+                            }
                         });
                         self.message_texts.insert(msg.id, display_text);
                     }
@@ -507,6 +573,7 @@ impl AgentChatTranscript {
     }
 
     pub fn scroll_to_reveal_item(&self, index: usize) {
+        self.follow_tail.set(false);
         self.list_state.set_follow_tail(false);
         self.list_state.scroll_to_reveal_item(index);
     }
@@ -516,11 +583,13 @@ impl AgentChatTranscript {
     }
 
     pub fn scroll_to(&self, offset: ListOffset) {
+        self.follow_tail.set(false);
         self.list_state.set_follow_tail(false);
         self.list_state.scroll_to(offset);
     }
 
     pub fn scroll_to_end(&self) {
+        self.follow_tail.set(true);
         self.list_state.set_follow_tail(true);
     }
 
@@ -582,6 +651,28 @@ impl AgentChatTranscript {
             thumb_bottom_px: thumb_bottom,
             thumb_position_ratio,
             measurement_source: "listState".to_string(),
+            follow_tail: self.follow_tail.get(),
+            manual_scroll: !self.follow_tail.get(),
+            pending_indicator_count: usize::from(!matches!(
+                pending_activity_placement(
+                    &self.messages,
+                    self.show_activity_row
+                        || matches!(self.thread_status, AgentChatThreadStatus::Streaming),
+                ),
+                PendingActivityPlacement::Hidden
+            )),
+            streaming_copy_available: matches!(
+                self.thread_status,
+                AgentChatThreadStatus::Streaming
+            ) && self.messages.iter().rev().any(|message| {
+                matches!(message.role, AgentChatThreadMessageRole::Assistant)
+                    && !message.body.trim().is_empty()
+            }),
+            row_semantic_ids: self
+                .messages
+                .iter()
+                .map(transcript_row_fidelity_id)
+                .collect(),
         }
     }
 
@@ -712,8 +803,31 @@ impl AgentChatTranscript {
         style_def: &AgentChatStyleDef,
         fidelity_scope: SharedString,
     ) -> TextView {
+        Self::selectable_markdown_view_with_policy(
+            text_view_state,
+            theme,
+            colors,
+            text_color,
+            style_def,
+            fidelity_scope,
+            MarkdownLinkLabelPolicy::Preserve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn selectable_markdown_view_with_policy(
+        text_view_state: &gpui::Entity<TextViewState>,
+        theme: &crate::theme::Theme,
+        colors: &PromptColors,
+        text_color: Rgba,
+        style_def: &AgentChatStyleDef,
+        fidelity_scope: SharedString,
+        link_label_policy: MarkdownLinkLabelPolicy,
+    ) -> TextView {
+        let style = Self::transcript_text_style(theme, colors, style_def)
+            .markdown_link_label_policy(link_label_policy);
         TextView::new(text_view_state)
-            .style(Self::transcript_text_style(theme, colors, style_def))
+            .style(style)
             .selectable(crate::logging::agent_chat_markdown_selectable_enabled())
             .fidelity_scope(fidelity_scope)
             .w_full()
@@ -833,6 +947,7 @@ impl AgentChatTranscript {
                 on_fork_edit_message,
             ),
             AgentChatThreadMessageRole::Assistant => Self::render_assistant_message(
+                ui_variant,
                 msg,
                 colors,
                 &theme,
@@ -889,6 +1004,7 @@ impl AgentChatTranscript {
             );
 
         div()
+            .debug_selector(|| "agent-chat-transcript-pending".to_string())
             .flex()
             .items_center()
             .gap(px(style_contract::AGENT_CHAT_ACTIVITY_GAP))
@@ -909,6 +1025,7 @@ impl AgentChatTranscript {
         style_def: &AgentChatStyleDef,
     ) -> gpui::AnyElement {
         div()
+            .debug_selector(|| "agent-chat-transcript-row-assistant-pending".to_string())
             .w_full()
             .px(px(style_def.transcript.row_padding_x))
             .pb(px(style_def.transcript.row_padding_bottom))
@@ -1066,6 +1183,7 @@ impl AgentChatTranscript {
     }
 
     fn render_assistant_message(
+        ui_variant: AgentChatUiVariant,
         msg: &AgentChatThreadMessage,
         _colors: &PromptColors,
         _theme: &crate::theme::Theme,
@@ -1077,13 +1195,14 @@ impl AgentChatTranscript {
         let content = if show_pending_activity {
             Self::render_pending_activity(_theme, style_def)
         } else {
-            Self::selectable_markdown_view(
+            Self::selectable_markdown_view_with_policy(
                 text_view_state,
                 _theme,
                 _colors,
                 rgb(_colors.text_primary),
                 style_def,
                 Self::message_text_fidelity_scope(msg),
+                Self::markdown_link_policy_for(ui_variant, msg),
             )
             .into_any_element()
         };
@@ -1622,8 +1741,9 @@ impl Render for AgentChatTranscript {
                     .get(&msg.id)
                     .copied()
                     .unwrap_or_default();
-                let use_heavy_preview = Self::should_use_heavy_markdown_preview(msg, stats)
-                    && !expanded_heavy_markdown_ids.contains(&msg.id);
+                let use_heavy_preview =
+                    Self::should_use_heavy_markdown_preview_for(ui_variant, msg, stats)
+                        && !expanded_heavy_markdown_ids.contains(&msg.id);
                 let row_fidelity_id = transcript_row_fidelity_id(msg);
                 let mut row = div()
                     .debug_selector(move || row_fidelity_id)
@@ -1709,8 +1829,9 @@ impl Render for AgentChatTranscript {
                     .get(&msg.id)
                     .copied()
                     .unwrap_or_default();
-                let use_heavy_preview = Self::should_use_heavy_markdown_preview(msg, stats)
-                    && !expanded_heavy_markdown_ids.contains(&msg.id);
+                let use_heavy_preview =
+                    Self::should_use_heavy_markdown_preview_for(ui_variant, msg, stats)
+                        && !expanded_heavy_markdown_ids.contains(&msg.id);
 
                 let row_fidelity_id = transcript_row_fidelity_id(msg);
                 let row = div()
@@ -1890,6 +2011,49 @@ mod tests {
     }
 
     #[test]
+    fn first_visible_assistant_text_parses_immediately() {
+        let assistant = message(AgentChatThreadMessageRole::Assistant, "First token");
+        assert!(AgentChatTranscript::should_parse_message_immediately(
+            &assistant,
+            Some(""),
+            "First token",
+            true
+        ));
+        assert!(AgentChatTranscript::should_parse_message_immediately(
+            &assistant,
+            None,
+            "First token",
+            true
+        ));
+        assert!(!AgentChatTranscript::should_parse_message_immediately(
+            &assistant,
+            None,
+            "Historical answer",
+            false
+        ));
+        assert!(!AgentChatTranscript::should_parse_message_immediately(
+            &assistant,
+            Some("First"),
+            "First token",
+            true
+        ));
+        assert!(!AgentChatTranscript::should_parse_message_immediately(
+            &assistant,
+            Some(""),
+            "   ",
+            true
+        ));
+
+        let user = message(AgentChatThreadMessageRole::User, "First token");
+        assert!(!AgentChatTranscript::should_parse_message_immediately(
+            &user,
+            Some(""),
+            "First token",
+            true
+        ));
+    }
+
+    #[test]
     fn heavy_markdown_stats_count_markdown_and_bare_links() {
         let body = [
             "[Calendar](scriptkit://run/add-to-google-calendar)",
@@ -1933,6 +2097,60 @@ mod tests {
         assert!(stats.is_scroll_heavy());
         assert!(!AgentChatTranscript::should_use_heavy_markdown_preview(
             &msg, stats
+        ));
+    }
+
+    #[test]
+    fn quick_ai_link_policy_is_assistant_only() {
+        let assistant = message(AgentChatThreadMessageRole::Assistant, "answer");
+        assert_eq!(
+            AgentChatTranscript::markdown_link_policy_for(AgentChatUiVariant::QuickAi, &assistant),
+            MarkdownLinkLabelPolicy::CompactLongBareHttp
+        );
+        assert_eq!(
+            AgentChatTranscript::markdown_link_policy_for(AgentChatUiVariant::Standard, &assistant),
+            MarkdownLinkLabelPolicy::Preserve
+        );
+
+        for role in [
+            AgentChatThreadMessageRole::User,
+            AgentChatThreadMessageRole::Thought,
+            AgentChatThreadMessageRole::Tool,
+            AgentChatThreadMessageRole::System,
+            AgentChatThreadMessageRole::Error,
+        ] {
+            let msg = message(role, "unchanged");
+            assert_eq!(
+                AgentChatTranscript::markdown_link_policy_for(AgentChatUiVariant::QuickAi, &msg),
+                MarkdownLinkLabelPolicy::Preserve
+            );
+        }
+    }
+
+    #[test]
+    fn quick_ai_compact_links_bypass_heavy_plain_preview() {
+        let body = (0..14)
+            .map(|ix| {
+                format!(
+                    "https://news.google.com/rss/articles/very-long-redirect-{ix}-{}",
+                    "x".repeat(96)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let stats = HeavyMarkdownStats::from_text(&body);
+        let msg = message(AgentChatThreadMessageRole::Assistant, body);
+
+        assert!(stats.is_scroll_heavy());
+        assert!(AgentChatTranscript::should_use_heavy_markdown_preview_for(
+            AgentChatUiVariant::Standard,
+            &msg,
+            stats
+        ));
+        assert!(!AgentChatTranscript::should_use_heavy_markdown_preview_for(
+            AgentChatUiVariant::QuickAi,
+            &msg,
+            stats
         ));
     }
 }

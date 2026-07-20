@@ -752,12 +752,16 @@ mod loading_decision_tests {
         }
     }
 
-    /// OF-32: a provider result arriving after paint must not replace the
-    /// selected row merely because the user has not moved selection yet.
-    /// Enter resolves the live grouped cache, so changing this identity races
-    /// the action the user saw before pressing the key.
+    /// Hard rule (user, 2026-07-20): while the user has not moved selection,
+    /// focus is pinned to the FIRST item — a late provider publish that
+    /// injects rows above must snap selection to the new first row, never
+    /// leave it stranded mid-list on the previously painted identity.
+    /// (OF-32 identity preservation applies only after deliberate movement;
+    /// see `same_query_root_file_publish_preserves_user_moved_selection`.)
     #[gpui::test]
-    fn same_query_root_file_publish_preserves_painted_selection(cx: &mut gpui::TestAppContext) {
+    fn same_query_root_file_publish_snaps_untouched_selection_to_first(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let app = main_menu_selection_test_app(cx);
         app.update(cx, |app, cx| {
             let query = "zzlauncherrefreshprobe";
@@ -804,9 +808,9 @@ mod loading_decision_tests {
             );
 
             assert_eq!(
-                selected_main_menu_stable_key(app).as_deref(),
-                Some(painted_key),
-                "late same-query results must preserve the row identity painted before Enter"
+                selected_main_menu_stable_key(app),
+                first_selectable_main_menu_stable_key(app),
+                "late same-query results must keep untouched selection pinned to the first row"
             );
         });
     }

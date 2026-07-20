@@ -263,6 +263,17 @@ pub(crate) fn byte_range_for_char_indices(
 
 fn normalized_indices_for_query(haystack: &str, query_lower: &str) -> Option<Vec<usize>> {
     let haystack_norm = normalized_chars_with_original_indices(haystack);
+    // Search folding never *shrinks* a string — every char folds to one or more
+    // chars (`fold_search_char`) — so a query with more characters than the
+    // folded haystack can never be a substring of it. Bail out before folding the
+    // whole query, counting only up to the haystack length (`nth` stops early), so
+    // a pathologically long query is not re-folded for every candidate line/field.
+    // Without this, a single non-ASCII char forces every candidate through the
+    // normalized path and re-folds the entire query O(scripts × lines) times,
+    // which made long non-ASCII launcher queries stall for seconds.
+    if query_lower.chars().nth(haystack_norm.len()).is_some() {
+        return None;
+    }
     let query_norm = normalized_query_chars(query_lower);
     if query_norm.is_empty() || query_norm.len() > haystack_norm.len() {
         return None;
@@ -287,7 +298,18 @@ fn normalized_indices_for_query(haystack: &str, query_lower: &str) -> Option<Vec
     None
 }
 
+// Test-only, thread-local count of how many times the *query* is folded. Lets a
+// test assert deterministically (no wall-clock) that a pathologically long query
+// is not re-folded per candidate — thread-local so parallel tests never perturb
+// it. Compiled out entirely in non-test builds.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static QUERY_FOLD_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn normalized_query_chars(value: &str) -> Vec<char> {
+    #[cfg(test)]
+    QUERY_FOLD_CALLS.with(|c| c.set(c.get().saturating_add(1)));
     value
         .chars()
         .flat_map(|ch| fold_search_char(ch).into_iter())
@@ -409,5 +431,225 @@ mod min_query_len_tests {
         assert!(query_meets_min_query_chars("日", 3));
         assert!(query_meets_min_query_chars("🚀", 3));
         assert!(query_meets_min_query_chars("日本", 4));
+    }
+}
+
+#[cfg(test)]
+mod normalized_substring_perf_tests {
+    use super::{normalized_indices_for_query, substring_indices};
+
+    #[test]
+    fn normalized_match_still_finds_non_ascii_substrings() {
+        // Fold path preserved: an accented query still substring-matches an
+        // accented haystack, and diacritics fold to their ASCII base.
+        assert!(substring_indices("café société", "société").is_some());
+        assert!(substring_indices("naïve", "naive").is_some()); // ï → i
+        assert!(substring_indices("straße", "strasse").is_some()); // ß → ss
+                                                                   // A genuine non-match still returns None.
+        assert!(substring_indices("café", "zzz").is_none());
+    }
+
+    #[test]
+    fn query_longer_than_haystack_returns_none() {
+        // Behavior preserved by the early-out: a query with more chars than the
+        // haystack can never be a substring.
+        let long = "é".repeat(50);
+        assert!(normalized_indices_for_query("café", &long).is_none());
+        assert!(substring_indices("café", &long).is_none());
+    }
+
+    #[test]
+    fn huge_non_ascii_query_is_not_re_folded_per_candidate() {
+        // Regression (F1): a long non-ASCII query used to be re-folded for every
+        // candidate line/field (per-char Unicode lowercasing), so launcher search
+        // stalled for seconds. Deterministic guard — no wall-clock: the early-out
+        // must reject an over-long query WITHOUT folding it. Pre-fix, this loop
+        // folded the query 1600 times (→ QUERY_FOLD_CALLS == 1600); the fix makes
+        // it 0. Thread-local, so parallel tests can't perturb the count.
+        use super::QUERY_FOLD_CALLS;
+        let huge = "é".repeat(200_000);
+        let haystacks = ["run notes", "clipboard history", "open terminal", "café"];
+        QUERY_FOLD_CALLS.with(|c| c.set(0));
+        let mut hits = 0usize;
+        for _ in 0..400 {
+            for h in haystacks {
+                if normalized_indices_for_query(h, &huge).is_some() {
+                    hits += 1;
+                }
+            }
+        }
+        assert_eq!(
+            hits, 0,
+            "a 200k-char query cannot substring-match short labels"
+        );
+        assert_eq!(
+            QUERY_FOLD_CALLS.with(|c| c.get()),
+            0,
+            "an over-long query must never be folded per candidate (F1 perf regression)"
+        );
+    }
+}
+
+/// Chaos-monkey fuzz of the long-text sentence matcher (`sentence.rs`), driven
+/// through its public API so the whole pipeline (query compile → tokenize →
+/// per-field scan → occurrence math → excerpt build) is exercised on adversarial
+/// input. Two invariants are asserted:
+///   1. No panic on ANY (query, field-set) combination — the byte/char/grapheme
+///      confusion family that produced most chaos-monkey finds this session.
+///   2. Every returned highlight index is IN BOUNDS for the text it indexes
+///      (`title_indices` < `title_text.chars().count()`, same for subtitle) — the
+///      contract renderers rely on (`LongTextMatchEvidence` doc: "char indices
+///      into title_text"). An out-of-bounds index would panic a highlighter.
+#[cfg(test)]
+mod sentence_matcher_fuzz_tests {
+    use crate::scripts::search::sentence::{
+        compile_long_text_query, match_long_text, FieldClass, FieldVisibility, LongTextField,
+        LongTextFieldId, RenderSlot,
+    };
+
+    /// Hostile query strings: multibyte, combining, RTL override, ZWJ, control,
+    /// quoted phrases, whitespace-only, huge, and mixed-script.
+    fn hostile_queries() -> Vec<String> {
+        vec![
+            String::new(),
+            " ".to_string(),
+            "\t\n".to_string(),
+            "é".to_string(),
+            "café".to_string(),
+            "\"café latte\"".to_string(),
+            "a\u{0301}".to_string(), // combining acute
+            "a".to_string() + &"\u{0301}".repeat(50),
+            "👩‍👩‍👧‍👦".to_string(),               // ZWJ family
+            "\u{202E}reversed".to_string(), // RTL override
+            "الله اكبر".to_string(),
+            "日本語 テスト".to_string(),
+            "\0null".to_string(),
+            "line1\nline2".to_string(),
+            "AaÉé ÄÖÜ".to_string(),
+            "é ".repeat(500), // long multibyte, many terms
+            "\"".to_string(), // lone quote
+            "\"unterminated phrase".to_string(),
+            "a".repeat(100_000), // huge single term
+            "(){}[]<>|&;".to_string(),
+        ]
+    }
+
+    /// Hostile field texts, including ones that CONTAIN query terms at multibyte
+    /// offsets so occurrence/excerpt math actually fires.
+    fn hostile_field_texts() -> Vec<String> {
+        vec![
+            String::new(),
+            "café".to_string(),
+            "a café at the end é".to_string(),
+            "prefix é café suffix".to_string(),
+            "日本語 café テスト reversed 👩‍👩‍👧‍👦".to_string(),
+            "a\u{0301}bc a\u{0301}bc".to_string(),
+            "\u{202E}café latte reversed\u{202C}".to_string(),
+            format!("{} café {}", "x".repeat(4000), "y".repeat(4000)),
+            "café\ncafé\ncafé".to_string(),
+            "the quick brown fox café jumps over the lazy é dog".to_string(),
+            "\0café\0latte\0".to_string(),
+            "é".repeat(3000),
+            "AaÉé café ÄÖÜ latte".to_string(),
+        ]
+    }
+
+    fn field<'a>(
+        id: LongTextFieldId,
+        text: &'a str,
+        vis: FieldVisibility,
+        class: FieldClass,
+    ) -> LongTextField<'a> {
+        LongTextField {
+            id,
+            text,
+            class,
+            visibility: vis,
+            weight: 10,
+        }
+    }
+
+    #[test]
+    fn matcher_never_panics_and_never_emits_out_of_bounds_indices() {
+        let queries = hostile_queries();
+        let texts = hostile_field_texts();
+        let mut compiled_count = 0usize;
+        let mut match_count = 0usize;
+
+        for raw in &queries {
+            let Some(query) = compile_long_text_query(raw) else {
+                continue;
+            };
+            compiled_count += 1;
+
+            // Cross every field text into title (visible) + a hidden transcript
+            // (drives build_excerpt) + a metadata url field.
+            for t_title in &texts {
+                for t_hidden in &texts {
+                    let fields = vec![
+                        field(
+                            LongTextFieldId::Title,
+                            t_title,
+                            FieldVisibility::Visible(RenderSlot::Title),
+                            FieldClass::NaturalText,
+                        ),
+                        field(
+                            LongTextFieldId::Preview,
+                            t_hidden,
+                            FieldVisibility::Visible(RenderSlot::Subtitle),
+                            FieldClass::NaturalText,
+                        ),
+                        field(
+                            LongTextFieldId::Transcript,
+                            t_hidden,
+                            FieldVisibility::Hidden,
+                            FieldClass::NaturalText,
+                        ),
+                        field(
+                            LongTextFieldId::Url,
+                            t_title,
+                            FieldVisibility::Hidden,
+                            FieldClass::Metadata,
+                        ),
+                    ];
+
+                    if let Some(m) = match_long_text(&query, &fields) {
+                        match_count += 1;
+                        let ev = &m.evidence;
+                        let title_chars = ev.title_text.chars().count();
+                        let sub_chars = ev.subtitle_text.chars().count();
+                        for &i in &ev.title_indices {
+                            assert!(
+                                i < title_chars,
+                                "title highlight index {i} out of bounds for {title_chars}-char \
+                                 title_text (query {raw:?}) — would panic a highlighter",
+                            );
+                        }
+                        for &i in &ev.subtitle_indices {
+                            assert!(
+                                i < sub_chars,
+                                "subtitle highlight index {i} out of bounds for {sub_chars}-char \
+                                 subtitle_text (query {raw:?}) — would panic a highlighter",
+                            );
+                        }
+                        // Indices must be sorted+deduped per the evidence contract.
+                        assert!(
+                            ev.title_indices.windows(2).all(|w| w[0] < w[1]),
+                            "title_indices must be strictly ascending (query {raw:?})",
+                        );
+                    }
+                }
+            }
+        }
+
+        // Sanity: the fuzz actually exercised the pipeline, not a no-op.
+        assert!(
+            compiled_count >= 5,
+            "expected several hostile queries to compile, got {compiled_count}",
+        );
+        assert!(
+            match_count > 0,
+            "expected at least one adversarial match to build evidence, got {match_count}",
+        );
     }
 }

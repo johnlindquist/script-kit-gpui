@@ -70,6 +70,13 @@ pub(crate) enum AgentChatWarmAcquireOrigin {
     ColdSpawned,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentChatWarmReprepareResult {
+    Started(AgentChatWarmSessionSnapshot),
+    Current(AgentChatWarmSessionSnapshot),
+    Missing,
+}
+
 struct WarmSlot {
     spec: AgentChatWarmSessionSpec,
     generation: u64,
@@ -313,7 +320,7 @@ impl AgentChatWarmSessionManager {
         };
 
         let manager = self.clone();
-        std::thread::Builder::new()
+        let spawn_result = std::thread::Builder::new()
             .name("warm-prepare-background".to_string())
             .spawn(move || {
                 tracing::info!(
@@ -329,16 +336,103 @@ impl AgentChatWarmSessionManager {
                 );
                 manager.insert_prepared_slot_if_current(slot, generation);
             })
-            .map_err(|error| {
-                tracing::error!(
-                    target: "script_kit::tab_ai",
-                    event = "warm_background_thread_spawn_failed",
-                    %error,
-                );
-            })
-            .ok();
+            .map(|_| ());
+        self.finish_background_thread_spawn(&snapshot, spawn_result)?;
 
         Ok(snapshot)
+    }
+
+    fn finish_background_thread_spawn(
+        &self,
+        snapshot: &AgentChatWarmSessionSnapshot,
+        spawn_result: std::io::Result<()>,
+    ) -> Result<()> {
+        if let Err(error) = spawn_result {
+            let message = format!("Failed to spawn Pi warm prepare worker: {error}");
+            tracing::error!(
+                target: "script_kit::tab_ai",
+                event = "warm_background_thread_spawn_failed",
+                generation = snapshot.generation,
+                key = %snapshot.key,
+                error = %message,
+            );
+            self.mark_preparing_generation_failed(
+                &snapshot.key,
+                snapshot.generation,
+                message.clone(),
+            );
+            anyhow::bail!(message);
+        }
+        Ok(())
+    }
+
+    /// Replace exactly one failed generation with a fresh background prepare.
+    /// Concurrent Retry clicks carrying the same generation are duplicate-safe:
+    /// only the first creates a slot and worker; later calls observe `Current`.
+    pub(crate) fn reprepare_failed_generation_background(
+        &self,
+        spec: AgentChatWarmSessionSpec,
+        expected_generation: u64,
+    ) -> AgentChatWarmReprepareResult {
+        let (snapshot, generation, ui_thread_id) = {
+            let mut inner = self.inner.lock();
+            let Some(current) = inner.slots.get(&spec.key) else {
+                return AgentChatWarmReprepareResult::Missing;
+            };
+            if current.generation != expected_generation
+                || current.state != AgentChatWarmSessionState::Failed
+            {
+                return AgentChatWarmReprepareResult::Current(current.snapshot());
+            }
+
+            inner.next_generation += 1;
+            let generation = inner.next_generation;
+            let ui_thread_id = (self.ui_thread_id_source)();
+            let slot = WarmSlot {
+                spec: spec.clone(),
+                generation,
+                ui_thread_id: Some(ui_thread_id.clone()),
+                state: AgentChatWarmSessionState::Preparing,
+                connection: None,
+                acquired_at: None,
+                failure_message: None,
+            };
+            let snapshot = slot.snapshot();
+            inner.slots.insert(spec.key.clone(), slot);
+            (snapshot, generation, ui_thread_id)
+        };
+
+        let manager = self.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("warm-reprepare-background".to_string())
+            .spawn(move || {
+                let slot = manager.prepare_slot_with_generation(spec, generation, ui_thread_id);
+                manager.insert_prepared_slot_if_current(slot, generation);
+            })
+        {
+            let message = format!("Failed to spawn Pi warm retry worker: {error}");
+            let mut inner = self.inner.lock();
+            if let Some(slot) = inner.slots.get_mut(&snapshot.key) {
+                if slot.generation == generation
+                    && slot.state == AgentChatWarmSessionState::Preparing
+                {
+                    slot.state = AgentChatWarmSessionState::Failed;
+                    slot.failure_message = Some(message);
+                }
+            }
+        }
+
+        AgentChatWarmReprepareResult::Started(snapshot)
+    }
+
+    fn mark_preparing_generation_failed(&self, key: &str, generation: u64, message: String) {
+        let mut inner = self.inner.lock();
+        if let Some(slot) = inner.slots.get_mut(key) {
+            if slot.generation == generation && slot.state == AgentChatWarmSessionState::Preparing {
+                slot.state = AgentChatWarmSessionState::Failed;
+                slot.failure_message = Some(message);
+            }
+        }
     }
 
     /// Acquire a slot that is still `Preparing` but whose runtime connection
@@ -1148,6 +1242,39 @@ mod tests {
     }
 
     #[test]
+    fn background_thread_spawn_failure_marks_same_generation_failed_and_returns_error() {
+        let manager = manager();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let factory = Arc::new(BlockingFactory::new(started_tx, release_rx));
+        let snapshot = manager
+            .prepare_warm_background(spec_with_factory(factory))
+            .expect("reserve background generation");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("real worker reached the blocking factory");
+
+        let error = manager
+            .finish_background_thread_spawn(
+                &snapshot,
+                Err(std::io::Error::other("synthetic spawn failure")),
+            )
+            .expect_err("spawn failure must be returned");
+        let failed = manager.snapshot("key-a").expect("failed slot retained");
+
+        assert!(error.to_string().contains("synthetic spawn failure"));
+        assert_eq!(failed.generation, snapshot.generation);
+        assert_eq!(failed.state, AgentChatWarmSessionState::Failed);
+        assert!(failed
+            .failure_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("synthetic spawn failure"));
+
+        release_tx.send(()).expect("release real worker");
+    }
+
+    #[test]
     fn acquire_warm_returns_ready_session_and_marks_it_acquired() {
         let manager = manager();
         let factory = Arc::new(RecordingFactory::default());
@@ -1518,5 +1645,37 @@ mod tests {
             Some("Pi Agent Chat setup required: login required. Available methods: browser")
         );
         assert_eq!(factory.spawned().len(), 1);
+    }
+
+    #[test]
+    fn failed_generation_reprepare_is_generation_checked_and_duplicate_safe() {
+        let manager = manager();
+        let factory = Arc::new(RecordingFactory::default());
+        factory.fail_next_prepare();
+        let failed = manager.prepare_warm(spec(factory.clone())).unwrap();
+        assert_eq!(failed.state, AgentChatWarmSessionState::Failed);
+
+        let first = manager
+            .reprepare_failed_generation_background(spec(factory.clone()), failed.generation);
+        let second = manager
+            .reprepare_failed_generation_background(spec(factory.clone()), failed.generation);
+
+        assert!(matches!(first, AgentChatWarmReprepareResult::Started(_)));
+        assert!(matches!(second, AgentChatWarmReprepareResult::Current(_)));
+        for _ in 0..100 {
+            if manager.snapshot("key-a").unwrap().state == AgentChatWarmSessionState::Ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            factory.spawned().len(),
+            2,
+            "one initial failure plus one retry"
+        );
+        assert_eq!(
+            manager.snapshot("key-a").unwrap().generation,
+            failed.generation + 1
+        );
     }
 }

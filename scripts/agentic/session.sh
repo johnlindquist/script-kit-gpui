@@ -17,7 +17,11 @@
 #                                        exposed — see tool-session-send-parse-receipt).
 #   session.sh rpc    SESSION_NAME CMD [--expect TYPE] [--timeout MS]
 #                                      — Send a JSON command and await the response
-#   session.sh stop   [SESSION_NAME]   — Stop a session and clean up
+#   session.sh stop   [SESSION_NAME] [--expected-pid PID --expected-generation GENERATION]
+#                                      — Stop a session and clean up. When both
+#                                        ownership options are supplied, fail
+#                                        closed unless the registry still has
+#                                        that exact PID and generation.
 #   session.sh status [SESSION_NAME]   — Print session state as JSON
 #
 # All output on stdout is machine-readable JSON. Diagnostics go to stderr.
@@ -78,6 +82,67 @@ json_error() {
   local code="$1" msg="$2"
   printf '{"schemaVersion":%d,"status":"error","error":{"code":"%s","message":"%s"}}\n' \
     "$SCHEMA_VERSION" "$code" "$msg"
+}
+
+STOP_OWNERSHIP_STRICT=false
+STOP_EXPECTED_PID=""
+STOP_EXPECTED_GENERATION=""
+STOP_ACTUAL_PID=""
+STOP_ACTUAL_GENERATION=""
+
+read_stop_identity() {
+  local sdir="$1"
+  STOP_ACTUAL_PID=""
+  STOP_ACTUAL_GENERATION=""
+  if [ -f "${sdir}/pid" ]; then
+    STOP_ACTUAL_PID="$(tr -d '\r\n' < "${sdir}/pid")"
+  fi
+  if [ -f "${sdir}/generation" ]; then
+    STOP_ACTUAL_GENERATION="$(tr -d '\r\n' < "${sdir}/generation")"
+  fi
+}
+
+stop_pid_json_value() {
+  local value="$1"
+  if [ -z "$value" ]; then
+    printf 'null'
+  elif [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf '"%s"' "$(json_escape "$value")"
+  fi
+}
+
+stop_generation_json_value() {
+  local value="$1"
+  if [ -z "$value" ]; then
+    printf 'null'
+  else
+    printf '"%s"' "$(json_escape "$value")"
+  fi
+}
+
+verify_stop_ownership() {
+  local name="$1"
+  local sdir="$2"
+  if [ "$STOP_OWNERSHIP_STRICT" != true ]; then
+    return 0
+  fi
+
+  read_stop_identity "$sdir"
+  if [ "$STOP_ACTUAL_PID" = "$STOP_EXPECTED_PID" ] \
+     && [ "$STOP_ACTUAL_GENERATION" = "$STOP_EXPECTED_GENERATION" ]; then
+    return 0
+  fi
+
+  local expected_generation actual_pid actual_generation
+  expected_generation="$(json_escape "$STOP_EXPECTED_GENERATION")"
+  actual_pid="$(stop_pid_json_value "$STOP_ACTUAL_PID")"
+  actual_generation="$(stop_generation_json_value "$STOP_ACTUAL_GENERATION")"
+  printf '{"schemaVersion":%d,"status":"error","session":"%s","ownershipVerified":false,"expectedPid":%s,"actualPid":%s,"expectedGeneration":"%s","actualGeneration":%s,"error":{"code":"session_ownership_mismatch","message":"Session ownership changed or is missing; refusing to stop or mutate the session."}}\n' \
+    "$SCHEMA_VERSION" "$(json_escape "$name")" "$STOP_EXPECTED_PID" "$actual_pid" \
+    "$expected_generation" "$actual_generation"
+  return 1
 }
 
 json_escape() {
@@ -266,9 +331,20 @@ terminate_session_app() {
   if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
     # The supervisor forwards SIGTERM to the app's dedicated process group and
     # stays alive until it has reaped the child and written its exit receipt.
+    if ! verify_stop_ownership "$name" "$sdir"; then
+      return 1
+    fi
     kill -TERM "$supervisor_pid" 2>/dev/null || true
   else
-    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    if ! verify_stop_ownership "$name" "$sdir"; then
+      return 1
+    fi
+    if ! kill -TERM -- "-$pid" 2>/dev/null; then
+      if ! verify_stop_ownership "$name" "$sdir"; then
+        return 1
+      fi
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
   fi
 
   if wait_for_process_exit "$pid" "$STOP_GRACE_MS"; then
@@ -278,7 +354,15 @@ terminate_session_app() {
 
   SESSION_STOP_FORCED_KILL=true
   log "Session '${name}' ignored SIGTERM; sending SIGKILL to process group ${pid}"
-  kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  if ! verify_stop_ownership "$name" "$sdir"; then
+    return 1
+  fi
+  if ! kill -KILL -- "-$pid" 2>/dev/null; then
+    if ! verify_stop_ownership "$name" "$sdir"; then
+      return 1
+    fi
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   if wait_for_process_exit "$pid" "$STOP_KILL_TIMEOUT_MS"; then
     log "Stopped session '${name}' with SIGKILL (pid ${pid})"
     return 0
@@ -341,6 +425,8 @@ cleanup_orphan_session_forwarders() {
   local pipe_path="$1"
   local input_fifo="$2"
   local keep_pid="${3:-}"
+  local ownership_name="${4:-}"
+  local ownership_sdir="${5:-}"
 
   while IFS= read -r orphan_pid; do
     if [ -z "$orphan_pid" ]; then
@@ -351,6 +437,9 @@ cleanup_orphan_session_forwarders() {
     fi
     if [ "$orphan_pid" = "$$" ]; then
       continue
+    fi
+    if [ -n "$ownership_name" ] && ! verify_stop_ownership "$ownership_name" "$ownership_sdir"; then
+      return 1
     fi
     kill "$orphan_pid" 2>/dev/null || true
   done < <(session_forwarder_pids "$pipe_path" "$input_fifo")
@@ -1127,12 +1216,65 @@ cmd_status() {
 
 cmd_stop() {
   local name="${1:-default}"
+  shift 1 2>/dev/null || true
+  local expected_pid=""
+  local expected_generation=""
+  local expected_pid_set=false
+  local expected_generation_set=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --expected-pid)
+        if [ $# -lt 2 ]; then
+          json_error "invalid_stop_ownership_options" "--expected-pid requires a value."
+          return 1
+        fi
+        expected_pid="$2"
+        expected_pid_set=true
+        shift 2
+        ;;
+      --expected-generation)
+        if [ $# -lt 2 ]; then
+          json_error "invalid_stop_ownership_options" "--expected-generation requires a value."
+          return 1
+        fi
+        expected_generation="$2"
+        expected_generation_set=true
+        shift 2
+        ;;
+      *)
+        json_error "invalid_stop_ownership_options" "Unknown stop option: $1"
+        return 1
+        ;;
+    esac
+  done
+
+  if [ "$expected_pid_set" != "$expected_generation_set" ]; then
+    json_error "invalid_stop_ownership_options" "--expected-pid and --expected-generation must be provided together."
+    return 1
+  fi
+  if [ "$expected_pid_set" = true ]; then
+    if ! [[ "$expected_pid" =~ ^[1-9][0-9]*$ ]] || [ -z "$expected_generation" ]; then
+      json_error "invalid_stop_ownership_options" "Strict stop requires a positive integer PID and a non-empty generation."
+      return 1
+    fi
+    STOP_OWNERSHIP_STRICT=true
+    STOP_EXPECTED_PID="$expected_pid"
+    STOP_EXPECTED_GENERATION="$expected_generation"
+  fi
+
   local sdir
   sdir="$(session_dir "$name")"
 
   if [ ! -d "$sdir" ]; then
+    if ! verify_stop_ownership "$name" "$sdir"; then
+      return 1
+    fi
     json_envelope "ok" "session:\"${name}\"" "wasRunning:false"
     return 0
+  fi
+
+  if ! verify_stop_ownership "$name" "$sdir"; then
+    return 1
   fi
 
   local fwd_pid=""
@@ -1158,21 +1300,47 @@ cmd_stop() {
   # The app is confirmed dead; its supervisor should exit after writing the
   # receipt, but stop any straggling supervisor/forwarder before FIFO cleanup.
   if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+    if ! verify_stop_ownership "$name" "$sdir"; then
+      return 1
+    fi
     kill -TERM "$supervisor_pid" 2>/dev/null || true
   fi
   if [ -n "$fwd_pid" ] && kill -0 "$fwd_pid" 2>/dev/null; then
+    if ! verify_stop_ownership "$name" "$sdir"; then
+      return 1
+    fi
     kill -TERM "$fwd_pid" 2>/dev/null || true
   fi
-  cleanup_orphan_session_forwarders "${sdir}/pipe" "${sdir}/input"
+  if ! cleanup_orphan_session_forwarders "${sdir}/pipe" "${sdir}/input" "" "$name" "$sdir"; then
+    return 1
+  fi
 
   # Clean up FIFOs and directory
+  if ! verify_stop_ownership "$name" "$sdir"; then
+    return 1
+  fi
   rm -f "${sdir}/pipe" "${sdir}/input"
+  if ! verify_stop_ownership "$name" "$sdir"; then
+    return 1
+  fi
   rm -rf "${sdir}"
 
-  json_envelope "ok" \
-    "session:\"${name}\"" \
-    "wasRunning:true" \
-    "forcedKill:${SESSION_STOP_FORCED_KILL}"
+  if [ "$STOP_OWNERSHIP_STRICT" = true ]; then
+    json_envelope "ok" \
+      "session:\"${name}\"" \
+      "wasRunning:true" \
+      "forcedKill:${SESSION_STOP_FORCED_KILL}" \
+      "ownershipVerified:true" \
+      "expectedPid:${STOP_EXPECTED_PID}" \
+      "actualPid:${STOP_ACTUAL_PID}" \
+      "expectedGeneration:\"$(json_escape "$STOP_EXPECTED_GENERATION")\"" \
+      "actualGeneration:\"$(json_escape "$STOP_ACTUAL_GENERATION")\""
+  else
+    json_envelope "ok" \
+      "session:\"${name}\"" \
+      "wasRunning:true" \
+      "forcedKill:${SESSION_STOP_FORCED_KILL}"
+  fi
 }
 
 # --- main -------------------------------------------------------------------

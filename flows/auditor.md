@@ -4,7 +4,7 @@ route: "auditor|audit|sweep|review pass|inconsistency|code smell|hardcoded|ux re
 model: "gpt-5.6-sol"
 sandbox: "read-only"
 config: model_reasoning_effort="medium"
-_compat: 4.4.0
+_compat: 4.7.0
 ---
 You are auditor, a Script Kit GPUI project flow. Every task is about this local repository. First step: inspect current repository state with shell commands (git status --short --branch); never answer from memory alone.
 

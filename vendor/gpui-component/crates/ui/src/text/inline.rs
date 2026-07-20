@@ -29,7 +29,7 @@ pub(super) struct Inline {
 /// The inline text state, used RefCell to keep the selection state.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct InlineState {
-    hovered_index: Option<usize>,
+    hovered_link_range: Option<Range<usize>>,
     /// The text that actually rendering, matched with selection.
     pub(super) text: SharedString,
     pub(super) selection: Option<Selection>,
@@ -74,6 +74,16 @@ impl Inline {
         }
 
         None
+    }
+
+    fn link_range_for_index(
+        links: &[(Range<usize>, LinkMark)],
+        index: Option<usize>,
+    ) -> Option<Range<usize>> {
+        let index = index?;
+        links
+            .iter()
+            .find_map(|(range, _)| range.contains(&index).then(|| range.clone()))
     }
 
     /// Paint selected bounds for debug.
@@ -245,14 +255,26 @@ impl Element for Inline {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let text_style = window.text_style();
+        let hovered_link_range = self.state.lock().unwrap().hovered_link_range.clone();
 
         let mut runs = Vec::new();
         let mut ix = 0;
-        for (range, highlight) in self.highlights.iter() {
+        for (range, highlight) in self.highlights.iter().map(|(range, highlight)| {
+            let mut highlight = *highlight;
+            if hovered_link_range
+                .as_ref()
+                .is_some_and(|hovered| hovered.start < range.end && range.start < hovered.end)
+            {
+                // Script Kit local: preserve link underline/font styling while making hover
+                // use the semantic theme token; keep this during upstream syncs.
+                highlight.color = Some(cx.theme().link_hover);
+            }
+            (range, highlight)
+        }) {
             if ix < range.start {
                 runs.push(text_style.clone().to_run(range.start - ix));
             }
-            runs.push(text_style.clone().highlight(*highlight).to_run(range.len()));
+            runs.push(text_style.clone().highlight(highlight).to_run(range.len()));
             ix = range.end;
         }
         if ix < self.text.len() {
@@ -324,18 +346,25 @@ impl Element for Inline {
         // mouse move, update hovered link
         window.on_mouse_event({
             let hitbox = hitbox.clone();
+            let links = self.links.clone();
+            let state = self.state.clone();
             let text_layout = text_layout.clone();
-            let mut hovered_index = state.hovered_index;
             move |event: &MouseMoveEvent, phase, window, cx| {
-                if !phase.bubble() || !hitbox.is_hovered(window) {
+                if !phase.bubble() {
                     return;
                 }
 
-                let current = hovered_index;
-                let updated = text_layout.index_for_position(event.position).ok();
-                //  notify update when hovering over different links
-                if current != updated {
-                    hovered_index = updated;
+                let hovered_index = hitbox
+                    .is_hovered(window)
+                    .then(|| text_layout.index_for_position(event.position).ok())
+                    .flatten();
+                let updated = Self::link_range_for_index(&links, hovered_index);
+                let mut state = state.lock().unwrap();
+                // Script Kit local: persist only the hovered link range so moving between
+                // characters does not redraw, and clear it when leaving the hitbox.
+                if state.hovered_link_range != updated {
+                    state.hovered_link_range = updated;
+                    drop(state);
                     cx.notify(current_view);
                 }
             }
@@ -401,8 +430,19 @@ fn point_in_text_selection(
 
 #[cfg(test)]
 mod tests {
-    use super::point_in_text_selection;
+    use super::{Inline, point_in_text_selection};
+    use crate::text::node::LinkMark;
     use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn test_link_range_for_index() {
+        let links = vec![(2..5, LinkMark::default()), (8..12, LinkMark::default())];
+
+        assert_eq!(Inline::link_range_for_index(&links, None), None);
+        assert_eq!(Inline::link_range_for_index(&links, Some(1)), None);
+        assert_eq!(Inline::link_range_for_index(&links, Some(3)), Some(2..5));
+        assert_eq!(Inline::link_range_for_index(&links, Some(9)), Some(8..12));
+    }
 
     #[test]
     fn test_point_in_text_selection() {

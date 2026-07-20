@@ -811,14 +811,21 @@ pub fn toggle_detached_actions(cx: &mut App) {
         usize,
         Vec<crate::ai::agent_chat::ui::AgentChatThreadSummary>,
         Vec<crate::ai::agent_chat::ui::AgentChatForkPoint>,
+        Vec<crate::actions::Action>,
     )> = view_weak.as_ref().and_then(|weak| {
         weak.upgrade().map(|entity| {
             let view = entity.read(cx);
             let thread_summaries = view.retained_thread_summaries(cx);
+            let callout_actions = view.active_callout_actions(cx);
             match &view.session {
-                crate::ai::agent_chat::ui::AgentChatSession::Setup(_) => {
-                    (None, Vec::new(), 0, thread_summaries, Vec::new())
-                }
+                crate::ai::agent_chat::ui::AgentChatSession::Setup(_) => (
+                    None,
+                    Vec::new(),
+                    0,
+                    thread_summaries,
+                    Vec::new(),
+                    Vec::new(),
+                ),
                 crate::ai::agent_chat::ui::AgentChatSession::Live(thread) => {
                     let thread = thread.read(cx);
                     (
@@ -827,6 +834,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
                         thread.standing_approvals().len(),
                         thread_summaries,
                         thread.fork_points().to_vec(),
+                        callout_actions,
                     )
                 }
             }
@@ -839,7 +847,9 @@ pub fn toggle_detached_actions(cx: &mut App) {
         standing_approval_count,
         thread_summaries,
         fork_points,
-    ) = agent_chat_context.unwrap_or_else(|| (None, Vec::new(), 0, Vec::new(), Vec::new()));
+        callout_actions,
+    ) = agent_chat_context
+        .unwrap_or_else(|| (None, Vec::new(), 0, Vec::new(), Vec::new(), Vec::new()));
 
     let dialog = cx.new(|cx| {
         let focus_handle = cx.focus_handle();
@@ -858,6 +868,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
             theme_arc,
             crate::actions::AgentChatActionsDialogHost::Detached,
         );
+        dialog.prepend_root_route_actions(callout_actions.clone());
         dialog.set_skip_track_focus(true);
         dialog
     });
@@ -1292,6 +1303,15 @@ fn dispatch_detached_action(
     }
 
     match action_id {
+        super::view::AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID
+        | super::view::AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID
+        | super::view::AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID => {
+            if let Some(entity) = entity_weak.upgrade() {
+                entity.update(cx, |chat, cx| {
+                    let _ = chat.dispatch_active_callout_action(action_id, cx);
+                });
+            }
+        }
         "agent_chat_new_thread" => {
             if let Some(entity) = entity_weak.upgrade() {
                 entity.update(cx, |chat, cx| chat.start_new_thread(cx));

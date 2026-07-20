@@ -127,6 +127,7 @@ impl ScriptListApp {
         auto_submit: bool,
         pending_script_list_trigger: Option<char>,
         suppress_focused_part: bool,
+        stage_instruction_notes: bool,
         source_view: &AppView,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -166,7 +167,7 @@ impl ScriptListApp {
         // Notes tagged `#instructions` act as user-authored standing guidance
         // for every new thread. Skipped on retry-draft restores because the
         // draft already carries its context parts.
-        if !has_retry_draft_state {
+        if !has_retry_draft_state && stage_instruction_notes {
             match crate::notes::count_active_notes_with_tag(crate::notes::NOTES_INSTRUCTIONS_TAG) {
                 Ok(count) if count > 0 => {
                     let part = crate::ai::message_parts::AiContextPart::ResourceUri {

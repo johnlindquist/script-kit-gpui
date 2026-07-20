@@ -826,7 +826,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
                 variant.menu_description(),
                 variant.keywords(),
                 BuiltInFeature::AiChatVariant(variant),
-                "bot",
+                variant.menu_icon(),
             ));
         }
         debug!("Added Agent Chat UI variation built-in entries");
@@ -843,7 +843,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/vault",
-            "AI Vault",
+            "Search AI Vault",
             "Search cmux AI conversation vault sessions from the launcher",
             vec![
                 "vault",
@@ -883,7 +883,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/tips",
-            "Tips",
+            "Script Kit Tips",
             "Learn Script Kit's hidden powers — sigils, gestures, and shortcuts",
             vec![
                 "tips",
@@ -1026,7 +1026,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/sleep",
-            "Sleep",
+            "Put Mac to Sleep",
             "Put the system to sleep",
             vec!["sleep", "suspend", "power"],
             BuiltInFeature::SystemAction(SystemActionType::Sleep),
@@ -1035,7 +1035,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/restart",
-            "Restart",
+            "Restart Mac",
             "Restart the system",
             vec!["restart", "reboot", "power"],
             BuiltInFeature::SystemAction(SystemActionType::Restart),
@@ -1044,7 +1044,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/shut-down",
-            "Shut Down",
+            "Shut Down Mac",
             "Shut down the system",
             vec!["shut", "down", "shutdown", "power", "off"],
             BuiltInFeature::SystemAction(SystemActionType::ShutDown),
@@ -1099,7 +1099,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/force-quit",
-            "Open Force Quit Apps",
+            "Force Quit Applications",
             "Open the macOS Force Quit Applications dialog",
             vec![
                 "force",
@@ -1117,7 +1117,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
         // Volume controls (preset levels)
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/volume-0",
-            "Volume 0%",
+            "Set Volume to 0%",
             "Set system volume to 0% (mute)",
             vec!["volume", "mute", "0", "percent", "zero", "off"],
             BuiltInFeature::SystemAction(SystemActionType::Volume0),
@@ -1126,7 +1126,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/volume-25",
-            "Volume 25%",
+            "Set Volume to 25%",
             "Set system volume to 25%",
             vec!["volume", "25", "percent", "low", "quiet"],
             BuiltInFeature::SystemAction(SystemActionType::Volume25),
@@ -1135,7 +1135,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/volume-50",
-            "Volume 50%",
+            "Set Volume to 50%",
             "Set system volume to 50%",
             vec!["volume", "50", "percent", "half", "medium"],
             BuiltInFeature::SystemAction(SystemActionType::Volume50),
@@ -1144,7 +1144,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/volume-75",
-            "Volume 75%",
+            "Set Volume to 75%",
             "Set system volume to 75%",
             vec!["volume", "75", "percent", "high", "loud"],
             BuiltInFeature::SystemAction(SystemActionType::Volume75),
@@ -1153,7 +1153,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/volume-100",
-            "Volume 100%",
+            "Set Volume to 100%",
             "Set system volume to 100% (max)",
             vec!["volume", "100", "percent", "max", "full"],
             BuiltInFeature::SystemAction(SystemActionType::Volume100),
@@ -1209,7 +1209,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
         // System Preferences
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/system-preferences",
-            "macOS System Settings",
+            "Open System Settings",
             "Open macOS System Settings",
             vec!["system", "settings", "preferences", "prefs"],
             BuiltInFeature::SystemAction(SystemActionType::OpenSystemPreferences),
@@ -1218,7 +1218,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/privacy-settings",
-            "Privacy & Security Settings",
+            "Open Privacy & Security Settings",
             "Open Privacy & Security settings",
             vec!["privacy", "security", "settings"],
             BuiltInFeature::SystemAction(SystemActionType::OpenPrivacySettings),
@@ -1227,7 +1227,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/display-settings",
-            "Displays Settings",
+            "Open Displays Settings",
             "Open Displays settings",
             vec!["display", "monitor", "screen", "resolution", "settings"],
             BuiltInFeature::SystemAction(SystemActionType::OpenDisplaySettings),
@@ -1236,7 +1236,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/sound-settings",
-            "Sound Settings",
+            "Open Sound Settings",
             "Open Sound settings",
             vec!["sound", "audio", "volume", "settings"],
             BuiltInFeature::SystemAction(SystemActionType::OpenSoundSettings),
@@ -1245,7 +1245,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/network-settings",
-            "Network Settings",
+            "Open Network Settings",
             "Open Network settings",
             vec!["network", "wifi", "ethernet", "internet", "settings"],
             BuiltInFeature::SystemAction(SystemActionType::OpenNetworkSettings),
@@ -1254,7 +1254,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/keyboard-settings",
-            "Keyboard Settings",
+            "Open Keyboard Settings",
             "Open Keyboard settings",
             vec!["keyboard", "shortcuts", "input", "settings"],
             BuiltInFeature::SystemAction(SystemActionType::OpenKeyboardSettings),
@@ -1263,7 +1263,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/bluetooth-settings",
-            "Bluetooth Settings",
+            "Open Bluetooth Settings",
             "Open Bluetooth settings",
             vec!["bluetooth", "wireless", "settings"],
             BuiltInFeature::SystemAction(SystemActionType::OpenBluetoothSettings),
@@ -1272,7 +1272,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/notifications-settings",
-            "Notifications Settings",
+            "Open Notifications Settings",
             "Open Notifications settings",
             vec!["notifications", "alerts", "banners", "settings"],
             BuiltInFeature::SystemAction(SystemActionType::OpenNotificationsSettings),
@@ -1334,7 +1334,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/quick-capture",
-            "Quick Capture",
+            "Quick Note Capture",
             "Capture a new note without opening the full Notes window",
             vec!["quick", "capture", "note", "fast"],
             BuiltInFeature::NotesCommand(NotesCommandType::QuickCapture),
@@ -1389,7 +1389,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/send-screen-to-ai",
-            "Send Screen to Agent Chat",
+            "Send Full Screen to Agent Chat",
             "Capture the full screen and send it to Agent Chat",
             vec![
                 "send",
@@ -1423,7 +1423,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/send-selected-text-to-ai",
-            "Send Selected Text to Agent Chat",
+            "Send Selection to Agent Chat",
             "Send the currently selected text to Agent Chat",
             vec![
                 "send",
@@ -1440,7 +1440,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/send-browser-tab-to-ai",
-            "Send Focused Browser Tab to Agent Chat",
+            "Send Current Browser Tab to Agent Chat",
             "Send the current browser tab URL to Agent Chat",
             vec![
                 "send", "browser", "tab", "url", "safari", "chrome", "ai", "chat", "web",
@@ -1484,7 +1484,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/new-extension",
-            "New Scriptlet Bundle",
+            "Create Scriptlet Bundle",
             "Create a new scriptlet bundle with YAML frontmatter and scriptlet examples",
             vec![
                 "new",
@@ -1506,7 +1506,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/allow-accessibility",
-            "Accessibility Permission Assistant",
+            "Open Accessibility Assistant",
             "Open the Permission Assistant for Accessibility",
             vec![
                 "allow",
@@ -1516,12 +1516,12 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
                 "assistant",
             ],
             BuiltInFeature::PermissionCommand(PermissionCommandType::AllowAccessibility),
-            "accessibility",
+            "shield-check",
         ));
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/allow-screen-recording",
-            "Screen Recording Permission Assistant",
+            "Open Screen Recording Assistant",
             "Open the Permission Assistant for Screen Recording",
             vec![
                 "allow",
@@ -1532,7 +1532,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
                 "assistant",
             ],
             BuiltInFeature::PermissionCommand(PermissionCommandType::AllowScreenRecording),
-            "monitor-check",
+            "shield-check",
         ));
 
         entries.push(BuiltInEntry::new_with_icon(
@@ -1566,7 +1566,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/request-accessibility",
-            "Request Accessibility Permission",
+            "Request Accessibility Access",
             "Request accessibility permission for Script Kit in System Settings",
             vec!["request", "accessibility", "permission"],
             BuiltInFeature::PermissionCommand(PermissionCommandType::RequestAccessibility),
@@ -1588,7 +1588,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/clear-suggested",
-            "Clear Suggested",
+            "Clear Suggested Items",
             "Clear all items from Suggested / Recently Used",
             vec![
                 "clear",
@@ -1664,7 +1664,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/background-effect-next",
-            "Background Effect: Next",
+            "Next Background Effect",
             "Cycle to the next background shader effect",
             vec![
                 "background",
@@ -1682,7 +1682,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/background-effect-previous",
-            "Background Effect: Previous",
+            "Previous Background Effect",
             "Cycle to the previous background shader effect",
             vec!["background", "effect", "shader", "previous"],
             BuiltInFeature::BackgroundEffectPrevious,
@@ -1691,11 +1691,11 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/background-effect-off",
-            "Background Effect: Off",
+            "Turn Off Background Effect",
             "Turn off the background shader effect",
             vec!["background", "effect", "shader", "off", "disable"],
             BuiltInFeature::BackgroundEffectOff,
-            "sparkles",
+            "circle-x",
         ));
 
         entries.push(BuiltInEntry::new_with_icon(
@@ -1726,7 +1726,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/configure-snap-mode",
-            "Configure Snap Mode",
+            "Choose Window Snap Mode",
             "Choose a snapping grid density or disable drag snapping",
             vec![
                 "snap",
@@ -1917,7 +1917,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
 
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/webcam",
-            "Webcam",
+            "Capture Webcam Photo",
             "Open the webcam prompt and capture a photo",
             vec!["webcam", "camera", "capture", "photo", "image"],
             BuiltInFeature::Webcam,

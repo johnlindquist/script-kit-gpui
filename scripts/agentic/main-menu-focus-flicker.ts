@@ -1,27 +1,63 @@
 #!/usr/bin/env bun
 
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { Driver, type Json } from "../devtools/driver";
+import {
+  buildArtifactLifecycle,
+  claimOutput,
+  commitFinalReceipt,
+  materializeAtomic,
+  validateArtifact,
+  validateOutputTarget,
+  writeJsonArtifactAtomic,
+  type ArtifactReceipt,
+  type ArtifactSpec,
+} from "./artifact-lifecycle";
 
 const repoRoot = resolve(import.meta.dir, "../..");
-const outArgIndex = process.argv.indexOf("--out");
-const durationArgIndex = process.argv.indexOf("--duration-ms");
+
+function usage(): string {
+  return `Usage: bun scripts/agentic/main-menu-focus-flicker.ts [options]
+
+Options:
+  --session <name>       Session label (uniquified per process/run)
+  --out <directory>      Fresh output directory under .test-output or the system temp directory
+  --duration-ms <ms>     Sampling duration (default: 160)
+  -h, --help             Show this help`;
+}
+
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(usage());
+  process.exit(0);
+}
+
+function argValue(name: string, fallback: string): string {
+  const index = process.argv.indexOf(name);
+  return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
+}
+
+const sessionLabel = argValue("--session", "main-menu-focus-flicker");
+const sessionName = `${sessionLabel}-${process.pid}-${Date.now()}`;
 const outDir =
-  outArgIndex >= 0 && process.argv[outArgIndex + 1]
-    ? resolve(process.argv[outArgIndex + 1])
-    : join(repoRoot, ".test-output", "main-menu-focus-flicker");
-const durationMs =
-  durationArgIndex >= 0 && process.argv[durationArgIndex + 1]
-    ? Number(process.argv[durationArgIndex + 1])
-    : 160;
+  process.argv.includes("--out")
+    ? resolve(argValue("--out", ""))
+    : join(repoRoot, ".test-output", "main-menu-focus-flicker", sessionName);
+const durationMs = Number(argValue("--duration-ms", "160"));
+const outputPlan = validateOutputTarget({
+  repoRoot,
+  candidate: outDir,
+  kind: "directory",
+  probeId: "main-menu-focus-flicker",
+});
 
 const homeDir = join(outDir, "home");
 const kitDir = join(homeDir, ".scriptkit");
 const scriptsDir = join(kitDir, "plugins", "main", "scripts");
 
 function seedFixtures() {
-  rmSync(outDir, { recursive: true, force: true });
   mkdirSync(scriptsDir, { recursive: true });
   writeFileSync(
     join(kitDir, "config.ts"),
@@ -53,6 +89,25 @@ console.log(${JSON.stringify(name)});
 `,
     );
   }
+}
+
+function provenance(binary: string): Json {
+  const gitSha = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  const gitStatus = spawnSync("git", ["status", "--porcelain"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  return {
+    binary,
+    binarySha256: existsSync(binary)
+      ? createHash("sha256").update(readFileSync(binary)).digest("hex")
+      : null,
+    gitSha: gitSha.status === 0 ? gitSha.stdout.trim() : null,
+    sourceDirty: gitStatus.status === 0 ? gitStatus.stdout.trim().length > 0 : null,
+  };
 }
 
 function elementsFromReceipt(receipt: Json): Json[] {
@@ -115,27 +170,46 @@ function assertStable(samples: Json[]) {
 }
 
 async function main() {
-  seedFixtures();
+  const claim = claimOutput(outputPlan);
   const binary =
     process.env.SCRIPT_KIT_GPUI_BINARY ??
     join(repoRoot, "target-agent", "artifacts", "main-menu-focus-flicker", "script-kit-gpui");
-  const driver = await Driver.launch({
-    binary,
-    sessionName: "main-menu-focus-flicker",
-    sessionDir: join(outDir, "driver"),
-    sandboxHome: false,
-    env: {
-      HOME: homeDir,
-      SK_PATH: kitDir,
-      SCRIPT_KIT_AGENTIC_RUST_LOG:
-        "info,script_kit::selection=debug,script_kit::scroll=debug,gpui=warn",
-    },
-    readyTimeoutMs: 15_000,
-    defaultTimeoutMs: 5_000,
-  });
-
+  let driver: Driver | null = null;
   const samples: Json[] = [];
+  const receipt: Json = {
+    schemaVersion: 2,
+    status: "error",
+    behavior: { status: "fail", failure: null },
+    durationMs,
+    outDir,
+    provenance: provenance(binary),
+    session: { name: sessionName, pid: null },
+    samples,
+    cleanup: {
+      attempted: false,
+      hidden: false,
+      hiddenState: null,
+      closed: false,
+      error: null,
+    },
+  };
   try {
+    seedFixtures();
+    driver = await Driver.launch({
+      binary,
+      sessionName,
+      sessionDir: join(outDir, "driver"),
+      sandboxHome: false,
+      env: {
+        HOME: homeDir,
+        SK_PATH: kitDir,
+        SCRIPT_KIT_AGENTIC_RUST_LOG:
+          "info,script_kit::selection=debug,script_kit::scroll=debug,gpui=warn",
+      },
+      readyTimeoutMs: 15_000,
+      defaultTimeoutMs: 5_000,
+    });
+    receipt.session.pid = driver.pid ?? null;
     await driver.setFilterAndWait("");
     await driver.waitForState({ promptType: "scriptList" }, { timeoutMs: 5000 });
     await driver.setFilterAndWait("gamma");
@@ -152,22 +226,149 @@ async function main() {
     await setFilter;
     samples.push(await sample(driver, "settled", t0));
     assertStable(samples);
-
-    const receipt = {
-      status: "pass",
-      durationMs,
-      binary,
-      outDir,
-      sessionDir: driver.sessionDir,
-      logPath: driver.logPath,
-      samples,
-      stats: driver.stats,
-    };
-    writeFileSync(join(outDir, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
-    console.log(JSON.stringify(receipt, null, 2));
+    receipt.behavior.status = "pass";
+    receipt.stats = driver.stats;
+  } catch (error) {
+    receipt.behavior.failure = error instanceof Error ? error.message : String(error);
   } finally {
-    await driver.close();
+    receipt.cleanup.attempted = driver !== null;
+    if (driver) {
+      try {
+        driver.send({ type: "hide", requestId: `main-menu-flicker-cleanup-hide-${Date.now()}` });
+        await driver.waitForState(
+          { windowVisible: false },
+          { timeoutMs: 5_000, pollIntervalMs: 10 },
+        );
+        const hiddenState = await driver.getState({ timeoutMs: 5_000 });
+        if (hiddenState.windowVisible !== false) {
+          throw new Error(`cleanup state remained visible: ${JSON.stringify(hiddenState)}`);
+        }
+        receipt.cleanup.hidden = true;
+        receipt.cleanup.hiddenState = hiddenState;
+      } catch (error) {
+        const cleanupError = error instanceof Error ? error.message : String(error);
+        receipt.cleanup.error = cleanupError;
+        receipt.behavior.failure ??= `cleanup: ${cleanupError}`;
+      }
+      try {
+        await driver.close();
+        if (driver.alive) {
+          throw new Error(`owned driver process ${driver.pid ?? "unknown"} survived close`);
+        }
+        receipt.cleanup.closed = true;
+      } catch (error) {
+        const closeError = error instanceof Error ? error.message : String(error);
+        receipt.cleanup.error = receipt.cleanup.error
+          ? `${receipt.cleanup.error}; close: ${closeError}`
+          : `close: ${closeError}`;
+        receipt.behavior.failure ??= `close: ${closeError}`;
+      }
+    }
+
+    const correlations = driver?.matchedResponses.map(({ requestId, expectedType }) => ({
+      requestId,
+      expectedType: expectedType ?? "__missing_expected_type__",
+    })) ?? [];
+    const specs: ArtifactSpec[] = [
+      {
+        id: "app-log",
+        sourceName: "app.log",
+        required: true,
+        mediaType: "text/plain",
+        kind: "text",
+        acceptedTextMarkers: ["STARTUP_READY ", "APP_READY|"],
+      },
+      {
+        id: "protocol-responses",
+        sourceName: "protocol-responses.ndjson",
+        required: true,
+        mediaType: "application/x-ndjson",
+        kind: "ndjson",
+        correlations,
+      },
+      {
+        id: "lifecycle",
+        sourceName: "lifecycle.json",
+        required: true,
+        mediaType: "application/json",
+        kind: "json",
+      },
+    ];
+    const artifacts: ArtifactReceipt[] = [];
+    const writersFinalized = receipt.cleanup.closed === true
+      && driver?.alive === false
+      && driver.finalization.processExited === true
+      && driver.finalization.streamsDrained === true
+      && driver.finalization.logWriterClosed === true;
+    const lifecycleProof = {
+      schemaVersion: 1,
+      probeId: "main-menu-focus-flicker",
+      runId: claim.owner.runId,
+      finalizationKind: "driver-close",
+      hidden: receipt.cleanup.hidden === true,
+      processExited: driver?.finalization.processExited ?? false,
+      streamsDrained: driver?.finalization.streamsDrained ?? false,
+      logWriterClosed: driver?.finalization.logWriterClosed ?? false,
+      aliveAfterClose: driver?.alive ?? false,
+      completedAt: new Date().toISOString(),
+    };
+    try {
+      if (driver && driver.alive === false && driver.finalization.logWriterClosed) {
+        for (const [source, destination] of [
+          [driver.logPath, join(claim.artifactsRoot, "app.log")],
+          [join(driver.sessionDir, "protocol-responses.ndjson"), join(claim.artifactsRoot, "protocol-responses.ndjson")],
+        ] as const) {
+          materializeAtomic(claim, {
+            sourceRoot: dirname(source),
+            sourceName: basename(source),
+            destinationName: basename(destination),
+          });
+        }
+      }
+      writeJsonArtifactAtomic(claim, "lifecycle.json", lifecycleProof);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      receipt.cleanup.error = receipt.cleanup.error
+        ? `${receipt.cleanup.error}; artifacts: ${message}`
+        : `artifacts: ${message}`;
+    }
+    for (const spec of specs) {
+      artifacts.push(validateArtifact(
+        join(claim.artifactsRoot, spec.destinationName ?? spec.sourceName),
+        spec,
+        claim.artifactsRoot,
+      ));
+    }
+    receipt.artifactLifecycle = buildArtifactLifecycle({
+      claim,
+      finalizationKind: "driver-close",
+      writersFinalized,
+      specs,
+      artifacts,
+    });
+    const lifecycleValid = receipt.artifactLifecycle.allRequiredValid === true
+      && receipt.artifactLifecycle.allRecordedPathsReadable === true;
+    receipt.status = receipt.behavior.status === "pass"
+      && receipt.cleanup.hidden === true
+      && lifecycleValid
+      ? "pass"
+      : "error";
+    receipt.failure = [receipt.behavior.failure, receipt.cleanup.error]
+      .filter(Boolean)
+      .join("; ") || null;
+    if (receipt.status !== "pass") {
+      receipt.failurePreservation = {
+        outputRootPreserved: true,
+        sessionRootPreserved: Boolean(driver && existsSync(driver.sessionDir)),
+        stagingPreserved: false,
+        paths: [claim.root, ...(driver && existsSync(driver.sessionDir) ? [driver.sessionDir] : [])],
+        reason: receipt.failure ?? "artifact lifecycle validation failed",
+      };
+    }
+    commitFinalReceipt(claim, receipt, specs, artifacts);
   }
+  console.log(JSON.stringify(receipt, null, 2));
+  process.exitCode = receipt.status === "pass" ? 0 : 1;
 }
 
 await main();
