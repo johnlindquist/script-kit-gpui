@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+/// <reference types="bun-types" />
 /**
  * NN=31 hotkey gesture grammar battery.
  *
@@ -18,6 +19,7 @@ import { Driver, type Json } from "../devtools/driver";
 
 const HOLD_MS = 250;
 const DOUBLE_MS = 300;
+const ROW_ISOLATION_SETTLE_MS = DOUBLE_MS + 60;
 const BINARY =
 	process.env.PROBE_BINARY ??
 	"target-agent/artifacts/finder-hotkeys/script-kit-gpui";
@@ -313,6 +315,13 @@ async function runBattery(): Promise<void> {
 					unclassifiedException: !(error instanceof HarnessInvalid),
 				});
 		}
+		// Rows share one classifier session. Let any accepted TapPreview fallback
+		// expire before the next row so OF-40's hidden double-tap window cannot
+		// reinterpret a later scenario's setup tap as a DoubleTap.
+		await Bun.sleep(ROW_ISOLATION_SETTLE_MS);
+		await sample("after-gesture-window-settle", {
+			settledForMs: ROW_ISOLATION_SETTLE_MS,
+		});
 		await sample("after-row");
 		const [layout, elements, logs] = await Promise.all([
 			diagnosticCall("layout", () =>
