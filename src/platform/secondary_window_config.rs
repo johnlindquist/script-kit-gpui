@@ -502,6 +502,41 @@ extern "C" fn tahoe_glass_backdrop_order_out_window(
     }
 }
 
+/// `+[CAMediaTimingFunction functionWithControlPoints::::]` — the objc
+/// msg_send! macro cannot express selectors with unnamed arguments, so call
+/// through a typed `objc_msgSend` cast. Control points with y outside 0..1
+/// give a smooth overshoot (spring feel) in a single continuous animation.
+#[cfg(target_os = "macos")]
+unsafe fn timing_function_with_control_points(c1x: f32, c1y: f32, c2x: f32, c2y: f32) -> id {
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_msgSend();
+    }
+
+    let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") else {
+        return nil;
+    };
+    let sel = objc::runtime::Sel::register("functionWithControlPoints::::");
+    // SAFETY: objc_msgSend with a matching typed signature; on arm64 a single
+    // objc_msgSend entry point serves all signatures.
+    let send: unsafe extern "C" fn(
+        *mut objc::runtime::Class,
+        objc::runtime::Sel,
+        f32,
+        f32,
+        f32,
+        f32,
+    ) -> id = std::mem::transmute(objc_msgSend as *const ());
+    send(
+        timing_class as *const objc::runtime::Class as *mut objc::runtime::Class,
+        sel,
+        c1x,
+        c1y,
+        c2x,
+        c2y,
+    )
+}
+
 /// Park a just-hidden window at alpha 0 so that whichever code path orders
 /// it front next cannot flash a full-alpha frame before the appear morph
 /// starts (multiple show paths exist: the platform show helpers and GPUI's
@@ -609,8 +644,11 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     }
 
     // Spotlight enters by SHRINKING into place: start larger than final
-    // (the "inset" slider is the start outset), overshoot slightly smaller
-    // than final in phase 1, then bounce back up to final in phase 2.
+    // (the "inset" slider is the start outset) and glide down in ONE
+    // continuous animation. The spring feel comes from an overshooting
+    // bezier (y > 1), which keeps velocity continuous — the previous
+    // two-phase overshoot+settle had a velocity discontinuity at the
+    // handoff that read as aggressive/mechanical.
     let outset_x = final_frame.size.width * inset_fraction;
     let outset_y = final_frame.size.height * inset_fraction;
     let start = NSRect::new(
@@ -621,19 +659,6 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         NSSize::new(
             final_frame.size.width + outset_x * 2.0,
             final_frame.size.height + outset_y * 2.0,
-        ),
-    );
-    let overshoot_fraction = (inset_fraction * 0.25).min(0.03);
-    let overshoot_x = final_frame.size.width * overshoot_fraction;
-    let overshoot_y = final_frame.size.height * overshoot_fraction;
-    let overshoot = NSRect::new(
-        NSPoint::new(
-            final_frame.origin.x + overshoot_x,
-            final_frame.origin.y + overshoot_y,
-        ),
-        NSSize::new(
-            final_frame.size.width - overshoot_x * 2.0,
-            final_frame.size.height - overshoot_y * 2.0,
         ),
     );
 
@@ -649,12 +674,17 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     let _: () = msg_send![window, setFrame: start display: true];
     let _: () = msg_send![window, setAlphaValue: 0.0f64];
 
-    let phase1 = (duration - 0.10).max(0.08);
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: phase1];
+    let _: () = msg_send![ctx, setDuration: duration];
     let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
-    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+    // Gentle attack, small continuous overshoot past final (~10% of the
+    // travel), long soft tail — the closest single-curve match to an Apple
+    // spring. Falls back to easeOut if the control-point call fails.
+    let spring = timing_function_with_control_points(0.32, 1.10, 0.35, 1.0);
+    if spring != nil {
+        let _: () = msg_send![ctx, setTimingFunction: spring];
+    } else if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
         let name = tahoe_ns_string("easeOut");
         if name != nil {
             let timing: id = msg_send![timing_class, functionWithName: name];
@@ -664,40 +694,19 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         }
     }
     let animator: id = msg_send![window, animator];
-    let _: () = msg_send![animator, setFrame: overshoot display: true];
+    let _: () = msg_send![animator, setFrame: final_frame display: true];
     let _: () = msg_send![animator, setAlphaValue: 1.0f64];
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
-
-    // Phase 2: bounce back up to the final frame via the glass view's
-    // settle selector (run-loop scheduled, outside any GPUI borrow).
-    if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGET.lock() {
-        *guard = Some((
-            window as usize,
-            final_frame.origin.x,
-            final_frame.origin.y,
-            final_frame.size.width,
-            final_frame.size.height,
-        ));
-    }
-    let settle_delay = phase1 + 0.01;
-    let _: () = msg_send![
-        glass_view,
-        performSelector: sel!(settleOwnWindowFrame)
-        withObject: nil
-        afterDelay: settle_delay
-    ];
 
     logging::log(
         log_target,
         &format!(
-            "{}: spotlight morph started ({:.2}s, outset {:.2}, {}x{} -> {}x{} -> {}x{})",
+            "{}: spotlight morph started ({:.2}s spring-bezier, outset {:.2}, {}x{} -> {}x{})",
             window_name,
             duration,
             inset_fraction,
             start.size.width as i64,
             start.size.height as i64,
-            overshoot.size.width as i64,
-            overshoot.size.height as i64,
             final_frame.size.width as i64,
             final_frame.size.height as i64,
         ),
