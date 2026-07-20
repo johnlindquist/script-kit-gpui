@@ -219,8 +219,7 @@ impl ScriptListApp {
                                             ListItem::new(tip.title.clone(), list_colors)
                                                 .description_opt(Some(tip.full_hint()))
                                                 .selected(is_selected)
-                                                .hovered(is_hovered)
-                                                .with_accent_bar(true),
+                                                .hovered(is_hovered),
                                         )
                                 } else {
                                     div().id(row).h(px(LIST_ITEM_HEIGHT))

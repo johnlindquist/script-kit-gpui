@@ -240,7 +240,6 @@ impl ScriptListApp {
                                             .selected(is_selected)
                                             .hovered(is_hovered)
                                             .main_menu_theme(main_menu_theme)
-                                            .with_accent_bar(true)
                                             .semantic_id(format!(
                                                 "profile-search-row:{}",
                                                 result.profile.id

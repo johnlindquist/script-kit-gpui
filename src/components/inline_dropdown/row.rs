@@ -2,8 +2,8 @@
 //!
 //! All inline dropdown consumers (Agent Chat popups, context selectors, model
 //! selectors, presets dropdown) render through these helpers so the chrome
-//! stays consistent: launcher-aligned row height, theme accent bar on
-//! selection, fuzzy-match highlights, and optional leading visual / accessory.
+//! stays consistent: launcher-aligned row height, theme-aware selection background,
+//! fuzzy-match highlights, and optional leading visual / accessory.
 
 use gpui::{
     div, prelude::FluentBuilder, px, AnyElement, FontWeight, Hsla, InteractiveElement, IntoElement,
@@ -143,12 +143,6 @@ pub(crate) fn render_soft_compact_picker_row(
         .flex()
         .items_center()
         .justify_between()
-        .border_l(px(2.0))
-        .border_color(if is_selected {
-            colors.accent
-        } else {
-            gpui::transparent_black()
-        })
         .pl(px(10.0))
         .pr(px(14.0))
         .py(px(4.0))
@@ -228,12 +222,6 @@ fn render_dense_monoline_picker_row_full(
         .flex()
         .items_center()
         .justify_between()
-        .border_l(px(2.0))
-        .border_color(if is_selected {
-            accent
-        } else {
-            gpui::transparent_black()
-        })
         .pl(px(10.0))
         .pr(px(14.0))
         .py(px(4.0))

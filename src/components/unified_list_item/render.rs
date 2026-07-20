@@ -29,7 +29,6 @@ pub struct UnifiedListItem {
     colors: UnifiedListItemColors,
     a11y_label: Option<SharedString>,
     a11y_hint: Option<SharedString>,
-    show_accent_bar: bool,
     direct_hover: bool,
 }
 
@@ -47,7 +46,6 @@ impl UnifiedListItem {
             colors: UnifiedListItemColors::default(),
             a11y_label: None,
             a11y_hint: None,
-            show_accent_bar: false,
             direct_hover: true,
         }
     }
@@ -107,11 +105,6 @@ impl UnifiedListItem {
         self
     }
 
-    pub fn with_accent_bar(mut self, show: bool) -> Self {
-        self.show_accent_bar = show;
-        self
-    }
-
     pub fn with_direct_hover(mut self, enabled: bool) -> Self {
         self.direct_hover = enabled;
         self
@@ -167,16 +160,10 @@ impl RenderOnce for UnifiedListItem {
             content_col = content_col.child(sub_el);
         }
 
-        let pl_val = if self.show_accent_bar {
-            layout.padding_x - 3.0
-        } else {
-            layout.padding_x
-        };
-
         let mut inner = div()
             .w_full()
             .h_full()
-            .pl(px(pl_val))
+            .pl(px(layout.padding_x))
             .pr(px(layout.padding_x))
             .py(px(layout.padding_y))
             .bg(bg_color)
@@ -209,15 +196,6 @@ impl RenderOnce for UnifiedListItem {
                     .flex_shrink_0()
                     .child(trailing_el),
             );
-        }
-
-        let accent_color = rgb(colors.accent);
-        if self.show_accent_bar {
-            inner = inner.border_l(px(3.0)).border_color(if state.is_selected {
-                accent_color
-            } else {
-                rgba(TRANSPARENT)
-            });
         }
 
         let mut container = div()

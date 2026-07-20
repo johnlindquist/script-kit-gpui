@@ -201,7 +201,6 @@ impl ScriptListApp {
                                     ListItem::new(choice.name.clone(), arg_list_colors)
                                         .description_opt(choice.description.clone())
                                         .selected(is_selected)
-                                        .with_accent_bar(true)
                                         .index(ix),
                                 )
                             } else {

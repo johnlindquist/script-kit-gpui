@@ -174,7 +174,6 @@ impl ScriptListApp {
                                                     arg_list_colors,
                                                 )
                                                 .selected(is_selected)
-                                                .with_accent_bar(true)
                                                 .index(ix),
                                             )
                                         } else {

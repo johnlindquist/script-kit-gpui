@@ -234,8 +234,7 @@ impl ScriptListApp {
 
                         let item = ListItem::new(entry.name.clone(), list_colors)
                             .description_opt(Some(description))
-                            .selected(is_selected)
-                            .with_accent_bar(true);
+                            .selected(is_selected);
 
                         // Row wrapper: when the entry is unsupported, overlay a
                         // right-aligned "Unsupported in GPUI" pill on the item so

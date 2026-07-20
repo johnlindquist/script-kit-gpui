@@ -1123,8 +1123,7 @@ impl ScriptListApp {
                                         .main_menu_theme(main_menu_theme)
                                         .semantic_id(Self::kit_store_browse_row_semantic_id(
                                             ix, result,
-                                        ))
-                                        .with_accent_bar(true),
+                                        )),
                                     )
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))
@@ -1466,8 +1465,7 @@ impl ScriptListApp {
                                         .main_menu_theme(main_menu_theme)
                                         .semantic_id(Self::kit_store_installed_row_semantic_id(
                                             ix, kit,
-                                        ))
-                                        .with_accent_bar(true),
+                                        )),
                                     )
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))

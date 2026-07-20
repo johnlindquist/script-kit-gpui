@@ -678,7 +678,6 @@ impl Render for AgentChatHistoryPopupWindow {
         let secondary_text = gpui::rgb(theme.colors.text.secondary);
         let hover_bg = gpui::rgba(chrome.hover_rgba);
         let selected_bg = gpui::rgba(chrome.selection_rgba);
-        let selected_bar = gpui::rgba((theme.colors.accent.selected << 8) | 0xFF);
         let container_bg = gpui::rgba(chrome.popup_surface_rgba);
         let container_border = gpui::rgba(chrome.border_rgba);
         let accent_color = gpui::rgb(theme.colors.accent.selected);
@@ -884,12 +883,6 @@ impl Render for AgentChatHistoryPopupWindow {
                                             .flex()
                                             .flex_col()
                                             .justify_center()
-                                            .border_l(px(crate::actions::constants::ACCENT_BAR_WIDTH))
-                                            .border_color(if is_selected {
-                                                selected_bar
-                                            } else {
-                                                gpui::rgba(0x0000_0000)
-                                            })
                                             .cursor_pointer()
                                             .when(is_selected, |d| d.bg(selected_bg))
                                             .when(!is_selected, |d| d.hover(|d| d.bg(hover_bg)))

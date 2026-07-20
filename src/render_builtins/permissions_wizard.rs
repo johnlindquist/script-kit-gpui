@@ -381,8 +381,7 @@ impl ScriptListApp {
                             .description_opt(Some(kind.subtitle().to_string()))
                             .trailing_accessory(badge)
                             .selected(is_selected)
-                            .hovered(is_hovered)
-                            .with_accent_bar(is_selected),
+                            .hovered(is_hovered),
                     )
                     .into_any_element()
             })

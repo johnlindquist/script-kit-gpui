@@ -52,7 +52,6 @@ impl Render for PathPrompt {
                             .index(ix)
                             .icon_kind(icon)
                             .selected(is_selected)
-                            .with_accent_bar(true)
                             .into_any_element()
                     })
                     .collect()

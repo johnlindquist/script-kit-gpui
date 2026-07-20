@@ -42,8 +42,7 @@ fn render_dictation_history_row(
     let item = ListItem::new(entry.preview.clone(), list_colors)
         .description_opt(Some(ScriptListApp::dictation_history_meta(entry)))
         .selected(selected)
-        .main_menu_theme(main_menu_theme)
-        .with_accent_bar(true);
+        .main_menu_theme(main_menu_theme);
 
     div()
         .id(gpui::ElementId::Integer(display_index as u64))

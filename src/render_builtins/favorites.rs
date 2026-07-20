@@ -264,8 +264,7 @@ impl ScriptListApp {
                                 } else {
                                     Some(description.to_string())
                                 })
-                                .selected(is_selected)
-                                .with_accent_bar(is_selected),
+                                .selected(is_selected),
                         )
                         .into_any_element()
                 },

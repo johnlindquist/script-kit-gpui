@@ -24,9 +24,6 @@ pub const ACTION_ITEM_HEIGHT: f32 = 36.0;
 /// Fixed height for the search input row
 pub const SEARCH_INPUT_HEIGHT: f32 = 40.0;
 
-/// Width of the left accent bar for selected items (legacy, kept for reference)
-pub const ACCENT_BAR_WIDTH: f32 = 3.0;
-
 /// Height for the header row showing context title (matches section header style)
 pub const HEADER_HEIGHT: f32 = 26.0;
 

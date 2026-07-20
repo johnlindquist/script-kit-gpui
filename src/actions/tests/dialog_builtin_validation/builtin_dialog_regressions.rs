@@ -4143,9 +4143,7 @@ mod from_dialog_builtin_action_validation_tests_35 {
         get_scriptlet_context_actions_with_custom, to_deeplink_name,
     };
     use crate::actions::command_bar::CommandBarConfig;
-    use crate::actions::constants::{
-        ACCENT_BAR_WIDTH, ACTION_ROW_INSET, HEADER_HEIGHT, SEARCH_INPUT_HEIGHT,
-    };
+    use crate::actions::constants::{ACTION_ROW_INSET, HEADER_HEIGHT, SEARCH_INPUT_HEIGHT};
     use crate::actions::dialog::{
         ActionsDialog, build_grouped_items_static, coerce_action_selection,
     };
@@ -5008,15 +5006,6 @@ mod from_dialog_builtin_action_validation_tests_35 {
 
     // Removed: constant_selection_radius, constant_keycap_min_width, constant_keycap_height
     // (legacy constants SELECTION_RADIUS, KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT removed from constants.rs)
-
-    // =====================================================================
-    // 18. Constants: accent bar
-    // =====================================================================
-
-    #[test]
-    fn constant_accent_bar_width() {
-        assert_eq!(ACCENT_BAR_WIDTH, 3.0);
-    }
 
     #[test]
     fn constant_search_input_height() {

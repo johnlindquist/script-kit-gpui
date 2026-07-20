@@ -244,8 +244,7 @@ impl ScriptListApp {
                     let item = ListItem::new(entry.display_title().to_string(), list_colors)
                         .icon_kind(icon)
                         .description_opt(Some(Self::browser_history_meta(entry)))
-                        .selected(display_ix == selected)
-                        .with_accent_bar(true);
+                        .selected(display_ix == selected);
 
                     let entity = entity.clone();
                     let app_icons = app_icons.clone();

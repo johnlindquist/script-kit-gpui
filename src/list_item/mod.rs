@@ -436,7 +436,7 @@ pub fn effective_footer_reveal_clearance_height_for_theme(
 const ITEM_PADDING_X: f32 = 14.0;
 /// Vertical padding for list item inner content
 const ITEM_PADDING_Y: f32 = 4.0;
-/// Right padding on outer container (balances accent bar width)
+/// Right padding on outer container
 const ITEM_CONTAINER_PADDING_R: f32 = 4.0;
 /// Gap between icon and text content
 const ITEM_ICON_TEXT_GAP: f32 = 8.0;
@@ -1313,9 +1313,6 @@ pub struct ListItem {
     on_hover: Option<OnHoverCallback>,
     /// Semantic ID for AI-driven UX targeting. Format: {type}:{index}:{value}
     semantic_id: Option<String>,
-    /// Deprecated: the left-edge selected-row accent bar has been removed.
-    /// Retained as a no-op flag so existing call sites keep compiling.
-    show_accent_bar: bool,
     /// Live cohesive theme exploration variation (main menu).
     main_menu_theme: crate::designs::MainMenuThemeVariant,
     /// Optional metrics override for shared-row consumers that are not the main menu.
@@ -1350,8 +1347,6 @@ pub struct TypeAccessory {
     /// Lucide or Script Kit icon hint name (e.g., "file-code", "command")
     pub icon_name: &'static str,
 }
-/// Width of the left accent bar for selected items
-pub const ACCENT_BAR_WIDTH: f32 = 3.0;
 /// Rounded selected/hover row radius for Tahoe/Liquid Glass visual hierarchy.
 pub const LIST_ITEM_ROW_RADIUS_PX: f32 = crate::ui::chrome::LIQUID_GLASS_COMPACT_RADIUS_PX;
 
@@ -1392,7 +1387,6 @@ impl ListItem {
             index: None,
             on_hover: None,
             semantic_id: None,
-            show_accent_bar: false,
             main_menu_theme: crate::designs::MainMenuThemeVariant::default(),
             metrics_override: None,
             highlight_indices: None,
@@ -1403,13 +1397,6 @@ impl ListItem {
             leading_accessory: None,
             trailing_accessory: None,
         }
-    }
-
-    /// Deprecated no-op: the left-edge selected-row accent bar was removed in
-    /// favor of the main-menu theme explorer.
-    /// Kept so existing call sites compile unchanged.
-    pub fn with_accent_bar(self, _show: bool) -> Self {
-        self
     }
 
     /// Set the live cohesive theme exploration variation for this row.
@@ -1547,7 +1534,7 @@ impl ListItem {
     ///
     /// Hovered items show a visible background tint (25% opacity).
     /// This is separate from `selected` which shows full focus styling
-    /// (35% opacity background + accent bar).
+    /// (35% opacity background).
     pub fn hovered(mut self, hovered: bool) -> Self {
         self.hovered = hovered;
         self
@@ -2084,8 +2071,7 @@ impl RenderOnce for ListItem {
         // without waiting for state updates via cx.notify().
         //
         // For selected items, we don't apply hover styles (they already have full focus styling).
-        // The left-edge selected-row accent bar was removed; rows use uniform
-        // leading padding regardless of selection.
+        // Rows use uniform leading padding regardless of selection.
         let pl_val = metrics.row_inner_padding_x;
 
         let inner_content_id = ElementId::NamedInteger("list-item-inner".into(), item_index as u64);
@@ -2244,8 +2230,7 @@ impl RenderOnce for ListItem {
             ElementId::NamedInteger("list-item".into(), item_index as u64)
         };
 
-        // Left-edge accent bar removed: accent usage is governed by the
-        // main-menu theme explorer applied above, not a fixed selection strip.
+        // Selection styling is governed by the main-menu theme explorer.
 
         // Accent Ring: outline the selected row with a thick accent border.
         if ring || metrics.row_selected_border_width > 0.0 {
@@ -2299,7 +2284,7 @@ impl RenderOnce for ListItem {
             ));
         }
 
-        // Add content (no separate accent bar child needed)
+        // Add content
         container.child(inner_content)
     }
 }
@@ -2576,33 +2561,6 @@ mod render_section_header_source_tests {
         assert!(
             !body.contains("suppresses top border"),
             "render_section_header docs should not describe removed separator behavior"
-        );
-    }
-}
-
-#[cfg(test)]
-mod selected_accent_bar_removed_tests {
-    const SOURCE: &str = include_str!("mod.rs");
-
-    #[test]
-    fn list_item_does_not_render_left_edge_accent_bar() {
-        // The selected-row left-edge accent strip was removed in favor of the
-        // main-menu theme explorer. Guard against it sneaking back in.
-        // NOTE: needle is assembled via concat! so this assertion does not
-        // match itself in the included source text.
-        let needle = concat!("border_l(px(ACCENT_", "BAR_WIDTH))");
-        assert!(
-            !SOURCE.contains(needle),
-            "selected-row left-edge accent bar must not render"
-        );
-    }
-
-    #[test]
-    fn with_accent_bar_is_a_no_op() {
-        // The builder is retained only for call-site compatibility.
-        assert!(
-            SOURCE.contains("pub fn with_accent_bar(self, _show: bool) -> Self"),
-            "with_accent_bar should be a compatibility no-op"
         );
     }
 }

@@ -427,7 +427,6 @@ fn render_unified_list_item_story(_window: &mut Window, _cx: &mut App) -> AnyEle
                 is_disabled: false,
             })
             .density(crate::components::Density::Comfortable)
-            .with_accent_bar(true)
             .colors(colors),
         )
         .child(

@@ -189,11 +189,10 @@ fn test_list_item_accessory_composes_with_existing_builders() {
         text_on_accent: 0x000000,
     };
 
-    // Full chain: icon + description + leading + trailing + accent bar
+    // Full chain: icon + description + leading + trailing accessories
     let _item = ListItem::new("Full chain", colors)
         .icon("📄")
         .description("A description")
-        .with_accent_bar(true)
         .selected(true)
         .leading_accessory(div().w(px(40.0)).h(px(8.0)))
         .trailing_accessory(div().child("Saved"));

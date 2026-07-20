@@ -256,8 +256,7 @@ impl ScriptListApp {
 
                         let item = ListItem::new(title, list_colors)
                             .description_opt(Some(description))
-                            .selected(is_selected)
-                            .with_accent_bar(true);
+                            .selected(is_selected);
 
                         let entity = entity.clone();
                         div()

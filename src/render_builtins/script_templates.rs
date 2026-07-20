@@ -238,8 +238,7 @@ impl ScriptListApp {
 
                         let item = ListItem::new(template.title.clone(), list_colors)
                             .description_opt(Some(description))
-                            .selected(is_selected)
-                            .with_accent_bar(true);
+                            .selected(is_selected);
 
                         div()
                             .id(gpui::ElementId::Integer(display_ix as u64))

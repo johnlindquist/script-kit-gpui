@@ -396,7 +396,6 @@ impl ScriptListApp {
                 let item = crate::list_item::ListItem::new(def.name, list_colors)
                     .description(format!("{}  ·  {}", def.id, def.description))
                     .selected(is_selected || is_live)
-                    .with_accent_bar(is_live)
                     .index(ix)
                     .leading_accessory(swatch)
                     .trailing_accessory_opt(status);

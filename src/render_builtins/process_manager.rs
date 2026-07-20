@@ -547,8 +547,7 @@ impl ScriptListApp {
                                         ListItem::new(name, list_colors)
                                             .description_opt(Some(description))
                                             .selected(is_selected)
-                                            .hovered(is_hovered)
-                                            .with_accent_bar(true),
+                                            .hovered(is_hovered),
                                     )
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))

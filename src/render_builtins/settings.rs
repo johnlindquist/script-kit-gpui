@@ -521,8 +521,7 @@ impl ScriptListApp {
                             .icon_kind_opt(crate::list_item::IconKind::from_icon_hint(item.icon))
                             .description_opt(Some(desc))
                             .selected(is_selected)
-                            .hovered(is_hovered)
-                            .with_accent_bar(is_selected),
+                            .hovered(is_hovered),
                     )
                     .into_any_element()
             })

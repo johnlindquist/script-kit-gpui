@@ -325,10 +325,9 @@ impl Render for SelectPrompt {
                                             },
                                         );
 
-                                        // UnifiedListItem owns row chrome. Keep the ghost
-                                        // selected background for focused or selected rows,
-                                        // but reserve the accent bar for the focused row so
-                                        // multi-select does not imply active focus everywhere.
+                                        // UnifiedListItem owns row chrome. Focused or selected
+                                        // rows share the neutral selected background; multi-select
+                                        // does not imply active focus everywhere.
                                         let row = div()
                                             .id(display_idx)
                                             .w_full()
@@ -373,7 +372,6 @@ impl Render for SelectPrompt {
                                                     is_disabled: false,
                                                 })
                                                 .density(Density::Comfortable)
-                                                .with_accent_bar(is_focused)
                                                 .with_direct_hover(false)
                                                 .colors(item_colors),
                                             );

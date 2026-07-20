@@ -3345,8 +3345,7 @@ impl ScriptListApp {
             .child(
                 crate::list_item::ListItem::new("Selected Item", list_colors)
                     .description("Description appears only on the focused row")
-                    .selected(true)
-                    .with_accent_bar(true),
+                    .selected(true),
             )
             .child(crate::list_item::ListItem::new("Regular Item", list_colors))
             .child(crate::list_item::ListItem::new("Another Item", list_colors).tool_badge("ts"))
@@ -3869,7 +3868,6 @@ impl ScriptListApp {
                 let item = crate::list_item::ListItem::new(name.to_string(), list_colors)
                     .description(desc.to_string())
                     .selected(is_selected)
-                    .with_accent_bar(true)
                     .index(ix)
                     .leading_accessory(color_bar)
                     .trailing_accessory_opt(saved_badge);
@@ -5098,7 +5096,7 @@ mod theme_chooser_filter_tests {
     #[test]
     fn test_theme_chooser_uses_shared_list_item_row() {
         // The theme chooser uses the shared ListItem component for preset rows,
-        // matching the main menu's accent bar, description reveal, and spacing.
+        // matching the main menu's selection background, description reveal, and spacing.
         let source = include_str!("theme_chooser.rs");
         assert!(
             source.contains("self.theme_chooser_list_state.clone(),"),

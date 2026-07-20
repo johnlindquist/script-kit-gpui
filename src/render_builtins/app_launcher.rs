@@ -377,8 +377,7 @@ impl ScriptListApp {
                                             .description_opt(description)
                                             .selected(is_selected)
                                             .hovered(is_hovered)
-                                            .main_menu_theme(main_menu_theme)
-                                            .with_accent_bar(true),
+                                            .main_menu_theme(main_menu_theme),
                                     )
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))

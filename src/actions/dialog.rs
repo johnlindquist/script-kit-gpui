@@ -31,18 +31,14 @@ use super::builders::{
     get_scriptlet_context_actions_with_custom, ChatPromptInfo, ClipboardEntryInfo, EmojiActionInfo,
 };
 use super::constants::{ACTIONS_POPUP_RADIUS, ACTIONS_ROW_RADIUS, ACTION_ROW_INSET, POPUP_WIDTH};
-use crate::file_search::FileInfo;
-use crate::scriptlets::Scriptlet;
-
-// Keep ACCENT_BAR_WIDTH for backwards compatibility during transition
-#[allow(unused_imports)]
-use super::constants::ACCENT_BAR_WIDTH;
 #[allow(unused_imports)] // AnchorPosition reserved for future use
 use super::types::{
     Action, ActionCallback, ActionCategory, ActionsDialogConfig, AnchorPosition, CloseCallback,
     ScriptInfo, SearchPosition, SectionStyle,
 };
+use crate::file_search::FileInfo;
 use crate::prompts::PathInfo;
+use crate::scriptlets::Scriptlet;
 
 // --- Storybook adoption: style struct and defaults ---
 // When the storybook feature is enabled, delegate to the storybook module.
@@ -5104,8 +5100,7 @@ mod tests {
         );
         assert!(
             fallback_actions.iter().all(|action| {
-                !action.id.starts_with("prompt-action/")
-                    && !action.id.starts_with("prompt-target/")
+                !action.id.starts_with("prompt-action/") && !action.id.starts_with("prompt-target/")
             }),
             "prompt export/handoff rows are Agent Chat-owned and must not appear in the global fallback"
         );

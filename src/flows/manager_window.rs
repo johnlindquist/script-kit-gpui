@@ -390,7 +390,6 @@ impl FlowManagerApp {
             .description_opt(Some(subtitle))
             .icon(phase_icon)
             .selected(selected)
-            .with_accent_bar(true)
             .into_any_element()
     }
 }

@@ -223,8 +223,7 @@ impl ScriptListApp {
                         .child(
                             ListItem::new(name.clone(), list_colors)
                                 .description_opt(Some(description))
-                                .selected(is_selected)
-                                .with_accent_bar(is_selected),
+                                .selected(is_selected),
                         )
                         .into_any_element()
                 },

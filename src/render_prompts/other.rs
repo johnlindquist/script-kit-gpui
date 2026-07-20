@@ -328,7 +328,6 @@ impl ScriptListApp {
         tracing::info!(
             surface = "render_prompts::select",
             row_subtitle = "focus-only",
-            row_accent_bar = "focused-only",
             trailing_metadata = "hint-text",
             shell_owner = "entity",
             "prompt_surface_rendered"

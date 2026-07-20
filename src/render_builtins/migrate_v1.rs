@@ -729,8 +729,7 @@ impl ScriptListApp {
                                         .selected(is_selected)
                                         .hovered(is_hovered)
                                         .main_menu_theme(main_menu_theme)
-                                        .semantic_id(format!("migrate-v1-row-{visible_ix}"))
-                                        .with_accent_bar(true),
+                                        .semantic_id(format!("migrate-v1-row-{visible_ix}")),
                                 )
                                 .into_any_element()
                         })
