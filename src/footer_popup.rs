@@ -1011,6 +1011,29 @@ fn close_gpui_footer_overlay(cx: &mut App) {
     }
 }
 
+/// While a main-window glass morph is in flight, park the overlay at alpha 0
+/// and fade it back in once the morph settles. The overlay is a separate
+/// NSWindow tracking the main window's bounds — without this it appears
+/// instantly at full alpha and visibly chases the animating frame.
+fn park_overlay_during_glass_morph(handle: gpui::WindowHandle<GpuiFooterOverlay>, cx: &mut App) {
+    let parked = handle
+        .update(cx, |_overlay, window, _cx| {
+            crate::platform::park_gpui_window_alpha_if_morphing(window)
+        })
+        .ok()
+        .flatten();
+    let Some(delay) = parked else {
+        return;
+    };
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.background_executor().timer(delay).await;
+        let _ = handle.update(cx, |_overlay, window, _cx| {
+            crate::platform::restore_gpui_window_alpha_animated(window);
+        });
+    })
+    .detach();
+}
+
 fn sync_gpui_footer_overlay(
     cx: &mut App,
     parent_window_handle: AnyWindowHandle,
@@ -1040,6 +1063,8 @@ fn sync_gpui_footer_overlay(
                         GPUI_FOOTER_OVERLAY_AUTOMATION_ID,
                         Some(automation_bounds_from_gpui(bounds)),
                     );
+                    let overlay_handle = slot.handle;
+                    park_overlay_during_glass_morph(overlay_handle, cx);
                     return;
                 }
                 *guard = None;
@@ -1083,6 +1108,8 @@ fn sync_gpui_footer_overlay(
             parent_window_handle,
         });
     }
+
+    park_overlay_during_glass_morph(handle, cx);
 
     if let Err(error) = crate::windows::register_attached_popup(
         GPUI_FOOTER_OVERLAY_AUTOMATION_ID.to_string(),

@@ -77,8 +77,14 @@ unsafe fn configure_window_vibrancy_common(
     // Secondary/overlay windows (notes, dictation, confirm, actions, AI,
     // flow manager, inline popups) are created per appearance, so a freshly
     // created backdrop means the window just appeared: morph it in.
+    // Child-attached panels get the alpha-only fade — frame animation on a
+    // child window fights the parent-child machinery and lags badly.
     if glass_created {
-        animate_tahoe_glass_appearance(window, log_target, window_name);
+        if matches!(window_name, "Actions popup" | "Confirm popup") {
+            animate_tahoe_glass_fade_appearance(window, log_target, window_name);
+        } else {
+            animate_tahoe_glass_appearance(window, log_target, window_name);
+        }
     }
 
     let appearance_name = if is_dark {
@@ -568,18 +574,151 @@ unsafe fn park_hidden_window_for_glass_morph(window: id) {
 /// the window a little more on every trigger.
 #[cfg(target_os = "macos")]
 fn glass_morph_recently_started() -> bool {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::OnceLock;
-    static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
-    static LAST_START_MS: AtomicU64 = AtomicU64::new(u64::MAX);
-    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
-    let now_ms = epoch.elapsed().as_millis() as u64;
-    let last = LAST_START_MS.load(Ordering::Relaxed);
+    use std::sync::atomic::Ordering;
+    let now_ms = glass_morph_now_ms();
+    let last = GLASS_MORPH_LAST_START_MS.load(Ordering::Relaxed);
     if last != u64::MAX && now_ms.saturating_sub(last) < 700 {
         return true;
     }
-    LAST_START_MS.store(now_ms, Ordering::Relaxed);
+    GLASS_MORPH_LAST_START_MS.store(now_ms, Ordering::Relaxed);
     false
+}
+
+#[cfg(target_os = "macos")]
+static GLASS_MORPH_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+#[cfg(target_os = "macos")]
+static GLASS_MORPH_LAST_START_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+#[cfg(target_os = "macos")]
+static GLASS_MORPH_LAST_DURATION_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+fn glass_morph_now_ms() -> u64 {
+    let epoch = *GLASS_MORPH_EPOCH.get_or_init(std::time::Instant::now);
+    epoch.elapsed().as_millis() as u64
+}
+
+/// Time left (plus a small settle tail) in the morph that most recently
+/// started, if it is still in flight. Lets sibling windows (the footer
+/// overlay) hide while the main window animates and fade in afterwards.
+#[cfg(target_os = "macos")]
+pub fn glass_morph_remaining() -> Option<std::time::Duration> {
+    use std::sync::atomic::Ordering;
+    let start = GLASS_MORPH_LAST_START_MS.load(Ordering::Relaxed);
+    if start == u64::MAX {
+        return None;
+    }
+    let duration_ms = GLASS_MORPH_LAST_DURATION_MS.load(Ordering::Relaxed) + 60;
+    let end = start.saturating_add(duration_ms);
+    let now = glass_morph_now_ms();
+    if now >= end {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(end - now))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn glass_morph_remaining() -> Option<std::time::Duration> {
+    None
+}
+
+/// Park a sibling GPUI window (footer overlay) at alpha 0 when a glass
+/// morph is in flight, returning how long until it should fade back in.
+/// The overlay is a separate NSWindow that tracks the main window's frame;
+/// without this it appears instantly at full alpha and visibly chases the
+/// animating frame.
+#[cfg(target_os = "macos")]
+pub fn park_gpui_window_alpha_if_morphing(window: &gpui::Window) -> Option<std::time::Duration> {
+    let remaining = glass_morph_remaining()?;
+    let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    let ns_view = appkit.ns_view.as_ptr() as id;
+    // SAFETY: main thread; standard NSWindow accessors, nil-checked.
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return None;
+        }
+        let _: () = msg_send![ns_window, setAlphaValue: 0.0f64];
+    }
+    Some(remaining)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn park_gpui_window_alpha_if_morphing(_window: &gpui::Window) -> Option<std::time::Duration> {
+    None
+}
+
+/// Fade a previously parked sibling window back in (short ease-out).
+#[cfg(target_os = "macos")]
+pub fn restore_gpui_window_alpha_animated(window: &gpui::Window) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr() as id;
+    // SAFETY: main thread; standard NSWindow/NSAnimationContext usage.
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![ctx, setDuration: 0.12f64];
+        let animator: id = msg_send![ns_window, animator];
+        let _: () = msg_send![animator, setAlphaValue: 1.0f64];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn restore_gpui_window_alpha_animated(_window: &gpui::Window) {}
+
+/// Alpha-only appear for child-attached panels (actions popup, confirm
+/// popup): animating a child window's FRAME fights the parent-child
+/// constraint machinery and lags badly, so they fade in with the same
+/// spring duration instead.
+#[cfg(target_os = "macos")]
+unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, window_name: &str) {
+    let duration = f64::from(
+        crate::theme::get_cached_theme()
+            .get_opacity()
+            .glass_morph_duration
+            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+            .clamp(0.0, 2.0),
+    );
+    if duration < 0.02 {
+        let _: () = msg_send![window, setAlphaValue: 1.0f64];
+        return;
+    }
+    let fade = (duration * 0.7).max(0.10);
+    let _: () = msg_send![window, setAlphaValue: 0.0f64];
+    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+    let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+    let _: () = msg_send![ctx, setDuration: fade];
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeOut");
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![ctx, setTimingFunction: timing];
+            }
+        }
+    }
+    let animator: id = msg_send![window, animator];
+    let _: () = msg_send![animator, setAlphaValue: 1.0f64];
+    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+    logging::log(
+        log_target,
+        &format!("{}: glass fade appearance ({:.2}s)", window_name, fade),
+    );
 }
 
 /// Morph the whole window into place: frame scales up from a centered inset
@@ -673,6 +812,13 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
 
     let _: () = msg_send![window, setFrame: start display: true];
     let _: () = msg_send![window, setAlphaValue: 0.0f64];
+
+    // Record the in-flight duration so sibling windows (footer overlay) can
+    // hide until the morph settles (glass_morph_remaining).
+    GLASS_MORPH_LAST_DURATION_MS.store(
+        (duration * 1000.0) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
