@@ -44,6 +44,37 @@ fn hide_main_window_for_notes(cx: &mut App) {
     crate::platform::defer_hide_main_window(cx);
 }
 
+fn hide_main_window_then_activate_notes(cx: &mut App, notes_handle: gpui::WindowHandle<Root>) {
+    crate::set_main_window_visible(false);
+    crate::hotkeys::reset_main_gesture_classifier();
+    let visibility_generation = crate::main_window_visibility_generation();
+
+    crate::platform::defer_hide_main_window_with_completion(
+        cx,
+        visibility_generation,
+        move |completion, cx| match completion {
+            crate::platform::MainWindowHideCompletion::Hidden(_) => {
+                if let Err(error) = update_notes_window_detached(notes_handle, cx, |window, _cx| {
+                    window.activate_window();
+                }) {
+                    tracing::warn!(
+                        target: "script_kit::notes",
+                        %error,
+                        "notes_reuse_activation_after_main_hide_failed"
+                    );
+                }
+            }
+            failure => {
+                tracing::warn!(
+                    target: "script_kit::notes",
+                    ?failure,
+                    "notes_reuse_main_hide_failed_closed"
+                );
+            }
+        },
+    );
+}
+
 /// Default Notes window bounds: top-right corner of the display the mouse
 /// cursor is on (falling back to the primary display). Geometry is owned by
 /// the app-authored contract (`notes::window::contract`), shared by
@@ -209,6 +240,16 @@ pub fn open_note_in_notes_window(cx: &mut App, note_id: NoteId) -> Result<()> {
     Err(anyhow::anyhow!("Notes window is unavailable"))
 }
 
+fn run_existing_day_note_reuse_handoff<C, E>(
+    cx: &mut C,
+    select_day_note: impl FnOnce(&mut C) -> std::result::Result<(), E>,
+    hide_main_then_activate_notes: impl FnOnce(&mut C),
+) -> std::result::Result<(), E> {
+    select_day_note(cx)?;
+    hide_main_then_activate_notes(cx);
+    Ok(())
+}
+
 pub fn open_day_note_in_notes_window(cx: &mut App, date: chrono::NaiveDate) -> Result<()> {
     storage::init_notes_db()?;
     let path = storage::notes_brain_days_dir().join(format!("{date}.md"));
@@ -227,14 +268,32 @@ pub fn open_day_note_in_notes_window(cx: &mut App, date: chrono::NaiveDate) -> R
     };
 
     if let (Some(handle), Some(notes_app)) = (existing_handle, existing_app.clone()) {
-        hide_main_window_for_notes(cx);
-
-        let result = update_notes_window_detached(handle, cx, |window, cx| {
-            window.activate_window();
-            notes_app.update(cx, |app, cx| {
-                app.select_day_note(date, window, cx);
-            });
-        });
+        let main_was_visible = crate::is_main_window_visible();
+        let result = run_existing_day_note_reuse_handoff(
+            cx,
+            |cx| {
+                update_notes_window_detached(handle, cx, |window, cx| {
+                    notes_app.update(cx, |app, cx| {
+                        app.select_day_note(date, window, cx);
+                    });
+                })
+            },
+            |cx| {
+                if main_was_visible {
+                    hide_main_window_then_activate_notes(cx, handle);
+                } else if let Err(error) =
+                    update_notes_window_detached(handle, cx, |window, _cx| {
+                        window.activate_window();
+                    })
+                {
+                    tracing::warn!(
+                        target: "script_kit::notes",
+                        %error,
+                        "notes_reuse_activation_without_main_hide_failed"
+                    );
+                }
+            },
+        );
 
         match result {
             Ok(()) => return Ok(()),
@@ -1621,9 +1680,38 @@ pub fn accept_notes_ghost_for_automation(cx: &mut App) -> Result<serde_json::Val
 mod lifecycle_tests {
     use super::{
         notes_window_close_transition, run_current_notes_window_close_sequence,
-        NotesWindowCloseOrigin,
+        run_existing_day_note_reuse_handoff, NotesWindowCloseOrigin,
     };
     use std::cell::RefCell;
+
+    #[test]
+    fn existing_day_note_reuse_selects_then_activates_after_main_hide() {
+        let events = RefCell::new(Vec::new());
+        let mut context = ();
+
+        run_existing_day_note_reuse_handoff(
+            &mut context,
+            |_| {
+                events.borrow_mut().push("select_day_note");
+                Ok::<(), ()>(())
+            },
+            |_| {
+                events.borrow_mut().push("hide_main_window_completed");
+                events.borrow_mut().push("activate_notes_window");
+            },
+        )
+        .expect("the modeled day-note selection should succeed");
+
+        assert_eq!(
+            events.into_inner(),
+            [
+                "select_day_note",
+                "hide_main_window_completed",
+                "activate_notes_window",
+            ],
+            "an existing Notes window must select the day note before main hides, then activate only after native hide completion",
+        );
+    }
 
     #[test]
     fn current_window_close_retires_every_registration_before_launcher_restore() {
