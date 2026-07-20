@@ -130,6 +130,21 @@ unsafe fn liquid_glass_tint_color() -> id {
     ]
 }
 
+/// True when the AppKit Liquid Glass API (macOS 26 Tahoe) is available, i.e.
+/// the tagged NSGlassEffectView backdrop can actually render. Window creation
+/// uses this to pick `Transparent` (the glass backdrop supplies the material)
+/// over `Blurred`, whose full-window NSVisualEffectView would sit above the
+/// backmost glass view and hide it entirely.
+#[cfg(target_os = "macos")]
+pub fn tahoe_liquid_glass_available() -> bool {
+    tahoe_liquid_glass_class().is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn tahoe_liquid_glass_available() -> bool {
+    false
+}
+
 /// Stable `tag` sentinel so the backdrop view can be found idempotently via
 /// `contentView.viewWithTag:` on repeated configure passes.
 #[cfg(target_os = "macos")]

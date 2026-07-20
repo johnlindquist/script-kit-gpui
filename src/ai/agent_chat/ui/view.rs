@@ -3706,6 +3706,19 @@ impl AgentChatView {
         }
     }
 
+    fn footer_button_element_id(
+        action: crate::footer_popup::FooterAction,
+        index: usize,
+    ) -> &'static str {
+        if action == crate::footer_popup::FooterAction::Retry {
+            "agent_chat-callout-retry"
+        } else if index == 0 {
+            "agent-chat-footer-leading-slot"
+        } else {
+            "agent-chat-footer-action-slot"
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_agent_chat_footer_hint_button(
         id: &'static str,
@@ -3770,11 +3783,7 @@ impl AgentChatView {
                 },
             );
             row = row.child(Self::render_agent_chat_footer_hint_button(
-                if index == 0 {
-                    "agent-chat-footer-leading-slot"
-                } else {
-                    "agent-chat-footer-action-slot"
-                },
+                Self::footer_button_element_id(button.action, index),
                 button.key,
                 button.label,
                 Self::footer_slot_width(button.action, index == 0),
@@ -10435,15 +10444,15 @@ impl AgentChatView {
 
     pub(crate) fn active_callout_actions(&self, cx: &App) -> Vec<crate::actions::Action> {
         let thread = self.live_thread().read(cx);
-        let Some(callout) = thread.active_callout() else {
-            return Vec::new();
-        };
-        Self::active_callout_action_specs(callout)
+        Self::active_callout_action_specs(thread.active_callout())
     }
 
     fn active_callout_action_specs(
-        callout: &super::thread::AgentChatCallout,
+        callout: Option<&super::thread::AgentChatCallout>,
     ) -> Vec<crate::actions::Action> {
+        let Some(callout) = callout else {
+            return Vec::new();
+        };
         use crate::actions::{Action, ActionCategory};
         use crate::designs::icon_variations::IconName;
 

@@ -102,6 +102,11 @@ fn retryable_error_callout_surfaces_retry_in_footer_contract() {
     assert_eq!(button.key, "⌘⇧R");
     assert_eq!(button.label, "Retry");
     assert!(button.enabled);
+    assert_eq!(
+        AgentChatView::footer_button_element_id(button.action, 0),
+        "agent_chat-callout-retry",
+        "the moved retry footer button should retain the former callout automation id"
+    );
     assert!(
         AgentChatView::retry_footer_button(AgentChatThreadStatus::Idle, Some(&callout)).is_none()
     );
@@ -116,7 +121,7 @@ fn active_callout_render_model_is_passive_content_only() {
     assert_eq!(model.title.as_ref(), "Turn failed");
     assert_eq!(model.detail.as_ref(), "connection lost");
 
-    let action_ids = AgentChatView::active_callout_action_specs(&callout)
+    let action_ids = AgentChatView::active_callout_action_specs(Some(&callout))
         .into_iter()
         .map(|action| action.id)
         .collect::<Vec<_>>();
@@ -128,6 +133,10 @@ fn active_callout_render_model_is_passive_content_only() {
             super::AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID,
         ],
         "callout interactions belong to the actions dialog, not the render model"
+    );
+    assert!(
+        AgentChatView::active_callout_action_specs(None).is_empty(),
+        "recovery rows must not appear without an active callout"
     );
 }
 

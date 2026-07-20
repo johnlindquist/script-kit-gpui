@@ -732,7 +732,13 @@ fn open_notes_window_with_close_behavior(
     // Load theme to determine window background appearance (vibrancy)
     let theme = get_cached_theme();
     let window_background = if theme.is_vibrancy_enabled() {
-        gpui::WindowBackgroundAppearance::Blurred
+        if crate::platform::tahoe_liquid_glass_available() {
+            // Tahoe: the native glass backdrop supplies the material; Blurred
+            // would cover it with the fork's NSVisualEffectView.
+            gpui::WindowBackgroundAppearance::Transparent
+        } else {
+            gpui::WindowBackgroundAppearance::Blurred
+        }
     } else {
         gpui::WindowBackgroundAppearance::Opaque
     };
