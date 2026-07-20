@@ -502,6 +502,32 @@ extern "C" fn tahoe_glass_backdrop_order_out_window(
     }
 }
 
+/// Park a just-hidden window at alpha 0 so that whichever code path orders
+/// it front next cannot flash a full-alpha frame before the appear morph
+/// starts (multiple show paths exist: the platform show helpers and GPUI's
+/// `activate_window`). The appear morph restores alpha — including on every
+/// early exit — so the window can never stay invisible.
+#[cfg(target_os = "macos")]
+unsafe fn park_hidden_window_for_glass_morph(window: id) {
+    if window.is_null() {
+        return;
+    }
+    if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
+        return;
+    }
+    let morph_opacity = crate::theme::get_cached_theme().get_opacity();
+    let duration = morph_opacity
+        .glass_morph_duration
+        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION);
+    let inset = morph_opacity
+        .glass_morph_inset
+        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET);
+    if duration < 0.02 || inset < 0.005 {
+        return; // morph disabled: leave alpha untouched
+    }
+    let _: () = msg_send![window, setAlphaValue: 0.0f64];
+}
+
 /// True when a morph started within the last 700ms. Rapid re-shows would
 /// otherwise capture a mid-animation frame as the "final" target and shrink
 /// the window a little more on every trigger.
@@ -536,6 +562,13 @@ fn glass_morph_recently_started() -> bool {
 unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_name: &str) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
+    // The hide path parks the window at alpha 0 so no show path can flash a
+    // full-alpha frame. Every early exit below must therefore restore alpha,
+    // or a skipped morph would leave the window invisible.
+    let restore_alpha = |window: id| {
+        let _: () = msg_send![window, setAlphaValue: 1.0f64];
+    };
+
     let morph_opacity = crate::theme::get_cached_theme().get_opacity();
     let duration = f64::from(
         morph_opacity
@@ -550,23 +583,28 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
             .clamp(0.0, 0.4),
     );
     if duration < 0.02 || inset_fraction < 0.005 {
+        restore_alpha(window);
         return; // morph disabled via theme sliders
     }
     if glass_morph_recently_started() {
+        restore_alpha(window);
         return;
     }
 
     let final_frame: NSRect = msg_send![window, frame];
     if final_frame.size.width < 40.0 || final_frame.size.height < 40.0 {
+        restore_alpha(window);
         return;
     }
 
     let content_view: id = msg_send![window, contentView];
     if content_view == nil {
+        restore_alpha(window);
         return;
     }
     let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
     if glass_view == nil {
+        restore_alpha(window);
         return;
     }
 

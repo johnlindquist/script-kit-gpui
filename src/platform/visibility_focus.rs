@@ -88,6 +88,10 @@ fn hide_main_window_with_geometry_trace(cycle_id: Option<u64>) {
         // nil sender means the action is programmatic, not from a menu item
         let _: () = msg_send![window, orderOut:nil];
 
+        // Glass mode: park at alpha 0 so the next show (whichever path wins)
+        // cannot flash a full-alpha frame before the appear morph runs.
+        park_hidden_window_for_glass_morph(window);
+
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("after_order_out", cycle_id, None, None);
         }
@@ -250,6 +254,10 @@ fn hide_main_window_with_completion(
         if is_visible {
             return MainWindowHideCompletion::StillVisible;
         }
+
+        // Glass mode: park at alpha 0 so the next show (whichever path wins)
+        // cannot flash a full-alpha frame before the appear morph runs.
+        park_hidden_window_for_glass_morph(window);
     }
 
     logging::log(
