@@ -46,12 +46,19 @@ import {
   readSync,
   closeSync,
   appendFileSync,
+  writeFileSync,
+  unlinkSync,
   watch,
   type FSWatcher,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
+import {
+  clipboardCaptureFixtureCommand,
+  gpuiKeyDownCommand,
+  triggerActionCommand,
+} from "./lib/client.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
 /**
@@ -384,6 +391,29 @@ export abstract class ProtocolCore {
     if (opts.target !== undefined) command.target = opts.target;
     return this.request(command, {
       expect: "simulateGpuiEventResult",
+      timeoutMs: opts.timeoutMs ?? this.defaultTimeoutMs,
+    });
+  }
+
+  simulateGpuiKeyDown(
+    key: string,
+    opts: { text?: string; modifiers?: string[]; target?: Json; timeoutMs?: number } = {},
+  ): Promise<Json> {
+    return this.request(
+      gpuiKeyDownCommand(key, opts.text, opts.modifiers ?? [], opts.target),
+      {
+        expect: "simulateGpuiEventResult",
+        timeoutMs: opts.timeoutMs ?? this.defaultTimeoutMs,
+      },
+    );
+  }
+
+  triggerAction(
+    actionId: string,
+    opts: { host?: string; timeoutMs?: number } = {},
+  ): Promise<Json> {
+    return this.request(triggerActionCommand(actionId, opts.host), {
+      expect: "triggerActionResult",
       timeoutMs: opts.timeoutMs ?? this.defaultTimeoutMs,
     });
   }
@@ -758,6 +788,47 @@ export class Driver extends ProtocolCore {
       }
     }
     return driver;
+  }
+
+  /**
+   * Inject text through the production clipboard capture pipeline without
+   * touching NSPasteboard. The payload file stays under the sandbox SK_PATH,
+   * so even the 100,001-byte rejection boundary fits beneath the JSONL cap.
+   */
+  async injectClipboardCaptureFixture(args: {
+    text: string;
+    sourceBundleId?: string;
+    concealedTypes?: string[];
+    changeGeneration: number;
+    timeoutMs?: number;
+  }): Promise<Json> {
+    const fixtureDir = join(this.sessionDir, "home", ".scriptkit", "devtools-fixtures");
+    mkdirSync(fixtureDir, { recursive: true });
+    const fixturePath = join(
+      fixtureDir,
+      `clipboard-${process.pid}-${Date.now()}-${args.changeGeneration}.txt`,
+    );
+    writeFileSync(fixturePath, args.text, { encoding: "utf8", mode: 0o600 });
+    try {
+      return await this.request(
+        clipboardCaptureFixtureCommand({
+          payloadPath: fixturePath,
+          sourceBundleId: args.sourceBundleId,
+          concealedTypes: args.concealedTypes,
+          changeGeneration: args.changeGeneration,
+        }),
+        {
+          expect: "externalCommandResult",
+          timeoutMs: args.timeoutMs ?? this.defaultTimeoutMs,
+        },
+      );
+    } finally {
+      try {
+        unlinkSync(fixturePath);
+      } catch {
+        // Run-scoped DB/log receipts are authoritative; payload is ephemeral.
+      }
+    }
   }
 
   // --- transport -------------------------------------------------------------

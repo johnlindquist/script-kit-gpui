@@ -2,6 +2,9 @@ import { describe, expect, test, afterEach } from "bun:test";
 import {
   classifyEnvelopeError,
   classifyEnvelopes,
+  clipboardCaptureFixtureCommand,
+  gpuiKeyDownCommand,
+  triggerActionCommand,
   finishReceipt,
   parseTargetArgs,
   requestId,
@@ -9,6 +12,36 @@ import {
   startClock,
   SESSION_LIFECYCLE_CODES,
 } from "../lib/client.ts";
+
+describe("DevTools command builders", () => {
+  test("clipboard fixture uses a file payload and preserves capture metadata", () => {
+    expect(clipboardCaptureFixtureCommand({
+      payloadPath: "/sandbox/.scriptkit/devtools-fixtures/oversize.txt",
+      sourceBundleId: "com.apple.TextEdit",
+      concealedTypes: ["org.nspasteboard.ConcealedType"],
+      changeGeneration: 42,
+    })).toEqual({
+      type: "injectClipboardCaptureFixture",
+      payload: { type: "textFile", path: "/sandbox/.scriptkit/devtools-fixtures/oversize.txt" },
+      sourceBundleId: "com.apple.TextEdit",
+      concealedTypes: ["org.nspasteboard.ConcealedType"],
+      changeGeneration: 42,
+    });
+  });
+
+  test("real key and direct action builders use receipt-backed routes", () => {
+    expect(gpuiKeyDownCommand("space", " ", [], { type: "main" })).toEqual({
+      type: "simulateGpuiEvent",
+      target: { type: "main" },
+      event: { type: "keyDown", key: "space", modifiers: [], text: " " },
+    });
+    expect(triggerActionCommand("clip:clipboard_keep_in_today", "clipboardHistory")).toEqual({
+      type: "triggerAction",
+      actionId: "clip:clipboard_keep_in_today",
+      host: "clipboardHistory",
+    });
+  });
+});
 
 describe("classifyEnvelopeError", () => {
   test("ok envelope classifies ok", () => {

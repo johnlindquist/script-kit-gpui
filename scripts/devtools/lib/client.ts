@@ -33,6 +33,49 @@ export function requestId(tool: string, prefix: string): string {
   return `devtools-${tool}-${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+export interface ClipboardCaptureFixtureCommandArgs {
+  payloadPath: string;
+  sourceBundleId?: string;
+  concealedTypes?: string[];
+  changeGeneration: number;
+}
+
+/** Build the typed, redacted command for a sandbox-file clipboard capture. */
+export function clipboardCaptureFixtureCommand(
+  args: ClipboardCaptureFixtureCommandArgs,
+): JsonObject {
+  return {
+    type: "injectClipboardCaptureFixture",
+    payload: { type: "textFile", path: args.payloadPath },
+    sourceBundleId: args.sourceBundleId,
+    concealedTypes: args.concealedTypes ?? [],
+    changeGeneration: args.changeGeneration,
+  };
+}
+
+/** Build a real GPUI key-down dispatch rather than legacy simulateKey. */
+export function gpuiKeyDownCommand(
+  key: string,
+  text?: string,
+  modifiers: string[] = [],
+  target?: JsonObject,
+): JsonObject {
+  return {
+    type: "simulateGpuiEvent",
+    ...(target ? { target } : {}),
+    event: { type: "keyDown", key, modifiers, ...(text === undefined ? {} : { text }) },
+  };
+}
+
+/** Build direct shared-action activation by the action id exposed in DevTools state. */
+export function triggerActionCommand(actionId: string, host?: string): JsonObject {
+  return {
+    type: "triggerAction",
+    actionId,
+    ...(host ? { host } : {}),
+  };
+}
+
 /**
  * Spawn a subprocess and parse its stdout as JSON. On failure returns a
  * structured error envelope (never throws), preserving any parseable JSON the

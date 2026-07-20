@@ -106,7 +106,10 @@ pub use rejection::{
 
 // Monitor/Init
 #[allow(unused_imports)]
-pub use monitor::{init_clipboard_history, stop_clipboard_monitoring};
+pub use monitor::{
+    init_clipboard_history, inject_clipboard_capture_fixture, stop_clipboard_monitoring,
+    ClipboardCaptureFixtureOutcome, ClipboardCaptureFixturePayload,
+};
 
 // OCR worker
 #[allow(unused_imports)]

@@ -4,8 +4,9 @@
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -23,8 +24,8 @@ use super::database::{
 use super::image::{compute_image_hash, decode_to_render_image, encode_image_as_blob};
 use super::ocr;
 use super::rejection::{
-    evaluate_text_capture_rejection, record_rejection, reject_before_reading_payload,
-    ClipboardPreCaptureProbe, RejectionReason,
+    contains_concealed_pasteboard_type, evaluate_text_capture_rejection, record_rejection,
+    reject_before_reading_payload, ClipboardPreCaptureProbe, RejectionReason,
 };
 use super::sediment::process_text_sediment;
 use super::types::ContentType;
@@ -63,6 +64,167 @@ impl LastImageState {
     }
 }
 
+/// Text payload accepted by the DevTools clipboard-capture fixture.
+///
+/// Large payloads use `textFile` because stdin JSONL is intentionally capped at
+/// 16 KiB. The file must resolve under the active sandbox's `SK_PATH`.
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "type", deny_unknown_fields)]
+pub enum ClipboardCaptureFixturePayload {
+    Text { text: String },
+    TextFile { path: PathBuf },
+}
+
+/// Redacted result from a synthetic capture. Payload content is never carried
+/// in protocol responses or logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardCaptureFixtureOutcome {
+    Stored { entry_id: String },
+    Rejected { reason: RejectionReason },
+    Oversized { text_len: usize, max_len: usize },
+    Empty,
+    UnchangedGeneration,
+    Failed { error: String },
+}
+
+#[derive(Debug, Default)]
+struct ClipboardCaptureFixtureState {
+    last_change_generation: Option<u64>,
+}
+
+static CLIPBOARD_CAPTURE_FIXTURE_STATE: OnceLock<Mutex<ClipboardCaptureFixtureState>> =
+    OnceLock::new();
+
+fn clipboard_capture_fixture_state() -> &'static Mutex<ClipboardCaptureFixtureState> {
+    CLIPBOARD_CAPTURE_FIXTURE_STATE
+        .get_or_init(|| Mutex::new(ClipboardCaptureFixtureState::default()))
+}
+
+fn clipboard_fixture_root() -> Result<PathBuf> {
+    let root = std::env::var_os("SK_PATH")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".scriptkit")))
+        .context("clipboard fixture requires SK_PATH or HOME")?;
+    root.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve clipboard fixture root {}",
+            root.display()
+        )
+    })
+}
+
+fn read_clipboard_fixture_text(payload: ClipboardCaptureFixturePayload) -> Result<String> {
+    match payload {
+        ClipboardCaptureFixturePayload::Text { text } => Ok(text),
+        ClipboardCaptureFixturePayload::TextFile { path } => {
+            let root = clipboard_fixture_root()?;
+            let resolved = path.canonicalize().with_context(|| {
+                format!("failed to resolve clipboard fixture {}", path.display())
+            })?;
+            if !resolved.starts_with(&root) {
+                anyhow::bail!(
+                    "clipboard fixture path must stay under SK_PATH (root={}, path={})",
+                    root.display(),
+                    resolved.display()
+                );
+            }
+            std::fs::read_to_string(&resolved)
+                .with_context(|| format!("failed to read clipboard fixture {}", resolved.display()))
+        }
+    }
+}
+
+fn capture_clipboard_fixture_with<Load, Add, Sediment>(
+    state: &mut ClipboardCaptureFixtureState,
+    change_generation: u64,
+    source_bundle_id: Option<&str>,
+    concealed_types: &[String],
+    load_text: Load,
+    add_entry: Add,
+    process_sediment: Sediment,
+) -> ClipboardCaptureFixtureOutcome
+where
+    Load: FnOnce() -> Result<String>,
+    Add: FnOnce(&str) -> Result<String>,
+    Sediment: FnOnce(&str, &str),
+{
+    if state.last_change_generation == Some(change_generation) {
+        return ClipboardCaptureFixtureOutcome::UnchangedGeneration;
+    }
+    // Mirrors ClipboardChangeDetector: observing a new generation advances the
+    // detector before any payload read or persistence attempt.
+    state.last_change_generation = Some(change_generation);
+
+    let pre_capture = ClipboardPreCaptureProbe {
+        pasteboard_has_concealed_types: contains_concealed_pasteboard_type(
+            concealed_types.iter().map(String::as_str),
+        ),
+    };
+    if let Some(reason) = reject_before_reading_payload(source_bundle_id, pre_capture) {
+        record_rejection(reason);
+        return ClipboardCaptureFixtureOutcome::Rejected { reason };
+    }
+
+    let text = match load_text() {
+        Ok(text) => text,
+        Err(error) => {
+            return ClipboardCaptureFixtureOutcome::Failed {
+                error: error.to_string(),
+            };
+        }
+    };
+    if text.is_empty() {
+        return ClipboardCaptureFixtureOutcome::Empty;
+    }
+    if is_text_over_limit(&text) {
+        let max_len = get_max_text_content_len();
+        warn!(
+            text_len = text.len(),
+            max_len, change_generation, "Skipping oversized clipboard text fixture entry"
+        );
+        return ClipboardCaptureFixtureOutcome::Oversized {
+            text_len: text.len(),
+            max_len,
+        };
+    }
+
+    match capture_text_entry(&text, source_bundle_id, pre_capture, add_entry) {
+        TextCaptureOutcome::Stored(entry_id) => {
+            process_sediment(&entry_id, &text);
+            ClipboardCaptureFixtureOutcome::Stored { entry_id }
+        }
+        TextCaptureOutcome::Rejected(reason) => ClipboardCaptureFixtureOutcome::Rejected { reason },
+        TextCaptureOutcome::Failed(error) => ClipboardCaptureFixtureOutcome::Failed { error },
+    }
+}
+
+/// Inject one synthetic text capture through the production rejection, size,
+/// dedupe, and sediment pipeline without touching NSPasteboard.
+pub fn inject_clipboard_capture_fixture(
+    payload: ClipboardCaptureFixturePayload,
+    source_bundle_id: Option<&str>,
+    concealed_types: &[String],
+    change_generation: u64,
+) -> ClipboardCaptureFixtureOutcome {
+    let mut state = match clipboard_capture_fixture_state().lock() {
+        Ok(state) => state,
+        Err(error) => {
+            return ClipboardCaptureFixtureOutcome::Failed {
+                error: format!("clipboard fixture state lock poisoned: {error}"),
+            };
+        }
+    };
+    capture_clipboard_fixture_with(
+        &mut state,
+        change_generation,
+        source_bundle_id,
+        concealed_types,
+        || read_clipboard_fixture_text(payload),
+        |text| add_entry(text, ContentType::Text),
+        |entry_id, text| process_text_sediment(entry_id, text, chrono::Utc::now()),
+    )
+}
+
 /// Initialize clipboard history: create DB and start monitoring
 ///
 /// This should be called once at application startup. It will:
@@ -76,6 +238,11 @@ impl LastImageState {
 /// # Errors
 /// Returns error if database creation fails.
 pub fn init_clipboard_history() -> Result<()> {
+    if std::env::var("SCRIPT_KIT_DISABLE_CLIPBOARD_MONITOR").is_ok_and(|value| value == "1") {
+        info!("Clipboard monitor disabled for sandboxed DevTools fixture injection");
+        return Ok(());
+    }
+
     // Ensure init is only called once (idempotency guard)
     if INIT_GUARD.set(()).is_err() {
         debug!("Clipboard history already initialized, skipping");
@@ -669,6 +836,128 @@ mod tests {
         assert_eq!(
             outcome,
             TextCaptureOutcome::Rejected(RejectionReason::SecretContentPattern)
+        );
+        assert!(!add_called.get());
+    }
+
+    #[test]
+    fn clipboard_capture_fixture_concealed_rejection_happens_before_payload_read() {
+        let mut state = ClipboardCaptureFixtureState::default();
+        let payload_read = std::cell::Cell::new(false);
+        let add_called = std::cell::Cell::new(false);
+        let concealed = vec!["org.nspasteboard.ConcealedType".to_string()];
+        let outcome = capture_clipboard_fixture_with(
+            &mut state,
+            1,
+            None,
+            &concealed,
+            || {
+                payload_read.set(true);
+                Ok("must-not-be-read".to_string())
+            },
+            |_| {
+                add_called.set(true);
+                Ok("entry-id".to_string())
+            },
+            |_, _| {},
+        );
+
+        assert_eq!(
+            outcome,
+            ClipboardCaptureFixtureOutcome::Rejected {
+                reason: RejectionReason::ConcealedPasteboardType,
+            }
+        );
+        assert!(
+            !payload_read.get(),
+            "concealed capture must reject before payload read"
+        );
+        assert!(
+            !add_called.get(),
+            "concealed capture must not call add_entry"
+        );
+    }
+
+    #[test]
+    fn clipboard_capture_fixture_generation_allows_same_value_recopy_once_per_change() {
+        let mut state = ClipboardCaptureFixtureState::default();
+        let add_calls = std::cell::Cell::new(0usize);
+        let sediment_calls = std::cell::Cell::new(0usize);
+        let concealed = Vec::new();
+
+        for generation in [40, 41] {
+            let outcome = capture_clipboard_fixture_with(
+                &mut state,
+                generation,
+                Some("com.apple.TextEdit"),
+                &concealed,
+                || Ok("same non-url value".to_string()),
+                |_| {
+                    add_calls.set(add_calls.get() + 1);
+                    Ok("same-entry-id".to_string())
+                },
+                |entry_id, text| {
+                    assert_eq!(entry_id, "same-entry-id");
+                    assert_eq!(text, "same non-url value");
+                    sediment_calls.set(sediment_calls.get() + 1);
+                },
+            );
+            assert_eq!(
+                outcome,
+                ClipboardCaptureFixtureOutcome::Stored {
+                    entry_id: "same-entry-id".to_string(),
+                }
+            );
+        }
+
+        let payload_read = std::cell::Cell::new(false);
+        let unchanged = capture_clipboard_fixture_with(
+            &mut state,
+            41,
+            None,
+            &concealed,
+            || {
+                payload_read.set(true);
+                Ok("same non-url value".to_string())
+            },
+            |_| panic!("unchanged generation must not add"),
+            |_, _| panic!("unchanged generation must not process sediment"),
+        );
+        assert_eq!(
+            unchanged,
+            ClipboardCaptureFixtureOutcome::UnchangedGeneration
+        );
+        assert!(
+            !payload_read.get(),
+            "unchanged generation must not read payload"
+        );
+        assert_eq!(add_calls.get(), 2);
+        assert_eq!(sediment_calls.get(), 2);
+    }
+
+    #[test]
+    fn clipboard_capture_fixture_oversize_rejects_before_add_entry() {
+        let mut state = ClipboardCaptureFixtureState::default();
+        let add_called = std::cell::Cell::new(false);
+        let max_len = get_max_text_content_len();
+        let outcome = capture_clipboard_fixture_with(
+            &mut state,
+            7,
+            None,
+            &[],
+            || Ok("x".repeat(max_len + 1)),
+            |_| {
+                add_called.set(true);
+                Ok("entry-id".to_string())
+            },
+            |_, _| {},
+        );
+        assert_eq!(
+            outcome,
+            ClipboardCaptureFixtureOutcome::Oversized {
+                text_len: max_len + 1,
+                max_len,
+            }
         );
         assert!(!add_called.get());
     }
