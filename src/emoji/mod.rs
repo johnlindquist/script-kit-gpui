@@ -1220,16 +1220,21 @@ pub fn grouped_emojis() -> Vec<(EmojiCategory, Vec<&'static Emoji>)> {
 
 /// Number of columns in the emoji picker grid.
 /// Shared between the renderer and the arrow-key navigation interceptor.
-pub const GRID_COLS: usize = 8;
+pub const GRID_COLS: usize = 12;
 
 /// Fixed square size for each rendered emoji tile.
-pub const GRID_TILE_SIZE: f32 = 36.0;
+pub const GRID_TILE_SIZE: f32 = 48.0;
 
-/// Horizontal spacing between emoji tiles.
-pub const GRID_TILE_GAP: f32 = 4.0;
+/// Horizontal spacing between emoji tiles. Combined with the tile size, this
+/// matches the row height so horizontal and vertical centers share one rhythm.
+pub const GRID_TILE_GAP: f32 = 8.0;
 
 /// Fixed height for every emoji picker row (headers and cell rows).
-pub const GRID_ROW_HEIGHT: f32 = 48.0;
+pub const GRID_ROW_HEIGHT: f32 = 56.0;
+
+/// Glyph scale relative to the tile, keeping emoji sizing derived from the
+/// shared tile size instead of introducing a renderer-local pixel value.
+pub const GRID_GLYPH_SCALE: f32 = 0.75;
 
 /// Label rendered as the section header above the Frequently Used head
 /// block. Pulled into a constant so the renderer, audits, and tests all
@@ -1830,12 +1835,18 @@ mod tests {
         }
     }
 
+    /// Locks the balanced emoji-grid rhythm: larger glyph-bearing tiles,
+    /// enough columns to use the window width, and equal horizontal and
+    /// vertical center-to-center spacing (`tile + gap == row height`).
     #[test]
     fn test_emoji_picker_grid_layout_constants_match_density_targets() {
-        assert_eq!(GRID_COLS, 8);
-        assert_eq!(GRID_TILE_SIZE, 36.0);
-        assert_eq!(GRID_TILE_GAP, 4.0);
-        assert_eq!(GRID_ROW_HEIGHT, 48.0);
+        assert_eq!(GRID_COLS, 12);
+        assert_eq!(GRID_TILE_SIZE, 48.0);
+        assert_eq!(GRID_TILE_GAP, 8.0);
+        assert_eq!(GRID_ROW_HEIGHT, 56.0);
+        assert_eq!(GRID_TILE_SIZE + GRID_TILE_GAP, GRID_ROW_HEIGHT);
+        assert_eq!(GRID_GLYPH_SCALE, 0.75);
+        assert_eq!(GRID_TILE_SIZE * GRID_GLYPH_SCALE, 36.0);
     }
 
     #[test]

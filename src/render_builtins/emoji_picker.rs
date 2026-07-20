@@ -274,6 +274,7 @@ impl ScriptListApp {
 
         let tile_size = crate::emoji::GRID_TILE_SIZE;
         let tile_gap = crate::emoji::GRID_TILE_GAP;
+        let glyph_size = tile_size * crate::emoji::GRID_GLYPH_SCALE;
         const EMOJI_ROW_ID_OFFSET: usize = 10_000;
         const EMOJI_CELL_ID_OFFSET: usize = 20_000;
 
@@ -288,6 +289,7 @@ impl ScriptListApp {
         } else {
             let row_height = crate::emoji::GRID_ROW_HEIGHT;
             let selected_outline = rgba((self.theme.colors.accent.selected << 8) | 0x80);
+            let idle_outline = rgba(self.theme.colors.accent.selected << 8);
             let selected_bg = rgba((self.theme.colors.text.primary << 8) | 0x2a);
             let idle_bg = rgba((ui_border << 8) | 0x10);
             let click_entity_handle = cx.entity().downgrade();
@@ -330,16 +332,15 @@ impl ScriptListApp {
                                 .into_any_element(),
 
                             Some(EmojiGridRow::Cells { start_index, count }) => {
-                                let is_full_row = *count == cols;
                                 let mut row_div = div()
                                     .id(EMOJI_ROW_ID_OFFSET + row_index)
                                     .w_full()
                                     .h(px(row_height))
                                     .flex()
                                     .items_center()
+                                    .justify_center()
                                     .px(px(design_spacing.padding_lg))
-                                    .gap(px(tile_gap))
-                                    .when(is_full_row, |d| d.justify_between());
+                                    .gap(px(tile_gap));
 
                                 for col in 0..*count {
                                     let flat_emoji_index = *start_index + col;
@@ -415,11 +416,12 @@ impl ScriptListApp {
                                                     .items_center()
                                                     .justify_center()
                                                     .rounded(px(design_visual.radius_md))
+                                                    .border_1()
+                                                    .border_color(idle_outline)
                                                     .bg(idle_bg)
-                                                    .text_size(px(28.0))
+                                                    .text_size(px(glyph_size))
                                                     .when(is_selected, |d| {
                                                         d.bg(selected_bg)
-                                                            .border_1()
                                                             .border_color(selected_outline)
                                                     })
                                                     .child(emoji_display),
@@ -427,11 +429,12 @@ impl ScriptListApp {
                                     );
                                 }
 
-                                if is_full_row {
-                                    row_div.into_any_element()
-                                } else {
-                                    row_div.child(div().flex_1()).into_any_element()
+                                for _ in *count..cols {
+                                    row_div = row_div
+                                        .child(div().w(px(tile_size)).h(px(tile_size)));
                                 }
+
+                                row_div.into_any_element()
                             }
 
                             None => div().w_full().h(px(row_height)).into_any_element(),
