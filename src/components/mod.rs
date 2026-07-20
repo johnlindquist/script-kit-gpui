@@ -149,8 +149,11 @@ pub(crate) use prompt_layout_shell::{
 #[allow(unused_imports)]
 pub(crate) use prompt_layout_shell::{
     prompt_detail_card, prompt_field_style, prompt_form_help, prompt_form_intro,
-    prompt_form_section, prompt_scroll_value, prompt_scroll_value_with_id, prompt_surface,
-    prompt_text_field, prompt_text_palette, PromptFieldState, PromptFieldStyle, PromptTextPalette,
+    prompt_form_section, prompt_scroll_value, prompt_scroll_value_with_id,
+    prompt_single_line_control_metrics, prompt_single_line_control_surface, prompt_surface,
+    prompt_text_field, prompt_text_palette, render_inset_prompt_body, PromptBodyInsets,
+    PromptFieldState, PromptFieldStyle, PromptSingleLineControlMetrics, PromptTextPalette,
+    ResolvedPromptBodyInsets,
 };
 #[allow(unused_imports)]
 pub use prompt_layout_shell::{prompt_shell_container, prompt_shell_content};

@@ -206,18 +206,11 @@ impl Render for DropPrompt {
                 rgba(chrome.drop_target_border_rgba),
             )
         };
-        let container = div()
-            .id(gpui::ElementId::Name("window:drop".into()))
+        let body = div()
             .flex()
             .flex_col()
             .w_full()
             .h_full()
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-                this.handle_external_paths(paths, cx);
-            }))
-            .when_some(vibrancy_bg, |d, bg| d.bg(bg)) // Only apply bg when vibrancy disabled
-            .text_color(text_color)
-            .p(px(spacing.padding_lg))
             .child(
                 // Drop zone — whisper chrome: ghost bg, hairline border, no rounding
                 div()
@@ -253,6 +246,17 @@ impl Render for DropPrompt {
                         .child(format!("{} file(s) dropped", self.dropped_files.len())),
                 )
             });
+
+        let container = crate::components::render_inset_prompt_body(
+            "window:drop",
+            body,
+            crate::components::PromptBodyInsets::MainMenu(self.design_variant),
+        )
+        .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+            this.handle_external_paths(paths, cx);
+        }))
+        .when_some(vibrancy_bg, |d, bg| d.bg(bg))
+        .text_color(text_color);
 
         FocusablePrompt::new(container)
             .key_context("drop_prompt")

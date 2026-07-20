@@ -13,7 +13,6 @@ impl ScriptListApp {
         let render_context = PromptRenderContext::new(self.theme.as_ref(), self.current_design);
         let theme = render_context.theme;
         let design_colors = render_context.design_colors;
-        let design_spacing = render_context.design_spacing;
         let design_typography = render_context.design_typography;
         let actions_dialog_top = render_context.actions_dialog_top;
         let actions_dialog_right = render_context.actions_dialog_right;
@@ -35,7 +34,7 @@ impl ScriptListApp {
             prompt_type,
             field_count,
             shell = "render_simple_prompt_shell",
-            body_padding = design_spacing.padding_lg,
+            body_insets = "main_menu",
             "prompt_surface_rendered"
         );
 
@@ -139,13 +138,16 @@ impl ScriptListApp {
         crate::components::render_simple_prompt_shell(
             0.0,
             vibrancy_bg,
-            div()
-                .flex_1()
-                .w_full()
-                .min_h(px(0.))
-                .overflow_y_scrollbar()
-                .p(px(design_spacing.padding_lg))
-                .child(entity.clone()),
+            crate::components::render_inset_prompt_body(
+                "form-prompt-inset-body",
+                div()
+                    .flex_1()
+                    .w_full()
+                    .min_h(px(0.))
+                    .overflow_y_scrollbar()
+                    .child(entity.clone()),
+                crate::components::PromptBodyInsets::MainMenu(self.current_design),
+            ),
             self.main_window_footer_slot(self.clickable_universal_hint_strip(cx)),
         )
         .h(content_height)
@@ -208,5 +210,4 @@ mod form_prompt_render_backdrop_tests {
             "form key handling should configure the shared helper via PromptKeyPreambleCfg"
         );
     }
-
 }

@@ -191,7 +191,7 @@ fn test_form_fields_use_shared_metrics_for_layout_tokens() {
     );
     assert!(
         text_field_render_source.contains("FormFieldMetrics::from_colors")
-            && text_field_render_source.contains("metrics.text_input_min_height_rems")
+            && text_field_render_source.contains("prompt_single_line_control_surface")
             && text_field_render_source.contains("metrics.field_gap_px")
             && text_field_render_source.contains("metrics.cursor_width_px")
             && text_field_render_source.contains("metrics.cursor_height_rems"),

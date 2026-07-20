@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use crate::designs::{get_tokens, DesignVariant};
 use crate::logging;
-use crate::panel::PROMPT_INPUT_FIELD_HEIGHT;
 use crate::template_variables;
 use crate::theme;
 

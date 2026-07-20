@@ -4,6 +4,14 @@ use crate::ui_foundation::{is_key_backspace, is_key_enter, is_key_tab, printable
 use gpui::FontWeight;
 use gpui_component::scroll::ScrollableElement;
 
+const TEMPLATE_PROMPT_BODY_SELECTOR: &str = "template-prompt-body-content";
+
+fn template_prompt_body_insets(
+    design_variant: DesignVariant,
+) -> crate::components::PromptBodyInsets {
+    crate::components::PromptBodyInsets::MainMenu(design_variant)
+}
+
 impl Focusable for TemplatePrompt {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
@@ -40,6 +48,7 @@ impl Render for TemplatePrompt {
 
         let mut content = div()
             .id(gpui::ElementId::Name("window:template".into()))
+            .debug_selector(|| TEMPLATE_PROMPT_BODY_SELECTOR.to_string())
             .flex()
             .flex_col()
             .w_full()
@@ -57,11 +66,7 @@ impl Render for TemplatePrompt {
                 "Preview",
                 text_secondary,
                 spacing.gap_sm,
-                crate::components::prompt_text_field(
-                    preview,
-                    preview_style,
-                    PROMPT_INPUT_FIELD_HEIGHT,
-                ),
+                crate::components::prompt_text_field(preview, preview_style),
             ));
 
         if self.inputs.is_empty() {
@@ -128,11 +133,7 @@ impl Render for TemplatePrompt {
                     label,
                     text_secondary,
                     spacing.gap_sm,
-                    crate::components::prompt_text_field(
-                        display,
-                        field_style,
-                        PROMPT_INPUT_FIELD_HEIGHT,
-                    ),
+                    crate::components::prompt_text_field(display, field_style),
                 )
                 .when_some(validation_message, |d, message| {
                     d.child(crate::components::prompt_form_help(
@@ -170,6 +171,12 @@ impl Render for TemplatePrompt {
             content = content.child(fields);
         }
 
+        let content = crate::components::render_inset_prompt_body(
+            "template-prompt-inset-body",
+            content,
+            template_prompt_body_insets(self.design_variant),
+        );
+
         FocusablePrompt::new(content)
             .key_context("template_prompt")
             .focus_handle(self.focus_handle.clone())
@@ -206,7 +213,61 @@ impl Render for TemplatePrompt {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     const SOURCE: &str = include_str!("render.rs");
+
+    #[test]
+    fn of58ab_template_inset_policy_matches_main_menu_content_frame() {
+        let resolved = template_prompt_body_insets(DesignVariant::Default).resolve();
+        let def = crate::designs::current_main_menu_theme().def();
+        let spacing = get_tokens(DesignVariant::Default).spacing();
+        assert_eq!(resolved.x_px, def.shell.content_inset_x);
+        assert_eq!(resolved.y_px, spacing.padding_sm);
+    }
+
+    #[gpui::test]
+    fn of58ab_layout_lock_template_body_uses_main_menu_content_insets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let def = crate::designs::current_main_menu_theme().def();
+        let spacing = get_tokens(DesignVariant::Default).spacing();
+        cx.update(gpui_component::init);
+        let window = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(480.0), px(320.0)),
+            )));
+            cx.open_window(options, |_, cx| {
+                let focus_handle = cx.focus_handle();
+                cx.new(|_| {
+                    TemplatePrompt::new(
+                        "layout-lock".to_string(),
+                        "Hello {{name}}".to_string(),
+                        focus_handle,
+                        Arc::new(|_, _| {}),
+                        Arc::new(theme::Theme::default()),
+                    )
+                })
+            })
+            .expect("template layout test window should open")
+        });
+
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, _| {
+                let body = window
+                    .debug_bounds_entries()
+                    .iter()
+                    .find(|entry| entry.selector == TEMPLATE_PROMPT_BODY_SELECTOR)
+                    .expect("template body should publish debug bounds");
+                assert_eq!(body.bounds.origin.x, px(def.shell.content_inset_x));
+                assert_eq!(body.bounds.origin.y, px(spacing.padding_sm));
+            })
+            .expect("template layout test window should update");
+    }
 
     #[test]
     fn template_render_uses_shared_create_flow_helpers() {

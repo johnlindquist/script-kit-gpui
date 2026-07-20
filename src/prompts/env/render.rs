@@ -91,11 +91,13 @@ impl Render for EnvPrompt {
                 env_input_label(self.secret),
                 text.label,
                 6.0,
-                crate::components::prompt_surface(field_style.background, field_style.border)
-                    .min_h(px(38.0))
-                    .flex()
-                    .items_center()
-                    .child(input_body),
+                crate::components::prompt_single_line_control_surface(
+                    field_style.background,
+                    field_style.border,
+                )
+                .flex()
+                .items_center()
+                .child(input_body),
             ))
             // Storage hint
             .child(crate::components::prompt_form_help(
@@ -161,14 +163,13 @@ impl Render for EnvPrompt {
             .text_color(text.primary)
             .font_family(crate::list_item::FONT_MONO)
             .child(
-                div()
-                    .id("env-body-scroll")
-                    .flex_1()
-                    .w_full()
-                    .overflow_y_hidden()
-                    .px(px(32.0))
-                    .py(px(24.0))
-                    .child(body),
+                crate::components::render_inset_prompt_body(
+                    "env-body-scroll",
+                    body,
+                    crate::components::PromptBodyInsets::MainMenu(self.design_variant),
+                )
+                .flex_1()
+                .overflow_y_hidden(),
             );
         // Footer is owned by the outer wrapper shell (render_prompts::other.rs)
         // which provides the canonical three-key hint strip.

@@ -114,21 +114,19 @@ impl Render for DivPrompt {
         let content_container = content_styled
             .id(gpui::ElementId::Name(panel_semantic_id.into()))
             .track_scroll(&self.scroll_handle)
-            .overflow_y_scrollbar();
+            .overflow_y_scrollbar()
+            .p(px(container_padding));
 
-        // Main container - fills entire window height with no bottom gap
-        // Use relative positioning to overlay scrollbar
-        let container = div()
-            .id(gpui::ElementId::Name("window:div".into()))
-            .relative()
-            .flex()
-            .flex_col()
-            .w_full()
-            .h_full() // Fill container height completely
-            .min_h(px(0.)) // Allow proper flex behavior
-            .when_some(container_bg, |d, bg| d.bg(bg)) // Only apply bg when available
-            .p(px(container_padding))
-            .child(content_container);
+        // SDK container padding belongs to the authored inner content plane;
+        // the shared main-menu inset remains non-removable outside it.
+        let container = crate::components::render_inset_prompt_body(
+            "window:div",
+            content_container,
+            crate::components::PromptBodyInsets::MainMenu(self.design_variant),
+        )
+        .relative()
+        .min_h(px(0.))
+        .when_some(container_bg, |d, bg| d.bg(bg));
 
         FocusablePrompt::new(container)
             .key_context("div_prompt")

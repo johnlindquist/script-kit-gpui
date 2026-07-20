@@ -71,6 +71,90 @@ pub(crate) fn prompt_frame_fill_content(content: impl IntoElement) -> Div {
         .child(content)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PromptBodyInsets {
+    #[allow(dead_code)] // Explicit opt-out for specialized/full-bleed body policies.
+    None,
+    MainMenu(crate::designs::DesignVariant),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ResolvedPromptBodyInsets {
+    pub x_px: f32,
+    pub y_px: f32,
+}
+
+impl PromptBodyInsets {
+    pub(crate) fn resolve(self) -> ResolvedPromptBodyInsets {
+        match self {
+            Self::None => ResolvedPromptBodyInsets {
+                x_px: 0.0,
+                y_px: 0.0,
+            },
+            Self::MainMenu(design_variant) => {
+                let def = crate::designs::current_main_menu_theme().def();
+                let spacing = crate::designs::get_tokens(design_variant).spacing();
+                ResolvedPromptBodyInsets {
+                    x_px: def.shell.content_inset_x,
+                    y_px: spacing.padding_sm,
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn render_inset_prompt_body(
+    id: impl Into<gpui::ElementId>,
+    body: impl IntoElement,
+    insets: PromptBodyInsets,
+) -> gpui::Stateful<Div> {
+    let insets = insets.resolve();
+    div()
+        .id(id.into())
+        .w_full()
+        .h_full()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .px(px(insets.x_px))
+        .py(px(insets.y_px))
+        .child(body)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PromptSingleLineControlMetrics {
+    pub total_height_px: f32,
+    pub radius_px: f32,
+    pub text_inset_x_px: f32,
+}
+
+pub(crate) fn prompt_single_line_control_metrics() -> PromptSingleLineControlMetrics {
+    let search = crate::designs::current_main_menu_theme().def().search;
+    PromptSingleLineControlMetrics {
+        total_height_px: search.height,
+        radius_px: search.radius,
+        text_inset_x_px: search.text_inset_x,
+    }
+}
+
+/// Shared single-line prompt control surface.
+///
+/// The main-menu search height is the total border box: vertical padding is
+/// intentionally absent here so callers cannot compose extra height onto it.
+pub(crate) fn prompt_single_line_control_surface(background: Rgba, border: Rgba) -> Div {
+    let metrics = prompt_single_line_control_metrics();
+    div()
+        .w_full()
+        .h(px(metrics.total_height_px))
+        .min_h(px(metrics.total_height_px))
+        .max_h(px(metrics.total_height_px))
+        .px(px(metrics.text_inset_x_px))
+        .bg(background)
+        .border_1()
+        .border_color(border)
+        .rounded(px(metrics.radius_px))
+}
+
 /// Shared inner card surface for form fields and content cards.
 ///
 /// Returns a full-width rounded div with consistent padding, border, and
@@ -221,13 +305,8 @@ pub(crate) fn prompt_field_style(
 }
 
 /// Single-line text field card using the shared prompt surface.
-pub(crate) fn prompt_text_field(
-    value: impl Into<SharedString>,
-    style: PromptFieldStyle,
-    min_height: f32,
-) -> Div {
-    prompt_surface(style.background, style.border)
-        .min_h(px(min_height))
+pub(crate) fn prompt_text_field(value: impl Into<SharedString>, style: PromptFieldStyle) -> Div {
+    prompt_single_line_control_surface(style.background, style.border)
         .flex()
         .items_center()
         .child(
@@ -1322,6 +1401,60 @@ fn render_header_divider() -> Div {
 #[cfg(test)]
 mod prompt_layout_shell_tests {
     use super::{prompt_shell_frame_config, PromptFrameConfig};
+    use gpui::{AppContext as _, InteractiveElement as _};
+
+    const SINGLE_LINE_CONTROL_SELECTOR: &str = "prompt-single-line-control";
+
+    struct TestSingleLinePromptControl;
+
+    impl gpui::Render for TestSingleLinePromptControl {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let theme = crate::theme::Theme::default();
+            let style = super::prompt_field_style(&theme, super::PromptFieldState::Active, false);
+            super::prompt_text_field("Value", style)
+                .debug_selector(|| SINGLE_LINE_CONTROL_SELECTOR.to_string())
+        }
+    }
+
+    #[gpui::test]
+    fn of58ab_layout_lock_single_line_control_matches_main_menu_search_height(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let expected_height = crate::designs::current_main_menu_theme()
+            .def()
+            .search
+            .height;
+        assert_eq!(
+            super::prompt_single_line_control_metrics().total_height_px,
+            expected_height
+        );
+        let window = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                gpui::size(gpui::px(320.0), gpui::px(120.0)),
+            )));
+            cx.open_window(options, |_, cx| cx.new(|_| TestSingleLinePromptControl))
+                .expect("single-line control test window should open")
+        });
+
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, _| {
+                let control = window
+                    .debug_bounds_entries()
+                    .iter()
+                    .find(|entry| entry.selector == SINGLE_LINE_CONTROL_SELECTOR)
+                    .expect("single-line prompt control should publish debug bounds");
+                assert_eq!(control.bounds.size.height, gpui::px(expected_height));
+            })
+            .expect("single-line control test window should update");
+    }
 
     #[test]
     fn test_prompt_frame_defaults_apply_min_h_and_overflow_hidden() {

@@ -134,26 +134,26 @@ impl Render for FormTextField {
             },
         );
 
-        // Input surface - uses shared prompt_surface for consistent card chrome
-        let input_surface = crate::components::prompt_surface(bg_color, border_color)
-            .id(ElementId::Name(format!("input-{}", field_name).into()))
-            .track_focus(&self.focus_handle)
-            .on_key_down(handle_key)
-            .on_click(handle_click)
-            .flex()
-            .flex_row()
-            .items_center()
-            .min_h(rems(metrics.text_input_min_height_rems))
-            .cursor_text()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(text_content),
-            );
+        // Input surface uses the shared exact-height single-line prompt control.
+        let input_surface =
+            crate::components::prompt_single_line_control_surface(bg_color, border_color)
+                .id(ElementId::Name(format!("input-{}", field_name).into()))
+                .track_focus(&self.focus_handle)
+                .on_key_down(handle_key)
+                .on_click(handle_click)
+                .flex()
+                .flex_row()
+                .items_center()
+                .cursor_text()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(text_content),
+                );
 
         // Build the main container - stacked vertical layout with label above input
         let mut container = div()

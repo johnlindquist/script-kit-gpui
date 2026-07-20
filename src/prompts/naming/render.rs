@@ -1,5 +1,7 @@
 use super::*;
 
+const NAMING_PROMPT_BODY_SELECTOR: &str = "naming-prompt-body-content";
+
 impl Focusable for NamingPrompt {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
@@ -86,6 +88,7 @@ impl Render for NamingPrompt {
                 div()
                     .w_full()
                     .flex_1()
+                    .debug_selector(|| NAMING_PROMPT_BODY_SELECTOR.to_string())
                     .flex()
                     .flex_col()
                     .gap(px(spacing.gap_lg))
@@ -101,11 +104,7 @@ impl Render for NamingPrompt {
                             "Friendly Name",
                             text_secondary,
                             spacing.gap_sm,
-                            crate::components::prompt_text_field(
-                                input_value,
-                                input_style,
-                                PROMPT_INPUT_FIELD_HEIGHT,
-                            ),
+                            crate::components::prompt_text_field(input_value, input_style),
                         )
                         .when_some(validation_message, |d, message| {
                             d.child(crate::components::prompt_form_help(message, error_color))
@@ -182,6 +181,12 @@ impl Render for NamingPrompt {
                     )),
             );
 
+        let content = crate::components::render_inset_prompt_body(
+            "naming-prompt-inset-body",
+            content,
+            crate::components::PromptBodyInsets::MainMenu(self.design_variant),
+        );
+
         FocusablePrompt::new(content)
             .key_context("naming_prompt")
             .focus_handle(self.focus_handle.clone())
@@ -220,7 +225,49 @@ impl Render for NamingPrompt {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     const SOURCE: &str = include_str!("render.rs");
+
+    #[gpui::test]
+    fn of58ab_layout_lock_naming_body_uses_main_menu_content_insets(cx: &mut gpui::TestAppContext) {
+        let def = crate::designs::current_main_menu_theme().def();
+        let spacing = get_tokens(DesignVariant::Default).spacing();
+        let window = cx.update(|cx| {
+            let mut options = gpui::WindowOptions::default();
+            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(480.0), px(360.0)),
+            )));
+            cx.open_window(options, |_, cx| {
+                let focus_handle = cx.focus_handle();
+                cx.new(|_| {
+                    NamingPrompt::new(
+                        "layout-lock".to_string(),
+                        NamingPromptConfig::new(NamingTarget::Script, PathBuf::from("/tmp"), "ts"),
+                        focus_handle,
+                        Arc::new(|_, _| {}),
+                        Arc::new(theme::Theme::default()),
+                    )
+                })
+            })
+            .expect("naming layout test window should open")
+        });
+
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, _| {
+                let body = window
+                    .debug_bounds_entries()
+                    .iter()
+                    .find(|entry| entry.selector == NAMING_PROMPT_BODY_SELECTOR)
+                    .expect("naming body should publish debug bounds");
+                assert_eq!(body.bounds.origin.x, px(def.shell.content_inset_x));
+                assert_eq!(body.bounds.origin.y, px(spacing.padding_sm));
+            })
+            .expect("naming layout test window should update");
+    }
 
     #[test]
     fn naming_render_uses_shared_create_flow_helpers() {

@@ -162,8 +162,6 @@ pub struct FormFieldMetrics {
     pub cursor_width_px: f32,
     /// Cursor height for general text field renderers.
     pub cursor_height_rems: f32,
-    /// Minimum height for single-line general form text inputs.
-    pub text_input_min_height_rems: f32,
     /// Height of one textarea row in rems.
     pub text_area_row_height_rems: f32,
     /// Additional textarea vertical padding in rems.
@@ -223,7 +221,6 @@ impl FormFieldMetrics {
             field_header_gap_px: 8.0,
             cursor_width_px: 2.0,
             cursor_height_rems: 1.125,
-            text_input_min_height_rems: 2.5,
             text_area_row_height_rems: 1.5,
             text_area_vertical_padding_rems: 1.0,
             checkbox_box_size_rems: 1.125,
