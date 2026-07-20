@@ -166,6 +166,15 @@ pub fn map_scriptkit_to_gpui_theme(sk_theme: &Theme, is_dark: bool) -> ThemeColo
             .vibrancy_background
             .unwrap_or(crate::theme::opacity::OPACITY_VIBRANCY_BACKGROUND)
             .clamp(0.0, 1.0);
+        // Glass mode: the native NSGlassEffectView backdrop supplies its own
+        // frost (plus a theme tint that resolves through the same veil value),
+        // so cap the Root veil to keep the glass — not the veil — as the
+        // visible window material.
+        let bg_alpha = if crate::platform::tahoe_liquid_glass_available() {
+            bg_alpha.min(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP)
+        } else {
+            bg_alpha
+        };
 
         debug!(
             is_dark,

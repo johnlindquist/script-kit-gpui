@@ -386,9 +386,19 @@ unsafe fn apply_backdrop_saturation_filter(view: id, amount: f64) -> bool {
     if backdrop_class.is_null() {
         return fail("CABackdropLayer class unavailable");
     }
-    let backdrop = find_backdrop_layer(layer, backdrop_class, 0);
+    let mut backdrop = find_backdrop_layer(layer, backdrop_class, 0);
     if backdrop.is_null() {
-        return fail("no CABackdropLayer in layer tree");
+        // NSGlassEffectView keeps its backdrop compositing out of the
+        // in-process layer tree, so there is no CABackdropLayer to target.
+        // Filter the view's root layer instead: colorSaturate on the
+        // composited glass output yields the same visual boost.
+        logging::log(
+            "VIBRANCY",
+            &format!(
+                "Backdrop saturation: no CABackdropLayer (view={view_name}); filtering root layer"
+            ),
+        );
+        backdrop = layer;
     }
 
     let input_amount_key: id =

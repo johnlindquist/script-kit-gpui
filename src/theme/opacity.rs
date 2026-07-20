@@ -18,6 +18,12 @@ pub const OPACITY_HIDDEN: f32 = 0.0;
 /// vs Raycast's ~54%. This veil only biases the material toward the theme
 /// color. Pairs with `VibrancySettings::backdrop_saturation`.
 pub const OPACITY_VIBRANCY_BACKGROUND: f32 = 0.30;
+/// Cap applied on top of the vibrancy veil when the native Tahoe
+/// `NSGlassEffectView` backdrop is the window material. The glass supplies
+/// its own frost AND receives a theme tint derived from this same resolved
+/// value, so the blur-era veil double-stacks: 0.30 veil + 0.30 glass tint
+/// reads nearly opaque. In glass mode both layers resolve through this cap.
+pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.15;
 /// Softer ghost-tier background opacity for barely-there fills (0.03–0.06 range).
 #[allow(dead_code)]
 pub const OPACITY_GHOST_SOFT: f32 = 0.03;

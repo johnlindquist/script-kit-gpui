@@ -129,14 +129,22 @@ pub(crate) const ALPHA_TINT_SUBTLE: u8 = 0x20;
 #[inline]
 fn resolve_window_vibrancy_opacity(theme: &Theme) -> f32 {
     let opacity = theme.get_opacity();
-    opacity
+    let alpha = opacity
         .vibrancy_background
         .unwrap_or(if theme.has_dark_colors() {
             VIBRANCY_DARK_OPACITY
         } else {
             VIBRANCY_LIGHT_OPACITY
         })
-        .clamp(0.0, 1.0)
+        .clamp(0.0, 1.0);
+    // Glass mode: the NSGlassEffectView backdrop frosts on its own, and the
+    // glass tint reuses this resolved value — without the cap the two layers
+    // stack into a nearly opaque veil (see OPACITY_GLASS_MODE_VEIL_CAP).
+    if theme.is_vibrancy_enabled() && crate::platform::tahoe_liquid_glass_available() {
+        alpha.min(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP)
+    } else {
+        alpha
+    }
 }
 
 pub fn get_window_vibrancy_background() -> Rgba {

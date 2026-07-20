@@ -137,7 +137,9 @@ unsafe fn liquid_glass_tint_color() -> id {
 /// backmost glass view and hide it entirely.
 #[cfg(target_os = "macos")]
 pub fn tahoe_liquid_glass_available() -> bool {
-    tahoe_liquid_glass_class().is_some()
+    // Cached: also consulted per-render by the veil-opacity resolver.
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| tahoe_liquid_glass_class().is_some())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -439,6 +441,9 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         if identifier != nil {
             let _: () = msg_send![glass_view, setIdentifier: identifier];
         }
+        // Layer-back immediately so the saturation boost below can find the
+        // glass backdrop layer on the first configure pass.
+        let _: () = msg_send![glass_view, setWantsLayer: true];
         let _: () =
             msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
         let _: () = msg_send![
@@ -479,6 +484,13 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     };
 
     tahoe_pin_glass_backdrop_backmost(content_view, glass_view);
+
+    // Match the footer NSVisualEffectView treatment: boost the glass
+    // backdrop layer's saturation (theme `vibrancy.backdrop_saturation`) so
+    // backdrop color survives the glass material instead of washing out flat.
+    let saturation_applied =
+        apply_backdrop_saturation_filter(glass_view, backdrop_saturation_amount());
+
     let _: () = msg_send![glass_view, setNeedsDisplay: true];
 
     let vev_count_after =
@@ -493,7 +505,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     logging::log(
         log_target,
         &format!(
-            "{}: Tahoe NSGlassEffectView backdrop {} (glass_count={}, backmost={}, index={}, subviews={}, frame=({:.1},{:.1},{:.1},{:.1}), tint_applied={}, corner_applied={}, corner_radius={:.1}, vev_before={}, vev_after_excl_glass={})",
+            "{}: Tahoe NSGlassEffectView backdrop {} (glass_count={}, backmost={}, index={}, subviews={}, frame=({:.1},{:.1},{:.1},{:.1}), tint_applied={}, corner_applied={}, corner_radius={:.1}, vev_before={}, vev_after_excl_glass={}, saturation_applied={saturation_applied})",
             window_name,
             if created { "installed" } else { "reused" },
             glass_count,
