@@ -79,6 +79,14 @@ fn hide_main_window_with_geometry_trace(cycle_id: Option<u64>) {
             trace_main_window_native_geometry("before_order_out", cycle_id, None, None);
         }
 
+        // Glass mode: Spotlight-style exit — a very fast fade with slight
+        // growth; orderOut: runs 130ms later on the raw run loop (outside any
+        // GPUI borrow, the same safety property this path documents).
+        if animate_tahoe_glass_disappearance(window, "PANEL", "Main window") {
+            logging::log("PANEL", "Main window hiding via glass exit fade");
+            return;
+        }
+
         // orderOut: removes the window from the screen without affecting other windows
         // nil sender means the action is programmatic, not from a menu item
         let _: () = msg_send![window, orderOut:nil];
@@ -331,14 +339,16 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
             trace_main_window_native_geometry("before_order_front", cycle_id, None, None);
         }
 
-        // orderFrontRegardless brings window to front without activating the app
-        let _: () = msg_send![window, orderFrontRegardless];
-
-        // Glass mode: morph the glass backdrop into place on every show.
+        // Glass mode: set the morph start state (alpha 0, larger frame) and
+        // begin animating BEFORE ordering front — ordering front first
+        // flashed one full-size frame before the morph hid it (flicker).
         if tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()
         {
             animate_tahoe_glass_appearance(window, "PANEL", "Main window");
         }
+
+        // orderFrontRegardless brings window to front without activating the app
+        let _: () = msg_send![window, orderFrontRegardless];
 
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("after_order_front", cycle_id, None, None);

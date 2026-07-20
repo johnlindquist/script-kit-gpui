@@ -301,6 +301,14 @@ fn tahoe_glass_backdrop_view_class(glass_class: id) -> Option<*const objc::runti
             sel!(repinToSuperviewBounds),
             tahoe_glass_backdrop_repin as extern "C" fn(&Object, Sel),
         );
+        decl.add_method(
+            sel!(settleOwnWindowFrame),
+            tahoe_glass_backdrop_settle as extern "C" fn(&Object, Sel),
+        );
+        decl.add_method(
+            sel!(orderOutOwnWindow),
+            tahoe_glass_backdrop_order_out_window as extern "C" fn(&Object, Sel),
+        );
         decl.register() as *const Class as usize
     });
     if ptr == 0 {
@@ -422,6 +430,78 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
     let _: () = msg_send![glass_view, release];
 }
 
+/// Two-phase bounce settle target: (window ptr, final frame x/y/w/h).
+/// Written by `animate_tahoe_glass_appearance`, consumed by the glass
+/// subclass's `settleOwnWindowFrame` selector. Single-slot is fine: the
+/// re-entry guard serializes morphs.
+#[cfg(target_os = "macos")]
+static GLASS_MORPH_SETTLE_TARGET: std::sync::Mutex<Option<(usize, f64, f64, f64, f64)>> =
+    std::sync::Mutex::new(None);
+
+/// Phase 2 of the appear bounce: ease the window from its overshoot
+/// (slightly smaller than final) back up to the final frame.
+#[cfg(target_os = "macos")]
+extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc::runtime::Sel) {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    // SAFETY: main thread (performSelector on the main run loop); standard
+    // NSView/NSWindow accessors and the window animator proxy.
+    unsafe {
+        let this_id = this as *const objc::runtime::Object as id;
+        let window: id = msg_send![this_id, window];
+        if window == nil {
+            return;
+        }
+        let target = GLASS_MORPH_SETTLE_TARGET
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        let Some((window_ptr, x, y, w, h)) = target else {
+            return;
+        };
+        if window_ptr != window as usize {
+            return;
+        }
+        let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![ctx, setDuration: 0.10f64];
+        let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![ctx, setTimingFunction: timing];
+                }
+            }
+        }
+        let animator: id = msg_send![window, animator];
+        let _: () = msg_send![animator, setFrame: frame display: true];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+    }
+}
+
+/// Deferred exit: order the glass view's window out after the exit fade and
+/// restore its alpha for the next show. Runs on the raw main run loop, i.e.
+/// outside any GPUI borrow — the safe context the hide-path docs require.
+#[cfg(target_os = "macos")]
+extern "C" fn tahoe_glass_backdrop_order_out_window(
+    this: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+) {
+    // SAFETY: main thread; standard NSWindow methods, nil-checked.
+    unsafe {
+        let this_id = this as *const objc::runtime::Object as id;
+        let window: id = msg_send![this_id, window];
+        if window == nil {
+            return;
+        }
+        let _: () = msg_send![window, orderOut: nil];
+        let _: () = msg_send![window, setAlphaValue: 1.0f64];
+        logging::log("PANEL", "Glass exit: window ordered out after fade");
+    }
+}
+
 /// True when a morph started within the last 700ms. Rapid re-shows would
 /// otherwise capture a mid-animation frame as the "final" target and shrink
 /// the window a little more on every trigger.
@@ -481,25 +561,60 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         return;
     }
 
-    // Collapsed start: same center, inset per theme.
-    let inset_x = final_frame.size.width * inset_fraction;
-    let inset_y = final_frame.size.height * inset_fraction;
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
+    if glass_view == nil {
+        return;
+    }
+
+    // Spotlight enters by SHRINKING into place: start larger than final
+    // (the "inset" slider is the start outset), overshoot slightly smaller
+    // than final in phase 1, then bounce back up to final in phase 2.
+    let outset_x = final_frame.size.width * inset_fraction;
+    let outset_y = final_frame.size.height * inset_fraction;
     let start = NSRect::new(
         NSPoint::new(
-            final_frame.origin.x + inset_x,
-            final_frame.origin.y + inset_y,
+            final_frame.origin.x - outset_x,
+            final_frame.origin.y - outset_y,
         ),
         NSSize::new(
-            final_frame.size.width - inset_x * 2.0,
-            final_frame.size.height - inset_y * 2.0,
+            final_frame.size.width + outset_x * 2.0,
+            final_frame.size.height + outset_y * 2.0,
         ),
     );
+    let overshoot_fraction = (inset_fraction * 0.25).min(0.03);
+    let overshoot_x = final_frame.size.width * overshoot_fraction;
+    let overshoot_y = final_frame.size.height * overshoot_fraction;
+    let overshoot = NSRect::new(
+        NSPoint::new(
+            final_frame.origin.x + overshoot_x,
+            final_frame.origin.y + overshoot_y,
+        ),
+        NSSize::new(
+            final_frame.size.width - overshoot_x * 2.0,
+            final_frame.size.height - overshoot_y * 2.0,
+        ),
+    );
+
+    // A show during the exit fade must cancel the pending deferred orderOut,
+    // or it would fire mid-appear and vanish the window.
+    let _: () = msg_send![
+        class!(NSObject),
+        cancelPreviousPerformRequestsWithTarget: glass_view
+        selector: sel!(orderOutOwnWindow)
+        object: nil
+    ];
+
     let _: () = msg_send![window, setFrame: start display: true];
     let _: () = msg_send![window, setAlphaValue: 0.0f64];
 
+    let phase1 = (duration - 0.10).max(0.08);
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: duration];
+    let _: () = msg_send![ctx, setDuration: phase1];
     let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
     if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
         let name = tahoe_ns_string("easeOut");
@@ -511,23 +626,144 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         }
     }
     let animator: id = msg_send![window, animator];
-    let _: () = msg_send![animator, setFrame: final_frame display: true];
+    let _: () = msg_send![animator, setFrame: overshoot display: true];
     let _: () = msg_send![animator, setAlphaValue: 1.0f64];
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+    // Phase 2: bounce back up to the final frame via the glass view's
+    // settle selector (run-loop scheduled, outside any GPUI borrow).
+    if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGET.lock() {
+        *guard = Some((
+            window as usize,
+            final_frame.origin.x,
+            final_frame.origin.y,
+            final_frame.size.width,
+            final_frame.size.height,
+        ));
+    }
+    let settle_delay = phase1 + 0.01;
+    let _: () = msg_send![
+        glass_view,
+        performSelector: sel!(settleOwnWindowFrame)
+        withObject: nil
+        afterDelay: settle_delay
+    ];
 
     logging::log(
         log_target,
         &format!(
-            "{}: window appear morph started ({:.2}s ease-out, inset {:.2}, {}x{} -> {}x{})",
+            "{}: spotlight morph started ({:.2}s, outset {:.2}, {}x{} -> {}x{} -> {}x{})",
             window_name,
             duration,
             inset_fraction,
             start.size.width as i64,
             start.size.height as i64,
+            overshoot.size.width as i64,
+            overshoot.size.height as i64,
             final_frame.size.width as i64,
             final_frame.size.height as i64,
         ),
     );
+}
+
+/// Spotlight-style exit: an extremely fast fade with a slight outward
+/// growth, then a deferred `orderOut:` via `orderOutOwnWindow` on the glass
+/// view (raw run loop — outside any GPUI borrow, which the hide-path docs
+/// require). Returns true when it took over hiding; the caller must then
+/// skip its own `orderOut:`.
+///
+/// # Safety
+/// `window` must be a valid NSWindow on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn animate_tahoe_glass_disappearance(
+    window: id,
+    log_target: &str,
+    window_name: &str,
+) -> bool {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+    if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
+        return false;
+    }
+    let morph_enabled = crate::theme::get_cached_theme()
+        .get_opacity()
+        .glass_morph_duration
+        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+        >= 0.02;
+    if !morph_enabled {
+        return false;
+    }
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return false;
+    }
+    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
+    if glass_view == nil {
+        return false;
+    }
+    let visible: bool = msg_send![window, isVisible];
+    if !visible {
+        return false;
+    }
+    let frame: NSRect = msg_send![window, frame];
+    if frame.size.width < 40.0 || frame.size.height < 40.0 {
+        return false;
+    }
+
+    // Hiding during the appear settle must cancel the pending bounce, or it
+    // would re-frame the window mid-fade.
+    let _: () = msg_send![
+        class!(NSObject),
+        cancelPreviousPerformRequestsWithTarget: glass_view
+        selector: sel!(settleOwnWindowFrame)
+        object: nil
+    ];
+
+    // Slight outward growth while fading — Spotlight's exit reads as a very
+    // fast "release" of the glass.
+    let grow_x = frame.size.width * 0.025;
+    let grow_y = frame.size.height * 0.025;
+    let grown = NSRect::new(
+        NSPoint::new(frame.origin.x - grow_x, frame.origin.y - grow_y),
+        NSSize::new(
+            frame.size.width + grow_x * 2.0,
+            frame.size.height + grow_y * 2.0,
+        ),
+    );
+
+    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+    let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+    let _: () = msg_send![ctx, setDuration: 0.11f64];
+    let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeIn");
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![ctx, setTimingFunction: timing];
+            }
+        }
+    }
+    let animator: id = msg_send![window, animator];
+    let _: () = msg_send![animator, setFrame: grown display: true];
+    let _: () = msg_send![animator, setAlphaValue: 0.0f64];
+    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+    let _: () = msg_send![
+        glass_view,
+        performSelector: sel!(orderOutOwnWindow)
+        withObject: nil
+        afterDelay: 0.13f64
+    ];
+
+    logging::log(
+        log_target,
+        &format!(
+            "{}: spotlight exit fade started (0.11s, orderOut deferred)",
+            window_name
+        ),
+    );
+    true
 }
 
 /// Install (or reuse) a native macOS 26 Tahoe `NSGlassEffectView` as the
