@@ -57,6 +57,27 @@ impl TerminalHandle {
 
         let mut events = self.event_proxy.take_events();
 
+        if events.iter().any(TerminalEvent::is_exit) {
+            self.exit_event_emitted = true;
+        } else if !self.exit_event_emitted {
+            match self.pty.try_wait() {
+                Ok(Some(status)) => {
+                    let exit_code = status.exit_code() as i32;
+                    debug!(exit_code, "Emitting terminal child exit status");
+                    crate::terminal::telemetry::log_terminal_child_exit(
+                        "alacritty::process",
+                        exit_code,
+                    );
+                    events.push(TerminalEvent::Exit(exit_code));
+                    self.exit_event_emitted = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to poll terminal child exit status");
+                }
+            }
+        }
+
         // Process PtyWrite events: write terminal emulator responses back to the PTY.
         // This handles protocol responses like device attributes and Kitty keyboard
         // mode queries that alacritty_terminal generates in response to escape sequences

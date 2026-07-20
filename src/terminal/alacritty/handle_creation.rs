@@ -153,6 +153,7 @@ impl TerminalHandle {
             state,
             event_proxy,
             pty,
+            exit_event_emitted: false,
             theme,
             cols,
             rows,

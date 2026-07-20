@@ -82,17 +82,30 @@ impl PtyManager {
         self.writer.flush()
     }
 
+    /// Polls for child completion without discarding a previously observed status.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        if let Some(status) = &self.exit_status {
+            return Ok(Some(status.clone()));
+        }
+
+        let status = self
+            .child
+            .try_wait()
+            .context("Failed to check child process status")?;
+        if let Some(status) = &status {
+            debug!(exit_status = ?status, "Child process has exited");
+            self.exit_status = Some(status.clone());
+        }
+        Ok(status)
+    }
+
     /// Checks if the child process is still running.
     pub fn is_running(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(Some(status)) => {
-                debug!(exit_status = ?status, "Child process has exited");
-                false
-            }
-            Ok(None) => true,
-            Err(e) => {
-                warn!(error = %e, "Failed to check child process status");
-                false
+        match self.try_wait() {
+            Ok(status) => status.is_none(),
+            Err(error) => {
+                warn!(%error, "Unable to observe child process status; assuming it is still running");
+                true
             }
         }
     }
@@ -100,10 +113,15 @@ impl PtyManager {
     /// Waits for the child process to exit and returns the exit status.
     #[instrument(level = "info", name = "pty_wait", skip(self))]
     pub fn wait(&mut self) -> Result<ExitStatus> {
+        if let Some(status) = &self.exit_status {
+            return Ok(status.clone());
+        }
+
         info!("Waiting for child process to exit");
         let status = self.child.wait().context("Failed to wait for child")?;
         info!(exit_status = ?status, "Child process exited");
         crate::terminal::telemetry::log_pty_exited("pty::wait", &format!("{status:?}"));
+        self.exit_status = Some(status.clone());
         Ok(status)
     }
 

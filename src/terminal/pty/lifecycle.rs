@@ -104,6 +104,7 @@ impl PtyManager {
         Ok(Self {
             master: pair.master,
             child,
+            exit_status: None,
             reader: Some(reader),
             writer,
             size,

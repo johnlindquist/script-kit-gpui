@@ -342,6 +342,8 @@ pub struct TerminalHandle {
     event_proxy: EventProxy,
     /// PTY manager for process I/O (writing only - reading happens in background thread).
     pty: PtyManager,
+    /// Prevents the cached child status from emitting duplicate exit events.
+    exit_event_emitted: bool,
     /// Theme adapter for colors.
     #[allow(dead_code)]
     theme: ThemeAdapter,

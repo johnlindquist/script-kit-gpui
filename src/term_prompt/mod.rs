@@ -931,19 +931,8 @@ impl TermPrompt {
                                 }
                             }
 
-                            // CRITICAL: Check if the process has exited but we didn't get an Exit event.
-                            // This can happen when:
-                            // 1. The shell exits via EOF (Ctrl+D) without explicit exit code
-                            // 2. The process is killed externally
-                            // 3. The PTY reader thread detected EOF but alacritty didn't emit an Exit event
-                            // Without this check, the timer loop would run forever at 60fps causing 100% CPU!
-                            if !term_prompt.terminal.is_running() && !term_prompt.exited {
-                                // Process exited without explicit Exit event
-                                // Use exit code 0 as we don't know the actual code
-                                info!("Terminal process exited (detected via is_running check)");
-                                term_prompt.handle_exit(0);
-                                return true; // Stop polling
-                            }
+                            // TerminalHandle::process polls the PTY child and emits the real exit
+                            // status exactly once, including EOF and external termination paths.
 
                             // Auto-scroll: If we were at bottom and got new output, stay at bottom
                             if was_at_bottom && had_output {

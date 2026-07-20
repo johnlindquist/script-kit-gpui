@@ -10,7 +10,7 @@
 //! - **Linux**: Uses native PTY via `/dev/ptmx` or `/dev/pts`
 //! - **Windows**: Uses ConPTY (Windows 10 1809+)
 
-use portable_pty::{Child, MasterPty, PtySize};
+use portable_pty::{Child, ExitStatus, MasterPty, PtySize};
 use std::io::{Read, Write};
 use tracing::{debug, error};
 
@@ -28,6 +28,8 @@ pub struct PtyManager {
     master: Box<dyn MasterPty + Send>,
     /// The child process running in the PTY
     child: Box<dyn Child + Send + Sync>,
+    /// Cached child status so liveness checks never discard the real exit code.
+    exit_status: Option<ExitStatus>,
     /// Reader for PTY output (Option to allow taking ownership)
     reader: Option<Box<dyn Read + Send>>,
     /// Writer for PTY input

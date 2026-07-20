@@ -22,6 +22,52 @@ fn test_event_proxy_batching() {
     assert!(proxy.take_events().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn terminal_process_reports_nonzero_shell_exit_code() {
+    const CHILD_MARKER: &str = "SCRIPT_KIT_OF41_EXIT_STATUS_CHILD";
+    const TEST_NAME: &str =
+        "terminal::alacritty::tests::events_and_content::terminal_process_reports_nonzero_shell_exit_code";
+
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let sandbox_home = tempfile::tempdir().expect("scratch HOME should be created");
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("test executable path should resolve"),
+        )
+        .arg(TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD_MARKER, "1")
+        .env("HOME", sandbox_home.path())
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("sandboxed child test should launch");
+        assert!(
+            output.status.success(),
+            "sandboxed child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let mut terminal = TerminalHandle::with_command("exit 23", 80, 24)
+        .expect("interactive terminal should launch");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut exit_code = None;
+
+    while std::time::Instant::now() < deadline {
+        let (_, events) = terminal.process();
+        exit_code = events.into_iter().find_map(|event| event.exit_code());
+        if exit_code.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert_eq!(exit_code, Some(23));
+}
+
 #[test]
 fn test_terminal_size() {
     let size = TerminalSize::new(80, 24);
