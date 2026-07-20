@@ -3,6 +3,15 @@ use itertools::Itertools;
 use super::*;
 use gpui::ScrollHandle;
 
+pub(super) fn active_notes_selection_id(
+    selected_note_id: Option<NoteId>,
+    active_day_date: Option<NaiveDate>,
+) -> Option<String> {
+    selected_note_id
+        .map(|id| id.as_str())
+        .or_else(|| active_day_date.map(|date| format!("day:{date}")))
+}
+
 impl NotesApp {
     pub(super) fn devtools_text_fingerprint(value: &str) -> String {
         let mut hash = 0xcbf29ce484222325_u64;
@@ -428,7 +437,10 @@ impl NotesApp {
             "schemaVersion": 1,
             "passive": true,
             "redacted": true,
-            "activeNoteId": self.selected_note_id.map(|id| id.as_str()),
+            "activeNoteId": active_notes_selection_id(
+                self.selected_note_id,
+                self.active_day_binding.as_ref().map(|binding| binding.date),
+            ),
             "dirtyState": {
                 "hasUnsavedChanges": self.has_unsaved_changes,
                 "lastSaveConfirmedMsAgo": self.last_save_confirmed.map(|instant| instant.elapsed().as_millis() as u64),

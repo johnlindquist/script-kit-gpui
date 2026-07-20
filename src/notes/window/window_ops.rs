@@ -1682,6 +1682,7 @@ mod lifecycle_tests {
         notes_window_close_transition, run_current_notes_window_close_sequence,
         run_existing_day_note_reuse_handoff, NotesWindowCloseOrigin,
     };
+    use crate::notes::window::navigation::active_notes_selection_id;
     use std::cell::RefCell;
 
     #[test]
@@ -1710,6 +1711,17 @@ mod lifecycle_tests {
                 "activate_notes_window",
             ],
             "an existing Notes window must select the day note before main hides, then activate only after native hide completion",
+        );
+    }
+
+    #[test]
+    fn external_day_note_select_updates_active_selection_id() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid fixture date");
+
+        assert_eq!(
+            active_notes_selection_id(None, Some(date)),
+            Some("day:2026-07-20".to_string()),
+            "an externally selected day note must remain observable as the active Notes selection",
         );
     }
 
