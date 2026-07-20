@@ -782,8 +782,7 @@ impl ScriptListApp {
         }
 
         let source_filter_mode = self.source_filter_mode_blocks_input_history_recall();
-        let filter_has_text =
-            !self.filter_text.is_empty() || !self.computed_filter_text.is_empty();
+        let filter_has_text = !self.filter_text.is_empty() || !self.computed_filter_text.is_empty();
         let (grouped_items, _) = self.get_grouped_results_cached();
         let first_item_position = grouped_items
             .iter()
@@ -2338,6 +2337,38 @@ impl ScriptListApp {
                 self.main_menu_render_diagnostics.last_render_log_item_count = item_count_for_log;
             }
 
+            let mini_footer = if self.main_window_uses_native_footer() {
+                crate::components::prompt_layout_shell::render_native_main_window_footer_hover_blocker()
+                    .into_any_element()
+            } else {
+                // Glass mode: the native footer host/overlay is disabled so
+                // the footer can morph with the window — render the same
+                // clickable in-window hint strip full mode uses.
+                let primary_label = self.main_window_primary_action_label();
+                crate::components::render_universal_prompt_hint_strip_clickable_with_primary_label(
+                    &primary_label,
+                    cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                        this.dispatch_main_window_footer_action(
+                            crate::footer_popup::FooterAction::Run,
+                            window,
+                            cx,
+                            "gpui_footer_click",
+                        );
+                    }),
+                    cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                        if this.has_actions()
+                            || this.show_actions_popup
+                            || crate::actions::is_actions_window_open()
+                        {
+                            this.toggle_actions(cx, window);
+                        }
+                    }),
+                    cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                        this.open_tab_ai_agent_chat_with_entry_intent(None, cx);
+                    }),
+                )
+                .into_any_element()
+            };
             return crate::components::main_view_chrome::render_main_view_chrome_header_overlay_footer_flush(
                 root,
                 &self.theme,
@@ -2346,9 +2377,7 @@ impl ScriptListApp {
                     header,
                     divider,
                     main,
-                    footer: Some(
-                        crate::components::prompt_layout_shell::render_native_main_window_footer_hover_blocker(),
-                    ),
+                    footer: Some(mini_footer),
                     overlays: log_panel
                         .into_iter()
                         .map(|panel| panel.into_any_element())

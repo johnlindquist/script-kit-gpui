@@ -1190,6 +1190,17 @@ pub(crate) fn sync_main_footer_popup(
     config: Option<&MainWindowFooterConfig>,
     cx: &mut App,
 ) {
+    // Glass mode: neither the native footer host nor the overlay window can
+    // participate in the whole-window glass morph (the overlay is a separate
+    // NSWindow that appears instantly and chases the animating frame).
+    // Forcing `config = None` reuses the existing teardown paths — native
+    // host removed, overlay closed, no installed surface — which makes
+    // `main_window_footer_slot` render the GPUI footer IN the main window,
+    // where it morphs with everything else.
+    let glass_in_window_footer = crate::platform::tahoe_liquid_glass_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled();
+    let config = if glass_in_window_footer { None } else { config };
+
     set_main_window_footer_last_config(config);
     let requested_surface = config.map(|cfg| cfg.surface);
     update_main_window_footer_host_state(requested_surface, None, false);
