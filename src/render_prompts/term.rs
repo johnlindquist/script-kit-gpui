@@ -192,16 +192,12 @@ impl ScriptListApp {
 
         let mut chrome_audit =
             crate::components::PromptChromeAudit::editor("render_prompts::term", has_actions);
-        chrome_audit.footer_mode = if is_quick_terminal {
-            "native_footer_spacer"
-        } else {
-            "custom_hint_strip"
-        };
+        chrome_audit.footer_mode = "native_footer_spacer";
         chrome_audit.hint_count = 0;
         chrome_audit.exception_reason = Some(if is_quick_terminal {
             "quick_terminal_uses_native_footer"
         } else {
-            "terminal_owns_contextual_footer"
+            "term_prompt_uses_native_footer"
         });
         crate::components::emit_prompt_chrome_audit(&chrome_audit);
 
@@ -427,10 +423,9 @@ impl ScriptListApp {
                     })
                     .child(entity)
             })
-            // Footer: Quick Terminal uses the native AppKit main-window footer
-            // (registered via main_window_footer_surface → "quick_terminal"),
-            // matching the main menu chrome exactly. SDK terminal paths still
-            // use the GPUI route-aware hint strip with paste-back + close hints.
+            // Footer: both terminal variants use the native AppKit main-window
+            // footer, matching the main menu chrome exactly. The route-aware
+            // GPUI strip remains only as a fallback until the native surface is active.
             .when_some(
                 if is_quick_terminal {
                     self.main_window_footer_slot(render_terminal_prompt_hint_strip(
@@ -609,32 +604,6 @@ mod term_prompt_render_tests {
         assert!(is_term_prompt_clear_shortcut(true, true, "K"));
         assert!(!is_term_prompt_clear_shortcut(true, false, "k"));
         assert!(!is_term_prompt_clear_shortcut(false, true, "k"));
-    }
-
-    /// The terminal renders in the editor chrome layout but owns its footer
-    /// (a contextual hint strip for SDK terminals, the native footer spacer
-    /// for the quick terminal). The audit emission moved from struct-literal
-    /// fields to `PromptChromeAudit::editor(..)` + field assignments; pin the
-    /// current shape so the divergence stays documented.
-    #[test]
-    fn test_term_chrome_audit_uses_editor_layout_with_custom_footer() {
-        const TERM_RENDER_SOURCE: &str = include_str!("term.rs");
-        assert!(
-            TERM_RENDER_SOURCE.contains("PromptChromeAudit::editor(\"render_prompts::term\""),
-            "term prompt should emit an editor layout chrome audit"
-        );
-        assert!(
-            TERM_RENDER_SOURCE.contains("\"custom_hint_strip\""),
-            "term prompt should declare a custom hint strip footer, not the universal one"
-        );
-        assert!(
-            TERM_RENDER_SOURCE.contains("\"terminal_owns_contextual_footer\""),
-            "term prompt should document why it has a custom footer"
-        );
-        assert!(
-            TERM_RENDER_SOURCE.contains("render_terminal_prompt_hint_strip("),
-            "term prompt should use the terminal-specific hint strip footer"
-        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use super::{
-    flow_session_footer_buttons, main_list_loading_left_info, main_window_result_action_label,
-    paste_into_frontmost_app_label,
+    flow_session_footer_buttons, main_list_loading_left_info,
+    main_window_footer_chrome_should_render, main_window_result_action_label,
+    paste_into_frontmost_app_label, term_prompt_footer_buttons,
 };
 use crate::scripts::{MatchIndices, Scriptlet, ScriptletMatch};
 use std::sync::Arc;
@@ -92,4 +93,34 @@ fn main_list_loading_left_info_uses_kind_label_and_current_braille_frame() {
     assert_eq!(tabs.model_name, "Fetching tabs");
     let files = main_list_loading_left_info(MainListLoadingKind::RootFileSearch, 0.0);
     assert_eq!(files.model_name, "Searching files");
+}
+
+#[test]
+fn main_window_footer_contract_term_prompt_buttons_use_native_keyboard_grammar() {
+    use crate::footer_popup::FooterAction;
+
+    let buttons = term_prompt_footer_buttons(true, false);
+    let grammar: Vec<_> = buttons
+        .iter()
+        .map(|button| (button.action, button.key.as_ref(), button.label.as_ref()))
+        .collect();
+    assert_eq!(
+        grammar,
+        vec![
+            (FooterAction::Run, "↵", "Continue"),
+            (FooterAction::Actions, "⌘K", "Actions"),
+            (FooterAction::Close, "Esc", "Cancel"),
+        ]
+    );
+    assert!(buttons.iter().all(|button| button.enabled));
+}
+
+#[test]
+fn main_window_footer_contract_agent_chat_error_keeps_chrome() {
+    assert!(main_window_footer_chrome_should_render(true, Some(true)));
+    assert!(
+        main_window_footer_chrome_should_render(true, Some(false)),
+        "Agent Chat contextual controls may hide, but main-window footer chrome must remain"
+    );
+    assert!(main_window_footer_chrome_should_render(false, None));
 }

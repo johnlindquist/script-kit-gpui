@@ -1186,6 +1186,7 @@ impl AppView {
             AppView::FavoritesBrowseView { .. } => Some("favorites"),
             AppView::ConfirmPrompt { .. } => Some("confirm_prompt"),
             AppView::TipsView { .. } => Some("tips"),
+            AppView::TermPrompt { .. } => Some("term_prompt"),
             // Legacy GPUI-footer surfaces. Every NEW main-window view must
             // return Some(surface) so it renders the shared native footer
             // buttons instead of a hand-rolled hint strip;
@@ -1193,7 +1194,6 @@ impl AppView {
             // (ui_window_tests.rs) shrink-locks this list.
             AppView::About { .. }
             | AppView::ActionsDialog
-            | AppView::TermPrompt { .. }
             | AppView::MicroPrompt { .. }
             | AppView::SdkReferenceView { .. }
             | AppView::ScriptTemplateCatalogView { .. }

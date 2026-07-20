@@ -43,7 +43,7 @@ fn app_view_owns_native_footer_surface_map() {
         "AppView::AgentChatView { .. } => Some(\"agent_chat\")",
         "AppView::ScriptIssuesView { .. } => Some(\"script_issues\")",
         "AppView::ConfirmPrompt { .. } => Some(\"confirm_prompt\")",
-        "AppView::TermPrompt { .. }",
+        "AppView::TermPrompt { .. } => Some(\"term_prompt\")",
         "AppView::MicroPrompt { .. }",
     ] {
         assert!(
@@ -68,7 +68,6 @@ fn main_window_views_without_native_footer_are_ratcheted() {
     const LEGACY_GPUI_FOOTER_VIEWS: &[&str] = &[
         "About",
         "ActionsDialog",
-        "TermPrompt",
         "MicroPrompt",
         "SdkReferenceView",
         "ScriptTemplateCatalogView",

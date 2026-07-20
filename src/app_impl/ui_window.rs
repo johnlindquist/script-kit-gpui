@@ -1,6 +1,35 @@
 use super::*;
 use std::sync::Once;
 
+/// Agent Chat's contextual footer controls may disappear while its content is
+/// unavailable, but that state must not remove the main window's persistent
+/// footer chrome.
+fn main_window_footer_chrome_should_render(
+    is_agent_chat: bool,
+    agent_chat_controls_visible: Option<bool>,
+) -> bool {
+    // This value controls Agent Chat's contextual buttons, not the chrome
+    // around the main window. Keep it observable without coupling it to
+    // whether the persistent footer exists.
+    let _contextual_controls_hidden = is_agent_chat && agent_chat_controls_visible == Some(false);
+    true
+}
+
+fn term_prompt_footer_buttons(
+    enabled: bool,
+    actions_open: bool,
+) -> Vec<crate::footer_popup::FooterButtonConfig> {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    vec![
+        FooterButtonConfig::new(FooterAction::Run, "↵", "Continue").enabled(enabled),
+        FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
+            .selected(actions_open)
+            .enabled(enabled),
+        FooterButtonConfig::new(FooterAction::Close, "Esc", "Cancel").enabled(enabled),
+    ]
+}
+
 static MAIN_FOOTER_ACTION_LISTENER: Once = Once::new();
 
 pub(crate) fn flow_session_footer_buttons(
@@ -326,6 +355,19 @@ impl ScriptListApp {
                         chat.submit_with_expanded_tokens(cx);
                     });
                     return;
+                } else if let AppView::TermPrompt { entity, .. } = &self.current_view {
+                    let entity = entity.clone();
+                    entity.update(cx, |term, _cx| {
+                        if let Err(error) = term.send_raw_input("\r") {
+                            tracing::warn!(
+                                target: "script_kit::footer_popup",
+                                event = "term_prompt_footer_continue_failed",
+                                %error,
+                                "Failed to send Enter from terminal footer"
+                            );
+                        }
+                    });
+                    return;
                 } else if let AppView::FlowSessionView { session_id } = self.current_view {
                     // The MAIN input is the composer: send its draft.
                     let text = self.filter_text.trim().to_string();
@@ -533,6 +575,13 @@ impl ScriptListApp {
                         "Closing quick terminal from native footer"
                     );
                     self.close_quick_terminal_main_window_state_first(cx);
+                } else if let AppView::TermPrompt { id, .. } = &self.current_view {
+                    tracing::info!(
+                        target: "script_kit::footer_popup",
+                        event = "term_prompt_footer_cancel",
+                        "Cancelling terminal prompt from native footer"
+                    );
+                    self.submit_prompt_response(id.clone(), None, cx);
                 } else if let AppView::HotkeyPrompt { id, .. } = &self.current_view {
                     tracing::info!(
                         target: "script_kit::footer_popup",
@@ -959,6 +1008,22 @@ impl ScriptListApp {
                 view = ?self.current_view,
                 button_count = buttons.len(),
                 "Resolved Quick Terminal footer buttons"
+            );
+            return buttons;
+        }
+
+        // Full terminal prompt: mirror the keyboard grammar previously shown
+        // by its GPUI hint strip through the persistent native footer.
+        if matches!(self.current_view, AppView::TermPrompt { .. }) {
+            let footer_disabled = self.main_window_footer_buttons_blocked();
+            let actions_open = self.show_actions_popup || crate::actions::is_actions_window_open();
+            let buttons = term_prompt_footer_buttons(!footer_disabled, actions_open);
+            tracing::debug!(
+                target: "script_kit::footer_popup",
+                event = "main_window_footer_buttons_resolved",
+                view = ?self.current_view,
+                button_count = buttons.len(),
+                "Resolved terminal prompt footer buttons"
             );
             return buttons;
         }
@@ -1480,15 +1545,14 @@ impl ScriptListApp {
         use crate::footer_popup::MainWindowFooterConfig;
 
         if let AppView::AgentChatView { entity } = &self.current_view {
-            let hidden_by_live_view = cx
-                .map(|cx| !entity.read(cx).main_window_footer_visible(cx))
-                .unwrap_or(false);
-            let hidden_by_cached_snapshot = cx.is_none()
-                && self
-                    .agent_chat_footer_snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| !snapshot.visible);
-            if hidden_by_live_view || hidden_by_cached_snapshot {
+            let controls_visible = cx
+                .map(|cx| entity.read(cx).main_window_footer_visible(cx))
+                .or_else(|| {
+                    self.agent_chat_footer_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.visible)
+                });
+            if !main_window_footer_chrome_should_render(true, controls_visible) {
                 return None;
             }
         }
@@ -1551,12 +1615,12 @@ impl ScriptListApp {
         &self,
         gpui_footer: gpui::AnyElement,
     ) -> Option<gpui::AnyElement> {
-        if matches!(self.current_view, AppView::AgentChatView { .. })
-            && self
-                .agent_chat_footer_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| !snapshot.visible)
-        {
+        let is_agent_chat = matches!(self.current_view, AppView::AgentChatView { .. });
+        let agent_chat_controls_visible = self
+            .agent_chat_footer_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.visible);
+        if !main_window_footer_chrome_should_render(is_agent_chat, agent_chat_controls_visible) {
             return None;
         }
         if self.main_window_uses_native_footer() {
