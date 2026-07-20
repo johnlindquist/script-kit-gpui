@@ -229,7 +229,10 @@ unsafe fn configure_visual_effect_views_recursive(
         // it (e.g. the Tahoe glass backdrop) actually contribute on screen.
         if std::env::var("SCRIPT_KIT_DEBUG_HIDE_VEV").is_ok() {
             let _: () = msg_send![view, setHidden: true];
-            logging::log("VIBRANCY", "DEBUG: NSVisualEffectView hidden via SCRIPT_KIT_DEBUG_HIDE_VEV");
+            logging::log(
+                "VIBRANCY",
+                "DEBUG: NSVisualEffectView hidden via SCRIPT_KIT_DEBUG_HIDE_VEV",
+            );
         }
 
         // NOTE: the backdrop saturation boost is NOT applied here — at
@@ -302,7 +305,11 @@ fn backdrop_saturation_amount() -> f64 {
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .filter(|amount| amount.is_finite());
     let amount = env_override.unwrap_or_else(|| {
-        f64::from(crate::theme::get_cached_theme().get_vibrancy().backdrop_saturation)
+        f64::from(
+            crate::theme::get_cached_theme()
+                .get_vibrancy()
+                .backdrop_saturation,
+        )
     });
     amount.clamp(0.0, 4.0)
 }
@@ -386,19 +393,13 @@ unsafe fn apply_backdrop_saturation_filter(view: id, amount: f64) -> bool {
     if backdrop_class.is_null() {
         return fail("CABackdropLayer class unavailable");
     }
-    let mut backdrop = find_backdrop_layer(layer, backdrop_class, 0);
+    let backdrop = find_backdrop_layer(layer, backdrop_class, 0);
     if backdrop.is_null() {
-        // NSGlassEffectView keeps its backdrop compositing out of the
-        // in-process layer tree, so there is no CABackdropLayer to target.
-        // Filter the view's root layer instead: colorSaturate on the
-        // composited glass output yields the same visual boost.
-        logging::log(
-            "VIBRANCY",
-            &format!(
-                "Backdrop saturation: no CABackdropLayer (view={view_name}); filtering root layer"
-            ),
-        );
-        backdrop = layer;
+        // NSGlassEffectView has no in-process CABackdropLayer. Do NOT fall
+        // back to filtering the view's root layer: the glass spans the whole
+        // window, and a root-layer filter degrades what within-window
+        // NSVisualEffectViews (footer trio) composite on top of it.
+        return fail("no CABackdropLayer in layer tree");
     }
 
     let input_amount_key: id =
@@ -467,7 +468,11 @@ unsafe fn apply_backdrop_saturation_filter(view: id, amount: f64) -> bool {
         "VIBRANCY",
         &format!(
             "Backdrop saturation: {} colorSaturate inputAmount={amount}",
-            if overrode_existing { "overrode existing" } else { "appended new" }
+            if overrode_existing {
+                "overrode existing"
+            } else {
+                "appended new"
+            }
         ),
     );
     true

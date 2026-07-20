@@ -98,9 +98,8 @@ fn tahoe_liquid_glass_class() -> Option<id> {
         fn NSClassFromString(a_class_name: id) -> id;
     }
 
-    let glass_class_name: id = unsafe {
-        msg_send![class!(NSString), stringWithUTF8String: c"NSGlassEffectView".as_ptr()]
-    };
+    let glass_class_name: id =
+        unsafe { msg_send![class!(NSString), stringWithUTF8String: c"NSGlassEffectView".as_ptr()] };
     let glass_class = if glass_class_name.is_null() {
         cocoa::base::nil
     } else {
@@ -114,6 +113,7 @@ fn tahoe_liquid_glass_class() -> Option<id> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Kept for reference: the blur-era themed glass tint.
 unsafe fn liquid_glass_tint_color() -> id {
     let theme = crate::theme::get_cached_theme();
     let rgba = crate::ui_foundation::main_window_matched_background_rgba(&theme);
@@ -173,7 +173,10 @@ extern "C" fn tahoe_glass_backdrop_hit_test(
 /// `NSView.tag` is read-only, so the subclass overrides it to return the
 /// stable sentinel, enabling idempotent `viewWithTag:` lookup.
 #[cfg(target_os = "macos")]
-extern "C" fn tahoe_glass_backdrop_tag(_this: &objc::runtime::Object, _: objc::runtime::Sel) -> isize {
+extern "C" fn tahoe_glass_backdrop_tag(
+    _this: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+) -> isize {
     TAHOE_GLASS_BACKDROP_TAG
 }
 
@@ -261,7 +264,10 @@ unsafe fn tahoe_count_views_kind_of_excluding(
 /// Audit the immediate children of `content_view`: how many are glass views and
 /// the index of the first glass child.
 #[cfg(target_os = "macos")]
-unsafe fn tahoe_glass_subview_audit(content_view: id, glass_class: id) -> (usize, Option<usize>, usize) {
+unsafe fn tahoe_glass_subview_audit(
+    content_view: id,
+    glass_class: id,
+) -> (usize, Option<usize>, usize) {
     if content_view == nil || glass_class == nil {
         return (0, None, 0);
     }
@@ -441,9 +447,6 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         if identifier != nil {
             let _: () = msg_send![glass_view, setIdentifier: identifier];
         }
-        // Layer-back immediately so the saturation boost below can find the
-        // glass backdrop layer on the first configure pass.
-        let _: () = msg_send![glass_view, setWantsLayer: true];
         let _: () =
             msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
         let _: () = msg_send![
@@ -459,16 +462,16 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
-    let tint_color = liquid_glass_tint_color();
-    let tint_applied = if tint_color != nil {
+    // Demo-parity: leave the glass untinted (the liquid-glass-demo bin uses a
+    // plain NSGlassEffectView and reads correctly). The themed veil GPUI
+    // paints above already carries the theme hue; tinting the glass as well
+    // double-darkens the material — the tint was tuned for the blur era.
+    let tint_applied = {
         let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
         if responds {
-            let _: () = msg_send![glass_view, setTintColor: tint_color];
-            true
-        } else {
-            false
+            let nil_color: id = nil;
+            let _: () = msg_send![glass_view, setTintColor: nil_color];
         }
-    } else {
         false
     };
 
@@ -484,13 +487,6 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     };
 
     tahoe_pin_glass_backdrop_backmost(content_view, glass_view);
-
-    // Match the footer NSVisualEffectView treatment: boost the glass
-    // backdrop layer's saturation (theme `vibrancy.backdrop_saturation`) so
-    // backdrop color survives the glass material instead of washing out flat.
-    let saturation_applied =
-        apply_backdrop_saturation_filter(glass_view, backdrop_saturation_amount());
-
     let _: () = msg_send![glass_view, setNeedsDisplay: true];
 
     let vev_count_after =
@@ -505,7 +501,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     logging::log(
         log_target,
         &format!(
-            "{}: Tahoe NSGlassEffectView backdrop {} (glass_count={}, backmost={}, index={}, subviews={}, frame=({:.1},{:.1},{:.1},{:.1}), tint_applied={}, corner_applied={}, corner_radius={:.1}, vev_before={}, vev_after_excl_glass={}, saturation_applied={saturation_applied})",
+            "{}: Tahoe NSGlassEffectView backdrop {} (glass_count={}, backmost={}, index={}, subviews={}, frame=({:.1},{:.1},{:.1},{:.1}), tint_applied={}, corner_applied={}, corner_radius={:.1}, vev_before={}, vev_after_excl_glass={})",
             window_name,
             if created { "installed" } else { "reused" },
             glass_count,
@@ -994,10 +990,11 @@ mod secondary_window_config_tests {
         let start = source
             .find("unsafe fn configure_tahoe_window_backdrop")
             .expect("configure_tahoe_window_backdrop exists");
-        let body = &source[start..source[start..]
-            .find("#[cfg(not(target_os = \"macos\"))]")
-            .map(|offset| start + offset)
-            .unwrap_or(source.len())];
+        let body = &source[start
+            ..source[start..]
+                .find("#[cfg(not(target_os = \"macos\"))]")
+                .map(|offset| start + offset)
+                .unwrap_or(source.len())];
         assert!(
             !body.contains("setContentView:"),
             "Tahoe backdrop must not wrap/reparent GPUI or footer content"
