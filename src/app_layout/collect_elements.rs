@@ -1099,6 +1099,30 @@ impl ScriptListApp {
                         format!("{:.2}", opacity.glass_tint_opacity.unwrap_or(0.0)),
                         "glass-tint-opacity",
                     );
+                    push_theme_control(
+                        "control:theme-chooser:glass-morph-duration".to_string(),
+                        protocol::ElementType::Slider,
+                        "Glass Morph Duration",
+                        format!(
+                            "{:.2}",
+                            opacity
+                                .glass_morph_duration
+                                .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+                        ),
+                        "glass-morph-duration",
+                    );
+                    push_theme_control(
+                        "control:theme-chooser:glass-morph-inset".to_string(),
+                        protocol::ElementType::Slider,
+                        "Glass Morph Inset",
+                        format!(
+                            "{:.2}",
+                            opacity
+                                .glass_morph_inset
+                                .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)
+                        ),
+                        "glass-morph-inset",
+                    );
                 }
                 push_theme_control(
                     "control:theme-chooser:secondary-text-opacity".to_string(),

@@ -234,6 +234,25 @@ extern "C" fn tahoe_glass_backdrop_hit_test(
     cocoa::base::nil
 }
 
+/// Self-heal after the appear morph: window content can resize while the
+/// frame animation is in flight (the launcher sizes to its list on show),
+/// leaving the glass stuck at stale bounds. Scheduled via
+/// `performSelector:afterDelay:` right after the animation ends.
+#[cfg(target_os = "macos")]
+extern "C" fn tahoe_glass_backdrop_repin(this: &objc::runtime::Object, _: objc::runtime::Sel) {
+    // SAFETY: main thread (performSelector on the main run loop); standard
+    // superview/bounds/frame accessors.
+    unsafe {
+        let this_id = this as *const objc::runtime::Object as id;
+        let superview: id = msg_send![this_id, superview];
+        if superview == nil {
+            return;
+        }
+        let bounds: cocoa::foundation::NSRect = msg_send![superview, bounds];
+        let _: () = msg_send![this_id, setFrame: bounds];
+    }
+}
+
 /// `NSView.tag` is read-only, so the subclass overrides it to return the
 /// stable sentinel, enabling idempotent `viewWithTag:` lookup.
 #[cfg(target_os = "macos")]
@@ -277,6 +296,10 @@ fn tahoe_glass_backdrop_view_class(glass_class: id) -> Option<*const objc::runti
         decl.add_method(
             sel!(tag),
             tahoe_glass_backdrop_tag as extern "C" fn(&Object, Sel) -> isize,
+        );
+        decl.add_method(
+            sel!(repinToSuperviewBounds),
+            tahoe_glass_backdrop_repin as extern "C" fn(&Object, Sel),
         );
         decl.register() as *const Class as usize
     });
@@ -399,10 +422,33 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
     let _: () = msg_send![glass_view, release];
 }
 
-/// Morph a freshly created glass backdrop into place: the sheet starts
-/// slightly inset with capsule-heavy corners and eases out to the full
-/// window — the liquid-glass appear from the demo. Runs via the AppKit
-/// animator so the glass material (refraction included) animates live.
+/// True when a morph started within the last 700ms. Rapid re-shows would
+/// otherwise capture a mid-animation frame as the "final" target and shrink
+/// the window a little more on every trigger.
+#[cfg(target_os = "macos")]
+fn glass_morph_recently_started() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+    static LAST_START_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
+    let now_ms = epoch.elapsed().as_millis() as u64;
+    let last = LAST_START_MS.load(Ordering::Relaxed);
+    if last != u64::MAX && now_ms.saturating_sub(last) < 700 {
+        return true;
+    }
+    LAST_START_MS.store(now_ms, Ordering::Relaxed);
+    false
+}
+
+/// Morph the whole window into place: frame scales up from a centered inset
+/// rect while the window fades in, so the glass backdrop AND the GPUI
+/// content arrive together (animating only the glass view left the content
+/// popping in at full size over a growing background). The glass tracks the
+/// window via its autoresizing mask during the frame animation.
+///
+/// Duration and inset come from the theme's glass morph sliders; either at
+/// (near) zero disables the morph.
 ///
 /// # Safety
 /// `window` must be a valid NSWindow on the main thread.
@@ -410,44 +456,50 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
 unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_name: &str) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
-    let content_view: id = msg_send![window, contentView];
-    if content_view == nil {
+    let morph_opacity = crate::theme::get_cached_theme().get_opacity();
+    let duration = f64::from(
+        morph_opacity
+            .glass_morph_duration
+            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+            .clamp(0.0, 2.0),
+    );
+    let inset_fraction = f64::from(
+        morph_opacity
+            .glass_morph_inset
+            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)
+            .clamp(0.0, 0.4),
+    );
+    if duration < 0.02 || inset_fraction < 0.005 {
+        return; // morph disabled via theme sliders
+    }
+    if glass_morph_recently_started() {
         return;
     }
-    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
-    if glass_view == nil {
-        return;
-    }
-    let bounds: NSRect = msg_send![content_view, bounds];
-    if bounds.size.width < 40.0 || bounds.size.height < 40.0 {
-        return;
-    }
-    let responds_radius: bool = msg_send![glass_view, respondsToSelector: sel!(setCornerRadius:)];
-    let end_radius: f64 = if responds_radius {
-        msg_send![glass_view, cornerRadius]
-    } else {
-        0.0
-    };
 
-    // Collapsed start: centered at ~82% size, capsule-heavy corners.
-    let inset_x = bounds.size.width * 0.09;
-    let inset_y = bounds.size.height * 0.09;
+    let final_frame: NSRect = msg_send![window, frame];
+    if final_frame.size.width < 40.0 || final_frame.size.height < 40.0 {
+        return;
+    }
+
+    // Collapsed start: same center, inset per theme.
+    let inset_x = final_frame.size.width * inset_fraction;
+    let inset_y = final_frame.size.height * inset_fraction;
     let start = NSRect::new(
-        NSPoint::new(bounds.origin.x + inset_x, bounds.origin.y + inset_y),
+        NSPoint::new(
+            final_frame.origin.x + inset_x,
+            final_frame.origin.y + inset_y,
+        ),
         NSSize::new(
-            bounds.size.width - inset_x * 2.0,
-            bounds.size.height - inset_y * 2.0,
+            final_frame.size.width - inset_x * 2.0,
+            final_frame.size.height - inset_y * 2.0,
         ),
     );
-    let start_radius = (start.size.width.min(start.size.height) * 0.5).min(48.0);
-    let _: () = msg_send![glass_view, setFrame: start];
-    if responds_radius {
-        let _: () = msg_send![glass_view, setCornerRadius: start_radius];
-    }
+    let _: () = msg_send![window, setFrame: start display: true];
+    let _: () = msg_send![window, setAlphaValue: 0.0f64];
 
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: 0.34f64];
+    let _: () = msg_send![ctx, setDuration: duration];
     let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
     if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
         let name = tahoe_ns_string("easeOut");
@@ -458,18 +510,22 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
             }
         }
     }
-    let animator: id = msg_send![glass_view, animator];
-    let _: () = msg_send![animator, setFrame: bounds];
-    if responds_radius {
-        let _: () = msg_send![animator, setCornerRadius: end_radius];
-    }
+    let animator: id = msg_send![window, animator];
+    let _: () = msg_send![animator, setFrame: final_frame display: true];
+    let _: () = msg_send![animator, setAlphaValue: 1.0f64];
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
 
     logging::log(
         log_target,
         &format!(
-            "{}: glass appear morph started (0.34s ease-out, radius {:.0} -> {:.0})",
-            window_name, start_radius, end_radius
+            "{}: window appear morph started ({:.2}s ease-out, inset {:.2}, {}x{} -> {}x{})",
+            window_name,
+            duration,
+            inset_fraction,
+            start.size.width as i64,
+            start.size.height as i64,
+            final_frame.size.width as i64,
+            final_frame.size.height as i64,
         ),
     );
 }

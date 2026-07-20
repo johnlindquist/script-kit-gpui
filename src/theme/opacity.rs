@@ -27,6 +27,10 @@ pub const OPACITY_VIBRANCY_BACKGROUND: f32 = 0.30;
 /// alone carries the frost and content sits directly on it. Raise this to
 /// restore a themed tint over the glass (0.15 was the previous value).
 pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.0;
+/// Default duration (seconds) of the glass appear morph.
+pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.34;
+/// Default start inset (fraction of each dimension) of the glass appear morph.
+pub const GLASS_MORPH_DEFAULT_INSET: f32 = 0.09;
 /// Softer ghost-tier background opacity for barely-there fills (0.03–0.06 range).
 #[allow(dead_code)]
 pub const OPACITY_GHOST_SOFT: f32 = 0.03;

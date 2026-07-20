@@ -143,6 +143,14 @@ pub struct BackgroundOpacity {
     /// 0.0/None = untinted glass.
     #[serde(default)]
     pub glass_tint_opacity: Option<f32>,
+    /// Glass appear morph duration in seconds (0 disables the morph).
+    /// None -> GLASS_MORPH_DEFAULT_DURATION.
+    #[serde(default)]
+    pub glass_morph_duration: Option<f32>,
+    /// Glass appear morph start inset as a fraction of each dimension.
+    /// None -> GLASS_MORPH_DEFAULT_INSET.
+    #[serde(default)]
+    pub glass_morph_inset: Option<f32>,
 
     // ── Text grading tiers (Raycast-style) ──────────────────────────────
     // All text elements use text_primary (white on dark) as the base color.
@@ -281,6 +289,8 @@ impl BackgroundOpacity {
             vibrancy_background: Some(crate::theme::opacity::OPACITY_VIBRANCY_BACKGROUND),
             glass_veil_opacity: None,
             glass_tint_opacity: None,
+            glass_morph_duration: None,
+            glass_morph_inset: None,
             // Text grading (all applied to text_primary)
             text_name: default_text_name(),
             text_strong: default_text_strong(),
@@ -318,6 +328,8 @@ impl BackgroundOpacity {
             vibrancy_background: Some(crate::theme::opacity::OPACITY_VIBRANCY_BACKGROUND),
             glass_veil_opacity: None,
             glass_tint_opacity: None,
+            glass_morph_duration: None,
+            glass_morph_inset: None,
             // Text grading (same defaults for light mode)
             text_name: default_text_name(),
             text_strong: default_text_strong(),
@@ -347,6 +359,8 @@ impl BackgroundOpacity {
         self.vibrancy_background = self.vibrancy_background.map(|value| value.clamp(0.0, 1.0));
         self.glass_veil_opacity = self.glass_veil_opacity.map(|value| value.clamp(0.0, 1.0));
         self.glass_tint_opacity = self.glass_tint_opacity.map(|value| value.clamp(0.0, 1.0));
+        self.glass_morph_duration = self.glass_morph_duration.map(|value| value.clamp(0.0, 2.0));
+        self.glass_morph_inset = self.glass_morph_inset.map(|value| value.clamp(0.0, 0.4));
         // Text grading tiers
         self.text_name = self.text_name.clamp(0.0, 1.0);
         self.text_strong = self.text_strong.clamp(0.0, 1.0);
@@ -1337,6 +1351,8 @@ impl Theme {
             vibrancy_background: base.vibrancy_background,
             glass_veil_opacity: base.glass_veil_opacity,
             glass_tint_opacity: base.glass_tint_opacity,
+            glass_morph_duration: base.glass_morph_duration,
+            glass_morph_inset: base.glass_morph_inset,
             // Text grading: keep unchanged on opacity offset
             text_name: base.text_name,
             text_strong: base.text_strong,

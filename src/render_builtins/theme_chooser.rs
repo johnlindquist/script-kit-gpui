@@ -15,6 +15,8 @@ enum ThemeChooserSliderBinding {
     FocusedBackgroundOpacity,
     GlassVeilOpacity,
     GlassTintOpacity,
+    GlassMorphDuration,
+    GlassMorphInset,
     UiFontSize,
     GradientAngle { layer_index: Option<usize> },
     GradientOpacity { layer_index: Option<usize> },
@@ -86,6 +88,8 @@ pub(crate) struct ThemeChooserControls {
     focused_background_opacity: Entity<SliderState>,
     glass_veil_opacity: Entity<SliderState>,
     glass_tint_opacity: Entity<SliderState>,
+    glass_morph_duration: Entity<SliderState>,
+    glass_morph_inset: Entity<SliderState>,
     ui_font_size: Entity<SliderState>,
     gradient_base: ThemeChooserGradientControls,
     gradient_layers: Vec<ThemeChooserGradientControls>,
@@ -586,6 +590,30 @@ impl ScriptListApp {
                 cx,
                 &mut subscriptions,
             );
+            let glass_morph_duration = self.new_theme_chooser_slider(
+                ThemeChooserSliderBinding::GlassMorphDuration,
+                0.0,
+                1.0,
+                0.01,
+                opacity
+                    .glass_morph_duration
+                    .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION),
+                window,
+                cx,
+                &mut subscriptions,
+            );
+            let glass_morph_inset = self.new_theme_chooser_slider(
+                ThemeChooserSliderBinding::GlassMorphInset,
+                0.0,
+                0.4,
+                0.01,
+                opacity
+                    .glass_morph_inset
+                    .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET),
+                window,
+                cx,
+                &mut subscriptions,
+            );
             let ui_font_size = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::UiFontSize,
                 12.0,
@@ -631,6 +659,8 @@ impl ScriptListApp {
                 focused_background_opacity,
                 glass_veil_opacity,
                 glass_tint_opacity,
+                glass_morph_duration,
+                glass_morph_inset,
                 ui_font_size,
                 gradient_base,
                 gradient_layers,
@@ -728,6 +758,30 @@ impl ScriptListApp {
                 self.apply_theme_chooser_slider_theme(
                     next,
                     "theme_chooser_glass_tint_opacity_slider",
+                    mode,
+                    cx,
+                );
+            }
+            ThemeChooserSliderBinding::GlassMorphDuration => {
+                let next = Self::apply_glass_morph_duration_preset(
+                    self.theme.as_ref(),
+                    value.clamp(0.0, 2.0),
+                );
+                self.apply_theme_chooser_slider_theme(
+                    next,
+                    "theme_chooser_glass_morph_duration_slider",
+                    mode,
+                    cx,
+                );
+            }
+            ThemeChooserSliderBinding::GlassMorphInset => {
+                let next = Self::apply_glass_morph_inset_preset(
+                    self.theme.as_ref(),
+                    value.clamp(0.0, 0.4),
+                );
+                self.apply_theme_chooser_slider_theme(
+                    next,
+                    "theme_chooser_glass_morph_inset_slider",
                     mode,
                     cx,
                 );
@@ -961,6 +1015,20 @@ impl ScriptListApp {
             "glass-tint-opacity" => {
                 self.apply_theme_chooser_slider_change(
                     ThemeChooserSliderBinding::GlassTintOpacity,
+                    SliderValue::Single(float_value()?),
+                    cx,
+                );
+            }
+            "glass-morph-duration" => {
+                self.apply_theme_chooser_slider_change(
+                    ThemeChooserSliderBinding::GlassMorphDuration,
+                    SliderValue::Single(float_value()?),
+                    cx,
+                );
+            }
+            "glass-morph-inset" => {
+                self.apply_theme_chooser_slider_change(
+                    ThemeChooserSliderBinding::GlassMorphInset,
                     SliderValue::Single(float_value()?),
                     cx,
                 );
@@ -1312,6 +1380,22 @@ impl ScriptListApp {
         Self::sync_slider_entity_value(
             &controls.glass_tint_opacity,
             opacity.glass_tint_opacity.unwrap_or(0.0),
+            window,
+            cx,
+        );
+        Self::sync_slider_entity_value(
+            &controls.glass_morph_duration,
+            opacity
+                .glass_morph_duration
+                .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION),
+            window,
+            cx,
+        );
+        Self::sync_slider_entity_value(
+            &controls.glass_morph_inset,
+            opacity
+                .glass_morph_inset
+                .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET),
             window,
             cx,
         );
@@ -3372,6 +3456,28 @@ impl ScriptListApp {
         next
     }
 
+    fn apply_glass_morph_duration_preset(
+        theme: &crate::theme::Theme,
+        value: f32,
+    ) -> crate::theme::Theme {
+        let mut next = theme.clone();
+        let mut opacity = next.get_opacity();
+        opacity.glass_morph_duration = Some(value);
+        next.opacity = Some(opacity);
+        next
+    }
+
+    fn apply_glass_morph_inset_preset(
+        theme: &crate::theme::Theme,
+        value: f32,
+    ) -> crate::theme::Theme {
+        let mut next = theme.clone();
+        let mut opacity = next.get_opacity();
+        opacity.glass_morph_inset = Some(value);
+        next.opacity = Some(opacity);
+        next
+    }
+
     fn apply_text_opacity_preset(theme: &crate::theme::Theme, value: f32) -> crate::theme::Theme {
         let mut next = theme.clone();
         let mut opacity = next.get_opacity();
@@ -4235,6 +4341,30 @@ impl ScriptListApp {
                     &controls.glass_tint_opacity,
                     &chrome,
                 ),
+                Self::render_theme_chooser_slider_row(
+                    "Glass Morph Duration",
+                    format!(
+                        "{:.0} ms",
+                        opacity
+                            .glass_morph_duration
+                            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+                            * 1000.0
+                    ),
+                    &controls.glass_morph_duration,
+                    &chrome,
+                ),
+                Self::render_theme_chooser_slider_row(
+                    "Glass Morph Inset",
+                    format!(
+                        "{:.0}%",
+                        opacity
+                            .glass_morph_inset
+                            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)
+                            * 100.0
+                    ),
+                    &controls.glass_morph_inset,
+                    &chrome,
+                ),
             )
         });
 
@@ -4335,9 +4465,17 @@ impl ScriptListApp {
             text_opacity_slider_row,
             focused_opacity_slider_row,
         ];
-        if let Some((glass_veil_row, glass_tint_row)) = glass_slider_rows {
+        if let Some((
+            glass_veil_row,
+            glass_tint_row,
+            glass_morph_duration_row,
+            glass_morph_inset_row,
+        )) = glass_slider_rows
+        {
             opacity_section_rows.push(glass_veil_row);
             opacity_section_rows.push(glass_tint_row);
+            opacity_section_rows.push(glass_morph_duration_row);
+            opacity_section_rows.push(glass_morph_inset_row);
         }
         opacity_section_rows.push(vibrancy_row);
         opacity_section_rows.push(material_row);
