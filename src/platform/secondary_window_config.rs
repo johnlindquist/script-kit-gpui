@@ -73,7 +73,13 @@ unsafe fn configure_window_vibrancy_common(
         );
     }
 
-    configure_tahoe_window_backdrop(window, log_target, window_name);
+    let glass_created = configure_tahoe_window_backdrop(window, log_target, window_name);
+    // Secondary/overlay windows (notes, dictation, confirm, actions, AI,
+    // flow manager, inline popups) are created per appearance, so a freshly
+    // created backdrop means the window just appeared: morph it in.
+    if glass_created {
+        animate_tahoe_glass_appearance(window, log_target, window_name);
+    }
 
     let appearance_name = if is_dark {
         "VibrantDark"
@@ -163,6 +169,47 @@ pub fn tahoe_liquid_glass_available() -> bool {
 pub fn tahoe_liquid_glass_available() -> bool {
     false
 }
+
+/// Background appearance for a vibrancy-enabled window: `Transparent` when
+/// the Tahoe glass backdrop supplies the material (a `Blurred` appearance
+/// would stack the gpui fork's NSVisualEffectView above the glass and hide
+/// it), `Blurred` otherwise.
+pub fn vibrancy_window_background() -> gpui::WindowBackgroundAppearance {
+    if tahoe_liquid_glass_available() {
+        gpui::WindowBackgroundAppearance::Transparent
+    } else {
+        gpui::WindowBackgroundAppearance::Blurred
+    }
+}
+
+/// Resolve the NSWindow behind a live GPUI window and run the shared
+/// secondary vibrancy/glass configuration on it (glass backdrop, VEV
+/// handling, glass-mode window base). For overlay windows (confirm popup,
+/// AI, flow manager) that have no dedicated native config path.
+#[cfg(target_os = "macos")]
+pub fn configure_overlay_window_glass(window: &gpui::Window, window_name: &str) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr() as id;
+    let is_dark = crate::theme::get_cached_theme().should_use_dark_vibrancy();
+    // SAFETY: ns_view belongs to the live GPUI window on the main thread;
+    // `-[NSView window]` is standard and the result is nil-checked inside
+    // configure_secondary_window_vibrancy.
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        configure_secondary_window_vibrancy(ns_window, window_name, is_dark);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn configure_overlay_window_glass(_window: &gpui::Window, _window_name: &str) {}
 
 /// Stable `tag` sentinel so the backdrop view can be found idempotently via
 /// `contentView.viewWithTag:` on repeated configure passes.
@@ -352,6 +399,81 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
     let _: () = msg_send![glass_view, release];
 }
 
+/// Morph a freshly created glass backdrop into place: the sheet starts
+/// slightly inset with capsule-heavy corners and eases out to the full
+/// window — the liquid-glass appear from the demo. Runs via the AppKit
+/// animator so the glass material (refraction included) animates live.
+///
+/// # Safety
+/// `window` must be a valid NSWindow on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_name: &str) {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
+    if glass_view == nil {
+        return;
+    }
+    let bounds: NSRect = msg_send![content_view, bounds];
+    if bounds.size.width < 40.0 || bounds.size.height < 40.0 {
+        return;
+    }
+    let responds_radius: bool = msg_send![glass_view, respondsToSelector: sel!(setCornerRadius:)];
+    let end_radius: f64 = if responds_radius {
+        msg_send![glass_view, cornerRadius]
+    } else {
+        0.0
+    };
+
+    // Collapsed start: centered at ~82% size, capsule-heavy corners.
+    let inset_x = bounds.size.width * 0.09;
+    let inset_y = bounds.size.height * 0.09;
+    let start = NSRect::new(
+        NSPoint::new(bounds.origin.x + inset_x, bounds.origin.y + inset_y),
+        NSSize::new(
+            bounds.size.width - inset_x * 2.0,
+            bounds.size.height - inset_y * 2.0,
+        ),
+    );
+    let start_radius = (start.size.width.min(start.size.height) * 0.5).min(48.0);
+    let _: () = msg_send![glass_view, setFrame: start];
+    if responds_radius {
+        let _: () = msg_send![glass_view, setCornerRadius: start_radius];
+    }
+
+    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+    let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+    let _: () = msg_send![ctx, setDuration: 0.34f64];
+    let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeOut");
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![ctx, setTimingFunction: timing];
+            }
+        }
+    }
+    let animator: id = msg_send![glass_view, animator];
+    let _: () = msg_send![animator, setFrame: bounds];
+    if responds_radius {
+        let _: () = msg_send![animator, setCornerRadius: end_radius];
+    }
+    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+    logging::log(
+        log_target,
+        &format!(
+            "{}: glass appear morph started (0.34s ease-out, radius {:.0} -> {:.0})",
+            window_name, start_radius, end_radius
+        ),
+    );
+}
+
 /// Install (or reuse) a native macOS 26 Tahoe `NSGlassEffectView` as the
 /// backmost backdrop of the window's content view.
 ///
@@ -369,15 +491,15 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
 /// # Safety
 /// `window` must be a valid NSWindow on the main thread (checked + null-guarded).
 #[cfg(target_os = "macos")]
-unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_name: &str) {
+unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_name: &str) -> bool {
     use cocoa::appkit::{NSViewHeightSizable, NSViewWidthSizable};
     use cocoa::foundation::NSRect;
 
     if window.is_null() {
-        return;
+        return false;
     }
     if require_main_thread("configure_tahoe_window_backdrop") {
-        return;
+        return false;
     }
 
     // Debug-only: skip the glass backdrop to measure whether it contributes
@@ -390,7 +512,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                 window_name
             ),
         );
-        return;
+        return false;
     }
 
     let Some(glass_class) = tahoe_liquid_glass_class() else {
@@ -401,7 +523,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                 window_name
             ),
         );
-        return;
+        return false;
     };
 
     let content_view: id = msg_send![window, contentView];
@@ -413,7 +535,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                 window_name
             ),
         );
-        return;
+        return false;
     }
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
@@ -435,7 +557,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                     superview == content_view
                 ),
             );
-            return;
+            return false;
         }
     } else {
         let Some(backdrop_class) = tahoe_glass_backdrop_view_class(glass_class) else {
@@ -446,7 +568,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                     window_name
                 ),
             );
-            return;
+            return false;
         };
         let allocated: id = msg_send![backdrop_class, alloc];
         glass_view = msg_send![allocated, initWithFrame: content_bounds];
@@ -458,7 +580,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                     window_name
                 ),
             );
-            return;
+            return false;
         }
         let identifier = tahoe_ns_string(TAHOE_GLASS_BACKDROP_IDENTIFIER);
         if identifier != nil {
@@ -570,6 +692,8 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
             ),
         );
     }
+
+    created
 }
 
 /// Build an autoreleased NSString from a Rust `&str` (nil on interior NUL).
@@ -587,7 +711,8 @@ fn configure_tahoe_window_backdrop(
     _window: *mut std::ffi::c_void,
     _log_target: &str,
     _window_name: &str,
-) {
+) -> bool {
+    false
 }
 
 /// Configure the actions popup window as a non-movable child window with vibrancy.

@@ -3,9 +3,8 @@ use super::*;
 use std::sync::{Mutex, OnceLock};
 
 use gpui::{
-    AnyWindowHandle, Bounds, DisplayId, Entity, FocusHandle, Pixels, Point, Render, Size,
+    div, AnyWindowHandle, Bounds, DisplayId, Entity, FocusHandle, Pixels, Point, Render, Size,
     WeakEntity, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-    div,
 };
 
 const SHORTCUT_RECORDER_POPUP_HEIGHT: f32 = 196.0;
@@ -297,7 +296,7 @@ fn open_shortcut_recorder_window(
     close_shortcut_recorder_window(cx);
 
     let window_background = if theme.is_vibrancy_enabled() {
-        WindowBackgroundAppearance::Blurred
+        crate::platform::vibrancy_window_background()
     } else {
         WindowBackgroundAppearance::Opaque
     };

@@ -1832,7 +1832,7 @@ pub fn open_actions_window(
     let theme = get_cached_theme();
     let is_dark_vibrancy = theme.should_use_dark_vibrancy();
     let window_background = if theme.is_vibrancy_enabled() {
-        gpui::WindowBackgroundAppearance::Blurred
+        crate::platform::vibrancy_window_background()
     } else {
         gpui::WindowBackgroundAppearance::Opaque
     };

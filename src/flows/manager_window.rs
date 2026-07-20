@@ -122,7 +122,7 @@ pub fn open_flow_manager_window(cx: &mut App) -> anyhow::Result<()> {
     }
 
     let window_background = if theme::get_cached_theme().is_vibrancy_enabled() {
-        gpui::WindowBackgroundAppearance::Blurred
+        crate::platform::vibrancy_window_background()
     } else {
         gpui::WindowBackgroundAppearance::Opaque
     };
@@ -156,6 +156,10 @@ pub fn open_flow_manager_window(cx: &mut App) -> anyhow::Result<()> {
         window.focus(&focus_handle, cx);
         view
     })?;
+
+    let _ = handle.update(cx, |_root, window, _cx| {
+        crate::platform::configure_overlay_window_glass(window, "Flow Manager");
+    });
 
     let any_handle: AnyWindowHandle = handle.into();
     {

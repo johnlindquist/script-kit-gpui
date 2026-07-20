@@ -811,7 +811,7 @@ pub(crate) fn open_confirm_popup_window(
     let is_dark_vibrancy = theme.should_use_dark_vibrancy();
     let vibrancy_enabled = theme.is_vibrancy_enabled();
     let window_background = if vibrancy_enabled {
-        WindowBackgroundAppearance::Blurred
+        crate::platform::vibrancy_window_background()
     } else {
         WindowBackgroundAppearance::Opaque
     };
@@ -861,6 +861,12 @@ pub(crate) fn open_confirm_popup_window(
         event = "open_confirm_popup_window_created",
         "open_confirm_popup_window: window created successfully"
     );
+
+    handle
+        .update(cx, |_view, window, _cx| {
+            crate::platform::configure_overlay_window_glass(window, "Confirm popup");
+        })
+        .ok();
 
     // Capture expected frame for NSWindow matching in the deferred callback
     let expected_w: f32 = bounds.size.width.into();

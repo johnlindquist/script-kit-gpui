@@ -334,6 +334,12 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
         // orderFrontRegardless brings window to front without activating the app
         let _: () = msg_send![window, orderFrontRegardless];
 
+        // Glass mode: morph the glass backdrop into place on every show.
+        if tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()
+        {
+            animate_tahoe_glass_appearance(window, "PANEL", "Main window");
+        }
+
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("after_order_front", cycle_id, None, None);
         }
@@ -421,6 +427,12 @@ pub fn show_main_window_background() {
             "visibility_focus::show_main_window_background",
             PanelInvariantPhase::BackgroundShow,
         );
+
+        // Glass mode: morph the glass backdrop into place on background shows too.
+        if tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()
+        {
+            animate_tahoe_glass_appearance(window, "PANEL", "Main window");
+        }
 
         // orderFrontRegardless brings the window to front without activating the app.
         // Crucially, we do NOT call makeKeyWindow so keyboard focus stays with

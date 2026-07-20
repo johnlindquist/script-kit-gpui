@@ -147,7 +147,7 @@ fn open_ai_window_with_mode_from(
     // Load theme to determine window background appearance (vibrancy)
     let theme = crate::theme::get_cached_theme();
     let window_background = if theme.is_vibrancy_enabled() {
-        gpui::WindowBackgroundAppearance::Blurred
+        crate::platform::vibrancy_window_background()
     } else {
         gpui::WindowBackgroundAppearance::Opaque
     };
@@ -235,6 +235,7 @@ fn open_ai_window_with_mode_from(
     // Activate the window (app already activated before open_window)
     let _ = handle.update(cx, |_root, window, _cx| {
         window.activate_window();
+        crate::platform::configure_overlay_window_glass(window, "AI");
     });
 
     // Focus the input field immediately after window creation

@@ -156,7 +156,7 @@ pub fn set_chat_window_fixture_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &m
 fn chat_window_options(inherit_bounds: Option<gpui::Bounds<gpui::Pixels>>) -> WindowOptions {
     let window_bounds = chat_window_bounds(inherit_bounds);
     let window_background = if theme::get_cached_theme().is_vibrancy_enabled() {
-        gpui::WindowBackgroundAppearance::Blurred
+        crate::platform::vibrancy_window_background()
     } else {
         gpui::WindowBackgroundAppearance::Opaque
     };

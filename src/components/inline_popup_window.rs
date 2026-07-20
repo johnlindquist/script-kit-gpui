@@ -101,7 +101,7 @@ pub fn inline_popup_window_options(
 ) -> WindowOptions {
     let theme = crate::theme::get_cached_theme();
     let window_background = if theme.is_vibrancy_enabled() {
-        gpui::WindowBackgroundAppearance::Blurred
+        crate::platform::vibrancy_window_background()
     } else {
         gpui::WindowBackgroundAppearance::Opaque
     };
