@@ -44,7 +44,12 @@ fn app_view_owns_native_footer_surface_map() {
         "AppView::ScriptIssuesView { .. } => Some(\"script_issues\")",
         "AppView::ConfirmPrompt { .. } => Some(\"confirm_prompt\")",
         "AppView::TermPrompt { .. } => Some(\"term_prompt\")",
-        "AppView::MicroPrompt { .. }",
+        "AppView::About { .. } => Some(\"about\")",
+        "AppView::MicroPrompt { .. } => Some(\"micro_prompt\")",
+        "AppView::SdkReferenceView { .. } => Some(\"sdk_reference\")",
+        "AppView::ScriptTemplateCatalogView { .. } => Some(\"script_template_catalog\")",
+        "AppView::CreateAiPresetView { .. } => Some(\"create_ai_preset\")",
+        "AppView::NotesBrowseView { .. } => Some(\"notes_browse\")",
     ] {
         assert!(
             body.contains(expected),
@@ -66,13 +71,7 @@ fn app_view_owns_native_footer_surface_map() {
 #[test]
 fn main_window_views_without_native_footer_are_ratcheted() {
     const LEGACY_GPUI_FOOTER_VIEWS: &[&str] = &[
-        "About",
         "ActionsDialog",
-        "MicroPrompt",
-        "SdkReferenceView",
-        "ScriptTemplateCatalogView",
-        "CreateAiPresetView",
-        "NotesBrowseView",
         // storybook-only surface
         "DesignExplorerView",
     ];
@@ -117,6 +116,50 @@ fn main_window_views_without_native_footer_are_ratcheted() {
             none_views.iter().any(|view| view == legacy),
             "AppView::{legacy} no longer opts out of the native footer — delete it \
              from LEGACY_GPUI_FOOTER_VIEWS (shrink-only ratchet)"
+        );
+    }
+}
+
+/// The six OF-57 migrations use the same action authorities as their physical
+/// keyboard handlers; native footer labels must never become decorative.
+#[test]
+fn migrated_footer_buttons_route_to_real_surface_actions() {
+    let buttons = function_body(
+        UI_WINDOW_SOURCE,
+        "fn main_window_footer_buttons_for_current_view",
+    );
+    for expected in [
+        "about_footer_buttons(enabled)",
+        "micro_prompt_footer_buttons(enabled)",
+        "sdk_reference_footer_buttons(enabled, has_selection)",
+        "script_template_catalog_footer_buttons(enabled, has_selection)",
+        "create_ai_preset_footer_buttons(enabled, !name.trim().is_empty())",
+        "notes_browse_footer_buttons(",
+    ] {
+        assert!(
+            buttons.contains(expected),
+            "migrated footer config must use its truthful button grammar: {expected}"
+        );
+    }
+
+    let dispatch = function_body(
+        UI_WINDOW_SOURCE,
+        "pub(crate) fn dispatch_main_window_footer_action",
+    );
+    for expected in [
+        "self.dismiss_about(cx);",
+        "self.submit_arg_prompt_from_current_state(&prompt_id, cx);",
+        "self.copy_selected_sdk_reference_markdown(cx)",
+        "self.show_naming_dialog_for_script_template(template, window, cx);",
+        "self.copy_selected_script_template_markdown(cx)",
+        "self.handle_create_ai_preset_key(\"enter\", window, cx);",
+        "self.handle_create_ai_preset_key(\"tab\", window, cx);",
+        "self.attach_selected_note_from_footer(cx)",
+        "self.close_attachment_portal_cancel(cx);",
+    ] {
+        assert!(
+            dispatch.contains(expected),
+            "migrated footer action must dispatch real surface behavior: {expected}"
         );
     }
 }

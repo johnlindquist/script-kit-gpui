@@ -30,6 +30,82 @@ fn term_prompt_footer_buttons(
     ]
 }
 
+fn about_footer_buttons(enabled: bool) -> Vec<crate::footer_popup::FooterButtonConfig> {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    vec![FooterButtonConfig::new(FooterAction::Close, "Esc", "Back").enabled(enabled)]
+}
+
+fn micro_prompt_footer_buttons(enabled: bool) -> Vec<crate::footer_popup::FooterButtonConfig> {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    vec![
+        FooterButtonConfig::new(FooterAction::Run, "↵", "Submit").enabled(enabled),
+        FooterButtonConfig::new(FooterAction::Close, "Esc", "Cancel").enabled(enabled),
+    ]
+}
+
+fn sdk_reference_footer_buttons(
+    enabled: bool,
+    has_selection: bool,
+) -> Vec<crate::footer_popup::FooterButtonConfig> {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    vec![
+        FooterButtonConfig::new(FooterAction::Run, "↵", "Copy Markdown")
+            .enabled(enabled && has_selection),
+        FooterButtonConfig::new(FooterAction::Copy, "⌘C", "Copy").enabled(enabled && has_selection),
+        FooterButtonConfig::new(FooterAction::Close, "Esc", "Back").enabled(enabled),
+    ]
+}
+
+fn script_template_catalog_footer_buttons(
+    enabled: bool,
+    has_selection: bool,
+) -> Vec<crate::footer_popup::FooterButtonConfig> {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    vec![
+        FooterButtonConfig::new(FooterAction::Run, "↵", "Create Local Script")
+            .enabled(enabled && has_selection),
+        FooterButtonConfig::new(FooterAction::Copy, "⌘C", "Copy").enabled(enabled && has_selection),
+        FooterButtonConfig::new(FooterAction::Close, "Esc", "Back").enabled(enabled),
+    ]
+}
+
+fn create_ai_preset_footer_buttons(
+    enabled: bool,
+    can_submit: bool,
+) -> Vec<crate::footer_popup::FooterButtonConfig> {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    vec![
+        FooterButtonConfig::new(FooterAction::Run, "↵", "Save Preset")
+            .enabled(enabled && can_submit),
+        FooterButtonConfig::new(FooterAction::Ai, "⇥", "Next Field").enabled(enabled),
+        FooterButtonConfig::new(FooterAction::Close, "Esc", "Cancel").enabled(enabled),
+    ]
+}
+
+fn notes_browse_footer_buttons(
+    enabled: bool,
+    in_portal: bool,
+    has_selection: bool,
+) -> Vec<crate::footer_popup::FooterButtonConfig> {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    let close_label = if in_portal { "Cancel" } else { "Back" };
+    let mut buttons = Vec::new();
+    if in_portal {
+        buttons.push(
+            FooterButtonConfig::new(FooterAction::Run, "↵", "Attach Note")
+                .enabled(enabled && has_selection),
+        );
+    }
+    buttons.push(FooterButtonConfig::new(FooterAction::Close, "Esc", close_label).enabled(enabled));
+    buttons
+}
+
 static MAIN_FOOTER_ACTION_LISTENER: Once = Once::new();
 
 pub(crate) fn flow_session_footer_buttons(
@@ -257,6 +333,85 @@ impl ScriptListApp {
             .unwrap_or_else(|| "Run".to_string())
     }
 
+    fn copy_selected_sdk_reference_markdown(&mut self, cx: &mut Context<Self>) -> bool {
+        let selected = match &self.current_view {
+            AppView::SdkReferenceView {
+                filter,
+                selected_index,
+                entries,
+            } => crate::mcp_resources::sdk_reference_visible_rows(entries, filter)
+                .get(*selected_index)
+                .map(|row| row.entry.clone()),
+            _ => None,
+        };
+        let Some(entry) = selected else {
+            return false;
+        };
+
+        let markdown = crate::mcp_resources::format_sdk_reference_entry_markdown(&entry);
+        match crate::platform::copy_text_to_clipboard(&markdown) {
+            Ok(()) => self.show_hud(format!("Copied {} reference", entry.name), Some(2000), cx),
+            Err(error) => tracing::warn!(
+                %error,
+                "sdk_reference footer copy_text_to_clipboard failed"
+            ),
+        }
+        true
+    }
+
+    fn selected_script_template(&self) -> Option<crate::mcp_resources::ScriptTemplateRef> {
+        match &self.current_view {
+            AppView::ScriptTemplateCatalogView {
+                filter,
+                selected_index,
+                templates,
+            } => crate::mcp_resources::script_template_catalog_visible_rows(templates, filter)
+                .get(*selected_index)
+                .map(|row| row.template.clone()),
+            _ => None,
+        }
+    }
+
+    fn copy_selected_script_template_markdown(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(template) = self.selected_script_template() else {
+            return false;
+        };
+
+        let markdown = crate::mcp_resources::format_script_template_markdown(&template);
+        match crate::platform::copy_text_to_clipboard(&markdown) {
+            Ok(()) => self.show_hud(
+                format!("Copied {} template", template.title),
+                Some(2000),
+                cx,
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                "script_template_catalog footer copy_text_to_clipboard failed"
+            ),
+        }
+        true
+    }
+
+    fn attach_selected_note_from_footer(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.is_in_attachment_portal() {
+            return false;
+        }
+        let selected_note = match &self.current_view {
+            AppView::NotesBrowseView {
+                filter,
+                selected_index,
+            } => Self::notes_browse_selected_visible_row(filter, *selected_index),
+            _ => None,
+        };
+        let Some(note) = selected_note else {
+            return false;
+        };
+
+        let part = self.build_notes_browse_portal_part(&note);
+        self.close_attachment_portal_with_part(part, cx);
+        true
+    }
+
     /// Route a footer action to the Day Page kit:// resource preview when one
     /// is open (the preview's actions live on the native footer). Returns
     /// true when the action was handled by the preview.
@@ -368,6 +523,24 @@ impl ScriptListApp {
                         }
                     });
                     return;
+                } else if let AppView::MicroPrompt { id, .. } = &self.current_view {
+                    let prompt_id = id.clone();
+                    self.submit_arg_prompt_from_current_state(&prompt_id, cx);
+                    return;
+                } else if matches!(self.current_view, AppView::SdkReferenceView { .. }) {
+                    let _ = self.copy_selected_sdk_reference_markdown(cx);
+                    return;
+                } else if matches!(self.current_view, AppView::ScriptTemplateCatalogView { .. }) {
+                    if let Some(template) = self.selected_script_template() {
+                        self.show_naming_dialog_for_script_template(template, window, cx);
+                    }
+                    return;
+                } else if matches!(self.current_view, AppView::CreateAiPresetView { .. }) {
+                    self.handle_create_ai_preset_key("enter", window, cx);
+                    return;
+                } else if matches!(self.current_view, AppView::NotesBrowseView { .. }) {
+                    let _ = self.attach_selected_note_from_footer(cx);
+                    return;
                 } else if let AppView::FlowSessionView { session_id } = self.current_view {
                     // The MAIN input is the composer: send its draft.
                     let text = self.filter_text.trim().to_string();
@@ -447,7 +620,10 @@ impl ScriptListApp {
                 );
             }
             crate::footer_popup::FooterAction::Ai => {
-                if let AppView::AgentChatView { entity } = &self.current_view {
+                if matches!(self.current_view, AppView::CreateAiPresetView { .. }) {
+                    self.handle_create_ai_preset_key("tab", window, cx);
+                    return;
+                } else if let AppView::AgentChatView { entity } = &self.current_view {
                     let entity = entity.clone();
                     entity.update(cx, |chat, cx| {
                         chat.open_profile_trigger_picker_in_window(window, cx);
@@ -502,6 +678,18 @@ impl ScriptListApp {
             | crate::footer_popup::FooterAction::Copy
             | crate::footer_popup::FooterAction::Expand
             | crate::footer_popup::FooterAction::Retry => {
+                if action == crate::footer_popup::FooterAction::Copy
+                    && matches!(self.current_view, AppView::SdkReferenceView { .. })
+                {
+                    let _ = self.copy_selected_sdk_reference_markdown(cx);
+                    return;
+                }
+                if action == crate::footer_popup::FooterAction::Copy
+                    && matches!(self.current_view, AppView::ScriptTemplateCatalogView { .. })
+                {
+                    let _ = self.copy_selected_script_template_markdown(cx);
+                    return;
+                }
                 if self.dispatch_day_page_preview_footer_action(action, window, cx) {
                     return;
                 }
@@ -547,7 +735,31 @@ impl ScriptListApp {
                 }
             }
             crate::footer_popup::FooterAction::Close => {
-                if let AppView::FlowSessionView { session_id } = self.current_view {
+                if matches!(self.current_view, AppView::About { .. }) {
+                    self.dismiss_about(cx);
+                    return;
+                } else if matches!(self.current_view, AppView::MicroPrompt { .. }) {
+                    self.go_back_or_close(window, cx);
+                    return;
+                } else if matches!(
+                    self.current_view,
+                    AppView::SdkReferenceView { .. } | AppView::ScriptTemplateCatalogView { .. }
+                ) {
+                    if !self.clear_builtin_view_filter(cx) {
+                        self.go_back_or_close(window, cx);
+                    }
+                    return;
+                } else if matches!(self.current_view, AppView::CreateAiPresetView { .. }) {
+                    self.go_back_or_close(window, cx);
+                    return;
+                } else if matches!(self.current_view, AppView::NotesBrowseView { .. }) {
+                    if self.is_in_attachment_portal() {
+                        self.close_attachment_portal_cancel(cx);
+                    } else if !self.clear_builtin_view_filter(cx) {
+                        self.go_back_or_close(window, cx);
+                    }
+                    return;
+                } else if let AppView::FlowSessionView { session_id } = self.current_view {
                     self.terminate_flow_session(session_id, window, cx);
                     return;
                 } else if matches!(self.current_view, AppView::PermissionsWizardView { .. }) {
@@ -979,6 +1191,59 @@ impl ScriptListApp {
                     FooterButtonConfig::new(footer_action, spec.key, spec.label).enabled(enabled)
                 })
                 .collect();
+        }
+
+        let enabled = !self.main_window_footer_buttons_blocked();
+
+        if matches!(self.current_view, AppView::About { .. }) {
+            return about_footer_buttons(enabled);
+        }
+
+        if matches!(self.current_view, AppView::MicroPrompt { .. }) {
+            return micro_prompt_footer_buttons(enabled);
+        }
+
+        if let AppView::SdkReferenceView {
+            filter,
+            selected_index,
+            entries,
+        } = &self.current_view
+        {
+            let has_selection = crate::mcp_resources::sdk_reference_visible_rows(entries, filter)
+                .get(*selected_index)
+                .is_some();
+            return sdk_reference_footer_buttons(enabled, has_selection);
+        }
+
+        if let AppView::ScriptTemplateCatalogView {
+            filter,
+            selected_index,
+            templates,
+        } = &self.current_view
+        {
+            let has_selection =
+                crate::mcp_resources::script_template_catalog_visible_rows(templates, filter)
+                    .get(*selected_index)
+                    .is_some();
+            return script_template_catalog_footer_buttons(enabled, has_selection);
+        }
+
+        if let AppView::CreateAiPresetView { name, .. } = &self.current_view {
+            return create_ai_preset_footer_buttons(enabled, !name.trim().is_empty());
+        }
+
+        if let AppView::NotesBrowseView {
+            filter,
+            selected_index,
+        } = &self.current_view
+        {
+            let has_selection =
+                Self::notes_browse_selected_visible_row(filter, *selected_index).is_some();
+            return notes_browse_footer_buttons(
+                enabled,
+                self.is_in_attachment_portal(),
+                has_selection,
+            );
         }
 
         // ConfirmPrompt: Apply (Confirm) + Close (Cancel) labeled per options.

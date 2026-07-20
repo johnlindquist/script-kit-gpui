@@ -1,8 +1,11 @@
 use super::{
-    flow_session_footer_buttons, main_list_loading_left_info,
-    main_window_footer_chrome_should_render, main_window_result_action_label,
-    paste_into_frontmost_app_label, term_prompt_footer_buttons,
+    about_footer_buttons, create_ai_preset_footer_buttons, flow_session_footer_buttons,
+    main_list_loading_left_info, main_window_footer_chrome_should_render,
+    main_window_result_action_label, micro_prompt_footer_buttons, notes_browse_footer_buttons,
+    paste_into_frontmost_app_label, script_template_catalog_footer_buttons,
+    sdk_reference_footer_buttons, term_prompt_footer_buttons,
 };
+use crate::footer_popup::FooterAction;
 use crate::scripts::{MatchIndices, Scriptlet, ScriptletMatch};
 use std::sync::Arc;
 
@@ -113,6 +116,71 @@ fn main_window_footer_contract_term_prompt_buttons_use_native_keyboard_grammar()
         ]
     );
     assert!(buttons.iter().all(|button| button.enabled));
+}
+
+#[test]
+fn main_window_footer_contract_legacy_view_buttons_match_real_keyboard_actions() {
+    fn grammar(
+        buttons: &[crate::footer_popup::FooterButtonConfig],
+    ) -> Vec<(FooterAction, &str, &str)> {
+        buttons
+            .iter()
+            .map(|button| (button.action, button.key.as_ref(), button.label.as_ref()))
+            .collect()
+    }
+
+    assert_eq!(
+        grammar(&about_footer_buttons(true)),
+        vec![(FooterAction::Close, "Esc", "Back")]
+    );
+    assert_eq!(
+        grammar(&micro_prompt_footer_buttons(true)),
+        vec![
+            (FooterAction::Run, "↵", "Submit"),
+            (FooterAction::Close, "Esc", "Cancel"),
+        ]
+    );
+    assert_eq!(
+        grammar(&sdk_reference_footer_buttons(true, true)),
+        vec![
+            (FooterAction::Run, "↵", "Copy Markdown"),
+            (FooterAction::Copy, "⌘C", "Copy"),
+            (FooterAction::Close, "Esc", "Back"),
+        ]
+    );
+    assert_eq!(
+        grammar(&script_template_catalog_footer_buttons(true, true)),
+        vec![
+            (FooterAction::Run, "↵", "Create Local Script"),
+            (FooterAction::Copy, "⌘C", "Copy"),
+            (FooterAction::Close, "Esc", "Back"),
+        ]
+    );
+    assert_eq!(
+        grammar(&create_ai_preset_footer_buttons(true, true)),
+        vec![
+            (FooterAction::Run, "↵", "Save Preset"),
+            (FooterAction::Ai, "⇥", "Next Field"),
+            (FooterAction::Close, "Esc", "Cancel"),
+        ]
+    );
+    assert_eq!(
+        grammar(&notes_browse_footer_buttons(true, true, true)),
+        vec![
+            (FooterAction::Run, "↵", "Attach Note"),
+            (FooterAction::Close, "Esc", "Cancel"),
+        ]
+    );
+    assert_eq!(
+        grammar(&notes_browse_footer_buttons(true, false, true)),
+        vec![(FooterAction::Close, "Esc", "Back")],
+        "standalone Notes Browse has no Enter behavior, so its footer must not advertise one"
+    );
+
+    assert!(!sdk_reference_footer_buttons(true, false)[0].enabled);
+    assert!(!script_template_catalog_footer_buttons(true, false)[0].enabled);
+    assert!(!create_ai_preset_footer_buttons(true, false)[0].enabled);
+    assert!(!notes_browse_footer_buttons(true, true, false)[0].enabled);
 }
 
 #[test]

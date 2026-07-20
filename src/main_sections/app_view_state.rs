@@ -79,7 +79,9 @@ enum AppView {
         state: crate::about::AboutState,
         update_state: std::sync::Arc<std::sync::RwLock<crate::updates::UpdateState>>,
     },
-    /// Showing the actions dialog (mini searchable popup)
+    /// Legacy full-view placeholder for the actions dialog. The live Cmd+K
+    /// route is an attached popup and deliberately keeps its host AppView
+    /// current so the host's native footer remains visible underneath.
     #[allow(dead_code)]
     ActionsDialog,
     /// Showing an arg prompt from a script
@@ -1187,18 +1189,17 @@ impl AppView {
             AppView::ConfirmPrompt { .. } => Some("confirm_prompt"),
             AppView::TipsView { .. } => Some("tips"),
             AppView::TermPrompt { .. } => Some("term_prompt"),
-            // Legacy GPUI-footer surfaces. Every NEW main-window view must
-            // return Some(surface) so it renders the shared native footer
-            // buttons instead of a hand-rolled hint strip;
-            // `main_window_views_without_native_footer_are_ratcheted`
-            // (ui_window_tests.rs) shrink-locks this list.
-            AppView::About { .. }
-            | AppView::ActionsDialog
-            | AppView::MicroPrompt { .. }
-            | AppView::SdkReferenceView { .. }
-            | AppView::ScriptTemplateCatalogView { .. }
-            | AppView::CreateAiPresetView { .. }
-            | AppView::NotesBrowseView { .. } => None,
+            AppView::About { .. } => Some("about"),
+            AppView::MicroPrompt { .. } => Some("micro_prompt"),
+            AppView::SdkReferenceView { .. } => Some("sdk_reference"),
+            AppView::ScriptTemplateCatalogView { .. } => Some("script_template_catalog"),
+            AppView::CreateAiPresetView { .. } => Some("create_ai_preset"),
+            AppView::NotesBrowseView { .. } => Some("notes_browse"),
+            // The live Cmd+K path is an attached popup that keeps the host
+            // AppView current (and therefore keeps the host footer visible).
+            // This dead full-view variant stores no host identity, so it stays
+            // deferred rather than advertising a decorative dialog footer.
+            AppView::ActionsDialog => None,
             #[cfg(feature = "storybook")]
             AppView::DesignExplorerView { .. } => None,
         }
