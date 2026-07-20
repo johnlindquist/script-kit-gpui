@@ -6,6 +6,56 @@ fn file_search_list_pane_top_inset(spacing: crate::designs::DesignSpacing) -> f3
     spacing.padding_xs
 }
 
+const FILE_SEARCH_PREVIEW_PATH_SELECTOR: &str = "file-search-preview-path";
+const FILE_SEARCH_PREVIEW_PATH_TEXT_SELECTOR: &str = "file-search-preview-path-text";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSearchPreviewPathTruncation {
+    constrain_width: bool,
+    hide_overflow: bool,
+    ellipsis: bool,
+    nowrap: bool,
+}
+
+const fn file_search_preview_path_truncation() -> FileSearchPreviewPathTruncation {
+    FileSearchPreviewPathTruncation {
+        constrain_width: true,
+        hide_overflow: true,
+        ellipsis: true,
+        nowrap: true,
+    }
+}
+
+fn file_search_preview_path(
+    value: impl Into<SharedString>,
+    color: gpui::Rgba,
+) -> gpui::Stateful<Div> {
+    let truncation = file_search_preview_path_truncation();
+    let text = div()
+        .debug_selector(|| FILE_SEARCH_PREVIEW_PATH_TEXT_SELECTOR.to_string())
+        .text_xs()
+        .text_color(color)
+        .when(truncation.constrain_width, |element| {
+            element.w_full().min_w(px(0.0))
+        })
+        .when(truncation.hide_overflow, |element| {
+            element.overflow_hidden()
+        })
+        .when(truncation.ellipsis, |element| element.text_ellipsis())
+        .when(truncation.nowrap, |element| element.whitespace_nowrap())
+        .child(value.into());
+
+    div()
+        .id(FILE_SEARCH_PREVIEW_PATH_SELECTOR)
+        .debug_selector(|| FILE_SEARCH_PREVIEW_PATH_SELECTOR.to_string())
+        .w_full()
+        .when(truncation.constrain_width, |element| element.min_w(px(0.0)))
+        .when(truncation.hide_overflow, |element| {
+            element.overflow_hidden()
+        })
+        .child(text)
+}
+
 static FILE_SEARCH_NATIVE_DRAG_AWAITING_APP_REACTIVATE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -1049,7 +1099,6 @@ impl ScriptListApp {
                                     .icon(file_search::file_type_icon(file.file_type))
                                     .selected(is_selected)
                                     .hovered(is_hovered)
-                                    .with_accent_bar(true)
                                     .trailing_accessory(file_search_row_trailing_metadata(
                                         file.size,
                                         file.modified,
@@ -1225,9 +1274,8 @@ impl ScriptListApp {
                             .text_color(rgb(text_primary))
                             .child(file.name.clone()),
                     )
-                    // Scrollable path (no section label — content is self-evident)
-                    .child(crate::components::prompt_scroll_value_with_id(
-                        "file-search-preview-path",
+                    // Truncated path (no section label — content is self-evident)
+                    .child(file_search_preview_path(
                         file.path.clone(),
                         rgb(text_dimmed),
                     ))
@@ -1597,6 +1645,16 @@ mod file_search_thumbnail_tests {
     use tempfile::tempdir;
 
     #[test]
+    fn file_search_preview_path_contract_is_width_constrained_nowrap_with_ellipsis() {
+        let truncation = file_search_preview_path_truncation();
+
+        assert!(truncation.constrain_width);
+        assert!(truncation.hide_overflow);
+        assert!(truncation.ellipsis);
+        assert!(truncation.nowrap);
+    }
+
+    #[test]
     fn test_file_search_thumbnail_display_size_scales_longest_side_when_over_limit() {
         let (width, height) = file_search_thumbnail_display_size(4000, 1000, 280.0);
         assert!((width - 280.0).abs() < f32::EPSILON);
@@ -1718,10 +1776,6 @@ mod file_search_chrome_audit {
         assert!(
             source.contains("ListItem::new(file.name.clone(), list_colors)"),
             "file_search must render rows through the shared ListItem component"
-        );
-        assert!(
-            source.contains(".with_accent_bar(true)"),
-            "file_search rows should use the shared accent bar like other built-in lists"
         );
         assert!(
             source.contains("LIST_ITEM_HEIGHT"),
