@@ -2327,6 +2327,10 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 window.focus(&focus_handle, ctx);
                                 sync_main_automation_window(None, true, true);
 
+                                // Ensure render-loop focus state is set so the input autofocuses
+                                view.focused_input = FocusedInput::MainFilter;
+                                view.pending_focus = Some(FocusTarget::MainFilter);
+
                                 // Passive AX-only selection sniff for the "Rewrite
                                 // selection" hint chip — mirrors show_main_window_helper.
                                 view.refresh_shown_selection_hint(ctx);
@@ -2668,6 +2672,73 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                             ),
                                         );
                                     }
+                                }
+                            }
+
+                            ExternalCommand::InjectClipboardCaptureFixture {
+                                payload,
+                                source_bundle_id,
+                                concealed_types,
+                                change_generation,
+                                request_id,
+                            } => {
+                                let outcome = crate::clipboard_history::inject_clipboard_capture_fixture(
+                                    payload,
+                                    source_bundle_id.as_deref(),
+                                    &concealed_types,
+                                    change_generation,
+                                );
+                                let (ok, outcome_code, entry_id, error_code, error_message) =
+                                    match outcome {
+                                        crate::clipboard_history::ClipboardCaptureFixtureOutcome::Stored { entry_id } => {
+                                            (true, "stored", Some(entry_id), None, None)
+                                        }
+                                        crate::clipboard_history::ClipboardCaptureFixtureOutcome::Rejected { reason } => {
+                                            (true, "rejected", None, Some(format!("{reason:?}")), None)
+                                        }
+                                        crate::clipboard_history::ClipboardCaptureFixtureOutcome::Oversized { text_len, max_len } => {
+                                            tracing::info!(
+                                                category = "STDIN",
+                                                text_len,
+                                                max_len,
+                                                change_generation,
+                                                "clipboard_capture_fixture_oversized"
+                                            );
+                                            (true, "oversized", None, None, None)
+                                        }
+                                        crate::clipboard_history::ClipboardCaptureFixtureOutcome::Empty => {
+                                            (true, "empty", None, None, None)
+                                        }
+                                        crate::clipboard_history::ClipboardCaptureFixtureOutcome::UnchangedGeneration => {
+                                            (true, "unchanged_generation", None, None, None)
+                                        }
+                                        crate::clipboard_history::ClipboardCaptureFixtureOutcome::Failed { error } => {
+                                            (false, "failed", None, Some("capture_failed".to_string()), Some(error))
+                                        }
+                                    };
+                                tracing::info!(
+                                    category = "STDIN",
+                                    event = "clipboard_capture_fixture_result",
+                                    change_generation,
+                                    concealed_type_count = concealed_types.len(),
+                                    source_bundle_id_present = source_bundle_id.is_some(),
+                                    outcome = outcome_code,
+                                    entry_id = ?entry_id,
+                                    error_code = ?error_code,
+                                    "clipboard capture fixture processed without NSPasteboard access"
+                                );
+                                if let (Some(request_id), Some(sender)) =
+                                    (request_id.as_ref(), view.response_sender.as_ref())
+                                {
+                                    let _ = sender.try_send(
+                                        crate::protocol::Message::external_command_result(
+                                            request_id.to_string(),
+                                            "injectClipboardCaptureFixture".to_string(),
+                                            ok,
+                                            error_code,
+                                            error_message,
+                                        ),
+                                    );
                                 }
                             }
 

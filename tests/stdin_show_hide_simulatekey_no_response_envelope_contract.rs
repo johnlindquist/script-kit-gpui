@@ -197,6 +197,57 @@ fn show_arm_emits_no_response_envelope() {
     );
 }
 
+/// OF-43: a hidden reset can consume the launcher focus request before
+/// AppKit finishes ordering the panel out. Every explicit Show dispatcher
+/// must therefore re-arm the main filter after the native reveal/root-focus
+/// phase; otherwise the panel becomes key while the launcher input remains
+/// without a GPUI first responder.
+#[test]
+fn show_arm_rearms_main_filter_after_native_reveal() {
+    for (label, arm) in [
+        (
+            "runtime_stdin_match_core.rs (Show arm)",
+            show_arm(MATCH_CORE, "runtime_stdin_match_core.rs"),
+        ),
+        (
+            "runtime_stdin.rs (Show arm)",
+            show_arm(RUNTIME_STDIN, "runtime_stdin.rs"),
+        ),
+        (
+            "app_run_setup.rs (Show arm)",
+            show_arm(APP_RUN_SETUP, "app_run_setup.rs"),
+        ),
+    ] {
+        let native_show = arm
+            .find("platform::show_main_window_without_activation();")
+            .unwrap_or_else(|| panic!("{label} must reveal the native main panel"));
+        let root_focus = arm
+            .find("window.focus(&focus_handle, ctx);")
+            .unwrap_or_else(|| panic!("{label} must restore the GPUI root focus context"));
+        let registry_sync = arm
+            .find("sync_main_automation_window(None, true, true);")
+            .unwrap_or_else(|| panic!("{label} must publish the visible main window"));
+        let focused_input = arm
+            .find("view.focused_input = FocusedInput::MainFilter;")
+            .unwrap_or_else(|| {
+                panic!("{label} must re-arm launcher input focus after native reveal")
+            });
+        let pending_focus = arm
+            .find("view.pending_focus = Some(FocusTarget::MainFilter);")
+            .unwrap_or_else(|| {
+                panic!("{label} must request a post-reveal MainFilter focus application")
+            });
+
+        assert!(
+            native_show < root_focus
+                && root_focus < registry_sync
+                && registry_sync < focused_input
+                && focused_input < pending_focus,
+            "{label} must re-arm focused_input/pending_focus after native reveal and root focus;              pre-reveal focus is consumed while hidden and then cleared by AppKit blur"
+        );
+    }
+}
+
 #[test]
 fn hide_arm_emits_no_response_envelope() {
     assert_no_response_sink(

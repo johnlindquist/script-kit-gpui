@@ -102,6 +102,10 @@
                                 window.focus(&focus_handle, ctx);
                                 sync_main_automation_window(None, true, true);
 
+                                // Ensure render-loop focus state is set so the input autofocuses
+                                view.focused_input = FocusedInput::MainFilter;
+                                view.pending_focus = Some(FocusTarget::MainFilter);
+
                                 // Passive AX-only selection sniff for the "Rewrite
                                 // selection" hint chip — mirrors show_main_window_helper.
                                 view.refresh_shown_selection_hint(ctx);
