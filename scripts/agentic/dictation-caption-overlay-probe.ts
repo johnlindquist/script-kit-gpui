@@ -62,6 +62,22 @@ try {
   const missing = expected.filter((n) => !names.includes(n));
   steps.push({ step: "header-row-layout", names, missing });
 
+  const glassLogs = (await driver.getLogs({
+    target: "script_kit::dictation",
+    contains: "dictation_glass_button_host_installed",
+    limit: 20,
+  })) as { entries?: Array<Record<string, unknown>> };
+  const glassInstalled = (glassLogs.entries ?? []).some((entry) =>
+    String(entry.message ?? "").includes(
+      "dictation_glass_button_host_installed",
+    ),
+  );
+  steps.push({
+    step: "liquid-glass-button-host",
+    installed: glassInstalled,
+    matchingLogs: glassLogs.entries ?? [],
+  });
+
   let screenshotOk = false;
   try {
     const shotPath = join(OUT_DIR, "dictation-overlay-recording.png");
@@ -80,7 +96,8 @@ try {
   }
 
   receipt.screenshotOk = screenshotOk;
-  receipt.ok = Boolean(dictation) && geometryOk && missing.length === 0;
+  receipt.ok =
+    Boolean(dictation) && geometryOk && missing.length === 0 && glassInstalled;
 } catch (error) {
   receipt.ok = false;
   receipt.error = String(error);

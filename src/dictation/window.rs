@@ -841,6 +841,10 @@ pub struct DictationOverlay {
     _animation_task: Option<Task<()>>,
     /// Drains native footer button clicks for the dictation window.
     _footer_action_task: Option<Task<()>>,
+    /// Tahoe-only native effect views aligned beneath the in-window footer
+    /// chips. Entity ownership makes teardown follow this overlay generation.
+    #[cfg(target_os = "macos")]
+    glass_button_host: Option<crate::platform::glass_button_host::GlassButtonHost>,
 }
 
 /// Phases where the app is working on the captured audio and the overlay
@@ -867,6 +871,33 @@ impl DictationOverlay {
             caption_scrolled_generation: 0,
             _animation_task: None,
             _footer_action_task: None,
+            #[cfg(target_os = "macos")]
+            glass_button_host: None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sync_glass_button_frames(&mut self, window: &Window, frames: &[(f64, f64, f64, f64, f64)]) {
+        if self.glass_button_host.is_none() {
+            self.glass_button_host =
+                crate::platform::glass_button_host::GlassButtonHost::install(window);
+        }
+        if let Some(host) = self.glass_button_host.as_mut() {
+            host.sync(frames);
+        }
+    }
+
+    fn hide_glass_button_frames(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(host) = self.glass_button_host.as_mut() {
+            host.sync(&[]);
+        }
+    }
+
+    fn teardown_glass_button_host(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            self.glass_button_host.take();
         }
     }
 
@@ -1076,7 +1107,7 @@ impl DictationOverlay {
         let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
         slot.lock().take();
         remove_global_escape_monitor();
-        Self::dematerialize_then_remove_overlay(window, cx);
+        self.dematerialize_then_remove_overlay(window, cx);
         if let Some(cb) = callback {
             cx.defer(move |cx| {
                 cb(cx);
@@ -1094,7 +1125,8 @@ impl DictationOverlay {
     /// Play the Spotlight dematerialize (same as the main window's exit),
     /// then run the native close prep and remove the overlay window. Falls
     /// back to instant close when glass/morph is unavailable.
-    fn dematerialize_then_remove_overlay(window: &mut Window, cx: &mut Context<Self>) {
+    fn dematerialize_then_remove_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.teardown_glass_button_host();
         if crate::platform::begin_gpui_window_exit_dematerialize(
             window,
             "DICTATION",
@@ -1128,7 +1160,7 @@ impl DictationOverlay {
         let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
         slot.lock().take();
         remove_global_escape_monitor();
-        Self::dematerialize_then_remove_overlay(window, cx);
+        self.dematerialize_then_remove_overlay(window, cx);
 
         if let Some(cb) = callback {
             cx.defer(move |cx| {
@@ -1153,7 +1185,7 @@ impl DictationOverlay {
         *OVERLAY_ABORT_CALLBACK.lock() = None;
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
         remove_global_escape_monitor();
-        Self::dematerialize_then_remove_overlay(window, cx);
+        self.dematerialize_then_remove_overlay(window, cx);
         tracing::info!(category = "DICTATION", "Overlay closed from within entity");
     }
 
@@ -1816,6 +1848,10 @@ impl Render for DictationOverlay {
         let footer_config = dictation_native_footer_config(&self.state.phase, armed);
         let glass_in_window_footer = crate::platform::tahoe_liquid_glass_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled();
+        let glass_buttons_enabled = glass_in_window_footer
+            && std::env::var("SCRIPT_KIT_DICTATION_GLASS_BUTTONS")
+                .map(|value| value != "0")
+                .unwrap_or(true);
         if !glass_in_window_footer {
             crate::footer_popup::sync_window_footer_popup(window, &footer_config);
         }
@@ -1841,6 +1877,10 @@ impl Render for DictationOverlay {
         let text_color = theme.colors.text.primary.with_opacity(OPACITY_ACTIVE);
 
         let phase = self.state.phase.clone();
+        let action_rail_present = !matches!(phase, DictationSessionPhase::Idle);
+        if !glass_buttons_enabled || !action_rail_present {
+            self.hide_glass_button_frames();
+        }
         let bars = &self.display_bars;
 
         // Every non-idle phase shares one anatomy — header row (timer, chips,
@@ -1956,7 +1996,12 @@ impl Render for DictationOverlay {
         };
 
         let footer_rail = if glass_in_window_footer {
-            render_static_action_rail(footer_config.buttons, Some(cx)).into_any_element()
+            render_static_action_rail(
+                footer_config.buttons,
+                Some(cx),
+                glass_buttons_enabled && action_rail_present,
+            )
+            .into_any_element()
         } else {
             native_footer_spacer().into_any_element()
         };
@@ -2327,6 +2372,7 @@ fn wrap_dictation_overlay_action_rail(rail: impl IntoElement) -> impl IntoElemen
 fn render_static_action_rail(
     buttons: impl IntoIterator<Item = crate::footer_popup::FooterButtonConfig>,
     mut cx: Option<&mut Context<DictationOverlay>>,
+    sync_glass_buttons: bool,
 ) -> AnyElement {
     use crate::components::footer_chrome::{
         footer_action_slot_width, footer_button_height, footer_rail_chrome,
@@ -2381,7 +2427,65 @@ fn render_static_action_rail(
         }
     }
 
-    render_footer_action_rail("dictation-action-rail", frames)
+    // Keep previews, non-Tahoe builds, and the explicit prototype opt-out on
+    // the canonical shared rail. The hook-capable clone below is only needed
+    // while native per-button glass is actively syncing.
+    if !sync_glass_buttons {
+        return render_footer_action_rail("dictation-action-rail", frames);
+    }
+
+    // This is the shared footer rail anatomy, kept local so the vendored
+    // child-prepaint hook can observe the real button frame children. The
+    // first direct child is the flexible spacer; subsequent bounds are the
+    // exact footer chip frames in GPUI window coordinates.
+    let rail = div()
+        .w_full()
+        .h(px(rail_chrome.height_px))
+        .min_h(px(rail_chrome.height_px))
+        .px(px(rail_chrome.side_inset_px))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(rail_chrome.item_gap_px));
+
+    #[cfg(target_os = "macos")]
+    let rail = if sync_glass_buttons {
+        let entity = cx
+            .as_ref()
+            .map(|cx| cx.entity().downgrade())
+            .expect("runtime dictation rail has an entity context");
+        let radius = rail_chrome.button_radius_px as f64;
+        rail.on_children_prepainted(move |bounds, window, cx| {
+            let frames = bounds
+                .into_iter()
+                .skip(1)
+                .map(|bounds| {
+                    (
+                        f64::from(bounds.origin.x.as_f32()),
+                        f64::from(bounds.origin.y.as_f32()),
+                        f64::from(bounds.size.width.as_f32()),
+                        f64::from(bounds.size.height.as_f32()),
+                        radius,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some(entity) = entity.upgrade() {
+                entity.update(cx, |this, _cx| {
+                    this.sync_glass_button_frames(window, &frames);
+                });
+            }
+        })
+    } else {
+        rail
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = sync_glass_buttons;
+
+    rail.id("dictation-action-rail")
+        .child(div().flex_1())
+        .children(frames)
+        .into_any_element()
 }
 
 /// Render the live glass bar from a fixed state for Storybook previews.
@@ -2515,7 +2619,7 @@ pub(crate) fn render_dictation_overlay_state_preview(
 
     let armed = !state.transcript.trim().is_empty();
     let footer_config = dictation_native_footer_config(&state.phase, armed);
-    let action_rail = render_static_action_rail(footer_config.buttons, None);
+    let action_rail = render_static_action_rail(footer_config.buttons, None, false);
 
     let inner = div()
         .flex()
@@ -3167,7 +3271,8 @@ pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
     if let Some(handle) = handle {
         // Fade to transparent before removing so the backing store clear
         // doesn't flash white.
-        let result = handle.update(cx, |_view, window, _cx| {
+        let result = handle.update(cx, |view, window, _cx| {
+            view.teardown_glass_button_host();
             prepare_overlay_window_for_close(window);
             window.remove_window();
         });

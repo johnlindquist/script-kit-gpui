@@ -17,6 +17,8 @@
 
 pub mod accessibility;
 mod display;
+#[cfg(target_os = "macos")]
+pub(crate) mod glass_button_host;
 pub(crate) mod gpui_event_simulator;
 pub mod permiso;
 pub mod permiso_detect;
