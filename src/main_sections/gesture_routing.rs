@@ -38,7 +38,12 @@ pub(crate) fn spawn_main_hotkey_gesture_listener(
             let waited: Option<Result<hotkeys::MainHotkeyPhysicalEvent, async_channel::RecvError>> =
                 match hotkeys::main_gesture_next_deadline() {
                     Some(deadline) => {
-                        let wait = deadline.saturating_duration_since(Instant::now());
+                        // Floor the wait: if a classifier state ever reports
+                        // an already-elapsed deadline that poll can't clear,
+                        // an unfloored timer spins this loop at 100% CPU.
+                        let wait = deadline
+                            .saturating_duration_since(Instant::now())
+                            .max(std::time::Duration::from_millis(4));
                         let recv = async { Some(receiver.recv().await) };
                         let timer = async {
                             executor.timer(wait).await;

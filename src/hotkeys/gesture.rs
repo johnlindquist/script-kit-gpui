@@ -141,9 +141,26 @@ impl GestureClassifier {
     }
 
     /// Next instant at which `poll` may emit `HoldStart` or `Tap`. `None` when idle.
+    ///
+    /// Must stay consistent with `poll`: a state that `poll` cannot advance
+    /// must report NO deadline. A press that completes a double-tap never
+    /// emits `HoldStart`, so it must not report the hold deadline — doing so
+    /// made the gesture listener spin at 100% CPU (timer fires instantly,
+    /// poll returns None, state unchanged, repeat forever) whenever the
+    /// matching key-up was missed.
     pub fn next_deadline(&self) -> Option<Instant> {
         match self.state {
-            ClassifierState::Pressed { down_at, .. } => Some(down_at + self.config.hold_duration()),
+            ClassifierState::Pressed {
+                down_at,
+                completes_double_tap,
+                ..
+            } => {
+                if completes_double_tap {
+                    None
+                } else {
+                    Some(down_at + self.config.hold_duration())
+                }
+            }
             ClassifierState::TapPending { released_at, .. } => {
                 Some(released_at + self.config.double_duration())
             }
