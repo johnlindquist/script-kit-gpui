@@ -747,20 +747,23 @@ pub(crate) fn render_expanded_view_prompt_shell(
 
 /// Build a hint-strip footer with optional leading status text.
 ///
-/// Wraps `HintStrip::new(hints)` and optionally attaches a leading element
-/// (e.g., contextual status text) so callers can replace `PromptFooter` with a
-/// single function call while preserving any existing status information.
+/// Renders footer hints as the shared footer-chrome button rail, optionally
+/// with a leading element (e.g., contextual status text) in the native
+/// footer's left-info slot. Every surface that feeds this into a footer slot
+/// gets the universal footer language — rail geometry, button frames, and
+/// per-token keycap nudges — so builtin footers cannot drift from the main
+/// window. (Formerly wrapped the text `HintStrip`, which is now reserved for
+/// non-footer hint rows.)
 #[allow(dead_code)]
 pub(crate) fn render_simple_hint_strip(
     hints: impl crate::components::hint_strip::IntoHints,
     leading: Option<AnyElement>,
 ) -> AnyElement {
-    let strip = crate::components::HintStrip::new(hints);
-
-    match leading {
-        Some(leading) => strip.leading(leading).into_any_element(),
-        None => strip.into_any_element(),
-    }
+    crate::components::footer_chrome::render_static_footer_hint_action_rail_with_leading(
+        "simple-hint-strip-footer-rail",
+        crate::components::hint_strip::IntoHints::into_hints(hints),
+        leading,
+    )
 }
 
 /// Render muted leading text for a minimal hint strip footer.
@@ -772,8 +775,11 @@ pub(crate) fn render_hint_strip_leading_text(
     text: impl Into<SharedString>,
     text_primary: u32,
 ) -> AnyElement {
+    let metrics = crate::components::footer_chrome::current_main_menu_footer_metrics();
     div()
-        .text_xs()
+        .font_family(crate::list_item::FONT_SYSTEM_UI)
+        .text_size(px(metrics.label_font_size))
+        .whitespace_nowrap()
         .text_color(rgba(
             ((text_primary & 0x00FF_FFFF) << 8)
                 | crate::ui::chrome::alpha_from_opacity(crate::ui::chrome::HINT_TEXT_OPACITY),

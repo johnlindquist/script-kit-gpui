@@ -222,11 +222,19 @@ impl ScriptListApp {
         let on_cancel = move |_: &gpui::ClickEvent, _w: &mut Window, cx: &mut gpui::App| {
             entity_for_cancel.update(cx, |editor, _| editor.submit_cancel());
         };
-        let editor_footer = crate::components::HintStrip::new(editor_hints)
-            .on_hint_click(0, on_submit)
-            .on_hint_click(1, on_actions)
-            .on_hint_click(2, on_cancel)
-            .into_any_element();
+        let mut editor_hint_handlers = [
+            Some(Box::new(on_submit) as crate::components::footer_chrome::FooterHintClickHandler),
+            Some(Box::new(on_actions) as _),
+            Some(Box::new(on_cancel) as _),
+        ]
+        .into_iter();
+        let editor_footer =
+            crate::components::footer_chrome::render_clickable_footer_hint_action_rail(
+                "editor-prompt-footer-rail",
+                editor_hints
+                    .into_iter()
+                    .map(|hint| (hint, editor_hint_handlers.next().flatten())),
+            );
 
         // NOTE: The EditorPrompt entity has its own track_focus and on_key_down in its render method.
         // We do NOT add track_focus here to avoid duplicate focus tracking on the same handle.
@@ -337,8 +345,7 @@ mod editor_prompt_tests {
             "editor prompt should use the editor-truthful hint set (⌘↵ Submit · ⌘K Actions · Esc Cancel)"
         );
         // Split literal so this test's own source can't satisfy the match.
-        let universal_rail_call =
-            "clickable_universal_".to_owned() + "footer_action_rail(";
+        let universal_rail_call = "clickable_universal_".to_owned() + "footer_action_rail(";
         assert!(
             !EDITOR_RENDER_SOURCE.contains(&universal_rail_call),
             "editor prompt must not advertise the universal footer-button rail's '↵ Run' action — Enter is a newline here"

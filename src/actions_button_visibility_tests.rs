@@ -110,13 +110,16 @@ mod tests {
     }
 
     #[test]
-    fn test_footer_uses_universal_hint_strip() {
+    fn test_footer_uses_config_driven_footer_rail() {
         let content = fs::read_to_string("src/render_script_list/mod.rs")
             .expect("Failed to read src/render_script_list/mod.rs");
 
+        // The glass in-window footer renders the surface's resolved
+        // MainWindowFooterConfig through the one shared rail renderer, so the
+        // GPUI fallback cannot drift from the native footer language.
         assert!(
-            content.contains("render_universal_prompt_hint_strip_clickable"),
-            "render_script_list footer must use the universal three-key hint strip"
+            content.contains("render_main_window_footer_config_rail"),
+            "render_script_list footer must render the shared config-driven rail"
         );
         assert!(
             content.contains("emit_prompt_hint_audit(\"render_script_list::full\""),
@@ -595,52 +598,37 @@ mod tests {
         );
     }
 
-    /// Fails if the full ScriptList footer clickable strip stops dispatching
-    /// all three actions through the canonical ScriptListApp methods.
-    /// Complements test_footer_uses_universal_hint_strip by verifying the
-    /// actual callback wiring, not just the function name.
+    /// Fails if the ScriptList footer rail stops dispatching clicks through
+    /// the canonical footer action authority. The old clickable strip
+    /// hand-rolled per-button callbacks (toggle_actions, open_tab_ai…, a
+    /// local has_actions() gate); the config-driven rail routes every button
+    /// through dispatch_main_window_footer_action, the same authority the
+    /// native footer and Cmd+K use — gating and view-aware routing are locked
+    /// there (see test_native_footer_dispatches_canonical_actions and
+    /// test_cmd_k_handler_uses_shared_dispatcher).
+    /// Complements test_footer_uses_config_driven_footer_rail by verifying
+    /// the actual callback wiring, not just the function name.
     #[test]
     fn test_full_footer_clickable_strip_dispatches_canonical_actions() {
         let content = fs::read_to_string("src/render_script_list/mod.rs")
             .expect("Failed to read src/render_script_list/mod.rs");
 
-        // Find the clickable strip section
-        let strip_pos = content
-            .find("render_universal_prompt_hint_strip_clickable")
-            .expect("Clickable hint strip must exist in render_script_list");
-        let strip_section = &content[strip_pos..content.len().min(strip_pos + 2000)];
-
+        let mut search_from = 0usize;
+        let mut rail_sites = 0usize;
+        while let Some(found) = content[search_from..].find("render_main_window_footer_config_rail")
+        {
+            let strip_pos = search_from + found;
+            let strip_section = &content[strip_pos..content.len().min(strip_pos + 2000)];
+            assert!(
+                strip_section.contains("dispatch_main_window_footer_action"),
+                "every footer rail click handler must route through dispatch_main_window_footer_action()"
+            );
+            rail_sites += 1;
+            search_from = strip_pos + "render_main_window_footer_config_rail".len();
+        }
         assert!(
-            strip_section.contains("dispatch_main_window_footer_action"),
-            "Full footer Run callback must route through dispatch_main_window_footer_action()"
-        );
-        assert!(
-            strip_section.contains("toggle_actions"),
-            "Full footer Actions callback must dispatch to toggle_actions()"
-        );
-        assert!(
-            strip_section.contains("open_tab_ai_agent_chat_with_entry_intent"),
-            "Full footer AI callback must dispatch to open_tab_ai_agent_chat_with_entry_intent()"
-        );
-    }
-
-    /// Fails if the full ScriptList footer Actions callback stops gating on
-    /// has_actions(). Both the native mini footer and the GPUI full footer
-    /// must share this contract.
-    #[test]
-    fn test_full_footer_actions_callback_gated_by_has_actions() {
-        let content = fs::read_to_string("src/render_script_list/mod.rs")
-            .expect("Failed to read src/render_script_list/mod.rs");
-
-        let strip_pos = content
-            .find("render_universal_prompt_hint_strip_clickable")
-            .expect("Clickable hint strip must exist in render_script_list");
-        let strip_section = &content[strip_pos..content.len().min(strip_pos + 2000)];
-
-        assert!(
-            strip_section.contains("has_actions()"),
-            "Full footer Actions callback must gate on has_actions(). Found:\n{}",
-            strip_section
+            rail_sites >= 1,
+            "the config-driven footer rail must exist in render_script_list"
         );
     }
 }

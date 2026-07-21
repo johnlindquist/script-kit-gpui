@@ -194,11 +194,17 @@ impl ScriptListApp {
             );
         });
 
-        crate::components::HintStrip::new(crate::components::template_prompt_hints())
-            .on_hint_click(0, on_submit)
-            .on_hint_click(1, on_next_field)
-            .on_hint_click(2, on_actions)
-            .into_any_element()
+        let hints = crate::components::template_prompt_hints();
+        crate::components::footer_chrome::render_clickable_footer_hint_action_rail(
+            "template-prompt-footer-rail",
+            hints.into_iter().zip([
+                Some(
+                    Box::new(on_submit) as crate::components::footer_chrome::FooterHintClickHandler
+                ),
+                Some(Box::new(on_next_field) as _),
+                Some(Box::new(on_actions) as _),
+            ]),
+        )
     }
 
     fn clickable_webcam_hint_strip(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -250,9 +256,15 @@ impl ScriptListApp {
             );
         });
 
-        crate::components::HintStrip::new(vec!["↵ Submit".into()])
-            .on_hint_click(0, on_submit)
-            .into_any_element()
+        crate::components::footer_chrome::render_clickable_footer_hint_action_rail(
+            "textarea-prompt-footer-rail",
+            [(
+                SharedString::from("↵ Submit"),
+                Some(
+                    Box::new(on_submit) as crate::components::footer_chrome::FooterHintClickHandler
+                ),
+            )],
+        )
     }
 
     fn clickable_drop_hint_strip(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -273,10 +285,20 @@ impl ScriptListApp {
             );
         });
 
-        crate::components::HintStrip::new(vec!["↵ Submit".into(), "⌘K Actions".into()])
-            .on_hint_click(0, on_submit)
-            .on_hint_click(1, on_actions)
-            .into_any_element()
+        crate::components::footer_chrome::render_clickable_footer_hint_action_rail(
+            "drop-prompt-footer-rail",
+            [
+                (
+                    SharedString::from("↵ Submit"),
+                    Some(Box::new(on_submit)
+                        as crate::components::footer_chrome::FooterHintClickHandler),
+                ),
+                (
+                    SharedString::from("⌘K Actions"),
+                    Some(Box::new(on_actions) as _),
+                ),
+            ],
+        )
     }
 
     fn render_wrapped_prompt_entity(
@@ -288,8 +310,7 @@ impl ScriptListApp {
         let shell_radius = self.other_prompt_shell_radius();
         let handle_key = cx.listener(key_handler);
         let vibrancy_bg = get_vibrancy_background(&self.theme);
-        let footer =
-            self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx));
+        let footer = self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx));
 
         crate::components::render_simple_prompt_shell(shell_radius, vibrancy_bg, entity, footer)
             .on_key_down(handle_key)
@@ -1356,7 +1377,6 @@ mod other_prompt_source_tests {
             "webcam prompt should not use a second surface id spelling"
         );
     }
-
 }
 
 #[cfg(test)]
@@ -1392,5 +1412,4 @@ mod prompt_footer_regression_tests {
             "term prompt should not keep PromptFooter after migration"
         );
     }
-
 }

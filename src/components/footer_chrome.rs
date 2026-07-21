@@ -212,6 +212,17 @@ pub(crate) fn render_footer_action_rail(
     id: &'static str,
     buttons: impl IntoIterator<Item = AnyElement>,
 ) -> AnyElement {
+    render_footer_action_rail_with_leading(id, None, buttons)
+}
+
+/// Rail variant with a left-info slot: `leading` (status text, spinner, …)
+/// sits at the left inset while the buttons stay right-aligned, mirroring the
+/// native footer's left-info + actions anatomy.
+pub(crate) fn render_footer_action_rail_with_leading(
+    id: &'static str,
+    leading: Option<AnyElement>,
+    buttons: impl IntoIterator<Item = AnyElement>,
+) -> AnyElement {
     let theme = crate::theme::get_cached_theme();
     let rail = footer_rail_chrome(&theme);
 
@@ -224,8 +235,17 @@ pub(crate) fn render_footer_action_rail(
         .flex()
         .flex_row()
         .items_center()
-        .justify_end()
         .gap(px(rail.item_gap_px))
+        .when_some(leading, |rail, leading| {
+            rail.child(
+                div()
+                    .flex_none()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .child(leading),
+            )
+        })
+        .child(div().flex_1())
         .children(buttons)
         .into_any_element()
 }
@@ -657,6 +677,18 @@ pub(crate) fn render_static_footer_hint_action_rail(
     id: &'static str,
     hints: impl IntoIterator<Item = SharedString>,
 ) -> AnyElement {
+    render_static_footer_hint_action_rail_with_leading(id, hints, None)
+}
+
+/// Static hint rail with the native footer's left-info slot: `leading`
+/// (contextual status text) rides at the left inset, hints render as shared
+/// footer button frames on the right.
+#[allow(dead_code)] // callers live in binary-only render modules
+pub(crate) fn render_static_footer_hint_action_rail_with_leading(
+    id: &'static str,
+    hints: impl IntoIterator<Item = SharedString>,
+    leading: Option<AnyElement>,
+) -> AnyElement {
     let theme = crate::theme::get_cached_theme();
     let rail = footer_rail_chrome(&theme);
     let button_height = footer_button_height(rail.height_px);
@@ -703,6 +735,67 @@ pub(crate) fn render_static_footer_hint_action_rail(
             )
             .into_any_element(),
         );
+    }
+
+    render_footer_action_rail_with_leading(id, leading, buttons)
+}
+
+pub(crate) type FooterHintClickHandler =
+    Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// Clickable variant of the static hint rail: each hint renders as a shared
+/// footer button frame and fires its handler on click. Keeps clickable
+/// prompt footers (template/textarea/drop) on the same footer language as
+/// every other in-window glass footer.
+#[allow(dead_code)] // callers live in binary-only render modules
+pub(crate) fn render_clickable_footer_hint_action_rail(
+    id: &'static str,
+    hints: impl IntoIterator<Item = (SharedString, Option<FooterHintClickHandler>)>,
+) -> AnyElement {
+    let theme = crate::theme::get_cached_theme();
+    let rail = footer_rail_chrome(&theme);
+    let button_height = footer_button_height(rail.height_px);
+    let button_ids = [
+        "clickable-footer-hint-0",
+        "clickable-footer-hint-1",
+        "clickable-footer-hint-2",
+        "clickable-footer-hint-3",
+        "clickable-footer-hint-4",
+        "clickable-footer-hint-5",
+    ];
+    let mut buttons = Vec::new();
+
+    for (hint, handler) in hints {
+        let index = buttons.len();
+        let button_id = button_ids
+            .get(index)
+            .copied()
+            .unwrap_or("clickable-footer-hint-overflow");
+        let (label, key) = footer_hint_button_parts(hint.as_ref());
+        let frame = render_footer_hint_action_button_frame(
+            FooterHintActionButtonFrameSpec {
+                id: button_id,
+                label,
+                key,
+                slot_width_px: footer_action_slot_width(FooterActionSlot::Run),
+                height_px: button_height,
+                selected: false,
+                key_first: false,
+                justify: FooterHintContentJustify::Center,
+                layout: FooterHintButtonLayoutOverrides {
+                    shrink_frame_to_content_px: true,
+                    hug_frame_to_content: true,
+                    ..FooterHintButtonLayoutOverrides::default()
+                },
+            },
+            &theme,
+        );
+        buttons.push(match handler {
+            Some(handler) => frame
+                .on_click(move |event, window, cx| handler(event, window, cx))
+                .into_any_element(),
+            None => frame.into_any_element(),
+        });
     }
 
     render_footer_action_rail(id, buttons)

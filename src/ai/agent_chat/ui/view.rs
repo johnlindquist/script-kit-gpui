@@ -3619,36 +3619,37 @@ impl AgentChatView {
         snapshot: AgentChatFooterSnapshot,
         weak_view: WeakEntity<AgentChatView>,
     ) -> gpui::AnyElement {
-        let theme = theme::get_cached_theme();
-        let hint_text_hex = theme.colors.text.primary;
-        let hint_opacity_byte = (crate::theme::opacity::OPACITY_TEXT_MUTED * 255.0).round() as u32;
-        let hint_text_rgba = (hint_text_hex << 8) | hint_opacity_byte;
-        let hint_row = Self::render_agent_chat_footer_hint_row(
-            &snapshot,
-            weak_view.clone(),
-            false,
-            hint_text_rgba,
-            &theme,
-        );
+        // Same config-driven rail as every other glass footer: the snapshot's
+        // buttons + profile left-info render through the shared footer
+        // chrome, and clicks dispatch through the same footer authority.
+        use crate::footer_popup::{FooterButtonConfig, MainWindowFooterConfig};
 
-        div()
-            .w_full()
-            .h(px(crate::window_resize::main_layout::HINT_STRIP_HEIGHT))
-            .px(px(crate::window_resize::main_layout::HINT_STRIP_PADDING_X))
-            .py(px(crate::window_resize::main_layout::HINT_STRIP_PADDING_Y))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .border_t(px(1.0))
-            .border_color(rgba((theme.colors.text.primary << 8) | 0x10))
-            .child(Self::render_profile_status_marker_from_snapshot(
-                &snapshot,
-                weak_view.clone(),
-                hint_text_rgba,
-            ))
-            .child(hint_row)
-            .into_any_element()
+        let buttons = snapshot
+            .buttons
+            .iter()
+            .map(|btn| {
+                let mut config = FooterButtonConfig::new(btn.action, btn.key, btn.label)
+                    .selected(btn.selected)
+                    .enabled(btn.enabled);
+                if let Some(reason) = btn.disabled_reason {
+                    config = config.disabled_reason(reason);
+                }
+                config
+            })
+            .collect();
+        let mut config = MainWindowFooterConfig::new("agent_chat", buttons);
+        config.left_info = Some(snapshot.profile_left_info());
+
+        crate::components::footer_chrome::render_main_window_footer_config_rail(
+            config,
+            move |action, window, cx| {
+                if let Some(view) = weak_view.upgrade() {
+                    view.update(cx, |view, cx| {
+                        view.dispatch_footer_button(action, window, cx);
+                    });
+                }
+            },
+        )
     }
 
     fn footer_slot_width(action: crate::footer_popup::FooterAction, leading: bool) -> f32 {
