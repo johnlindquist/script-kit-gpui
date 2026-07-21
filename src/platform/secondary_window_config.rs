@@ -930,6 +930,12 @@ unsafe fn begin_ns_window_exit_dematerialize(
         if parent_window != nil {
             let _: () = msg_send![parent_window, removeChildWindow: window];
         }
+        if variant == GlassMorphVariant::ContentLayer {
+            // Freeze content layout during the outward release so it fades
+            // in place instead of reflowing wider (window is destroyed after
+            // the tail — no restore needed).
+            let _ = pin_gpui_content_views_for_morph(window);
+        }
 
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
@@ -1153,6 +1159,14 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
 /// transforms on NSViewBackingLayer (runtime-proven with a static-scale
 /// experiment) — and frame-animating while parent-attached fights the
 /// parent-child machinery (c598a32bf). Detaching for ~300ms sidesteps both.
+///
+/// GPUI content is PINNED at its final size (centered, flexible margins)
+/// for the morph's duration: without this, GPUI re-lays-out the popup at
+/// every intermediate window size and the content REFLOWS — right-anchored
+/// keycaps slide while left-aligned text stays put, which reads as the list
+/// and the container being out of sync (user report, frame-measured). The
+/// glass backdrop keeps its autoresizing so the material breathes with the
+/// frame around rock-solid content.
 #[cfg(target_os = "macos")]
 unsafe fn animate_tahoe_glass_child_appearance(window: id, log_target: &str, window_name: &str) {
     let Some(tuning) = glass_morph_tuning() else {
@@ -1163,28 +1177,97 @@ unsafe fn animate_tahoe_glass_child_appearance(window: id, log_target: &str, win
     let parent: id = msg_send![window, parentWindow];
     if parent != nil {
         let _: id = msg_send![parent, retain];
-        let _: id = msg_send![window, retain];
         let _: () = msg_send![parent, removeChildWindow: window];
-        schedule_child_window_reattach(parent, window, tuning.duration + 0.08);
     }
+    let pinned = pin_gpui_content_views_for_morph(window);
+
+    let _: id = msg_send![window, retain];
+    schedule_child_morph_settle(parent, window, pinned, tuning.duration + 0.08);
 
     animate_tahoe_glass_appearance(window, log_target, window_name);
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s detached={}",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s detached={} pinned={}",
             window_name,
             GlassMorphVariant::ContentLayer.log_name(),
             tuning.duration,
             parent != nil,
+            pinned,
         ),
     );
 }
 
-/// Re-attach a popup to its parent after the enter morph settles. Both
-/// windows were retained by the caller; releases happen here exactly once.
+/// Pin every non-backdrop contentView subview (the GPUI Metal view and the
+/// glass-button container) at the CURRENT content size with flexible-margin
+/// autoresizing, so the window frame can animate around statically laid-out
+/// content. Must run while the window is still at its FINAL frame (before
+/// the morph sets the start outset). Returns true when anything was pinned.
 #[cfg(target_os = "macos")]
-unsafe fn schedule_child_window_reattach(parent: id, window: id, delay_seconds: f64) {
+unsafe fn pin_gpui_content_views_for_morph(window: id) -> bool {
+    use cocoa::foundation::NSRect;
+
+    // Fixed size, auto-centering: flexible min/max margins on both axes.
+    const MASK_CENTERED_FIXED: u64 = 1 | 4 | 8 | 32;
+
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return false;
+    }
+    let bounds: NSRect = msg_send![content_view, bounds];
+    let subviews: id = msg_send![content_view, subviews];
+    let count: usize = msg_send![subviews, count];
+    let mut pinned = false;
+    for index in 0..count {
+        let view: id = msg_send![subviews, objectAtIndex: index];
+        if view == nil {
+            continue;
+        }
+        let tag: isize = msg_send![view, tag];
+        if tag == TAHOE_GLASS_BACKDROP_TAG {
+            continue; // the material tracks the frame and breathes
+        }
+        let _: () = msg_send![view, setFrame: bounds];
+        let _: () = msg_send![view, setAutoresizingMask: MASK_CENTERED_FIXED];
+        pinned = true;
+    }
+    pinned
+}
+
+/// Undo [`pin_gpui_content_views_for_morph`]: restore width/height-sizable
+/// autoresizing and stretch the views back over the (now settled) bounds.
+#[cfg(target_os = "macos")]
+unsafe fn restore_gpui_content_views_after_morph(window: id) {
+    use cocoa::foundation::NSRect;
+
+    const MASK_SIZABLE: u64 = 2 | 16;
+
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let bounds: NSRect = msg_send![content_view, bounds];
+    let subviews: id = msg_send![content_view, subviews];
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let view: id = msg_send![subviews, objectAtIndex: index];
+        if view == nil {
+            continue;
+        }
+        let tag: isize = msg_send![view, tag];
+        if tag == TAHOE_GLASS_BACKDROP_TAG {
+            continue;
+        }
+        let _: () = msg_send![view, setFrame: bounds];
+        let _: () = msg_send![view, setAutoresizingMask: MASK_SIZABLE];
+    }
+}
+
+/// After the enter morph settles: restore pinned content geometry and
+/// re-attach the popup to its parent. All raw pointers were retained by the
+/// caller; releases happen here exactly once.
+#[cfg(target_os = "macos")]
+unsafe fn schedule_child_morph_settle(parent: id, window: id, pinned: bool, delay_seconds: f64) {
     #[link(name = "System", kind = "dylib")]
     extern "C" {
         static _dispatch_main_q: std::ffi::c_void;
@@ -1197,41 +1280,51 @@ unsafe fn schedule_child_window_reattach(parent: id, window: id, delay_seconds: 
         );
     }
 
-    struct ReattachContext {
+    struct SettleContext {
         parent: id,
         window: id,
+        pinned: bool,
     }
     // SAFETY: raw NSWindow pointers retained by the caller; consumed exactly
     // once on the main queue below.
-    unsafe impl Send for ReattachContext {}
+    unsafe impl Send for SettleContext {}
 
-    extern "C" fn reattach(context: *mut std::ffi::c_void) {
-        // SAFETY: context is the Box leaked below; main queue; both windows
+    extern "C" fn settle(context: *mut std::ffi::c_void) {
+        // SAFETY: context is the Box leaked below; main queue; the windows
         // were retained before the hop.
         unsafe {
-            let context = Box::from_raw(context as *mut ReattachContext);
+            let context = Box::from_raw(context as *mut SettleContext);
             let parent = context.parent;
             let window = context.window;
             let window_visible: bool = msg_send![window, isVisible];
-            let parent_visible: bool = msg_send![parent, isVisible];
-            let current_parent: id = msg_send![window, parentWindow];
-            if window_visible && parent_visible && current_parent == nil {
-                const NS_WINDOW_ABOVE: i64 = 1;
-                let _: () = msg_send![parent, addChildWindow: window ordered: NS_WINDOW_ABOVE];
+            if context.pinned && window_visible {
+                restore_gpui_content_views_after_morph(window);
+            }
+            if parent != nil {
+                let parent_visible: bool = msg_send![parent, isVisible];
+                let current_parent: id = msg_send![window, parentWindow];
+                if window_visible && parent_visible && current_parent == nil {
+                    const NS_WINDOW_ABOVE: i64 = 1;
+                    let _: () = msg_send![parent, addChildWindow: window ordered: NS_WINDOW_ABOVE];
+                }
+                let _: () = msg_send![parent, release];
             }
             let _: () = msg_send![window, release];
-            let _: () = msg_send![parent, release];
         }
     }
 
     const DISPATCH_TIME_NOW: u64 = 0;
     let when = dispatch_time(DISPATCH_TIME_NOW, (delay_seconds * 1e9) as i64);
-    let context = Box::into_raw(Box::new(ReattachContext { parent, window }));
+    let context = Box::into_raw(Box::new(SettleContext {
+        parent,
+        window,
+        pinned,
+    }));
     dispatch_after_f(
         when,
         &_dispatch_main_q as *const std::ffi::c_void,
         context as *mut std::ffi::c_void,
-        reattach,
+        settle,
     );
 }
 
