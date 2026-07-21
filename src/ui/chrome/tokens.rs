@@ -12,6 +12,11 @@ pub const LIQUID_GLASS_MIN_VISUAL_PX: f32 = 20.0;
 pub const LIQUID_GLASS_PREFERRED_HIT_PX: f32 = 44.0;
 pub const LIQUID_GLASS_PREFERRED_CENTER_GAP_PX: f32 = 60.0;
 
+/// Height of the click-through glass edge strip below the main-window header.
+/// The launcher list uses the same value as its resting top inset so rows can
+/// scroll beneath the native strip without resting behind it.
+pub const LIQUID_GLASS_HEADER_EDGE_STRIP_HEIGHT_PX: f32 = 20.0;
+
 pub const LIQUID_GLASS_WINDOW_RADIUS_PX: f32 = 22.0;
 /// Radius for the Tahoe-style floating popup shell (e.g. the actions dialog).
 pub const LIQUID_GLASS_POPUP_RADIUS_PX: f32 = 18.0;

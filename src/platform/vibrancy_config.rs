@@ -126,6 +126,7 @@ pub fn configure_window_vibrancy_material_for_appearance(
         let mut count = 0;
         configure_visual_effect_views_recursive(content_view, &mut count, is_dark, material);
         configure_tahoe_window_backdrop(window, "PANEL", "Main window");
+        crate::footer_popup::sync_main_window_glass_scroll_bands(window);
 
         let material_name = vibrancy_material_name(material);
         if count == 0 {

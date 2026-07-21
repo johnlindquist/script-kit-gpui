@@ -16,6 +16,8 @@ use objc::{msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
 const FOOTER_EFFECT_ID: &str = "script-kit-footer-effect";
 #[cfg(target_os = "macos")]
+const HEADER_GLASS_STRIP_ID: &str = "script-kit-header-glass-strip";
+#[cfg(target_os = "macos")]
 const FOOTER_DIVIDER_ID: &str = "script-kit-footer-divider";
 #[cfg(target_os = "macos")]
 const FOOTER_HINTS_ID: &str = "script-kit-footer-hints";
@@ -1194,16 +1196,10 @@ pub(crate) fn sync_main_footer_popup(
     config: Option<&MainWindowFooterConfig>,
     cx: &mut App,
 ) {
-    // Glass mode: neither the native footer host nor the overlay window can
-    // participate in the whole-window glass morph (the overlay is a separate
-    // NSWindow that appears instantly and chases the animating frame).
-    // Forcing `config = None` reuses the existing teardown paths — native
-    // host removed, overlay closed, no installed surface — which makes
-    // `main_window_footer_slot` render the GPUI footer IN the main window,
-    // where it morphs with everything else.
-    let glass_in_window_footer = crate::platform::tahoe_liquid_glass_available()
-        && crate::theme::get_cached_theme().is_vibrancy_enabled();
-    let config = if glass_in_window_footer { None } else { config };
+    // The in-window AppKit host rides the main NSWindow's frame morph. The
+    // separate GPUI overlay NSWindow does not, so glass mode keeps only the
+    // native host active and always closes the overlay.
+    let overlay_config = (!glass_scroll_bands_active()).then_some(config).flatten();
 
     set_main_window_footer_last_config(config);
     let requested_surface = config.map(|cfg| cfg.surface);
@@ -1249,7 +1245,13 @@ pub(crate) fn sync_main_footer_popup(
         }
     }
 
-    defer_gpui_footer_overlay_sync(cx, parent_window_handle, parent_bounds, display_id, config);
+    defer_gpui_footer_overlay_sync(
+        cx,
+        parent_window_handle,
+        parent_bounds,
+        display_id,
+        overlay_config,
+    );
 
     #[cfg(not(target_os = "macos"))]
     let _ = (window, config);
@@ -1306,6 +1308,36 @@ pub(crate) fn sync_window_footer_popup(window: &mut Window, config: &MainWindowF
 
     #[cfg(not(target_os = "macos"))]
     let _ = (window, config);
+}
+
+/// Remove the reusable native footer host associated with THIS window (not the
+/// main-window global). This is the symmetric teardown to
+/// [`sync_window_footer_popup`]: it tears down only the footer-effect subview
+/// on this window's own NSWindow via `removeFromSuperview`, leaving the native
+/// NSVisualEffectView blur trio on every OTHER window untouched. Agent Chat
+/// calls this when its resolved footer owner transitions away from the native
+/// spacer (to an inline rail or an external host) so a detached window never
+/// leaves an orphan native footer host behind.
+///
+/// It is a no-op when no host is installed on this window (`remove_main_footer_host`
+/// finds no matching subview and returns), so callers may invoke it defensively
+/// on any non-native owner.
+pub(crate) fn clear_window_footer_popup(window: &mut Window) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(ns_window) = main_window_ns_window(window) else {
+            return;
+        };
+
+        // SAFETY: `ns_window` comes from the live GPUI window currently being
+        // rendered/observed on the AppKit main thread.
+        unsafe {
+            remove_main_footer_host(ns_window);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 }
 
 pub(crate) fn notify_main_footer_popup(
@@ -1855,6 +1887,229 @@ unsafe fn configure_gpui_footer_overlay_ns_window(ns_window: id) {
     }
 }
 
+/// True when the main window should use the Tahoe above-Metal scroll bands.
+/// Keeping this policy in the native-band owner prevents AppKit installation,
+/// GPUI insets, and scroll receipts from drifting onto different gates.
+pub(crate) fn glass_scroll_bands_active() -> bool {
+    crate::platform::tahoe_liquid_glass_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled()
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn main_window_gpui_metal_view(content_view: id, glass_class: &objc::runtime::Class) -> id {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let subviews: id = msg_send![content_view, subviews];
+    if subviews == nil {
+        return nil;
+    }
+
+    let count: usize = msg_send![subviews, count];
+    let mut fallback = nil;
+    for index in 0..count {
+        let view: id = msg_send![subviews, objectAtIndex: index];
+        if view == nil {
+            continue;
+        }
+        let is_glass: cocoa::base::BOOL = msg_send![view, isKindOfClass: glass_class];
+        let is_visual_effect: cocoa::base::BOOL =
+            msg_send![view, isKindOfClass: class!(NSVisualEffectView)];
+        if is_glass == YES || is_visual_effect == YES {
+            continue;
+        }
+
+        let view_class: id = msg_send![view, class];
+        let class_name: id = msg_send![view_class, className];
+        let utf8: *const std::os::raw::c_char = msg_send![class_name, UTF8String];
+        let class_name = if utf8.is_null() {
+            ""
+        } else {
+            std::ffi::CStr::from_ptr(utf8).to_str().unwrap_or("")
+        };
+        if class_name.contains("Metal") || class_name.contains("GPUI") {
+            return view;
+        }
+        fallback = view;
+    }
+    fallback
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_main_window_glass_band_above_metal(content_view: id, band: id) -> bool {
+    use objc::{msg_send, sel, sel_impl};
+
+    let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
+        return false;
+    };
+    let gpui_view = main_window_gpui_metal_view(content_view, glass_class);
+    if gpui_view == nil {
+        tracing::warn!(
+            target: "script_kit::footer_popup",
+            event = "glass_scroll_band_missing_metal_view",
+            "Unable to order main-window glass band above the GPUI Metal view"
+        );
+        return false;
+    }
+    let _: () = msg_send![
+        content_view,
+        addSubview: band
+        positioned: 1isize
+        relativeTo: gpui_view
+    ];
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn main_window_header_glass_strip_frame(
+    content_bounds: cocoa::foundation::NSRect,
+) -> cocoa::foundation::NSRect {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+    let def = crate::designs::current_main_menu_theme().def();
+    let header_height =
+        crate::components::main_view_chrome::main_view_header_metrics(def, Some(def.search.height))
+            .header_height as f64;
+    let strip_height = crate::ui::chrome::LIQUID_GLASS_HEADER_EDGE_STRIP_HEIGHT_PX as f64;
+    // Oversized horizontally: the Liquid Glass material draws an edge rim;
+    // bleeding past the window edges clips the side rims out of view.
+    NSRect::new(
+        NSPoint::new(
+            -8.0,
+            (content_bounds.size.height - header_height - strip_height).max(0.0),
+        ),
+        NSSize::new(content_bounds.size.width + 16.0, strip_height),
+    )
+}
+
+/// Reconcile the platform-managed footer band and header edge strip with the
+/// main window's current glass mode and frame. Called beside Tahoe backdrop
+/// recreation and again when the footer host is created/refreshed.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
+    use cocoa::appkit::NSViewWidthSizable;
+    use cocoa::base::YES;
+    use cocoa::foundation::NSRect;
+    use objc::{msg_send, sel, sel_impl};
+
+    if crate::platform::require_main_thread("sync_main_window_glass_scroll_bands") {
+        return;
+    }
+    let content_view: id = msg_send![ns_window, contentView];
+    if content_view == nil {
+        return;
+    }
+
+    let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
+        return;
+    };
+    let active = glass_scroll_bands_active();
+    let mut footer_view = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
+    if footer_view != nil {
+        let footer_is_glass: cocoa::base::BOOL = msg_send![footer_view, isKindOfClass: glass_class];
+        if (footer_is_glass == YES) != active {
+            let _: () = msg_send![footer_view, removeFromSuperview];
+            clear_main_window_footer_refresh_signature();
+            footer_view = nil;
+        }
+    }
+
+    let header_strip = find_subview_by_identifier(content_view, HEADER_GLASS_STRIP_ID);
+    if !active {
+        if header_strip != nil {
+            let _: () = msg_send![header_strip, removeFromSuperview];
+        }
+        return;
+    }
+
+    let content_bounds: NSRect = msg_send![content_view, bounds];
+    if footer_view != nil {
+        let footer_frame = cocoa::foundation::NSRect::new(
+            cocoa::foundation::NSPoint::new(0.0, 0.0),
+            cocoa::foundation::NSSize::new(content_bounds.size.width, footer_height()),
+        );
+        let _: () = msg_send![footer_view, setFrame: footer_frame];
+    }
+
+    let strip = if header_strip != nil {
+        header_strip
+    } else {
+        let Some(strip_class) = glass_header_strip_view_class(glass_class) else {
+            return;
+        };
+        let strip: id = msg_send![strip_class, alloc];
+        let strip: id =
+            msg_send![strip, initWithFrame: main_window_header_glass_strip_frame(content_bounds)];
+        if strip == nil {
+            return;
+        }
+        let identifier = ns_string(HEADER_GLASS_STRIP_ID);
+        if identifier != nil {
+            let _: () = msg_send![strip, setIdentifier: identifier];
+        }
+        let _: () = msg_send![strip, setAutoresizingMask: NSViewWidthSizable];
+        let _: () = msg_send![strip, setWantsLayer: YES];
+        let _: () = msg_send![strip, setCornerRadius: 0.0_f64];
+        log_glass_effect_view_properties_once(glass_class);
+        if !add_main_window_glass_band_above_metal(content_view, strip) {
+            let _: () = msg_send![strip, release];
+            return;
+        }
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "glass_header_strip_installed",
+            height = crate::ui::chrome::LIQUID_GLASS_HEADER_EDGE_STRIP_HEIGHT_PX,
+            "Installed click-through glass header edge strip above the GPUI Metal view"
+        );
+        strip
+    };
+
+    let _: () = msg_send![strip, setFrame: main_window_header_glass_strip_frame(content_bounds)];
+}
+
+/// One-shot introspection: log NSGlassEffectView's declared properties so we
+/// can discover any rim/style knobs Apple exposes (macOS 26 API surface is
+/// underdocumented). Debug aid; logs once per process.
+#[cfg(target_os = "macos")]
+unsafe fn log_glass_effect_view_properties_once(glass_class: &objc::runtime::Class) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        #[link(name = "objc")]
+        extern "C" {
+            fn class_copyPropertyList(
+                cls: *const objc::runtime::Class,
+                out_count: *mut u32,
+            ) -> *mut *const std::ffi::c_void;
+            fn property_getName(property: *const std::ffi::c_void) -> *const std::os::raw::c_char;
+            fn free(ptr: *mut std::ffi::c_void);
+        }
+        let mut count: u32 = 0;
+        let list = class_copyPropertyList(glass_class as *const _, &mut count);
+        if list.is_null() {
+            return;
+        }
+        let mut names = Vec::new();
+        for index in 0..count as usize {
+            let property = *list.add(index);
+            let name = property_getName(property);
+            if !name.is_null() {
+                names.push(
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        free(list as *mut std::ffi::c_void);
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "glass_effect_view_properties",
+            properties = %names.join(","),
+            "NSGlassEffectView declared properties"
+        );
+    });
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     use cocoa::appkit::NSViewWidthSizable;
@@ -1870,6 +2125,8 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
         return false;
     }
 
+    sync_main_window_glass_scroll_bands(ns_window);
+
     let existing = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
     if existing != nil {
         return true;
@@ -1881,7 +2138,15 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
         NSSize::new(content_bounds.size.width, footer_height()),
     );
 
-    let footer_cls = footer_effect_view_class();
+    let glass_mode = glass_scroll_bands_active();
+    let footer_cls = if glass_mode {
+        let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
+            return false;
+        };
+        glass_footer_effect_view_class(glass_class).unwrap_or_else(footer_effect_view_class)
+    } else {
+        footer_effect_view_class()
+    };
     let footer_view: id = msg_send![footer_cls, alloc];
     let footer_view: id = msg_send![footer_view, initWithFrame: footer_frame];
     if footer_view == nil {
@@ -1894,18 +2159,6 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     }
     let _: () = msg_send![footer_view, setAutoresizingMask: NSViewWidthSizable];
     let _: () = msg_send![footer_view, setWantsLayer: YES];
-
-    // Glass mode: this host is an NSVisualEffectView whose blur band would
-    // composite on top of the Tahoe glass backdrop. The vibrancy configure
-    // pass hides VEVs, but it has already run by the time this host is
-    // (re)created on each window show — first open looked right, reopen
-    // brought the band back. Start hidden so every recreation matches the
-    // configured glass-mode state.
-    if crate::platform::tahoe_liquid_glass_available()
-        && crate::theme::get_cached_theme().is_vibrancy_enabled()
-    {
-        let _: () = msg_send![footer_view, setHidden: YES];
-    }
 
     let divider_view: id = msg_send![class!(NSView), alloc];
     let divider_view: id = msg_send![
@@ -1952,18 +2205,35 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
         let _: () = msg_send![footer_view, addSubview: left_info_view];
     }
 
-    let _: () = msg_send![
-        content_view,
-        addSubview: footer_view
-        positioned: 1isize
-        relativeTo: nil
-    ];
+    let installed = if glass_mode {
+        add_main_window_glass_band_above_metal(content_view, footer_view)
+    } else {
+        let _: () = msg_send![
+            content_view,
+            addSubview: footer_view
+            positioned: 1isize
+            relativeTo: nil
+        ];
+        true
+    };
+    if !installed {
+        let _: () = msg_send![footer_view, release];
+        return false;
+    }
 
     tracing::info!(
         target: "script_kit::footer_popup",
         event = "native_footer_host_installed",
         "Installed native footer host inside the main window contentView"
     );
+    if glass_mode {
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "glass_footer_band_installed",
+            height = footer_height(),
+            "Installed native footer chrome on a glass band above the GPUI Metal view"
+        );
+    }
 
     find_subview_by_identifier(content_view, FOOTER_EFFECT_ID) != nil
 }
@@ -2061,7 +2331,12 @@ fn footer_divider_rgba(theme: &crate::theme::Theme, default_rgba: u32) -> u32 {
 /// overlay child window owns the glyphs.
 #[cfg(target_os = "macos")]
 unsafe fn refresh_main_footer_host(ns_window: id, config: &MainWindowFooterConfig) -> bool {
-    refresh_footer_host_impl(ns_window, config, gpui_footer_overlay_enabled())
+    sync_main_window_glass_scroll_bands(ns_window);
+    refresh_footer_host_impl(
+        ns_window,
+        config,
+        gpui_footer_overlay_enabled() && !glass_scroll_bands_active(),
+    )
 }
 
 /// Refresh a reusable (non-main) window footer host — detached Agent Chat and
@@ -2094,6 +2369,12 @@ unsafe fn refresh_footer_host_impl(
     if footer_view == nil {
         return false;
     }
+    let footer_is_glass = objc::runtime::Class::get("NSGlassEffectView")
+        .map(|glass_class| {
+            let is_glass: cocoa::base::BOOL = msg_send![footer_view, isKindOfClass: glass_class];
+            is_glass == YES
+        })
+        .unwrap_or(false);
 
     let theme = crate::theme::get_cached_theme();
     let chrome = crate::theme::AppChromeColors::from_theme(&theme);
@@ -2236,10 +2517,12 @@ unsafe fn refresh_footer_host_impl(
             }
         }
 
-        let _: () = msg_send![footer_view, setMaterial: material];
-        let _: () = msg_send![footer_view, setState: 1isize];
-        let _: () = msg_send![footer_view, setBlendingMode: 1isize];
-        let _: () = msg_send![footer_view, setEmphasized: is_dark];
+        if !footer_is_glass {
+            let _: () = msg_send![footer_view, setMaterial: material];
+            let _: () = msg_send![footer_view, setState: 1isize];
+            let _: () = msg_send![footer_view, setBlendingMode: 1isize];
+            let _: () = msg_send![footer_view, setEmphasized: is_dark];
+        }
     }
 
     if footer_geometry_changed {
@@ -2249,10 +2532,17 @@ unsafe fn refresh_footer_host_impl(
         );
         let _: () = msg_send![footer_view, setFrame: footer_frame];
 
-        let footer_layer: id = msg_send![footer_view, layer];
-        if footer_layer != nil {
-            let _: () = msg_send![footer_layer, setCornerRadius: 0.0_f64];
-            let _: () = msg_send![footer_layer, setMasksToBounds: YES];
+        if footer_is_glass {
+            // Square band: rounding the glass view rounds its TOP corners
+            // too (user-rejected); the window's own corner mask supplies the
+            // bottom rounding.
+            let _: () = msg_send![footer_view, setCornerRadius: 0.0_f64];
+        } else {
+            let footer_layer: id = msg_send![footer_view, layer];
+            if footer_layer != nil {
+                let _: () = msg_send![footer_layer, setCornerRadius: 0.0_f64];
+                let _: () = msg_send![footer_layer, setMasksToBounds: YES];
+            }
         }
     }
 
@@ -2262,7 +2552,11 @@ unsafe fn refresh_footer_host_impl(
         // native material host. Hide only the hard divider in that mode so
         // the controls read as floating, while keeping the identified view
         // installed for fidelity inspection and the native-only fallback.
-        let divider_hidden = if gpui_overlay_owns_glyphs { YES } else { NO };
+        let divider_hidden = if gpui_overlay_owns_glyphs || footer_is_glass {
+            YES
+        } else {
+            NO
+        };
         let _: () = msg_send![divider_view, setHidden: divider_hidden];
 
         if footer_geometry_changed {
@@ -5084,6 +5378,70 @@ extern "C" fn footer_button_mouse_exited(
 }
 
 #[cfg(target_os = "macos")]
+fn glass_header_strip_view_class(
+    glass_class: &objc::runtime::Class,
+) -> Option<*const objc::runtime::Class> {
+    use std::sync::OnceLock;
+
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    use objc::{sel, sel_impl};
+
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let ptr = *CLASS.get_or_init(|| unsafe {
+        if let Some(existing) = Class::get("ScriptKitHeaderGlassStripView") {
+            return existing as *const Class as usize;
+        }
+        let Some(mut decl) = ClassDecl::new("ScriptKitHeaderGlassStripView", glass_class) else {
+            return 0;
+        };
+        decl.add_method(
+            sel!(hitTest:),
+            glass_header_strip_hit_test
+                as extern "C" fn(&Object, Sel, cocoa::foundation::NSPoint) -> id,
+        );
+        decl.register() as *const Class as usize
+    });
+    (ptr != 0).then_some(ptr as *const objc::runtime::Class)
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn glass_header_strip_hit_test(
+    _this: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+    _: cocoa::foundation::NSPoint,
+) -> id {
+    nil
+}
+
+#[cfg(target_os = "macos")]
+fn glass_footer_effect_view_class(
+    glass_class: &objc::runtime::Class,
+) -> Option<*const objc::runtime::Class> {
+    use std::sync::OnceLock;
+
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    use objc::{sel, sel_impl};
+
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let ptr = *CLASS.get_or_init(|| unsafe {
+        if let Some(existing) = Class::get("ScriptKitFooterGlassEffectView") {
+            return existing as *const Class as usize;
+        }
+        let Some(mut decl) = ClassDecl::new("ScriptKitFooterGlassEffectView", glass_class) else {
+            return 0;
+        };
+        decl.add_method(
+            sel!(hitTest:),
+            glass_footer_hit_test as extern "C" fn(&Object, Sel, cocoa::foundation::NSPoint) -> id,
+        );
+        decl.register() as *const Class as usize
+    });
+    (ptr != 0).then_some(ptr as *const objc::runtime::Class)
+}
+
+#[cfg(target_os = "macos")]
 fn footer_effect_view_class() -> *const objc::runtime::Class {
     use std::sync::OnceLock;
 
@@ -5293,6 +5651,41 @@ unsafe fn footer_item_button_at_point(
     }
 
     nil
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn glass_footer_hit_test(
+    this: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+    point: cocoa::foundation::NSPoint,
+) -> id {
+    use objc::{msg_send, sel, sel_impl};
+
+    // SAFETY: `this` is a live NSGlassEffectView subclass. Visible AppKit
+    // controls remain interactive; every background hit returns nil so wheel,
+    // hover, and row clicks continue to the GPUI Metal sibling underneath.
+    unsafe {
+        let this_id = this as *const _ as id;
+        let item_button = footer_item_button_at_point(this_id, point);
+        if item_button != nil {
+            return item_button;
+        }
+
+        let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
+            return nil;
+        };
+        let hit: id = msg_send![super(this_id, glass_class), hitTest: point];
+        let button = nearest_footer_button(hit);
+        if button != nil {
+            return button;
+        }
+        let item_button = nearest_footer_item_button(hit);
+        if item_button != nil {
+            return item_button;
+        }
+
+        nil
+    }
 }
 
 #[cfg(target_os = "macos")]

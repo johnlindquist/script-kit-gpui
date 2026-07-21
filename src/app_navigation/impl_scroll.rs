@@ -12,6 +12,25 @@ pub(crate) fn main_list_footer_overlay_total_padding() -> gpui::Pixels {
     main_list_footer_overlay_height() + main_list_footer_reveal_clearance_height()
 }
 
+#[inline]
+pub(crate) fn main_list_header_glass_strip_height() -> gpui::Pixels {
+    if crate::footer_popup::glass_scroll_bands_active() {
+        gpui::px(crate::ui::chrome::LIQUID_GLASS_HEADER_EDGE_STRIP_HEIGHT_PX)
+    } else {
+        gpui::px(0.0)
+    }
+}
+
+#[inline]
+pub(crate) fn main_list_header_overlay_height(
+    def: crate::designs::MainMenuThemeDef,
+) -> gpui::Pixels {
+    gpui::px(
+        crate::components::main_view_chrome::main_view_header_metrics(def, Some(def.search.height))
+            .header_height,
+    ) + main_list_header_glass_strip_height()
+}
+
 /// Per-kind row heights resolved once per measurement pass.
 ///
 /// `effective_*_height_for_theme` resolves the full theme metrics override
@@ -338,11 +357,7 @@ impl ScriptListApp {
     fn main_list_scroll_geometry(&mut self) -> MainListScrollGeometry {
         let viewport_height = self.main_list_state.viewport_bounds().size.height.as_f32();
         let def = self.current_main_menu_theme.def();
-        let header_height = crate::components::main_view_chrome::main_view_header_metrics(
-            def,
-            Some(def.search.height),
-        )
-        .header_height;
+        let header_height = main_list_header_overlay_height(def).as_f32();
         let footer_height = main_list_footer_overlay_total_padding().as_f32();
         let scroll_offset = self.main_list_state.logical_scroll_top();
         let heights = ScriptListRowHeights::for_theme(self.current_main_menu_theme);
@@ -365,12 +380,16 @@ impl ScriptListApp {
     pub(crate) fn main_list_top_fade_snapshot(&mut self) -> MainListTopFadeSnapshot {
         let geometry = self.main_list_scroll_geometry();
         let tokens = self.current_main_menu_theme.def().list;
-        let progress = main_list_top_fade_progress_for_selection(
-            geometry.scroll_top,
-            tokens.top_occlusion_ramp,
-            self.selected_index,
-            self.main_menu_result_caches.first_selectable_index(),
-        );
+        let progress = if crate::footer_popup::glass_scroll_bands_active() {
+            0.0
+        } else {
+            main_list_top_fade_progress_for_selection(
+                geometry.scroll_top,
+                tokens.top_occlusion_ramp,
+                self.selected_index,
+                self.main_menu_result_caches.first_selectable_index(),
+            )
+        };
         MainListTopFadeSnapshot {
             active: progress > 0.0,
             progress,
@@ -646,11 +665,7 @@ impl ScriptListApp {
         let geometry = main_list_scroll_geometry_values(
             content_height,
             viewport_height.as_f32(),
-            crate::components::main_view_chrome::main_view_header_metrics(
-                self.current_main_menu_theme.def(),
-                Some(self.current_main_menu_theme.def().search.height),
-            )
-            .header_height,
+            main_list_header_overlay_height(self.current_main_menu_theme.def()).as_f32(),
             footer_height.as_f32(),
             scroll_top,
         );
@@ -671,12 +686,16 @@ impl ScriptListApp {
         let selected_row_within_safe_viewport =
             selected_row_below_header && selected_row_above_footer;
         let tokens = self.current_main_menu_theme.def().list;
-        let top_fade_progress = main_list_top_fade_progress_for_selection(
-            geometry.scroll_top,
-            tokens.top_occlusion_ramp,
-            self.selected_index,
-            self.main_menu_result_caches.first_selectable_index(),
-        );
+        let top_fade_progress = if crate::footer_popup::glass_scroll_bands_active() {
+            0.0
+        } else {
+            main_list_top_fade_progress_for_selection(
+                geometry.scroll_top,
+                tokens.top_occlusion_ramp,
+                self.selected_index,
+                self.main_menu_result_caches.first_selectable_index(),
+            )
+        };
         let top_fade_alpha = crate::components::list_scroll_affordance::top_occlusion_alpha(
             tokens,
             top_fade_progress,
@@ -715,6 +734,8 @@ impl ScriptListApp {
             "scrollTopOffset": scroll_offset.offset_in_item.as_f32(),
             "contentHeight": geometry.content_height,
             "viewportHeight": geometry.viewport_height,
+            "headerOverlayHeight": geometry.header_height,
+            "headerGlassStripHeight": main_list_header_glass_strip_height().as_f32(),
             "footerHeight": geometry.footer_height,
             "footerOverlayHeight": main_list_footer_overlay_height().as_f32().max(0.0),
             "footerRevealClearanceHeight": main_list_footer_reveal_clearance_height().as_f32().max(0.0),
@@ -796,13 +817,7 @@ impl ScriptListApp {
                         this.update(cx, |app, cx| {
                             let viewport_height = app.main_list_state.viewport_bounds().size.height;
                             let def = app.current_main_menu_theme.def();
-                            let header_height = gpui::px(
-                                crate::components::main_view_chrome::main_view_header_metrics(
-                                    def,
-                                    Some(def.search.height),
-                                )
-                                .header_height,
-                            );
+                            let header_height = main_list_header_overlay_height(def);
                             if viewport_height
                                 <= header_height + main_list_footer_overlay_total_padding()
                             {
@@ -833,13 +848,7 @@ impl ScriptListApp {
 
         let viewport_height = self.main_list_state.viewport_bounds().size.height;
         let def = self.current_main_menu_theme.def();
-        let header_overlay_height = gpui::px(
-            crate::components::main_view_chrome::main_view_header_metrics(
-                def,
-                Some(def.search.height),
-            )
-            .header_height,
-        );
+        let header_overlay_height = main_list_header_overlay_height(def);
         let safe_height =
             viewport_height - header_overlay_height - main_list_footer_overlay_total_padding();
         if safe_height <= gpui::px(0.0) {
@@ -887,13 +896,7 @@ impl ScriptListApp {
                 &grouped_items,
                 self.main_list_state.logical_scroll_top(),
                 viewport_height,
-                gpui::px(
-                    crate::components::main_view_chrome::main_view_header_metrics(
-                        self.current_main_menu_theme.def(),
-                        Some(self.current_main_menu_theme.def().search.height),
-                    )
-                    .header_height,
-                ),
+                main_list_header_overlay_height(self.current_main_menu_theme.def()),
                 main_list_footer_overlay_total_padding(),
                 target,
             )
@@ -1413,8 +1416,8 @@ mod scroll_fade_tests {
         leading_context_scroll_offset_for_selection, main_list_boundary_eligibility_values,
         main_list_safe_scroll_offset_for_item, main_list_scroll_geometry_values,
         main_list_scroll_lifecycle_phase, main_list_top_fade_progress,
-        main_list_top_fade_progress_for_selection, scrollbar_fade_duration, scrollbar_fade_opacity,
-        script_list_pixel_top_for_offset, ScriptListRowHeights,
+        main_list_top_fade_progress_for_selection, script_list_pixel_top_for_offset,
+        scrollbar_fade_duration, scrollbar_fade_opacity, ScriptListRowHeights,
     };
     use crate::list_item::GroupedListItem;
 

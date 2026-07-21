@@ -350,6 +350,8 @@ async function main() {
         viewportMeasurementWarning: normalized.viewportMeasurementWarning,
         safeViewportHeight: scroll.safeViewportHeight ?? null,
         effectiveSafeViewportHeight: normalized.effectiveSafeViewportHeight,
+        headerOverlayHeight: scroll.headerOverlayHeight ?? null,
+        headerGlassStripHeight: scroll.headerGlassStripHeight ?? null,
         footerHeight: scroll.footerHeight ?? null,
         footerOverlayHeight: scroll.footerOverlayHeight ?? null,
         footerRevealClearanceHeight: scroll.footerRevealClearanceHeight ?? null,
