@@ -924,19 +924,12 @@ unsafe fn begin_ns_window_exit_dematerialize(
         if variant == GlassMorphVariant::ContentLayer && content_view != nil {
             let layer: id = msg_send![content_view, layer];
             if layer != nil {
-                // Same centered anchor as the enter morph, or the outward
-                // release pins a corner and smears sideways.
-                center_layer_anchor_for_morph(layer);
-                add_layer_scale_exit(
+                // Center-compensated outward release (anchor stays AppKit's;
+                // see center_scaled_transform for why).
+                add_layer_center_scale_exit(
                     layer,
-                    "transform.scale.x",
-                    "scriptKitGlassExitX",
+                    "scriptKitGlassExit",
                     1.0 + GLASS_EXIT_GROW_X * 2.0,
-                );
-                add_layer_scale_exit(
-                    layer,
-                    "transform.scale.y",
-                    "scriptKitGlassExitY",
                     1.0 + GLASS_EXIT_GROW_Y * 2.0,
                 );
             }
@@ -1190,26 +1183,37 @@ unsafe fn make_morph_timing_functions() -> id {
 #[cfg(target_os = "macos")]
 /// Center the layer's transform anchor before a scale morph.
 ///
-/// Layer-backed AppKit views default to a corner `anchorPoint`, so a bare
-/// `transform.scale` animation pins one corner and smears sideways instead
-/// of breathing about the center (user-visible on the Actions popup: top
-/// edge frozen, left edge sweeping). Setting the anchor to the midpoint
-/// requires re-deriving `position` from the current frame or the layer
-/// would jump. The model transform must be identity when this runs; callers
-/// reset it first.
+/// Layer-backed AppKit views default to a corner `anchorPoint`, and AppKit
+/// OWNS that layer's geometry: mutating `anchorPoint`/`position` gets
+/// stomped on the next layout pass (frame-measured: the popup content
+/// displaced for two frames, then snapped back as AppKit re-laid the layer
+/// out, with no visible scale in either direction). So the anchor is left
+/// untouched and the centering is baked into the animated transform itself:
+/// for a scale `s` about the layer center `c` with the anchor at a corner,
+/// the equivalent transform is `translate(c·(1−s)) ∘ scale(s)`.
 #[cfg(target_os = "macos")]
-unsafe fn center_layer_anchor_for_morph(layer: id) {
-    use cocoa::foundation::{NSPoint, NSRect};
+unsafe fn center_scaled_transform(
+    layer: id,
+    scale_x: f64,
+    scale_y: f64,
+) -> cocoa::quartzcore::CATransform3D {
+    use cocoa::foundation::NSRect;
+    use cocoa::quartzcore::CATransform3D;
 
-    let frame: NSRect = msg_send![layer, frame];
-    let _: () = msg_send![layer, setAnchorPoint: NSPoint::new(0.5, 0.5)];
-    let _: () = msg_send![
-        layer,
-        setPosition: NSPoint::new(
-            frame.origin.x + frame.size.width * 0.5,
-            frame.origin.y + frame.size.height * 0.5
-        )
-    ];
+    let bounds: NSRect = msg_send![layer, bounds];
+    let center_x = bounds.size.width * 0.5;
+    let center_y = bounds.size.height * 0.5;
+    let mut transform = CATransform3D::IDENTITY;
+    transform.m11 = scale_x;
+    transform.m22 = scale_y;
+    transform.m41 = center_x * (1.0 - scale_x);
+    transform.m42 = center_y * (1.0 - scale_y);
+    transform
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn transform_ns_value(transform: cocoa::quartzcore::CATransform3D) -> id {
+    msg_send![class!(NSValue), valueWithCATransform3D: transform]
 }
 
 #[cfg(target_os = "macos")]
@@ -1218,23 +1222,29 @@ unsafe fn reset_layer_transform_identity(layer: id) {
     let _: () = msg_send![layer, setTransform: identity];
 }
 
+/// Keyframe the layer's full `transform` through center-compensated scales
+/// (see [`center_scaled_transform`]); `scales` are (x, y) pairs for
+/// start → squish → settle.
 #[cfg(target_os = "macos")]
-unsafe fn add_layer_scale_keyframes(
+unsafe fn add_layer_center_scale_keyframes(
     layer: id,
-    key_path: &str,
     animation_key: &str,
-    values: [f64; 3],
+    scales: [(f64, f64); 3],
     tuning: GlassMorphTuning,
 ) -> bool {
     let Some(animation_class) = objc::runtime::Class::get("CAKeyframeAnimation") else {
         return false;
     };
-    let key_path = tahoe_ns_string(key_path);
+    let key_path = tahoe_ns_string("transform");
     let animation: id = msg_send![animation_class, animationWithKeyPath: key_path];
     if animation == nil {
         return false;
     }
-    let values = make_number_array(&values);
+    let values: id = msg_send![class!(NSMutableArray), array];
+    for (scale_x, scale_y) in scales {
+        let value = transform_ns_value(center_scaled_transform(layer, scale_x, scale_y));
+        let _: () = msg_send![values, addObject: value];
+    }
     let total_duration = tuning.phase1 + tuning.phase2;
     let rebound_key_time = if total_duration > 0.0 {
         tuning.phase1 / total_duration
@@ -1253,17 +1263,22 @@ unsafe fn add_layer_scale_keyframes(
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn add_layer_scale_exit(layer: id, key_path: &str, animation_key: &str, to_value: f64) {
+unsafe fn add_layer_center_scale_exit(
+    layer: id,
+    animation_key: &str,
+    to_scale_x: f64,
+    to_scale_y: f64,
+) {
     let Some(animation_class) = objc::runtime::Class::get("CABasicAnimation") else {
         return;
     };
-    let key_path = tahoe_ns_string(key_path);
+    let key_path = tahoe_ns_string("transform");
     let animation: id = msg_send![animation_class, animationWithKeyPath: key_path];
     if animation == nil {
         return;
     }
-    let from: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64];
-    let to: id = msg_send![class!(NSNumber), numberWithDouble: to_value];
+    let from = transform_ns_value(cocoa::quartzcore::CATransform3D::IDENTITY);
+    let to = transform_ns_value(center_scaled_transform(layer, to_scale_x, to_scale_y));
     let _: () = msg_send![animation, setFromValue: from];
     let _: () = msg_send![animation, setToValue: to];
     let _: () = msg_send![animation, setDuration: GLASS_EXIT_DURATION];
@@ -1309,26 +1324,20 @@ unsafe fn animate_tahoe_glass_layer_appearance(window: id, log_target: &str, win
     }
 
     let _: () = msg_send![layer, removeAllAnimations];
-    // A superseded exit may have left a non-identity model transform, and
-    // the scale keyframes only read correctly about a centered anchor.
+    // A superseded exit may have left a non-identity model transform.
     reset_layer_transform_identity(layer);
-    center_layer_anchor_for_morph(layer);
     let _: () = msg_send![window, setAlphaValue: 0.0f64];
-    let x_started = add_layer_scale_keyframes(
+    let started = add_layer_center_scale_keyframes(
         layer,
-        "transform.scale.x",
-        "scriptKitGlassMorphX",
-        [tuning.start_scale_x, tuning.squish_scale_x, 1.0],
+        "scriptKitGlassMorph",
+        [
+            (tuning.start_scale_x, tuning.start_scale_y),
+            (tuning.squish_scale_x, tuning.squish_scale_y),
+            (1.0, 1.0),
+        ],
         tuning,
     );
-    let y_started = add_layer_scale_keyframes(
-        layer,
-        "transform.scale.y",
-        "scriptKitGlassMorphY",
-        [tuning.start_scale_y, tuning.squish_scale_y, 1.0],
-        tuning,
-    );
-    if !(x_started && y_started) {
+    if !started {
         let _: () = msg_send![layer, removeAllAnimations];
         restore_alpha(window);
         return;
