@@ -159,9 +159,32 @@ fn dispatch_main_gesture_event(
             });
         }
         GestureEvent::DoubleTap => {
-            logging::log("GESTURE", "DoubleTap — Agent Chat entry intent");
             MAIN_GESTURE_BEGAN_CLOSED.store(false, Ordering::SeqCst);
             MAIN_GESTURE_TAP_PREVIEW_APPLIED.store(false, Ordering::SeqCst);
+            // Double-tap while the quick-question surface is already showing
+            // reads as an impatient "close it". Re-opening the composer here
+            // made the window feel stuck: a single tap waits out the
+            // double-tap window before hiding, so pressing the hotkey
+            // rapidly while Quick AI was open always landed in this arm and
+            // kept the surface alive.
+            if script_kit_gpui::is_main_window_visible()
+                && matches!(
+                    app_entity.read(cx).current_view,
+                    AppView::AgentChatView { .. }
+                )
+            {
+                logging::log(
+                    "GESTURE",
+                    "DoubleTap — quick AI already open, toggling closed",
+                );
+                let _ = window.update(cx, |_root, window, cx| {
+                    app_entity.update(cx, |view, cx| {
+                        view.handle_main_hotkey_tap(window, cx);
+                    });
+                });
+                return;
+            }
+            logging::log("GESTURE", "DoubleTap — Agent Chat entry intent");
             if !script_kit_gpui::is_main_window_visible() {
                 show_main_window_helper(window, app_entity.clone(), cx);
             }
