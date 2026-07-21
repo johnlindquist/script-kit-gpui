@@ -721,7 +721,8 @@ fn open_notes_window_with_close_behavior(
     // Use defer_hide_main_window to only hide the main window, not the whole app.
     // Must be deferred to avoid RefCell reentrancy from macOS callbacks.
     // IMPORTANT: Set visibility to false so the main hotkey knows to SHOW (not hide) next time
-    if crate::is_main_window_visible() {
+    let main_was_visible_at_open = crate::is_main_window_visible();
+    if main_was_visible_at_open {
         logging::log(
             "PANEL",
             "Main window was visible - hiding it since Notes is opening",
@@ -814,10 +815,19 @@ fn open_notes_window_with_close_behavior(
         }
     }
     {
+        // "Restore launcher" means: bring back what Notes hid. When Notes was
+        // opened with the launcher already hidden (direct cmd+ctrl+N), there
+        // is nothing to restore — closing Notes must NOT summon the launcher.
+        let effective_behavior =
+            if close_behavior == NotesCloseBehavior::RestoreLauncher && !main_was_visible_at_open {
+                NotesCloseBehavior::LeaveLauncherHidden
+            } else {
+                close_behavior
+            };
         let slot = NOTES_CLOSE_BEHAVIOR
             .get_or_init(|| std::sync::Mutex::new(NotesCloseBehavior::RestoreLauncher));
         if let Ok(mut g) = slot.lock() {
-            *g = close_behavior;
+            *g = effective_behavior;
         }
     }
 
