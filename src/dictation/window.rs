@@ -871,17 +871,18 @@ impl DictationOverlay {
     }
 
     fn hide_glass_button_frames(&self, window: &Window) {
-        #[cfg(target_os = "macos")]
-        crate::platform::glass_button_host::sync_for_window(window, &[]);
-        #[cfg(not(target_os = "macos"))]
-        let _ = window;
+        crate::components::footer_chrome::remove_glass_capsule_group(
+            window,
+            "dictation-action-rail",
+        );
+        crate::components::footer_chrome::remove_glass_capsule_group(
+            window,
+            "dictation-header-targets",
+        );
     }
 
     fn teardown_glass_button_host(&self, window: &Window) {
-        #[cfg(target_os = "macos")]
-        crate::platform::glass_button_host::remove_for_window(window);
-        #[cfg(not(target_os = "macos"))]
-        let _ = window;
+        crate::components::footer_chrome::remove_glass_capsule_window(window);
     }
 
     /// Scrollable runtime caption container, sharing the preview block's
@@ -1410,12 +1411,13 @@ impl DictationOverlay {
         interactive: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let mut row = div()
+        let row = div()
             .flex()
             .flex_row()
             .items_center()
             .justify_center()
             .gap(px(6.));
+        let mut chips = Vec::new();
 
         let theme = get_cached_theme();
         let hover_bg = theme.colors.background.main.with_opacity(OPACITY_SELECTED);
@@ -1457,10 +1459,27 @@ impl DictationOverlay {
                         }),
                     );
             }
-            row = row.child(chip);
+            chips.push(chip.into_any_element());
         }
 
-        row.into_any_element()
+        if interactive {
+            crate::components::footer_chrome::glass_capsule_row(
+                "dictation-header-targets",
+                0,
+                Some(999.0),
+                row,
+                chips,
+            )
+        } else {
+            let chip_count = chips.len();
+            crate::components::footer_chrome::glass_capsule_row(
+                "dictation-header-targets",
+                chip_count,
+                Some(999.0),
+                row.children(chips),
+                std::iter::empty(),
+            )
+        }
     }
 
     /// Apply an explicit destination pick from a verb chip: retarget the live
@@ -1831,10 +1850,7 @@ impl Render for DictationOverlay {
         let footer_config = dictation_native_footer_config(&self.state.phase, armed);
         let glass_in_window_footer = crate::platform::tahoe_liquid_glass_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled();
-        #[cfg(target_os = "macos")]
-        let glass_buttons_enabled = crate::platform::glass_button_host::glass_buttons_enabled();
-        #[cfg(not(target_os = "macos"))]
-        let glass_buttons_enabled = false;
+        let glass_buttons_enabled = crate::components::footer_chrome::glass_capsules_enabled();
         if !glass_in_window_footer {
             crate::footer_popup::sync_window_footer_popup(window, &footer_config);
         }

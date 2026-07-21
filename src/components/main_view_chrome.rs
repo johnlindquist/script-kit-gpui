@@ -977,6 +977,26 @@ pub(crate) fn render_main_view_context_zone_required(
         chip
     });
 
+    let mut left_capsules = Vec::new();
+    if info.show_cwd {
+        left_capsules.push(cwd_chip.into_any_element());
+    }
+    if let Some(chip) = selection_chip {
+        left_capsules.push(chip.into_any_element());
+    }
+    let left_capsule_row = crate::components::footer_chrome::glass_capsule_row(
+        "main-header-left-capsules",
+        0,
+        Some(info.pill_radius),
+        div()
+            .min_w(px(0.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(info.gap_px)),
+        left_capsules,
+    );
+
     let mut left_lane = div()
         .flex_1()
         .min_w(px(0.0))
@@ -985,13 +1005,8 @@ pub(crate) fn render_main_view_context_zone_required(
         .flex_row()
         .items_center()
         .justify_start()
-        .gap(px(info.gap_px));
-    if info.show_cwd {
-        left_lane = left_lane.child(cwd_chip);
-    }
-    if let Some(chip) = selection_chip {
-        left_lane = left_lane.child(chip);
-    }
+        .gap(px(info.gap_px))
+        .child(left_capsule_row);
     if info.show_cwd
         && info.show_agent_model
         && !matches!(info.layout, crate::designs::HeaderInfoBarLayout::Split)
@@ -1005,7 +1020,25 @@ pub(crate) fn render_main_view_context_zone_required(
         );
     }
 
-    let mut right_lane = div()
+    let right_capsules = if info.show_agent_model {
+        vec![model_chip.into_any_element()]
+    } else {
+        Vec::new()
+    };
+    let right_capsule_row = crate::components::footer_chrome::glass_capsule_row(
+        "main-header-right-capsules",
+        0,
+        Some(info.pill_radius),
+        div()
+            .min_w(px(0.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap(px(info.gap_px)),
+        right_capsules,
+    );
+    let right_lane = div()
         .flex_1()
         .min_w(px(0.0))
         .overflow_hidden()
@@ -1013,10 +1046,8 @@ pub(crate) fn render_main_view_context_zone_required(
         .flex_row()
         .items_center()
         .justify_end()
-        .gap(px(info.gap_px));
-    if info.show_agent_model {
-        right_lane = right_lane.child(model_chip);
-    }
+        .gap(px(info.gap_px))
+        .child(right_capsule_row);
 
     div()
         .id(MAIN_VIEW_CONTEXT_ZONE_ID)

@@ -1,5 +1,5 @@
 use gpui::{
-    div, prelude::FluentBuilder, px, rgba, svg, Animation, AnimationExt, AnyElement, App,
+    div, prelude::FluentBuilder, px, rgba, svg, Animation, AnimationExt, AnyElement, App, Div,
     FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window,
 };
@@ -54,6 +54,136 @@ pub(crate) const FOOTER_STOP_SLOT_WIDTH_PX: f32 = 76.0;
 pub(crate) const FOOTER_PASTE_RESPONSE_SLOT_WIDTH_PX: f32 = 140.0;
 pub(crate) const FOOTER_SHORTCUT_LAYOUT_MEASUREMENT_SOURCE: &str =
     "runtime.footerChrome.shortcutKeycapLayoutModel";
+
+/// The default radius for every shared native glass capsule opt-in.
+pub(crate) fn default_glass_capsule_radius_px() -> f32 {
+    FOOTER_ACTION_BUTTON_RADIUS_PX
+}
+
+pub(crate) fn glass_capsules_enabled() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::glass_button_host::glass_buttons_enabled()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Shared row opt-in for native glass capsules. Capsule geometry always comes
+/// from the supplied elements' real painted bounds; hover events address the
+/// same stable group/index pair used by the native registry.
+pub(crate) fn glass_capsule_row(
+    group: &'static str,
+    skip_leading_children: usize,
+    radius_px: Option<f32>,
+    row: Div,
+    capsules: impl IntoIterator<Item = AnyElement>,
+) -> AnyElement {
+    glass_capsule_row_with_cleanup(
+        group,
+        skip_leading_children,
+        radius_px,
+        row,
+        capsules,
+        Vec::new(),
+    )
+}
+
+fn glass_capsule_row_with_cleanup(
+    group: &'static str,
+    skip_leading_children: usize,
+    radius_px: Option<f32>,
+    row: Div,
+    capsules: impl IntoIterator<Item = AnyElement>,
+    groups_to_remove: Vec<&'static str>,
+) -> AnyElement {
+    let radius = f64::from(radius_px.unwrap_or_else(default_glass_capsule_radius_px));
+    let capsules = capsules
+        .into_iter()
+        .enumerate()
+        .map(|(index, capsule)| {
+            let wrapper_id = SharedString::from(format!("glass-capsule-{group}-{index}"));
+            let wrapper = div()
+                .id(wrapper_id)
+                .min_w(px(0.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(capsule);
+
+            #[cfg(target_os = "macos")]
+            let wrapper = wrapper.on_hover(move |hovered: &bool, window, _cx| {
+                crate::platform::glass_button_host::set_hover(window, group, index, *hovered);
+            });
+
+            wrapper.into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+    let enabled = glass_capsules_enabled();
+    let row = row.children(capsules);
+
+    #[cfg(target_os = "macos")]
+    let row = if enabled {
+        row.on_children_prepainted(move |bounds, window, _cx| {
+            for stale_group in &groups_to_remove {
+                crate::platform::glass_button_host::remove_group(window, stale_group);
+            }
+            let frames = bounds
+                .into_iter()
+                .skip(skip_leading_children)
+                .map(|bounds| {
+                    (
+                        f64::from(bounds.origin.x.as_f32()),
+                        f64::from(bounds.origin.y.as_f32()),
+                        f64::from(bounds.size.width.as_f32()),
+                        f64::from(bounds.size.height.as_f32()),
+                        radius,
+                    )
+                })
+                .collect::<Vec<_>>();
+            crate::platform::glass_button_host::sync_for_window(window, group, &frames);
+        })
+    } else {
+        row
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (enabled, radius, skip_leading_children);
+
+    row.id(group).into_any_element()
+}
+
+/// Standalone-chip form of [`glass_capsule_row`].
+pub(crate) fn glass_capsule(
+    group: &'static str,
+    radius_px: Option<f32>,
+    capsule: impl IntoElement,
+) -> AnyElement {
+    glass_capsule_row(
+        group,
+        0,
+        radius_px,
+        div().min_w(px(0.0)).flex().flex_row().items_center(),
+        [capsule.into_any_element()],
+    )
+}
+
+pub(crate) fn remove_glass_capsule_group(window: &Window, group: &'static str) {
+    #[cfg(target_os = "macos")]
+    crate::platform::glass_button_host::remove_group(window, group);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, group);
+}
+
+pub(crate) fn remove_glass_capsule_window(window: &Window) {
+    #[cfg(target_os = "macos")]
+    crate::platform::glass_button_host::remove_for_window(window);
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
 
 pub(crate) const FOOTER_CHIP_BORDER_ALPHA: f32 = 0.18;
 pub(crate) const FOOTER_CHIP_BORDER_HOVER_ALPHA: f32 = 0.34;
@@ -225,15 +355,21 @@ pub(crate) fn render_footer_action_rail_with_leading(
     leading: Option<AnyElement>,
     buttons: impl IntoIterator<Item = AnyElement>,
 ) -> AnyElement {
+    render_footer_action_rail_with_leading_and_cleanup(id, leading, buttons, Vec::new())
+}
+
+fn render_footer_action_rail_with_leading_and_cleanup(
+    id: &'static str,
+    leading: Option<AnyElement>,
+    buttons: impl IntoIterator<Item = AnyElement>,
+    groups_to_remove: Vec<&'static str>,
+) -> AnyElement {
     let theme = crate::theme::get_cached_theme();
     let rail = footer_rail_chrome(&theme);
     let has_leading = leading.is_some();
     let buttons = buttons.into_iter().collect::<Vec<_>>();
 
-    #[cfg(target_os = "macos")]
-    let glass_buttons_enabled = crate::platform::glass_button_host::glass_buttons_enabled();
-    #[cfg(not(target_os = "macos"))]
-    let glass_buttons_enabled = false;
+    let glass_buttons_enabled = glass_capsules_enabled();
 
     let item_gap_px = if glass_buttons_enabled {
         FOOTER_GLASS_BUTTON_GAP_PX
@@ -249,34 +385,7 @@ pub(crate) fn render_footer_action_rail_with_leading(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(item_gap_px));
-
-    #[cfg(target_os = "macos")]
-    let rail_element = if glass_buttons_enabled {
-        let radius = f64::from(rail.button_radius_px);
-        rail_element.on_children_prepainted(move |bounds, window, _cx| {
-            let button_start = usize::from(has_leading) + 1;
-            let frames = bounds
-                .into_iter()
-                .skip(button_start)
-                .map(|bounds| {
-                    (
-                        f64::from(bounds.origin.x.as_f32()),
-                        f64::from(bounds.origin.y.as_f32()),
-                        f64::from(bounds.size.width.as_f32()),
-                        f64::from(bounds.size.height.as_f32()),
-                        radius,
-                    )
-                })
-                .collect::<Vec<_>>();
-            crate::platform::glass_button_host::sync_for_window(window, &frames);
-        })
-    } else {
-        rail_element
-    };
-
-    rail_element
-        .id(id)
+        .gap(px(item_gap_px))
         .when_some(leading, |rail, leading| {
             rail.child(
                 div()
@@ -286,9 +395,16 @@ pub(crate) fn render_footer_action_rail_with_leading(
                     .child(leading),
             )
         })
-        .child(div().flex_1())
-        .children(buttons)
-        .into_any_element()
+        .child(div().flex_1());
+
+    glass_capsule_row_with_cleanup(
+        id,
+        usize::from(has_leading) + 1,
+        Some(rail.button_radius_px),
+        rail_element,
+        buttons,
+        groups_to_remove,
+    )
 }
 
 fn footer_config_action_slot(action: crate::footer_popup::FooterAction) -> FooterActionSlot {
@@ -482,10 +598,15 @@ where
         );
     }
 
+    let interactive = action.is_some();
     if let Some(action) = action {
         marker = marker.on_click(move |_event, window, cx| on_action(action, window, cx));
     }
-    marker.into_any_element()
+    if interactive {
+        glass_capsule(id, Some(metrics.button_radius), marker)
+    } else {
+        marker.into_any_element()
+    }
 }
 
 fn render_footer_config_left_info<H>(
@@ -597,6 +718,29 @@ where
     ];
     let mut left_buttons = Vec::new();
     let mut right_buttons = Vec::new();
+    let mut active_left_info_groups = Vec::new();
+    if let Some(info) = config.left_info.as_ref() {
+        if info.cwd_chip.is_some() {
+            active_left_info_groups.push("config-footer-cwd-chip");
+        }
+        if info.profile_name.is_some() {
+            if info.action.is_some() {
+                active_left_info_groups.push("config-footer-profile-chip");
+            }
+            active_left_info_groups.push("config-footer-model-chip");
+        } else if info.action.is_some() {
+            active_left_info_groups.push("config-footer-left-info");
+        }
+    }
+    let stale_left_info_groups = [
+        "config-footer-cwd-chip",
+        "config-footer-profile-chip",
+        "config-footer-model-chip",
+        "config-footer-left-info",
+    ]
+    .into_iter()
+    .filter(|group| !active_left_info_groups.contains(group))
+    .collect::<Vec<_>>();
 
     for (index, button) in config.buttons.into_iter().enumerate() {
         let action = button.action;
@@ -663,10 +807,11 @@ where
         .children(left_info)
         .into_any_element();
 
-    render_footer_action_rail_with_leading(
+    render_footer_action_rail_with_leading_and_cleanup(
         "main-window-footer-config-rail",
         Some(leading),
         right_buttons,
+        stale_left_info_groups,
     )
 }
 
@@ -1928,6 +2073,28 @@ fn render_footer_keycap_with_metrics(
 mod tests {
     use super::*;
 
+    fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .expect("function signature should exist");
+        let source = &source[start..];
+        let open = source.find('{').expect("function body should open");
+        let mut depth = 0usize;
+        for (offset, byte) in source.as_bytes()[open..].iter().copied().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("function body should close")
+    }
+
     #[test]
     fn config_rail_maps_every_footer_action_to_shared_chrome_slots() {
         use crate::footer_popup::FooterAction;
@@ -2096,6 +2263,34 @@ mod tests {
             rail_body.contains("render_footer_hint_action_button_frame"),
             "the shared rail must compose the shared footer button frames"
         );
+
+        // Liquid Glass consistency lock: the footer rail itself never reaches
+        // into AppKit. Both row and standalone opt-ins converge on the one
+        // painted-bounds wrapper, and that wrapper is the only owner here of
+        // raw native sync + group/index hover routing.
+        let footer_rail = function_body(
+            source,
+            "pub(crate) fn render_footer_action_rail_with_leading",
+        );
+        assert!(footer_rail.contains("render_footer_action_rail_with_leading_and_cleanup("));
+        assert!(!footer_rail.contains("glass_button_host::sync_for_window"));
+
+        let capsule_row = function_body(source, "pub(crate) fn glass_capsule_row");
+        assert!(capsule_row.contains("glass_capsule_row_with_cleanup("));
+        let capsule_row_core = function_body(source, "fn glass_capsule_row_with_cleanup");
+        for required in [
+            ".on_children_prepainted(",
+            "glass_button_host::sync_for_window(window, group, &frames)",
+            "glass_button_host::set_hover(window, group, index, *hovered)",
+        ] {
+            assert!(
+                capsule_row_core.contains(required),
+                "shared glass row must retain {required}"
+            );
+        }
+
+        let standalone = function_body(source, "pub(crate) fn glass_capsule(");
+        assert!(standalone.contains("glass_capsule_row("));
     }
 
     #[test]
