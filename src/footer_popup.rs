@@ -2050,6 +2050,15 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
         let _: () = msg_send![strip, setWantsLayer: YES];
         let _: () = msg_send![strip, setCornerRadius: 0.0_f64];
         log_glass_effect_view_properties_once(glass_class);
+        // Subdued material variant: the default glass variant renders the
+        // strip as a visible dark band over rows (user-rejected smudge);
+        // _variant=1 reads as near-invisible glass that still softly
+        // refracts rows scrolling beneath (screenshot-swept 2026-07-21:
+        // default/scrim=smudge, style:1/variant:2=bright gray stripe,
+        // variant:1=seamless). Private property — guarded by existence
+        // check; on failure the strip keeps the default material.
+        apply_glass_variant_if_available(strip, glass_class, 1);
+        apply_debug_glass_strip_style(strip);
         if !add_main_window_glass_band_above_metal(content_view, strip) {
             let _: () = msg_send![strip, release];
             return;
@@ -2081,6 +2090,9 @@ unsafe fn log_glass_effect_view_properties_once(glass_class: &objc::runtime::Cla
                 out_count: *mut u32,
             ) -> *mut *const std::ffi::c_void;
             fn property_getName(property: *const std::ffi::c_void) -> *const std::os::raw::c_char;
+            fn property_getAttributes(
+                property: *const std::ffi::c_void,
+            ) -> *const std::os::raw::c_char;
             fn free(ptr: *mut std::ffi::c_void);
         }
         let mut count: u32 = 0;
@@ -2092,12 +2104,20 @@ unsafe fn log_glass_effect_view_properties_once(glass_class: &objc::runtime::Cla
         for index in 0..count as usize {
             let property = *list.add(index);
             let name = property_getName(property);
+            let attrs = property_getAttributes(property);
             if !name.is_null() {
-                names.push(
-                    std::ffi::CStr::from_ptr(name)
+                let attr_text = if attrs.is_null() {
+                    String::new()
+                } else {
+                    std::ffi::CStr::from_ptr(attrs)
                         .to_string_lossy()
-                        .into_owned(),
-                );
+                        .into_owned()
+                };
+                names.push(format!(
+                    "{}[{}]",
+                    std::ffi::CStr::from_ptr(name).to_string_lossy(),
+                    attr_text,
+                ));
             }
         }
         free(list as *mut std::ffi::c_void);
@@ -2108,6 +2128,123 @@ unsafe fn log_glass_effect_view_properties_once(glass_class: &objc::runtime::Cla
             "NSGlassEffectView declared properties"
         );
     });
+}
+
+/// Debug knob (SCRIPT_KIT_GLASS_STRIP_STYLE): experiment with
+/// NSGlassEffectView's private scroll-pocket / variant surface on the header
+/// strip via KVC. Values: "pocket:N" sets _scrollPocketElementStyle=N,
+/// "variant:N" sets _variant=N, "style:N" sets style=N. Logs what stuck.
+#[cfg(target_os = "macos")]
+unsafe fn apply_debug_glass_strip_style(strip: id) {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let Ok(spec) = std::env::var("SCRIPT_KIT_GLASS_STRIP_STYLE") else {
+        return;
+    };
+    for part in spec.split(',') {
+        let Some((key, value)) = part.split_once(':') else {
+            continue;
+        };
+        let Ok(value) = value.trim().parse::<i64>() else {
+            continue;
+        };
+        let key_name = match key.trim() {
+            // _scrollPocketElementStyle is READONLY (attr "R") — setting it
+            // throws NSException. It reports pocket membership; not a knob.
+            "variant" => "_variant",
+            "subvariant" => "_subvariant",
+            "style" => "style",
+            "lensing" => "_contentLensing",
+            other => {
+                tracing::warn!(
+                    target: "script_kit::footer_popup",
+                    event = "glass_strip_style_unknown_key",
+                    key = other,
+                    "Unknown glass strip style key"
+                );
+                continue;
+            }
+        };
+        let ns_key = ns_string(key_name);
+        let number: id = msg_send![class!(NSNumber), numberWithLongLong: value];
+        // KVC setValue:forKey: — exceptions from unknown keys would unwind
+        // through objc; these keys exist per class_copyPropertyList.
+        let _: () = msg_send![strip, setValue: number forKey: ns_key];
+        let readback: id = msg_send![strip, valueForKey: ns_key];
+        let readback_value: i64 = if readback == nil {
+            i64::MIN
+        } else {
+            msg_send![readback, longLongValue]
+        };
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "glass_strip_style_applied",
+            key = key_name,
+            requested = value,
+            readback = readback_value,
+            "Applied debug glass strip style"
+        );
+    }
+    // One-shot: report scroll-pocket-related classes available at runtime.
+    for candidate in [
+        "NSScrollPocket",
+        "NSScrollEdgeEffect",
+        "NSScrollEdgeElementContainerView",
+        "_NSScrollPocketView",
+    ] {
+        let exists = objc::runtime::Class::get(candidate).is_some();
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "glass_scroll_pocket_class_probe",
+            class = candidate,
+            exists,
+            "Scroll pocket class availability"
+        );
+    }
+}
+
+/// Set NSGlassEffectView's private `_variant` via KVC when the property
+/// exists on this OS build; readback-logged, no-op otherwise.
+#[cfg(target_os = "macos")]
+unsafe fn apply_glass_variant_if_available(
+    view: id,
+    glass_class: &objc::runtime::Class,
+    variant: i64,
+) {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    #[link(name = "objc")]
+    extern "C" {
+        fn class_getProperty(
+            cls: *const objc::runtime::Class,
+            name: *const std::os::raw::c_char,
+        ) -> *const std::ffi::c_void;
+    }
+    let name = c"_variant";
+    if class_getProperty(glass_class as *const _, name.as_ptr()).is_null() {
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "glass_variant_unavailable",
+            "NSGlassEffectView _variant property missing; keeping default material"
+        );
+        return;
+    }
+    let ns_key = ns_string("_variant");
+    let number: id = msg_send![class!(NSNumber), numberWithLongLong: variant];
+    let _: () = msg_send![view, setValue: number forKey: ns_key];
+    let readback: id = msg_send![view, valueForKey: ns_key];
+    let readback_value: i64 = if readback == nil {
+        i64::MIN
+    } else {
+        msg_send![readback, longLongValue]
+    };
+    tracing::info!(
+        target: "script_kit::footer_popup",
+        event = "glass_variant_applied",
+        requested = variant,
+        readback = readback_value,
+        "Applied glass material variant"
+    );
 }
 
 #[cfg(target_os = "macos")]
