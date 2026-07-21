@@ -7,8 +7,8 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, FocusHandle, IntoElement, KeyBinding,
-    ListState, ParentElement as _, Pixels, Point, Render, SharedString, Size, Styled as _, Task,
-    Window, prelude::FluentBuilder as _, px,
+    ListState, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Task, Window,
+    prelude::FluentBuilder as _, px,
 };
 use smol::{Timer, stream::StreamExt as _};
 
@@ -21,6 +21,7 @@ use crate::{
         document::ParsedDocument,
         format,
         node::{self, NodeContext},
+        selection::{self, SelectionDocument, TextSelection},
     },
     v_flex,
 };
@@ -46,6 +47,14 @@ pub(super) enum TextViewFormat {
     Html,
 }
 
+/// One rendered run's hit-testing handle, registered fresh every paint:
+/// the run's document byte range plus the laid-out text and bounds.
+pub(crate) struct HitRun {
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) layout: gpui::TextLayout,
+    pub(crate) bounds: Bounds<Pixels>,
+}
+
 /// The state of a TextView.
 pub struct TextViewState {
     pub(super) focus_handle: FocusHandle,
@@ -60,8 +69,12 @@ pub struct TextViewState {
     pub(super) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
 
     pub(super) is_selecting: bool,
-    /// The local (in TextView) position of the selection.
-    selection_positions: (Option<Point<Pixels>>, Option<Point<Pixels>>),
+    /// The logical selection: byte positions into the flattened
+    /// selection document. Pixel points are transient mouse input only.
+    selection: Option<TextSelection>,
+    /// Per-run hit-test handles, keyed by document range start and
+    /// refreshed by each run's paint.
+    hit_runs: std::collections::HashMap<usize, HitRun>,
 
     pub(super) parsed_content: Arc<Mutex<ParsedContent>>,
     text: SharedString,
@@ -118,7 +131,10 @@ impl TextViewState {
                         if let Err(err) = &parsed_result {
                             state.parsed_error = Some(err.clone());
                         }
+                        // Content changed: the old selection's byte ranges
+                        // and the painted layout handles are both stale.
                         state.clear_selection();
+                        state.clear_hit_runs();
                         cx.notify();
                     });
                 }
@@ -130,7 +146,8 @@ impl TextViewState {
         let mut this = Self {
             focus_handle,
             bounds: Bounds::default(),
-            selection_positions: (None, None),
+            selection: None,
+            hit_runs: std::collections::HashMap::new(),
             selectable: false,
             scrollable: false,
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
@@ -250,9 +267,15 @@ impl TextViewState {
         self.increment_update(new_text, true, cx);
     }
 
-    /// Return the selected text.
+    /// Return the selected text: an exact slice of the flattened selection
+    /// document (whitespace preserved, independent of what was painted).
     pub fn selected_text(&self) -> String {
-        self.parsed_content.lock().unwrap().document.selected_text()
+        let Some(selection) = &self.selection else {
+            return String::new();
+        };
+        let content = self.parsed_content.lock().unwrap();
+        let range = selection.effective_range(&content.selection);
+        content.selection.text[range].to_string()
     }
 
     fn increment_update(&mut self, text: &str, append: bool, cx: &mut Context<Self>) {
@@ -270,55 +293,111 @@ impl TextViewState {
         _ = self.tx.try_send(update_options);
     }
 
-    /// Save bounds and unselect if bounds changed.
+    /// Save bounds. The selection is logical (text-anchored), so reflow and
+    /// resize preserve it; only content changes clear it.
     pub(super) fn update_bounds(&mut self, bounds: Bounds<Pixels>) {
-        if self.bounds.size != bounds.size {
-            self.clear_selection();
-        }
         self.bounds = bounds;
     }
 
     pub(super) fn clear_selection(&mut self) {
-        self.selection_positions = (None, None);
+        self.selection = None;
         self.is_selecting = false;
     }
 
-    pub(super) fn start_selection(&mut self, pos: Point<Pixels>) {
-        let pos = pos - self.bounds.origin;
-        self.selection_positions = (Some(pos), Some(pos));
+    /// Runs re-register their layout handles on every paint; content
+    /// changes drop them wholesale so a stale layout is never hit-tested
+    /// against a new document.
+    pub(super) fn clear_hit_runs(&mut self) {
+        self.hit_runs.clear();
+    }
+
+    pub(crate) fn register_hit_run(&mut self, run: HitRun) {
+        self.hit_runs.insert(run.range.start, run);
+    }
+
+    /// Map a window point to a document byte position: the run whose
+    /// vertical band contains the point (else the nearest run), then the
+    /// layout's nearest caret index, snapped to a grapheme boundary.
+    fn hit_test(&self, position: Point<Pixels>) -> Option<usize> {
+        let run = self.hit_runs.values().min_by_key(|run| {
+            let bounds = run.bounds;
+            let dy = if position.y < bounds.top() {
+                bounds.top() - position.y
+            } else if position.y > bounds.bottom() {
+                position.y - bounds.bottom()
+            } else {
+                Pixels::ZERO
+            };
+            // Prefer vertical containment; break ties horizontally.
+            let dx = if position.x < bounds.left() {
+                bounds.left() - position.x
+            } else if position.x > bounds.right() {
+                position.x - bounds.right()
+            } else {
+                Pixels::ZERO
+            };
+            ((f32::from(dy) * 10_000.0) + f32::from(dx)) as i64
+        })?;
+        let local = match run.layout.index_for_position(position) {
+            Ok(index) => index,
+            // Outside the glyphs: the layout's nearest caret index.
+            Err(index) => index,
+        };
+        let byte = run.range.start + local.min(run.range.len());
+        let content = self.parsed_content.lock().unwrap();
+        Some(selection::snap_to_grapheme(&content.selection.text, byte))
+    }
+
+    pub(super) fn begin_selection(&mut self, position: Point<Pixels>, click_count: usize) {
+        let Some(byte) = self.hit_test(position) else {
+            return;
+        };
+        let content = self.parsed_content.lock().unwrap();
+        let selection = TextSelection::begin(&content.selection, byte, click_count);
+        drop(content);
+        self.selection = Some(selection);
         self.is_selecting = true;
     }
 
-    pub(super) fn update_selection(&mut self, pos: Point<Pixels>) {
-        let pos = pos - self.bounds.origin;
-        if let (Some(start), Some(_)) = self.selection_positions {
-            self.selection_positions = (Some(start), Some(pos))
+    pub(super) fn extend_selection(&mut self, position: Point<Pixels>) {
+        if !self.is_selecting {
+            return;
+        }
+        let Some(byte) = self.hit_test(position) else {
+            return;
+        };
+        if let Some(selection) = &mut self.selection {
+            selection.focus = byte;
         }
     }
 
     pub(super) fn end_selection(&mut self) {
         self.is_selecting = false;
-    }
-
-    pub(crate) fn has_selection(&self) -> bool {
-        if let (Some(start), Some(end)) = self.selection_positions {
-            start != end
-        } else {
-            false
+        // A plain click (no drag, grapheme granularity) selects nothing.
+        if self
+            .effective_selection_range()
+            .is_none_or(|range| range.is_empty())
+        {
+            self.selection = None;
         }
     }
 
-    /// Return the bounds of the selection in window coordinates.
-    pub(crate) fn selection_bounds(&self) -> Bounds<Pixels> {
-        selection_bounds(
-            self.selection_positions.0,
-            self.selection_positions.1,
-            self.bounds,
-        )
+    pub(crate) fn has_selection(&self) -> bool {
+        self.effective_selection_range()
+            .is_some_and(|range| !range.is_empty())
+    }
+
+    /// The selected document byte range, when a selection exists.
+    pub(crate) fn effective_selection_range(&self) -> Option<std::ops::Range<usize>> {
+        let selection = self.selection.as_ref()?;
+        let content = self.parsed_content.lock().unwrap();
+        Some(selection.effective_range(&content.selection))
     }
 
     pub(super) fn on_action_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        let selected_text = self.selected_text().trim().to_string();
+        // Exact copy: the selected slice verbatim — deliberately selected
+        // whitespace and indentation are content, never trimmed.
+        let selected_text = self.selected_text();
         if selected_text.is_empty() {
             return;
         }
@@ -371,6 +450,8 @@ impl Render for TextViewState {
 pub(crate) struct ParsedContent {
     pub(crate) document: ParsedDocument,
     pub(crate) node_cx: node::NodeContext,
+    /// The rendered document flattened for logical selection and copy.
+    pub(crate) selection: SelectionDocument,
 }
 
 struct UpdateFuture {
@@ -496,38 +577,16 @@ fn parse_content(format: TextViewFormat, options: &UpdateOptions) -> Result<(), 
         content.document = new_content;
     }
     content.node_cx = node_cx;
+    // Rebuild the flattened selection document and re-stamp every run's
+    // document range in the same pass the renderer will read from.
+    content.selection = selection::build_selection_document(&content.document);
 
     Ok(())
-}
-
-fn selection_bounds(
-    start: Option<Point<Pixels>>,
-    end: Option<Point<Pixels>>,
-    bounds: Bounds<Pixels>,
-) -> Bounds<Pixels> {
-    if let (Some(start), Some(end)) = (start, end) {
-        let start = start + bounds.origin;
-        let end = end + bounds.origin;
-
-        let origin = Point {
-            x: start.x.min(end.x),
-            y: start.y.min(end.y),
-        };
-        let size = Size {
-            width: (start.x - end.x).abs(),
-            height: (start.y - end.y).abs(),
-        };
-
-        return Bounds { origin, size };
-    }
-
-    Bounds::default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Bounds, point, px, size};
 
     #[gpui::test]
     fn immediate_markdown_update_is_visible_before_return(cx: &mut gpui::TestAppContext) {
@@ -538,86 +597,5 @@ mod tests {
             state.set_markdown_text_immediate("First token", cx);
             assert_eq!(state.source().as_ref(), "First token");
         });
-    }
-
-    #[test]
-    fn test_text_view_state_selection_bounds() {
-        assert_eq!(
-            selection_bounds(None, None, Default::default()),
-            Bounds::default()
-        );
-        assert_eq!(
-            selection_bounds(None, Some(point(px(10.), px(20.))), Default::default()),
-            Bounds::default()
-        );
-        assert_eq!(
-            selection_bounds(Some(point(px(10.), px(20.))), None, Default::default()),
-            Bounds::default()
-        );
-
-        // 10,10 start
-        //   |------|
-        //   |      |
-        //   |------|
-        //         50,50
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(10.), px(10.))),
-                Some(point(px(50.), px(50.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
-            }
-        );
-        // 10,10
-        //   |------|
-        //   |      |
-        //   |------|
-        //         50,50 start
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(50.), px(50.))),
-                Some(point(px(10.), px(10.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
-            }
-        );
-        //        50,10 start
-        //   |------|
-        //   |      |
-        //   |------|
-        // 10,50
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(50.), px(10.))),
-                Some(point(px(10.), px(50.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
-            }
-        );
-        //        50,10
-        //   |------|
-        //   |      |
-        //   |------|
-        // 10,50 start
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(10.), px(50.))),
-                Some(point(px(50.), px(10.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
-            }
-        );
     }
 }

@@ -2,6 +2,7 @@ mod document;
 mod format;
 mod inline;
 mod node;
+mod selection;
 mod state;
 mod style;
 mod text_view;

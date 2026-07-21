@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId,
-    InteractiveElement, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
+    InteractiveElement, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
 };
 
 use crate::StyledExt;
@@ -283,6 +283,11 @@ impl Element for TextView {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        // Runs re-register their layout handles during the paint that
+        // follows; dropping the old set here keeps the hit map fresh.
+        request_layout
+            .state
+            .update(cx, |state, _| state.clear_hit_runs());
         request_layout.element.prepaint(window, cx);
     }
 
@@ -334,73 +339,70 @@ impl Element for TextView {
         drop(paint_element);
 
         if self.selectable {
-            let is_selecting = state.read(cx).is_selecting;
-            let has_selection = state.read(cx).has_selection();
             let parent_view_id = window.current_view();
 
+            // All handlers are registered unconditionally: gating them on
+            // state captured at paint time made correctness depend on a
+            // repaint landing between mouse events (a real race that forced
+            // tests to draw between every event).
             window.on_mouse_event({
                 let state = state.clone();
 
                 move |event: &MouseDownEvent, phase, _, cx| {
-                    if !bounds.contains(&event.position) || !phase.bubble() {
+                    if !phase.bubble() || event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    if bounds.contains(&event.position) {
+                        // Click count sets granularity: drag=graphemes,
+                        // double-click=word, triple-click=paragraph.
+                        state.update(cx, |state, _| {
+                            state.begin_selection(event.position, event.click_count);
+                        });
+                    } else if state.read(cx).has_selection() {
+                        state.update(cx, |state, _| state.clear_selection());
+                    } else {
+                        return;
+                    }
+                    cx.notify(parent_view_id);
+                }
+            });
+
+            window.on_mouse_event({
+                let state = state.clone();
+                move |event: &MouseMoveEvent, phase, _, cx| {
+                    // Only an actual left-button drag extends the selection;
+                    // hover after a missed mouse-up must never select.
+                    if !phase.bubble()
+                        || event.pressed_button != Some(MouseButton::Left)
+                        || !state.read(cx).is_selecting
+                    {
                         return;
                     }
 
                     state.update(cx, |state, _| {
-                        state.start_selection(event.position);
+                        state.extend_selection(event.position);
                     });
                     cx.notify(parent_view_id);
                 }
             });
 
-            if is_selecting {
-                // move to update end position.
-                window.on_mouse_event({
-                    let state = state.clone();
-                    move |event: &MouseMoveEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.update_selection(event.position);
-                        });
-                        cx.notify(parent_view_id);
+            window.on_mouse_event({
+                let state = state.clone();
+                move |event: &MouseUpEvent, phase, _, cx| {
+                    if !phase.bubble()
+                        || event.button != MouseButton::Left
+                        || !state.read(cx).is_selecting
+                    {
+                        return;
                     }
-                });
 
-                // up to end selection
-                window.on_mouse_event({
-                    let state = state.clone();
-                    move |_: &MouseUpEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.end_selection();
-                        });
-                        cx.notify(parent_view_id);
-                    }
-                });
-            }
-
-            if has_selection {
-                // down outside to clear selection
-                window.on_mouse_event({
-                    let state = state.clone();
-                    move |event: &MouseDownEvent, _, _, cx| {
-                        if bounds.contains(&event.position) {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.clear_selection();
-                        });
-                        cx.notify(parent_view_id);
-                    }
-                });
-            }
+                    state.update(cx, |state, _| {
+                        state.end_selection();
+                    });
+                    cx.notify(parent_view_id);
+                }
+            });
         }
     }
 }

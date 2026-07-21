@@ -108,17 +108,21 @@ invent from scratch:
 | `.notes/power-user-stories.md` | The grammar acceptance matrix (`+ : # ! / @` sigils; plain text stays fuzzy search) |
 | `scripts/hitl-choice/data/script-kit-qa-scenarios.json` + `.hitl-choice/script-kit-qa-scenarios-v2-25.json` | ~75 structured QA scenarios with per-scenario proof commands and pass/fail evidence |
 | `.claude/skills/script-kit-devtools/references/devtools-truth-scenarios/` | ~40 executed truth-scenario receipts — treat as covered; don't re-prove, chaos around their edges |
+| `references/surface-contract-matrix.md` (this skill) | The affordance-parity oracle: per-surface expected footer affordances + overlay symmetry contract + ratified divergences — every surface gets a parity row |
 | `tests/*_contract.rs` corpus, `docs/adr/` | Already-locked invariants and decisions — the "intent" side of reality-vs-intent |
 
 **Chaos classes** (from `.notes/chaos-monkey.md` batteries, applied *per
 story*, not just globally): nominal · empty/zero-results · hostile input
 (encoding edges, huge, control chars, pathological filters) · corrupt/churning
 state · rapid interaction (open-while-opening, Esc storms, hold-repeat) ·
+**chord/affordance symmetry** (every chord that opens an overlay must toggle it
+closed on repeat, close on Escape, restore focus to the pre-open owner, and
+leave the underlying footer/chrome intact — run surface × registered chord) ·
 degraded environment (LLM down, permission denied — expect graceful clarity) ·
 recovery (cancel mid-stream, relaunch dirty).
 
 **Lenses** (what gets captured — Phase 2): correctness · perf · layout/CLS ·
-data-integrity · design-vision.
+data-integrity · design-vision · affordance-parity.
 
 **Finite selection, not Cartesian:** every surface gets at least a nominal
 story, an empty state, one hostile-input row, one perf row, and one layout row.
@@ -149,6 +153,13 @@ return it to `ready` — proof goes stale, the ledger says so.
    `simulateGpuiEvent` nor cliclick can scroll).
 4. **`/usr/bin/sample <pid> <secs> -file out.txt` while driving input** — for
    perf rows that need attribution (sampling idle windows proves nothing).
+5. **Glancing lane** (one serialized screen-level pass per epoch): walk the
+   user journeys frontmost, screenshot each stop, and have a multimodal judge
+   answer one question per frame: "what would a user complain about here,
+   compared to the main menu?" No metrics, pure judgment, filed as candidate
+   findings for triage. Cheap, and it is the lane that finds
+   obvious-to-a-human bugs (all five 2026-07 user-reported bugs were visible
+   in one glance; no metric probe filed any of them).
 
 **Capture per lens** (a row may capture several):
 
@@ -186,6 +197,16 @@ return it to `ready` — proof goes stale, the ledger says so.
   no new hardcoded visual values (pair with a read-only `flows/auditor.md`
   sweep). Screenshots are evidence for a named principle, never free-floating
   vibes.
+- **Affordance-parity:** diff each surface's ACTUAL affordances (footer
+  buttons enumerated via `getElements`/the automation surface; registered
+  chords) against `references/surface-contract-matrix.md`. Absences and
+  asymmetries are findings — a missing button fails no metric, so it must
+  fail the matrix. Any divergence not listed as ratified in the matrix is a
+  finding regardless of how deliberate the code comment sounds (see the
+  divergence-ratification rule in Phase 3). This lens exists because metric
+  probes are structurally blind to what SHOULD exist: the 2026-07 campaign
+  shipped a Quick Terminal footer whose code said "Actions intentionally
+  omitted" and no probe could disagree (OF-60).
 
 **Existing chaos batteries — reuse, then extend** (`scripts/agentic/chaos-*.ts`):
 smoke-sheet (9 story smokes) · interaction-stress · corrupt-state ·
@@ -220,6 +241,15 @@ Rank every surprising observation:
 - **By-design** — surprising but defensible and consistent with
   docs/ADRs/contract tests (verify the spawn is argv-vector before calling
   injection "by design"). → document, don't "fix."
+
+**Divergence-ratification rule:** any change (or discovered code) that opts a
+surface out of a cross-surface contract — comments like "intentionally
+omitted", "deliberately different", scoped-down affordances — must be posted
+to the campaign's ratification board AND recorded in
+`references/surface-contract-matrix.md` as ratified-or-pending. A deliberate
+divergence without a ratification entry is a finding, not a decision.
+Grep-enforceable at harvest time: `rg -i "intentional(ly)? omit|deliberate(ly)?"`
+over changed files.
 - **Environment** — see standing constraints. → name it plainly; not a bug.
 
 For any GUI-runtime bug, run the `flows/devtools.md` loop (intake → primitive
@@ -229,6 +259,17 @@ attach its receipts to the ledger row.
 ---
 
 ## Phase 4 — Fix & lock
+
+**Fix embargo — discovery and fixing are separate epochs.** Never staff a fix
+the moment a red appears: discovery lanes run to their tranche boundary,
+findings accumulate on the ranked board, and fixes happen in batched waves
+between epochs (the 2026-07 retrospective measured ~60-65% of campaign effort
+going to fix-acceptance overhead while discovery starved; the five clearest
+bugs arrived from the user, not the herd). Per epoch: cap concurrent fixers,
+rank user-visible/affordance findings above metric drift, and end each fix
+wave with a frozen-tree re-validation of only the affected rows. The only
+exception is a finding that blocks discovery itself (harness/fixture defects)
+— those fix immediately, in the harness, not the product.
 
 1. Reproduce minimally; capture the **red** receipt with the exact probe stack.
 2. Fix in `src/` or the owning `crates/sk-*` (context-rich errors at

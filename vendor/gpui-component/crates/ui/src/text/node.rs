@@ -114,90 +114,6 @@ impl BlockNode {
             BlockNode::Unknown { .. } => None,
         }
     }
-
-    pub(super) fn selected_text(&self) -> String {
-        let mut text = String::new();
-        match self {
-            BlockNode::Root { children, .. } => {
-                let mut block_text = String::new();
-                for c in children.iter() {
-                    block_text.push_str(&c.selected_text());
-                }
-                if !block_text.is_empty() {
-                    text.push_str(&block_text);
-                    text.push('\n');
-                }
-            }
-            BlockNode::Paragraph(paragraph) => {
-                let mut block_text = String::new();
-                block_text.push_str(&paragraph.selected_text());
-                if !block_text.is_empty() {
-                    text.push_str(&block_text);
-                    text.push('\n');
-                }
-            }
-            BlockNode::Heading { children, .. } => {
-                let mut block_text = String::new();
-                block_text.push_str(&children.selected_text());
-                if !block_text.is_empty() {
-                    text.push_str(&block_text);
-                    text.push('\n');
-                }
-            }
-            BlockNode::List { children, .. } => {
-                for c in children.iter() {
-                    text.push_str(&c.selected_text());
-                }
-            }
-            BlockNode::ListItem { children, .. } => {
-                for c in children.iter() {
-                    text.push_str(&c.selected_text());
-                }
-            }
-            BlockNode::Blockquote { children, .. } => {
-                let mut block_text = String::new();
-                for c in children.iter() {
-                    block_text.push_str(&c.selected_text());
-                }
-
-                if !block_text.is_empty() {
-                    text.push_str(&block_text);
-                    text.push('\n');
-                }
-            }
-            BlockNode::Table(table) => {
-                let mut block_text = String::new();
-                for row in table.children.iter() {
-                    let mut row_texts = vec![];
-                    for cell in row.children.iter() {
-                        row_texts.push(cell.children.selected_text());
-                    }
-                    if !row_texts.is_empty() {
-                        block_text.push_str(&row_texts.join(" "));
-                        block_text.push('\n');
-                    }
-                }
-
-                if !block_text.is_empty() {
-                    text.push_str(&block_text);
-                    text.push('\n');
-                }
-            }
-            BlockNode::CodeBlock(code_block) => {
-                let block_text = code_block.selected_text();
-                if !block_text.is_empty() {
-                    text.push_str(&block_text);
-                    text.push('\n');
-                }
-            }
-            BlockNode::Definition { .. }
-            | BlockNode::Break { .. }
-            | BlockNode::Divider { .. }
-            | BlockNode::Unknown { .. } => {}
-        }
-
-        text
-    }
 }
 
 #[allow(unused)]
@@ -297,7 +213,7 @@ pub(crate) struct InlineNode {
     /// The text styles, each tuple contains the range of the text and the style.
     pub(crate) marks: Vec<(Range<usize>, TextMark)>,
 
-    state: Arc<Mutex<InlineState>>,
+    pub(super) state: Arc<Mutex<InlineState>>,
 }
 
 impl PartialEq for InlineNode {
@@ -360,26 +276,6 @@ impl Paragraph {
             link_refs: HashMap::new(),
             state: Arc::new(Mutex::new(InlineState::default())),
         }
-    }
-
-    pub(super) fn selected_text(&self) -> String {
-        let mut text = String::new();
-
-        for c in self.children.iter() {
-            let state = c.state.lock().unwrap();
-            if let Some(selection) = &state.selection {
-                let part_text = state.text.clone();
-                text.push_str(&part_text[selection.start..selection.end]);
-            }
-        }
-
-        let state = self.state.lock().unwrap();
-        if let Some(selection) = &state.selection {
-            let all_text = state.text.clone();
-            text.push_str(&all_text[selection.start..selection.end]);
-        }
-
-        text
     }
 }
 
@@ -507,6 +403,11 @@ impl CodeBlock {
         self.state.lock().unwrap().text.clone()
     }
 
+    /// The shared render/selection state of this code block's text run.
+    pub(super) fn state(&self) -> &Arc<Mutex<InlineState>> {
+        &self.state
+    }
+
     pub(crate) fn new(
         code: SharedString,
         lang: Option<SharedString>,
@@ -529,16 +430,6 @@ impl CodeBlock {
             state,
             span: span.map(|s| s.into()),
         }
-    }
-
-    pub(super) fn selected_text(&self) -> String {
-        let mut text = String::new();
-        let state = self.state.lock().unwrap();
-        if let Some(selection) = &state.selection {
-            let part_text = state.text.clone();
-            text.push_str(&part_text[selection.start..selection.end]);
-        }
-        text
     }
 
     fn agentic_code_styles(&self, cx: &App) -> Vec<(Range<usize>, HighlightStyle)> {

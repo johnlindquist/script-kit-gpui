@@ -30,14 +30,6 @@ impl NodeRenderOptions {
 }
 
 impl ParsedDocument {
-    pub(super) fn selected_text(&self) -> String {
-        let mut text = String::new();
-        for block in self.blocks.iter() {
-            text.push_str(&block.selected_text());
-        }
-        text
-    }
-
     /// Converts the node to markdown format.
     ///
     /// This is used to generate markdown for test.
