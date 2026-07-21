@@ -426,7 +426,7 @@ impl AiApp {
                     );
                     // Clear global handle + state so reopen works correctly
                     super::window_api::cleanup_ai_window_globals();
-                    window.remove_window();
+                    crate::platform::dematerialize_then_remove_gpui_window(window, cx, "AI", "AI");
                 }
                 _ => {}
             }
@@ -685,7 +685,7 @@ impl AiApp {
             );
             // Clear global handle + state so reopen works correctly
             super::window_api::cleanup_ai_window_globals();
-            window.remove_window();
+            crate::platform::dematerialize_then_remove_gpui_window(window, cx, "AI", "AI");
             // Show the main window so user lands back on the main menu
             crate::platform::show_main_window_without_activation();
             cx.stop_propagation();

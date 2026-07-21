@@ -189,7 +189,7 @@ pub fn open_chat_window(cx: &mut App) -> anyhow::Result<()> {
     let window_bounds = chat_window_bounds(None);
     let automation_bounds = automation_bounds_from_window_bounds(window_bounds);
     let handle = cx.open_window(chat_window_options(None), |window, cx| {
-        window.on_window_should_close(cx, |window, _cx| {
+        window.on_window_should_close(cx, |window, cx| {
             let wb = window.window_bounds();
             crate::window_state::save_window_from_gpui(
                 crate::window_state::WindowRole::AgentChat,
@@ -204,7 +204,16 @@ pub fn open_chat_window(cx: &mut App) -> anyhow::Result<()> {
                     }
                 }
             }
-            true
+            if crate::platform::begin_gpui_window_exit_dematerialize(
+                window,
+                "AGENT_CHAT",
+                "Agent Chat",
+            ) {
+                crate::platform::remove_gpui_window_after_glass_exit_from_app(window, cx);
+                false
+            } else {
+                true
+            }
         });
         let view = cx.new(ChatWindowPlaceholder::new);
         let focus_handle = view.read(cx).focus_handle.clone();
@@ -289,7 +298,16 @@ pub fn open_chat_window_with_thread(
                     }
                 }
             }
-            true // allow close
+            if crate::platform::begin_gpui_window_exit_dematerialize(
+                window,
+                "AGENT_CHAT",
+                "Agent Chat",
+            ) {
+                crate::platform::remove_gpui_window_after_glass_exit_from_app(window, cx);
+                false
+            } else {
+                true
+            }
         });
 
         let view = cx.new(|cx| AgentChatView::new(thread, cx));
@@ -627,7 +645,12 @@ pub fn close_chat_window(cx: &mut App) {
                 crate::window_state::WindowRole::AgentChat,
                 wb,
             );
-            window.remove_window();
+            crate::platform::dematerialize_then_remove_gpui_window_from_app(
+                window,
+                _cx,
+                "AGENT_CHAT",
+                "Agent Chat",
+            );
         });
     }
 }

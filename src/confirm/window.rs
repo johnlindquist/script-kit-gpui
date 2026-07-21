@@ -711,8 +711,13 @@ pub(crate) fn close_confirm_window(cx: &mut App) {
                 // remove_window() destroys the NSWindow, which causes AppKit
                 // to automatically detach it from its parent (addChildWindow
                 // relationship). No manual removeChildWindow: needed.
-                let _ = handle.update(cx, |_root, window, _cx| {
-                    window.remove_window();
+                let _ = handle.update(cx, |_root, window, cx| {
+                    crate::platform::dematerialize_then_remove_gpui_window(
+                        window,
+                        cx,
+                        "CONFIRM",
+                        "Confirm popup",
+                    );
                 });
             } else {
                 tracing::debug!(
@@ -864,7 +869,11 @@ pub(crate) fn open_confirm_popup_window(
 
     handle
         .update(cx, |_view, window, _cx| {
-            crate::platform::configure_overlay_window_glass(window, "Confirm popup");
+            crate::platform::configure_child_attached_overlay_window_glass(
+                window,
+                "CONFIRM",
+                "Confirm popup",
+            );
         })
         .ok();
 
@@ -1423,7 +1432,7 @@ impl ConfirmPopupWindow {
         self.resolved = true;
         let _ = self.result_tx.try_send(result);
 
-        window.defer(cx, |window, _cx| {
+        window.defer(cx, |window, cx| {
             tracing::info!(
                 target: "script_kit::confirm",
                 event = "resolve_and_close_deferred",
@@ -1431,13 +1440,18 @@ impl ConfirmPopupWindow {
             );
             unregister_confirm_popup_automation_window("resolve_and_close");
             clear_confirm_window_handle();
-            notify_confirm_parent_window(_cx);
+            notify_confirm_parent_window(cx);
             if let Some(storage) = CONFIRM_PARENT_WINDOW.get() {
                 if let Ok(mut guard) = storage.lock() {
                     *guard = None;
                 }
             }
-            window.remove_window();
+            crate::platform::dematerialize_then_remove_gpui_window_from_app(
+                window,
+                cx,
+                "CONFIRM",
+                "Confirm popup",
+            );
         });
     }
 }

@@ -1002,8 +1002,8 @@ fn dismiss_hud_by_id(hud_id: u64, cx: &mut App) {
     if let Some(window_handle) = window_to_close {
         // Use WindowHandle.update() to access window.remove_window()
         window_handle
-            .update(cx, |_view, window, _cx| {
-                window.remove_window();
+            .update(cx, |_view, window, cx| {
+                crate::platform::dematerialize_then_remove_gpui_window(window, cx, "HUD", "HUD");
             })
             .ok();
 
@@ -1050,8 +1050,8 @@ fn cleanup_expired_huds(cx: &mut App) {
     for hud in &expired {
         crate::windows::remove_automation_window(&hud_automation_id(hud.id));
         hud.window
-            .update(cx, |_view, window, _cx| {
-                window.remove_window();
+            .update(cx, |_view, window, cx| {
+                crate::platform::dematerialize_then_remove_gpui_window(window, cx, "HUD", "HUD");
             })
             .ok();
     }
@@ -1105,8 +1105,8 @@ pub fn dismiss_all_huds(cx: &mut App) {
 
     // Close each window using GPUI's proper API
     for window_handle in windows_to_close {
-        let _ = window_handle.update(cx, |_view, window, _cx| {
-            window.remove_window();
+        let _ = window_handle.update(cx, |_view, window, cx| {
+            crate::platform::dematerialize_then_remove_gpui_window(window, cx, "HUD", "HUD");
         });
     }
 

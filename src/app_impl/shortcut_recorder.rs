@@ -207,8 +207,13 @@ fn close_shortcut_recorder_window(cx: &mut App) {
     if let Some(storage) = SHORTCUT_RECORDER_WINDOW.get() {
         if let Ok(mut guard) = storage.lock() {
             if let Some(handle) = guard.take() {
-                let _ = handle.update(cx, |_popup, window, _cx| {
-                    window.remove_window();
+                let _ = handle.update(cx, |_popup, window, cx| {
+                    crate::platform::dematerialize_then_remove_gpui_window(
+                        window,
+                        cx,
+                        "SHORTCUT",
+                        "Shortcut recorder popup",
+                    );
                 });
             }
         }
@@ -333,7 +338,7 @@ fn open_shortcut_recorder_window(
             window.defer(cx, move |window, cx| {
                 if let Some(ns_window) = shortcut_recorder_ns_window(window) {
                     unsafe {
-                        crate::platform::configure_actions_popup_window(
+                        crate::platform::configure_shortcut_recorder_popup_window(
                             ns_window,
                             is_dark_vibrancy,
                         );

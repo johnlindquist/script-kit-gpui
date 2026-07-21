@@ -14969,7 +14969,12 @@ impl Render for AgentChatView {
                     );
                     this.prepare_for_host_hide(cx);
                     crate::ai::agent_chat::ui::chat_window::clear_chat_window_handle();
-                    window.remove_window();
+                    crate::platform::dematerialize_then_remove_gpui_window(
+                        window,
+                        cx,
+                        "AGENT_CHAT",
+                        "Agent Chat",
+                    );
                     cx.stop_propagation();
                     return;
                 }

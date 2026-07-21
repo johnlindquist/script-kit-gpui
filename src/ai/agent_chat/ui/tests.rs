@@ -954,8 +954,8 @@ fn agent_chat_close_paths_close_slash_and_composer_picker_session() {
         .find("this.prepare_for_host_hide(cx);")
         .expect("detached Cmd+W block must prepare Agent Chat host hide");
     let detached_cmd_w_remove = detached_cmd_w_block
-        .find("window.remove_window();")
-        .expect("detached Cmd+W block must remove the window");
+        .find("dematerialize_then_remove_gpui_window(")
+        .expect("detached Cmd+W block must dematerialize then remove the window");
     assert!(
         detached_cmd_w_prepare < detached_cmd_w_remove,
         "detached Agent Chat Cmd+W must close slash/profile composer sessions before removing the window"
@@ -970,8 +970,8 @@ fn agent_chat_close_paths_close_slash_and_composer_picker_session() {
         .find("view.prepare_for_host_hide(cx);")
         .expect("close_chat_window must prepare Agent Chat host hide");
     let detached_helper_remove = detached_close_helper
-        .find("window.remove_window();")
-        .expect("close_chat_window must remove the window");
+        .find("dematerialize_then_remove_gpui_window_from_app(")
+        .expect("close_chat_window must dematerialize then remove the window");
     assert!(
         detached_helper_prepare < detached_helper_remove,
         "detached close_chat_window must close slash/profile composer sessions before removing the window"

@@ -611,7 +611,7 @@ impl AiApp {
                     "closing",
                 );
                 super::window_api::cleanup_ai_window_globals();
-                window.remove_window();
+                crate::platform::dematerialize_then_remove_gpui_window(window, cx, "AI", "AI");
                 tracing::info!(target: "ai", "SimulateKey: Escape - closed mini window");
                 return;
             }

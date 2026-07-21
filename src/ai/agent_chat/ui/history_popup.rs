@@ -209,8 +209,13 @@ pub(crate) fn close_history_popup_window(cx: &mut App) {
     if let Some(storage) = AGENT_CHAT_HISTORY_POPUP_WINDOW.get() {
         if let Ok(mut guard) = storage.lock() {
             if let Some(slot) = guard.take() {
-                let _ = slot.handle.update(cx, |_popup, window, _cx| {
-                    window.remove_window();
+                let _ = slot.handle.update(cx, |_popup, window, cx| {
+                    crate::platform::dematerialize_then_remove_gpui_window(
+                        window,
+                        cx,
+                        "AGENT_CHAT",
+                        "Agent Chat history popup",
+                    );
                 });
             }
         }
@@ -339,8 +344,13 @@ pub(crate) fn sync_history_popup_window(
                 unregister_history_popup_automation_window();
                 *guard = None;
             } else {
-                let _ = slot.handle.update(cx, |_popup, window, _cx| {
-                    window.remove_window();
+                let _ = slot.handle.update(cx, |_popup, window, cx| {
+                    crate::platform::dematerialize_then_remove_gpui_window(
+                        window,
+                        cx,
+                        "AGENT_CHAT",
+                        "Agent Chat history popup",
+                    );
                 });
                 unregister_history_popup_automation_window();
                 *guard = None;
@@ -627,10 +637,15 @@ impl AgentChatHistoryPopupWindow {
             });
         }
 
-        window.defer(cx, |_window, _cx| {
+        window.defer(cx, |window, cx| {
             clear_history_popup_window_slot();
             unregister_history_popup_automation_window();
-            _window.remove_window();
+            crate::platform::dematerialize_then_remove_gpui_window_from_app(
+                window,
+                cx,
+                "AGENT_CHAT",
+                "Agent Chat history popup",
+            );
         });
     }
 

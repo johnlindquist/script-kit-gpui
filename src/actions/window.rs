@@ -481,7 +481,7 @@ impl ActionsWindow {
             "ACTIONS",
             &format!("ACTIONS_WINDOW_LIFECYCLE defer_close_scheduled: reason={reason}"),
         );
-        window.defer(cx, move |window, _cx| {
+        window.defer(cx, move |window, cx| {
             crate::logging::log(
                 "ACTIONS",
                 &format!("ACTIONS_WINDOW_LIFECYCLE defer_close_executing: reason={reason}"),
@@ -493,7 +493,12 @@ impl ActionsWindow {
             crate::windows::remove_runtime_window_handle("actions-dialog");
             crate::windows::remove_automation_window("actions-dialog");
             clear_actions_window_handle(reason);
-            window.remove_window();
+            crate::platform::dematerialize_then_remove_gpui_window_from_app(
+                window,
+                cx,
+                "ACTIONS",
+                "Actions popup",
+            );
         });
     }
 
@@ -2040,8 +2045,13 @@ pub fn close_actions_window(cx: &mut App) {
                 crate::logging::log("ACTIONS", "Closing actions popup window");
                 emit_actions_popup_event(ActionsPopupEvent::Closed, None, None, None, None, None);
                 // Close the window
-                let close_result = handle.update(cx, |_this, window, _cx| {
-                    window.remove_window();
+                let close_result = handle.update(cx, |_this, window, cx| {
+                    crate::platform::dematerialize_then_remove_gpui_window(
+                        window,
+                        cx,
+                        "ACTIONS",
+                        "Actions popup",
+                    );
                 });
                 if let Err(error) = close_result {
                     crate::logging::log(

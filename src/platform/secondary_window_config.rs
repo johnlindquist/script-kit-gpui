@@ -2,6 +2,114 @@
 // Actions Popup Window Configuration
 // ============================================================================
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlassMorphVariant {
+    WindowFrame,
+    ContentLayer,
+    FadeOnly,
+}
+
+#[cfg(target_os = "macos")]
+impl GlassMorphVariant {
+    fn log_name(self) -> &'static str {
+        match self {
+            Self::WindowFrame => "window_frame",
+            Self::ContentLayer => "content_layer",
+            Self::FadeOnly => "fade_only",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct GlassMorphTuning {
+    duration: f64,
+    inset_fraction: f64,
+    start_scale_x: f64,
+    start_scale_y: f64,
+    squish_scale_x: f64,
+    squish_scale_y: f64,
+    phase1: f64,
+    phase2: f64,
+}
+
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MIN_DURATION: f64 = 0.02;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MIN_INSET: f64 = 0.005;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MAX_DURATION: f64 = 2.0;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MAX_INSET: f64 = 0.4;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_VERTICAL_DAMPING: f64 = 0.4;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_SQUISH_FACTOR: f64 = 0.5;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MIN_SQUISH: f64 = 0.012;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MAX_SQUISH: f64 = 0.03;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_PHASE1_FRACTION: f64 = 0.5;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MIN_REBOUND_DURATION: f64 = 0.08;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_FADE_FRACTION: f64 = 0.7;
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_MIN_FADE_DURATION: f64 = 0.10;
+#[cfg(target_os = "macos")]
+const GLASS_EXIT_DURATION: f64 = 0.12;
+const GLASS_EXIT_REMOVE_DELAY_MS: u64 = 135;
+#[cfg(target_os = "macos")]
+const GLASS_EXIT_GROW_X: f64 = 0.03;
+#[cfg(target_os = "macos")]
+const GLASS_EXIT_GROW_Y: f64 = 0.012;
+#[cfg(target_os = "macos")]
+const GLASS_EXIT_BLUR_RADIUS: f64 = 8.0;
+
+#[cfg(target_os = "macos")]
+fn glass_morph_tuning() -> Option<GlassMorphTuning> {
+    let opacity = crate::theme::get_cached_theme().get_opacity();
+    let duration = f64::from(
+        opacity
+            .glass_morph_duration
+            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+            .clamp(0.0, GLASS_MORPH_MAX_DURATION as f32),
+    );
+    let inset_fraction = f64::from(
+        opacity
+            .glass_morph_inset
+            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)
+            .clamp(0.0, GLASS_MORPH_MAX_INSET as f32),
+    );
+    glass_morph_tuning_from(duration, inset_fraction)
+}
+
+#[cfg(target_os = "macos")]
+fn glass_morph_tuning_from(
+    duration: f64,
+    inset_fraction: f64,
+) -> Option<GlassMorphTuning> {
+    if duration < GLASS_MORPH_MIN_DURATION || inset_fraction < GLASS_MORPH_MIN_INSET {
+        return None;
+    }
+
+    let squish_fraction = (inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
+        .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
+    let phase1 = duration * GLASS_MORPH_PHASE1_FRACTION;
+    Some(GlassMorphTuning {
+        duration,
+        inset_fraction,
+        start_scale_x: 1.0 + inset_fraction * 2.0,
+        start_scale_y: 1.0 + inset_fraction * GLASS_MORPH_VERTICAL_DAMPING * 2.0,
+        squish_scale_x: 1.0 - squish_fraction * 2.0,
+        squish_scale_y: 1.0 - squish_fraction * GLASS_MORPH_VERTICAL_DAMPING * 2.0,
+        phase1,
+        phase2: (duration - phase1).max(GLASS_MORPH_MIN_REBOUND_DURATION),
+    })
+}
+
 // SAFETY: Caller must pass a valid NSWindow pointer on the main thread.
 // The function nil-checks all derived pointers (content view, appearance).
 #[cfg(target_os = "macos")]
@@ -10,6 +118,7 @@ unsafe fn configure_window_vibrancy_common(
     log_target: &str,
     window_name: &str,
     is_dark: bool,
+    morph_variant: GlassMorphVariant,
 ) {
     // Clear window appearance so GPUI can detect system appearance changes.
     // Appearance is set on individual NSVisualEffectViews instead.
@@ -77,13 +186,19 @@ unsafe fn configure_window_vibrancy_common(
     // Secondary/overlay windows (notes, dictation, confirm, actions, AI,
     // flow manager, inline popups) are created per appearance, so a freshly
     // created backdrop means the window just appeared: morph it in.
-    // Child-attached panels get the alpha-only fade — frame animation on a
-    // child window fights the parent-child machinery and lags badly.
+    // Child-attached panels transform the content layer because animating a
+    // child NSWindow frame fights AppKit's parent-child machinery and lags.
     if glass_created {
-        if matches!(window_name, "Actions popup" | "Confirm popup") {
-            animate_tahoe_glass_fade_appearance(window, log_target, window_name);
-        } else {
-            animate_tahoe_glass_appearance(window, log_target, window_name);
+        match morph_variant {
+            GlassMorphVariant::WindowFrame => {
+                animate_tahoe_glass_appearance(window, log_target, window_name)
+            }
+            GlassMorphVariant::ContentLayer => {
+                animate_tahoe_glass_layer_appearance(window, log_target, window_name)
+            }
+            GlassMorphVariant::FadeOnly => {
+                animate_tahoe_glass_fade_appearance(window, log_target, window_name)
+            }
         }
     }
 
@@ -212,6 +327,44 @@ pub fn configure_overlay_window_glass(window: &gpui::Window, window_name: &str) 
         }
         configure_secondary_window_vibrancy(ns_window, window_name, is_dark);
     }
+}
+
+/// Configure a GPUI overlay that will be attached to a parent NSWindow.
+#[cfg(target_os = "macos")]
+pub fn configure_child_attached_overlay_window_glass(
+    window: &gpui::Window,
+    log_target: &str,
+    window_name: &str,
+) {
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr() as id;
+    let is_dark = crate::theme::get_cached_theme().should_use_dark_vibrancy();
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        configure_window_vibrancy_common(
+            ns_window,
+            log_target,
+            window_name,
+            is_dark,
+            GlassMorphVariant::ContentLayer,
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn configure_child_attached_overlay_window_glass(
+    _window: &gpui::Window,
+    _log_target: &str,
+    _window_name: &str,
+) {
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -436,13 +589,13 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
     let _: () = msg_send![glass_view, release];
 }
 
-/// Two-phase bounce settle target: (window ptr, final frame x/y/w/h,
-/// settle duration seconds). Written by `animate_tahoe_glass_appearance`,
-/// consumed by the glass subclass's `settleOwnWindowFrame` selector.
-/// Single-slot is fine: the re-entry guard serializes morphs.
+/// Per-window two-phase bounce settle targets. Multiple HUDs and secondary
+/// windows can materialize concurrently, so a single global slot would let one
+/// window steal another's rebound target.
 #[cfg(target_os = "macos")]
-static GLASS_MORPH_SETTLE_TARGET: std::sync::Mutex<Option<(usize, f64, f64, f64, f64, f64)>> =
-    std::sync::Mutex::new(None);
+static GLASS_MORPH_SETTLE_TARGETS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, (f64, f64, f64, f64, f64)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Phase 2 of the appear bounce: ease the window from its overshoot
 /// (slightly smaller than final) back up to the final frame.
@@ -457,16 +610,13 @@ extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc:
         if window == nil {
             return;
         }
-        let target = GLASS_MORPH_SETTLE_TARGET
+        let target = GLASS_MORPH_SETTLE_TARGETS
             .lock()
             .ok()
-            .and_then(|mut guard| guard.take());
-        let Some((window_ptr, x, y, w, h, settle_duration)) = target else {
+            .and_then(|mut guard| guard.remove(&(window as usize)));
+        let Some((x, y, w, h, settle_duration)) = target else {
             return;
         };
-        if window_ptr != window as usize {
-            return;
-        }
         let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
@@ -613,6 +763,72 @@ pub fn begin_gpui_window_exit_dematerialize(
     }
 }
 
+/// Start the shared exit and remove the GPUI window after its short visual
+/// tail. Registry cleanup and parent-focus handoff should happen before this
+/// call; only destruction is delayed, so dismissal remains input-instant.
+pub fn dematerialize_then_remove_gpui_window<V: 'static>(
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<V>,
+    log_target: &'static str,
+    window_name: &'static str,
+) {
+    if begin_gpui_window_exit_dematerialize(window, log_target, window_name) {
+        let any_handle = window.window_handle();
+        cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    GLASS_EXIT_REMOVE_DELAY_MS,
+                ))
+                .await;
+            let _ = cx.update(|cx| {
+                let _ = any_handle.update(cx, |_view, window, _cx| {
+                    window.remove_window();
+                });
+            });
+        })
+        .detach();
+    } else {
+        window.remove_window();
+    }
+}
+
+/// App-context counterpart used by global popup/HUD registries.
+pub fn dematerialize_then_remove_gpui_window_from_app(
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+    log_target: &'static str,
+    window_name: &'static str,
+) {
+    if begin_gpui_window_exit_dematerialize(window, log_target, window_name) {
+        remove_gpui_window_after_glass_exit_from_app(window, cx);
+    } else {
+        window.remove_window();
+    }
+}
+
+/// Schedule only the destruction tail after a caller has already started the
+/// exit. This is used by `on_window_should_close` handlers that must return
+/// `false` while the visual tail completes.
+pub fn remove_gpui_window_after_glass_exit_from_app(
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) {
+    let any_handle = window.window_handle();
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(
+                GLASS_EXIT_REMOVE_DELAY_MS,
+            ))
+            .await;
+        let _ = cx.update(|cx| {
+            let _ = any_handle.update(cx, |_view, window, _cx| {
+                window.remove_window();
+            });
+        });
+    })
+    .detach();
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn begin_gpui_window_exit_dematerialize(
     _window: &gpui::Window,
@@ -637,12 +853,7 @@ unsafe fn begin_ns_window_exit_dematerialize(
     if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
         return false;
     }
-    let morph_enabled = crate::theme::get_cached_theme()
-        .get_opacity()
-        .glass_morph_duration
-        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
-        >= 0.02;
-    if !morph_enabled {
+    if glass_morph_tuning().is_none() {
         return false;
     }
 
@@ -681,10 +892,10 @@ unsafe fn begin_ns_window_exit_dematerialize(
                         let key_path = tahoe_ns_string("filters.exitBlur.inputRadius");
                         let anim: id = msg_send![anim_class, animationWithKeyPath: key_path];
                         if anim != nil {
-                            let eight: id = msg_send![class!(NSNumber), numberWithDouble: 8.0f64];
+                            let eight: id = msg_send![class!(NSNumber), numberWithDouble: GLASS_EXIT_BLUR_RADIUS];
                             let _: () = msg_send![anim, setFromValue: zero];
                             let _: () = msg_send![anim, setToValue: eight];
-                            let _: () = msg_send![anim, setDuration: 0.12f64];
+                            let _: () = msg_send![anim, setDuration: GLASS_EXIT_DURATION];
                             let forwards = tahoe_ns_string("forwards");
                             let _: () = msg_send![anim, setFillMode: forwards];
                             let _: () = msg_send![anim, setRemovedOnCompletion: false];
@@ -698,8 +909,8 @@ unsafe fn begin_ns_window_exit_dematerialize(
 
         // Fade + slight outward release (inverse of the entry compression;
         // vertical damped like the entry, per the measured width dominance).
-        let grow_x = frame.size.width * 0.03;
-        let grow_y = frame.size.height * 0.012;
+        let grow_x = frame.size.width * GLASS_EXIT_GROW_X;
+        let grow_y = frame.size.height * GLASS_EXIT_GROW_Y;
         let grown = NSRect::new(
             NSPoint::new(frame.origin.x - grow_x, frame.origin.y - grow_y),
             NSSize::new(
@@ -707,9 +918,34 @@ unsafe fn begin_ns_window_exit_dematerialize(
                 frame.size.height + grow_y * 2.0,
             ),
         );
+        let parent_window: id = msg_send![window, parentWindow];
+        let variant = if parent_window == nil {
+            GlassMorphVariant::WindowFrame
+        } else {
+            GlassMorphVariant::ContentLayer
+        };
+
+        if variant == GlassMorphVariant::ContentLayer && content_view != nil {
+            let layer: id = msg_send![content_view, layer];
+            if layer != nil {
+                add_layer_scale_exit(
+                    layer,
+                    "transform.scale.x",
+                    "scriptKitGlassExitX",
+                    1.0 + GLASS_EXIT_GROW_X * 2.0,
+                );
+                add_layer_scale_exit(
+                    layer,
+                    "transform.scale.y",
+                    "scriptKitGlassExitY",
+                    1.0 + GLASS_EXIT_GROW_Y * 2.0,
+                );
+            }
+        }
+
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-        let _: () = msg_send![ctx, setDuration: 0.12f64];
+        let _: () = msg_send![ctx, setDuration: GLASS_EXIT_DURATION];
         let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
         if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
             let name = tahoe_ns_string("easeInEaseOut");
@@ -721,18 +957,22 @@ unsafe fn begin_ns_window_exit_dematerialize(
             }
         }
         let animator: id = msg_send![window, animator];
-        let _: () = msg_send![animator, setFrame: grown display: true];
+        if variant == GlassMorphVariant::WindowFrame {
+            let _: () = msg_send![animator, setFrame: grown display: true];
+        }
         let _: () = msg_send![animator, setAlphaValue: 0.0f64];
         let _: () = msg_send![class!(NSAnimationContext), endGrouping];
-    }
 
-    logging::log(
-        log_target,
-        &format!(
-            "{}: exit dematerialize started (0.12s fade + blur + growth)",
-            window_name
-        ),
-    );
+        logging::log(
+            log_target,
+            &format!(
+                "event=glass_morph window={} variant={} phase=exit duration={:.2}s",
+                window_name,
+                variant.log_name(),
+                GLASS_EXIT_DURATION
+            ),
+        );
+    }
     true
 }
 
@@ -888,18 +1128,11 @@ pub fn restore_gpui_window_alpha_animated(_window: &gpui::Window) {}
 /// spring duration instead.
 #[cfg(target_os = "macos")]
 unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, window_name: &str) {
-    let duration = f64::from(
-        crate::theme::get_cached_theme()
-            .get_opacity()
-            .glass_morph_duration
-            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
-            .clamp(0.0, 2.0),
-    );
-    if duration < 0.02 {
+    let Some(tuning) = glass_morph_tuning() else {
         let _: () = msg_send![window, setAlphaValue: 1.0f64];
         return;
-    }
-    let fade = (duration * 0.7).max(0.10);
+    };
+    let fade = (tuning.duration * GLASS_MORPH_FADE_FRACTION).max(GLASS_MORPH_MIN_FADE_DURATION);
     let _: () = msg_send![window, setAlphaValue: 0.0f64];
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
@@ -918,7 +1151,194 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
     logging::log(
         log_target,
-        &format!("{}: glass fade appearance ({:.2}s)", window_name, fade),
+        &format!(
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s",
+            window_name,
+            GlassMorphVariant::FadeOnly.log_name(),
+            fade
+        ),
+    );
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn make_number_array(values: &[f64]) -> id {
+    let array: id = msg_send![class!(NSMutableArray), array];
+    for value in values {
+        let number: id = msg_send![class!(NSNumber), numberWithDouble: *value];
+        let _: () = msg_send![array, addObject: number];
+    }
+    array
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn make_morph_timing_functions() -> id {
+    let functions: id = msg_send![class!(NSMutableArray), array];
+    let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") else {
+        return functions;
+    };
+    for curve_name in ["easeInEaseOut", "easeOut"] {
+        let name = tahoe_ns_string(curve_name);
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![functions, addObject: timing];
+            }
+        }
+    }
+    functions
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_layer_scale_keyframes(
+    layer: id,
+    key_path: &str,
+    animation_key: &str,
+    values: [f64; 3],
+    tuning: GlassMorphTuning,
+) -> bool {
+    let Some(animation_class) = objc::runtime::Class::get("CAKeyframeAnimation") else {
+        return false;
+    };
+    let key_path = tahoe_ns_string(key_path);
+    let animation: id = msg_send![animation_class, animationWithKeyPath: key_path];
+    if animation == nil {
+        return false;
+    }
+    let values = make_number_array(&values);
+    let total_duration = tuning.phase1 + tuning.phase2;
+    let rebound_key_time = if total_duration > 0.0 {
+        tuning.phase1 / total_duration
+    } else {
+        GLASS_MORPH_PHASE1_FRACTION
+    };
+    let key_times = make_number_array(&[0.0, rebound_key_time, 1.0]);
+    let timing_functions = make_morph_timing_functions();
+    let _: () = msg_send![animation, setValues: values];
+    let _: () = msg_send![animation, setKeyTimes: key_times];
+    let _: () = msg_send![animation, setTimingFunctions: timing_functions];
+    let _: () = msg_send![animation, setDuration: total_duration];
+    let animation_key = tahoe_ns_string(animation_key);
+    let _: () = msg_send![layer, addAnimation: animation forKey: animation_key];
+    true
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_layer_scale_exit(
+    layer: id,
+    key_path: &str,
+    animation_key: &str,
+    to_value: f64,
+) {
+    let Some(animation_class) = objc::runtime::Class::get("CABasicAnimation") else {
+        return;
+    };
+    let key_path = tahoe_ns_string(key_path);
+    let animation: id = msg_send![animation_class, animationWithKeyPath: key_path];
+    if animation == nil {
+        return;
+    }
+    let from: id = msg_send![class!(NSNumber), numberWithDouble: 1.0f64];
+    let to: id = msg_send![class!(NSNumber), numberWithDouble: to_value];
+    let _: () = msg_send![animation, setFromValue: from];
+    let _: () = msg_send![animation, setToValue: to];
+    let _: () = msg_send![animation, setDuration: GLASS_EXIT_DURATION];
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeInEaseOut");
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![animation, setTimingFunction: timing];
+            }
+        }
+    }
+    let forwards = tahoe_ns_string("forwards");
+    let _: () = msg_send![animation, setFillMode: forwards];
+    let _: () = msg_send![animation, setRemovedOnCompletion: false];
+    let animation_key = tahoe_ns_string(animation_key);
+    let _: () = msg_send![layer, addAnimation: animation forKey: animation_key];
+}
+
+/// Child-window enter using presentation-layer scale keyframes. This consumes
+/// exactly the same start/squish/final ratios and timing split as the frame
+/// morph, while leaving the attached NSWindow frame untouched.
+#[cfg(target_os = "macos")]
+unsafe fn animate_tahoe_glass_layer_appearance(
+    window: id,
+    log_target: &str,
+    window_name: &str,
+) {
+    clear_exit_dematerialize_blur(window);
+    let restore_alpha = |window: id| {
+        let _: () = msg_send![window, setAlphaValue: 1.0f64];
+    };
+    let Some(tuning) = glass_morph_tuning() else {
+        restore_alpha(window);
+        return;
+    };
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        restore_alpha(window);
+        return;
+    }
+    let _: () = msg_send![content_view, setWantsLayer: true];
+    let layer: id = msg_send![content_view, layer];
+    if layer == nil {
+        restore_alpha(window);
+        return;
+    }
+
+    let _: () = msg_send![layer, removeAllAnimations];
+    let _: () = msg_send![window, setAlphaValue: 0.0f64];
+    let x_started = add_layer_scale_keyframes(
+        layer,
+        "transform.scale.x",
+        "scriptKitGlassMorphX",
+        [tuning.start_scale_x, tuning.squish_scale_x, 1.0],
+        tuning,
+    );
+    let y_started = add_layer_scale_keyframes(
+        layer,
+        "transform.scale.y",
+        "scriptKitGlassMorphY",
+        [tuning.start_scale_y, tuning.squish_scale_y, 1.0],
+        tuning,
+    );
+    if !(x_started && y_started) {
+        let _: () = msg_send![layer, removeAllAnimations];
+        restore_alpha(window);
+        return;
+    }
+
+    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+    let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+    let _: () = msg_send![ctx, setDuration: tuning.phase1];
+    let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeInEaseOut");
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![ctx, setTimingFunction: timing];
+            }
+        }
+    }
+    let animator: id = msg_send![window, animator];
+    let _: () = msg_send![animator, setAlphaValue: 1.0f64];
+    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+    logging::log(
+        log_target,
+        &format!(
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start={:.3}x{:.3} squish={:.3}x{:.3}",
+            window_name,
+            GlassMorphVariant::ContentLayer.log_name(),
+            tuning.duration,
+            tuning.inset_fraction,
+            tuning.start_scale_x,
+            tuning.start_scale_y,
+            tuning.squish_scale_x,
+            tuning.squish_scale_y,
+        ),
     );
 }
 
@@ -948,24 +1368,12 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         let _: () = msg_send![window, setAlphaValue: 1.0f64];
     };
 
-    let morph_opacity = crate::theme::get_cached_theme().get_opacity();
-    let duration = f64::from(
-        morph_opacity
-            .glass_morph_duration
-            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
-            .clamp(0.0, 2.0),
-    );
-    let inset_fraction = f64::from(
-        morph_opacity
-            .glass_morph_inset
-            .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)
-            .clamp(0.0, 0.4),
-    );
-    if duration < 0.02 || inset_fraction < 0.005 {
+    let Some(tuning) = glass_morph_tuning() else {
         restore_alpha(window);
         return; // morph disabled via theme sliders
-    }
-    if glass_morph_recently_started() {
+    };
+    let is_main_window = crate::window_manager::get_main_window() == Some(window);
+    if is_main_window && glass_morph_recently_started() {
         restore_alpha(window);
         return;
     }
@@ -991,8 +1399,9 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     // (the "inset" slider is the start outset) and glide down. Measured
     // from the real Spotlight: the morph is WIDTH-DOMINANT — height locks
     // early and barely undershoots — so the vertical deltas are damped.
-    let outset_x = final_frame.size.width * inset_fraction;
-    let outset_y = final_frame.size.height * (inset_fraction * 0.4);
+    let outset_x = final_frame.size.width * tuning.inset_fraction;
+    let outset_y =
+        final_frame.size.height * (tuning.inset_fraction * GLASS_MORPH_VERTICAL_DAMPING);
     let start = NSRect::new(
         NSPoint::new(
             final_frame.origin.x - outset_x,
@@ -1018,17 +1427,21 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
 
     // Record the in-flight duration so sibling windows (footer overlay) can
     // hide until the morph settles (glass_morph_remaining).
-    GLASS_MORPH_LAST_DURATION_MS.store(
-        (duration * 1000.0) as u64,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    if is_main_window {
+        GLASS_MORPH_LAST_DURATION_MS.store(
+            (tuning.duration * 1000.0) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 
     // Squish target: compress BELOW the final size — the released-elastic
     // physics the Spotlight enter has. Visible (~1.5% of each dimension),
     // scaled off the start outset.
-    let squish_fraction = (inset_fraction * 0.5).clamp(0.012, 0.03);
+    let squish_fraction = (tuning.inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
+        .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
     let squish_x = final_frame.size.width * squish_fraction;
-    let squish_y = final_frame.size.height * (squish_fraction * 0.4);
+    let squish_y =
+        final_frame.size.height * (squish_fraction * GLASS_MORPH_VERTICAL_DAMPING);
     let squish = NSRect::new(
         NSPoint::new(
             final_frame.origin.x + squish_x,
@@ -1044,8 +1457,8 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     // momentarily comes to rest at max compression — physically natural).
     // Measured Spotlight split: compression and rebound take EQUAL time,
     // but the rebound travels ~1/4 the distance, so it reads far gentler.
-    let phase1 = duration * 0.50;
-    let phase2 = (duration - phase1).max(0.08);
+    let phase1 = tuning.phase1;
+    let phase2 = tuning.phase2;
 
     // Cancel any pending settle from an interrupted previous morph.
     let _: () = msg_send![
@@ -1075,15 +1488,17 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
 
     // Phase 2: rebound out to the natural size (settle selector, run-loop
     // scheduled, ease-out over the remaining duration).
-    if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGET.lock() {
-        *guard = Some((
+    if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGETS.lock() {
+        guard.insert(
             window as usize,
+            (
             final_frame.origin.x,
             final_frame.origin.y,
             final_frame.size.width,
             final_frame.size.height,
             phase2,
-        ));
+            ),
+        );
     }
     let _: () = msg_send![
         glass_view,
@@ -1095,10 +1510,11 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     logging::log(
         log_target,
         &format!(
-            "{}: spotlight morph started ({:.2}s squish-rebound, outset {:.2}, {}x{} -> {}x{} -> {}x{})",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} frames={}x{}->{}x{}->{}x{}",
             window_name,
-            duration,
-            inset_fraction,
+            GlassMorphVariant::WindowFrame.log_name(),
+            tuning.duration,
+            tuning.inset_fraction,
             start.size.width as i64,
             start.size.height as i64,
             squish.size.width as i64,
@@ -1477,11 +1893,18 @@ fn configure_tahoe_window_backdrop(
 /// - NSAppearance pointers are nil-checked before use.
 /// - Content view is nil-checked before recursing into visual effect views.
 #[cfg(target_os = "macos")]
-pub unsafe fn configure_actions_popup_window(window: id, is_dark: bool) {
+unsafe fn configure_attached_popup_window(
+    window: id,
+    is_dark: bool,
+    log_target: &str,
+    window_name: &str,
+    morph_variant: GlassMorphVariant,
+) {
     if window.is_null() {
         tracing::warn!(
-            event = "actions_popup_configure.null_window",
-            "Cannot configure null window as actions popup"
+            event = "attached_popup_configure.null_window",
+            window_name,
+            "Cannot configure null attached popup window"
         );
         return;
     }
@@ -1530,12 +1953,29 @@ pub unsafe fn configure_actions_popup_window(window: id, is_dark: bool) {
     let empty_string: id = msg_send![class!(NSString), string];
     let _: () = msg_send![window, setFrameAutosaveName: empty_string];
 
-    configure_window_vibrancy_common(window, "ACTIONS", "Actions popup", is_dark);
+    configure_window_vibrancy_common(
+        window,
+        log_target,
+        window_name,
+        is_dark,
+        morph_variant,
+    );
 
     // SAFETY: `window` is a valid, non-null NSWindow pointer (checked at function entry).
     // orderFrontRegardless brings the popup visually above the main panel without
     // activating the app — same pattern as show_main_window_without_activation.
     let _: () = msg_send![window, orderFrontRegardless];
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn configure_actions_popup_window(window: id, is_dark: bool) {
+    configure_attached_popup_window(
+        window,
+        is_dark,
+        "ACTIONS",
+        "Actions popup",
+        GlassMorphVariant::ContentLayer,
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1550,7 +1990,13 @@ pub fn configure_actions_popup_window(_window: *mut std::ffi::c_void, _is_dark: 
 /// Same invariants as `configure_actions_popup_window`.
 #[cfg(target_os = "macos")]
 pub unsafe fn configure_inline_dropdown_popup_window(window: id, is_dark: bool) {
-    configure_actions_popup_window(window, is_dark);
+    configure_attached_popup_window(
+        window,
+        is_dark,
+        "POPUP",
+        "Inline popup",
+        GlassMorphVariant::ContentLayer,
+    );
 
     // Inline dropdowns should read as native child popups with depth.
     let _: () = msg_send![window, setHasShadow: true];
@@ -1576,12 +2022,37 @@ pub fn configure_inline_dropdown_popup_window(_window: *mut std::ffi::c_void, _i
 /// Same invariants as `configure_actions_popup_window`.
 #[cfg(target_os = "macos")]
 pub unsafe fn configure_confirm_popup_window(window: id, is_dark: bool) {
-    configure_actions_popup_window(window, is_dark);
+    configure_attached_popup_window(
+        window,
+        is_dark,
+        "CONFIRM",
+        "Confirm popup",
+        GlassMorphVariant::ContentLayer,
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn configure_confirm_popup_window(_window: *mut std::ffi::c_void, _is_dark: bool) {
     // No-op on non-macOS platforms
+}
+
+/// Configure the child-attached shortcut recorder with its own morph receipt.
+#[cfg(target_os = "macos")]
+pub unsafe fn configure_shortcut_recorder_popup_window(window: id, is_dark: bool) {
+    configure_attached_popup_window(
+        window,
+        is_dark,
+        "SHORTCUT",
+        "Shortcut recorder popup",
+        GlassMorphVariant::ContentLayer,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn configure_shortcut_recorder_popup_window(
+    _window: *mut std::ffi::c_void,
+    _is_dark: bool,
+) {
 }
 
 /// Configure the launcher footer popup window. This uses the shared popup
@@ -1592,7 +2063,15 @@ pub fn configure_confirm_popup_window(_window: *mut std::ffi::c_void, _is_dark: 
 /// Same invariants as `configure_actions_popup_window`.
 #[cfg(target_os = "macos")]
 pub unsafe fn configure_footer_popup_window(window: id, is_dark: bool) {
-    configure_actions_popup_window(window, is_dark);
+    // Footer behavior is intentionally unchanged and remains alpha-only; it
+    // tracks the parent frame and is outside the floating-surface contract.
+    configure_attached_popup_window(
+        window,
+        is_dark,
+        "ACTIONS",
+        "Actions popup",
+        GlassMorphVariant::FadeOnly,
+    );
     let _: () = msg_send![window, setIgnoresMouseEvents: true];
 
     // SAFETY: `window` is a valid NSWindow. The footer popup sits flush with
@@ -1660,7 +2139,13 @@ pub unsafe fn configure_secondary_window_vibrancy(window: id, window_name: &str,
         return;
     }
 
-    configure_window_vibrancy_common(window, "PANEL", window_name, is_dark);
+    configure_window_vibrancy_common(
+        window,
+        "PANEL",
+        window_name,
+        is_dark,
+        GlassMorphVariant::WindowFrame,
+    );
 }
 
 /// Configure the live dictation overlay with the shared native material path.
@@ -1689,7 +2174,13 @@ pub unsafe fn configure_dictation_overlay_window(window: id, is_dark: bool) {
         is_dark,
         "Configuring dictation overlay shared native material"
     );
-    configure_window_vibrancy_common(window, "DICTATION", "Dictation overlay", is_dark);
+    configure_window_vibrancy_common(
+        window,
+        "DICTATION",
+        "Dictation overlay",
+        is_dark,
+        GlassMorphVariant::WindowFrame,
+    );
 
     let title: id = msg_send![
         class!(NSString),
@@ -1728,7 +2219,13 @@ pub unsafe fn configure_hud_window_vibrancy(window: id, is_dark: bool) {
         return;
     }
 
-    configure_window_vibrancy_common(window, "HUD", "HUD", is_dark);
+    configure_window_vibrancy_common(
+        window,
+        "HUD",
+        "HUD",
+        is_dark,
+        GlassMorphVariant::WindowFrame,
+    );
 
     let title: id = msg_send![
         class!(NSString),
@@ -1760,6 +2257,26 @@ pub fn configure_hud_window_vibrancy(_window: *mut std::ffi::c_void, _is_dark: b
 
 #[cfg(test)]
 mod secondary_window_config_tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn glass_morph_tuning_drives_matching_frame_and_layer_geometry() {
+        let tuning = super::glass_morph_tuning_from(0.28, 0.03).expect("morph enabled");
+        let epsilon = 1e-12;
+        assert!((tuning.start_scale_x - 1.06).abs() < epsilon);
+        assert!((tuning.start_scale_y - 1.024).abs() < epsilon);
+        assert!((tuning.squish_scale_x - 0.97).abs() < epsilon);
+        assert!((tuning.squish_scale_y - 0.988).abs() < epsilon);
+        assert!((tuning.phase1 - 0.14).abs() < epsilon);
+        assert!((tuning.phase2 - 0.14).abs() < epsilon);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn glass_morph_tuning_respects_slider_disable_thresholds() {
+        assert!(super::glass_morph_tuning_from(0.0, 0.03).is_none());
+        assert!(super::glass_morph_tuning_from(0.28, 0.0).is_none());
+    }
+
     #[test]
     fn actions_popup_focus_shadow_contract_uses_becomes_key_only_if_needed() {
         let source = include_str!("secondary_window_config.rs");
@@ -1792,7 +2309,9 @@ mod secondary_window_config_tests {
             .expect("HUD vibrancy function body");
 
         assert!(
-            body.contains("configure_window_vibrancy_common(window, \"HUD\", \"HUD\", is_dark)"),
+            body.contains("configure_window_vibrancy_common(")
+                && body.contains("\"HUD\",")
+                && body.contains("GlassMorphVariant::WindowFrame"),
             "HUD window vibrancy must reuse the shared native background/material configuration"
         );
         assert!(

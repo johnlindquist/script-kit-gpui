@@ -196,8 +196,13 @@ pub(crate) fn sync_dictation_microphone_popup_window(
                 crate::windows::remove_automation_window(DICTATION_MICROPHONE_POPUP_AUTOMATION_ID);
                 *guard = None;
             } else {
-                let _ = slot.handle.update(cx, |_popup, window, _cx| {
-                    window.remove_window();
+                let _ = slot.handle.update(cx, |_popup, window, cx| {
+                    crate::platform::dematerialize_then_remove_gpui_window(
+                        window,
+                        cx,
+                        "DICTATION",
+                        "Microphone popup",
+                    );
                 });
                 crate::windows::automation_surface_collector::remove_dictation_microphone_prompt_popup_snapshot(
                     DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
@@ -267,20 +272,30 @@ pub(crate) fn close_dictation_microphone_popup_window(cx: &mut App) {
     let storage = DICTATION_MICROPHONE_POPUP_WINDOW.get_or_init(|| Mutex::new(None));
     let handle = storage.lock().ok().and_then(|mut guard| guard.take());
     if let Some(slot) = handle {
-        let _ = slot.handle.update(cx, |_popup, window, _cx| {
-            window.remove_window();
+        let _ = slot.handle.update(cx, |_popup, window, cx| {
+            crate::platform::dematerialize_then_remove_gpui_window(
+                window,
+                cx,
+                "DICTATION",
+                "Microphone popup",
+            );
         });
     }
     clear_dictation_microphone_popup_registration();
 }
 
-fn close_dictation_microphone_popup_from_entity(window: &mut Window) {
+fn close_dictation_microphone_popup_from_entity(window: &mut Window, cx: &mut App) {
     let storage = DICTATION_MICROPHONE_POPUP_WINDOW.get_or_init(|| Mutex::new(None));
     if let Ok(mut guard) = storage.lock() {
         guard.take();
     }
     clear_dictation_microphone_popup_registration();
-    window.remove_window();
+    crate::platform::dematerialize_then_remove_gpui_window_from_app(
+        window,
+        cx,
+        "DICTATION",
+        "Microphone popup",
+    );
 }
 
 fn clear_dictation_microphone_popup_registration() {
@@ -440,7 +455,7 @@ impl DictationMicrophonePopupWindow {
                 });
             });
         }
-        close_dictation_microphone_popup_from_entity(window);
+        close_dictation_microphone_popup_from_entity(window, cx);
         Some(row.row_id)
     }
 
@@ -512,7 +527,7 @@ impl DictationMicrophonePopupWindow {
             return;
         }
         if crate::ui_foundation::is_key_escape(key) {
-            close_dictation_microphone_popup_from_entity(window);
+            close_dictation_microphone_popup_from_entity(window, cx);
             cx.stop_propagation();
             return;
         }

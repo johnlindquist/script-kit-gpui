@@ -212,7 +212,18 @@ fn open_ai_window_with_mode_from(
         "BEACHBALL TRACE: window options prepared, calling cx.open_window (app mode=regular)"
     );
 
-    let handle = match cx.open_window(window_options, |window, cx| {
+    let handle = match cx.open_window(window_options, move |window, cx| {
+        window.on_window_should_close(cx, move |window, cx| {
+            let wb = window.window_bounds();
+            crate::window_state::save_window_from_gpui(window_role_for_mode(mode), wb);
+            cleanup_ai_window_globals();
+            if crate::platform::begin_gpui_window_exit_dematerialize(window, "AI", "AI") {
+                crate::platform::remove_gpui_window_after_glass_exit_from_app(window, cx);
+                false
+            } else {
+                true
+            }
+        });
         let view = cx.new(|cx| AiApp::new_with_mode(mode, window, cx));
         // Store the AiApp entity temporarily for immediate focus after window creation
         *ai_app_holder_clone
@@ -419,7 +430,7 @@ pub fn close_ai_window(cx: &mut App) {
     };
 
     if let Some(handle) = handle {
-        let _ = handle.update(cx, |_, window, _| {
+        let _ = handle.update(cx, |_, window, cx| {
             let wb = window.window_bounds();
             // Derive role from the global atomic mirror, not from window title string.
             let mode = AiWindowMode::from_u8(
@@ -427,7 +438,7 @@ pub fn close_ai_window(cx: &mut App) {
             );
             let role = window_role_for_mode(mode);
             crate::window_state::save_window_from_gpui(role, wb);
-            window.remove_window();
+            crate::platform::dematerialize_then_remove_gpui_window(window, cx, "AI", "AI");
         });
     }
 

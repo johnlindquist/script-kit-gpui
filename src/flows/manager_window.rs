@@ -145,11 +145,17 @@ pub fn open_flow_manager_window(cx: &mut App) -> anyhow::Result<()> {
     };
 
     let handle = cx.open_window(options, |window, cx| {
-        window.on_window_should_close(cx, |_window, _cx| {
+        window.on_window_should_close(cx, |window, cx| {
             // Closing the manager must never cancel runs — it only drops the
             // window and its automation registrations (protocol §7).
             clear_manager_window_slot();
-            true
+            if crate::platform::begin_gpui_window_exit_dematerialize(window, "FLOW", "Flow Manager")
+            {
+                crate::platform::remove_gpui_window_after_glass_exit_from_app(window, cx);
+                false
+            } else {
+                true
+            }
         });
         let view = cx.new(|cx| FlowManagerApp::new(window, cx));
         let focus_handle = view.read(cx).focus_handle.clone();
@@ -194,8 +200,13 @@ pub fn close_flow_manager_window(cx: &mut App) {
         slot.lock().ok().and_then(|g| g.as_ref().map(|s| s.handle))
     };
     if let Some(handle) = handle {
-        let _ = handle.update(cx, |_root, window, _cx| {
-            window.remove_window();
+        let _ = handle.update(cx, |_root, window, cx| {
+            crate::platform::dematerialize_then_remove_gpui_window_from_app(
+                window,
+                cx,
+                "FLOW",
+                "Flow Manager",
+            );
         });
     }
     clear_manager_window_slot();
@@ -275,8 +286,13 @@ impl FlowManagerApp {
         let registry = flow_run_registry();
 
         if is_key_escape(key) {
-            window.remove_window();
             clear_manager_window_slot();
+            crate::platform::dematerialize_then_remove_gpui_window(
+                window,
+                cx,
+                "FLOW",
+                "Flow Manager",
+            );
             return;
         }
         if key == "tab" {
