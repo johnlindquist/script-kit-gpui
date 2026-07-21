@@ -10,25 +10,30 @@ const TRANSACTION_PROVIDER: &str =
     include_str!("../src/windows/automation_transaction_provider.rs");
 
 #[test]
-fn agent_chat_model_toolbar_opens_actions_instead_of_detached_selector_list() {
+fn agent_chat_config_footer_model_chip_opens_actions_instead_of_detached_selector_list() {
     assert!(
         AGENT_CHAT_VIEW.contains("fn trigger_toggle_actions_from_parent")
             && AGENT_CHAT_VIEW.contains("parent.handle.update(cx, |_root, window, cx|")
             && AGENT_CHAT_VIEW.contains("callback(window, cx);"),
-        "Agent Chat model toolbar needs a parent-window bridge into the host actions callback"
+        "Agent Chat config footer needs a parent-window bridge into the host actions callback"
     );
 
-    let handler = AGENT_CHAT_VIEW
-        .split("AgentChatToolbarEvent::ToggleModelSelector(parent) =>")
+    let dispatch = AGENT_CHAT_VIEW
+        .split("pub(crate) fn dispatch_footer_button")
         .nth(1)
-        .and_then(|tail| tail.split("AgentChatToolbarEvent::ExportThread").next())
-        .expect("model selector toolbar handler");
+        .expect("config-footer dispatcher");
+    let handler = dispatch
+        .split("FooterAction::AgentModel =>")
+        .nth(1)
+        .and_then(|tail| tail.split("FooterAction::Tips =>").next())
+        .expect("config-footer model selector handler");
 
     assert!(
-        handler.contains("this.sync_agent_chat_popup_windows_from_cached_parent(cx);")
-            && handler.contains("this.trigger_toggle_actions_from_parent(*parent, cx);")
+        handler.contains("self.cache_composer_parent_window(window, cx);")
+            && handler.contains("self.sync_agent_chat_popup_windows_from_cached_parent(cx);")
+            && handler.contains("self.trigger_toggle_actions_from_parent(parent, cx);")
             && !handler.contains("model_selector_open"),
-        "toolbar model selection should open Cmd+K actions rather than toggling the detached selector"
+        "config-footer model selection should open Cmd+K actions rather than toggling the detached selector"
     );
 }
 

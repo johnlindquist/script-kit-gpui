@@ -1011,6 +1011,33 @@ impl Render for DayPageView {
                 this.handle_key_down(event, window, cx);
             }));
 
+        let footer_config = app
+            .read(cx)
+            .main_window_footer_config_with_cx(Some(&*cx))
+            .expect("Day Page owns a main-window footer config");
+        let footer_app = app.downgrade();
+        let footer =
+            crate::components::prompt_layout_shell::render_main_window_footer_slot_for_prompt_surface(
+                "day_page",
+                move || {
+                    crate::components::footer_chrome::render_main_window_footer_config_rail(
+                        footer_config,
+                        move |action, window, cx| {
+                            if let Some(app) = footer_app.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.dispatch_main_window_footer_action(
+                                        action,
+                                        window,
+                                        cx,
+                                        "gpui_footer_click",
+                                    );
+                                });
+                            }
+                        },
+                    )
+                },
+            );
+
         crate::components::main_view_chrome::render_main_view_chrome(
             root,
             &theme,
@@ -1019,10 +1046,7 @@ impl Render for DayPageView {
                 header,
                 divider,
                 main,
-                footer: Some(
-                    crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(
-                    ),
-                ),
+                footer: Some(footer),
                 overlays: Vec::new(),
             },
         )

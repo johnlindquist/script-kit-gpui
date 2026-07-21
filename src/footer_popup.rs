@@ -63,13 +63,17 @@ const FOOTER_LEFT_INFO_HIT_TARGET_ID: &str = "script-kit-footer-left-info-hit-ta
 #[cfg(target_os = "macos")]
 const FOOTER_LEFT_PROFILE_ICON_SIZE: f64 = 13.0;
 #[cfg(target_os = "macos")]
-const FOOTER_STREAMING_DOT_SIZE: f64 = 6.0;
+const FOOTER_STREAMING_DOT_SIZE: f64 =
+    crate::components::footer_chrome::FOOTER_STATUS_DOT_SIZE_PX as f64;
 #[cfg(target_os = "macos")]
-const FOOTER_LEFT_DOT_LABEL_GAP: f64 = 6.0;
+const FOOTER_LEFT_DOT_LABEL_GAP: f64 =
+    crate::components::footer_chrome::FOOTER_LEFT_INFO_GAP_PX as f64;
 /// Braille loading spinner in the footer left info: glyph size and the
 /// fixed lane width that keeps the label from shifting as frames cycle.
-const FOOTER_BRAILLE_SPINNER_FONT_PX: f32 = 15.0;
-const FOOTER_BRAILLE_SPINNER_LANE_PX: f32 = 12.0;
+const FOOTER_BRAILLE_SPINNER_FONT_PX: f32 =
+    crate::components::footer_chrome::FOOTER_BRAILLE_SPINNER_FONT_PX;
+const FOOTER_BRAILLE_SPINNER_LANE_PX: f32 =
+    crate::components::footer_chrome::FOOTER_BRAILLE_SPINNER_LANE_PX;
 #[cfg(target_os = "macos")]
 const FOOTER_ACTIVE_DOT_MIN_OPACITY: f32 = 0.6;
 #[cfg(target_os = "macos")]

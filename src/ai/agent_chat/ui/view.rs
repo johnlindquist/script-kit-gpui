@@ -66,7 +66,6 @@ use crate::spine::list::{SpineListAction, SpineListRow, SpineListRowKind, SpineL
 use super::components::setup_card::{
     AgentChatSetupAgentPickerState, AgentChatSetupCard, AgentChatSetupCardEvent,
 };
-use super::components::toolbar::{AgentChatToolbar, AgentChatToolbarEvent};
 use super::components::transcript::{AgentChatTranscript, AgentChatTranscriptEvent};
 
 mod portal_host;
@@ -680,7 +679,6 @@ pub(crate) struct AgentChatView {
     pasted_image_tokens: Vec<crate::pasted_image::PastedImageToken>,
     /// Setup card entity (only present during setup or runtime recovery).
     setup_card: Option<Entity<AgentChatSetupCard>>,
-    toolbar: Option<Entity<AgentChatToolbar>>,
     pub(crate) transcript: Option<Entity<AgentChatTranscript>>,
     ui_variant: AgentChatUiVariant,
     focused_text: Option<FocusedTextAgentChatState>,
@@ -1739,6 +1737,21 @@ impl AgentChatView {
         config.left_info = Some(snapshot.profile_left_info());
 
         config
+    }
+
+    fn render_agent_chat_config_footer_rail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let config = self.agent_chat_detached_native_footer_config(cx);
+        let view = cx.entity().downgrade();
+        crate::components::footer_chrome::render_main_window_footer_config_rail(
+            config,
+            move |action, window, cx| {
+                if let Some(view) = view.upgrade() {
+                    view.update(cx, |view, cx| {
+                        view.dispatch_footer_button(action, window, cx);
+                    });
+                }
+            },
+        )
     }
 
     fn ensure_native_footer_action_listener(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -3550,12 +3563,14 @@ impl AgentChatView {
                 );
             }
             FooterAction::AgentModel => {
-                // Agent/model picker is owned by the main launcher window;
-                // the Agent Chat chat does not currently host it inline.
-                tracing::info!(
-                    target: "script_kit::agent_chat",
-                    event = "agent_chat_footer_agent_model_chip_clicked_noop",
-                );
+                // Preserve the former toolbar's model-selector path: cache the
+                // exact host window, sync popup ownership, then ask the host's
+                // Actions authority to open the model controls.
+                self.cache_composer_parent_window(window, cx);
+                self.sync_agent_chat_popup_windows_from_cached_parent(cx);
+                if let Some(parent) = self.composer_parent_window {
+                    self.trigger_toggle_actions_from_parent(parent, cx);
+                }
             }
             FooterAction::Tips => {}
         }
@@ -3598,45 +3613,6 @@ impl AgentChatView {
             AgentChatThreadStatus::Error => Some("Error"),
             AgentChatThreadStatus::Idle => None,
         }
-    }
-
-    fn render_toolbar_from_snapshot(
-        snapshot: AgentChatFooterSnapshot,
-        weak_view: WeakEntity<AgentChatView>,
-    ) -> gpui::AnyElement {
-        let theme = theme::get_cached_theme();
-
-        // Hint strip opacity: match main menu's OPACITY_TEXT_MUTED (0.65)
-        let hint_text_hex = theme.colors.text.primary;
-        let hint_opacity_byte = (crate::theme::opacity::OPACITY_TEXT_MUTED * 255.0).round() as u32;
-        let hint_text_rgba = (hint_text_hex << 8) | hint_opacity_byte;
-
-        let hint_row = Self::render_agent_chat_footer_hint_row(
-            &snapshot,
-            weak_view.clone(),
-            true,
-            hint_text_rgba,
-            &theme,
-        );
-
-        div()
-            .w_full()
-            .h(px(crate::window_resize::main_layout::HINT_STRIP_HEIGHT))
-            .px(px(crate::window_resize::main_layout::HINT_STRIP_PADDING_X))
-            .py(px(crate::window_resize::main_layout::HINT_STRIP_PADDING_Y))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .border_t(px(1.0))
-            .border_color(rgba((theme.colors.text.primary << 8) | 0x10))
-            .child(Self::render_profile_status_marker_from_snapshot(
-                &snapshot,
-                weak_view.clone(),
-                hint_text_rgba,
-            ))
-            .child(hint_row)
-            .into_any_element()
     }
 
     fn render_external_host_footer_from_snapshot(
@@ -5914,8 +5890,6 @@ impl AgentChatView {
                 activity_row_visible,
                 messages,
                 status,
-                profile_display,
-                model_display,
                 new_ready,
                 focused_text_phase,
                 focused_text_input_locked,
@@ -5926,8 +5900,6 @@ impl AgentChatView {
                 let activity = thread_ref.awaiting_first_assistant_text();
                 let msgs = thread_ref.messages.clone();
                 let st = thread_ref.status;
-                let pd = thread_ref.profile_display().to_string();
-                let md = thread_ref.selected_model_display().to_string();
                 let phase = this.focused_text_mini_phase_for_thread(thread_ref);
                 let locked = matches!(
                     phase,
@@ -5943,7 +5915,7 @@ impl AgentChatView {
                     .map(|r| r.path);
                 let tid = thread_ref.ui_thread_id().to_string();
                 let forks = thread_ref.fork_points().to_vec();
-                (activity, msgs, st, pd, md, ready, phase, locked, tid, forks)
+                (activity, msgs, st, ready, phase, locked, tid, forks)
             };
 
             // The active thread's messages are on screen — mark them seen.
@@ -5978,15 +5950,6 @@ impl AgentChatView {
             }
 
             this.sync_balanced_focused_text_variation(&messages, status, cx);
-
-            // Update toolbar status and model.
-            if let Some(toolbar) = &this.toolbar {
-                toolbar.update(cx, |toolbar, cx| {
-                    toolbar.set_status(status, cx);
-                    toolbar.set_profile_name(profile_display, cx);
-                    toolbar.set_model_name(model_display, cx);
-                });
-            }
 
             // Update transcript.
             if let Some(transcript) = &this.transcript {
@@ -6081,7 +6044,6 @@ impl AgentChatView {
             pasted_text_tokens: Vec::new(),
             pasted_image_tokens: Vec::new(),
             setup_card: None,
-            toolbar: None,
             transcript: None,
             ui_variant: AgentChatUiVariant::Standard,
             focused_text: None,
@@ -6172,7 +6134,6 @@ impl AgentChatView {
             pasted_text_tokens: Vec::new(),
             pasted_image_tokens: Vec::new(),
             setup_card: None,
-            toolbar: None,
             transcript: None,
             ui_variant: AgentChatUiVariant::Standard,
             focused_text: None,
@@ -11426,14 +11387,6 @@ impl AgentChatView {
             .into_any_element()
     }
 
-    fn render_toolbar(
-        &self,
-        weak_view: WeakEntity<AgentChatView>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        Self::render_toolbar_from_snapshot(self.footer_snapshot(cx), weak_view)
-    }
-
     fn render_send_button_for_state(
         can_send: bool,
         status: AgentChatThreadStatus,
@@ -12780,63 +12733,6 @@ impl AgentChatView {
 
         self.setup_card = Some(card.clone());
         card
-    }
-
-    fn ensure_toolbar(&mut self, cx: &mut Context<Self>) -> Entity<AgentChatToolbar> {
-        if let Some(toolbar) = &self.toolbar {
-            return toolbar.clone();
-        }
-
-        let thread_ref = self.live_thread().read(cx);
-        let status = thread_ref.status;
-        let profile_name = thread_ref.profile_display().to_string();
-        let model_name = thread_ref.selected_model_display().to_string();
-
-        let toolbar = cx.new(|cx| AgentChatToolbar::new(status, profile_name, model_name, cx));
-
-        cx.subscribe(&toolbar, |this, _toolbar, event, cx| match event {
-            AgentChatToolbarEvent::ToggleProfileSelector(parent) => {
-                this.composer_parent_window = Some(*parent);
-                this.open_profile_trigger_picker(cx);
-            }
-            AgentChatToolbarEvent::ToggleModelSelector(parent) => {
-                this.composer_parent_window = Some(*parent);
-                this.sync_agent_chat_popup_windows_from_cached_parent(cx);
-                this.trigger_toggle_actions_from_parent(*parent, cx);
-                cx.notify();
-            }
-            AgentChatToolbarEvent::ExportThread => {
-                this.export_thread_to_downloads(cx);
-            }
-            AgentChatToolbarEvent::ClearThread => {
-                this.live_thread().update(cx, |thread, cx| {
-                    thread.clear_messages(cx);
-                });
-                if let Some(transcript) = &this.transcript {
-                    transcript.update(cx, |t, cx| t.clear_collapsed_ids(cx));
-                }
-                cx.notify();
-            }
-            AgentChatToolbarEvent::OpenHistory => {
-                if let Some(parent) = this.composer_parent_window {
-                    this.open_history_popup_from_host(
-                        parent.handle,
-                        parent.bounds,
-                        parent.display_id,
-                        cx,
-                    );
-                } else {
-                    this.toggle_history_popup_from_cached_parent(cx);
-                }
-            }
-            AgentChatToolbarEvent::CloseChat => {
-                crate::ai::agent_chat::ui::chat_window::close_chat_window(cx);
-            }
-        })
-        .detach();
-
-        self.toolbar = Some(toolbar.clone());
-        toolbar
     }
 
     fn ensure_transcript(&mut self, cx: &mut Context<Self>) -> Entity<AgentChatTranscript> {
@@ -15328,14 +15224,21 @@ impl Render for AgentChatView {
                 #[cfg(target_os = "macos")]
                 {
                     if !is_main_window {
-                        self.ensure_native_footer_action_listener(window, cx);
-                        crate::footer_popup::sync_window_footer_popup(
-                            window,
-                            &self.agent_chat_detached_native_footer_config(cx),
-                        );
-                        Some(
-                            crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
-                        )
+                        let glass_in_window_footer =
+                            crate::platform::tahoe_liquid_glass_available()
+                                && crate::theme::get_cached_theme().is_vibrancy_enabled();
+                        if glass_in_window_footer {
+                            Some(self.render_agent_chat_config_footer_rail(cx))
+                        } else {
+                            self.ensure_native_footer_action_listener(window, cx);
+                            crate::footer_popup::sync_window_footer_popup(
+                                window,
+                                &self.agent_chat_detached_native_footer_config(cx),
+                            );
+                            Some(
+                                crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
+                            )
+                        }
                     } else {
                         let active_surface =
                             crate::footer_popup::active_main_window_footer_surface();
@@ -15345,7 +15248,7 @@ impl Render for AgentChatView {
                                 crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
                             )
                         } else {
-                            Some(self.ensure_toolbar(cx).into_any_element())
+                            Some(self.render_agent_chat_config_footer_rail(cx))
                         }
                     }
                 }
@@ -15360,7 +15263,7 @@ impl Render for AgentChatView {
                             crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
                         )
                     } else {
-                        Some(self.ensure_toolbar(cx).into_any_element())
+                        Some(self.render_agent_chat_config_footer_rail(cx))
                     }
                 }
             };
@@ -15604,6 +15507,12 @@ impl Render for AgentChatView {
                 #[cfg(target_os = "macos")]
                 {
                     if !is_main_window {
+                        let glass_in_window_footer =
+                            crate::platform::tahoe_liquid_glass_available()
+                                && crate::theme::get_cached_theme().is_vibrancy_enabled();
+                        if glass_in_window_footer {
+                            return d.child(self.render_agent_chat_config_footer_rail(cx));
+                        }
                         self.ensure_native_footer_action_listener(window, cx);
                         crate::footer_popup::sync_window_footer_popup(
                             window,
@@ -15619,7 +15528,7 @@ impl Render for AgentChatView {
                 if use_native_footer_spacer {
                     d.child(crate::components::prompt_layout_shell::render_native_main_window_footer_spacer())
                 } else {
-                    d.child(self.ensure_toolbar(cx).into_any_element())
+                    d.child(self.render_agent_chat_config_footer_rail(cx))
                 }
             })
             .into_any_element()

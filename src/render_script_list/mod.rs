@@ -2341,35 +2341,25 @@ impl ScriptListApp {
                 crate::components::prompt_layout_shell::render_native_main_window_footer_hover_blocker()
                     .into_any_element()
             } else {
-                // Glass mode: the native footer host/overlay is disabled so
-                // the footer can morph with the window — render the shared
-                // footer-button rail with native footer geometry.
-                let primary_label = self.main_window_primary_action_label();
-                crate::components::render_universal_footer_action_rail(
-                    "script-list",
-                    "↵",
-                    primary_label.into(),
-                    cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                        this.dispatch_main_window_footer_action(
-                            crate::footer_popup::FooterAction::Run,
-                            window,
-                            cx,
-                            "gpui_footer_click",
-                        );
-                    }),
-                    cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                        if this.has_actions()
-                            || this.show_actions_popup
-                            || crate::actions::is_actions_window_open()
-                        {
-                            this.toggle_actions(cx, window);
+                let config = self
+                    .main_window_footer_config_with_cx(Some(&*cx))
+                    .expect("Script List owns a main-window footer config");
+                let app = cx.entity().downgrade();
+                crate::components::footer_chrome::render_main_window_footer_config_rail(
+                    config,
+                    move |action, window, cx| {
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |this, cx| {
+                                this.dispatch_main_window_footer_action(
+                                    action,
+                                    window,
+                                    cx,
+                                    "gpui_footer_click",
+                                );
+                            });
                         }
-                    }),
-                    cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                        this.open_tab_ai_agent_chat_with_entry_intent(None, cx);
-                    }),
+                    },
                 )
-                .into_any_element()
             };
             return crate::components::main_view_chrome::render_main_view_chrome_header_overlay_footer_flush(
                 root,
@@ -2466,36 +2456,25 @@ impl ScriptListApp {
                 primary_label = %primary_label,
                 "Script list footer rendered with selected enter-action label"
             );
-            let gpui_footer = crate::components::render_universal_footer_action_rail(
-                    "script-list",
-                    "↵",
-                    primary_label.clone().into(),
-                    cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                        this.dispatch_main_window_footer_action(
-                            crate::footer_popup::FooterAction::Run,
-                            window,
-                            cx,
-                            "gpui_footer_click",
-                        );
-                    }),
-                    cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                        if this.has_actions()
-                            || this.show_actions_popup
-                            || crate::actions::is_actions_window_open()
-                        {
-                            this.toggle_actions(cx, window);
-                        } else {
-                            tracing::info!(
-                                target: "script_kit::prompt_chrome",
-                                event = "render_script_list_footer_actions_ignored_no_actions",
-                                selected_index = this.selected_index,
-                                "Ignored ScriptList footer actions click because the current selection has no actions"
-                            );
+            let config = self
+                .main_window_footer_config_with_cx(Some(&*cx))
+                .expect("Script List owns a main-window footer config");
+            let app = cx.entity().downgrade();
+            let gpui_footer =
+                crate::components::footer_chrome::render_main_window_footer_config_rail(
+                    config,
+                    move |action, window, cx| {
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |this, cx| {
+                                this.dispatch_main_window_footer_action(
+                                    action,
+                                    window,
+                                    cx,
+                                    "gpui_footer_click",
+                                );
+                            });
                         }
-                    }),
-                    cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                        this.open_tab_ai_agent_chat_with_entry_intent(None, cx);
-                    }),
+                    },
                 );
             self.main_window_footer_slot(gpui_footer)
         };

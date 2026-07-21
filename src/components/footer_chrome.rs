@@ -1,7 +1,9 @@
 use gpui::{
-    div, prelude::FluentBuilder, px, svg, AnyElement, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, Styled,
+    div, prelude::FluentBuilder, px, rgba, svg, Animation, AnimationExt, AnyElement, App,
+    FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window,
 };
+use std::time::Duration;
 
 use crate::list_item::FONT_SYSTEM_UI;
 use crate::theme::opacity::OPACITY_TEXT_MUTED;
@@ -61,6 +63,10 @@ pub(crate) const FOOTER_MIC_ICON_TOKEN: &str = "mic";
 pub(crate) const FOOTER_MIC_ICON_PATH: &str = "icons/mic.svg";
 pub(crate) const FOOTER_PROFILE_ICON_TOKEN: &str = "bot";
 pub(crate) const FOOTER_PROFILE_ICON_PATH: &str = "icons/bot.svg";
+pub(crate) const FOOTER_STATUS_DOT_SIZE_PX: f32 = 6.0;
+pub(crate) const FOOTER_LEFT_INFO_GAP_PX: f32 = 6.0;
+pub(crate) const FOOTER_BRAILLE_SPINNER_FONT_PX: f32 = 15.0;
+pub(crate) const FOOTER_BRAILLE_SPINNER_LANE_PX: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -222,6 +228,398 @@ pub(crate) fn render_footer_action_rail(
         .gap(px(rail.item_gap_px))
         .children(buttons)
         .into_any_element()
+}
+
+fn footer_config_action_slot(action: crate::footer_popup::FooterAction) -> FooterActionSlot {
+    use crate::footer_popup::FooterAction;
+
+    match action {
+        FooterAction::Run => FooterActionSlot::Run,
+        FooterAction::Actions => FooterActionSlot::Actions,
+        FooterAction::Ai | FooterAction::Cwd | FooterAction::AgentModel | FooterAction::Tips => {
+            FooterActionSlot::Ai
+        }
+        FooterAction::Apply => FooterActionSlot::Apply,
+        FooterAction::Replace => FooterActionSlot::Replace,
+        FooterAction::Append => FooterActionSlot::Append,
+        FooterAction::Copy => FooterActionSlot::Copy,
+        FooterAction::Expand => FooterActionSlot::Expand,
+        FooterAction::Retry => FooterActionSlot::Retry,
+        FooterAction::Close => FooterActionSlot::Close,
+        FooterAction::Stop => FooterActionSlot::Stop,
+        FooterAction::PasteResponse => FooterActionSlot::PasteResponse,
+    }
+}
+
+fn footer_config_button_is_left_pinned(button: &crate::footer_popup::FooterButtonConfig) -> bool {
+    use crate::footer_popup::FooterAction;
+
+    button.left_pinned
+        || matches!(button.action, FooterAction::Cwd | FooterAction::AgentModel)
+        || (matches!(button.action, FooterAction::Ai)
+            && button.key.as_ref() == FOOTER_MIC_ICON_TOKEN)
+}
+
+fn footer_config_dot_color(
+    status: crate::footer_popup::FooterDotStatus,
+    prefer_accent: bool,
+    theme: &Theme,
+) -> gpui::Rgba {
+    use crate::footer_popup::FooterDotStatus;
+
+    let color = match status {
+        FooterDotStatus::Streaming | FooterDotStatus::WaitingForPermission => {
+            if prefer_accent {
+                theme.colors.accent.selected
+            } else {
+                theme.colors.text.primary
+            }
+        }
+        FooterDotStatus::Idle => theme.colors.text.secondary,
+        FooterDotStatus::Error => theme.colors.ui.error,
+        FooterDotStatus::Hidden => theme.colors.text.secondary,
+    };
+    rgba((color << 8) | 0xff)
+}
+
+fn render_footer_config_status_dot(
+    status: crate::footer_popup::FooterDotStatus,
+    prefer_accent: bool,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    use crate::footer_popup::FooterDotStatus;
+
+    if matches!(status, FooterDotStatus::Hidden) {
+        return None;
+    }
+
+    let dot = div()
+        .id("config-footer-status-dot")
+        .size(px(FOOTER_STATUS_DOT_SIZE_PX))
+        .flex_none()
+        .rounded(px(FOOTER_STATUS_DOT_SIZE_PX / 2.0))
+        .bg(footer_config_dot_color(status, prefer_accent, theme));
+    let dot: AnyElement = if matches!(
+        status,
+        FooterDotStatus::Streaming | FooterDotStatus::WaitingForPermission
+    ) {
+        dot.with_animation(
+            "config-footer-status-dot-pulse",
+            Animation::new(Duration::from_millis(2_000)).repeat(),
+            |dot, delta| dot.opacity(0.6 + 0.4 * (delta * std::f32::consts::TAU).sin().abs()),
+        )
+        .into_any_element()
+    } else {
+        dot.into_any_element()
+    };
+    Some(dot)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_footer_config_left_marker<H>(
+    id: &'static str,
+    icon_token: Option<&str>,
+    dot_status: crate::footer_popup::FooterDotStatus,
+    prefer_accent: bool,
+    spinner_glyph: Option<&str>,
+    keycap: Option<&str>,
+    label: &str,
+    bold_label: bool,
+    selected: bool,
+    action: Option<crate::footer_popup::FooterAction>,
+    theme: &Theme,
+    on_action: H,
+) -> AnyElement
+where
+    H: Fn(crate::footer_popup::FooterAction, &mut Window, &mut App) + Clone + 'static,
+{
+    let metrics = current_main_menu_footer_metrics();
+    let interactive = action.is_some();
+    let hover_bg = rgba(themed_footer_button_hover_rgba(theme));
+    let active_bg = rgba(themed_footer_button_active_rgba(theme));
+    let hover_text = footer_hover_text_color(theme, None);
+    let hover_glyph = footer_hover_glyph_color(theme, None);
+    let mut marker = div()
+        .id(id)
+        .h(px(footer_button_height(metrics.height_px)))
+        .min_w(px(0.0))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(FOOTER_LEFT_INFO_GAP_PX))
+        .px(px(footer_centered_action_edge_padding_x()))
+        .rounded(px(metrics.button_radius))
+        .group("config-footer-left-marker")
+        .when(selected, |style| style.bg(active_bg));
+
+    if interactive {
+        marker = marker
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover_bg))
+            .active(move |style| style.bg(active_bg));
+    }
+
+    if let Some(dot) = render_footer_config_status_dot(dot_status, prefer_accent, theme) {
+        marker = marker.child(dot);
+    }
+    if let Some(glyph) = spinner_glyph.filter(|glyph| !glyph.trim().is_empty()) {
+        marker = marker.child(
+            div()
+                .id("config-footer-braille-spinner")
+                .w(px(FOOTER_BRAILLE_SPINNER_LANE_PX))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(crate::list_item::FONT_MONO)
+                .text_size(px(FOOTER_BRAILLE_SPINNER_FONT_PX))
+                .text_color(rgba((theme.colors.accent.selected << 8) | 0xff))
+                .child(glyph.to_string()),
+        );
+    }
+    if let Some(path) = icon_token.and_then(footer_icon_path) {
+        marker = marker.child(
+            svg()
+                .path(path)
+                .size(px(13.0))
+                .flex_none()
+                .text_color(footer_hint_text_color(theme))
+                .group_hover("config-footer-left-marker", move |style| {
+                    style.text_color(hover_glyph)
+                }),
+        );
+    }
+    if let Some(keycap) = keycap.filter(|key| !key.trim().is_empty()) {
+        marker = marker.child(render_footer_shortcut_keycaps_with_metrics(
+            keycap.to_string(),
+            theme,
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+    if !label.trim().is_empty() {
+        marker = marker.child(
+            div()
+                .min_w(px(0.0))
+                .font_family(FONT_SYSTEM_UI)
+                .font_weight(if bold_label {
+                    FontWeight::SEMIBOLD
+                } else {
+                    metrics.font_weight
+                })
+                .text_size(px(metrics.label_font_size))
+                .text_color(footer_hint_text_color(theme))
+                .group_hover("config-footer-left-marker", move |style| {
+                    style.text_color(hover_text)
+                })
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label.to_string()),
+        );
+    }
+
+    if let Some(action) = action {
+        marker = marker.on_click(move |_event, window, cx| on_action(action, window, cx));
+    }
+    marker.into_any_element()
+}
+
+fn render_footer_config_left_info<H>(
+    info: crate::footer_popup::FooterLeftInfo,
+    theme: &Theme,
+    on_action: H,
+) -> AnyElement
+where
+    H: Fn(crate::footer_popup::FooterAction, &mut Window, &mut App) + Clone + 'static,
+{
+    let mut row = div()
+        .flex()
+        .flex_1()
+        .min_w(px(0.0))
+        .items_center()
+        .gap(px(FOOTER_ACTION_ITEM_GAP_PX))
+        .overflow_hidden();
+
+    if let Some(cwd) = info.cwd_chip.as_ref() {
+        row = row.child(render_footer_config_left_marker(
+            "config-footer-cwd-chip",
+            Some(&cwd.icon_token),
+            crate::footer_popup::FooterDotStatus::Hidden,
+            false,
+            None,
+            cwd.key.as_deref(),
+            &cwd.label,
+            false,
+            false,
+            Some(crate::footer_popup::FooterAction::Cwd),
+            theme,
+            on_action.clone(),
+        ));
+    }
+
+    if let Some(profile_name) = info.profile_name.as_deref() {
+        row = row
+            .child(render_footer_config_left_marker(
+                "config-footer-profile-chip",
+                info.icon_token
+                    .as_deref()
+                    .or(Some(FOOTER_PROFILE_ICON_TOKEN)),
+                info.dot_status,
+                info.prefer_accent_for_active_states,
+                info.spinner_glyph.as_deref(),
+                info.keycap.as_deref(),
+                profile_name,
+                info.bold_label,
+                info.selected,
+                info.action,
+                theme,
+                on_action.clone(),
+            ))
+            .child(render_footer_config_left_marker(
+                "config-footer-model-chip",
+                None,
+                crate::footer_popup::FooterDotStatus::Hidden,
+                false,
+                None,
+                None,
+                &info.model_name,
+                false,
+                false,
+                Some(crate::footer_popup::FooterAction::AgentModel),
+                theme,
+                on_action,
+            ));
+    } else {
+        row = row.child(render_footer_config_left_marker(
+            "config-footer-left-info",
+            info.icon_token.as_deref(),
+            info.dot_status,
+            info.prefer_accent_for_active_states,
+            info.spinner_glyph.as_deref(),
+            info.keycap.as_deref(),
+            &info.model_name,
+            info.bold_label,
+            info.selected,
+            info.action,
+            theme,
+            on_action,
+        ));
+    }
+
+    row.into_any_element()
+}
+
+/// Render a complete native-footer config inside a GPUI window. This is the
+/// sole in-window glass footer renderer: surfaces resolve the same config the
+/// AppKit footer consumes, then supply only their action dispatcher.
+#[allow(dead_code)] // callers live in binary-only render modules
+pub(crate) fn render_main_window_footer_config_rail<H>(
+    config: crate::footer_popup::MainWindowFooterConfig,
+    on_action: H,
+) -> AnyElement
+where
+    H: Fn(crate::footer_popup::FooterAction, &mut Window, &mut App) + Clone + 'static,
+{
+    let theme = crate::theme::get_cached_theme();
+    let rail = footer_rail_chrome(&theme);
+    let button_height = footer_button_height(rail.height_px);
+    let button_ids = [
+        "config-footer-button-0",
+        "config-footer-button-1",
+        "config-footer-button-2",
+        "config-footer-button-3",
+        "config-footer-button-4",
+        "config-footer-button-overflow",
+    ];
+    let mut left_buttons = Vec::new();
+    let mut right_buttons = Vec::new();
+
+    for (index, button) in config.buttons.into_iter().enumerate() {
+        let action = button.action;
+        let enabled = button.enabled && button.disabled_reason.is_none();
+        let left_pinned = footer_config_button_is_left_pinned(&button);
+        let key_first = left_pinned
+            && !matches!(
+                action,
+                crate::footer_popup::FooterAction::Cwd
+                    | crate::footer_popup::FooterAction::AgentModel
+            );
+        let justify = if left_pinned {
+            FooterHintContentJustify::Start
+        } else if matches!(action, crate::footer_popup::FooterAction::Run) {
+            FooterHintContentJustify::KeyAnchored
+        } else {
+            FooterHintContentJustify::Center
+        };
+        let mut frame = render_footer_hint_action_button_frame(
+            FooterHintActionButtonFrameSpec {
+                id: button_ids
+                    .get(index)
+                    .copied()
+                    .unwrap_or("config-footer-button-overflow"),
+                label: button.label,
+                key: button.key,
+                slot_width_px: footer_action_slot_width(footer_config_action_slot(action)),
+                height_px: button_height,
+                selected: button.selected,
+                key_first,
+                justify,
+                layout: FooterHintButtonLayoutOverrides {
+                    shrink_frame_to_content_px: true,
+                    hug_frame_to_content: true,
+                    ..FooterHintButtonLayoutOverrides::default()
+                },
+            },
+            &theme,
+        );
+        if enabled {
+            let handler = on_action.clone();
+            frame = frame.on_click(move |_event, window, cx| handler(action, window, cx));
+        } else {
+            frame = frame.opacity(0.45);
+        }
+        if left_pinned {
+            left_buttons.push(frame.into_any_element());
+        } else {
+            right_buttons.push(frame.into_any_element());
+        }
+    }
+
+    let left_info = config
+        .left_info
+        .map(|info| render_footer_config_left_info(info, &theme, on_action));
+    let content = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(rail.item_gap_px))
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w(px(0.0))
+                .items_center()
+                .gap(px(rail.item_gap_px))
+                .overflow_hidden()
+                .children(left_buttons)
+                .children(left_info),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(rail.item_gap_px))
+                .children(right_buttons),
+        )
+        .into_any_element();
+
+    render_footer_action_rail("main-window-footer-config-rail", [content])
 }
 
 #[allow(dead_code)] // callers live in binary-only render modules
@@ -1409,6 +1807,49 @@ fn render_footer_keycap_with_metrics(
 mod tests {
     use super::*;
 
+    #[test]
+    fn config_rail_maps_every_footer_action_to_shared_chrome_slots() {
+        use crate::footer_popup::FooterAction;
+
+        for (action, expected) in [
+            (FooterAction::Run, FooterActionSlot::Run),
+            (FooterAction::Actions, FooterActionSlot::Actions),
+            (FooterAction::Ai, FooterActionSlot::Ai),
+            (FooterAction::Apply, FooterActionSlot::Apply),
+            (FooterAction::Replace, FooterActionSlot::Replace),
+            (FooterAction::Append, FooterActionSlot::Append),
+            (FooterAction::Copy, FooterActionSlot::Copy),
+            (FooterAction::Expand, FooterActionSlot::Expand),
+            (FooterAction::Retry, FooterActionSlot::Retry),
+            (FooterAction::Close, FooterActionSlot::Close),
+            (FooterAction::Stop, FooterActionSlot::Stop),
+            (FooterAction::PasteResponse, FooterActionSlot::PasteResponse),
+            (FooterAction::Cwd, FooterActionSlot::Ai),
+            (FooterAction::AgentModel, FooterActionSlot::Ai),
+            (FooterAction::Tips, FooterActionSlot::Ai),
+        ] {
+            assert_eq!(footer_config_action_slot(action), expected);
+        }
+    }
+
+    #[test]
+    fn config_rail_preserves_explicit_and_contextual_left_pinning() {
+        use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+        assert!(footer_config_button_is_left_pinned(
+            &FooterButtonConfig::new(FooterAction::Cwd, "⇥", "Project")
+        ));
+        assert!(footer_config_button_is_left_pinned(
+            &FooterButtonConfig::new(FooterAction::AgentModel, "⇧⇥", "Agent · Model")
+        ));
+        assert!(footer_config_button_is_left_pinned(
+            &FooterButtonConfig::new(FooterAction::Close, "Esc", "Terminate").left_pinned()
+        ));
+        assert!(!footer_config_button_is_left_pinned(
+            &FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
+        ));
+    }
+
     /// Optical keycap corrections (user report 2026-07-11): the ⌘ ink sat
     /// low-left of chip center, and word keycaps ("Space") rendered with zero
     /// horizontal padding and the single-glyph down-nudge crowding the
@@ -1512,6 +1953,27 @@ mod tests {
         assert!(
             frame_body.contains(".max_w(px(spec.slot_width_px))"),
             "the content-hugging frame must stay bounded by the fixed slot"
+        );
+
+        // Universal-chrome lock (2026-07-20): glass in-window footers across
+        // surfaces render ONE config-driven rail so the GPUI fallback can
+        // never drift from the native footer language. The renderer's input
+        // must stay MainWindowFooterConfig (the same model the native footer
+        // consumes) and it must compose the shared frames above.
+        let rail_start = source
+            .find("pub(crate) fn render_main_window_footer_config_rail")
+            .expect("config-driven footer rail renderer should exist");
+        let rail_source = &source[rail_start..];
+        let rail_body = &rail_source[..rail_source
+            .find("\n}\n")
+            .expect("config rail renderer should terminate")];
+        assert!(
+            rail_body.contains("MainWindowFooterConfig"),
+            "the shared rail must consume the same config model as the native footer"
+        );
+        assert!(
+            rail_body.contains("render_footer_hint_action_button_frame"),
+            "the shared rail must compose the shared footer button frames"
         );
     }
 
