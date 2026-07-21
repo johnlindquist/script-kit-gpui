@@ -2854,9 +2854,21 @@ fn configure_overlay_window_surface(window: &mut Window) {
                 // the ~1px native rim render the same way across all Script
                 // Kit windows. The rounded outer shape is clipped via the
                 // contentView's layer mask below.
-                let window_bg_color: id = msg_send![class!(NSColor), windowBackgroundColor];
-                if !window_bg_color.is_null() {
-                    let () = msg_send![ns_window, setBackgroundColor: window_bg_color];
+                //
+                // Glass mode: the shared vibrancy config already set the
+                // near-clear base (0.0001-alpha black, 57220a68c) so the
+                // NSGlassEffectView backdrop IS the visible material.
+                // Overwriting it here with the opaque system color painted
+                // the whole overlay as a dark slab over the glass — this
+                // runs AFTER configure_dictation_overlay_window, so it must
+                // preserve the glass base, not "restore" the blur-era one.
+                let glass_mode = crate::platform::tahoe_liquid_glass_available()
+                    && crate::theme::get_cached_theme().is_vibrancy_enabled();
+                if !glass_mode {
+                    let window_bg_color: id = msg_send![class!(NSColor), windowBackgroundColor];
+                    if !window_bg_color.is_null() {
+                        let () = msg_send![ns_window, setBackgroundColor: window_bg_color];
+                    }
                 }
 
                 let content_view: id = msg_send![ns_window, contentView];
