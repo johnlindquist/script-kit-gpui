@@ -15,7 +15,7 @@ impl GlassMorphVariant {
     fn log_name(self) -> &'static str {
         match self {
             Self::WindowFrame => "window_frame",
-            Self::ContentLayer => "content_layer",
+            Self::ContentLayer => "detached_window_frame",
             Self::FadeOnly => "fade_only",
         }
     }
@@ -54,12 +54,6 @@ const GLASS_MORPH_MAX_SQUISH: f64 = 0.03;
 const GLASS_MORPH_PHASE1_FRACTION: f64 = 0.5;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MIN_REBOUND_DURATION: f64 = 0.08;
-/// Content-layer morphs fade in over dense window content, so alpha must
-/// reach 1.0 well before the scale settles (fraction of total duration).
-#[cfg(target_os = "macos")]
-const GLASS_LAYER_ALPHA_FRACTION: f64 = 0.35;
-#[cfg(target_os = "macos")]
-const GLASS_LAYER_ALPHA_MIN_DURATION: f64 = 0.08;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_FADE_FRACTION: f64 = 0.7;
 #[cfg(target_os = "macos")]
@@ -197,7 +191,16 @@ unsafe fn configure_window_vibrancy_common(
                 animate_tahoe_glass_appearance(window, log_target, window_name)
             }
             GlassMorphVariant::ContentLayer => {
-                animate_tahoe_glass_layer_appearance(window, log_target, window_name)
+                // Runtime-proven (real-pixel capture + static-transform
+                // experiment): CALayer transforms on the contentView's
+                // NSViewBackingLayer are neutralized by AppKit — even a
+                // static 0.85 model scale renders at full size. No
+                // layer-transform morph can ever work on AppKit-managed
+                // backing layers. Instead: detach from the parent window for
+                // the morph's duration and run the SAME NSWindow frame morph
+                // the main window uses, then reattach — the frame animation
+                // only fights the parent-child machinery while attached.
+                animate_tahoe_glass_child_appearance(window, log_target, window_name);
             }
             GlassMorphVariant::FadeOnly => {
                 animate_tahoe_glass_fade_appearance(window, log_target, window_name)
@@ -914,25 +917,18 @@ unsafe fn begin_ns_window_exit_dematerialize(
                 frame.size.height + grow_y * 2.0,
             ),
         );
+        // Child-attached popups: layer transforms are neutralized by AppKit
+        // (NSViewBackingLayer, runtime-proven) and frame animation fights the
+        // parent-child machinery — so detach for the exit. The window is
+        // being destroyed after the 135ms tail; no reattach.
         let parent_window: id = msg_send![window, parentWindow];
         let variant = if parent_window == nil {
             GlassMorphVariant::WindowFrame
         } else {
             GlassMorphVariant::ContentLayer
         };
-
-        if variant == GlassMorphVariant::ContentLayer && content_view != nil {
-            let layer: id = msg_send![content_view, layer];
-            if layer != nil {
-                // Center-compensated outward release (anchor stays AppKit's;
-                // see center_scaled_transform for why).
-                add_layer_center_scale_exit(
-                    layer,
-                    "scriptKitGlassExit",
-                    1.0 + GLASS_EXIT_GROW_X * 2.0,
-                    1.0 + GLASS_EXIT_GROW_Y * 2.0,
-                );
-            }
+        if parent_window != nil {
+            let _: () = msg_send![parent_window, removeChildWindow: window];
         }
 
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
@@ -949,9 +945,7 @@ unsafe fn begin_ns_window_exit_dematerialize(
             }
         }
         let animator: id = msg_send![window, animator];
-        if variant == GlassMorphVariant::WindowFrame {
-            let _: () = msg_send![animator, setFrame: grown display: true];
-        }
+        let _: () = msg_send![animator, setFrame: grown display: true];
         let _: () = msg_send![animator, setAlphaValue: 0.0f64];
         let _: () = msg_send![class!(NSAnimationContext), endGrouping];
 
@@ -1153,234 +1147,91 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn make_number_array(values: &[f64]) -> id {
-    let array: id = msg_send![class!(NSMutableArray), array];
-    for value in values {
-        let number: id = msg_send![class!(NSNumber), numberWithDouble: *value];
-        let _: () = msg_send![array, addObject: number];
-    }
-    array
-}
-
+/// Child-attached popup enter: detach from the parent NSWindow, run the
+/// SAME frame morph the main window uses, and reattach after the morph
+/// settles. Layer-transform morphs are impossible here — AppKit neutralizes
+/// transforms on NSViewBackingLayer (runtime-proven with a static-scale
+/// experiment) — and frame-animating while parent-attached fights the
+/// parent-child machinery (c598a32bf). Detaching for ~300ms sidesteps both.
 #[cfg(target_os = "macos")]
-unsafe fn make_morph_timing_functions() -> id {
-    let functions: id = msg_send![class!(NSMutableArray), array];
-    let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") else {
-        return functions;
-    };
-    for curve_name in ["easeInEaseOut", "easeOut"] {
-        let name = tahoe_ns_string(curve_name);
-        if name != nil {
-            let timing: id = msg_send![timing_class, functionWithName: name];
-            if timing != nil {
-                let _: () = msg_send![functions, addObject: timing];
-            }
-        }
-    }
-    functions
-}
-
-#[cfg(target_os = "macos")]
-/// Center the layer's transform anchor before a scale morph.
-///
-/// Layer-backed AppKit views default to a corner `anchorPoint`, and AppKit
-/// OWNS that layer's geometry: mutating `anchorPoint`/`position` gets
-/// stomped on the next layout pass (frame-measured: the popup content
-/// displaced for two frames, then snapped back as AppKit re-laid the layer
-/// out, with no visible scale in either direction). So the anchor is left
-/// untouched and the centering is baked into the animated transform itself:
-/// for a scale `s` about the layer center `c` with the anchor at a corner,
-/// the equivalent transform is `translate(c·(1−s)) ∘ scale(s)`.
-#[cfg(target_os = "macos")]
-unsafe fn center_scaled_transform(
-    layer: id,
-    scale_x: f64,
-    scale_y: f64,
-) -> cocoa::quartzcore::CATransform3D {
-    use cocoa::foundation::NSRect;
-    use cocoa::quartzcore::CATransform3D;
-
-    let bounds: NSRect = msg_send![layer, bounds];
-    let center_x = bounds.size.width * 0.5;
-    let center_y = bounds.size.height * 0.5;
-    let mut transform = CATransform3D::IDENTITY;
-    transform.m11 = scale_x;
-    transform.m22 = scale_y;
-    transform.m41 = center_x * (1.0 - scale_x);
-    transform.m42 = center_y * (1.0 - scale_y);
-    transform
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn transform_ns_value(transform: cocoa::quartzcore::CATransform3D) -> id {
-    msg_send![class!(NSValue), valueWithCATransform3D: transform]
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn reset_layer_transform_identity(layer: id) {
-    let identity = cocoa::quartzcore::CATransform3D::IDENTITY;
-    let _: () = msg_send![layer, setTransform: identity];
-}
-
-/// Keyframe the layer's full `transform` through center-compensated scales
-/// (see [`center_scaled_transform`]); `scales` are (x, y) pairs for
-/// start → squish → settle.
-#[cfg(target_os = "macos")]
-unsafe fn add_layer_center_scale_keyframes(
-    layer: id,
-    animation_key: &str,
-    scales: [(f64, f64); 3],
-    tuning: GlassMorphTuning,
-) -> bool {
-    let Some(animation_class) = objc::runtime::Class::get("CAKeyframeAnimation") else {
-        return false;
-    };
-    let key_path = tahoe_ns_string("transform");
-    let animation: id = msg_send![animation_class, animationWithKeyPath: key_path];
-    if animation == nil {
-        return false;
-    }
-    let values: id = msg_send![class!(NSMutableArray), array];
-    for (scale_x, scale_y) in scales {
-        let value = transform_ns_value(center_scaled_transform(layer, scale_x, scale_y));
-        let _: () = msg_send![values, addObject: value];
-    }
-    let total_duration = tuning.phase1 + tuning.phase2;
-    let rebound_key_time = if total_duration > 0.0 {
-        tuning.phase1 / total_duration
-    } else {
-        GLASS_MORPH_PHASE1_FRACTION
-    };
-    let key_times = make_number_array(&[0.0, rebound_key_time, 1.0]);
-    let timing_functions = make_morph_timing_functions();
-    let _: () = msg_send![animation, setValues: values];
-    let _: () = msg_send![animation, setKeyTimes: key_times];
-    let _: () = msg_send![animation, setTimingFunctions: timing_functions];
-    let _: () = msg_send![animation, setDuration: total_duration];
-    let animation_key = tahoe_ns_string(animation_key);
-    let _: () = msg_send![layer, addAnimation: animation forKey: animation_key];
-    true
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn add_layer_center_scale_exit(
-    layer: id,
-    animation_key: &str,
-    to_scale_x: f64,
-    to_scale_y: f64,
-) {
-    let Some(animation_class) = objc::runtime::Class::get("CABasicAnimation") else {
-        return;
-    };
-    let key_path = tahoe_ns_string("transform");
-    let animation: id = msg_send![animation_class, animationWithKeyPath: key_path];
-    if animation == nil {
-        return;
-    }
-    let from = transform_ns_value(cocoa::quartzcore::CATransform3D::IDENTITY);
-    let to = transform_ns_value(center_scaled_transform(layer, to_scale_x, to_scale_y));
-    let _: () = msg_send![animation, setFromValue: from];
-    let _: () = msg_send![animation, setToValue: to];
-    let _: () = msg_send![animation, setDuration: GLASS_EXIT_DURATION];
-    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeInEaseOut");
-        if name != nil {
-            let timing: id = msg_send![timing_class, functionWithName: name];
-            if timing != nil {
-                let _: () = msg_send![animation, setTimingFunction: timing];
-            }
-        }
-    }
-    let forwards = tahoe_ns_string("forwards");
-    let _: () = msg_send![animation, setFillMode: forwards];
-    let _: () = msg_send![animation, setRemovedOnCompletion: false];
-    let animation_key = tahoe_ns_string(animation_key);
-    let _: () = msg_send![layer, addAnimation: animation forKey: animation_key];
-}
-
-/// Child-window enter using presentation-layer scale keyframes. This consumes
-/// exactly the same start/squish/final ratios and timing split as the frame
-/// morph, while leaving the attached NSWindow frame untouched.
-#[cfg(target_os = "macos")]
-unsafe fn animate_tahoe_glass_layer_appearance(window: id, log_target: &str, window_name: &str) {
-    clear_exit_dematerialize_blur(window);
-    let restore_alpha = |window: id| {
-        let _: () = msg_send![window, setAlphaValue: 1.0f64];
-    };
+unsafe fn animate_tahoe_glass_child_appearance(window: id, log_target: &str, window_name: &str) {
     let Some(tuning) = glass_morph_tuning() else {
-        restore_alpha(window);
+        let _: () = msg_send![window, setAlphaValue: 1.0f64];
         return;
     };
-    let content_view: id = msg_send![window, contentView];
-    if content_view == nil {
-        restore_alpha(window);
-        return;
-    }
-    let _: () = msg_send![content_view, setWantsLayer: true];
-    let layer: id = msg_send![content_view, layer];
-    if layer == nil {
-        restore_alpha(window);
-        return;
+
+    let parent: id = msg_send![window, parentWindow];
+    if parent != nil {
+        let _: id = msg_send![parent, retain];
+        let _: id = msg_send![window, retain];
+        let _: () = msg_send![parent, removeChildWindow: window];
+        schedule_child_window_reattach(parent, window, tuning.duration + 0.08);
     }
 
-    let _: () = msg_send![layer, removeAllAnimations];
-    // A superseded exit may have left a non-identity model transform.
-    reset_layer_transform_identity(layer);
-    let _: () = msg_send![window, setAlphaValue: 0.0f64];
-    let started = add_layer_center_scale_keyframes(
-        layer,
-        "scriptKitGlassMorph",
-        [
-            (tuning.start_scale_x, tuning.start_scale_y),
-            (tuning.squish_scale_x, tuning.squish_scale_y),
-            (1.0, 1.0),
-        ],
-        tuning,
-    );
-    if !started {
-        let _: () = msg_send![layer, removeAllAnimations];
-        restore_alpha(window);
-        return;
-    }
-
-    // Child panels morph in OVER dense text: a long ease-in-ease-out fade
-    // (the previous full-phase1 ramp) leaves the popup translucent for most
-    // of the morph and double-exposes against the content underneath (the
-    // launcher list ghosting through the Actions menu). Front-load the
-    // alpha — ease-out, reaching full opacity in roughly the first third of
-    // the morph — and let the centered scale keyframes carry the rest.
-    let alpha_duration = (tuning.duration * GLASS_LAYER_ALPHA_FRACTION)
-        .clamp(GLASS_LAYER_ALPHA_MIN_DURATION, tuning.phase1.max(0.01));
-    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
-    let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: alpha_duration];
-    let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
-    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeOut");
-        if name != nil {
-            let timing: id = msg_send![timing_class, functionWithName: name];
-            if timing != nil {
-                let _: () = msg_send![ctx, setTimingFunction: timing];
-            }
-        }
-    }
-    let animator: id = msg_send![window, animator];
-    let _: () = msg_send![animator, setAlphaValue: 1.0f64];
-    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
-
+    animate_tahoe_glass_appearance(window, log_target, window_name);
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start={:.3}x{:.3} squish={:.3}x{:.3}",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s detached={}",
             window_name,
             GlassMorphVariant::ContentLayer.log_name(),
             tuning.duration,
-            tuning.inset_fraction,
-            tuning.start_scale_x,
-            tuning.start_scale_y,
-            tuning.squish_scale_x,
-            tuning.squish_scale_y,
+            parent != nil,
         ),
+    );
+}
+
+/// Re-attach a popup to its parent after the enter morph settles. Both
+/// windows were retained by the caller; releases happen here exactly once.
+#[cfg(target_os = "macos")]
+unsafe fn schedule_child_window_reattach(parent: id, window: id, delay_seconds: f64) {
+    #[link(name = "System", kind = "dylib")]
+    extern "C" {
+        static _dispatch_main_q: std::ffi::c_void;
+        fn dispatch_time(when: u64, delta: i64) -> u64;
+        fn dispatch_after_f(
+            when: u64,
+            queue: *const std::ffi::c_void,
+            context: *mut std::ffi::c_void,
+            work: extern "C" fn(*mut std::ffi::c_void),
+        );
+    }
+
+    struct ReattachContext {
+        parent: id,
+        window: id,
+    }
+    // SAFETY: raw NSWindow pointers retained by the caller; consumed exactly
+    // once on the main queue below.
+    unsafe impl Send for ReattachContext {}
+
+    extern "C" fn reattach(context: *mut std::ffi::c_void) {
+        // SAFETY: context is the Box leaked below; main queue; both windows
+        // were retained before the hop.
+        unsafe {
+            let context = Box::from_raw(context as *mut ReattachContext);
+            let parent = context.parent;
+            let window = context.window;
+            let window_visible: bool = msg_send![window, isVisible];
+            let parent_visible: bool = msg_send![parent, isVisible];
+            let current_parent: id = msg_send![window, parentWindow];
+            if window_visible && parent_visible && current_parent == nil {
+                const NS_WINDOW_ABOVE: i64 = 1;
+                let _: () = msg_send![parent, addChildWindow: window ordered: NS_WINDOW_ABOVE];
+            }
+            let _: () = msg_send![window, release];
+            let _: () = msg_send![parent, release];
+        }
+    }
+
+    const DISPATCH_TIME_NOW: u64 = 0;
+    let when = dispatch_time(DISPATCH_TIME_NOW, (delay_seconds * 1e9) as i64);
+    let context = Box::into_raw(Box::new(ReattachContext { parent, window }));
+    dispatch_after_f(
+        when,
+        &_dispatch_main_q as *const std::ffi::c_void,
+        context as *mut std::ffi::c_void,
+        reattach,
     );
 }
 
