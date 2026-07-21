@@ -16,7 +16,6 @@ use objc::{msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
 const FOOTER_EFFECT_ID: &str = "script-kit-footer-effect";
 #[cfg(target_os = "macos")]
-const HEADER_GLASS_STRIP_ID: &str = "script-kit-header-glass-strip";
 #[cfg(target_os = "macos")]
 const FOOTER_DIVIDER_ID: &str = "script-kit-footer-divider";
 #[cfg(target_os = "macos")]
@@ -1959,28 +1958,6 @@ unsafe fn add_main_window_glass_band_above_metal(content_view: id, band: id) -> 
     true
 }
 
-#[cfg(target_os = "macos")]
-fn main_window_header_glass_strip_frame(
-    content_bounds: cocoa::foundation::NSRect,
-) -> cocoa::foundation::NSRect {
-    use cocoa::foundation::{NSPoint, NSRect, NSSize};
-
-    let def = crate::designs::current_main_menu_theme().def();
-    let header_height =
-        crate::components::main_view_chrome::main_view_header_metrics(def, Some(def.search.height))
-            .header_height as f64;
-    let strip_height = crate::ui::chrome::LIQUID_GLASS_HEADER_EDGE_STRIP_HEIGHT_PX as f64;
-    // Oversized horizontally: the Liquid Glass material draws an edge rim;
-    // bleeding past the window edges clips the side rims out of view.
-    NSRect::new(
-        NSPoint::new(
-            -8.0,
-            (content_bounds.size.height - header_height - strip_height).max(0.0),
-        ),
-        NSSize::new(content_bounds.size.width + 16.0, strip_height),
-    )
-}
-
 /// Reconcile the platform-managed footer band and header edge strip with the
 /// main window's current glass mode and frame. Called beside Tahoe backdrop
 /// recreation and again when the footer host is created/refreshed.
@@ -1999,26 +1976,21 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
         return;
     }
 
-    let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
-        return;
-    };
     let active = glass_scroll_bands_active();
     let mut footer_view = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
     if footer_view != nil {
-        let footer_is_glass: cocoa::base::BOOL = msg_send![footer_view, isKindOfClass: glass_class];
-        if (footer_is_glass == YES) != active {
+        // Mode changed (float host <-> blur-era VEV): recreate the host.
+        let float_ok = float_footer_host_view_class()
+            .map(|cls| {
+                let is_float: cocoa::base::BOOL = msg_send![footer_view, isKindOfClass: cls];
+                is_float == YES
+            })
+            .unwrap_or(false);
+        if float_ok != active {
             let _: () = msg_send![footer_view, removeFromSuperview];
             clear_main_window_footer_refresh_signature();
             footer_view = nil;
         }
-    }
-
-    let header_strip = find_subview_by_identifier(content_view, HEADER_GLASS_STRIP_ID);
-    if !active {
-        if header_strip != nil {
-            let _: () = msg_send![header_strip, removeFromSuperview];
-        }
-        return;
     }
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
@@ -2029,50 +2001,7 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
         );
         let _: () = msg_send![footer_view, setFrame: footer_frame];
     }
-
-    let strip = if header_strip != nil {
-        header_strip
-    } else {
-        let Some(strip_class) = glass_header_strip_view_class(glass_class) else {
-            return;
-        };
-        let strip: id = msg_send![strip_class, alloc];
-        let strip: id =
-            msg_send![strip, initWithFrame: main_window_header_glass_strip_frame(content_bounds)];
-        if strip == nil {
-            return;
-        }
-        let identifier = ns_string(HEADER_GLASS_STRIP_ID);
-        if identifier != nil {
-            let _: () = msg_send![strip, setIdentifier: identifier];
-        }
-        let _: () = msg_send![strip, setAutoresizingMask: NSViewWidthSizable];
-        let _: () = msg_send![strip, setWantsLayer: YES];
-        let _: () = msg_send![strip, setCornerRadius: 0.0_f64];
-        log_glass_effect_view_properties_once(glass_class);
-        // Subdued material variant: the default glass variant renders the
-        // strip as a visible dark band over rows (user-rejected smudge);
-        // _variant=1 reads as near-invisible glass that still softly
-        // refracts rows scrolling beneath (screenshot-swept 2026-07-21:
-        // default/scrim=smudge, style:1/variant:2=bright gray stripe,
-        // variant:1=seamless). Private property — guarded by existence
-        // check; on failure the strip keeps the default material.
-        apply_glass_variant_if_available(strip, glass_class, 1);
-        apply_debug_glass_strip_style(strip);
-        if !add_main_window_glass_band_above_metal(content_view, strip) {
-            let _: () = msg_send![strip, release];
-            return;
-        }
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "glass_header_strip_installed",
-            height = crate::ui::chrome::LIQUID_GLASS_HEADER_EDGE_STRIP_HEIGHT_PX,
-            "Installed click-through glass header edge strip above the GPUI Metal view"
-        );
-        strip
-    };
-
-    let _: () = msg_send![strip, setFrame: main_window_header_glass_strip_frame(content_bounds)];
+    let _ = NSViewWidthSizable;
 }
 
 /// One-shot introspection: log NSGlassEffectView's declared properties so we
@@ -2130,123 +2059,6 @@ unsafe fn log_glass_effect_view_properties_once(glass_class: &objc::runtime::Cla
     });
 }
 
-/// Debug knob (SCRIPT_KIT_GLASS_STRIP_STYLE): experiment with
-/// NSGlassEffectView's private scroll-pocket / variant surface on the header
-/// strip via KVC. Values: "pocket:N" sets _scrollPocketElementStyle=N,
-/// "variant:N" sets _variant=N, "style:N" sets style=N. Logs what stuck.
-#[cfg(target_os = "macos")]
-unsafe fn apply_debug_glass_strip_style(strip: id) {
-    use objc::{class, msg_send, sel, sel_impl};
-
-    let Ok(spec) = std::env::var("SCRIPT_KIT_GLASS_STRIP_STYLE") else {
-        return;
-    };
-    for part in spec.split(',') {
-        let Some((key, value)) = part.split_once(':') else {
-            continue;
-        };
-        let Ok(value) = value.trim().parse::<i64>() else {
-            continue;
-        };
-        let key_name = match key.trim() {
-            // _scrollPocketElementStyle is READONLY (attr "R") — setting it
-            // throws NSException. It reports pocket membership; not a knob.
-            "variant" => "_variant",
-            "subvariant" => "_subvariant",
-            "style" => "style",
-            "lensing" => "_contentLensing",
-            other => {
-                tracing::warn!(
-                    target: "script_kit::footer_popup",
-                    event = "glass_strip_style_unknown_key",
-                    key = other,
-                    "Unknown glass strip style key"
-                );
-                continue;
-            }
-        };
-        let ns_key = ns_string(key_name);
-        let number: id = msg_send![class!(NSNumber), numberWithLongLong: value];
-        // KVC setValue:forKey: — exceptions from unknown keys would unwind
-        // through objc; these keys exist per class_copyPropertyList.
-        let _: () = msg_send![strip, setValue: number forKey: ns_key];
-        let readback: id = msg_send![strip, valueForKey: ns_key];
-        let readback_value: i64 = if readback == nil {
-            i64::MIN
-        } else {
-            msg_send![readback, longLongValue]
-        };
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "glass_strip_style_applied",
-            key = key_name,
-            requested = value,
-            readback = readback_value,
-            "Applied debug glass strip style"
-        );
-    }
-    // One-shot: report scroll-pocket-related classes available at runtime.
-    for candidate in [
-        "NSScrollPocket",
-        "NSScrollEdgeEffect",
-        "NSScrollEdgeElementContainerView",
-        "_NSScrollPocketView",
-    ] {
-        let exists = objc::runtime::Class::get(candidate).is_some();
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "glass_scroll_pocket_class_probe",
-            class = candidate,
-            exists,
-            "Scroll pocket class availability"
-        );
-    }
-}
-
-/// Set NSGlassEffectView's private `_variant` via KVC when the property
-/// exists on this OS build; readback-logged, no-op otherwise.
-#[cfg(target_os = "macos")]
-unsafe fn apply_glass_variant_if_available(
-    view: id,
-    glass_class: &objc::runtime::Class,
-    variant: i64,
-) {
-    use objc::{class, msg_send, sel, sel_impl};
-
-    #[link(name = "objc")]
-    extern "C" {
-        fn class_getProperty(
-            cls: *const objc::runtime::Class,
-            name: *const std::os::raw::c_char,
-        ) -> *const std::ffi::c_void;
-    }
-    let name = c"_variant";
-    if class_getProperty(glass_class as *const _, name.as_ptr()).is_null() {
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "glass_variant_unavailable",
-            "NSGlassEffectView _variant property missing; keeping default material"
-        );
-        return;
-    }
-    let ns_key = ns_string("_variant");
-    let number: id = msg_send![class!(NSNumber), numberWithLongLong: variant];
-    let _: () = msg_send![view, setValue: number forKey: ns_key];
-    let readback: id = msg_send![view, valueForKey: ns_key];
-    let readback_value: i64 = if readback == nil {
-        i64::MIN
-    } else {
-        msg_send![readback, longLongValue]
-    };
-    tracing::info!(
-        target: "script_kit::footer_popup",
-        event = "glass_variant_applied",
-        requested = variant,
-        readback = readback_value,
-        "Applied glass material variant"
-    );
-}
-
 #[cfg(target_os = "macos")]
 unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     use cocoa::appkit::NSViewWidthSizable;
@@ -2276,11 +2088,16 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     );
 
     let glass_mode = glass_scroll_bands_active();
+    // Float mode (phase 1 of the floating-chrome design): the host is an
+    // INVISIBLE passthrough container above the Metal view - no band, no
+    // material. Each button item carries its own glass capsule instead, so
+    // rows refract through the CONTROLS rather than through a divider band.
+    // Buttons still hit-test; empty areas pass through to GPUI.
     let footer_cls = if glass_mode {
-        let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
-            return false;
-        };
-        glass_footer_effect_view_class(glass_class).unwrap_or_else(footer_effect_view_class)
+        if let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") {
+            log_glass_effect_view_properties_once(glass_class);
+        }
+        float_footer_host_view_class().unwrap_or_else(footer_effect_view_class)
     } else {
         footer_effect_view_class()
     };
@@ -2366,9 +2183,9 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     if glass_mode {
         tracing::info!(
             target: "script_kit::footer_popup",
-            event = "glass_footer_band_installed",
+            event = "glass_footer_float_host_installed",
             height = footer_height(),
-            "Installed native footer chrome on a glass band above the GPUI Metal view"
+            "Installed floating footer chrome host (passthrough, per-button glass capsules) above the GPUI Metal view"
         );
     }
 
@@ -2654,7 +2471,13 @@ unsafe fn refresh_footer_host_impl(
             }
         }
 
-        if !footer_is_glass {
+        let footer_is_vev = objc::runtime::Class::get("NSVisualEffectView")
+            .map(|vev_class| {
+                let is_vev: cocoa::base::BOOL = msg_send![footer_view, isKindOfClass: vev_class];
+                is_vev == YES
+            })
+            .unwrap_or(false);
+        if footer_is_vev {
             let _: () = msg_send![footer_view, setMaterial: material];
             let _: () = msg_send![footer_view, setState: 1isize];
             let _: () = msg_send![footer_view, setBlendingMode: 1isize];
@@ -2689,11 +2512,12 @@ unsafe fn refresh_footer_host_impl(
         // native material host. Hide only the hard divider in that mode so
         // the controls read as floating, while keeping the identified view
         // installed for fidelity inspection and the native-only fallback.
-        let divider_hidden = if gpui_overlay_owns_glyphs || footer_is_glass {
-            YES
-        } else {
-            NO
-        };
+        let divider_hidden =
+            if gpui_overlay_owns_glyphs || footer_is_glass || glass_scroll_bands_active() {
+                YES
+            } else {
+                NO
+            };
         let _: () = msg_send![divider_view, setHidden: divider_hidden];
 
         if footer_geometry_changed {
@@ -3053,6 +2877,64 @@ unsafe fn layout_footer_left_info(
             NSSize::new((x - hit_start_x).max(0.0), bounds.size.height),
         ),
     );
+
+    ensure_footer_left_info_capsule(left_info_view, x, bounds.size.height);
+}
+
+/// Floating-chrome mode: back the left-info content (tips/status) with its
+/// own glass capsule sized to the laid-out content width. Hidden when there
+/// is no content or float mode is off.
+#[cfg(target_os = "macos")]
+unsafe fn ensure_footer_left_info_capsule(left_info_view: id, content_width: f64, height: f64) {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use objc::{msg_send, sel, sel_impl};
+
+    const CAPSULE_ID: &str = "script-kit-footer-left-info-capsule";
+    const PAD_X: f64 = 8.0;
+    let existing = find_subview_by_identifier(left_info_view, CAPSULE_ID);
+    let active = glass_scroll_bands_active() && content_width > 1.0;
+    if !active {
+        if existing != nil {
+            let _: () = msg_send![existing, setHidden: YES];
+        }
+        return;
+    }
+    let item_height =
+        crate::components::footer_chrome::footer_button_height(footer_height() as f32) as f64;
+    let frame = NSRect::new(
+        NSPoint::new(-PAD_X, ((height - item_height) / 2.0).round()),
+        NSSize::new(content_width + PAD_X * 2.0, item_height),
+    );
+    let capsule = if existing != nil {
+        existing
+    } else {
+        let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
+            return;
+        };
+        let capsule: id = msg_send![glass_class, alloc];
+        let capsule: id = msg_send![capsule, initWithFrame: frame];
+        if capsule == nil {
+            return;
+        }
+        let identifier = ns_string(CAPSULE_ID);
+        if identifier != nil {
+            let _: () = msg_send![capsule, setIdentifier: identifier];
+        }
+        let _: () = msg_send![
+            capsule,
+            setCornerRadius:
+                crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
+        ];
+        let _: () = msg_send![
+            left_info_view,
+            addSubview: capsule
+            positioned: -1isize
+            relativeTo: cocoa::base::nil
+        ];
+        capsule
+    };
+    let _: () = msg_send![capsule, setHidden: NO];
+    let _: () = msg_send![capsule, setFrame: frame];
 }
 
 #[cfg(target_os = "macos")]
@@ -4062,6 +3944,35 @@ unsafe fn make_footer_hint_item(
     ];
     if container == nil {
         return nil;
+    }
+
+    // Floating-chrome mode: each button rides its own glass capsule (rows
+    // refract through the control itself; there is no footer band).
+    if glass_scroll_bands_active() {
+        if let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") {
+            let capsule: id = msg_send![glass_class, alloc];
+            let capsule: id = msg_send![
+                capsule,
+                initWithFrame: NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(0.0, item_height)
+                )
+            ];
+            if capsule != nil {
+                let _: () = msg_send![capsule, setAutoresizingMask: 18u64];
+                let _: () = msg_send![
+                    capsule,
+                    setCornerRadius:
+                        crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
+                ];
+                let _: () = msg_send![
+                    container,
+                    addSubview: capsule
+                    positioned: -1isize
+                    relativeTo: cocoa::base::nil
+                ];
+            }
+        }
     }
 
     let has_label = !button_cfg.label.as_ref().is_empty();
@@ -5514,10 +5425,10 @@ extern "C" fn footer_button_mouse_exited(
     }
 }
 
+/// Invisible float-mode footer host: plain NSView container with the same
+/// button-scoped hit-testing as the old glass band; draws nothing itself.
 #[cfg(target_os = "macos")]
-fn glass_header_strip_view_class(
-    glass_class: &objc::runtime::Class,
-) -> Option<*const objc::runtime::Class> {
+fn float_footer_host_view_class() -> Option<*const objc::runtime::Class> {
     use std::sync::OnceLock;
 
     use objc::declare::ClassDecl;
@@ -5526,47 +5437,13 @@ fn glass_header_strip_view_class(
 
     static CLASS: OnceLock<usize> = OnceLock::new();
     let ptr = *CLASS.get_or_init(|| unsafe {
-        if let Some(existing) = Class::get("ScriptKitHeaderGlassStripView") {
+        if let Some(existing) = Class::get("ScriptKitFooterFloatHostView") {
             return existing as *const Class as usize;
         }
-        let Some(mut decl) = ClassDecl::new("ScriptKitHeaderGlassStripView", glass_class) else {
+        let Some(superclass) = Class::get("NSView") else {
             return 0;
         };
-        decl.add_method(
-            sel!(hitTest:),
-            glass_header_strip_hit_test
-                as extern "C" fn(&Object, Sel, cocoa::foundation::NSPoint) -> id,
-        );
-        decl.register() as *const Class as usize
-    });
-    (ptr != 0).then_some(ptr as *const objc::runtime::Class)
-}
-
-#[cfg(target_os = "macos")]
-extern "C" fn glass_header_strip_hit_test(
-    _this: &objc::runtime::Object,
-    _: objc::runtime::Sel,
-    _: cocoa::foundation::NSPoint,
-) -> id {
-    nil
-}
-
-#[cfg(target_os = "macos")]
-fn glass_footer_effect_view_class(
-    glass_class: &objc::runtime::Class,
-) -> Option<*const objc::runtime::Class> {
-    use std::sync::OnceLock;
-
-    use objc::declare::ClassDecl;
-    use objc::runtime::{Class, Object, Sel};
-    use objc::{sel, sel_impl};
-
-    static CLASS: OnceLock<usize> = OnceLock::new();
-    let ptr = *CLASS.get_or_init(|| unsafe {
-        if let Some(existing) = Class::get("ScriptKitFooterGlassEffectView") {
-            return existing as *const Class as usize;
-        }
-        let Some(mut decl) = ClassDecl::new("ScriptKitFooterGlassEffectView", glass_class) else {
+        let Some(mut decl) = ClassDecl::new("ScriptKitFooterFloatHostView", superclass) else {
             return 0;
         };
         decl.add_method(

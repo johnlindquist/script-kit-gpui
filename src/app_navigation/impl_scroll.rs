@@ -14,11 +14,9 @@ pub(crate) fn main_list_footer_overlay_total_padding() -> gpui::Pixels {
 
 #[inline]
 pub(crate) fn main_list_header_glass_strip_height() -> gpui::Pixels {
-    if crate::footer_popup::glass_scroll_bands_active() {
-        gpui::px(crate::ui::chrome::LIQUID_GLASS_HEADER_EDGE_STRIP_HEIGHT_PX)
-    } else {
-        gpui::px(0.0)
-    }
+    // The header glass strip was removed (floating-chrome design 2026-07-21);
+    // sticky group separators are the planned header scroll affordance.
+    gpui::px(0.0)
 }
 
 #[inline]
