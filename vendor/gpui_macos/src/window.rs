@@ -2406,6 +2406,28 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
         callback(content_size, scale_factor);
         window_state.lock().resize_callback = Some(callback);
     };
+
+    // PATCH(script-kit tahoe glass): present one frame synchronously inside
+    // this transaction, mirroring `display_layer` below. Animator-driven
+    // NSWindow frame animations (the glass morph) resize the view every
+    // animation frame; the default path only schedules layout+draw for the
+    // next display-link tick, so the window border visibly leads the GPUI
+    // content by 1-2 frames (runtime-measured: a dead gap opens on the
+    // growing edge of the Actions popup). Committing the freshly laid-out
+    // frame within the same CATransaction keeps border and content atomic —
+    // for morphs and for user live-resize alike.
+    let mut lock = window_state.lock();
+    if let Some(mut callback) = lock.request_frame_callback.take() {
+        lock.renderer.set_presents_with_transaction(true);
+        lock.stop_display_link();
+        drop(lock);
+        callback(Default::default());
+
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        lock.renderer.set_presents_with_transaction(false);
+        lock.start_display_link();
+    }
 }
 
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {

@@ -476,11 +476,17 @@ impl ActionsWindow {
         }
     }
 
-    fn defer_close(window: &mut Window, cx: &mut Context<Self>, reason: &'static str) {
+    fn defer_close(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        reason: &'static str,
+        dialog: Entity<ActionsDialog>,
+    ) {
         crate::logging::log(
             "ACTIONS",
             &format!("ACTIONS_WINDOW_LIFECYCLE defer_close_scheduled: reason={reason}"),
         );
+        let dialog_for_close = dialog;
         window.defer(cx, move |window, cx| {
             crate::logging::log(
                 "ACTIONS",
@@ -493,6 +499,9 @@ impl ActionsWindow {
             crate::windows::remove_runtime_window_handle("actions-dialog");
             crate::windows::remove_automation_window("actions-dialog");
             clear_actions_window_handle(reason);
+            dialog_for_close.update(cx, |dialog, _cx| {
+                dialog.fill_window_bounds = false;
+            });
             crate::platform::dematerialize_then_remove_gpui_window_from_app(
                 window,
                 cx,
@@ -553,7 +562,7 @@ impl ActionsWindow {
             on_close(cx);
         }
 
-        Self::defer_close(window, cx, reason);
+        Self::defer_close(window, cx, reason, self.dialog.clone());
     }
 
     fn ensure_activation_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1905,6 +1914,11 @@ pub fn open_actions_window(
     // Create the window with the shared dialog entity
     // The popup requests its GPUI focus handle from render after the window exists,
     // while parent surfaces can still route keys through their interceptors.
+    // Detached windows own their size: let the dialog fill the window bounds
+    // so the list reflows WITH the glass morph (reset on close).
+    dialog_entity.update(cx, |dialog, _cx| {
+        dialog.fill_window_bounds = true;
+    });
     let parent_automation_id_for_window = parent_automation_id.clone();
     let handle = cx.open_window(window_options, |_window, cx| {
         cx.new(|cx| {

@@ -783,6 +783,12 @@ pub struct ActionsDialog {
     pub config: ActionsDialogConfig,
     /// When true, skip track_focus in render (parent handles focus, e.g., ActionsWindow)
     pub skip_track_focus: bool,
+    /// When true, the container fills the hosting window's bounds instead of
+    /// its fixed shell width/height. Set by the detached ActionsWindow so the
+    /// list reflows WITH the window during the glass grow-in morph — a fixed,
+    /// left-anchored shell leaves dead space on the growing edge
+    /// (frame-measured user report).
+    pub fill_window_bounds: bool,
     /// When true, reuse the main window vibrancy alpha for the dialog container.
     /// This is for detached popup-window actions surfaces that should read like the
     /// same background/material stack as their parent window.
@@ -1123,6 +1129,7 @@ impl ActionsDialog {
             default_search_placeholder: config.search_placeholder.clone(),
             config,
             skip_track_focus: false,
+            fill_window_bounds: false,
             match_main_window_background: true,
             on_close: None,
             on_activation: None,
@@ -4610,11 +4617,17 @@ impl Render for ActionsDialog {
             None
         };
 
-        let mut container = div()
-            .flex()
-            .flex_col()
-            .w(px(popup_theme.shell.width))
-            .h(px(total_height)) // Use calculated height including footer
+        let mut container = div().flex().flex_col();
+        if self.fill_window_bounds {
+            // Width tracks the hosting window (glass morph reflow); height
+            // stays content-derived — the detached window can be taller than
+            // the content and a full-height stretch starves the list layout.
+            container = container.w_full().h(px(total_height));
+        } else {
+            container = container.w(px(popup_theme.shell.width)).h(px(total_height));
+            // Use calculated height including footer
+        }
+        let mut container = container
             .when(!use_vibrancy, |d| d.bg(main_bg))
             .rounded(px(popup_theme.shell.radius))
             .overflow_hidden()
