@@ -1537,6 +1537,10 @@ pub(crate) fn footer_hover_glyph_color(theme: &Theme, alpha: Option<u32>) -> gpu
         .with_opacity((alpha as f32 / 255.0).clamp(0.0, 1.0))
 }
 
+// Keycap borders no longer change on hover (glass extrusion is the hover
+// affordance); the token resolver stays for the theme border-alpha contract
+// tests and any future opt-in.
+#[allow(dead_code)]
 fn footer_keycap_border_hover_color_with_alpha(theme: &Theme, alpha: Option<u32>) -> gpui::Hsla {
     let alpha = alpha
         .map(|alpha| (alpha as f32 / 255.0).clamp(0.0, 1.0))
@@ -2008,10 +2012,6 @@ fn render_footer_keycap_with_metrics(
     let hover_glyph = hover_style
         .map(|style| style.glyph)
         .unwrap_or_else(|| footer_hover_glyph_color(theme, None));
-    let hover_border = footer_keycap_border_hover_color_with_alpha(
-        theme,
-        hover_style.and_then(|style| style.border_alpha),
-    );
     let metrics = current_main_menu_footer_metrics();
     let keycap_height = keycap_height_px.unwrap_or(metrics.keycap_height);
     let keycap_font_size = keycap_font_size_px.unwrap_or(metrics.keycap_font_size);
@@ -2053,9 +2053,10 @@ fn render_footer_keycap_with_metrics(
         .font_weight(metrics.font_weight)
         .text_size(px(keycap_font_size))
         .text_color(footer_text)
-        .group_hover("footer-action-button", move |s| {
-            s.text_color(hover_text).border_color(hover_border)
-        })
+        // Keycap borders stay static on hover (user call 2026-07-21): the
+        // glass capsule's extrusion is the hover affordance; only the glyph
+        // text brightens with the label.
+        .group_hover("footer-action-button", move |s| s.text_color(hover_text))
         .child(token_child);
 
     if let Some(max_width_px) = max_width_px {

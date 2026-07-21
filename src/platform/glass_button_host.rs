@@ -10,8 +10,16 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 const DEFAULT_GLASS_SPACING: f64 = 4.0;
-const DEFAULT_GLASS_HOVER_SCALE: f64 = 1.05;
-const GLASS_HOVER_DURATION_SECONDS: f64 = 0.14;
+const DEFAULT_GLASS_HOVER_SCALE: f64 = 1.12;
+const GLASS_HOVER_DURATION_SECONDS: f64 = 0.18;
+/// A capsule group that hasn't re-synced within this window is unmounted.
+///
+/// GPUI redraws the whole window per frame, so every mounted rail re-syncs
+/// its group on every draw; a group whose stamp lags the newest sync by more
+/// than this TTL belongs to an element that stopped rendering (view switch,
+/// rail swap) and must be dropped — otherwise its capsules linger at stale
+/// positions and overlap the new surface's buttons.
+const GLASS_GROUP_STALE_TTL: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(crate) type GlassButtonFrame = (f64, f64, f64, f64, f64);
 
@@ -20,9 +28,14 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+struct GlassGroup {
+    frames: Vec<GlassButtonFrame>,
+    last_synced: std::time::Instant,
+}
+
 struct WindowGlassState {
     host: GlassButtonHost,
-    groups: BTreeMap<&'static str, Vec<GlassButtonFrame>>,
+    groups: BTreeMap<&'static str, GlassGroup>,
     hovered: BTreeMap<(&'static str, usize), bool>,
 }
 
@@ -34,24 +47,38 @@ impl WindowGlassState {
 
     fn flat_index(&self, target_group: &'static str, target_index: usize) -> Option<usize> {
         let mut offset = 0;
-        for (group, frames) in &self.groups {
+        for (group, glass_group) in &self.groups {
             if *group == target_group {
-                return (target_index < frames.len()).then_some(offset + target_index);
+                return (target_index < glass_group.frames.len()).then_some(offset + target_index);
             }
-            offset += frames.len();
+            offset += glass_group.frames.len();
         }
         None
+    }
+
+    /// Drop groups whose elements stopped syncing (see [`GLASS_GROUP_STALE_TTL`]).
+    fn prune_stale_groups(&mut self, now: std::time::Instant) -> usize {
+        let before = self.groups.len();
+        self.groups
+            .retain(|_, group| now.duration_since(group.last_synced) <= GLASS_GROUP_STALE_TTL);
+        let pruned = before - self.groups.len();
+        if pruned > 0 {
+            let live: Vec<&'static str> = self.groups.keys().copied().collect();
+            self.hovered
+                .retain(|(owned_group, _), _| live.contains(owned_group));
+        }
+        pruned
     }
 }
 
 fn flatten_groups(
-    groups: &BTreeMap<&'static str, Vec<GlassButtonFrame>>,
+    groups: &BTreeMap<&'static str, GlassGroup>,
     hovered_by_group: &BTreeMap<(&'static str, usize), bool>,
 ) -> (Vec<GlassButtonFrame>, Vec<bool>) {
     let mut frames = Vec::new();
     let mut hovered = Vec::new();
-    for (group, group_frames) in groups {
-        for (index, frame) in group_frames.iter().copied().enumerate() {
+    for (group, glass_group) in groups {
+        for (index, frame) in glass_group.frames.iter().copied().enumerate() {
             frames.push(frame);
             hovered.push(
                 hovered_by_group
@@ -90,12 +117,21 @@ pub(crate) fn sync_for_window(
         let mut registry = registry.borrow_mut();
         registry.retain(|_, state| state.host.window_is_alive());
 
+        let now = std::time::Instant::now();
+
         if frames.is_empty() {
             if let Some(state) = registry.get_mut(&window_key) {
-                state.groups.insert(group, Vec::new());
+                state.groups.insert(
+                    group,
+                    GlassGroup {
+                        frames: Vec::new(),
+                        last_synced: now,
+                    },
+                );
                 state
                     .hovered
                     .retain(|(owned_group, _), _| *owned_group != group);
+                state.prune_stale_groups(now);
                 state.sync_host();
                 tracing::debug!(
                     target: "script_kit::glass_buttons",
@@ -124,10 +160,17 @@ pub(crate) fn sync_for_window(
             );
         }
         if let Some(state) = registry.get_mut(&window_key) {
-            state.groups.insert(group, frames.to_vec());
+            state.groups.insert(
+                group,
+                GlassGroup {
+                    frames: frames.to_vec(),
+                    last_synced: now,
+                },
+            );
             state
                 .hovered
                 .retain(|(owned_group, index), _| *owned_group != group || *index < frames.len());
+            let pruned = state.prune_stale_groups(now);
             state.sync_host();
             tracing::debug!(
                 target: "script_kit::glass_buttons",
@@ -136,6 +179,7 @@ pub(crate) fn sync_for_window(
                 group,
                 group_frames = frames.len(),
                 groups = state.groups.len(),
+                pruned_stale_groups = pruned,
                 "glass_button_group_synced"
             );
         }
@@ -497,14 +541,21 @@ fn gpui_view_and_ns_window(window: &gpui::Window) -> Option<(id, id)> {
 mod tests {
     use super::*;
 
+    fn group(frames: Vec<GlassButtonFrame>) -> GlassGroup {
+        GlassGroup {
+            frames,
+            last_synced: std::time::Instant::now(),
+        }
+    }
+
     #[test]
     fn grouped_frames_flatten_in_stable_name_order_and_preserve_hover_identity() {
         let footer = (20.0, 30.0, 40.0, 18.0, 6.0);
         let header_first = (1.0, 2.0, 10.0, 12.0, 8.0);
         let header_second = (12.0, 2.0, 10.0, 12.0, 8.0);
         let mut groups = BTreeMap::new();
-        groups.insert("footer", vec![footer]);
-        groups.insert("header", vec![header_first, header_second]);
+        groups.insert("footer", group(vec![footer]));
+        groups.insert("header", group(vec![header_first, header_second]));
         let hovered = BTreeMap::from([(("header", 1), true)]);
 
         let (frames, hovered) = flatten_groups(&groups, &hovered);
@@ -517,12 +568,47 @@ mod tests {
     fn empty_group_hides_only_itself() {
         let header = (1.0, 2.0, 10.0, 12.0, 8.0);
         let mut groups = BTreeMap::new();
-        groups.insert("footer", Vec::new());
-        groups.insert("header", vec![header]);
+        groups.insert("footer", group(Vec::new()));
+        groups.insert("header", group(vec![header]));
 
         let (frames, hovered) = flatten_groups(&groups, &BTreeMap::new());
 
         assert_eq!(frames, vec![header]);
         assert_eq!(hovered, vec![false]);
+    }
+
+    /// A group that stops syncing (its element unmounted on a view switch)
+    /// must be dropped once it exceeds the stale TTL — lingering frames
+    /// overlap the next surface's capsules.
+    #[test]
+    fn stale_groups_prune_after_ttl_and_drop_their_hover_state() {
+        let now = std::time::Instant::now();
+        let stale_stamp = now - (GLASS_GROUP_STALE_TTL + std::time::Duration::from_millis(50));
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "old-rail",
+            GlassGroup {
+                frames: vec![(1.0, 2.0, 10.0, 12.0, 8.0)],
+                last_synced: stale_stamp,
+            },
+        );
+        groups.insert("footer", group(vec![(20.0, 30.0, 40.0, 18.0, 6.0)]));
+
+        let mut hovered = BTreeMap::new();
+        hovered.insert(("old-rail", 0usize), true);
+
+        // prune_stale_groups lives on WindowGlassState, which needs a live
+        // NSWindow; exercise the same retain predicate directly.
+        let before = groups.len();
+        groups.retain(|_, group: &mut GlassGroup| {
+            now.duration_since(group.last_synced) <= GLASS_GROUP_STALE_TTL
+        });
+        let live: Vec<&'static str> = groups.keys().copied().collect();
+        hovered.retain(|(owned_group, _), _| live.contains(owned_group));
+
+        assert_eq!(before - groups.len(), 1);
+        assert!(groups.contains_key("footer"));
+        assert!(!groups.contains_key("old-rail"));
+        assert!(hovered.is_empty());
     }
 }
