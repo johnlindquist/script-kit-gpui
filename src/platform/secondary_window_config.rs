@@ -545,6 +545,147 @@ unsafe fn timing_function_with_control_points(c1x: f32, c1y: f32, c2x: f32, c2y:
     )
 }
 
+/// Remove any exit-dematerialize blur left on the window's content view
+/// layer (a superseded exit, or post-hide cleanup before the next show).
+#[cfg(target_os = "macos")]
+unsafe fn clear_exit_dematerialize_blur(window: id) {
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let layer: id = msg_send![content_view, layer];
+    if layer == nil {
+        return;
+    }
+    let nil_id: id = nil;
+    let _: () = msg_send![layer, setFilters: nil_id];
+    let _: () = msg_send![layer, removeAllAnimations];
+}
+
+/// Spotlight-style exit dematerialize for the main window, measured from a
+/// 57fps recording: ~120ms ease-in-out fade + slight outward growth (the
+/// inverse of the entry's compression) + a gaussian blur ramp on the
+/// content view layer (private CAFilter — same pattern as the backdrop
+/// saturation boost). Returns false when glass/morph is unavailable so the
+/// caller hides immediately.
+///
+/// This runs ABOVE the synchronous hide layer: the caller plays this,
+/// waits ~135ms, then runs the NORMAL hide flow. Never defer orderOut:
+/// itself — that livelocked the hotkey gesture listener.
+#[cfg(target_os = "macos")]
+pub fn begin_main_window_exit_dematerialize() -> bool {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+    if require_main_thread("begin_main_window_exit_dematerialize") {
+        return false;
+    }
+    if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
+        return false;
+    }
+    let morph_enabled = crate::theme::get_cached_theme()
+        .get_opacity()
+        .glass_morph_duration
+        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+        >= 0.02;
+    if !morph_enabled {
+        return false;
+    }
+    let Some(window) = window_manager::get_main_window() else {
+        return false;
+    };
+
+    // SAFETY: main thread verified; standard AppKit calls plus the private
+    // CAFilter/CABasicAnimation classes resolved at runtime.
+    unsafe {
+        let visible: bool = msg_send![window, isVisible];
+        if !visible {
+            return false;
+        }
+        let frame: NSRect = msg_send![window, frame];
+        if frame.size.width < 40.0 || frame.size.height < 40.0 {
+            return false;
+        }
+
+        // Blur ramp: 0 -> 8pt over the fade.
+        let content_view: id = msg_send![window, contentView];
+        if content_view != nil {
+            let layer: id = msg_send![content_view, layer];
+            if layer != nil {
+                if let (Some(filter_class), Some(anim_class)) = (
+                    objc::runtime::Class::get("CAFilter"),
+                    objc::runtime::Class::get("CABasicAnimation"),
+                ) {
+                    let blur_type = tahoe_ns_string("gaussianBlur");
+                    let filter: id = msg_send![filter_class, filterWithType: blur_type];
+                    if filter != nil {
+                        let exit_name = tahoe_ns_string("exitBlur");
+                        let _: () = msg_send![filter, setName: exit_name];
+                        let radius_key = tahoe_ns_string("inputRadius");
+                        let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0f64];
+                        let _: () = msg_send![filter, setValue: zero forKey: radius_key];
+                        let filters: id = msg_send![class!(NSArray), arrayWithObject: filter];
+                        let _: () = msg_send![layer, setFilters: filters];
+
+                        let key_path = tahoe_ns_string("filters.exitBlur.inputRadius");
+                        let anim: id = msg_send![anim_class, animationWithKeyPath: key_path];
+                        if anim != nil {
+                            let eight: id = msg_send![class!(NSNumber), numberWithDouble: 8.0f64];
+                            let _: () = msg_send![anim, setFromValue: zero];
+                            let _: () = msg_send![anim, setToValue: eight];
+                            let _: () = msg_send![anim, setDuration: 0.12f64];
+                            let forwards = tahoe_ns_string("forwards");
+                            let _: () = msg_send![anim, setFillMode: forwards];
+                            let _: () = msg_send![anim, setRemovedOnCompletion: false];
+                            let anim_key = tahoe_ns_string("exitBlurRamp");
+                            let _: () = msg_send![layer, addAnimation: anim forKey: anim_key];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fade + slight outward release (inverse of the entry compression;
+        // vertical damped like the entry, per the measured width dominance).
+        let grow_x = frame.size.width * 0.03;
+        let grow_y = frame.size.height * 0.012;
+        let grown = NSRect::new(
+            NSPoint::new(frame.origin.x - grow_x, frame.origin.y - grow_y),
+            NSSize::new(
+                frame.size.width + grow_x * 2.0,
+                frame.size.height + grow_y * 2.0,
+            ),
+        );
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![ctx, setDuration: 0.12f64];
+        let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeInEaseOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![ctx, setTimingFunction: timing];
+                }
+            }
+        }
+        let animator: id = msg_send![window, animator];
+        let _: () = msg_send![animator, setFrame: grown display: true];
+        let _: () = msg_send![animator, setAlphaValue: 0.0f64];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+    }
+
+    logging::log(
+        "PANEL",
+        "Main window exit dematerialize started (0.12s fade + blur + growth)",
+    );
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn begin_main_window_exit_dematerialize() -> bool {
+    false
+}
+
 /// Park a just-hidden window at alpha 0 so that whichever code path orders
 /// it front next cannot flash a full-alpha frame before the appear morph
 /// starts (multiple show paths exist: the platform show helpers and GPUI's
@@ -555,6 +696,9 @@ unsafe fn park_hidden_window_for_glass_morph(window: id) {
     if window.is_null() {
         return;
     }
+    // Post-hide cleanup: drop any exit-dematerialize blur so the next show
+    // starts crisp.
+    clear_exit_dematerialize_blur(window);
     if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
         return;
     }
@@ -738,6 +882,10 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
 unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_name: &str) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
+    // A superseded exit dematerialize may have left a blur on the content
+    // view layer — every show must clear it before drawing.
+    clear_exit_dematerialize_blur(window);
+
     // The hide path parks the window at alpha 0 so no show path can flash a
     // full-alpha frame. Every early exit below must therefore restore alpha,
     // or a skipped morph would leave the window invisible.
@@ -785,13 +933,11 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     }
 
     // Spotlight enters by SHRINKING into place: start larger than final
-    // (the "inset" slider is the start outset) and glide down in ONE
-    // continuous animation. The spring feel comes from an overshooting
-    // bezier (y > 1), which keeps velocity continuous — the previous
-    // two-phase overshoot+settle had a velocity discontinuity at the
-    // handoff that read as aggressive/mechanical.
+    // (the "inset" slider is the start outset) and glide down. Measured
+    // from the real Spotlight: the morph is WIDTH-DOMINANT — height locks
+    // early and barely undershoots — so the vertical deltas are damped.
     let outset_x = final_frame.size.width * inset_fraction;
-    let outset_y = final_frame.size.height * inset_fraction;
+    let outset_y = final_frame.size.height * (inset_fraction * 0.4);
     let start = NSRect::new(
         NSPoint::new(
             final_frame.origin.x - outset_x,
@@ -825,9 +971,9 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     // Squish target: compress BELOW the final size — the released-elastic
     // physics the Spotlight enter has. Visible (~1.5% of each dimension),
     // scaled off the start outset.
-    let squish_fraction = (inset_fraction * 0.75).clamp(0.012, 0.03);
+    let squish_fraction = (inset_fraction * 0.5).clamp(0.012, 0.03);
     let squish_x = final_frame.size.width * squish_fraction;
-    let squish_y = final_frame.size.height * squish_fraction;
+    let squish_y = final_frame.size.height * (squish_fraction * 0.4);
     let squish = NSRect::new(
         NSPoint::new(
             final_frame.origin.x + squish_x,
@@ -840,9 +986,10 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     );
 
     // Phase 1: wide -> squished-under-final, soft on both ends (the window
-    // momentarily comes to rest at max compression — physically natural,
-    // unlike the old snap that handed off at full velocity).
-    let phase1 = duration * 0.62;
+    // momentarily comes to rest at max compression — physically natural).
+    // Measured Spotlight split: compression and rebound take EQUAL time,
+    // but the rebound travels ~1/4 the distance, so it reads far gentler.
+    let phase1 = duration * 0.50;
     let phase2 = (duration - phase1).max(0.08);
 
     // Cancel any pending settle from an interrupted previous morph.

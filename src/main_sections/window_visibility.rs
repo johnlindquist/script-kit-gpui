@@ -773,7 +773,34 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
             secondary_windows_open
         ),
     );
-    if platform::main_window_geometry_trace_enabled() {
+    // Glass mode: play the Spotlight-style dematerialize (~120ms fade +
+    // blur + slight growth), THEN run the normal hide flow — the native
+    // orderOut: itself must stay synchronous inside that flow (deferring it
+    // at the platform layer livelocked the hotkey gesture listener). A
+    // re-show during the animation supersedes the delayed hide.
+    if platform::begin_main_window_exit_dematerialize() {
+        let trace = platform::main_window_geometry_trace_enabled();
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(135))
+                .await;
+            let _ = cx.update(|cx| {
+                if crate::is_main_window_visible() {
+                    logging::log(
+                        "VISIBILITY",
+                        "Exit dematerialize superseded by re-show; skipping deferred hide",
+                    );
+                    return;
+                }
+                if trace {
+                    platform::defer_hide_main_window_with_geometry_trace(cx, geometry_cycle_id);
+                } else {
+                    platform::defer_hide_main_window(cx);
+                }
+            });
+        })
+        .detach();
+    } else if platform::main_window_geometry_trace_enabled() {
         platform::defer_hide_main_window_with_geometry_trace(cx, geometry_cycle_id);
     } else {
         platform::defer_hide_main_window(cx);

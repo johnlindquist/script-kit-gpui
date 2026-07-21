@@ -27,13 +27,13 @@ pub const OPACITY_VIBRANCY_BACKGROUND: f32 = 0.30;
 /// alone carries the frost and content sits directly on it. Raise this to
 /// restore a themed tint over the glass (0.15 was the previous value).
 pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.0;
-/// Default duration (seconds) of the glass appear morph — one continuous
-/// spring-bezier glide; Spotlight's enter reads at roughly a quarter second.
-pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.26;
-/// Default start outset (fraction of each dimension) of the glass appear
-/// morph: how much larger than final the window starts. Only slightly
-/// bigger than final — the recoil in the timing curve carries the feel.
-pub const GLASS_MORPH_DEFAULT_INSET: f32 = 0.02;
+/// Default duration (seconds) of the glass appear morph. Measured from a
+/// 57fps Spotlight recording: compression ~140ms + rebound ~140ms.
+pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.28;
+/// Default start outset (fraction of width per side) of the glass appear
+/// morph. Spotlight measures ~+10% total width at first photon (~3-5% per
+/// side); height participation is damped in the morph itself.
+pub const GLASS_MORPH_DEFAULT_INSET: f32 = 0.03;
 /// Softer ghost-tier background opacity for barely-there fills (0.03–0.06 range).
 #[allow(dead_code)]
 pub const OPACITY_GHOST_SOFT: f32 = 0.03;

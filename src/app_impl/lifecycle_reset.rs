@@ -299,7 +299,30 @@ impl ScriptListApp {
             "VISIBILITY",
             "Using defer_hide_main_window() - main-only hide",
         );
-        platform::defer_hide_main_window(cx);
+        // Glass mode: play the Spotlight-style dematerialize (~120ms fade +
+        // blur + slight growth) and delay the normal hide flow past it. The
+        // native orderOut: stays synchronous inside that flow; a re-show
+        // during the animation supersedes the deferred hide.
+        if platform::begin_main_window_exit_dematerialize() {
+            cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(135))
+                    .await;
+                let _ = cx.update(|cx| {
+                    if script_kit_gpui::is_main_window_visible() {
+                        logging::log(
+                            "VISIBILITY",
+                            "Exit dematerialize superseded by re-show; skipping deferred hide",
+                        );
+                        return;
+                    }
+                    platform::defer_hide_main_window(cx);
+                });
+            })
+            .detach();
+        } else {
+            platform::defer_hide_main_window(cx);
+        }
         self.defer_reset_to_script_list_after_main_window_hidden(
             cx,
             "close_and_reset_window",
@@ -318,14 +341,12 @@ impl ScriptListApp {
             "VISIBILITY",
             "=== Close Agent Chat with native hide/reset barrier ===",
         );
-        let Some(visibility_generation) =
-            self.prepare_main_window_close(
-                cx,
-                "close_agent_chat_native_hide_barrier",
-                false,
-                false,
-            )
-        else {
+        let Some(visibility_generation) = self.prepare_main_window_close(
+            cx,
+            "close_agent_chat_native_hide_barrier",
+            false,
+            false,
+        ) else {
             return;
         };
         let app_entity = cx.entity().downgrade();
