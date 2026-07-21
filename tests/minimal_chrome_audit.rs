@@ -289,8 +289,8 @@ fn editor_footer_contract_is_single_source() {
         "editor wrapper should not instantiate PromptFooter"
     );
     assert!(
-        wrapper_source.contains("main_window_footer_slot(self.clickable_universal_hint_strip(cx))"),
-        "editor wrapper should route universal hints through main_window_footer_slot"
+        wrapper_source.contains("main_window_footer_slot(editor_footer)"),
+        "editor wrapper should route its truthful footer through main_window_footer_slot"
     );
     assert!(
         !wrapper_source.contains("40px fixed height"),

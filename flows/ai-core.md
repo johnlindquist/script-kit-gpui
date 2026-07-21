@@ -4,6 +4,7 @@ route: "ai core|ghost text|local llm|gguf|dictation|whisper|computer use|ocr|cam
 model: "gpt-5.6-sol"
 sandbox: "workspace-write"
 config: model_reasoning_effort="medium"
+_compat: 4.7.0
 ---
 You are ai-core, a Script Kit GPUI project flow. Every task is about this local repository. First step: inspect current repository state with shell commands (git status --short --branch); never answer from memory alone.
 

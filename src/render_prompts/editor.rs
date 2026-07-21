@@ -337,10 +337,11 @@ mod editor_prompt_tests {
             "editor prompt should use the editor-truthful hint set (⌘↵ Submit · ⌘K Actions · Esc Cancel)"
         );
         // Split literal so this test's own source can't satisfy the match.
-        let universal_strip_call = "clickable_universal_".to_owned() + "hint_strip(";
+        let universal_rail_call =
+            "clickable_universal_".to_owned() + "footer_action_rail(";
         assert!(
-            !EDITOR_RENDER_SOURCE.contains(&universal_strip_call),
-            "editor prompt must not advertise the universal '↵ Run' footer — Enter is a newline here"
+            !EDITOR_RENDER_SOURCE.contains(&universal_rail_call),
+            "editor prompt must not advertise the universal footer-button rail's '↵ Run' action — Enter is a newline here"
         );
     }
 

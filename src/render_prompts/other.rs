@@ -133,7 +133,7 @@ impl ScriptListApp {
     /// All three buttons route through `dispatch_main_window_footer_action` so
     /// that prompt footers use the same per-view routing as `Cmd+K` and the
     /// native mini-footer.
-    fn clickable_universal_hint_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn clickable_universal_footer_action_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let on_run = cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
             this.dispatch_main_window_footer_action(
                 crate::footer_popup::FooterAction::Run,
@@ -158,7 +158,14 @@ impl ScriptListApp {
                 "gpui_footer",
             );
         });
-        crate::components::render_universal_prompt_hint_strip_clickable(on_run, on_actions, on_ai)
+        crate::components::render_universal_footer_action_rail(
+            "prompt",
+            "↵",
+            "Run".into(),
+            on_run,
+            on_actions,
+            on_ai,
+        )
     }
 
     fn clickable_template_hint_strip(
@@ -223,8 +230,10 @@ impl ScriptListApp {
         // The shared helper owns label↔index wiring; hand-rolled on_hint_click
         // indices against the universal label list is how the "⌘K Actions"
         // chip ended up dead while "⌘↵ Agent" opened Actions.
-        crate::components::render_universal_prompt_hint_strip_clickable_with_primary_label(
-            "Capture Photo",
+        crate::components::render_universal_footer_action_rail(
+            "prompt",
+            "↵",
+            "Capture Photo".into(),
             on_capture,
             on_actions,
             on_ai,
@@ -279,7 +288,8 @@ impl ScriptListApp {
         let shell_radius = self.other_prompt_shell_radius();
         let handle_key = cx.listener(key_handler);
         let vibrancy_bg = get_vibrancy_background(&self.theme);
-        let footer = self.main_window_footer_slot(self.clickable_universal_hint_strip(cx));
+        let footer =
+            self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx));
 
         crate::components::render_simple_prompt_shell(shell_radius, vibrancy_bg, entity, footer)
             .on_key_down(handle_key)
@@ -804,7 +814,7 @@ impl ScriptListApp {
                     ),
             )
             .when_some(
-                self.main_window_footer_slot(self.clickable_universal_hint_strip(cx)),
+                self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx)),
                 |d, footer| d.child(footer),
             )
             .into_any_element()
@@ -1010,7 +1020,7 @@ impl ScriptListApp {
                     .child(panel),
             )
             .when_some(
-                self.main_window_footer_slot(self.clickable_universal_hint_strip(cx)),
+                self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx)),
                 |d, footer| d.child(footer),
             )
             .into_any_element()
@@ -1096,7 +1106,7 @@ impl ScriptListApp {
                     ),
             )
             .when_some(
-                self.main_window_footer_slot(self.clickable_universal_hint_strip(cx)),
+                self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx)),
                 |d, footer| d.child(footer),
             )
             .into_any_element()
@@ -1155,7 +1165,7 @@ mod other_prompt_render_wrapper_tests {
             "select prompt should not get a second outer prompt shell/footer"
         );
         assert!(
-            !body.contains("clickable_universal_hint_strip("),
+            !body.contains("clickable_universal_footer_action_rail("),
             "select prompt outer renderer should not add a second footer"
         );
         assert!(
@@ -1227,8 +1237,8 @@ mod other_prompt_render_wrapper_tests {
             "render_wrapped_prompt_entity must call the shared component helper explicitly"
         );
         assert!(
-            body.contains("clickable_universal_hint_strip("),
-            "render_wrapped_prompt_entity must supply the clickable three-key hint strip footer"
+            body.contains("clickable_universal_footer_action_rail("),
+            "render_wrapped_prompt_entity must supply the shared three-button footer rail"
         );
     }
 
@@ -1259,7 +1269,7 @@ mod other_prompt_render_wrapper_tests {
     }
 
     #[test]
-    fn render_creation_feedback_uses_hint_strip() {
+    fn render_creation_feedback_uses_footer_action_rail() {
         let body = fn_source("render_creation_feedback");
         assert!(
             body.contains("window_resize::layout::STANDARD_HEIGHT"),
@@ -1274,21 +1284,21 @@ mod other_prompt_render_wrapper_tests {
             "render_creation_feedback should not use PromptFooter"
         );
         assert!(
-            body.contains("clickable_universal_hint_strip("),
-            "render_creation_feedback should use the clickable hint strip"
+            body.contains("clickable_universal_footer_action_rail("),
+            "render_creation_feedback should use the shared footer action rail"
         );
     }
 
     #[test]
-    fn render_webcam_prompt_uses_hint_strip() {
+    fn render_webcam_prompt_uses_footer_action_rail() {
         let body = fn_source("render_webcam_prompt");
         assert!(
             !body.contains("PromptFooter::new("),
             "render_webcam_prompt should not use PromptFooter"
         );
         assert!(
-            body.contains("clickable_universal_hint_strip("),
-            "render_webcam_prompt should use the clickable hint strip"
+            body.contains("clickable_universal_footer_action_rail("),
+            "render_webcam_prompt should use the shared footer action rail"
         );
     }
 }
@@ -1358,10 +1368,10 @@ mod prompt_footer_regression_tests {
         let source = fs::read_to_string("src/render_prompts/form/render.rs")
             .expect("Failed to read src/render_prompts/form/render.rs");
         assert!(
-            source.contains("clickable_universal_hint_strip(")
+            source.contains("clickable_universal_footer_action_rail(")
                 || source.contains("render_simple_hint_strip(")
                 || source.contains("render_minimal_list_prompt_shell("),
-            "form prompt should render the shared hint strip"
+            "form prompt should render shared footer chrome"
         );
         assert!(
             !source.contains("PromptFooter::new("),

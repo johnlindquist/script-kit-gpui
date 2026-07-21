@@ -148,7 +148,7 @@ impl ScriptListApp {
                     .child(entity.clone()),
                 crate::components::PromptBodyInsets::MainMenu(self.current_design),
             ),
-            self.main_window_footer_slot(self.clickable_universal_hint_strip(cx)),
+            self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx)),
         )
         .h(content_height)
         .text_color(rgb(design_colors.text_primary))

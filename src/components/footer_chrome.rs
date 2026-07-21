@@ -199,6 +199,117 @@ pub(crate) fn footer_rail_chrome(theme: &Theme) -> FooterRailChrome {
     }
 }
 
+/// Canonical in-window footer rail geometry. Callers supply footer-chrome
+/// button frames; this helper keeps the glass fallback aligned with the
+/// native footer's height, side insets, and inter-item spacing.
+pub(crate) fn render_footer_action_rail(
+    id: &'static str,
+    buttons: impl IntoIterator<Item = AnyElement>,
+) -> AnyElement {
+    let theme = crate::theme::get_cached_theme();
+    let rail = footer_rail_chrome(&theme);
+
+    div()
+        .id(id)
+        .w_full()
+        .h(px(rail.height_px))
+        .min_h(px(rail.height_px))
+        .px(px(rail.side_inset_px))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .gap(px(rail.item_gap_px))
+        .children(buttons)
+        .into_any_element()
+}
+
+#[allow(dead_code)] // callers live in binary-only render modules
+fn footer_hint_button_parts(hint: &str) -> (SharedString, SharedString) {
+    let Some((candidate_key, label)) = hint.trim().split_once(' ') else {
+        return (
+            SharedString::from(hint.trim().to_owned()),
+            SharedString::from(""),
+        );
+    };
+    let is_shortcut = matches!(
+        candidate_key.to_ascii_lowercase().as_str(),
+        "esc" | "escape"
+    ) || candidate_key
+        .chars()
+        .any(|ch| matches!(ch, '↵' | '⇥' | '⌘' | '⇧' | '⌥' | '⌃'));
+    if is_shortcut {
+        (
+            SharedString::from(label.to_owned()),
+            SharedString::from(candidate_key.to_owned()),
+        )
+    } else {
+        (
+            SharedString::from(hint.trim().to_owned()),
+            SharedString::from(""),
+        )
+    }
+}
+
+/// Static footer hints rendered with the same frames and optical keycap
+/// metrics as clickable footer actions. Composite hint strings retain each
+/// advertised shortcut as its own footer button.
+#[allow(dead_code)] // callers live in binary-only render modules
+pub(crate) fn render_static_footer_hint_action_rail(
+    id: &'static str,
+    hints: impl IntoIterator<Item = SharedString>,
+) -> AnyElement {
+    let theme = crate::theme::get_cached_theme();
+    let rail = footer_rail_chrome(&theme);
+    let button_height = footer_button_height(rail.height_px);
+    let button_ids = [
+        "static-footer-hint-0",
+        "static-footer-hint-1",
+        "static-footer-hint-2",
+        "static-footer-hint-3",
+        "static-footer-hint-4",
+        "static-footer-hint-5",
+        "static-footer-hint-6",
+        "static-footer-hint-7",
+    ];
+    let mut buttons = Vec::new();
+
+    for segment in hints
+        .into_iter()
+        .flat_map(|hint| hint.split(" · ").map(str::to_owned).collect::<Vec<_>>())
+    {
+        let index = buttons.len();
+        let button_id = button_ids
+            .get(index)
+            .copied()
+            .unwrap_or("static-footer-hint-overflow");
+        let (label, key) = footer_hint_button_parts(&segment);
+        buttons.push(
+            render_footer_hint_action_button_frame(
+                FooterHintActionButtonFrameSpec {
+                    id: button_id,
+                    label,
+                    key,
+                    slot_width_px: footer_action_slot_width(FooterActionSlot::Run),
+                    height_px: button_height,
+                    selected: false,
+                    key_first: false,
+                    justify: FooterHintContentJustify::Center,
+                    layout: FooterHintButtonLayoutOverrides {
+                        shrink_frame_to_content_px: true,
+                        hug_frame_to_content: true,
+                        ..FooterHintButtonLayoutOverrides::default()
+                    },
+                },
+                &theme,
+            )
+            .into_any_element(),
+        );
+    }
+
+    render_footer_action_rail(id, buttons)
+}
+
 fn current_footer_button_theme_rgba(theme: &Theme, alpha: u32) -> u32 {
     let def = crate::designs::current_main_menu_theme().def();
     let chrome = crate::theme::AppChromeColors::from_theme(theme);

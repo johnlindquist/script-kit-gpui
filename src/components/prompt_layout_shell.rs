@@ -975,28 +975,30 @@ pub(crate) fn render_universal_prompt_hint_strip_clickable_with_primary_key_labe
 pub(crate) fn render_universal_footer_action_buttons(
     id_prefix: &'static str,
     primary_key: &'static str,
-    primary_label: &'static str,
+    primary_label: impl Into<SharedString>,
     on_primary: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     on_actions: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     on_ai: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
     use crate::components::footer_chrome::{
-        footer_action_slot_width, footer_button_height, render_footer_hint_action_button_frame,
-        FooterActionSlot, FooterHintActionButtonFrameSpec, FooterHintButtonLayoutOverrides,
-        FooterHintContentJustify, FOOTER_ACTION_ITEM_GAP_PX,
+        footer_action_slot_width, footer_button_height, footer_rail_chrome,
+        render_footer_hint_action_button_frame, FooterActionSlot, FooterHintActionButtonFrameSpec,
+        FooterHintButtonLayoutOverrides, FooterHintContentJustify,
     };
 
     let theme = crate::theme::get_cached_theme();
-    let height = footer_button_height(crate::window_resize::main_layout::HINT_STRIP_HEIGHT);
+    let primary_label = primary_label.into();
+    let rail = footer_rail_chrome(&theme);
+    let height = footer_button_height(rail.height_px);
     let button = |id: &'static str,
-                  label: &'static str,
+                  label: SharedString,
                   key: &'static str,
                   slot_width_px: f32|
      -> gpui::Stateful<gpui::Div> {
         render_footer_hint_action_button_frame(
             FooterHintActionButtonFrameSpec {
                 id,
-                label: SharedString::from(label),
+                label,
                 key: SharedString::from(key),
                 slot_width_px,
                 height_px: height,
@@ -1038,7 +1040,7 @@ pub(crate) fn render_universal_footer_action_buttons(
         .flex_none()
         .flex_row()
         .items_center()
-        .gap(px(FOOTER_ACTION_ITEM_GAP_PX))
+        .gap(px(rail.item_gap_px))
         .child(
             button(
                 primary_id,
@@ -1051,7 +1053,7 @@ pub(crate) fn render_universal_footer_action_buttons(
         .child(
             button(
                 actions_id,
-                "Actions",
+                SharedString::from("Actions"),
                 "⌘K",
                 footer_action_slot_width(FooterActionSlot::Actions),
             )
@@ -1060,13 +1062,38 @@ pub(crate) fn render_universal_footer_action_buttons(
         .child(
             button(
                 ai_id,
-                "Agent",
+                SharedString::from("Agent"),
                 "⌘↵",
                 footer_action_slot_width(FooterActionSlot::Ai),
             )
             .on_click(move |event, window, cx| on_ai(event, window, cx)),
         )
         .into_any_element()
+}
+
+/// Canonical in-window universal footer: native rail geometry containing the
+/// shared footer action-button frames and keycaps.
+#[allow(dead_code)] // callers live in binary-only render modules
+pub(crate) fn render_universal_footer_action_rail(
+    id_prefix: &'static str,
+    primary_key: &'static str,
+    primary_label: SharedString,
+    on_primary: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_actions: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_ai: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    let buttons = render_universal_footer_action_buttons(
+        id_prefix,
+        primary_key,
+        primary_label,
+        on_primary,
+        on_actions,
+        on_ai,
+    );
+    crate::components::footer_chrome::render_footer_action_rail(
+        "universal-footer-action-rail",
+        [buttons],
+    )
 }
 
 /// Returns `true` when `hints` matches the canonical three-key ANATOMY in
@@ -1544,7 +1571,7 @@ mod prompt_layout_shell_tests {
             "select prompt should not get a second outer prompt shell/footer"
         );
         assert!(
-            !body.contains("clickable_universal_hint_strip("),
+            !body.contains("clickable_universal_footer_action_rail("),
             "select prompt outer renderer should not add a second footer"
         );
         assert!(

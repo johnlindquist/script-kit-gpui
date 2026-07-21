@@ -2235,21 +2235,6 @@ fn active_microphone_footer_label() -> SharedString {
         .into()
 }
 
-fn action_chip_width(label: &str) -> f32 {
-    use crate::components::footer_chrome::{footer_action_slot_width, FooterActionSlot};
-
-    match label {
-        "" => footer_action_slot_width(FooterActionSlot::Ai),
-        ACTION_STOP_LABEL => footer_action_slot_width(FooterActionSlot::Stop),
-        ACTION_CANCEL_LABEL | ACTION_CLOSE_LABEL | ACTION_DISCARD_LABEL => {
-            footer_action_slot_width(FooterActionSlot::Close)
-        }
-        ACTION_MIC_LABEL => footer_action_slot_width(FooterActionSlot::PasteResponse),
-        ACTION_CONTINUE_LABEL => footer_action_slot_width(FooterActionSlot::Actions),
-        _ => footer_action_slot_width(FooterActionSlot::Run),
-    }
-}
-
 pub(crate) fn dictation_native_footer_config(
     phase: &DictationSessionPhase,
     armed: bool,
@@ -2324,12 +2309,6 @@ fn native_footer_spacer() -> impl IntoElement {
         .min_h(px(rail_chrome.height_px))
 }
 
-fn footer_action_button_height() -> f32 {
-    crate::components::footer_chrome::footer_button_height(
-        crate::window_resize::main_layout::NATIVE_MAIN_WINDOW_FOOTER_HEIGHT,
-    )
-}
-
 fn render_glass_signal_band(body: AnyElement) -> impl IntoElement {
     div()
         .w_full()
@@ -2341,74 +2320,6 @@ fn render_glass_signal_band(body: AnyElement) -> impl IntoElement {
         .child(body)
 }
 
-fn render_action_chip_content(label: SharedString, key: SharedString) -> impl IntoElement {
-    let theme = get_cached_theme();
-    if key.as_ref() == MIC_KEYCAP {
-        return render_mic_action_chip_content(&theme);
-    }
-
-    crate::components::footer_chrome::render_footer_hint_content(
-        label,
-        key,
-        crate::components::footer_chrome::FooterHintKeyMode::Shortcut,
-        &theme,
-    )
-}
-
-fn render_mic_action_chip_content(theme: &crate::theme::Theme) -> AnyElement {
-    let footer_text = crate::components::footer_chrome::footer_hint_text_color(theme);
-    let full_text = theme.colors.text.primary.to_rgb();
-
-    div()
-        .min_w(px(
-            crate::components::footer_chrome::FOOTER_KEYCAP_HEIGHT_PX,
-        ))
-        .min_h(px(
-            crate::components::footer_chrome::FOOTER_KEYCAP_HEIGHT_PX,
-        ))
-        .h(px(
-            crate::components::footer_chrome::FOOTER_KEYCAP_HEIGHT_PX,
-        ))
-        .px(px(
-            crate::components::footer_chrome::FOOTER_KEYCAP_PADDING_X_PX,
-        ))
-        .rounded(px(
-            crate::components::footer_chrome::FOOTER_KEYCAP_RADIUS_PX,
-        ))
-        .border_1()
-        .border_color(crate::components::footer_chrome::footer_keycap_border_color(theme))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(footer_text)
-        .group_hover("footer-action-button", move |s| s.text_color(full_text))
-        .child(
-            svg()
-                .path(crate::components::footer_chrome::FOOTER_MIC_ICON_PATH)
-                .size(px(13.0))
-                .flex_shrink_0()
-                .text_color(footer_text)
-                .group_hover("footer-action-button", move |s| s.text_color(full_text)),
-        )
-        .into_any_element()
-}
-
-fn render_action_chip(label: SharedString, key: SharedString) -> gpui::Stateful<Div> {
-    let width = action_chip_width(label.as_ref());
-    let chip_id: SharedString = format!("dictation-action-chip-{}", label.as_ref()).into();
-
-    div()
-        .id(chip_id)
-        .w(px(width))
-        .h(px(footer_action_button_height()))
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .group("footer-action-button")
-        .child(render_action_chip_content(label, key))
-}
-
 fn wrap_dictation_overlay_action_rail(rail: impl IntoElement) -> impl IntoElement {
     div().w_full().child(rail)
 }
@@ -2416,37 +2327,61 @@ fn wrap_dictation_overlay_action_rail(rail: impl IntoElement) -> impl IntoElemen
 fn render_static_action_rail(
     buttons: impl IntoIterator<Item = crate::footer_popup::FooterButtonConfig>,
     mut cx: Option<&mut Context<DictationOverlay>>,
-) -> impl IntoElement {
+) -> AnyElement {
+    use crate::components::footer_chrome::{
+        footer_action_slot_width, footer_button_height, footer_rail_chrome,
+        render_footer_action_rail, render_footer_hint_action_button_frame, FooterActionSlot,
+        FooterHintActionButtonFrameSpec, FooterHintButtonLayoutOverrides, FooterHintContentJustify,
+    };
+
     let theme = get_cached_theme();
-    let rail_chrome = crate::components::footer_chrome::footer_rail_chrome(&theme);
+    let rail_chrome = footer_rail_chrome(&theme);
+    let button_height = footer_button_height(rail_chrome.height_px);
+    let button_ids = [
+        "dictation-footer-action-0",
+        "dictation-footer-action-1",
+        "dictation-footer-action-2",
+        "dictation-footer-action-3",
+    ];
+    let mut frames = Vec::new();
 
-    let mut rail = div()
-        .id("dictation-action-rail")
-        .w_full()
-        .h(px(rail_chrome.height_px))
-        .min_h(px(rail_chrome.height_px))
-        .px(px(rail_chrome.side_inset_px))
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_end()
-        .gap(px(rail_chrome.item_gap_px));
-
-    for button in buttons {
-        let chip = render_action_chip(button.label, button.key);
+    for (index, button) in buttons.into_iter().enumerate() {
+        let frame = render_footer_hint_action_button_frame(
+            FooterHintActionButtonFrameSpec {
+                id: button_ids
+                    .get(index)
+                    .copied()
+                    .unwrap_or("dictation-footer-action-overflow"),
+                label: button.label,
+                key: button.key,
+                slot_width_px: footer_action_slot_width(FooterActionSlot::Run),
+                height_px: button_height,
+                selected: false,
+                key_first: false,
+                justify: FooterHintContentJustify::Center,
+                layout: FooterHintButtonLayoutOverrides {
+                    shrink_frame_to_content_px: true,
+                    hug_frame_to_content: true,
+                    ..FooterHintButtonLayoutOverrides::default()
+                },
+            },
+            &theme,
+        );
         if let Some(cx) = cx.as_mut() {
             let action = button.action;
-            rail = rail.child(chip.cursor_pointer().on_click(cx.listener(
-                move |this, _, window, cx| {
-                    this.handle_native_footer_action(action, window, cx);
-                },
-            )));
+            frames.push(
+                frame
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.handle_native_footer_action(action, window, cx);
+                    }))
+                    .into_any_element(),
+            );
         } else {
-            rail = rail.child(chip);
+            frames.push(frame.into_any_element());
         }
     }
 
-    rail
+    render_footer_action_rail("dictation-action-rail", frames)
 }
 
 /// Render the live glass bar from a fixed state for Storybook previews.

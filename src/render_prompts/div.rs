@@ -74,7 +74,7 @@ impl ScriptListApp {
             )
             // Universal three-key hint strip footer (native or GPUI)
             .when_some(
-                self.main_window_footer_slot(self.clickable_universal_hint_strip(cx)),
+                self.main_window_footer_slot(self.clickable_universal_footer_action_rail(cx)),
                 |d, footer| d.child(footer),
             )
             // Actions dialog overlay (when Cmd+K is pressed with SDK actions)
@@ -139,10 +139,10 @@ mod div_prompt_render_tests {
     }
 
     #[test]
-    fn div_prompt_uses_universal_hint_strip_footer() {
+    fn div_prompt_uses_universal_footer_action_rail() {
         assert!(
-            DIV_RENDER_SOURCE.contains("clickable_universal_hint_strip("),
-            "div prompt should render a clickable hint strip footer"
+            DIV_RENDER_SOURCE.contains("clickable_universal_footer_action_rail("),
+            "div prompt should render the shared footer-button rail"
         );
         // Split string to avoid self-match in source audit
         let needle = ["PromptFooter", "::new("].concat();

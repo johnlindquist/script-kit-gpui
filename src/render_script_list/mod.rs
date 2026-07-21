@@ -2342,11 +2342,13 @@ impl ScriptListApp {
                     .into_any_element()
             } else {
                 // Glass mode: the native footer host/overlay is disabled so
-                // the footer can morph with the window — render the same
-                // clickable in-window hint strip full mode uses.
+                // the footer can morph with the window — render the shared
+                // footer-button rail with native footer geometry.
                 let primary_label = self.main_window_primary_action_label();
-                crate::components::render_universal_prompt_hint_strip_clickable_with_primary_label(
-                    &primary_label,
+                crate::components::render_universal_footer_action_rail(
+                    "script-list",
+                    "↵",
+                    primary_label.into(),
                     cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                         this.dispatch_main_window_footer_action(
                             crate::footer_popup::FooterAction::Run,
@@ -2464,9 +2466,10 @@ impl ScriptListApp {
                 primary_label = %primary_label,
                 "Script list footer rendered with selected enter-action label"
             );
-            let gpui_footer =
-                crate::components::render_universal_prompt_hint_strip_clickable_with_primary_label(
-                    &primary_label,
+            let gpui_footer = crate::components::render_universal_footer_action_rail(
+                    "script-list",
+                    "↵",
+                    primary_label.clone().into(),
                     cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                         this.dispatch_main_window_footer_action(
                             crate::footer_popup::FooterAction::Run,

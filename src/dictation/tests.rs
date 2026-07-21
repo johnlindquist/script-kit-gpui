@@ -1862,24 +1862,26 @@ fn dictation_overlay_derives_colors_from_theme_and_compact_capsule_chrome() {
         std::fs::read_to_string("src/dictation/window.rs").expect("read dictation window.rs");
 
     // 81e23d77c moved the rail chrome contract into the shared footer_chrome
-    // layer: footer_rail_chrome derives from AppChromeColors::from_theme, and
-    // render_footer_hint_content owns split_footer_shortcut keycap rendering,
-    // so the overlay and the native main-menu footer share one source of truth.
+    // layer, and the glass in-window rail now composes the shared button
+    // frames (render_footer_hint_action_button_frame delegates to the hint
+    // renderer in FooterHintKeyMode::Shortcut — locked by footer_chrome's own
+    // frame contract test), so the overlay and the native main-menu footer
+    // share one source of truth.
     assert!(
         source.contains("footer_chrome::footer_rail_chrome"),
         "overlay surface must use the shared footer chrome (AppChromeColors) tokens"
     );
     assert!(
-        source.contains("footer_chrome::render_footer_hint_content"),
-        "overlay action rail buttons must use the shared footer hint renderer"
+        source.contains("render_footer_hint_action_button_frame"),
+        "overlay action rail buttons must use the shared footer button frame"
     );
     assert!(
         source.contains("render_glass_signal_band"),
         "overlay must render the launcher-style selected signal band"
     );
     assert!(
-        source.contains("FooterHintKeyMode::Shortcut"),
-        "overlay action rail shortcuts must use the main-menu footer shortcut keycap mode"
+        source.contains("render_footer_action_rail"),
+        "overlay action rail must use the shared tokenized footer rail geometry"
     );
     // Theme tokens still used for content colors.
     assert!(
@@ -3113,8 +3115,8 @@ fn overlay_uses_glass_bar_styling() {
         "overlay must derive glass surface from the shared footer rail chrome"
     );
     assert!(
-        window_src.contains("footer_chrome::render_footer_hint_content"),
-        "overlay must use the shared footer hint renderer for action buttons"
+        window_src.contains("render_footer_hint_action_button_frame"),
+        "overlay must use the shared footer button frame for action buttons"
     );
     let rail_start = window_src
         .find("fn render_static_action_rail")
@@ -3138,8 +3140,8 @@ fn overlay_uses_glass_bar_styling() {
     );
     assert!(
         window_src.contains("footer_chrome::footer_rail_chrome")
-            && window_src.contains("FooterHintKeyMode::Shortcut"),
-        "dictation action buttons must match main menu footer hover, active, font, and shortcut rendering"
+            && window_src.contains("render_footer_hint_action_button_frame"),
+        "dictation action buttons must match main menu footer hover, active, font, and shortcut rendering (the shared frame pins FooterHintKeyMode::Shortcut via footer_chrome's own contract test)"
     );
 }
 

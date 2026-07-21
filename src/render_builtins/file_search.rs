@@ -1578,8 +1578,13 @@ impl ScriptListApp {
             crate::components::emit_prompt_hint_audit("file_search", &file_search_hints);
         }
 
-        // Build GPUI hint strip, then route through the native footer slot
-        let gpui_footer = crate::components::render_simple_hint_strip(file_search_hints, None);
+        // Glass fallback uses the same rail geometry, button frames, and
+        // optically nudged keycaps as the native footer.
+        let gpui_footer =
+            crate::components::footer_chrome::render_static_footer_hint_action_rail(
+                "file-search-footer-action-rail",
+                file_search_hints,
+            );
         let footer = self.main_window_footer_slot(gpui_footer);
 
         let root = crate::components::main_view_chrome::render_main_view_shell()

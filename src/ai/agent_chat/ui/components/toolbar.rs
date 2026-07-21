@@ -59,15 +59,17 @@ impl AgentChatToolbar {
 impl Render for AgentChatToolbar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::get_cached_theme();
+        let rail = crate::components::footer_chrome::footer_rail_chrome(&theme);
 
         div()
             .id("agent_chat-toolbar")
             .w_full()
-            .h(px(32.0))
+            .h(px(rail.height_px))
+            .min_h(px(rail.height_px))
             .flex()
             .items_center()
             .justify_between()
-            .px(px(12.0))
+            .px(px(rail.side_inset_px))
             .bg(if theme.is_vibrancy_enabled() {
                 rgba(0x00000000)
             } else {
