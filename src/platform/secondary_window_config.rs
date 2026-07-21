@@ -54,6 +54,12 @@ const GLASS_MORPH_MAX_SQUISH: f64 = 0.03;
 const GLASS_MORPH_PHASE1_FRACTION: f64 = 0.5;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MIN_REBOUND_DURATION: f64 = 0.08;
+/// Content-layer morphs fade in over dense window content, so alpha must
+/// reach 1.0 well before the scale settles (fraction of total duration).
+#[cfg(target_os = "macos")]
+const GLASS_LAYER_ALPHA_FRACTION: f64 = 0.35;
+#[cfg(target_os = "macos")]
+const GLASS_LAYER_ALPHA_MIN_DURATION: f64 = 0.08;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_FADE_FRACTION: f64 = 0.7;
 #[cfg(target_os = "macos")]
@@ -87,10 +93,7 @@ fn glass_morph_tuning() -> Option<GlassMorphTuning> {
 }
 
 #[cfg(target_os = "macos")]
-fn glass_morph_tuning_from(
-    duration: f64,
-    inset_fraction: f64,
-) -> Option<GlassMorphTuning> {
+fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMorphTuning> {
     if duration < GLASS_MORPH_MIN_DURATION || inset_fraction < GLASS_MORPH_MIN_INSET {
         return None;
     }
@@ -776,9 +779,7 @@ pub fn dematerialize_then_remove_gpui_window<V: 'static>(
         let any_handle = window.window_handle();
         cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(
-                    GLASS_EXIT_REMOVE_DELAY_MS,
-                ))
+                .timer(std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS))
                 .await;
             let _ = cx.update(|cx| {
                 let _ = any_handle.update(cx, |_view, window, _cx| {
@@ -809,16 +810,11 @@ pub fn dematerialize_then_remove_gpui_window_from_app(
 /// Schedule only the destruction tail after a caller has already started the
 /// exit. This is used by `on_window_should_close` handlers that must return
 /// `false` while the visual tail completes.
-pub fn remove_gpui_window_after_glass_exit_from_app(
-    window: &mut gpui::Window,
-    cx: &mut gpui::App,
-) {
+pub fn remove_gpui_window_after_glass_exit_from_app(window: &mut gpui::Window, cx: &mut gpui::App) {
     let any_handle = window.window_handle();
     cx.spawn(async move |cx: &mut gpui::AsyncApp| {
         cx.background_executor()
-            .timer(std::time::Duration::from_millis(
-                GLASS_EXIT_REMOVE_DELAY_MS,
-            ))
+            .timer(std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS))
             .await;
         let _ = cx.update(|cx| {
             let _ = any_handle.update(cx, |_view, window, _cx| {
@@ -928,6 +924,9 @@ unsafe fn begin_ns_window_exit_dematerialize(
         if variant == GlassMorphVariant::ContentLayer && content_view != nil {
             let layer: id = msg_send![content_view, layer];
             if layer != nil {
+                // Same centered anchor as the enter morph, or the outward
+                // release pins a corner and smears sideways.
+                center_layer_anchor_for_morph(layer);
                 add_layer_scale_exit(
                     layer,
                     "transform.scale.x",
@@ -1189,6 +1188,37 @@ unsafe fn make_morph_timing_functions() -> id {
 }
 
 #[cfg(target_os = "macos")]
+/// Center the layer's transform anchor before a scale morph.
+///
+/// Layer-backed AppKit views default to a corner `anchorPoint`, so a bare
+/// `transform.scale` animation pins one corner and smears sideways instead
+/// of breathing about the center (user-visible on the Actions popup: top
+/// edge frozen, left edge sweeping). Setting the anchor to the midpoint
+/// requires re-deriving `position` from the current frame or the layer
+/// would jump. The model transform must be identity when this runs; callers
+/// reset it first.
+#[cfg(target_os = "macos")]
+unsafe fn center_layer_anchor_for_morph(layer: id) {
+    use cocoa::foundation::{NSPoint, NSRect};
+
+    let frame: NSRect = msg_send![layer, frame];
+    let _: () = msg_send![layer, setAnchorPoint: NSPoint::new(0.5, 0.5)];
+    let _: () = msg_send![
+        layer,
+        setPosition: NSPoint::new(
+            frame.origin.x + frame.size.width * 0.5,
+            frame.origin.y + frame.size.height * 0.5
+        )
+    ];
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn reset_layer_transform_identity(layer: id) {
+    let identity = cocoa::quartzcore::CATransform3D::IDENTITY;
+    let _: () = msg_send![layer, setTransform: identity];
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn add_layer_scale_keyframes(
     layer: id,
     key_path: &str,
@@ -1223,12 +1253,7 @@ unsafe fn add_layer_scale_keyframes(
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn add_layer_scale_exit(
-    layer: id,
-    key_path: &str,
-    animation_key: &str,
-    to_value: f64,
-) {
+unsafe fn add_layer_scale_exit(layer: id, key_path: &str, animation_key: &str, to_value: f64) {
     let Some(animation_class) = objc::runtime::Class::get("CABasicAnimation") else {
         return;
     };
@@ -1262,11 +1287,7 @@ unsafe fn add_layer_scale_exit(
 /// exactly the same start/squish/final ratios and timing split as the frame
 /// morph, while leaving the attached NSWindow frame untouched.
 #[cfg(target_os = "macos")]
-unsafe fn animate_tahoe_glass_layer_appearance(
-    window: id,
-    log_target: &str,
-    window_name: &str,
-) {
+unsafe fn animate_tahoe_glass_layer_appearance(window: id, log_target: &str, window_name: &str) {
     clear_exit_dematerialize_blur(window);
     let restore_alpha = |window: id| {
         let _: () = msg_send![window, setAlphaValue: 1.0f64];
@@ -1288,6 +1309,10 @@ unsafe fn animate_tahoe_glass_layer_appearance(
     }
 
     let _: () = msg_send![layer, removeAllAnimations];
+    // A superseded exit may have left a non-identity model transform, and
+    // the scale keyframes only read correctly about a centered anchor.
+    reset_layer_transform_identity(layer);
+    center_layer_anchor_for_morph(layer);
     let _: () = msg_send![window, setAlphaValue: 0.0f64];
     let x_started = add_layer_scale_keyframes(
         layer,
@@ -1309,12 +1334,20 @@ unsafe fn animate_tahoe_glass_layer_appearance(
         return;
     }
 
+    // Child panels morph in OVER dense text: a long ease-in-ease-out fade
+    // (the previous full-phase1 ramp) leaves the popup translucent for most
+    // of the morph and double-exposes against the content underneath (the
+    // launcher list ghosting through the Actions menu). Front-load the
+    // alpha — ease-out, reaching full opacity in roughly the first third of
+    // the morph — and let the centered scale keyframes carry the rest.
+    let alpha_duration = (tuning.duration * GLASS_LAYER_ALPHA_FRACTION)
+        .clamp(GLASS_LAYER_ALPHA_MIN_DURATION, tuning.phase1.max(0.01));
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: tuning.phase1];
+    let _: () = msg_send![ctx, setDuration: alpha_duration];
     let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
     if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeInEaseOut");
+        let name = tahoe_ns_string("easeOut");
         if name != nil {
             let timing: id = msg_send![timing_class, functionWithName: name];
             if timing != nil {
@@ -1400,8 +1433,7 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     // from the real Spotlight: the morph is WIDTH-DOMINANT — height locks
     // early and barely undershoots — so the vertical deltas are damped.
     let outset_x = final_frame.size.width * tuning.inset_fraction;
-    let outset_y =
-        final_frame.size.height * (tuning.inset_fraction * GLASS_MORPH_VERTICAL_DAMPING);
+    let outset_y = final_frame.size.height * (tuning.inset_fraction * GLASS_MORPH_VERTICAL_DAMPING);
     let start = NSRect::new(
         NSPoint::new(
             final_frame.origin.x - outset_x,
@@ -1440,8 +1472,7 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     let squish_fraction = (tuning.inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
         .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
     let squish_x = final_frame.size.width * squish_fraction;
-    let squish_y =
-        final_frame.size.height * (squish_fraction * GLASS_MORPH_VERTICAL_DAMPING);
+    let squish_y = final_frame.size.height * (squish_fraction * GLASS_MORPH_VERTICAL_DAMPING);
     let squish = NSRect::new(
         NSPoint::new(
             final_frame.origin.x + squish_x,
@@ -1492,11 +1523,11 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         guard.insert(
             window as usize,
             (
-            final_frame.origin.x,
-            final_frame.origin.y,
-            final_frame.size.width,
-            final_frame.size.height,
-            phase2,
+                final_frame.origin.x,
+                final_frame.origin.y,
+                final_frame.size.width,
+                final_frame.size.height,
+                phase2,
             ),
         );
     }
@@ -1953,13 +1984,7 @@ unsafe fn configure_attached_popup_window(
     let empty_string: id = msg_send![class!(NSString), string];
     let _: () = msg_send![window, setFrameAutosaveName: empty_string];
 
-    configure_window_vibrancy_common(
-        window,
-        log_target,
-        window_name,
-        is_dark,
-        morph_variant,
-    );
+    configure_window_vibrancy_common(window, log_target, window_name, is_dark, morph_variant);
 
     // SAFETY: `window` is a valid, non-null NSWindow pointer (checked at function entry).
     // orderFrontRegardless brings the popup visually above the main panel without
@@ -2049,11 +2074,7 @@ pub unsafe fn configure_shortcut_recorder_popup_window(window: id, is_dark: bool
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn configure_shortcut_recorder_popup_window(
-    _window: *mut std::ffi::c_void,
-    _is_dark: bool,
-) {
-}
+pub fn configure_shortcut_recorder_popup_window(_window: *mut std::ffi::c_void, _is_dark: bool) {}
 
 /// Configure the launcher footer popup window. This uses the shared popup
 /// vibrancy path, disables its shadow, and ignores mouse events so the launcher
