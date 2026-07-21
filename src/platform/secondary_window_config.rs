@@ -63,6 +63,13 @@ const GLASS_EXIT_DURATION: f64 = 0.12;
 const GLASS_EXIT_REMOVE_DELAY_MS: u64 = 135;
 #[cfg(target_os = "macos")]
 const GLASS_EXIT_GROW_X: f64 = 0.03;
+/// Popup/modal shrink-out exit travel (fraction per side). Slightly larger
+/// than the grow-out release so the "someone let go of the ball" read is
+/// visible at the fast exit duration.
+#[cfg(target_os = "macos")]
+const GLASS_EXIT_SHRINK_X: f64 = 0.05;
+#[cfg(target_os = "macos")]
+const GLASS_EXIT_SHRINK_Y: f64 = 0.035;
 #[cfg(target_os = "macos")]
 const GLASS_EXIT_GROW_Y: f64 = 0.012;
 #[cfg(target_os = "macos")]
@@ -906,17 +913,42 @@ unsafe fn begin_ns_window_exit_dematerialize(
             }
         }
 
-        // Fade + slight outward release (inverse of the entry compression;
-        // vertical damped like the entry, per the measured width dominance).
-        let grow_x = frame.size.width * GLASS_EXIT_GROW_X;
-        let grow_y = frame.size.height * GLASS_EXIT_GROW_Y;
-        let grown = NSRect::new(
-            NSPoint::new(frame.origin.x - grow_x, frame.origin.y - grow_y),
-            NSSize::new(
-                frame.size.width + grow_x * 2.0,
-                frame.size.height + grow_y * 2.0,
-            ),
+        // Exit travel direction is a per-surface policy (user call
+        // 2026-07-21): the main window (and other free-standing windows)
+        // keep the outward release, while the actions menu and modal popups
+        // SHRINK away — the inverse of their grow-in enter, like a squeezed
+        // ball being let go of in reverse. Centralized here so every exit
+        // path shares one classification.
+        let shrink_out = matches!(
+            window_name,
+            "Actions popup"
+                | "Confirm popup"
+                | "Inline popup"
+                | "Shortcut recorder popup"
+                | "Microphone popup"
+                | "Agent Chat history popup"
         );
+        let grown = if shrink_out {
+            let shrink_x = frame.size.width * GLASS_EXIT_SHRINK_X;
+            let shrink_y = frame.size.height * GLASS_EXIT_SHRINK_Y;
+            NSRect::new(
+                NSPoint::new(frame.origin.x + shrink_x, frame.origin.y + shrink_y),
+                NSSize::new(
+                    (frame.size.width - shrink_x * 2.0).max(1.0),
+                    (frame.size.height - shrink_y * 2.0).max(1.0),
+                ),
+            )
+        } else {
+            let grow_x = frame.size.width * GLASS_EXIT_GROW_X;
+            let grow_y = frame.size.height * GLASS_EXIT_GROW_Y;
+            NSRect::new(
+                NSPoint::new(frame.origin.x - grow_x, frame.origin.y - grow_y),
+                NSSize::new(
+                    frame.size.width + grow_x * 2.0,
+                    frame.size.height + grow_y * 2.0,
+                ),
+            )
+        };
         // Child-attached popups: layer transforms are neutralized by AppKit
         // (NSViewBackingLayer, runtime-proven) and frame animation fights the
         // parent-child machinery — so detach for the exit. The window is
@@ -952,10 +984,11 @@ unsafe fn begin_ns_window_exit_dematerialize(
         logging::log(
             log_target,
             &format!(
-                "event=glass_morph window={} variant={} phase=exit duration={:.2}s",
+                "event=glass_morph window={} variant={} phase=exit duration={:.2}s direction={}",
                 window_name,
                 variant.log_name(),
-                GLASS_EXIT_DURATION
+                GLASS_EXIT_DURATION,
+                if shrink_out { "shrink_out" } else { "grow_out" }
             ),
         );
     }
