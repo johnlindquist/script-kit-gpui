@@ -574,11 +574,66 @@ unsafe fn clear_exit_dematerialize_blur(window: id) {
 /// itself — that livelocked the hotkey gesture listener.
 #[cfg(target_os = "macos")]
 pub fn begin_main_window_exit_dematerialize() -> bool {
-    use cocoa::foundation::{NSPoint, NSRect, NSSize};
-
     if require_main_thread("begin_main_window_exit_dematerialize") {
         return false;
     }
+    let Some(window) = window_manager::get_main_window() else {
+        return false;
+    };
+    // SAFETY: main thread verified; window valid from the manager.
+    unsafe { begin_ns_window_exit_dematerialize(window, "PANEL", "Main window") }
+}
+
+/// Generalized dematerialize for any live GPUI window (notes, dictation
+/// overlay) — same measured recipe as the main window's exit. Returns false
+/// when glass/morph is unavailable so callers close instantly instead.
+#[cfg(target_os = "macos")]
+pub fn begin_gpui_window_exit_dematerialize(
+    window: &gpui::Window,
+    log_target: &str,
+    window_name: &str,
+) -> bool {
+    if require_main_thread("begin_gpui_window_exit_dematerialize") {
+        return false;
+    }
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return false;
+    };
+    let ns_view = appkit.ns_view.as_ptr() as id;
+    // SAFETY: ns_view belongs to a live GPUI window on the main thread.
+    unsafe {
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return false;
+        }
+        begin_ns_window_exit_dematerialize(ns_window, log_target, window_name)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn begin_gpui_window_exit_dematerialize(
+    _window: &gpui::Window,
+    _log_target: &str,
+    _window_name: &str,
+) -> bool {
+    false
+}
+
+/// Core of the exit dematerialize, shared by every window kind.
+///
+/// # Safety
+/// `window` must be a valid NSWindow on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn begin_ns_window_exit_dematerialize(
+    window: id,
+    log_target: &str,
+    window_name: &str,
+) -> bool {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
     if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
         return false;
     }
@@ -590,13 +645,10 @@ pub fn begin_main_window_exit_dematerialize() -> bool {
     if !morph_enabled {
         return false;
     }
-    let Some(window) = window_manager::get_main_window() else {
-        return false;
-    };
 
-    // SAFETY: main thread verified; standard AppKit calls plus the private
+    // SAFETY: main thread; standard AppKit calls plus the private
     // CAFilter/CABasicAnimation classes resolved at runtime.
-    unsafe {
+    {
         let visible: bool = msg_send![window, isVisible];
         if !visible {
             return false;
@@ -675,8 +727,11 @@ pub fn begin_main_window_exit_dematerialize() -> bool {
     }
 
     logging::log(
-        "PANEL",
-        "Main window exit dematerialize started (0.12s fade + blur + growth)",
+        log_target,
+        &format!(
+            "{}: exit dematerialize started (0.12s fade + blur + growth)",
+            window_name
+        ),
     );
     true
 }

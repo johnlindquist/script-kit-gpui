@@ -678,7 +678,24 @@ fn open_notes_window_with_close_behavior(
                 // bypasses the second lease and prevents the entity_map.rs:142 double-lease
                 // panic that fires on rapid `openNotes` -> `hide` -> `openNotes` toggles.
                 root.close_all_dialogs(window, cx);
-                window.remove_window();
+                // Glass mode: play the Spotlight dematerialize (same as the
+                // main window's exit), then remove after the fade.
+                if crate::platform::begin_gpui_window_exit_dematerialize(window, "PANEL", "Notes") {
+                    let any_handle = window.window_handle();
+                    cx.spawn(async move |_root, cx: &mut gpui::AsyncApp| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(135))
+                            .await;
+                        let _ = cx.update(|cx| {
+                            let _ = any_handle.update(cx, |_root, window, _cx| {
+                                window.remove_window();
+                            });
+                        });
+                    })
+                    .detach();
+                } else {
+                    window.remove_window();
+                }
             })
             .is_ok()
         {
@@ -1214,15 +1231,40 @@ fn run_current_notes_window_close_sequence(
 /// focus handoff makes GPUI's callback log `window not found`.
 pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
     let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
+    // Glass mode: start the Spotlight dematerialize before the close
+    // sequence (focus handoff proceeds during the fade); removal is then
+    // deferred past the animation instead of running on the next frame.
+    let dematerialize_handle =
+        if crate::platform::begin_gpui_window_exit_dematerialize(window, "PANEL", "Notes") {
+            Some(window.window_handle())
+        } else {
+            None
+        };
+    let instant_remove = dematerialize_handle.is_none();
     run_current_notes_window_close_sequence(
         transition,
         retire_notes_window_registrations,
         || restore_launcher_after_notes_close_if_needed(cx),
         || {
-            window.on_next_frame(|window, _cx| window.remove_window());
-            window.request_animation_frame();
+            if instant_remove {
+                window.on_next_frame(|window, _cx| window.remove_window());
+                window.request_animation_frame();
+            }
         },
     );
+    if let Some(any_handle) = dematerialize_handle {
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(135))
+                .await;
+            let _ = cx.update(|cx| {
+                let _ = any_handle.update(cx, |_root, window, _cx| {
+                    window.remove_window();
+                });
+            });
+        })
+        .detach();
+    }
 }
 
 pub fn close_notes_window(cx: &mut App) {
@@ -1245,7 +1287,24 @@ pub fn close_notes_window(cx: &mut App) {
             // Safe here: no Root lease is held, so the Root::update inside
             // close_all_dialogs does not double-lease.
             window.close_all_dialogs(cx);
-            window.remove_window();
+            // Glass mode: play the Spotlight dematerialize (same as the main
+            // window's exit), then remove after the fade.
+            if crate::platform::begin_gpui_window_exit_dematerialize(window, "PANEL", "Notes") {
+                let any_handle = window.window_handle();
+                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(135))
+                        .await;
+                    let _ = cx.update(|cx| {
+                        let _ = any_handle.update(cx, |_root, window, _cx| {
+                            window.remove_window();
+                        });
+                    });
+                })
+                .detach();
+            } else {
+                window.remove_window();
+            }
         }) {
             Ok(()) => {
                 tracing::info!(

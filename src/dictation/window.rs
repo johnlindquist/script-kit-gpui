@@ -1076,8 +1076,7 @@ impl DictationOverlay {
         let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
         slot.lock().take();
         remove_global_escape_monitor();
-        prepare_overlay_window_for_close(window);
-        window.remove_window();
+        Self::dematerialize_then_remove_overlay(window, cx);
         if let Some(cb) = callback {
             cx.defer(move |cx| {
                 cb(cx);
@@ -1092,6 +1091,34 @@ impl DictationOverlay {
     /// Submit the active recording via the registered callback.
     ///
     /// Closing happens before callback dispatch so the app-owned stop path can
+    /// Play the Spotlight dematerialize (same as the main window's exit),
+    /// then run the native close prep and remove the overlay window. Falls
+    /// back to instant close when glass/morph is unavailable.
+    fn dematerialize_then_remove_overlay(window: &mut Window, cx: &mut Context<Self>) {
+        if crate::platform::begin_gpui_window_exit_dematerialize(
+            window,
+            "DICTATION",
+            "Dictation overlay",
+        ) {
+            let any_handle = window.window_handle();
+            cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(135))
+                    .await;
+                let _ = cx.update(|cx| {
+                    let _ = any_handle.update(cx, |_view, window, _cx| {
+                        prepare_overlay_window_for_close(window);
+                        window.remove_window();
+                    });
+                });
+            })
+            .detach();
+        } else {
+            prepare_overlay_window_for_close(window);
+            window.remove_window();
+        }
+    }
+
     /// reopen/update the overlay into its transcribing state without reentrant
     /// updates to this entity.
     fn submit_overlay_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1101,8 +1128,7 @@ impl DictationOverlay {
         let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
         slot.lock().take();
         remove_global_escape_monitor();
-        prepare_overlay_window_for_close(window);
-        window.remove_window();
+        Self::dematerialize_then_remove_overlay(window, cx);
 
         if let Some(cb) = callback {
             cx.defer(move |cx| {
@@ -1127,8 +1153,7 @@ impl DictationOverlay {
         *OVERLAY_ABORT_CALLBACK.lock() = None;
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
         remove_global_escape_monitor();
-        prepare_overlay_window_for_close(window);
-        window.remove_window();
+        Self::dematerialize_then_remove_overlay(window, cx);
         tracing::info!(category = "DICTATION", "Overlay closed from within entity");
     }
 
@@ -1788,10 +1813,12 @@ impl Render for DictationOverlay {
         self.sync_caption_follow();
         self.ensure_native_footer_action_listener(window, cx);
         let armed = self.transcript_armed();
-        crate::footer_popup::sync_window_footer_popup(
-            window,
-            &dictation_native_footer_config(&self.state.phase, armed),
-        );
+        let footer_config = dictation_native_footer_config(&self.state.phase, armed);
+        let glass_in_window_footer = crate::platform::tahoe_liquid_glass_available()
+            && crate::theme::get_cached_theme().is_vibrancy_enabled();
+        if !glass_in_window_footer {
+            crate::footer_popup::sync_window_footer_popup(window, &footer_config);
+        }
 
         let theme = get_cached_theme();
         if self.last_render_logged_phase.as_ref() != Some(&self.state.phase) {
@@ -1928,6 +1955,12 @@ impl Render for DictationOverlay {
             DictationSessionPhase::Idle => div().into_any_element(),
         };
 
+        let footer_rail = if glass_in_window_footer {
+            render_static_action_rail(footer_config.buttons, Some(cx)).into_any_element()
+        } else {
+            native_footer_spacer().into_any_element()
+        };
+
         let inner = if matches!(phase, DictationSessionPhase::Idle) {
             div()
         } else {
@@ -1953,7 +1986,7 @@ impl Render for DictationOverlay {
                         .justify_center()
                         .child(render_glass_signal_band(center)),
                 )
-                .child(native_footer_spacer())
+                .child(footer_rail)
         };
 
         // Same capsule radius for all phases; confirming swaps content inline.
@@ -2202,7 +2235,6 @@ fn active_microphone_footer_label() -> SharedString {
         .into()
 }
 
-#[allow(dead_code)] // preview-chain helper (see render_dictation_overlay_state_preview)
 fn action_chip_width(label: &str) -> f32 {
     use crate::components::footer_chrome::{footer_action_slot_width, FooterActionSlot};
 
@@ -2292,7 +2324,6 @@ fn native_footer_spacer() -> impl IntoElement {
         .min_h(px(rail_chrome.height_px))
 }
 
-#[allow(dead_code)] // preview-chain helper (see render_dictation_overlay_state_preview)
 fn footer_action_button_height() -> f32 {
     crate::components::footer_chrome::footer_button_height(
         crate::window_resize::main_layout::NATIVE_MAIN_WINDOW_FOOTER_HEIGHT,
@@ -2310,7 +2341,6 @@ fn render_glass_signal_band(body: AnyElement) -> impl IntoElement {
         .child(body)
 }
 
-#[allow(dead_code)] // preview-chain helper (see render_dictation_overlay_state_preview)
 fn render_action_chip_content(label: SharedString, key: SharedString) -> impl IntoElement {
     let theme = get_cached_theme();
     if key.as_ref() == MIC_KEYCAP {
@@ -2325,7 +2355,6 @@ fn render_action_chip_content(label: SharedString, key: SharedString) -> impl In
     )
 }
 
-#[allow(dead_code)] // preview-chain helper (see render_dictation_overlay_state_preview)
 fn render_mic_action_chip_content(theme: &crate::theme::Theme) -> AnyElement {
     let footer_text = crate::components::footer_chrome::footer_hint_text_color(theme);
     let full_text = theme.colors.text.primary.to_rgb();
@@ -2364,27 +2393,29 @@ fn render_mic_action_chip_content(theme: &crate::theme::Theme) -> AnyElement {
         .into_any_element()
 }
 
-#[allow(dead_code)] // preview-chain helper (see render_dictation_overlay_state_preview)
-fn render_action_chip(label: &'static str, key: SharedString) -> impl IntoElement {
+fn render_action_chip(label: SharedString, key: SharedString) -> gpui::Stateful<Div> {
+    let width = action_chip_width(label.as_ref());
+    let chip_id: SharedString = format!("dictation-action-chip-{}", label.as_ref()).into();
+
     div()
-        .w(px(action_chip_width(label)))
+        .id(chip_id)
+        .w(px(width))
         .h(px(footer_action_button_height()))
         .flex()
         .flex_row()
         .items_center()
         .justify_center()
         .group("footer-action-button")
-        .child(render_action_chip_content(label.into(), key))
+        .child(render_action_chip_content(label, key))
 }
 
-#[allow(dead_code)] // preview-chain helper (see render_dictation_overlay_state_preview)
 fn wrap_dictation_overlay_action_rail(rail: impl IntoElement) -> impl IntoElement {
     div().w_full().child(rail)
 }
 
-#[allow(dead_code)] // preview-chain helper (see render_dictation_overlay_state_preview)
 fn render_static_action_rail(
-    actions: impl IntoIterator<Item = (&'static str, SharedString)>,
+    buttons: impl IntoIterator<Item = crate::footer_popup::FooterButtonConfig>,
+    mut cx: Option<&mut Context<DictationOverlay>>,
 ) -> impl IntoElement {
     let theme = get_cached_theme();
     let rail_chrome = crate::components::footer_chrome::footer_rail_chrome(&theme);
@@ -2401,8 +2432,18 @@ fn render_static_action_rail(
         .justify_end()
         .gap(px(rail_chrome.item_gap_px));
 
-    for (label, key) in actions {
-        rail = rail.child(render_action_chip(label, key));
+    for button in buttons {
+        let chip = render_action_chip(button.label, button.key);
+        if let Some(cx) = cx.as_mut() {
+            let action = button.action;
+            rail = rail.child(chip.cursor_pointer().on_click(cx.listener(
+                move |this, _, window, cx| {
+                    this.handle_native_footer_action(action, window, cx);
+                },
+            )));
+        } else {
+            rail = rail.child(chip);
+        }
     }
 
     rail
@@ -2538,27 +2579,8 @@ pub(crate) fn render_dictation_overlay_state_preview(
     };
 
     let armed = !state.transcript.trim().is_empty();
-    let rail_actions: Vec<(&'static str, SharedString)> = match &state.phase {
-        DictationSessionPhase::Recording => {
-            let mut actions = vec![(ACTION_MIC_LABEL, SharedString::default())];
-            if armed {
-                actions.push((ACTION_STOP_LABEL, dictation_stop_keycap()));
-            }
-            actions.push((ACTION_CANCEL_LABEL, ESC_KEYCAP.into()));
-            actions
-        }
-        DictationSessionPhase::Confirming => {
-            let mut actions = Vec::new();
-            if armed {
-                actions.push((ACTION_STOP_LABEL, ENTER_KEYCAP.into()));
-            }
-            actions.push((ACTION_DISCARD_LABEL, BACKSPACE_KEYCAP.into()));
-            actions.push((ACTION_CONTINUE_LABEL, ESC_KEYCAP.into()));
-            actions
-        }
-        _ => vec![(ACTION_CLOSE_LABEL, ESC_KEYCAP.into())],
-    };
-    let action_rail = render_static_action_rail(rail_actions);
+    let footer_config = dictation_native_footer_config(&state.phase, armed);
+    let action_rail = render_static_action_rail(footer_config.buttons, None);
 
     let inner = div()
         .flex()
