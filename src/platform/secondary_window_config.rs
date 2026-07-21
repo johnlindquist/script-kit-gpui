@@ -930,12 +930,6 @@ unsafe fn begin_ns_window_exit_dematerialize(
         if parent_window != nil {
             let _: () = msg_send![parent_window, removeChildWindow: window];
         }
-        if variant == GlassMorphVariant::ContentLayer {
-            // Freeze content layout during the outward release so it fades
-            // in place instead of reflowing wider (window is destroyed after
-            // the tail — no restore needed).
-            let _ = pin_gpui_content_views_for_morph(window);
-        }
 
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
@@ -1154,19 +1148,17 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
 
 #[cfg(target_os = "macos")]
 /// Child-attached popup enter: detach from the parent NSWindow, run the
-/// SAME frame morph the main window uses, and reattach after the morph
-/// settles. Layer-transform morphs are impossible here — AppKit neutralizes
-/// transforms on NSViewBackingLayer (runtime-proven with a static-scale
-/// experiment) — and frame-animating while parent-attached fights the
-/// parent-child machinery (c598a32bf). Detaching for ~300ms sidesteps both.
+/// frame morph in GROW-IN direction, and reattach after it settles.
+/// Layer-transform morphs are impossible here — AppKit neutralizes
+/// transforms on NSViewBackingLayer (runtime-proven) — and frame-animating
+/// while parent-attached fights the parent-child machinery (c598a32bf).
 ///
-/// GPUI content is PINNED at its final size (centered, flexible margins)
-/// for the morph's duration: without this, GPUI re-lays-out the popup at
-/// every intermediate window size and the content REFLOWS — right-anchored
-/// keycaps slide while left-aligned text stays put, which reads as the list
-/// and the container being out of sync (user report, frame-measured). The
-/// glass backdrop keeps its autoresizing so the material breathes with the
-/// frame around rock-solid content.
+/// Direction matters for reflow feel: GPUI re-lays-out the popup at every
+/// intermediate size (wanted — the content stays alive), but starting WIDE
+/// (the main window's outset enter) lays the content out ~6-12%% wider
+/// first and the squeeze reads as the list lagging the container (user
+/// report). Growing in from below final size keeps the same physics while
+/// the reflow reads as the menu materializing into place.
 #[cfg(target_os = "macos")]
 unsafe fn animate_tahoe_glass_child_appearance(window: id, log_target: &str, window_name: &str) {
     let Some(tuning) = glass_morph_tuning() else {
@@ -1178,96 +1170,27 @@ unsafe fn animate_tahoe_glass_child_appearance(window: id, log_target: &str, win
     if parent != nil {
         let _: id = msg_send![parent, retain];
         let _: () = msg_send![parent, removeChildWindow: window];
+        let _: id = msg_send![window, retain];
+        schedule_child_morph_settle(parent, window, tuning.duration + 0.08);
     }
-    let pinned = pin_gpui_content_views_for_morph(window);
 
-    let _: id = msg_send![window, retain];
-    schedule_child_morph_settle(parent, window, pinned, tuning.duration + 0.08);
-
-    animate_tahoe_glass_appearance(window, log_target, window_name);
+    animate_tahoe_glass_appearance_directed(window, log_target, window_name, true);
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s detached={} pinned={}",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s detached={} direction=grow_in",
             window_name,
             GlassMorphVariant::ContentLayer.log_name(),
             tuning.duration,
             parent != nil,
-            pinned,
         ),
     );
 }
 
-/// Pin every non-backdrop contentView subview (the GPUI Metal view and the
-/// glass-button container) at the CURRENT content size with flexible-margin
-/// autoresizing, so the window frame can animate around statically laid-out
-/// content. Must run while the window is still at its FINAL frame (before
-/// the morph sets the start outset). Returns true when anything was pinned.
+/// After the enter morph settles: re-attach the popup to its parent. Both
+/// windows were retained by the caller; releases happen here exactly once.
 #[cfg(target_os = "macos")]
-unsafe fn pin_gpui_content_views_for_morph(window: id) -> bool {
-    use cocoa::foundation::NSRect;
-
-    // Fixed size, auto-centering: flexible min/max margins on both axes.
-    const MASK_CENTERED_FIXED: u64 = 1 | 4 | 8 | 32;
-
-    let content_view: id = msg_send![window, contentView];
-    if content_view == nil {
-        return false;
-    }
-    let bounds: NSRect = msg_send![content_view, bounds];
-    let subviews: id = msg_send![content_view, subviews];
-    let count: usize = msg_send![subviews, count];
-    let mut pinned = false;
-    for index in 0..count {
-        let view: id = msg_send![subviews, objectAtIndex: index];
-        if view == nil {
-            continue;
-        }
-        let tag: isize = msg_send![view, tag];
-        if tag == TAHOE_GLASS_BACKDROP_TAG {
-            continue; // the material tracks the frame and breathes
-        }
-        let _: () = msg_send![view, setFrame: bounds];
-        let _: () = msg_send![view, setAutoresizingMask: MASK_CENTERED_FIXED];
-        pinned = true;
-    }
-    pinned
-}
-
-/// Undo [`pin_gpui_content_views_for_morph`]: restore width/height-sizable
-/// autoresizing and stretch the views back over the (now settled) bounds.
-#[cfg(target_os = "macos")]
-unsafe fn restore_gpui_content_views_after_morph(window: id) {
-    use cocoa::foundation::NSRect;
-
-    const MASK_SIZABLE: u64 = 2 | 16;
-
-    let content_view: id = msg_send![window, contentView];
-    if content_view == nil {
-        return;
-    }
-    let bounds: NSRect = msg_send![content_view, bounds];
-    let subviews: id = msg_send![content_view, subviews];
-    let count: usize = msg_send![subviews, count];
-    for index in 0..count {
-        let view: id = msg_send![subviews, objectAtIndex: index];
-        if view == nil {
-            continue;
-        }
-        let tag: isize = msg_send![view, tag];
-        if tag == TAHOE_GLASS_BACKDROP_TAG {
-            continue;
-        }
-        let _: () = msg_send![view, setFrame: bounds];
-        let _: () = msg_send![view, setAutoresizingMask: MASK_SIZABLE];
-    }
-}
-
-/// After the enter morph settles: restore pinned content geometry and
-/// re-attach the popup to its parent. All raw pointers were retained by the
-/// caller; releases happen here exactly once.
-#[cfg(target_os = "macos")]
-unsafe fn schedule_child_morph_settle(parent: id, window: id, pinned: bool, delay_seconds: f64) {
+unsafe fn schedule_child_morph_settle(parent: id, window: id, delay_seconds: f64) {
     #[link(name = "System", kind = "dylib")]
     extern "C" {
         static _dispatch_main_q: std::ffi::c_void;
@@ -1283,7 +1206,6 @@ unsafe fn schedule_child_morph_settle(parent: id, window: id, pinned: bool, dela
     struct SettleContext {
         parent: id,
         window: id,
-        pinned: bool,
     }
     // SAFETY: raw NSWindow pointers retained by the caller; consumed exactly
     // once on the main queue below.
@@ -1297,29 +1219,20 @@ unsafe fn schedule_child_morph_settle(parent: id, window: id, pinned: bool, dela
             let parent = context.parent;
             let window = context.window;
             let window_visible: bool = msg_send![window, isVisible];
-            if context.pinned && window_visible {
-                restore_gpui_content_views_after_morph(window);
+            let parent_visible: bool = msg_send![parent, isVisible];
+            let current_parent: id = msg_send![window, parentWindow];
+            if window_visible && parent_visible && current_parent == nil {
+                const NS_WINDOW_ABOVE: i64 = 1;
+                let _: () = msg_send![parent, addChildWindow: window ordered: NS_WINDOW_ABOVE];
             }
-            if parent != nil {
-                let parent_visible: bool = msg_send![parent, isVisible];
-                let current_parent: id = msg_send![window, parentWindow];
-                if window_visible && parent_visible && current_parent == nil {
-                    const NS_WINDOW_ABOVE: i64 = 1;
-                    let _: () = msg_send![parent, addChildWindow: window ordered: NS_WINDOW_ABOVE];
-                }
-                let _: () = msg_send![parent, release];
-            }
+            let _: () = msg_send![parent, release];
             let _: () = msg_send![window, release];
         }
     }
 
     const DISPATCH_TIME_NOW: u64 = 0;
     let when = dispatch_time(DISPATCH_TIME_NOW, (delay_seconds * 1e9) as i64);
-    let context = Box::into_raw(Box::new(SettleContext {
-        parent,
-        window,
-        pinned,
-    }));
+    let context = Box::into_raw(Box::new(SettleContext { parent, window }));
     dispatch_after_f(
         when,
         &_dispatch_main_q as *const std::ffi::c_void,
@@ -1341,6 +1254,21 @@ unsafe fn schedule_child_morph_settle(parent: id, window: id, pinned: bool, dela
 /// `window` must be a valid NSWindow on the main thread.
 #[cfg(target_os = "macos")]
 unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_name: &str) {
+    animate_tahoe_glass_appearance_directed(window, log_target, window_name, false)
+}
+
+/// `grow_in = false`: the Spotlight outset enter (start wider, compress
+/// below final, rebound out) used by free-standing windows. `grow_in =
+/// true`: the child-popup direction — start BELOW final size, overshoot
+/// slightly past it, settle back — same phases and curves, inverted travel,
+/// so live GPUI reflow reads as the menu materializing instead of a squeeze.
+#[cfg(target_os = "macos")]
+unsafe fn animate_tahoe_glass_appearance_directed(
+    window: id,
+    log_target: &str,
+    window_name: &str,
+    grow_in: bool,
+) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
     // A superseded exit dematerialize may have left a blur on the content
@@ -1387,14 +1315,15 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
     // early and barely undershoots — so the vertical deltas are damped.
     let outset_x = final_frame.size.width * tuning.inset_fraction;
     let outset_y = final_frame.size.height * (tuning.inset_fraction * GLASS_MORPH_VERTICAL_DAMPING);
+    let outset_sign = if grow_in { -1.0 } else { 1.0 };
     let start = NSRect::new(
         NSPoint::new(
-            final_frame.origin.x - outset_x,
-            final_frame.origin.y - outset_y,
+            final_frame.origin.x - outset_x * outset_sign,
+            final_frame.origin.y - outset_y * outset_sign,
         ),
         NSSize::new(
-            final_frame.size.width + outset_x * 2.0,
-            final_frame.size.height + outset_y * 2.0,
+            final_frame.size.width + outset_x * 2.0 * outset_sign,
+            final_frame.size.height + outset_y * 2.0 * outset_sign,
         ),
     );
 
@@ -1426,14 +1355,15 @@ unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_na
         .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
     let squish_x = final_frame.size.width * squish_fraction;
     let squish_y = final_frame.size.height * (squish_fraction * GLASS_MORPH_VERTICAL_DAMPING);
+    // Grow-in inverts the mid-point too: a slight overshoot PAST final.
     let squish = NSRect::new(
         NSPoint::new(
-            final_frame.origin.x + squish_x,
-            final_frame.origin.y + squish_y,
+            final_frame.origin.x + squish_x * outset_sign,
+            final_frame.origin.y + squish_y * outset_sign,
         ),
         NSSize::new(
-            final_frame.size.width - squish_x * 2.0,
-            final_frame.size.height - squish_y * 2.0,
+            final_frame.size.width - squish_x * 2.0 * outset_sign,
+            final_frame.size.height - squish_y * 2.0 * outset_sign,
         ),
     );
 
