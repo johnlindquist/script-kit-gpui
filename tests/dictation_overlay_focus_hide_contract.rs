@@ -92,37 +92,32 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
         "recording, confirming, and terminal phases must use compact action labels plus keycaps"
     );
     assert!(
-        DICTATION_WINDOW.contains("fn render_action_chip")
-            && DICTATION_WINDOW.contains("fn dictation_native_footer_config(")
+        DICTATION_WINDOW.contains("fn dictation_native_footer_config(")
             && DICTATION_WINDOW.contains(".id(\"dictation-action-rail\")")
             && DICTATION_WINDOW.contains("native_footer_spacer()")
-            && DICTATION_WINDOW.contains("render_static_action_rail(rail_actions)"),
+            && DICTATION_WINDOW.contains("render_footer_hint_action_button_frame(")
+            && DICTATION_WINDOW
+                .contains("render_footer_action_rail(\"dictation-action-rail\", frames)")
+            && DICTATION_WINDOW
+                .contains("render_static_action_rail(footer_config.buttons, Some(cx))"),
         "runtime must reserve the native footer slot while preview keeps the compact action rail"
     );
     assert!(
-        DICTATION_WINDOW
-            .contains("crate::window_resize::main_layout::NATIVE_MAIN_WINDOW_FOOTER_HEIGHT")
-            && DICTATION_WINDOW.contains("crate::components::footer_chrome::footer_rail_chrome")
+        DICTATION_WINDOW.contains("crate::components::footer_chrome::footer_rail_chrome")
             && DICTATION_WINDOW.contains("sync_window_footer_popup(")
             && DICTATION_WINDOW.contains("dictation_native_footer_config(")
             && !DICTATION_WINDOW.contains(".bg(rgba(rail_chrome.surface_rgba))")
             && !DICTATION_WINDOW.contains("rgba(rail_chrome.divider_rgba)")
             && DICTATION_WINDOW.contains("fn native_footer_spacer()"),
-        "dictation action rail must reserve native-footer height while the same AppKit footer host paints material, divider, and buttons"
+        "dictation action rail must reserve shared footer height without painting a local material or divider"
     );
     assert!(
-        DICTATION_WINDOW.contains("crate::components::footer_chrome::render_footer_hint_content")
-            && DICTATION_WINDOW.contains("crate::components::footer_chrome::FooterHintKeyMode")
-            && DICTATION_WINDOW.contains("fn render_mic_action_chip_content(")
-            // Icon API renamed external_path → path; the invariant is the
-            // shared FOOTER_MIC_ICON_PATH token, not the method name.
-            && DICTATION_WINDOW
-                .contains(".path(crate::components::footer_chrome::FOOTER_MIC_ICON_PATH)")
-            && DICTATION_WINDOW.contains("fn footer_action_button_height()")
-            && DICTATION_WINDOW.contains(".h(px(footer_action_button_height()))")
-            && DICTATION_WINDOW.contains(".group(\"footer-action-button\")")
+        DICTATION_WINDOW.contains("render_footer_hint_action_button_frame(")
+            && DICTATION_WINDOW.contains("FooterHintActionButtonFrameSpec")
+            && DICTATION_WINDOW.contains("footer_button_height(")
+            && DICTATION_WINDOW.contains("render_footer_action_rail(")
             && !DICTATION_WINDOW.contains("render_inline_shortcut_keys("),
-        "preview-only dictation action chips must render through the shared footer chrome owner with inset button height"
+        "dictation footer actions must render entirely through the shared footer frame and rail owners"
     );
     assert!(
         DICTATION_WINDOW.contains(
@@ -188,31 +183,34 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
         "shared footer keycaps must use the escape glyph, runtime footer metrics, labelcap balance, hover foreground, and no steady-state fill"
     );
     assert!(
-        DICTATION_WINDOW.contains("FooterButtonConfig::new(FooterAction::Stop")
+        DICTATION_WINDOW.contains("FooterAction::Stop,")
             && DICTATION_WINDOW.contains("FooterAction::Ai,")
             && DICTATION_WINDOW.contains("MIC_KEYCAP,")
             && DICTATION_WINDOW.contains("active_microphone_footer_label(),")
             && DICTATION_WINDOW.contains("fn active_microphone_footer_label() -> SharedString")
             && DICTATION_WINDOW.contains("crate::dictation::get_active_dictation_device()")
-            && DICTATION_WINDOW.contains("FooterButtonConfig::new(FooterAction::Close")
+            && DICTATION_WINDOW.contains("FooterAction::Close,")
             && DICTATION_WINDOW.contains("self.submit_overlay_session(window, cx)")
             && DICTATION_WINDOW.contains("self.open_microphone_picker(window, cx)")
             && DICTATION_WINDOW.contains("self.abort_overlay_session(window, cx)"),
         "recording Stop, Mic, and Cancel controls must be native footer buttons routed into the overlay"
     );
+    let footer_config_source = &DICTATION_WINDOW[DICTATION_WINDOW
+        .find("pub(crate) fn dictation_native_footer_config")
+        .expect("dictation footer config must exist")..];
     let recording_footer = section_between(
-        DICTATION_WINDOW,
-        "DictationSessionPhase::Recording => vec![",
-        "DictationSessionPhase::Confirming => vec![",
+        footer_config_source,
+        "DictationSessionPhase::Recording => {",
+        "DictationSessionPhase::Confirming => {",
     );
     let mic_pos = recording_footer
         .find("FooterAction::Ai,")
         .expect("recording footer must include the mic action");
     let stop_pos = recording_footer
-        .find("FooterButtonConfig::new(\n                FooterAction::Stop,")
+        .find("FooterAction::Stop,")
         .expect("recording footer must include Stop after mic");
     let cancel_pos = recording_footer
-        .find("FooterButtonConfig::new(FooterAction::Close, ESC_KEYCAP, ACTION_CANCEL_LABEL)")
+        .find("FooterAction::Close,")
         .expect("recording footer must include Cancel after Stop");
     assert!(
         mic_pos < stop_pos && stop_pos < cancel_pos,
@@ -285,9 +283,8 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
         "runtime Delivering state must reserve the shared native footer Close + esc action"
     );
     assert!(
-        preview_render.contains("DictationSessionPhase::Delivering")
-            && preview_render.contains("ACTION_CLOSE_LABEL")
-            && preview_render.contains("ESC_KEYCAP"),
-        "preview Delivering state must render the same compact Close + esc action"
+        preview_render.contains("dictation_native_footer_config(&state.phase, armed)")
+            && preview_render.contains("render_static_action_rail(footer_config.buttons, None)"),
+        "preview phases must derive their footer actions from the same shared config as runtime"
     );
 }

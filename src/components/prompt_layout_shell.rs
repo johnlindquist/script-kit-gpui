@@ -986,6 +986,35 @@ pub(crate) fn render_universal_footer_action_buttons(
     on_actions: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     on_ai: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
+    let frames = render_universal_footer_action_button_frames(
+        id_prefix,
+        primary_key,
+        primary_label,
+        on_primary,
+        on_actions,
+        on_ai,
+    );
+    let theme = crate::theme::get_cached_theme();
+    let rail = crate::components::footer_chrome::footer_rail_chrome(&theme);
+
+    div()
+        .flex()
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .gap(px(rail.item_gap_px))
+        .children(frames)
+        .into_any_element()
+}
+
+pub(crate) fn render_universal_footer_action_button_frames(
+    id_prefix: &'static str,
+    primary_key: &'static str,
+    primary_label: impl Into<SharedString>,
+    on_primary: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_actions: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_ai: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> Vec<AnyElement> {
     use crate::components::footer_chrome::{
         footer_action_slot_width, footer_button_height, footer_rail_chrome,
         render_footer_hint_action_button_frame, FooterActionSlot, FooterHintActionButtonFrameSpec,
@@ -1039,42 +1068,32 @@ pub(crate) fn render_universal_footer_action_buttons(
         ),
     };
 
-    // flex_none on the row and hug/flex_none inside the frame: footer buttons
-    // never shrink or truncate — an ellipsized shortcut button is useless.
-    div()
-        .flex()
-        .flex_none()
-        .flex_row()
-        .items_center()
-        .gap(px(rail.item_gap_px))
-        .child(
-            button(
-                primary_id,
-                primary_label,
-                primary_key,
-                footer_action_slot_width(FooterActionSlot::Run),
-            )
-            .on_click(move |event, window, cx| on_primary(event, window, cx)),
+    vec![
+        (button(
+            primary_id,
+            primary_label,
+            primary_key,
+            footer_action_slot_width(FooterActionSlot::Run),
         )
-        .child(
-            button(
-                actions_id,
-                SharedString::from("Actions"),
-                "⌘K",
-                footer_action_slot_width(FooterActionSlot::Actions),
-            )
-            .on_click(move |event, window, cx| on_actions(event, window, cx)),
+        .on_click(move |event, window, cx| on_primary(event, window, cx))
+        .into_any_element()),
+        (button(
+            actions_id,
+            SharedString::from("Actions"),
+            "⌘K",
+            footer_action_slot_width(FooterActionSlot::Actions),
         )
-        .child(
-            button(
-                ai_id,
-                SharedString::from("Agent"),
-                "⌘↵",
-                footer_action_slot_width(FooterActionSlot::Ai),
-            )
-            .on_click(move |event, window, cx| on_ai(event, window, cx)),
+        .on_click(move |event, window, cx| on_actions(event, window, cx))
+        .into_any_element()),
+        (button(
+            ai_id,
+            SharedString::from("Agent"),
+            "⌘↵",
+            footer_action_slot_width(FooterActionSlot::Ai),
         )
-        .into_any_element()
+        .on_click(move |event, window, cx| on_ai(event, window, cx))
+        .into_any_element()),
+    ]
 }
 
 /// Canonical in-window universal footer: native rail geometry containing the
@@ -1088,7 +1107,7 @@ pub(crate) fn render_universal_footer_action_rail(
     on_actions: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     on_ai: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
-    let buttons = render_universal_footer_action_buttons(
+    let buttons = render_universal_footer_action_button_frames(
         id_prefix,
         primary_key,
         primary_label,
@@ -1098,7 +1117,7 @@ pub(crate) fn render_universal_footer_action_rail(
     );
     crate::components::footer_chrome::render_footer_action_rail(
         "universal-footer-action-rail",
-        [buttons],
+        buttons,
     )
 }
 

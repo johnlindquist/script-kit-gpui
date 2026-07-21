@@ -2,10 +2,69 @@
 
 use cocoa::base::{id, nil, NO, YES};
 use cocoa::foundation::{NSPoint, NSRect, NSSize};
+use objc::rc::WeakPtr;
 use objc::runtime::Class;
 use objc::{msg_send, sel, sel_impl};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
-const DEFAULT_GLASS_SPACING: f64 = 8.0;
+const DEFAULT_GLASS_SPACING: f64 = 4.0;
+
+pub(crate) type GlassButtonFrame = (f64, f64, f64, f64, f64);
+
+thread_local! {
+    static HOSTS_BY_WINDOW: RefCell<HashMap<usize, GlassButtonHost>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(crate) fn glass_buttons_enabled() -> bool {
+    crate::platform::tahoe_liquid_glass_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled()
+        && std::env::var("SCRIPT_KIT_GLASS_BUTTONS")
+            .map(|value| value != "0")
+            .unwrap_or(true)
+}
+
+/// Sync the footer capsules owned by one live GPUI window. Empty frames hide
+/// the existing pool without eagerly installing a host.
+pub(crate) fn sync_for_window(window: &gpui::Window, frames: &[GlassButtonFrame]) {
+    let Some((_, ns_window)) = gpui_view_and_ns_window(window) else {
+        return;
+    };
+    let window_key = ns_window as usize;
+
+    HOSTS_BY_WINDOW.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.retain(|_, host| host.window_is_alive());
+
+        if frames.is_empty() {
+            if let Some(host) = registry.get_mut(&window_key) {
+                host.sync(frames);
+            }
+            return;
+        }
+
+        if !registry.contains_key(&window_key) {
+            let Some(host) = GlassButtonHost::install(window) else {
+                return;
+            };
+            registry.insert(window_key, host);
+        }
+        if let Some(host) = registry.get_mut(&window_key) {
+            host.sync(frames);
+        }
+    });
+}
+
+/// Remove the host for a window before its native handle is retired.
+pub(crate) fn remove_for_window(window: &gpui::Window) {
+    let Some((_, ns_window)) = gpui_view_and_ns_window(window) else {
+        return;
+    };
+    HOSTS_BY_WINDOW.with(|registry| {
+        registry.borrow_mut().remove(&(ns_window as usize));
+    });
+}
 
 /// Owns a native Liquid Glass container and a reusable pool of effect views.
 ///
@@ -13,6 +72,8 @@ const DEFAULT_GLASS_SPACING: f64 = 8.0;
 /// pixels, y-down). AppKit content-view coordinates are points with y-up, so
 /// only the y axis is flipped when placing each effect view.
 pub(crate) struct GlassButtonHost {
+    window_key: usize,
+    window: WeakPtr,
     content_view: id,
     container: id,
     inner: id,
@@ -28,6 +89,7 @@ impl GlassButtonHost {
         let container_class = Class::get("NSGlassEffectContainerView")?;
         let nsview_class = Class::get("NSView")?;
         let (gpui_view, ns_window) = gpui_view_and_ns_window(window)?;
+        let window_key = ns_window as usize;
         let spacing = glass_spacing();
 
         // SAFETY: GPUI renders and prepaints on the AppKit main thread. The
@@ -64,11 +126,14 @@ impl GlassButtonHost {
             tracing::info!(
                 target: "script_kit::dictation",
                 event = "dictation_glass_button_host_installed",
+                window_key,
                 spacing,
                 "dictation_glass_button_host_installed"
             );
 
             Some(Self {
+                window_key,
+                window: WeakPtr::new(ns_window),
                 content_view,
                 container,
                 inner,
@@ -127,10 +192,15 @@ impl GlassButtonHost {
         tracing::debug!(
             target: "script_kit::dictation",
             event = "dictation_glass_button_host_synced",
+            window_key = self.window_key,
             visible_views = frames.len().min(self.views.len()),
             pooled_views = self.views.len(),
             "dictation_glass_button_host_synced"
         );
+    }
+
+    fn window_is_alive(&self) -> bool {
+        !(*self.window.load()).is_null()
     }
 }
 
@@ -150,13 +220,14 @@ impl Drop for GlassButtonHost {
         tracing::info!(
             target: "script_kit::dictation",
             event = "dictation_glass_button_host_torn_down",
+            window_key = self.window_key,
             "dictation_glass_button_host_torn_down"
         );
     }
 }
 
 fn glass_spacing() -> f64 {
-    std::env::var("SCRIPT_KIT_DICTATION_GLASS_SPACING")
+    std::env::var("SCRIPT_KIT_GLASS_BUTTON_SPACING")
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0)

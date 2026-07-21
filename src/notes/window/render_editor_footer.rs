@@ -47,41 +47,43 @@ impl NotesApp {
 
         // Same footer_chrome button frames as the main window footer — shared
         // component, shared keycap language (one cap per key), shared slots.
-        let buttons = crate::components::render_universal_footer_action_buttons(
-            "notes",
-            "⌘P",
-            "Notes",
-            cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                this.close_actions_panel(window, cx);
-                if this.note_switcher.is_open() {
-                    this.close_browse_panel(window, cx);
-                } else {
-                    this.open_browse_panel(window, cx);
-                }
-            }),
-            cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                if this.command_bar.is_open() {
+        let buttons = if in_focus_mode && !window_hovered {
+            Vec::new()
+        } else {
+            crate::components::render_universal_footer_action_button_frames(
+                "notes",
+                "⌘P",
+                "Notes",
+                cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                     this.close_actions_panel(window, cx);
-                } else {
-                    this.open_actions_panel(window, cx);
-                }
-            }),
-            cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                let _ =
-                    this.open_selected_note_cart_in_embedded_agent_chat("NotesFooterCmdEnter", cx);
-            }),
-        );
+                    if this.note_switcher.is_open() {
+                        this.close_browse_panel(window, cx);
+                    } else {
+                        this.open_browse_panel(window, cx);
+                    }
+                }),
+                cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                    if this.command_bar.is_open() {
+                        this.close_actions_panel(window, cx);
+                    } else {
+                        this.open_actions_panel(window, cx);
+                    }
+                }),
+                cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                    let _ = this
+                        .open_selected_note_cart_in_embedded_agent_chat("NotesFooterCmdEnter", cx);
+                }),
+            )
+        };
 
         // Mention-preview hint occupies the flexible middle lane: it may
         // truncate (informational), and its presence never moves the
         // never-shrink buttons on the right.
         let mention_preview = self.focused_note_mention_preview(cx);
-        let hint_strip = div()
+        let leading = div()
             .flex()
             .flex_row()
             .items_center()
-            .w_full()
-            .px(px(crate::ui::chrome::HINT_STRIP_PADDING_X))
             .child(leading)
             .child(
                 div()
@@ -95,7 +97,12 @@ impl NotesApp {
                         d.child(format!("{token} · {detail}"))
                     }),
             )
-            .child(buttons);
+            .into_any_element();
+        let hint_strip = crate::components::footer_chrome::render_footer_action_rail_with_leading(
+            "notes-footer-action-rail",
+            Some(leading),
+            buttons,
+        );
 
         div()
             .child(hint_strip)

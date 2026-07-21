@@ -31,6 +31,8 @@ pub(crate) const FOOTER_BUTTON_VERTICAL_INSET_PX: f32 = 2.0;
 // keycaps carry borders; label text no longer needs the wider bordered-chip
 // spacing rhythm.
 pub(crate) const FOOTER_ACTION_ITEM_GAP_PX: f32 = 2.0;
+/// Resting separation between adjacent native Liquid Glass capsules.
+pub(crate) const FOOTER_GLASS_BUTTON_GAP_PX: f32 = 6.0;
 pub(crate) const FOOTER_ACTION_CONTENT_GAP_PX: f32 = 4.0;
 pub(crate) const FOOTER_ACTION_CONTENT_PADDING_X_PX: f32 = 4.0;
 // Extra inner x width (total, split across both sides) that trailing centered
@@ -225,9 +227,21 @@ pub(crate) fn render_footer_action_rail_with_leading(
 ) -> AnyElement {
     let theme = crate::theme::get_cached_theme();
     let rail = footer_rail_chrome(&theme);
+    let has_leading = leading.is_some();
+    let buttons = buttons.into_iter().collect::<Vec<_>>();
 
-    div()
-        .id(id)
+    #[cfg(target_os = "macos")]
+    let glass_buttons_enabled = crate::platform::glass_button_host::glass_buttons_enabled();
+    #[cfg(not(target_os = "macos"))]
+    let glass_buttons_enabled = false;
+
+    let item_gap_px = if glass_buttons_enabled {
+        FOOTER_GLASS_BUTTON_GAP_PX
+    } else {
+        rail.item_gap_px
+    };
+
+    let rail_element = div()
         .w_full()
         .h(px(rail.height_px))
         .min_h(px(rail.height_px))
@@ -235,7 +249,34 @@ pub(crate) fn render_footer_action_rail_with_leading(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(rail.item_gap_px))
+        .gap(px(item_gap_px));
+
+    #[cfg(target_os = "macos")]
+    let rail_element = if glass_buttons_enabled {
+        let radius = f64::from(rail.button_radius_px);
+        rail_element.on_children_prepainted(move |bounds, window, _cx| {
+            let button_start = usize::from(has_leading) + 1;
+            let frames = bounds
+                .into_iter()
+                .skip(button_start)
+                .map(|bounds| {
+                    (
+                        f64::from(bounds.origin.x.as_f32()),
+                        f64::from(bounds.origin.y.as_f32()),
+                        f64::from(bounds.size.width.as_f32()),
+                        f64::from(bounds.size.height.as_f32()),
+                        radius,
+                    )
+                })
+                .collect::<Vec<_>>();
+            crate::platform::glass_button_host::sync_for_window(window, &frames);
+        })
+    } else {
+        rail_element
+    };
+
+    rail_element
+        .id(id)
         .when_some(leading, |rail, leading| {
             rail.child(
                 div()
@@ -611,35 +652,22 @@ where
     let left_info = config
         .left_info
         .map(|info| render_footer_config_left_info(info, &theme, on_action));
-    let content = div()
-        .w_full()
-        .min_w(px(0.0))
+    let leading = div()
         .flex()
+        .flex_1()
+        .min_w(px(0.0))
         .items_center()
-        .justify_between()
         .gap(px(rail.item_gap_px))
-        .child(
-            div()
-                .flex()
-                .flex_1()
-                .min_w(px(0.0))
-                .items_center()
-                .gap(px(rail.item_gap_px))
-                .overflow_hidden()
-                .children(left_buttons)
-                .children(left_info),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(rail.item_gap_px))
-                .children(right_buttons),
-        )
+        .overflow_hidden()
+        .children(left_buttons)
+        .children(left_info)
         .into_any_element();
 
-    render_footer_action_rail("main-window-footer-config-rail", [content])
+    render_footer_action_rail_with_leading(
+        "main-window-footer-config-rail",
+        Some(leading),
+        right_buttons,
+    )
 }
 
 #[allow(dead_code)] // callers live in binary-only render modules
@@ -2124,6 +2152,7 @@ mod tests {
     #[test]
     fn footer_action_chrome_tokens_match_native_footer_contract() {
         assert_eq!(FOOTER_ACTION_ITEM_GAP_PX, 2.0);
+        assert_eq!(FOOTER_GLASS_BUTTON_GAP_PX, 6.0);
         assert_eq!(FOOTER_ACTION_CONTENT_GAP_PX, 4.0);
         assert_eq!(FOOTER_ACTION_CONTENT_PADDING_X_PX, 4.0);
         assert_eq!(FOOTER_ACTION_BUTTON_RADIUS_PX, 6.0);
