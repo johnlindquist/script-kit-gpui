@@ -154,6 +154,59 @@ fn script_list_offset_for_pixel_top(
     }
 }
 
+fn main_list_visible_range(
+    items: &[GroupedListItem],
+    scroll_top: f32,
+    visible_height: f32,
+    heights: ScriptListRowHeights,
+) -> (usize, usize) {
+    let visible_bottom = scroll_top + visible_height.max(0.0);
+    let mut row_top = 0.0_f32;
+    let mut first = None;
+    let mut last_exclusive = 0;
+
+    for (index, item) in items.iter().enumerate() {
+        let row_bottom = row_top + heights.row_height(item, index);
+        if row_bottom > scroll_top && row_top < visible_bottom {
+            first.get_or_insert(index);
+            last_exclusive = index + 1;
+        }
+        row_top = row_bottom;
+        if row_top >= visible_bottom && first.is_some() {
+            break;
+        }
+    }
+
+    first.map_or((items.len(), items.len()), |first| (first, last_exclusive))
+}
+
+fn main_list_row_stable_key(
+    grouped_item: &GroupedListItem,
+    grouped_index: usize,
+    flat_results: &[scripts::SearchResult],
+) -> String {
+    match grouped_item {
+        GroupedListItem::Item(result_index) => flat_results
+            .get(*result_index)
+            .and_then(scripts::SearchResult::stable_selection_key)
+            .unwrap_or_else(|| format!("generated/item/{grouped_index}/{result_index}")),
+        GroupedListItem::SectionHeader(label, icon) => format!(
+            "section/{grouped_index}/{label}/{}",
+            icon.as_deref().unwrap_or("none")
+        ),
+        GroupedListItem::Status(status) => format!(
+            "status/{}/{}/{grouped_index}/{}",
+            status.source.receipt_label(),
+            status.status_kind.as_str(),
+            status.label
+        ),
+    }
+}
+
+fn main_list_row_semantic_id(stable_key: &str) -> String {
+    format!("main-list-row:{stable_key}")
+}
+
 fn main_list_safe_scroll_offset_for_item(
     items: &[GroupedListItem],
     current_offset: gpui::ListOffset,
@@ -353,6 +406,38 @@ fn main_list_scroll_lifecycle_phase(
 }
 
 impl ScriptListApp {
+    fn record_main_list_scroll_frame_trace(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let momentum = event.momentum_phase != gpui::ScrollPhase::None;
+        self.main_list_last_interaction_source = if momentum {
+            MainListInteractionSource::Momentum
+        } else {
+            MainListInteractionSource::Wheel
+        };
+        let began_gesture = event.phase == gpui::ScrollPhase::Began
+            || event.momentum_phase == gpui::ScrollPhase::Began
+            || event.touch_phase == gpui::TouchPhase::Started;
+        if !self
+            .main_list_scroll_frame_trace
+            .record_event(began_gesture, std::time::Instant::now())
+        {
+            return;
+        }
+
+        let app = cx.weak_entity();
+        window.on_next_frame(move |_window, cx| {
+            let _ = app.update(cx, |app, _cx| {
+                app.main_list_scroll_frame_trace
+                    .record_frame_callback(std::time::Instant::now());
+            });
+        });
+        window.request_animation_frame();
+    }
+
     fn main_list_boundary_affordance_tuning(
         &self,
     ) -> crate::scrolling::boundary_affordance::BoundaryAffordanceTuning {
@@ -576,6 +661,7 @@ impl ScriptListApp {
     ) {
         use crate::scrolling::boundary_affordance::SettleReason;
 
+        self.record_main_list_scroll_frame_trace(event, window, cx);
         if item_count == 0 {
             return;
         }
@@ -647,9 +733,35 @@ impl ScriptListApp {
         let footer_height = main_list_footer_overlay_total_padding();
         let scroll_offset = self.main_list_state.logical_scroll_top();
         let heights = ScriptListRowHeights::current();
-        let (content_height, selected_row_top, selected_row_bottom, item_count) = {
-            let (grouped_items, _) = self.get_grouped_results_cached();
+        let (
+            content_height,
+            selected_row_top,
+            selected_row_bottom,
+            item_count,
+            first_visible_index,
+            last_visible_index_exclusive,
+            first_visible_semantic_id,
+            last_visible_semantic_id,
+            selected_stable_key,
+            selected_semantic_id,
+            hovered_semantic_id,
+        ) = {
+            let (grouped_items, flat_results) = self.get_grouped_results_cached();
             let content_height = script_list_content_height_with(&grouped_items, heights);
+            let scroll_top =
+                script_list_pixel_top_for_offset(&grouped_items, scroll_offset, heights);
+            let visible_height = (viewport_height.as_f32()
+                - main_list_header_overlay_height(self.current_main_menu_theme.def()).as_f32())
+            .max(0.0);
+            let (first_visible_index, last_visible_index_exclusive) =
+                main_list_visible_range(&grouped_items, scroll_top, visible_height, heights);
+            let stable_key_at = |index: usize| {
+                grouped_items
+                    .get(index)
+                    .map(|item| main_list_row_stable_key(item, index, &flat_results))
+            };
+            let semantic_id_at =
+                |index: usize| stable_key_at(index).map(|key| main_list_row_semantic_id(&key));
             let selected_row_top = grouped_items.get(self.selected_index).map(|_| {
                 script_list_pixel_top_for_item(&grouped_items, self.selected_index, heights)
             });
@@ -661,6 +773,15 @@ impl ScriptListApp {
                 selected_row_top,
                 selected_row_bottom,
                 grouped_items.len(),
+                first_visible_index,
+                last_visible_index_exclusive,
+                semantic_id_at(first_visible_index),
+                last_visible_index_exclusive
+                    .checked_sub(1)
+                    .and_then(semantic_id_at),
+                stable_key_at(self.selected_index),
+                semantic_id_at(self.selected_index),
+                self.hovered_index.and_then(semantic_id_at),
             )
         };
         let scroll_top = {
@@ -737,6 +858,10 @@ impl ScriptListApp {
             "scrollTop": geometry.scroll_top,
             "scrollTopItem": scroll_offset.item_ix,
             "scrollTopOffset": scroll_offset.offset_in_item.as_f32(),
+            "firstVisibleIndex": first_visible_index,
+            "lastVisibleIndexExclusive": last_visible_index_exclusive,
+            "firstVisibleSemanticId": first_visible_semantic_id,
+            "lastVisibleSemanticId": last_visible_semantic_id,
             "contentHeight": geometry.content_height,
             "viewportHeight": geometry.viewport_height,
             "headerOverlayHeight": geometry.header_height,
@@ -748,11 +873,23 @@ impl ScriptListApp {
             "safeViewportHeight": geometry.safe_viewport_height,
             "maxScrollTop": geometry.max_scroll_top,
             "selectedIndex": self.selected_index,
+            "selectedSemanticId": selected_semantic_id,
+            "selectedStableKey": selected_stable_key,
             "selectedRowTop": selected_row_top_in_view,
             "selectedRowBottom": selected_row_bottom_in_view,
             "selectedRowVisible": selected_row_visible,
             "selectedRowAboveFooter": selected_row_above_footer,
             "itemCount": item_count,
+            "hoveredIndex": self.hovered_index,
+            "hoveredSemanticId": hovered_semantic_id,
+            "hoverSuppressedUntilPointerMove": self.main_list_suppress_hover_until_mouse_move,
+            "inputMode": match self.input_mode {
+                InputMode::Keyboard => "keyboard",
+                InputMode::Mouse => "mouse",
+            },
+            "focusedSemanticId": "input:filter",
+            "lastInteractionSource": self.main_list_last_interaction_source.as_str(),
+            "performance": self.main_list_scroll_frame_trace.receipt(),
             "affordance": {
                 "atTop": geometry.at_top,
                 "atBottom": geometry.at_bottom,
@@ -1419,10 +1556,11 @@ impl ScriptListApp {
 mod scroll_fade_tests {
     use super::{
         leading_context_scroll_offset_for_selection, main_list_boundary_eligibility_values,
-        main_list_safe_scroll_offset_for_item, main_list_scroll_geometry_values,
-        main_list_scroll_lifecycle_phase, main_list_top_fade_progress,
-        main_list_top_fade_progress_for_selection, script_list_pixel_top_for_offset,
-        scrollbar_fade_duration, scrollbar_fade_opacity, ScriptListRowHeights,
+        main_list_row_stable_key, main_list_safe_scroll_offset_for_item,
+        main_list_scroll_geometry_values, main_list_scroll_lifecycle_phase,
+        main_list_top_fade_progress, main_list_top_fade_progress_for_selection,
+        main_list_visible_range, script_list_pixel_top_for_offset, scrollbar_fade_duration,
+        scrollbar_fade_opacity, ScriptListRowHeights,
     };
     use crate::list_item::GroupedListItem;
 
@@ -1599,6 +1737,42 @@ mod scroll_fade_tests {
         assert_eq!(
             script_list_pixel_top_for_offset(&rows, adjusted, ScriptListRowHeights::current()),
             124.0
+        );
+    }
+
+    #[test]
+    fn visible_range_includes_partial_rows_and_variable_headers() {
+        let rows = vec![
+            GroupedListItem::SectionHeader("Recent".to_string(), None),
+            GroupedListItem::Item(0),
+            GroupedListItem::Status(crate::list_item::SourceChipStatusRow {
+                source: crate::menu_syntax::RootUnifiedSourceFilter::Files,
+                source_name: "Files".to_string(),
+                status_kind: crate::list_item::SourceChipStatusKind::Loading,
+                label: "Loading files".to_string(),
+                shown: 0,
+                loaded: 0,
+                total: None,
+            }),
+            GroupedListItem::Item(1),
+        ];
+        let heights = ScriptListRowHeights {
+            first_section_header: 20.0,
+            section_header: 32.0,
+            status: 24.0,
+            item: 40.0,
+        };
+
+        assert_eq!(main_list_visible_range(&rows, 10.0, 55.0, heights), (0, 3));
+        assert_eq!(main_list_visible_range(&rows, 61.0, 22.0, heights), (2, 3));
+    }
+
+    #[test]
+    fn generated_row_identity_is_deterministic_when_model_has_no_stable_key() {
+        let row = GroupedListItem::Item(7);
+        assert_eq!(
+            main_list_row_stable_key(&row, 11, &[]),
+            "generated/item/11/7"
         );
     }
 }

@@ -152,7 +152,7 @@ function layoutNodeBounds(layoutReceipt: JsonObject, name: string): Rect | null 
   return rectFrom(node?.bounds);
 }
 
-function normalizeScriptListScrollMeasurement(
+export function normalizeScriptListScrollMeasurement(
   scroll: JsonObject,
   layoutReceipt: JsonObject | null,
 ): NormalizedScrollMeasurement {
@@ -184,7 +184,7 @@ function normalizeScriptListScrollMeasurement(
       : layoutNodeBounds(layoutReceipt, `ListItem[${selectedIndex}]`);
   const footerBounds = layoutReceipt ? layoutNodeBounds(layoutReceipt, "MainViewFooter") : null;
 
-  if (!listBounds || !selectedRowBounds) {
+  if (!listBounds) {
     return {
       scroll: {
         ...scroll,
@@ -192,11 +192,11 @@ function normalizeScriptListScrollMeasurement(
         selectedRowAboveFooter: null,
       },
       classification: "blocked-by-missing-primitive",
-      missingPrimitive: "selectedRowBounds",
+      missingPrimitive: "scriptListBounds",
       listStateViewportHeight,
-      effectiveViewportHeight: listBounds?.height ?? null,
+      effectiveViewportHeight: null,
       effectiveSafeViewportHeight: null,
-      viewportMeasurementSource: listBounds ? "layout" : "listState",
+      viewportMeasurementSource: "listState",
       viewportMeasurementWarning: "listStateViewportUnmeasured",
       selectedRowVisible: null,
       selectedRowAboveFooter: null,
@@ -204,22 +204,26 @@ function normalizeScriptListScrollMeasurement(
   }
 
   const effectiveViewportHeight = listBounds.height;
-  const selectedRowVisible =
-    selectedRowBounds.y >= listBounds.y
-    && selectedRowBounds.y + selectedRowBounds.height <= listBounds.y + listBounds.height;
   const effectiveSafeViewportHeight = footerBounds
     ? Math.max(0, footerBounds.y - listBounds.y)
     : effectiveViewportHeight;
-  const selectedRowAboveFooter =
-    selectedRowBounds.y + selectedRowBounds.height <= listBounds.y + effectiveSafeViewportHeight;
+  const selectedRowVisible = selectedRowBounds
+    ? selectedRowBounds.y >= listBounds.y
+      && selectedRowBounds.y + selectedRowBounds.height <= listBounds.y + listBounds.height
+    : rawSelectedRowVisible ?? null;
+  const selectedRowAboveFooter = selectedRowBounds
+    ? selectedRowBounds.y + selectedRowBounds.height <= listBounds.y + effectiveSafeViewportHeight
+    : rawSelectedRowAboveFooter ?? null;
 
   return {
     scroll: {
       ...scroll,
       viewportHeight: effectiveViewportHeight,
       safeViewportHeight: effectiveSafeViewportHeight,
-      selectedRowTop: selectedRowBounds.y - listBounds.y,
-      selectedRowBottom: selectedRowBounds.y + selectedRowBounds.height - listBounds.y,
+      selectedRowTop: selectedRowBounds ? selectedRowBounds.y - listBounds.y : null,
+      selectedRowBottom: selectedRowBounds
+        ? selectedRowBounds.y + selectedRowBounds.height - listBounds.y
+        : null,
       selectedRowVisible,
       selectedRowAboveFooter,
     },
@@ -229,7 +233,9 @@ function normalizeScriptListScrollMeasurement(
     effectiveViewportHeight,
     effectiveSafeViewportHeight,
     viewportMeasurementSource: "layout",
-    viewportMeasurementWarning: "listStateViewportUnmeasured",
+    viewportMeasurementWarning: selectedRowBounds
+      ? "listStateViewportUnmeasured"
+      : "listStateViewportUnmeasured;selectedRowBoundsUnavailable",
     selectedRowVisible,
     selectedRowAboveFooter,
   };
@@ -342,6 +348,11 @@ async function main() {
       scroll: {
         scrollTop,
         scrollTopItem: scroll.scrollTopItem ?? null,
+        scrollTopOffset: scroll.scrollTopOffset ?? null,
+        firstVisibleIndex: scroll.firstVisibleIndex ?? null,
+        lastVisibleIndexExclusive: scroll.lastVisibleIndexExclusive ?? null,
+        firstVisibleSemanticId: scroll.firstVisibleSemanticId ?? null,
+        lastVisibleSemanticId: scroll.lastVisibleSemanticId ?? null,
         contentHeight,
         viewportHeight,
         listStateViewportHeight: normalized.listStateViewportHeight,
@@ -359,10 +370,20 @@ async function main() {
         maxScrollTop,
         canScrollY,
         selectedIndex: scroll.selectedIndex ?? state.selectedIndex ?? null,
+        selectedSemanticId: scroll.selectedSemanticId ?? null,
+        selectedStableKey: scroll.selectedStableKey ?? null,
         selectedRowTop: scroll.selectedRowTop ?? null,
         selectedRowBottom: scroll.selectedRowBottom ?? null,
         selectedRowVisible: scroll.selectedRowVisible ?? null,
         selectedRowAboveFooter: scroll.selectedRowAboveFooter ?? null,
+        selectedRowWithinSafeViewport: scroll.selectedRowWithinSafeViewport ?? null,
+        hoveredIndex: scroll.hoveredIndex ?? null,
+        hoveredSemanticId: scroll.hoveredSemanticId ?? null,
+        hoverSuppressedUntilPointerMove: scroll.hoverSuppressedUntilPointerMove ?? null,
+        inputMode: scroll.inputMode ?? null,
+        focusedSemanticId: scroll.focusedSemanticId ?? null,
+        lastInteractionSource: scroll.lastInteractionSource ?? null,
+        performance: scroll.performance ?? null,
         itemCount: scroll.itemCount ?? state.visibleChoiceCount ?? null,
         owner: scroll.owner ?? (isNotesTarget ? "notes.unknown" : "main.list"),
         activeNoteId: scroll.activeNoteId ?? null,
@@ -379,7 +400,10 @@ async function main() {
       resizePressure: {
         overflowY: canScrollY,
         hiddenContentHeight: contentHeight != null && viewportHeight != null ? Math.max(0, contentHeight - viewportHeight) : null,
-        selectedRowOccluded: scroll.selectedRowVisible === false || scroll.selectedRowAboveFooter === false,
+        selectedRowOutsideSafeViewport:
+          scroll.selectedRowWithinSafeViewport === false
+          || scroll.selectedRowVisible === false
+          || scroll.selectedRowAboveFooter === false,
       },
       missingPrimitives: [
         Object.keys(scroll).length === 0 || scroll.scrollTop == null || scroll.viewportHeight == null

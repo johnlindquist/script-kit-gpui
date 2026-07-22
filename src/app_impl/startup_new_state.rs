@@ -200,6 +200,8 @@
             theme_chooser_controls: None,
             theme_chooser_panel_mode: ThemeChooserPanelMode::default(),
             main_menu_render_diagnostics: MainMenuRenderDiagnosticsState::default(),
+            main_list_scroll_frame_trace: MainListScrollFrameTrace::from_env(),
+            main_list_last_interaction_source: MainListInteractionSource::Refresh,
             // Pending path action - starts as None (Arc<Mutex<>> for callback access)
             pending_path_action: Arc::new(Mutex::new(None)),
             // Signal to close path actions dialog

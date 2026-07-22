@@ -196,7 +196,7 @@ const primitiveSchemas = [
       "scroll.selectedRowAboveFooter",
       "resizePressure.overflowY",
       "resizePressure.hiddenContentHeight",
-      "resizePressure.selectedRowOccluded",
+      "resizePressure.selectedRowOutsideSafeViewport",
     ],
     failClosedWhen: ["target identity is not strict", "mainListScroll is missing", "selected row visibility is unknown for list surfaces"],
     implementation: "bun scripts/devtools/scroll.ts inspect",

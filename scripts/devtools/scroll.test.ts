@@ -3,6 +3,7 @@ import {
   MAIN_LIST_SCROLL_AFFORDANCE_FIELDS,
   inspectMainListScrollAffordance,
   mainListScrollFromState,
+  normalizeScriptListScrollMeasurement,
 } from "./scroll.ts";
 import { ProtocolCore, type Json } from "./driver.ts";
 
@@ -122,4 +123,35 @@ test("typed scroll-wheel helper emits the exact pixel-only phased wire event", a
     phase: "moved",
   });
   expect(command.event.deltaMode).toBeUndefined();
+});
+
+test("an intentionally offscreen selected row keeps viewport measurement valid", () => {
+  const normalized = normalizeScriptListScrollMeasurement(
+    {
+      scrollTop: 240,
+      viewportHeight: 0,
+      safeViewportHeight: 0,
+      selectedIndex: 1,
+      selectedSemanticId: "main-list-row:script/example",
+      selectedStableKey: "script/example",
+      selectedRowVisible: false,
+      selectedRowAboveFooter: false,
+      selectedRowWithinSafeViewport: false,
+    },
+    {
+      nodes: [
+        { name: "ScriptList", bounds: { x: 0, y: 60, width: 640, height: 360 } },
+        { name: "MainViewFooter", bounds: { x: 0, y: 390, width: 640, height: 30 } },
+      ],
+    },
+  );
+
+  expect(normalized.classification).toBeNull();
+  expect(normalized.missingPrimitive).toBeNull();
+  expect(normalized.effectiveViewportHeight).toBe(360);
+  expect(normalized.effectiveSafeViewportHeight).toBe(330);
+  expect(normalized.scroll.selectedRowTop).toBeNull();
+  expect(normalized.scroll.selectedRowBottom).toBeNull();
+  expect(normalized.scroll.selectedRowVisible).toBe(false);
+  expect(normalized.viewportMeasurementWarning).toContain("selectedRowBoundsUnavailable");
 });

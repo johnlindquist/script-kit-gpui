@@ -2,6 +2,7 @@ impl ScriptListApp {
     #[inline]
     fn enter_keyboard_mode(&mut self, cx: &mut Context<Self>) {
         self.input_mode = InputMode::Keyboard;
+        self.main_list_last_interaction_source = MainListInteractionSource::Keyboard;
         self.hovered_index = None;
         self.hide_mouse_cursor(cx);
     }

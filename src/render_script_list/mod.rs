@@ -1341,6 +1341,8 @@ impl ScriptListApp {
                                               window,
                                               cx| {
                                             let click_count = event.click_count();
+                                            this.main_list_last_interaction_source =
+                                                MainListInteractionSource::Click;
                                             if this.menu_syntax_trigger_picker_suppress_next_launcher_click {
                                                 logging::log(
                                                     "UI",

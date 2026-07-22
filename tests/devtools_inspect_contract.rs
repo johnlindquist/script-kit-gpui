@@ -274,7 +274,7 @@ fn scroll_cli_reports_viewport_selected_row_and_overflow_pressure() {
         "selectedRowVisible",
         "selectedRowAboveFooter",
         "hiddenContentHeight",
-        "selectedRowOccluded",
+        "selectedRowOutsideSafeViewport",
         "blocked-by-missing-primitive",
         "strictTargetIdentity",
     ] {
