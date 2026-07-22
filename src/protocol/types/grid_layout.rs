@@ -598,6 +598,16 @@ pub struct AppKitFidelitySnapshot {
     pub target_kind: String,
     pub coordinate_space: String,
     pub window_bounds: LayoutBounds,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_backdrop_frame: Option<LayoutBounds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer_container_frame: Option<LayoutBounds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent_gap_points: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backdrop_footer_intersection_area: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_window_has_shadow: Option<bool>,
     pub nodes: Vec<AppKitFidelityNode>,
 }
 
@@ -1025,6 +1035,11 @@ mod tests {
                 target_kind: "appKitFooterHost".to_string(),
                 coordinate_space: "appkit-content-bottom-left+screenshot-top-left".to_string(),
                 window_bounds: bounds.clone(),
+                main_backdrop_frame: None,
+                footer_container_frame: None,
+                transparent_gap_points: None,
+                backdrop_footer_intersection_area: None,
+                outer_window_has_shadow: None,
                 nodes: vec![AppKitFidelityNode {
                     id: "script-kit-footer-effect".to_string(),
                     class_name: "NSVisualEffectView".to_string(),

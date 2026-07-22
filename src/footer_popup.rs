@@ -1781,11 +1781,49 @@ pub(crate) fn collect_main_footer_appkit_fidelity_snapshot(
                 return AppKitFidelityCaptureOutcome::blocked(status);
             }
 
+            let backdrop = find_subview_by_identifier(
+                content_view,
+                crate::platform::TAHOE_GLASS_BACKDROP_IDENTIFIER,
+            );
+            let footer_container =
+                find_subview_by_identifier(content_view, FOOTER_GLASS_CONTAINER_ID);
+            let main_backdrop_frame = (backdrop != nil).then(|| {
+                let frame: cocoa::foundation::NSRect = msg_send![backdrop, frame];
+                appkit_layout_bounds(frame)
+            });
+            let footer_container_frame = (footer_container != nil).then(|| {
+                let frame: cocoa::foundation::NSRect = msg_send![footer_container, frame];
+                appkit_layout_bounds(frame)
+            });
+            let (transparent_gap_points, backdrop_footer_intersection_area) =
+                match (&main_backdrop_frame, &footer_container_frame) {
+                    (Some(backdrop), Some(footer)) => {
+                        let gap = backdrop.y - (footer.y + footer.height);
+                        let overlap_width = (backdrop.x + backdrop.width)
+                            .min(footer.x + footer.width)
+                            - backdrop.x.max(footer.x);
+                        let overlap_height = (backdrop.y + backdrop.height)
+                            .min(footer.y + footer.height)
+                            - backdrop.y.max(footer.y);
+                        (
+                            Some(gap),
+                            Some(overlap_width.max(0.0) * overlap_height.max(0.0)),
+                        )
+                    }
+                    _ => (None, None),
+                };
+            let has_shadow: cocoa::base::BOOL = msg_send![ns_window, hasShadow];
+
             AppKitFidelityCaptureOutcome::captured(crate::protocol::AppKitFidelitySnapshot {
                 target_id: "main-footer-host".to_string(),
                 target_kind: "appKitFooterHost".to_string(),
                 coordinate_space: "appkit-content-bottom-left+screenshot-top-left".to_string(),
                 window_bounds: crate::fidelity_capture::layout_bounds(window.bounds()),
+                main_backdrop_frame,
+                footer_container_frame,
+                transparent_gap_points,
+                backdrop_footer_intersection_area,
+                outer_window_has_shadow: Some(has_shadow == YES),
                 nodes,
             })
         }

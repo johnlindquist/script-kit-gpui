@@ -1139,7 +1139,7 @@ impl Render for ScriptListApp {
                     // content.
                     .children(main_list_loading_layer)
                     // Visual styling - rounded corners, subtle border, clip content
-                    .rounded(px(12.))
+                    .rounded(px(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX))
                     .border_1()
                     .border_color(border_color)
                     .overflow_hidden()

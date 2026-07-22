@@ -179,7 +179,7 @@ fn footer_native_host_uses_theme_vibrancy_and_reports_installed_surface() {
         "MainWindowFooterHostSnapshot",
         "native_host_installed",
         "active_main_window_footer_surface",
-        "ensure_main_footer_host(ns_window)",
+        "ensure_main_window_footer_host(gpui_view, ns_window)",
         "refresh_main_footer_host(ns_window, config)",
         "update_main_window_footer_host_state(",
         "installed.then_some(config.surface)",

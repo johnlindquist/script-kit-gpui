@@ -13,6 +13,9 @@ pub const LIQUID_GLASS_PREFERRED_HIT_PX: f32 = 44.0;
 pub const LIQUID_GLASS_PREFERRED_CENTER_GAP_PX: f32 = 60.0;
 
 pub const LIQUID_GLASS_WINDOW_RADIUS_PX: f32 = 22.0;
+/// Radius of the bounded launcher content capsule when its footer controls
+/// occupy a detached region inside the same transparent native window.
+pub const MAIN_WINDOW_CONTENT_RADIUS_PX: f32 = 12.0;
 /// Radius for the Tahoe-style floating popup shell (e.g. the actions dialog).
 pub const LIQUID_GLASS_POPUP_RADIUS_PX: f32 = 18.0;
 pub const LIQUID_GLASS_PANEL_RADIUS_PX: f32 = 16.0;

@@ -389,10 +389,59 @@ pub fn configure_overlay_window_glass(_window: &gpui::Window, _window_name: &str
 const TAHOE_GLASS_BACKDROP_TAG: isize = 0x5c17_0175;
 /// Accessibility/debug identifier for the native glass backdrop view.
 #[cfg(target_os = "macos")]
-const TAHOE_GLASS_BACKDROP_IDENTIFIER: &str = "script-kit-tahoe-glass-backdrop";
+pub(crate) const TAHOE_GLASS_BACKDROP_IDENTIFIER: &str = "script-kit-tahoe-glass-backdrop";
 /// `NSWindowBelow` ordering constant for `addSubview:positioned:relativeTo:`.
 #[cfg(target_os = "macos")]
 const NS_WINDOW_BELOW: isize = -1;
+
+/// Native backdrop partition. Secondary windows remain full-bleed; the main
+/// launcher leaves its detached footer and the desktop gutter outside the
+/// material frame while retaining one physical NSWindow.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TahoeBackdropLayout {
+    FullWindow,
+    MainContentAboveDetachedFooter { bottom_inset: f64 },
+}
+
+#[cfg(target_os = "macos")]
+impl TahoeBackdropLayout {
+    fn frame(self, bounds: cocoa::foundation::NSRect) -> cocoa::foundation::NSRect {
+        use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+        match self {
+            Self::FullWindow => bounds,
+            Self::MainContentAboveDetachedFooter { bottom_inset } => {
+                let bottom_inset = bottom_inset.clamp(0.0, bounds.size.height.max(0.0));
+                NSRect::new(
+                    NSPoint::new(bounds.origin.x, bounds.origin.y + bottom_inset),
+                    NSSize::new(bounds.size.width, (bounds.size.height - bottom_inset).max(0.0)),
+                )
+            }
+        }
+    }
+
+    fn bottom_inset(self) -> f64 {
+        match self {
+            Self::FullWindow => 0.0,
+            Self::MainContentAboveDetachedFooter { bottom_inset } => bottom_inset.max(0.0),
+        }
+    }
+
+    fn is_detached_main(self) -> bool {
+        matches!(self, Self::MainContentAboveDetachedFooter { .. })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tahoe_backdrop_layout(window_name: &str) -> TahoeBackdropLayout {
+    let bottom_inset = f64::from(crate::footer_popup::main_window_float_footer_strip_height());
+    if window_name == "Main window" && bottom_inset > 0.0 {
+        TahoeBackdropLayout::MainContentAboveDetachedFooter { bottom_inset }
+    } else {
+        TahoeBackdropLayout::FullWindow
+    }
+}
 
 /// Pass-through hit test: the backdrop never participates in input so it can
 /// never steal clicks/scrolls from GPUI content or the footer trio. Mirrors
@@ -421,7 +470,10 @@ extern "C" fn tahoe_glass_backdrop_repin(this: &objc::runtime::Object, _: objc::
             return;
         }
         let bounds: cocoa::foundation::NSRect = msg_send![superview, bounds];
-        let _: () = msg_send![this_id, setFrame: bounds];
+        let bottom_inset = *this.get_ivar::<f64>("_scriptKitBottomInset");
+        let frame = TahoeBackdropLayout::MainContentAboveDetachedFooter { bottom_inset }
+            .frame(bounds);
+        let _: () = msg_send![this_id, setFrame: frame];
     }
 }
 
@@ -460,6 +512,7 @@ fn tahoe_glass_backdrop_view_class(glass_class: id) -> Option<*const objc::runti
                 .map(|class| class as *const Class as usize)
                 .unwrap_or(0);
         };
+        decl.add_ivar::<f64>("_scriptKitBottomInset");
         decl.add_method(
             sel!(hitTest:),
             tahoe_glass_backdrop_hit_test
@@ -1683,10 +1736,8 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     }
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
-    // Floating footer chrome: the footer strip lives OUTSIDE the window frame
-    // (window_resize shortens the NSWindow), so the backdrop is full-bleed
-    // like every other glass window.
-    let backdrop_frame = content_bounds;
+    let backdrop_layout = tahoe_backdrop_layout(window_name);
+    let backdrop_frame = backdrop_layout.frame(content_bounds);
     let vev_count_before =
         tahoe_count_views_kind_of_excluding(content_view, class!(NSVisualEffectView), nil);
 
@@ -1745,6 +1796,10 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         created = true;
     }
 
+    (*glass_view).set_ivar(
+        "_scriptKitBottomInset",
+        backdrop_layout.bottom_inset(),
+    );
     let _: () = msg_send![glass_view, setFrame: backdrop_frame];
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
@@ -1758,7 +1813,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         // own), so round them to match the GPUI root container's
         // `rounded(12.)`.
         if window_name == "Main window" && radius <= 0.0 {
-            12.0
+            f64::from(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX)
         } else {
             radius
         }
@@ -1772,6 +1827,64 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
             false
         }
     };
+
+    // The physical main NSWindow is only a transparent composition host. A
+    // native full-window shadow would reveal that host as one rectangular
+    // slab and visually bridge the main material to the footer capsules.
+    // Cast any depth from the bounded backdrop layer instead.
+    let content_layer: id = msg_send![content_view, layer];
+    if backdrop_layout.is_detached_main() {
+        let _: () = msg_send![window, setHasShadow: false];
+        if content_layer != nil {
+            let _: () = msg_send![content_layer, setCornerRadius: 0.0f64];
+            let _: () = msg_send![content_layer, setMasksToBounds: false];
+        }
+        let _: () = msg_send![glass_view, setWantsLayer: true];
+        let backdrop_layer: id = msg_send![glass_view, layer];
+        if backdrop_layer != nil {
+            let shadow = crate::theme::get_cached_theme().get_drop_shadow();
+            let shadow_opacity = if shadow.enabled { shadow.opacity } else { 0.0 };
+            let _: () = msg_send![backdrop_layer, setMasksToBounds: false];
+            let _: () = msg_send![backdrop_layer, setShadowOpacity: shadow_opacity];
+            let _: () = msg_send![backdrop_layer, setShadowRadius: f64::from(shadow.blur_radius) / 2.0];
+            let _: () = msg_send![
+                backdrop_layer,
+                setShadowOffset: cocoa::foundation::NSSize::new(
+                    f64::from(shadow.offset_x),
+                    -f64::from(shadow.offset_y)
+                )
+            ];
+            let shadow_color: id = msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: f64::from((shadow.color >> 16) & 0xff) / 255.0
+                green: f64::from((shadow.color >> 8) & 0xff) / 255.0
+                blue: f64::from(shadow.color & 0xff) / 255.0
+                alpha: 1.0f64
+            ];
+            if shadow_color != nil {
+                let cg_color: id = msg_send![shadow_color, CGColor];
+                let _: () = msg_send![backdrop_layer, setShadowColor: cg_color];
+            }
+            let backdrop_bounds: NSRect = msg_send![glass_view, bounds];
+            let path: id = msg_send![
+                class!(NSBezierPath),
+                bezierPathWithRoundedRect: backdrop_bounds
+                xRadius: corner_radius
+                yRadius: corner_radius
+            ];
+            if path != nil {
+                let cg_path: id = msg_send![path, CGPath];
+                let _: () = msg_send![backdrop_layer, setShadowPath: cg_path];
+            }
+        }
+    } else {
+        let _: () = msg_send![window, setHasShadow: true];
+        let backdrop_layer: id = msg_send![glass_view, layer];
+        if backdrop_layer != nil {
+            let _: () = msg_send![backdrop_layer, setShadowOpacity: 0.0f32];
+            let _: () = msg_send![backdrop_layer, setShadowPath: nil];
+        }
+    }
 
     tahoe_pin_glass_backdrop_backmost(content_view, glass_view);
     let _: () = msg_send![glass_view, setNeedsDisplay: true];
@@ -1795,10 +1908,10 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
             backmost,
             index_label,
             subview_count,
-            content_bounds.origin.x,
-            content_bounds.origin.y,
-            content_bounds.size.width,
-            content_bounds.size.height,
+            backdrop_frame.origin.x,
+            backdrop_frame.origin.y,
+            backdrop_frame.size.width,
+            backdrop_frame.size.height,
             tint_applied,
             corner_applied,
             corner_radius,
@@ -2237,6 +2350,40 @@ mod secondary_window_config_tests {
         assert!(super::glass_morph_tuning_from(0.28, 0.0).is_none());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detached_main_backdrop_excludes_footer_and_exact_eight_point_gutter() {
+        use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(750.0, 501.0));
+        let layout = super::TahoeBackdropLayout::MainContentAboveDetachedFooter {
+            bottom_inset: 40.0,
+        };
+        let frame = layout.frame(bounds);
+        assert_eq!(frame.origin.x, 0.0);
+        assert_eq!(frame.origin.y, 40.0);
+        assert_eq!(frame.size.width, 750.0);
+        assert_eq!(frame.size.height, 461.0);
+        assert_eq!(layout.bottom_inset(), 40.0);
+
+        let footer_top = 32.0;
+        assert_eq!(frame.origin.y - footer_top, 8.0);
+        assert!(footer_top <= frame.origin.y);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn secondary_backdrop_remains_full_window() {
+        use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+        let bounds = NSRect::new(NSPoint::new(3.0, 5.0), NSSize::new(420.0, 280.0));
+        let frame = super::TahoeBackdropLayout::FullWindow.frame(bounds);
+        assert_eq!(frame.origin.x, bounds.origin.x);
+        assert_eq!(frame.origin.y, bounds.origin.y);
+        assert_eq!(frame.size.width, bounds.size.width);
+        assert_eq!(frame.size.height, bounds.size.height);
+    }
+
     #[test]
     fn actions_popup_focus_shadow_contract_uses_becomes_key_only_if_needed() {
         let source = include_str!("secondary_window_config.rs");
@@ -2343,10 +2490,6 @@ mod secondary_window_config_tests {
         assert!(
             source.contains("viewWithTag: TAHOE_GLASS_BACKDROP_TAG"),
             "Tahoe glass backdrop must be idempotent via a stable tag lookup"
-        );
-        assert!(
-            source.contains("initWithFrame: content_bounds"),
-            "Tahoe glass backdrop must be created at contentView bounds"
         );
         assert!(
             source.contains("positioned: NS_WINDOW_BELOW") && source.contains("relativeTo: nil"),
