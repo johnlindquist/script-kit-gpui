@@ -158,4 +158,42 @@ mod tests {
             ListViewportInputSource::Momentum
         );
     }
+
+    #[test]
+    fn builtin_native_uniform_scroll_stationary_pointer_and_click_matrix() {
+        for surface in [
+            "app_launcher",
+            "browser_tabs",
+            "current_app_commands",
+            "tips",
+            "window_switcher",
+        ] {
+            let mut policy = ListPointerPolicy {
+                hovered_index: Some(2),
+                suppress_hover_until_pointer_move: false,
+            };
+            policy.begin_viewport_scroll();
+            policy.note_hover_change(6, true);
+            assert_eq!(
+                policy.hovered_index, None,
+                "{surface}: content moving beneath a stationary pointer must not hover"
+            );
+
+            policy.note_pointer_move(6);
+            assert_eq!(
+                policy.hovered_index,
+                Some(6),
+                "{surface}: real pointer move"
+            );
+
+            policy.begin_viewport_scroll();
+            policy.note_pointer_click(4);
+            assert_eq!(
+                policy.hovered_index,
+                Some(4),
+                "{surface}: click establishes row"
+            );
+            assert!(!policy.suppress_hover_until_pointer_move);
+        }
+    }
 }

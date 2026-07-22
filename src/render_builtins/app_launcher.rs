@@ -127,27 +127,6 @@ impl ScriptListApp {
 
         let filtered_apps = Self::app_launcher_filtered_entries(&self.apps, &filter);
         let filtered_len = filtered_apps.len();
-        let selected_index = if let Some(reanchored) = self.builtin_reanchor_selection_from_scroll(
-            selected_index,
-            &self.list_scroll_handle,
-            filtered_len,
-            8,
-        ) {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "app_launcher",
-                reason = "render",
-                selected_before = selected_index,
-                selected_after = reanchored,
-            );
-            if let AppView::AppLauncherView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected_index
-        };
 
         // Key handler for app launcher
         let handle_key = cx.listener(
@@ -195,20 +174,17 @@ impl ScriptListApp {
 
                     match key {
                         _ if is_key_up(key) => {
-                            if *selected_index > 0 {
-                                *selected_index -= 1;
-                                this.list_scroll_handle
-                                    .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                                cx.notify();
-                            }
+                            *selected_index = selected_index.saturating_sub(1);
+                            this.list_scroll_handle
+                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                            cx.notify();
                         }
                         _ if is_key_down(key) => {
-                            if *selected_index < filtered_len.saturating_sub(1) {
-                                *selected_index += 1;
-                                this.list_scroll_handle
-                                    .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                                cx.notify();
-                            }
+                            *selected_index =
+                                (*selected_index + 1).min(filtered_len.saturating_sub(1));
+                            this.list_scroll_handle
+                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                            cx.notify();
                         }
                         _ if is_key_enter(key) => {
                             // Launch selected app and hide window
@@ -268,6 +244,10 @@ impl ScriptListApp {
                             if let Some((_, app)) = apps_for_closure.get(ix) {
                                 let is_selected = ix == selected;
                                 let is_hovered = hovered == Some(ix);
+                                let row_id = app
+                                    .bundle_id
+                                    .clone()
+                                    .unwrap_or_else(|| app.path.to_string_lossy().into_owned());
 
                                 // Format app path for description
                                 let path_str = app.path.to_string_lossy();
@@ -302,7 +282,9 @@ impl ScriptListApp {
                                                 {
                                                     *selected_index = ix;
                                                 }
-                                                cx.notify();
+                                                this.list_scroll_handle
+                                                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                                this.note_list_pointer_click(ix, cx);
 
                                                 // Double-click: launch app
                                                 if let gpui::ClickEvent::Mouse(mouse_event) = event
@@ -330,28 +312,32 @@ impl ScriptListApp {
 
                                 // Hover handler for mouse tracking
                                 let hover_entity = hover_entity_handle.clone();
+                                let move_entity = hover_entity_handle.clone();
+                                let move_handler =
+                                    move |_event: &gpui::MouseMoveEvent,
+                                          _window: &mut Window,
+                                          cx: &mut gpui::App| {
+                                        if let Some(app) = move_entity.upgrade() {
+                                            app.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(ix, cx);
+                                            });
+                                        }
+                                    };
                                 let hover_handler =
                                     move |is_hovered: &bool,
                                           _window: &mut Window,
                                           cx: &mut gpui::App| {
                                         if let Some(app) = hover_entity.upgrade() {
                                             app.update(cx, |this, cx| {
-                                                if *is_hovered {
-                                                    this.input_mode = InputMode::Mouse;
-                                                    if this.hovered_index != Some(ix) {
-                                                        this.hovered_index = Some(ix);
-                                                        cx.notify();
-                                                    }
-                                                } else if this.hovered_index == Some(ix) {
-                                                    this.hovered_index = None;
-                                                    cx.notify();
+                                                if !*is_hovered {
+                                                    this.note_list_pointer_leave(ix, cx);
                                                 }
                                             });
                                         }
                                     };
 
                                 div()
-                                    .id(ix)
+                                    .id(row_id)
                                     .cursor_pointer()
                                     .when(
                                         crate::list_item::LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED,
@@ -370,6 +356,7 @@ impl ScriptListApp {
                                         },
                                     )
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
                                     .child(
                                         ListItem::new(app.name.clone(), list_colors)
@@ -424,101 +411,7 @@ impl ScriptListApp {
                     .min_h(px(0.))
                     .on_scroll_wheel(cx.listener(
                         move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                            let view_state = if let AppView::AppLauncherView {
-                                filter,
-                                selected_index,
-                            } = &this.current_view
-                            {
-                                Some((filter.clone(), *selected_index))
-                            } else {
-                                None
-                            };
-
-                            let Some((current_filter, current_selected)) = view_state else {
-                                return;
-                            };
-
-                            let (_, filtered_len) =
-                                this.app_launcher_dataset_and_visible_counts(&current_filter);
-                            let scroll_top_before =
-                                Self::builtin_uniform_list_scrollbar_metrics(
-                                    &this.list_scroll_handle,
-                                    filtered_len,
-                                    8,
-                                )
-                                .map(|(first_visible, _, _)| first_visible)
-                                .unwrap_or(0);
-                            let wheel_accum_before = this.wheel_accum;
-                            let delta_lines: f32 = match event.delta {
-                                gpui::ScrollDelta::Lines(point) => point.y,
-                                gpui::ScrollDelta::Pixels(point) => {
-                                    let pixels: f32 = point.y.into();
-                                    pixels
-                                        / crate::list_item::effective_average_item_height_for_scroll()
-                                }
-                            };
-
-                            let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                                event,
-                                current_selected,
-                                filtered_len,
-                            ) else {
-                                if filtered_len > 0 {
-                                    cx.stop_propagation();
-                                }
-                                return;
-                            };
-
-                            if let AppView::AppLauncherView { selected_index, .. } =
-                                &mut this.current_view
-                            {
-                                *selected_index = new_selected;
-                            }
-
-                            this.list_scroll_handle
-                                .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                            this.note_builtin_selection_owned_wheel_scroll(new_selected);
-
-                            let final_selected = new_selected;
-
-                            let scroll_top_after =
-                                Self::builtin_uniform_list_scrollbar_metrics(
-                                    &this.list_scroll_handle,
-                                    filtered_len,
-                                    8,
-                                )
-                                .map(|(first_visible, _, _)| first_visible)
-                                .unwrap_or(scroll_top_before);
-                            let steps = (wheel_accum_before + -delta_lines).trunc() as i32;
-
-                            Self::log_builtin_scroll_event(
-                                "app_launcher",
-                                "scroll_to_item",
-                                "wheel",
-                                filtered_len,
-                                Some(final_selected),
-                                Some(new_selected),
-                                Some(&current_filter),
-                                "mouse",
-                            );
-                            tracing::debug!(
-                                target: "SCROLL_STATE",
-                                view = "app_launcher",
-                                delta_lines,
-                                steps,
-                                total_items = filtered_len,
-                                selected_before = current_selected,
-                                selected_after = final_selected,
-                                scroll_top_before,
-                                scroll_top_after,
-                                wheel_accum_before,
-                                wheel_accum_after = this.wheel_accum,
-                                propagation_stopped = true,
-                                "app launcher wheel handled"
-                            );
-
-                            cx.notify();
-                            cx.stop_propagation();
+                            this.observe_builtin_native_list_scroll(event, cx);
                         },
                     ))
                     .child(list_element)
@@ -626,27 +519,6 @@ mod app_launcher_chrome_tests {
                 && source.contains("PromptChromeAudit::minimal_list(")
                 && source.contains("\"render_builtins::app_launcher\""),
             "app launcher should emit a minimal-list runtime audit"
-        );
-    }
-
-    #[test]
-    fn app_launcher_owns_wheel_scroll_and_reanchors_selection() {
-        let source = read_source();
-        assert!(
-            source.contains(".on_scroll_wheel(cx.listener("),
-            "app launcher should intercept wheel events on the list pane"
-        );
-        assert!(
-            source.contains("builtin_scroll_target_from_wheel("),
-            "app launcher should convert wheel deltas into selection targets"
-        );
-        assert!(
-            source.contains("builtin_reanchor_selection_from_scroll("),
-            "app launcher should reanchor selection after handle movement"
-        );
-        assert!(
-            source.contains("target: \"SCROLL_STATE\""),
-            "app launcher wheel path should emit SCROLL_STATE logs"
         );
     }
 }

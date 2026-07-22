@@ -57,27 +57,6 @@ impl ScriptListApp {
                 *selected_index = selected;
             }
         }
-        let selected = if let Some(reanchored) = self.builtin_reanchor_selection_from_scroll(
-            selected,
-            &self.tips_list_scroll_handle,
-            filtered_len,
-            8,
-        ) {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "tips",
-                reason = "render",
-                selected_before = selected,
-                selected_after = reanchored,
-            );
-            if let AppView::TipsView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected
-        };
         let preview = visible
             .get(selected)
             .and_then(|index| entries.get(*index))
@@ -163,6 +142,8 @@ impl ScriptListApp {
                                     .get(row)
                                     .and_then(|index| entries_for_rows.get(*index))
                                 {
+                                    let underlying_index = visible_for_rows[row];
+                                    let row_id = format!("tip-{underlying_index}-{}", tip.title);
                                     let is_selected = row == current_selected;
                                     let is_hovered = hovered == Some(row);
 
@@ -179,6 +160,7 @@ impl ScriptListApp {
                                         }
                                         this.tips_list_scroll_handle
                                             .scroll_to_item(row, ScrollStrategy::Nearest);
+                                        this.note_list_pointer_click(row, cx);
                                         if let gpui::ClickEvent::Mouse(mouse_event) = event {
                                             if mouse_event.down.click_count == 2 {
                                                 this.tips_copy_selected_example(cx);
@@ -191,29 +173,33 @@ impl ScriptListApp {
                             };
 
                                     let hover_entity = hover_entity_handle.clone();
+                                    let move_entity = hover_entity_handle.clone();
+                                    let move_handler = move |_event: &gpui::MouseMoveEvent,
+                                                             _window: &mut Window,
+                                                             cx: &mut gpui::App| {
+                                        if let Some(app) = move_entity.upgrade() {
+                                            app.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(row, cx);
+                                            });
+                                        }
+                                    };
                                     let hover_handler = move |is_hovered: &bool,
                                                       _window: &mut Window,
                                                       cx: &mut gpui::App| {
                                 if let Some(app) = hover_entity.upgrade() {
                                     app.update(cx, |this, cx| {
-                                        if *is_hovered {
-                                            this.input_mode = InputMode::Mouse;
-                                            if this.hovered_index != Some(row) {
-                                                this.hovered_index = Some(row);
-                                                cx.notify();
-                                            }
-                                        } else if this.hovered_index == Some(row) {
-                                            this.hovered_index = None;
-                                            cx.notify();
+                                        if !*is_hovered {
+                                            this.note_list_pointer_leave(row, cx);
                                         }
                                     });
                                 }
                             };
 
                                     div()
-                                        .id(row)
+                                        .id(row_id)
                                         .cursor_pointer()
                                         .on_click(click_handler)
+                                        .on_mouse_move(move_handler)
                                         .on_hover(hover_handler)
                                         .child(
                                             ListItem::new(tip.title.clone(), list_colors)
@@ -244,51 +230,7 @@ impl ScriptListApp {
             .flex_col()
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                    let view_state = if let AppView::TipsView {
-                        filter,
-                        selected_index,
-                        entries,
-                    } = &this.current_view
-                    {
-                        Some((
-                            filter.clone(),
-                            *selected_index,
-                            script_kit_gpui::tips::visible_tip_indices(entries, filter).len(),
-                        ))
-                    } else {
-                        None
-                    };
-                    let Some((current_filter, current_selected, filtered_len)) = view_state else {
-                        return;
-                    };
-                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                        event,
-                        current_selected,
-                        filtered_len,
-                    ) else {
-                        if filtered_len > 0 {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    };
-                    if let AppView::TipsView { selected_index, .. } = &mut this.current_view {
-                        *selected_index = new_selected;
-                    }
-                    this.tips_list_scroll_handle
-                        .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                    this.note_builtin_selection_owned_wheel_scroll(new_selected);
-                    Self::log_builtin_scroll_event(
-                        "tips",
-                        "scroll_to_item",
-                        "wheel",
-                        filtered_len,
-                        Some(new_selected),
-                        Some(new_selected),
-                        Some(&current_filter),
-                        "mouse",
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
+                    this.observe_builtin_native_list_scroll(event, cx);
                 },
             ))
             .child(
@@ -414,7 +356,7 @@ mod tips_consistency_audit {
     /// native main-window footer and a list that never scrolled its selection
     /// into view (2026-07-11 regression). These assertions pin the surface to
     /// the shared builtin-browser anatomy: tracked uniform list with
-    /// scroll-into-view, shared wheel contract, vendor scrollbar, shared
+    /// scroll-into-view, vendor scrollbar, shared
     /// chrome, and the persistent native-footer slot.
     #[test]
     fn tips_list_scrolls_selection_into_view() {
@@ -422,14 +364,6 @@ mod tips_consistency_audit {
         assert!(
             source.contains(".track_scroll(&self.tips_list_scroll_handle)"),
             "tips list must be a tracked uniform list"
-        );
-        assert!(
-            source.contains("builtin_reanchor_selection_from_scroll("),
-            "tips must reanchor selection after scrollbar movement"
-        );
-        assert!(
-            source.contains("builtin_scroll_target_from_wheel("),
-            "tips must use the shared wheel delta conversion"
         );
         assert!(
             source.contains("builtin_uniform_list_scrollbar("),

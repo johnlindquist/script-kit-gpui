@@ -4,9 +4,10 @@ use std::{
 };
 
 use gpui::{
-    div, list, point, prelude::*, px, size, AppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ListAlignment, ListOffset, ListSizingBehavior, ListState, Render, ScrollDelta,
-    ScrollPhase, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, Window,
+    div, list, point, prelude::*, px, size, uniform_list, AppContext as _, Context, Entity,
+    InteractiveElement, IntoElement, ListAlignment, ListOffset, ListSizingBehavior, ListState,
+    Render, ScrollDelta, ScrollPhase, ScrollStrategy, ScrollWheelEvent, TestAppContext, TouchPhase,
+    UniformListScrollHandle, VisualTestContext, Window,
 };
 
 const VIEWPORT_WIDTH: f32 = 320.0;
@@ -92,6 +93,60 @@ struct HarnessFixture {
     observer_samples: Rc<RefCell<Vec<ObserverSample>>>,
 }
 
+struct NativeUniformListScrollHarness {
+    scroll_handle: UniformListScrollHandle,
+    item_count: usize,
+    row_height: f32,
+    selected_index: Rc<Cell<usize>>,
+    observer_count: Rc<Cell<usize>>,
+}
+
+impl Render for NativeUniformListScrollHarness {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected_index = self.selected_index.clone();
+        let row_height = self.row_height;
+        let native_list = uniform_list(
+            "builtin-native-uniform-list",
+            self.item_count,
+            move |visible_range, _window, _cx| {
+                visible_range
+                    .map(|ix| {
+                        div()
+                            .id(("builtin-native-uniform-row", ix))
+                            .h(px(row_height))
+                            .w_full()
+                            .when(selected_index.get() == ix, |row| {
+                                row.child(div().id("builtin-native-uniform-selection"))
+                            })
+                    })
+                    .collect()
+            },
+        )
+        .h_full()
+        .track_scroll(&self.scroll_handle);
+
+        div()
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .on_scroll_wheel(
+                cx.listener(|this, _event: &ScrollWheelEvent, _window, _cx| {
+                    this.observer_count.set(this.observer_count.get() + 1);
+                }),
+            )
+            .child(native_list)
+    }
+}
+
+struct UniformHarnessFixture {
+    entity: Entity<NativeUniformListScrollHarness>,
+    scroll_handle: UniformListScrollHandle,
+    item_count: usize,
+    row_height: f32,
+    selected_index: Rc<Cell<usize>>,
+    observer_count: Rc<Cell<usize>>,
+}
+
 fn rows_with_first_header(hidden: bool) -> Vec<FixtureRow> {
     let mut rows = Vec::with_capacity(ITEM_COUNT + 16);
     rows.push(FixtureRow {
@@ -143,6 +198,61 @@ fn build_harness(cx: &mut TestAppContext, hidden_first_header: bool) -> HarnessF
         selected_index,
         observer_samples,
     }
+}
+
+fn build_uniform_harness(
+    cx: &mut TestAppContext,
+    item_count: usize,
+    row_height: f32,
+) -> UniformHarnessFixture {
+    let scroll_handle = UniformListScrollHandle::new();
+    let selected_index = Rc::new(Cell::new(0));
+    let observer_count = Rc::new(Cell::new(0));
+    let entity = cx.new(|_| NativeUniformListScrollHarness {
+        scroll_handle: scroll_handle.clone(),
+        item_count,
+        row_height,
+        selected_index: selected_index.clone(),
+        observer_count: observer_count.clone(),
+    });
+
+    UniformHarnessFixture {
+        entity,
+        scroll_handle,
+        item_count,
+        row_height,
+        selected_index,
+        observer_count,
+    }
+}
+
+fn draw_uniform(vcx: &mut VisualTestContext, entity: &Entity<NativeUniformListScrollHarness>) {
+    let entity = entity.clone();
+    vcx.draw(
+        point(px(0.0), px(0.0)),
+        size(px(VIEWPORT_WIDTH), px(VIEWPORT_HEIGHT)),
+        move |_window, _cx| entity.into_any_element(),
+    );
+}
+
+fn dispatch_and_redraw_uniform(
+    vcx: &mut VisualTestContext,
+    entity: &Entity<NativeUniformListScrollHarness>,
+    event: ScrollWheelEvent,
+) {
+    vcx.simulate_event(event);
+    draw_uniform(vcx, entity);
+}
+
+fn uniform_absolute_scroll_top(fixture: &UniformHarnessFixture) -> f32 {
+    -fixture
+        .scroll_handle
+        .0
+        .borrow()
+        .base_handle
+        .offset()
+        .y
+        .as_f32()
 }
 
 fn draw(vcx: &mut VisualTestContext, entity: &Entity<NativeScriptListScrollHarness>) {
@@ -510,4 +620,165 @@ fn native_script_list_scrollbar_changes_only_the_fully_progressed_viewport(
         observer_count_before,
         "the direct scrollbar API must not synthesize a wheel observer event"
     );
+}
+
+#[gpui::test]
+fn builtin_native_uniform_scroll_transport_and_dataset_matrix(cx: &mut TestAppContext) {
+    const SURFACES: [&str; 5] = [
+        "app_launcher",
+        "browser_tabs",
+        "current_app_commands",
+        "tips",
+        "window_switcher",
+    ];
+
+    for surface in SURFACES {
+        for item_count in [0, 3, 80] {
+            let fixture = build_uniform_harness(cx, item_count, 40.0);
+            let mut vcx = cx.add_empty_window();
+            draw_uniform(&mut vcx, &fixture.entity);
+            let selected_before = fixture.selected_index.get();
+
+            for event in [
+                pixel_event(
+                    -7.5,
+                    TouchPhase::Started,
+                    ScrollPhase::Began,
+                    ScrollPhase::None,
+                    1.0,
+                ),
+                line_event(-1.0),
+                pixel_event(
+                    -4.25,
+                    TouchPhase::Moved,
+                    ScrollPhase::None,
+                    ScrollPhase::Changed,
+                    1.1,
+                ),
+            ] {
+                dispatch_and_redraw_uniform(&mut vcx, &fixture.entity, event);
+            }
+
+            assert_eq!(
+                fixture.selected_index.get(),
+                selected_before,
+                "{surface}: native pixel/line/momentum input must not change selection"
+            );
+            assert_eq!(
+                fixture.observer_count.get(),
+                3,
+                "{surface}: ancestor observer"
+            );
+            let absolute = uniform_absolute_scroll_top(&fixture);
+            if item_count <= 3 {
+                assert_near(absolute, 0.0, &format!("{surface}: empty/short data"));
+            } else {
+                // GPUI converts one line using the window's native 26px line
+                // height in this harness: 7.5px + 26px + 4.25px.
+                assert_near(absolute, 37.75, &format!("{surface}: long data"));
+                dispatch_and_redraw_uniform(
+                    &mut vcx,
+                    &fixture.entity,
+                    pixel_event(
+                        -100_000.0,
+                        TouchPhase::Moved,
+                        ScrollPhase::Changed,
+                        ScrollPhase::None,
+                        1.2,
+                    ),
+                );
+                assert_near(
+                    uniform_absolute_scroll_top(&fixture),
+                    fixture.item_count as f32 * fixture.row_height - VIEWPORT_HEIGHT,
+                    &format!("{surface}: exact bottom"),
+                );
+                dispatch_and_redraw_uniform(
+                    &mut vcx,
+                    &fixture.entity,
+                    pixel_event(
+                        100_000.0,
+                        TouchPhase::Moved,
+                        ScrollPhase::Changed,
+                        ScrollPhase::None,
+                        1.3,
+                    ),
+                );
+                assert_near(
+                    uniform_absolute_scroll_top(&fixture),
+                    0.0,
+                    &format!("{surface}: exact top after bottom"),
+                );
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn builtin_native_uniform_scroll_explicit_selection_reveal_and_theme_height_matrix(
+    cx: &mut TestAppContext,
+) {
+    const SURFACES: [&str; 5] = [
+        "app_launcher",
+        "browser_tabs",
+        "current_app_commands",
+        "tips",
+        "window_switcher",
+    ];
+
+    for surface in SURFACES {
+        for row_height in [32.0, 56.0] {
+            let fixture = build_uniform_harness(cx, 80, row_height);
+            let mut vcx = cx.add_empty_window();
+            draw_uniform(&mut vcx, &fixture.entity);
+
+            dispatch_and_redraw_uniform(
+                &mut vcx,
+                &fixture.entity,
+                pixel_event(
+                    -45.0,
+                    TouchPhase::Moved,
+                    ScrollPhase::Changed,
+                    ScrollPhase::None,
+                    2.0,
+                ),
+            );
+            assert_near(
+                uniform_absolute_scroll_top(&fixture),
+                45.0,
+                &format!("{surface}: theme row height {row_height}"),
+            );
+
+            // Keyboard intent: even a clamped endpoint selection explicitly
+            // reveals the selected row after independent viewport movement.
+            fixture.selected_index.set(79);
+            fixture
+                .scroll_handle
+                .scroll_to_item(79, ScrollStrategy::Nearest);
+            draw_uniform(&mut vcx, &fixture.entity);
+            let keyboard_top = uniform_absolute_scroll_top(&fixture);
+            assert!(
+                keyboard_top <= 79.0 * row_height
+                    && keyboard_top + VIEWPORT_HEIGHT >= 80.0 * row_height,
+                "{surface}: keyboard reveal keeps selected row in the viewport"
+            );
+
+            // Click intent follows the same explicit selection-then-reveal
+            // contract and is independent of the preceding native offset.
+            fixture.selected_index.set(0);
+            fixture
+                .scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Nearest);
+            draw_uniform(&mut vcx, &fixture.entity);
+            assert_eq!(
+                fixture.selected_index.get(),
+                0,
+                "{surface}: click selection"
+            );
+            assert_near(
+                uniform_absolute_scroll_top(&fixture),
+                0.0,
+                &format!("{surface}: click reveal"),
+            );
+        }
+    }
 }

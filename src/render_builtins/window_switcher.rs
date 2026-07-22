@@ -90,27 +90,6 @@ impl ScriptListApp {
                 .collect()
         };
         let filtered_len = filtered_windows.len();
-        let selected_index = if let Some(reanchored) = self.builtin_reanchor_selection_from_scroll(
-            selected_index,
-            &self.window_list_scroll_handle,
-            filtered_len,
-            8,
-        ) {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "window_switcher",
-                reason = "render",
-                selected_before = selected_index,
-                selected_after = reanchored,
-            );
-            if let AppView::WindowSwitcherView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected_index
-        };
 
         // Key handler for window switcher
         let handle_key = cx.listener(
@@ -172,35 +151,26 @@ impl ScriptListApp {
 
                     match key {
                         _ if is_key_up(key) => {
-                            if *selected_index > 0 {
-                                *selected_index -= 1;
-                                this.window_list_scroll_handle
-                                    .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                                cx.notify();
-                            }
+                            *selected_index = selected_index.saturating_sub(1);
+                            this.window_list_scroll_handle
+                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                            cx.notify();
                         }
                         _ if is_key_down(key) => {
-                            if *selected_index < filtered_len.saturating_sub(1) {
-                                *selected_index += 1;
-                                this.window_list_scroll_handle
-                                    .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                                cx.notify();
-                            }
+                            *selected_index =
+                                (*selected_index + 1).min(filtered_len.saturating_sub(1));
+                            this.window_list_scroll_handle
+                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                            cx.notify();
                         }
                         _ if is_key_enter(key) => {
                             // Focus selected window and hide Script Kit
                             if let Some((_, window_info)) = filtered_windows.get(*selected_index) {
                                 let focus_action = WindowSwitcherFocusAction::FocusSelectedWindow;
-                                logging::log(
-                                    "EXEC",
-                                    &focus_action.attempt_log(&window_info.title),
-                                );
+                                logging::log("EXEC", &focus_action.attempt_log(&window_info.title));
                                 if let Err(e) = window_control::focus_window(window_info.id) {
                                     let failure_message = focus_action.failure_message(e);
-                                    logging::log(
-                                        "ERROR",
-                                        &failure_message,
-                                    );
+                                    logging::log("ERROR", &failure_message);
                                     this.toast_manager.push(
                                         components::toast::Toast::error(
                                             failure_message,
@@ -288,7 +258,9 @@ impl ScriptListApp {
                                                 {
                                                     *selected_index = ix;
                                                 }
-                                                cx.notify();
+                                                this.window_list_scroll_handle
+                                                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                                this.note_list_pointer_click(ix, cx);
 
                                                 // Double-click: focus window
                                                 if let gpui::ClickEvent::Mouse(mouse_event) = event
@@ -314,28 +286,32 @@ impl ScriptListApp {
 
                                 // Hover handler for mouse tracking
                                 let hover_entity = hover_entity_handle.clone();
+                                let move_entity = hover_entity_handle.clone();
+                                let move_handler =
+                                    move |_event: &gpui::MouseMoveEvent,
+                                          _window: &mut Window,
+                                          cx: &mut gpui::App| {
+                                        if let Some(app) = move_entity.upgrade() {
+                                            app.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(ix, cx);
+                                            });
+                                        }
+                                    };
                                 let hover_handler =
                                     move |is_hovered: &bool,
                                           _window: &mut Window,
                                           cx: &mut gpui::App| {
                                         if let Some(app) = hover_entity.upgrade() {
                                             app.update(cx, |this, cx| {
-                                                if *is_hovered {
-                                                    this.input_mode = InputMode::Mouse;
-                                                    if this.hovered_index != Some(ix) {
-                                                        this.hovered_index = Some(ix);
-                                                        cx.notify();
-                                                    }
-                                                } else if this.hovered_index == Some(ix) {
-                                                    this.hovered_index = None;
-                                                    cx.notify();
+                                                if !*is_hovered {
+                                                    this.note_list_pointer_leave(ix, cx);
                                                 }
                                             });
                                         }
                                     };
 
                                 div()
-                                    .id(ix)
+                                    .id(("window-switcher-row", win_id))
                                     .cursor_pointer()
                                     .when(
                                         crate::list_item::LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED,
@@ -354,6 +330,7 @@ impl ScriptListApp {
                                         },
                                     )
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
                                     .child(
                                         ListItem::new(name, list_colors)
@@ -404,66 +381,7 @@ impl ScriptListApp {
                     .py(px(design_spacing.padding_xs))
                     .on_scroll_wheel(cx.listener(
                         move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                            let view_state = if let AppView::WindowSwitcherView {
-                                filter,
-                                selected_index,
-                            } = &this.current_view
-                            {
-                                Some((filter.clone(), *selected_index))
-                            } else {
-                                None
-                            };
-
-                            let Some((current_filter, current_selected)) = view_state else {
-                                return;
-                            };
-
-                            let filtered_len = if current_filter.is_empty() {
-                                this.cached_windows.len()
-                            } else {
-                                let filter_lower = current_filter.to_lowercase();
-                                this.cached_windows
-                                    .iter()
-                                    .filter(|window| {
-                                        window.title.to_lowercase().contains(&filter_lower)
-                                            || window.app.to_lowercase().contains(&filter_lower)
-                                    })
-                                    .count()
-                            };
-
-                            let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                                event,
-                                current_selected,
-                                filtered_len,
-                            ) else {
-                                if filtered_len > 0 {
-                                    cx.stop_propagation();
-                                }
-                                return;
-                            };
-
-                            if let AppView::WindowSwitcherView { selected_index, .. } =
-                                &mut this.current_view
-                            {
-                                *selected_index = new_selected;
-                            }
-
-                            this.window_list_scroll_handle
-                                .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                            this.note_builtin_selection_owned_wheel_scroll(new_selected);
-
-                            Self::log_builtin_scroll_event(
-                                "window_switcher",
-                                "scroll_to_item",
-                                "wheel",
-                                filtered_len,
-                                Some(new_selected),
-                                Some(new_selected),
-                                Some(&current_filter),
-                                "mouse",
-                            );
-                            cx.notify();
-                            cx.stop_propagation();
+                            this.observe_builtin_native_list_scroll(event, cx);
                         },
                     ))
                     .child(list_element)
@@ -504,12 +422,13 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(format!(
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(format!(
                         "{} windows",
                         self.cached_windows.len()
-                    )),
-                ], cx),
+                    ))],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,
@@ -538,27 +457,6 @@ mod window_switcher_chrome_audit {
             source.matches(&legacy).count(),
             0,
             "window_switcher should not use PromptFooter"
-        );
-    }
-
-    #[test]
-    fn window_switcher_uses_wheel_contract_and_vendor_scrollbar() {
-        let source = include_str!("window_switcher.rs");
-        assert!(
-            source.contains(".on_scroll_wheel(cx.listener("),
-            "window_switcher should intercept wheel scrolling on the list pane"
-        );
-        assert!(
-            source.contains("builtin_scroll_target_from_wheel("),
-            "window_switcher should use shared wheel delta conversion"
-        );
-        assert!(
-            source.contains("builtin_reanchor_selection_from_scroll("),
-            "window_switcher should reanchor selection after handle movement"
-        );
-        assert!(
-            source.contains("builtin_uniform_list_scrollbar("),
-            "window_switcher should attach the shared vendor scrollbar helper"
         );
     }
 }

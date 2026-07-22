@@ -611,7 +611,16 @@ impl ScriptListApp {
     /// Returns `false` for `ScriptList`, `FileSearchView` (dedicated routing
     /// via `restart_file_search_stream_for_query`), and non-filter views.
     pub(crate) fn write_filter_to_current_subview(&mut self, text: &str) -> bool {
-        match &mut self.current_view {
+        enum StableUniformReset {
+            AppLauncher,
+            WindowSwitcher,
+            BrowserTabs,
+            CurrentAppCommands,
+            Tips,
+        }
+
+        let mut stable_uniform_reset = None;
+        let handled = match &mut self.current_view {
             AppView::ClipboardHistoryView {
                 filter,
                 selected_index,
@@ -623,21 +632,27 @@ impl ScriptListApp {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    stable_uniform_reset = Some(StableUniformReset::AppLauncher);
+                }
                 true
             }
             AppView::WindowSwitcherView {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    stable_uniform_reset = Some(StableUniformReset::WindowSwitcher);
+                }
                 true
             }
             AppView::BrowserTabsView {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    stable_uniform_reset = Some(StableUniformReset::BrowserTabs);
+                }
                 true
             }
             AppView::DesignGalleryView {
@@ -714,7 +729,9 @@ impl ScriptListApp {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    stable_uniform_reset = Some(StableUniformReset::CurrentAppCommands);
+                }
                 true
             }
             AppView::AgentChatHistoryView {
@@ -743,7 +760,9 @@ impl ScriptListApp {
                 selected_index,
                 ..
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    stable_uniform_reset = Some(StableUniformReset::Tips);
+                }
                 true
             }
             AppView::NotesBrowseView {
@@ -773,7 +792,33 @@ impl ScriptListApp {
             // query. Consume the write so main-menu filter logic never runs.
             AppView::FlowSessionView { .. } => true,
             _ => false,
+        };
+
+        if let Some(reset) = stable_uniform_reset {
+            match reset {
+                StableUniformReset::AppLauncher => self
+                    .list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top),
+                StableUniformReset::WindowSwitcher => self
+                    .window_list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top),
+                StableUniformReset::BrowserTabs => self
+                    .browser_tabs_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top),
+                StableUniformReset::CurrentAppCommands => self
+                    .current_app_commands_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top),
+                StableUniformReset::Tips => self
+                    .tips_list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top),
+            }
+            self.hovered_index = None;
+            self.list_suppress_hover_until_pointer_move = true;
+            self.last_list_interaction_source =
+                crate::scrolling::list_interaction::ListViewportInputSource::Filter;
         }
+
+        handled
     }
 
     pub(crate) fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -132,27 +132,6 @@ impl ScriptListApp {
         let filtered_tabs =
             crate::browser_tabs::fuzzy_search_browser_tabs(&self.cached_browser_tabs, &filter);
         let filtered_len = filtered_tabs.len();
-        let selected_index = if let Some(reanchored) = self.builtin_reanchor_selection_from_scroll(
-            selected_index,
-            &self.browser_tabs_scroll_handle,
-            filtered_len,
-            8,
-        ) {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "browser_tabs",
-                reason = "render",
-                selected_before = selected_index,
-                selected_after = reanchored,
-            );
-            if let AppView::BrowserTabsView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected_index
-        };
         let total_count = self.cached_browser_tabs.len();
 
         // Key handler — only navigation keys; character input flows through the shared GPUI Input.
@@ -198,20 +177,16 @@ impl ScriptListApp {
                     let filtered_len = filtered_tabs.len();
 
                     if is_key_up(key) {
-                        if *selected_index > 0 {
-                            *selected_index -= 1;
-                            this.browser_tabs_scroll_handle
-                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                            cx.notify();
-                        }
+                        *selected_index = selected_index.saturating_sub(1);
+                        this.browser_tabs_scroll_handle
+                            .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                        cx.notify();
                         cx.stop_propagation();
                     } else if is_key_down(key) {
-                        if *selected_index < filtered_len.saturating_sub(1) {
-                            *selected_index += 1;
-                            this.browser_tabs_scroll_handle
-                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                            cx.notify();
-                        }
+                        *selected_index = (*selected_index + 1).min(filtered_len.saturating_sub(1));
+                        this.browser_tabs_scroll_handle
+                            .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
+                        cx.notify();
                         cx.stop_propagation();
                     } else if is_key_enter(key) {
                         if let Some(tab) = filtered_tabs.get(*selected_index).map(|m| m.tab.clone())
@@ -292,9 +267,11 @@ impl ScriptListApp {
                                     None
                                 };
                                 let display_title = tab.display_title().to_string();
+                                let row_id = crate::browser_tabs::browser_tab_stable_key(&tab);
 
                                 let click_entity = click_entity_handle.clone();
                                 let hover_entity = hover_entity_handle.clone();
+                                let move_entity = hover_entity_handle.clone();
                                 let tab_for_click = tab.clone();
                                 let activation_action =
                                     BrowserTabsActivationAction::ActivateSelectedTab;
@@ -312,7 +289,9 @@ impl ScriptListApp {
                                                 {
                                                     *selected_index = ix;
                                                 }
-                                                cx.notify();
+                                                this.browser_tabs_scroll_handle
+                                                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                                this.note_list_pointer_click(ix, cx);
 
                                                 if let gpui::ClickEvent::Mouse(mouse_event) = event
                                                 {
@@ -353,30 +332,35 @@ impl ScriptListApp {
                                         }
                                     };
 
+                                let move_handler =
+                                    move |_event: &gpui::MouseMoveEvent,
+                                          _window: &mut Window,
+                                          cx: &mut gpui::App| {
+                                        if let Some(app) = move_entity.upgrade() {
+                                            app.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(ix, cx);
+                                            });
+                                        }
+                                    };
+
                                 let hover_handler =
                                     move |is_hovered: &bool,
                                           _window: &mut Window,
                                           cx: &mut gpui::App| {
                                         if let Some(app) = hover_entity.upgrade() {
                                             app.update(cx, |this, cx| {
-                                                if *is_hovered {
-                                                    this.input_mode = InputMode::Mouse;
-                                                    if this.hovered_index != Some(ix) {
-                                                        this.hovered_index = Some(ix);
-                                                        cx.notify();
-                                                    }
-                                                } else if this.hovered_index == Some(ix) {
-                                                    this.hovered_index = None;
-                                                    cx.notify();
+                                                if !*is_hovered {
+                                                    this.note_list_pointer_leave(ix, cx);
                                                 }
                                             });
                                         }
                                     };
 
                                 div()
-                                    .id(ix)
+                                    .id(row_id)
                                     .cursor_pointer()
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
                                     .child(
                                         ListItem::new(display_title, list_colors)
@@ -406,59 +390,7 @@ impl ScriptListApp {
             .py(px(design_spacing.padding_xs))
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                            let view_state = if let AppView::BrowserTabsView {
-                                filter,
-                                selected_index,
-                            } = &this.current_view
-                            {
-                                Some((filter.clone(), *selected_index))
-                            } else {
-                                None
-                            };
-
-                            let Some((current_filter, current_selected)) = view_state else {
-                                return;
-                            };
-
-                            let filtered_len = crate::browser_tabs::fuzzy_search_browser_tabs(
-                                &this.cached_browser_tabs,
-                                &current_filter,
-                            )
-                            .len();
-
-                            let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                                event,
-                                current_selected,
-                                filtered_len,
-                            ) else {
-                                if filtered_len > 0 {
-                                    cx.stop_propagation();
-                                }
-                                return;
-                            };
-
-                            if let AppView::BrowserTabsView { selected_index, .. } =
-                                &mut this.current_view
-                            {
-                                *selected_index = new_selected;
-                            }
-
-                            this.browser_tabs_scroll_handle
-                                .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                            this.note_builtin_selection_owned_wheel_scroll(new_selected);
-
-                            Self::log_builtin_scroll_event(
-                                "browser_tabs",
-                                "scroll_to_item",
-                                "wheel",
-                                filtered_len,
-                                Some(new_selected),
-                                Some(new_selected),
-                                Some(&current_filter),
-                                "mouse",
-                            );
-                            cx.notify();
-                            cx.stop_propagation();
+                    this.observe_builtin_native_list_scroll(event, cx);
                 },
             ))
             .child(list_element)
@@ -495,11 +427,12 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(Self::browser_tabs_count_label(
-                        total_count,
-                    )),
-                ], cx),
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(
+                        Self::browser_tabs_count_label(total_count),
+                    )],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,
@@ -510,31 +443,6 @@ impl ScriptListApp {
                 overlays: Vec::new(),
             },
         )
-    }
-}
-
-#[cfg(test)]
-mod browser_tabs_scroll_contract {
-    const SOURCE: &str = include_str!("browser_tabs.rs");
-
-    #[test]
-    fn browser_tabs_use_wheel_contract_and_vendor_scrollbar() {
-        assert!(
-            SOURCE.contains(".on_scroll_wheel(cx.listener("),
-            "browser tabs should intercept wheel scrolling on the list pane"
-        );
-        assert!(
-            SOURCE.contains("builtin_scroll_target_from_wheel("),
-            "browser tabs should use shared wheel delta conversion"
-        );
-        assert!(
-            SOURCE.contains("builtin_reanchor_selection_from_scroll("),
-            "browser tabs should reanchor selection after handle movement"
-        );
-        assert!(
-            SOURCE.contains("builtin_uniform_list_scrollbar("),
-            "browser tabs should attach the shared vendor scrollbar helper"
-        );
     }
 }
 

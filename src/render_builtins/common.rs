@@ -50,6 +50,19 @@ impl ScriptListApp {
         self.last_list_interaction_source = source;
     }
 
+    /// Observe native list wheel/momentum input without consuming it or
+    /// translating viewport movement into selection movement.
+    pub(crate) fn observe_builtin_native_list_scroll(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.begin_list_viewport_scroll(
+            crate::scrolling::list_interaction::ListViewportInputSource::from_event(event),
+            cx,
+        );
+    }
+
     pub(crate) fn note_list_pointer_move(&mut self, row: usize, cx: &mut gpui::Context<Self>) {
         let mut policy = crate::scrolling::list_interaction::ListPointerPolicy {
             hovered_index: self.hovered_index,

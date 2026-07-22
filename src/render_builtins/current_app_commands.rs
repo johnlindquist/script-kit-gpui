@@ -92,21 +92,6 @@ impl ScriptListApp {
         let filtered_entries =
             Self::current_app_commands_filtered_entries(&self.cached_current_app_entries, &filter);
         let filtered_len = filtered_entries.len();
-        let filter_safe = crate::logging::log_user_value(&filter);
-        tracing::info!(
-            target: "script_kit::scroll_trace",
-            event = "SCROLL_TRACE current_app.render_state",
-            filter_preview = %filter_safe,
-            filter_bytes = filter_safe.raw_bytes,
-            filter_safe_bytes = filter_safe.safe_bytes,
-            filter_truncated = filter_safe.truncated,
-            selected_index,
-            filtered_len,
-            cached_entries = self.cached_current_app_entries.len(),
-            wheel_owned_selected_index = ?self.builtin_wheel_owned_selected_index,
-            "SCROLL_TRACE current_app.render_state"
-        );
-
         // Key handler
         let handle_key = cx.listener(
             move |this: &mut Self,
@@ -197,28 +182,26 @@ impl ScriptListApp {
                 let current_filtered_len = filtered.len();
 
                 if is_key_up(key) {
-                    if current_selected > 0 {
-                        if let AppView::CurrentAppCommandsView { selected_index, .. } =
-                            &mut this.current_view
-                        {
-                            *selected_index = current_selected - 1;
-                            this.current_app_commands_scroll_handle
-                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                        }
-                        cx.notify();
+                    let next = current_selected.saturating_sub(1);
+                    if let AppView::CurrentAppCommandsView { selected_index, .. } =
+                        &mut this.current_view
+                    {
+                        *selected_index = next;
                     }
+                    this.current_app_commands_scroll_handle
+                        .scroll_to_item(next, ScrollStrategy::Nearest);
+                    cx.notify();
                     cx.stop_propagation();
                 } else if is_key_down(key) {
-                    if current_selected < current_filtered_len.saturating_sub(1) {
-                        if let AppView::CurrentAppCommandsView { selected_index, .. } =
-                            &mut this.current_view
-                        {
-                            *selected_index = current_selected + 1;
-                            this.current_app_commands_scroll_handle
-                                .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                        }
-                        cx.notify();
+                    let next = (current_selected + 1).min(current_filtered_len.saturating_sub(1));
+                    if let AppView::CurrentAppCommandsView { selected_index, .. } =
+                        &mut this.current_view
+                    {
+                        *selected_index = next;
                     }
+                    this.current_app_commands_scroll_handle
+                        .scroll_to_item(next, ScrollStrategy::Nearest);
+                    cx.notify();
                     cx.stop_propagation();
                 } else if is_key_enter(key) {
                     // Execute selected menu bar action
@@ -273,6 +256,10 @@ impl ScriptListApp {
                                 let name = entry.name.clone();
                                 let description = entry.description.clone();
                                 let original_entry_index = *orig_idx;
+                                let row_id = format!(
+                                    "current-app-command-{original_entry_index}-{}",
+                                    entry.id
+                                );
 
                                 let click_entity = click_entity_handle.clone();
                                 let click_handler =
@@ -299,37 +286,44 @@ impl ScriptListApp {
                                                         cx,
                                                     );
                                                 }
-                                                cx.notify();
+                                                this.current_app_commands_scroll_handle
+                                                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                                this.note_list_pointer_click(ix, cx);
                                             });
                                         }
                                         cx.stop_propagation();
                                     };
 
                                 let hover_entity = hover_entity_handle.clone();
+                                let move_entity = hover_entity_handle.clone();
+                                let move_handler =
+                                    move |_event: &gpui::MouseMoveEvent,
+                                          _window: &mut Window,
+                                          cx: &mut gpui::App| {
+                                        if let Some(app) = move_entity.upgrade() {
+                                            app.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(ix, cx);
+                                            });
+                                        }
+                                    };
                                 let hover_handler =
                                     move |is_hovered: &bool,
                                           _window: &mut Window,
                                           cx: &mut gpui::App| {
                                         if let Some(app) = hover_entity.upgrade() {
                                             app.update(cx, |this, cx| {
-                                                if *is_hovered {
-                                                    this.input_mode = InputMode::Mouse;
-                                                    if this.hovered_index != Some(ix) {
-                                                        this.hovered_index = Some(ix);
-                                                        cx.notify();
-                                                    }
-                                                } else if this.hovered_index == Some(ix) {
-                                                    this.hovered_index = None;
-                                                    cx.notify();
+                                                if !*is_hovered {
+                                                    this.note_list_pointer_leave(ix, cx);
                                                 }
                                             });
                                         }
                                     };
 
                                 div()
-                                    .id(ix)
+                                    .id(row_id)
                                     .cursor_pointer()
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
                                     .child(
                                         ListItem::new(name, list_colors)
@@ -362,88 +356,7 @@ impl ScriptListApp {
             .relative()
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                    let view_state = if let AppView::CurrentAppCommandsView {
-                        filter,
-                        selected_index,
-                    } = &this.current_view
-                    {
-                        Some((filter.clone(), *selected_index))
-                    } else {
-                        None
-                    };
-
-                    let Some((current_filter, current_selected)) = view_state else {
-                        return;
-                    };
-
-                    let filtered = Self::current_app_commands_filtered_entries(
-                        &this.cached_current_app_entries,
-                        &current_filter,
-                    );
-                    let filtered_len = filtered.len();
-                    let current_filter_safe = crate::logging::log_user_value(&current_filter);
-                    tracing::info!(
-                        target: "script_kit::scroll_trace",
-                        event = "SCROLL_TRACE current_app.wheel_event",
-                        current_selected,
-                        filtered_len,
-                        filter_preview = %current_filter_safe,
-                        filter_bytes = current_filter_safe.raw_bytes,
-                        filter_safe_bytes = current_filter_safe.safe_bytes,
-                        filter_truncated = current_filter_safe.truncated,
-                        "SCROLL_TRACE current_app.wheel_event"
-                    );
-
-                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                        event,
-                        current_selected,
-                        filtered_len,
-                    ) else {
-                        tracing::info!(
-                            target: "script_kit::scroll_trace",
-                            event = "SCROLL_TRACE current_app.wheel_no_target",
-                            current_selected,
-                            filtered_len,
-                            filter_preview = %current_filter_safe,
-                            "SCROLL_TRACE current_app.wheel_no_target"
-                        );
-                        if filtered_len > 0 {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    };
-
-                    if let AppView::CurrentAppCommandsView { selected_index, .. } =
-                        &mut this.current_view
-                    {
-                        *selected_index = new_selected;
-                    }
-
-                    this.current_app_commands_scroll_handle
-                        .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                    this.note_builtin_selection_owned_wheel_scroll(new_selected);
-                    tracing::info!(
-                        target: "script_kit::scroll_trace",
-                        event = "SCROLL_TRACE current_app.wheel_selected",
-                        selected_before = current_selected,
-                        selected_after = new_selected,
-                        filtered_len,
-                        filter_preview = %current_filter_safe,
-                        "SCROLL_TRACE current_app.wheel_selected"
-                    );
-
-                    Self::log_builtin_scroll_event(
-                        "current_app_commands",
-                        "scroll_to_item",
-                        "wheel",
-                        filtered_len,
-                        Some(new_selected),
-                        Some(new_selected),
-                        Some(&current_filter),
-                        "mouse",
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
+                    this.observe_builtin_native_list_scroll(event, cx);
                 },
             ))
             .child(
@@ -497,13 +410,14 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(format!(
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(format!(
                         "{} command{}",
                         total_count,
                         if total_count == 1 { "" } else { "s" }
-                    )),
-                ], cx),
+                    ))],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,
@@ -539,27 +453,6 @@ mod current_app_commands_chrome_audit {
             source.matches(&legacy).count(),
             0,
             "current_app_commands should not use PromptFooter"
-        );
-    }
-
-    #[test]
-    fn current_app_commands_use_wheel_contract_and_vendor_scrollbar() {
-        let source = production_source();
-        assert!(
-            source.contains(".on_scroll_wheel(cx.listener("),
-            "current_app_commands should intercept wheel scrolling on the list pane"
-        );
-        assert!(
-            source.contains("builtin_scroll_target_from_wheel("),
-            "current_app_commands should use shared wheel delta conversion"
-        );
-        assert!(
-            !source.contains("builtin_reanchor_selection_from_scroll("),
-            "current_app_commands should keep selection owned by keyboard/wheel/click, matching the main menu"
-        );
-        assert!(
-            source.contains("builtin_uniform_list_scrollbar("),
-            "current_app_commands should attach the shared vendor scrollbar helper"
         );
     }
 }
