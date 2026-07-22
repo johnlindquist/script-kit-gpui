@@ -1640,6 +1640,24 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     }
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
+    // Floating footer chrome: the main window's glass container ends above a
+    // transparent bottom strip so the footer capsules float over the desktop.
+    // The GPUI root subtracts the same strip via bottom padding.
+    let bottom_strip = if window_name == "Main window" {
+        f64::from(crate::footer_popup::main_window_float_footer_strip_height())
+    } else {
+        0.0
+    };
+    let backdrop_frame = NSRect::new(
+        cocoa::foundation::NSPoint::new(
+            content_bounds.origin.x,
+            content_bounds.origin.y + bottom_strip,
+        ),
+        cocoa::foundation::NSSize::new(
+            content_bounds.size.width,
+            (content_bounds.size.height - bottom_strip).max(0.0),
+        ),
+    );
     let vev_count_before =
         tahoe_count_views_kind_of_excluding(content_view, class!(NSVisualEffectView), nil);
 
@@ -1672,7 +1690,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
             return false;
         };
         let allocated: id = msg_send![backdrop_class, alloc];
-        glass_view = msg_send![allocated, initWithFrame: content_bounds];
+        glass_view = msg_send![allocated, initWithFrame: backdrop_frame];
         if glass_view == nil {
             logging::log(
                 log_target,
@@ -1698,7 +1716,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         created = true;
     }
 
-    let _: () = msg_send![glass_view, setFrame: content_bounds];
+    let _: () = msg_send![glass_view, setFrame: backdrop_frame];
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
@@ -1739,7 +1757,17 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         }
     };
 
-    let corner_radius = tahoe_content_corner_radius(content_view);
+    let corner_radius = {
+        let radius = tahoe_content_corner_radius(content_view);
+        // Floating footer chrome: the backdrop's bottom edge is now a visible
+        // container edge (mid-window, not masked by the window shape), so it
+        // must round itself to match the GPUI root container's `rounded(12.)`.
+        if bottom_strip > 0.0 && radius <= 0.0 {
+            12.0
+        } else {
+            radius
+        }
+    };
     let corner_applied = {
         let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setCornerRadius:)];
         if responds {

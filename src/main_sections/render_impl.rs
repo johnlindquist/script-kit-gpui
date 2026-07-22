@@ -353,6 +353,15 @@ impl Render for ScriptListApp {
 
         self.sync_main_footer_popup(window, cx);
 
+        // Native footer active in glass mode: the GPUI fallback rail isn't
+        // rendered, so no capsule sync ever prunes the groups it registered
+        // during startup frames — drop them or they linger as ghost capsules
+        // at the container's bottom edge.
+        if crate::footer_popup::glass_scroll_bands_active() && self.main_window_uses_native_footer()
+        {
+            crate::components::footer_chrome::remove_glass_capsule_window(window);
+        }
+
         // P0-4: Clone current_view only for dispatch (needed to call &mut self methods)
         // The clone is unavoidable due to borrow checker: we need &mut self for render methods
         // but also need to match on self.current_view. Future optimization: refactor render
@@ -945,10 +954,15 @@ impl Render for ScriptListApp {
                 .into_any_element()
         };
 
+        // Floating footer chrome: the glass container ends above a fully
+        // transparent strip where the footer capsules hover over the desktop.
+        let float_footer_strip = crate::footer_popup::main_window_float_footer_strip_height();
+
         div()
             .id("main-window-root")
             .size_full()
             .relative()
+            .when(float_footer_strip > 0.0, |d| d.pb(px(float_footer_strip)))
             // Route keys to confirm popup when it's open (Escape/Enter/Tab).
             // This must be at the outermost level to intercept before any
             // view-specific handlers.

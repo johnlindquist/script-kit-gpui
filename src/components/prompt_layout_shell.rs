@@ -868,6 +868,12 @@ pub(crate) fn render_native_main_window_footer_spacer() -> AnyElement {
 /// flowing behind the native main-window footer material.
 #[allow(dead_code)]
 pub(crate) fn render_native_main_window_footer_hover_blocker() -> AnyElement {
+    // Floating footer chrome: the capsules hang below the container in a
+    // transparent window strip, so nothing overlaps in-container content and
+    // a blocker would swallow hovers/clicks on the last visible rows.
+    if crate::footer_popup::glass_scroll_bands_active() {
+        return div().into_any_element();
+    }
     gpui::deferred(
         div()
             .id("native-main-window-footer-hover-blocker")

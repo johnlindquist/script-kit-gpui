@@ -1894,6 +1894,24 @@ pub(crate) fn glass_scroll_bands_active() -> bool {
         && crate::theme::get_cached_theme().is_vibrancy_enabled()
 }
 
+/// Desktop gap between the main container's bottom edge and the floating
+/// footer capsules.
+pub(crate) const FLOAT_FOOTER_CONTAINER_GAP_PX: f32 = 8.0;
+
+/// Height of the fully transparent strip the main window reserves below its
+/// glass container so the footer capsules float over the bare desktop.
+/// Both the GPUI root (bottom padding) and the native NSGlassEffectView
+/// backdrop (bottom frame inset) subtract this same value; 0 when float
+/// chrome is off.
+pub(crate) fn main_window_float_footer_strip_height() -> f32 {
+    if glass_scroll_bands_active() {
+        crate::components::footer_chrome::current_main_menu_footer_height()
+            + FLOAT_FOOTER_CONTAINER_GAP_PX
+    } else {
+        0.0
+    }
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn main_window_gpui_metal_view(content_view: id, glass_class: &objc::runtime::Class) -> id {
     use objc::{class, msg_send, sel, sel_impl};
