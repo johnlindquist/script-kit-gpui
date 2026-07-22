@@ -942,7 +942,8 @@ impl ScriptListApp {
             theme_chooser_panel_mode: ThemeChooserPanelMode::default(),
             main_menu_render_diagnostics: MainMenuRenderDiagnosticsState::default(),
             main_list_scroll_frame_trace: MainListScrollFrameTrace::from_env(),
-            main_list_last_interaction_source: MainListInteractionSource::Refresh,
+            last_list_interaction_source:
+                crate::scrolling::list_interaction::ListViewportInputSource::Refresh,
             // Pending path action - starts as None (Arc<Mutex<>> for callback access)
             pending_path_action: Arc::new(Mutex::new(None)),
             // Signal to close path actions dialog
@@ -978,7 +979,7 @@ impl ScriptListApp {
                 crate::scrolling::boundary_affordance::BoundaryAffordanceState::new(
                     crate::platform::prefers_reduced_motion(),
                 ),
-            main_list_suppress_hover_until_mouse_move: false,
+            list_suppress_hover_until_pointer_move: false,
             menu_syntax_trigger_picker_suppress_next_launcher_click: false,
             menu_syntax_trigger_picker_enter_guard: None,
             // Window focus tracking - for detecting focus lost and auto-dismissing prompts

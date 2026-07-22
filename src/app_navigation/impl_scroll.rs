@@ -36,68 +36,22 @@ pub(crate) fn main_list_header_overlay_height(
     ) + main_list_header_glass_strip_height()
 }
 
-/// Per-kind row heights resolved once per measurement pass.
-///
-/// `effective_*_height_for_theme` resolves the full theme metrics override
-/// struct on every call; doing that per item turned the O(n) height walks
-/// below into the arrow-key scroll hotspot (~92% of key handling time in
-/// `sample` profiles). Resolving the four heights once keeps the walks to a
-/// match + f32 add per item.
-#[derive(Clone, Copy)]
-struct ScriptListRowHeights {
-    first_section_header: f32,
-    section_header: f32,
-    status: f32,
-    item: f32,
-}
-
-impl ScriptListRowHeights {
-    #[inline]
-    fn current() -> Self {
-        Self::for_theme(crate::designs::current_main_menu_theme())
-    }
-
-    #[inline]
-    fn for_theme(theme: crate::designs::MainMenuThemeVariant) -> Self {
-        Self {
-            first_section_header: crate::list_item::effective_first_section_header_height_for_theme(
-                theme,
-            ),
-            section_header: crate::list_item::effective_section_header_height_for_theme(theme),
-            status: crate::list_item::effective_source_status_row_height_for_theme(theme),
-            item: crate::list_item::effective_list_item_height_for_theme(theme),
-        }
-    }
-
-    #[inline]
-    fn row_height(&self, item: &GroupedListItem, ix: usize) -> f32 {
-        match item {
-            GroupedListItem::SectionHeader(..) => {
-                if ix == 0 {
-                    self.first_section_header
-                } else {
-                    self.section_header
-                }
-            }
-            GroupedListItem::Status(..) => self.status,
-            GroupedListItem::Item(..) => self.item,
-        }
-    }
-}
+type ScriptListRowHeights = crate::scrolling::list_geometry::GroupedListRowHeights;
 
 pub(crate) fn script_list_content_height(items: &[GroupedListItem]) -> f32 {
-    script_list_content_height_with(items, ScriptListRowHeights::current())
+    script_list_content_height_with(
+        items,
+        ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme()),
+    )
 }
 
 fn script_list_content_height_with(
     items: &[GroupedListItem],
     heights: ScriptListRowHeights,
 ) -> f32 {
-    items
-        .iter()
-        .enumerate()
-        .map(|(ix, item)| heights.row_height(item, ix))
-        .sum()
+    crate::scrolling::list_geometry::content_height(items.len(), |ix| {
+        heights.row_height(&items[ix], ix)
+    })
 }
 
 fn script_list_pixel_top_for_item(
@@ -105,12 +59,9 @@ fn script_list_pixel_top_for_item(
     ix: usize,
     heights: ScriptListRowHeights,
 ) -> f32 {
-    items
-        .iter()
-        .take(ix)
-        .enumerate()
-        .map(|(item_ix, item)| heights.row_height(item, item_ix))
-        .sum()
+    crate::scrolling::list_geometry::pixel_top_for_item(items.len(), ix, |item_ix| {
+        heights.row_height(&items[item_ix], item_ix)
+    })
 }
 
 fn script_list_pixel_top_for_offset(
@@ -118,9 +69,9 @@ fn script_list_pixel_top_for_offset(
     offset: gpui::ListOffset,
     heights: ScriptListRowHeights,
 ) -> f32 {
-    let offset_in_item = offset.offset_in_item.as_f32().max(0.0);
-    let clamped_item_ix = offset.item_ix.min(items.len());
-    script_list_pixel_top_for_item(items, clamped_item_ix, heights) + offset_in_item
+    crate::scrolling::list_geometry::pixel_top_for_offset(items.len(), offset, |ix| {
+        heights.row_height(&items[ix], ix)
+    })
 }
 
 fn script_list_offset_for_pixel_top(
@@ -128,30 +79,9 @@ fn script_list_offset_for_pixel_top(
     scroll_top_px: f32,
     heights: ScriptListRowHeights,
 ) -> gpui::ListOffset {
-    if items.is_empty() {
-        return gpui::ListOffset {
-            item_ix: 0,
-            offset_in_item: gpui::px(0.0),
-        };
-    }
-
-    let mut accumulated = 0.0_f32;
-    for (ix, item) in items.iter().enumerate() {
-        let item_height = heights.row_height(item, ix);
-        let item_bottom = accumulated + item_height;
-        if scroll_top_px < item_bottom {
-            return gpui::ListOffset {
-                item_ix: ix,
-                offset_in_item: gpui::px((scroll_top_px - accumulated).max(0.0)),
-            };
-        }
-        accumulated = item_bottom;
-    }
-
-    gpui::ListOffset {
-        item_ix: items.len(),
-        offset_in_item: gpui::px(0.0),
-    }
+    crate::scrolling::list_geometry::offset_for_pixel_top(items.len(), scroll_top_px, |ix| {
+        heights.row_height(&items[ix], ix)
+    })
 }
 
 fn main_list_visible_range(
@@ -160,24 +90,13 @@ fn main_list_visible_range(
     visible_height: f32,
     heights: ScriptListRowHeights,
 ) -> (usize, usize) {
-    let visible_bottom = scroll_top + visible_height.max(0.0);
-    let mut row_top = 0.0_f32;
-    let mut first = None;
-    let mut last_exclusive = 0;
-
-    for (index, item) in items.iter().enumerate() {
-        let row_bottom = row_top + heights.row_height(item, index);
-        if row_bottom > scroll_top && row_top < visible_bottom {
-            first.get_or_insert(index);
-            last_exclusive = index + 1;
-        }
-        row_top = row_bottom;
-        if row_top >= visible_bottom && first.is_some() {
-            break;
-        }
-    }
-
-    first.map_or((items.len(), items.len()), |first| (first, last_exclusive))
+    crate::scrolling::list_geometry::visible_range(
+        items.len(),
+        scroll_top,
+        gpui::px(visible_height.max(0.0)),
+        |ix| heights.row_height(&items[ix], ix),
+    )
+    .unwrap_or((items.len(), items.len()))
 }
 
 fn main_list_row_stable_key(
@@ -222,7 +141,7 @@ fn main_list_safe_scroll_offset_for_item(
         return None;
     }
 
-    let heights = ScriptListRowHeights::current();
+    let heights = ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme());
     let viewport_height = viewport_height.as_f32();
     let footer_overlay_height = footer_overlay_height.as_f32();
     let safe_viewport_height =
@@ -412,12 +331,6 @@ impl ScriptListApp {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        let momentum = event.momentum_phase != gpui::ScrollPhase::None;
-        self.main_list_last_interaction_source = if momentum {
-            MainListInteractionSource::Momentum
-        } else {
-            MainListInteractionSource::Wheel
-        };
         let began_gesture = event.phase == gpui::ScrollPhase::Began
             || event.momentum_phase == gpui::ScrollPhase::Began
             || matches!(event.touch_phase, gpui::TouchPhase::Started);
@@ -615,11 +528,7 @@ impl ScriptListApp {
             return;
         }
 
-        self.main_list_suppress_hover_until_mouse_move = true;
         self.mark_main_menu_selection_user_moved();
-        if self.hovered_index.take().is_some() {
-            cx.notify();
-        }
 
         let selected_before = self.selected_index;
         let scroll_top_before = self.main_list_state.logical_scroll_top();
@@ -662,6 +571,10 @@ impl ScriptListApp {
         use crate::scrolling::boundary_affordance::SettleReason;
 
         self.record_main_list_scroll_frame_trace(event, window, cx);
+        self.begin_list_viewport_scroll(
+            crate::scrolling::list_interaction::ListViewportInputSource::from_event(event),
+            cx,
+        );
         if item_count == 0 {
             return;
         }
@@ -732,7 +645,7 @@ impl ScriptListApp {
         let viewport_height = self.main_list_state.viewport_bounds().size.height;
         let footer_height = main_list_footer_overlay_total_padding();
         let scroll_offset = self.main_list_state.logical_scroll_top();
-        let heights = ScriptListRowHeights::current();
+        let heights = ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme());
         let (
             content_height,
             selected_row_top,
@@ -882,13 +795,13 @@ impl ScriptListApp {
             "itemCount": item_count,
             "hoveredIndex": self.hovered_index,
             "hoveredSemanticId": hovered_semantic_id,
-            "hoverSuppressedUntilPointerMove": self.main_list_suppress_hover_until_mouse_move,
+            "hoverSuppressedUntilPointerMove": self.list_suppress_hover_until_pointer_move,
             "inputMode": match self.input_mode {
                 InputMode::Keyboard => "keyboard",
                 InputMode::Mouse => "mouse",
             },
             "focusedSemanticId": "input:filter",
-            "lastInteractionSource": self.main_list_last_interaction_source.as_str(),
+            "lastInteractionSource": self.last_list_interaction_source.as_str(),
             "performance": self.main_list_scroll_frame_trace.receipt(),
             "affordance": {
                 "atTop": geometry.at_top,
@@ -1702,7 +1615,11 @@ mod scroll_fade_tests {
         .expect("target should be pushed above the footer overlay");
 
         assert_eq!(
-            script_list_pixel_top_for_offset(&rows, adjusted, ScriptListRowHeights::current()),
+            script_list_pixel_top_for_offset(
+                &rows,
+                adjusted,
+                ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme()),
+            ),
             124.0
         );
     }
@@ -1735,7 +1652,11 @@ mod scroll_fade_tests {
         .expect("last row should get the extra footer-height trailing scroll budget");
 
         assert_eq!(
-            script_list_pixel_top_for_offset(&rows, adjusted, ScriptListRowHeights::current()),
+            script_list_pixel_top_for_offset(
+                &rows,
+                adjusted,
+                ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme()),
+            ),
             124.0
         );
     }

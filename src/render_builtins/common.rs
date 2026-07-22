@@ -31,6 +31,66 @@ pub(crate) fn render_builtin_split_main_content_layout(
 }
 
 impl ScriptListApp {
+    pub(crate) fn begin_list_viewport_scroll(
+        &mut self,
+        source: crate::scrolling::list_interaction::ListViewportInputSource,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let mut policy = crate::scrolling::list_interaction::ListPointerPolicy {
+            hovered_index: self.hovered_index,
+            suppress_hover_until_pointer_move: self.list_suppress_hover_until_pointer_move,
+        };
+        policy.begin_viewport_scroll();
+        self.last_scrolled_index = None;
+        if self.hovered_index != policy.hovered_index {
+            cx.notify();
+        }
+        self.hovered_index = policy.hovered_index;
+        self.list_suppress_hover_until_pointer_move = policy.suppress_hover_until_pointer_move;
+        self.last_list_interaction_source = source;
+    }
+
+    pub(crate) fn note_list_pointer_move(&mut self, row: usize, cx: &mut gpui::Context<Self>) {
+        let mut policy = crate::scrolling::list_interaction::ListPointerPolicy {
+            hovered_index: self.hovered_index,
+            suppress_hover_until_pointer_move: self.list_suppress_hover_until_pointer_move,
+        };
+        policy.note_pointer_move(row);
+        self.input_mode = InputMode::Mouse;
+        if self.hovered_index != policy.hovered_index {
+            cx.notify();
+        }
+        self.hovered_index = policy.hovered_index;
+        self.list_suppress_hover_until_pointer_move = policy.suppress_hover_until_pointer_move;
+    }
+
+    pub(crate) fn note_list_pointer_leave(&mut self, row: usize, cx: &mut gpui::Context<Self>) {
+        let mut policy = crate::scrolling::list_interaction::ListPointerPolicy {
+            hovered_index: self.hovered_index,
+            suppress_hover_until_pointer_move: self.list_suppress_hover_until_pointer_move,
+        };
+        policy.note_hover_change(row, false);
+        if self.hovered_index != policy.hovered_index {
+            cx.notify();
+        }
+        self.hovered_index = policy.hovered_index;
+        self.list_suppress_hover_until_pointer_move = policy.suppress_hover_until_pointer_move;
+    }
+
+    pub(crate) fn note_list_pointer_click(&mut self, row: usize, cx: &mut gpui::Context<Self>) {
+        let mut policy = crate::scrolling::list_interaction::ListPointerPolicy {
+            hovered_index: self.hovered_index,
+            suppress_hover_until_pointer_move: self.list_suppress_hover_until_pointer_move,
+        };
+        policy.note_pointer_click(row);
+        self.input_mode = InputMode::Mouse;
+        self.hovered_index = policy.hovered_index;
+        self.list_suppress_hover_until_pointer_move = policy.suppress_hover_until_pointer_move;
+        self.last_list_interaction_source =
+            crate::scrolling::list_interaction::ListViewportInputSource::Click;
+        cx.notify();
+    }
+
     /// Available vibrancy material presets for the theme customizer
     const VIBRANCY_MATERIALS: &[(theme::VibrancyMaterial, &str)] = &[
         (theme::VibrancyMaterial::Hud, "HUD"),

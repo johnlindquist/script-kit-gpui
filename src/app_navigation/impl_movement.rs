@@ -1,9 +1,16 @@
 impl ScriptListApp {
     #[inline]
     fn enter_keyboard_mode(&mut self, cx: &mut Context<Self>) {
+        let mut policy = crate::scrolling::list_interaction::ListPointerPolicy {
+            hovered_index: self.hovered_index,
+            suppress_hover_until_pointer_move: self.list_suppress_hover_until_pointer_move,
+        };
+        policy.enter_keyboard_mode();
         self.input_mode = InputMode::Keyboard;
-        self.main_list_last_interaction_source = MainListInteractionSource::Keyboard;
-        self.hovered_index = None;
+        self.last_list_interaction_source =
+            crate::scrolling::list_interaction::ListViewportInputSource::Keyboard;
+        self.list_suppress_hover_until_pointer_move = policy.suppress_hover_until_pointer_move;
+        self.hovered_index = policy.hovered_index;
         self.hide_mouse_cursor(cx);
     }
 

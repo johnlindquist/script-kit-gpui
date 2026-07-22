@@ -1267,12 +1267,7 @@ impl ScriptListApp {
                                               _event: &gpui::MouseMoveEvent,
                                               _window,
                                               cx| {
-                                            this.input_mode = InputMode::Mouse;
-                                            this.main_list_suppress_hover_until_mouse_move = false;
-                                            if this.hovered_index != Some(ix) {
-                                                this.hovered_index = Some(ix);
-                                                cx.notify();
-                                            }
+                                            this.note_list_pointer_move(ix, cx);
                                         },
                                     );
                                     let hover_handler = cx.listener(
@@ -1280,12 +1275,8 @@ impl ScriptListApp {
                                               hovered: &bool,
                                               _window,
                                               cx| {
-                                            if this.main_list_suppress_hover_until_mouse_move {
-                                                return;
-                                            }
-                                            if !*hovered && this.hovered_index == Some(ix) {
-                                                this.hovered_index = None;
-                                                cx.notify();
+                                            if !*hovered {
+                                                this.note_list_pointer_leave(ix, cx);
                                             }
                                         },
                                     );
@@ -1341,8 +1332,7 @@ impl ScriptListApp {
                                               window,
                                               cx| {
                                             let click_count = event.click_count();
-                                            this.main_list_last_interaction_source =
-                                                MainListInteractionSource::Click;
+                                            this.note_list_pointer_click(ix, cx);
                                             if this.menu_syntax_trigger_picker_suppress_next_launcher_click {
                                                 logging::log(
                                                     "UI",

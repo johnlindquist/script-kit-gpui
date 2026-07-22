@@ -2,50 +2,20 @@ use crate::list_item::{coerce_selection, GroupedListItem};
 use gpui::{ListOffset, Pixels};
 
 #[allow(dead_code)] // Shared with the launcher binary; the library target compiles this module without the owning call sites.
-fn row_height_for_theme(
-    row: &GroupedListItem,
-    ix: usize,
-    theme: crate::designs::MainMenuThemeVariant,
-) -> f32 {
-    match row {
-        GroupedListItem::SectionHeader(..) => {
-            if ix == 0 {
-                crate::list_item::effective_first_section_header_height_for_theme(theme)
-            } else {
-                crate::list_item::effective_section_header_height_for_theme(theme)
-            }
-        }
-        GroupedListItem::Status(..) => {
-            crate::list_item::effective_source_status_row_height_for_theme(theme)
-        }
-        GroupedListItem::Item(..) => crate::list_item::effective_list_item_height_for_theme(theme),
-    }
-}
-
-#[allow(dead_code)] // Shared with the launcher binary; the library target compiles this module without the owning call sites.
 pub(crate) fn visible_grouped_row_range(
     rows: &[GroupedListItem],
     scroll_top: ListOffset,
     viewport_height: Pixels,
 ) -> Option<(usize, usize)> {
-    if rows.is_empty() || viewport_height <= gpui::px(0.0) {
-        return None;
-    }
-
     let theme = crate::designs::current_main_menu_theme();
-    let first = scroll_top.item_ix.min(rows.len().saturating_sub(1));
-    let mut consumed = -scroll_top.offset_in_item.as_f32().max(0.0);
-    let mut last = first;
-
-    while last < rows.len() {
-        consumed += row_height_for_theme(&rows[last], last, theme);
-        if consumed >= viewport_height.as_f32() || last == rows.len() - 1 {
-            break;
-        }
-        last += 1;
-    }
-
-    Some((first, last))
+    let heights = crate::scrolling::list_geometry::GroupedListRowHeights::for_theme(theme);
+    crate::scrolling::list_geometry::visible_range_for_offset(
+        rows.len(),
+        scroll_top,
+        viewport_height,
+        |ix| heights.row_height(&rows[ix], ix),
+    )
+    .map(|(first, last_exclusive)| (first, last_exclusive - 1))
 }
 
 #[allow(dead_code)] // Shared with the launcher binary; the library target compiles this module without the owning call sites.

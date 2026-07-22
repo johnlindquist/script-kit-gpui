@@ -55,32 +55,6 @@ impl Default for MainMenuRenderDiagnosticsState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum MainListInteractionSource {
-    Keyboard,
-    Click,
-    Wheel,
-    Momentum,
-    Scrollbar,
-    Filter,
-    #[default]
-    Refresh,
-}
-
-impl MainListInteractionSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Keyboard => "keyboard",
-            Self::Click => "click",
-            Self::Wheel => "wheel",
-            Self::Momentum => "momentum",
-            Self::Scrollbar => "scrollbar",
-            Self::Filter => "filter",
-            Self::Refresh => "refresh",
-        }
-    }
-}
-
 /// Environment-gated proxy timing from main-list wheel events to GPUI's next
 /// frame callback. This is callback timing, not compositor presentation time.
 #[derive(Debug)]
@@ -1318,7 +1292,7 @@ pub(crate) struct ScriptListApp {
     /// Contract-grade launcher scroll instrumentation; normal builds leave the
     /// frame trace disabled and schedule no callbacks.
     main_list_scroll_frame_trace: MainListScrollFrameTrace,
-    main_list_last_interaction_source: MainListInteractionSource,
+    last_list_interaction_source: crate::scrolling::list_interaction::ListViewportInputSource,
     // Pending path action - when set, show ActionsDialog for this path
     // Uses Arc<Mutex<>> so callbacks can write to it
     pending_path_action: Arc<Mutex<Option<PathInfo>>>,
@@ -1360,7 +1334,7 @@ pub(crate) struct ScriptListApp {
     wheel_accum: f32,
     /// Visual-only boundary gesture state. Logical ListState and selection stay clamped.
     main_list_boundary_affordance: crate::scrolling::boundary_affordance::BoundaryAffordanceState,
-    main_list_suppress_hover_until_mouse_move: bool,
+    list_suppress_hover_until_pointer_move: bool,
     /// Armed when a menu-syntax picker row accepts on mouse down. The same
     /// physical click can finish after the list has re-rendered to normal
     /// launcher rows; consume that trailing click so it cannot submit row 0.
