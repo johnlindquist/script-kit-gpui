@@ -50,9 +50,71 @@ const driver = await Driver.launch({
     SCRIPT_KIT_FLOWS_PACKAGE_DIR: PACKAGE_FIXTURE,
     SCRIPT_KIT_FLOWS_BIN_DIR: join(PACKAGE_FIXTURE, "bin"),
     SCRIPT_KIT_CODEX_BIN: join(PACKAGE_FIXTURE, "bin/fake-codex"),
+    // WP5/C-R8: arm the hot-path counters so the additive quiet-idle phase
+    // (check 12) can read the Flow tick / invalidation / surface-render
+    // snapshot. Zero-cost when unset, so this never perturbs the existing 11
+    // receipts.
+    SCRIPT_KIT_CHAT_HOT_COUNTERS: "1",
     PATH: `${join(FIXTURE, "bin")}:${join(PACKAGE_FIXTURE, "bin")}:${process.env.PATH ?? ""}`,
   },
 });
+
+// -- WP5 hot-counter reader (additive) -------------------------------------
+// The app emits one consolidated `chat_hot_counters` line (target
+// script_kit::chat_hot) each Flow tick (throttled) and at turn settle. Parse
+// the LATEST line's `key=value` pairs = cumulative process totals.
+// WP-B3 semantic counter set + per-frame draw timing.
+const COUNTER_KEYS = [
+  "flow_tick_wakes",
+  "flow_render_requests",
+  "flow_desk_render_calls",
+  "flow_session_render_calls",
+  "flow_events_received",
+  "flow_events_effective",
+  "flow_child_commits",
+  "flow_child_bytes_committed",
+  "flow_sessions_scanned",
+  "flow_stdout_bytes_copied",
+  "list_all_row_passes",
+  "list_visible_row_passes",
+  "text_full_parses",
+  "text_append_parses",
+  "text_full_parse_bytes",
+  "text_append_parse_bytes",
+  "frame_count",
+  "frame_draw_busy_us_total",
+  "frame_max_us",
+  "frame_p95_us",
+  "frames_over_33ms",
+];
+const readFlowCounters = async (): Promise<Json | null> => {
+  const result = (await driver.getLogs(
+    { target: "script_kit::chat_hot", limit: 50 },
+    { timeoutMs: 8_000 },
+  )) as Json;
+  const entries = (result.entries as Json[]) ?? [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const message = String(entries[i]?.message ?? "");
+    if (!message.includes("chat_hot_counters")) continue;
+    const counters: Json = {};
+    let matched = 0;
+    for (const key of COUNTER_KEYS) {
+      const m = message.match(new RegExp(`\\b${key}=(\\d+)\\b`));
+      if (m) {
+        counters[key] = Number.parseInt(m[1], 10);
+        matched += 1;
+      }
+    }
+    if (matched > 0) return counters;
+  }
+  return null;
+};
+const quietIdleSeconds = (() => {
+  const idx = process.argv.indexOf("--quiet-idle-seconds");
+  const raw = idx >= 0 ? process.argv[idx + 1] : undefined;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 2;
+})();
 
 type Json = Record<string, any>;
 const receipt: Json = { binary, fixture: FIXTURE, packageFixture: PACKAGE_FIXTURE, checks: {} };
@@ -359,6 +421,60 @@ try {
       ((fx?.sessions as Json[]) ?? []).length === sessionsBefore,
   };
   await shot("run-once-succeeded");
+
+  // -- 12. WP-B3 quiet-idle counters (ADDITIVE) ----------------------------
+  // Re-enter the live session, then sit idle. Baseline the Flow hot counters,
+  // wait `quietIdleSeconds`, and report BOTH the render REQUESTS (tick
+  // `cx.notify()` invalidations, which a session forces every wake) and the
+  // ACTUAL render calls (desk + session), split per WP-B3. An idle session
+  // should keep requesting (tick forces dirty) but NOT paint more than a bound
+  // of actual frames. This is the reading WP9 must later drive to ~0 requests
+  // and a parked tick; here it proves the split is real and readable, with an
+  // explicit expected bound on actual renders/frames.
+  await deskFilter("");
+  await pressMain("enter"); // live session sorts first
+  await pollState((s) => s.promptType === "flowSession", 5_000);
+  const idleBefore = await readFlowCounters();
+  const idleWallStart = Bun.nanoseconds();
+  await Bun.sleep(quietIdleSeconds * 1000);
+  const idleAfter = await readFlowCounters();
+  const idleWallMs = (Bun.nanoseconds() - idleWallStart) / 1e6;
+  const delta = (key: string): number | null =>
+    idleBefore && idleAfter
+      ? (idleAfter[key] ?? 0) - (idleBefore[key] ?? 0)
+      : null;
+  const actualRenderDelta =
+    (delta("flow_desk_render_calls") ?? 0) + (delta("flow_session_render_calls") ?? 0);
+  const frameDelta = delta("frame_count") ?? 0;
+  const drawBusyMs = (delta("frame_draw_busy_us_total") ?? 0) / 1000;
+  // Bound: an idle Flow session may repaint on the ~120ms tick, so allow up to
+  // ~1.5x the tick rate over the window plus slack; renders must not exceed this.
+  const expectedRenderBound = Math.ceil((quietIdleSeconds * 1000) / 120) * 2 + 4;
+  checks.quietIdleCounters = {
+    quietIdleSeconds,
+    countersReadable: idleBefore !== null && idleAfter !== null,
+    before: idleBefore,
+    after: idleAfter,
+    tickWakesDelta: delta("flow_tick_wakes"),
+    renderRequestsDelta: delta("flow_render_requests"),
+    actualRenderCallsDelta: actualRenderDelta,
+    frameCountDelta: frameDelta,
+    expectedRenderBound,
+    performance: {
+      draw_busy_ms: Number(drawBusyMs.toFixed(3)),
+      observation_wall_ms: Number(idleWallMs.toFixed(1)),
+      draw_share: Number((idleWallMs > 0 ? drawBusyMs / idleWallMs : 0).toFixed(4)),
+      frame_p95_ms: Number((Number(idleAfter?.frame_p95_us ?? 0) / 1000).toFixed(3)),
+      frame_max_ms: Number((Number(idleAfter?.frame_max_us ?? 0) / 1000).toFixed(3)),
+      frames_over_33ms: delta("frames_over_33ms"),
+    },
+    // Readable, split reported, AND actual renders within the explicit bound.
+    ok:
+      idleBefore !== null &&
+      idleAfter !== null &&
+      actualRenderDelta <= expectedRenderBound,
+  };
+  await shot("quiet-idle-counters");
 
   // -- 11. Cleanup: leave the app hidden ------------------------------------
   await returnToRoot();

@@ -73,13 +73,6 @@ const LIVE_TRIGGER_BUILTINS: LiveSurfaceProbe[] = [
     notes: "mini filterable list",
   },
   {
-    id: "design-gallery",
-    command: { type: "triggerBuiltin", name: "design-gallery" },
-    expectedPromptType: "designGallery",
-    screenshotable: true,
-    notes: "filterable list with preview",
-  },
-  {
     id: "process-manager",
     command: { type: "triggerBuiltin", name: "process-manager" },
     expectedPromptType: "processManager",

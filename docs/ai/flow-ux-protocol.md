@@ -182,8 +182,7 @@ Built-ins (hidden, QueryOnly visibility — excluded only for the empty query):
 - `flow-ux-dispatch` → "Flow UX — Dispatch"
 - `flow-ux-lens` → "Flow UX — Lens"
 - `flow-ux-mission-control` → "Flow UX — Mission Control"
-- `flow-manager` → "Flow Manager"
 
-Window: one global Flow Manager window handle (Notes-window pattern); reopen
-focuses, never duplicates; creation only via deferred action (`cx.defer`),
-never during draw; closing/hiding never cancels runs.
+The detached Flow Manager window was removed (2026-07-22, dead-surface
+cleanup): run supervision lives in the main-window Flow Desk. Closing the
+launcher never cancels runs.
