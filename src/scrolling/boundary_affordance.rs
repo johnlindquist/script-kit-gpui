@@ -402,6 +402,40 @@ impl BoundaryAffordanceState {
         decision
     }
 
+    /// Observe a native viewport scroll without claiming any of its delta.
+    ///
+    /// Launcher wheel and momentum events have already updated GPUI ListState
+    /// before this entry point runs. The returned decision may schedule visual
+    /// affordance work, but it can never request residual selection movement or
+    /// leave momentum marked as owned by the affordance.
+    pub(crate) fn observe_scroll_lifecycle(
+        &mut self,
+        delta_y_px: f32,
+        direct_phase: ScrollLifecyclePhase,
+        momentum_phase: ScrollLifecyclePhase,
+        legacy_phase: PreciseTouchPhase,
+        eligibility: BoundaryEligibility,
+        tuning: BoundaryAffordanceTuning,
+        reduced_motion: bool,
+        now: Instant,
+        native_timestamp_seconds: Option<f64>,
+    ) -> BoundaryDecision {
+        let mut decision = self.handle_scroll_lifecycle(
+            delta_y_px,
+            direct_phase,
+            momentum_phase,
+            legacy_phase,
+            eligibility,
+            tuning,
+            reduced_motion,
+            now,
+            native_timestamp_seconds,
+        );
+        decision.residual_delta_y_px = 0.0;
+        self.suppress_momentum_until_terminal = false;
+        decision
+    }
+
     fn handle_scroll_lifecycle_inner(
         &mut self,
         delta_y_px: f32,
@@ -1122,6 +1156,42 @@ mod tests {
             now,
             None,
         )
+    }
+
+    #[test]
+    fn native_observer_never_returns_residual_or_claims_momentum() {
+        let now = Instant::now();
+        let tuning = BoundaryAffordanceTuning::default();
+        let mut state = BoundaryAffordanceState::default();
+
+        let direct = state.observe_scroll_lifecycle(
+            18.0,
+            ScrollLifecyclePhase::Began,
+            ScrollLifecyclePhase::None,
+            PreciseTouchPhase::Started,
+            top_only(),
+            tuning,
+            false,
+            now,
+            Some(1.0),
+        );
+        assert_eq!(direct.residual_delta_y_px, 0.0);
+        assert!(state.offset_px > 0.0);
+        assert!(!state.suppress_momentum_until_terminal);
+
+        let momentum = state.observe_scroll_lifecycle(
+            -8.0,
+            ScrollLifecyclePhase::None,
+            ScrollLifecyclePhase::Began,
+            PreciseTouchPhase::Moved,
+            top_only(),
+            tuning,
+            false,
+            now + Duration::from_millis(16),
+            Some(1.016),
+        );
+        assert_eq!(momentum.residual_delta_y_px, 0.0);
+        assert!(!state.suppress_momentum_until_terminal);
     }
 
     #[test]

@@ -283,29 +283,12 @@ fn main_list_top_fade_progress(scroll_top: f32, ramp: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-#[inline]
-fn main_list_top_fade_progress_for_selection(
-    scroll_top: f32,
-    ramp: f32,
-    selected_index: usize,
-    first_selectable: Option<usize>,
-) -> f32 {
-    if first_selectable == Some(selected_index) {
-        0.0
-    } else {
-        main_list_top_fade_progress(scroll_top, ramp)
-    }
-}
-
 fn main_list_boundary_eligibility_values(
     geometry: MainListScrollGeometry,
-    selected_index: usize,
-    first_selectable: Option<usize>,
-    last_selectable: Option<usize>,
 ) -> crate::scrolling::boundary_affordance::BoundaryEligibility {
     crate::scrolling::boundary_affordance::BoundaryEligibility {
-        top: geometry.at_top && first_selectable == Some(selected_index),
-        bottom: geometry.at_bottom && last_selectable == Some(selected_index),
+        top: geometry.at_top,
+        bottom: geometry.at_bottom,
     }
 }
 
@@ -386,12 +369,7 @@ impl ScriptListApp {
         let progress = if crate::footer_popup::glass_scroll_bands_active() {
             0.0
         } else {
-            main_list_top_fade_progress_for_selection(
-                geometry.scroll_top,
-                tokens.top_occlusion_ramp,
-                self.selected_index,
-                self.main_menu_result_caches.first_selectable_index(),
-            )
+            main_list_top_fade_progress(geometry.scroll_top, tokens.top_occlusion_ramp)
         };
         MainListTopFadeSnapshot {
             active: progress > 0.0,
@@ -404,9 +382,7 @@ impl ScriptListApp {
         &mut self,
         geometry: MainListScrollGeometry,
     ) -> crate::scrolling::boundary_affordance::BoundaryEligibility {
-        let first = self.main_menu_result_caches.first_selectable_index();
-        let last = self.main_menu_result_caches.last_selectable_index();
-        main_list_boundary_eligibility_values(geometry, self.selected_index, first, last)
+        main_list_boundary_eligibility_values(geometry)
     }
 
     pub(crate) fn reset_main_list_boundary_affordance(
@@ -518,53 +494,9 @@ impl ScriptListApp {
         .detach();
     }
 
-    fn apply_selection_owned_wheel_lines(
-        &mut self,
-        delta_lines: f32,
-        item_count: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if item_count == 0 || delta_lines.abs() <= f32::EPSILON {
-            return;
-        }
-
-        self.mark_main_menu_selection_user_moved();
-
-        let selected_before = self.selected_index;
-        let scroll_top_before = self.main_list_state.logical_scroll_top();
-        let wheel_accum_before = self.wheel_accum;
-        self.wheel_accum += -delta_lines;
-        let steps = self.wheel_accum.trunc() as i32;
-        if steps != 0 {
-            self.wheel_accum -= steps as f32;
-            self.move_selection_by(steps, cx);
-        }
-
-        let scroll_top_after = self.main_list_state.logical_scroll_top();
-        self.sync_main_list_selection_to_visible_window("wheel");
-        tracing::debug!(
-            target: "SCROLL_STATE",
-            delta_lines,
-            steps,
-            total_items = item_count,
-            selected_before,
-            selected_after = self.selected_index,
-            scroll_top_before = scroll_top_before.item_ix,
-            scroll_top_after = scroll_top_after.item_ix,
-            offset_before_px = scroll_top_before.offset_in_item.as_f32(),
-            offset_after_px = scroll_top_after.offset_in_item.as_f32(),
-            wheel_accum_before,
-            wheel_accum_after = self.wheel_accum,
-            propagation_stopped = true,
-            "script list wheel handled"
-        );
-    }
-
-    pub(crate) fn handle_main_list_scroll_wheel(
+    pub(crate) fn observe_main_list_scroll_wheel(
         &mut self,
         event: &gpui::ScrollWheelEvent,
-        average_item_height: f32,
-        item_count: usize,
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
@@ -575,20 +507,16 @@ impl ScriptListApp {
             crate::scrolling::list_interaction::ListViewportInputSource::from_event(event),
             cx,
         );
-        if item_count == 0 {
-            return;
-        }
-        cx.stop_propagation();
+        self.trigger_scroll_activity(cx);
 
         match event.delta {
-            gpui::ScrollDelta::Lines(point) => {
+            gpui::ScrollDelta::Lines(_) => {
                 if self.main_list_boundary_affordance.phase
                     != crate::scrolling::boundary_affordance::BoundaryPhase::Idle
                     && self.reset_main_list_boundary_affordance(SettleReason::Reset)
                 {
                     cx.notify();
                 }
-                self.apply_selection_owned_wheel_lines(point.y, item_count, cx);
             }
             gpui::ScrollDelta::Pixels(point) => {
                 let delta_y_px = point.y.as_f32();
@@ -606,7 +534,7 @@ impl ScriptListApp {
                         crate::scrolling::boundary_affordance::PreciseTouchPhase::Ended
                     }
                 };
-                let decision = self.main_list_boundary_affordance.handle_scroll_lifecycle(
+                let decision = self.main_list_boundary_affordance.observe_scroll_lifecycle(
                     delta_y_px,
                     main_list_scroll_lifecycle_phase(event.phase),
                     main_list_scroll_lifecycle_phase(event.momentum_phase),
@@ -618,9 +546,6 @@ impl ScriptListApp {
                     event.timestamp_seconds,
                 );
 
-                if decision.arm_idle_watchdog || decision.start_settle.is_some() {
-                    self.wheel_accum = 0.0;
-                }
                 if decision.arm_idle_watchdog {
                     self.schedule_main_list_boundary_idle_watchdog(tuning, cx);
                 }
@@ -630,15 +555,26 @@ impl ScriptListApp {
                 if decision.visual_changed {
                     cx.notify();
                 }
-                if decision.residual_delta_y_px.abs() > f32::EPSILON {
-                    self.apply_selection_owned_wheel_lines(
-                        decision.residual_delta_y_px / average_item_height.max(1.0),
-                        item_count,
-                        cx,
-                    );
-                }
             }
         }
+
+        // The native List listener has already updated ListState before this
+        // ancestor observer runs. Repaint viewport-derived fade/receipt state;
+        // selection and focus deliberately remain untouched.
+        cx.notify();
+    }
+
+    pub(crate) fn observe_main_list_scrollbar_pointer_down(&mut self, cx: &mut Context<Self>) {
+        self.begin_list_viewport_scroll(
+            crate::scrolling::list_interaction::ListViewportInputSource::Scrollbar,
+            cx,
+        );
+        if self.reset_main_list_boundary_affordance(
+            crate::scrolling::boundary_affordance::SettleReason::Reset,
+        ) {
+            cx.notify();
+        }
+        self.trigger_scroll_activity(cx);
     }
 
     pub(crate) fn main_list_scroll_receipt(&mut self) -> serde_json::Value {
@@ -728,12 +664,7 @@ impl ScriptListApp {
         let top_fade_progress = if crate::footer_popup::glass_scroll_bands_active() {
             0.0
         } else {
-            main_list_top_fade_progress_for_selection(
-                geometry.scroll_top,
-                tokens.top_occlusion_ramp,
-                self.selected_index,
-                self.main_menu_result_caches.first_selectable_index(),
-            )
+            main_list_top_fade_progress(geometry.scroll_top, tokens.top_occlusion_ramp)
         };
         let top_fade_alpha = crate::components::list_scroll_affordance::top_occlusion_alpha(
             tokens,
@@ -894,49 +825,6 @@ impl ScriptListApp {
             }
         })
         .detach();
-    }
-
-    pub(crate) fn sync_main_list_selection_to_visible_window(&mut self, reason: &'static str) {
-        if reason == "render" && self.last_scrolled_index.is_none() {
-            return;
-        }
-
-        let viewport_height = self.main_list_state.viewport_bounds().size.height;
-        let def = self.current_main_menu_theme.def();
-        let header_overlay_height = main_list_header_overlay_height(def);
-        let safe_height =
-            viewport_height - header_overlay_height - main_list_footer_overlay_total_padding();
-        if safe_height <= gpui::px(0.0) {
-            return;
-        }
-
-        let (grouped_items, _) = self.get_grouped_results_cached();
-        let scroll_top = self.main_list_state.logical_scroll_top();
-        let Some(target) = crate::scrolling::selection_owned::reanchor_grouped_selection(
-            &grouped_items,
-            self.selected_index,
-            scroll_top,
-            safe_height,
-        ) else {
-            return;
-        };
-
-        self.reset_main_list_boundary_affordance(
-            crate::scrolling::boundary_affordance::SettleReason::Reset,
-        );
-
-        tracing::info!(
-            target: "script_kit::scroll",
-            event = "launcher_selection_resynced_from_scrollbar",
-            reason,
-            selected_before = self.selected_index,
-            selected_after = target,
-            scroll_top_item_ix = scroll_top.item_ix,
-        );
-        self.clear_menu_syntax_filter_accept_hint();
-        self.mark_main_menu_selection_user_moved();
-        self.selected_index = target;
-        self.last_scrolled_index = Some(target);
     }
 
     fn adjust_selected_item_above_footer_overlay(&mut self, target: usize) {
@@ -1471,9 +1359,8 @@ mod scroll_fade_tests {
         leading_context_scroll_offset_for_selection, main_list_boundary_eligibility_values,
         main_list_row_stable_key, main_list_safe_scroll_offset_for_item,
         main_list_scroll_geometry_values, main_list_scroll_lifecycle_phase,
-        main_list_top_fade_progress, main_list_top_fade_progress_for_selection,
-        main_list_visible_range, script_list_pixel_top_for_offset, scrollbar_fade_duration,
-        scrollbar_fade_opacity, ScriptListRowHeights,
+        main_list_top_fade_progress, main_list_visible_range, script_list_pixel_top_for_offset,
+        scrollbar_fade_duration, scrollbar_fade_opacity, ScriptListRowHeights,
     };
     use crate::list_item::GroupedListItem;
 
@@ -1518,14 +1405,9 @@ mod scroll_fade_tests {
     }
 
     #[test]
-    fn top_occlusion_is_absent_when_selection_returns_to_first_row() {
-        assert_eq!(
-            main_list_top_fade_progress_for_selection(28.0, 96.0, 1, Some(1)),
-            0.0
-        );
-
-        let after_first_row = main_list_top_fade_progress_for_selection(44.0, 96.0, 2, Some(1));
-        assert!(after_first_row > 0.0 && after_first_row < 0.5);
+    fn top_occlusion_depends_only_on_viewport_offset() {
+        let progress = main_list_top_fade_progress(44.0, 96.0);
+        assert!(progress > 0.0 && progress < 0.5);
     }
 
     #[test]
@@ -1573,18 +1455,16 @@ mod scroll_fade_tests {
     }
 
     #[test]
-    fn boundary_capture_requires_the_matching_selected_endpoint() {
+    fn boundary_capture_depends_only_on_viewport_endpoints() {
         let top = main_list_scroll_geometry_values(1000.0, 420.0, 58.0, 32.0, 0.0);
-        let not_first = main_list_boundary_eligibility_values(top, 2, Some(1), Some(20));
-        assert!(!not_first.top);
-        let first = main_list_boundary_eligibility_values(top, 1, Some(1), Some(20));
-        assert!(first.top);
+        let top_eligibility = main_list_boundary_eligibility_values(top);
+        assert!(top_eligibility.top);
+        assert!(!top_eligibility.bottom);
 
         let bottom = main_list_scroll_geometry_values(1000.0, 420.0, 58.0, 32.0, 670.0);
-        let not_last = main_list_boundary_eligibility_values(bottom, 19, Some(1), Some(20));
-        assert!(!not_last.bottom);
-        let last = main_list_boundary_eligibility_values(bottom, 20, Some(1), Some(20));
-        assert!(last.bottom);
+        let bottom_eligibility = main_list_boundary_eligibility_values(bottom);
+        assert!(!bottom_eligibility.top);
+        assert!(bottom_eligibility.bottom);
     }
 
     #[test]

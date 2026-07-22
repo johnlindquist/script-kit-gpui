@@ -16,20 +16,21 @@ impl ScriptListApp {
 
     #[inline]
     fn set_selected_index(&mut self, ix: usize, reason: &str, cx: &mut Context<Self>) {
-        if ix == self.selected_index {
-            return;
+        let changed = ix != self.selected_index;
+        if changed {
+            self.reset_main_list_boundary_affordance(
+                crate::scrolling::boundary_affordance::SettleReason::Reset,
+            );
+            self.clear_menu_syntax_filter_accept_hint();
+            self.selected_index = ix;
+            self.maybe_expand_root_file_source_chip_page(cx);
+            self.rebuild_main_window_preflight_if_needed();
         }
-
-        self.reset_main_list_boundary_affordance(
-            crate::scrolling::boundary_affordance::SettleReason::Reset,
-        );
-        self.clear_menu_syntax_filter_accept_hint();
-        self.selected_index = ix;
-        self.maybe_expand_root_file_source_chip_page(cx);
-        self.rebuild_main_window_preflight_if_needed();
         self.scroll_to_selected_if_needed(reason);
         self.trigger_scroll_activity(cx);
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     fn maybe_expand_root_file_source_chip_page(&mut self, cx: &mut Context<Self>) -> bool {

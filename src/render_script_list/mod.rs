@@ -1530,23 +1530,8 @@ impl ScriptListApp {
                 .pt(header_overlay_height)
                 .pb(footer_padding);
 
-            // Wrap list in a relative container with scrollbar overlay
-            // CUSTOM SCROLL HANDLER: GPUI's list() component has issues measuring unmeasured items
-            // (they appear as 0px height). This causes mouse scroll to fail to reach all items.
-            // Solution: Intercept scroll wheel events and convert to index-based scrolling,
-            // which works correctly like keyboard navigation does.
-            //
-            // Average item height for delta-to-index conversion:
-            // Most items are LIST_ITEM_HEIGHT (40px), headers are SECTION_HEADER_HEIGHT (32px)
-            // Use 44px as a reasonable average that feels natural for scrolling
-            let avg_item_height =
-                crate::list_item::effective_average_item_height_for_scroll_for_theme(
-                    current_main_menu_theme,
-                );
-
-            // Capture item count for scroll handler logging
-            let scroll_item_count = item_count;
-
+            // Native GPUI ListState owns wheel, line, and momentum scrolling.
+            // The surrounding pane observes the post-native viewport only.
             let scrollbar_overlay = {
                 let footer_overlay_height = main_list_footer_overlay_total_padding();
                 let viewport_height = self.main_list_state.viewport_bounds().size.height;
@@ -1597,6 +1582,14 @@ impl ScriptListApp {
                     .right_0()
                     .h(safe_viewport_height)
                     .w(px(self.current_main_menu_theme.def().list.scrollbar_width))
+                    .capture_any_mouse_down(cx.listener(
+                        |this, event: &gpui::MouseDownEvent, _window, cx| {
+                            if event.button != gpui::MouseButton::Left {
+                                return;
+                            }
+                            this.observe_main_list_scrollbar_pointer_down(cx);
+                        },
+                    ))
                     .child(
                         GpuiScrollbar::vertical(&self.main_list_state)
                             .id("launcher-main-scrollbar")
@@ -1618,6 +1611,11 @@ impl ScriptListApp {
                 .w_full()
                 .h_full()
                 .overflow_hidden()
+                .on_scroll_wheel(
+                    cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+                        this.observe_main_list_scroll_wheel(event, window, cx);
+                    }),
+                )
                 // Move only the painted row subtree. Header, logical ListState,
                 // scrollbar, and footer remain fixed during boundary pull.
                 .child(
@@ -1640,25 +1638,6 @@ impl ScriptListApp {
                     )
                 })
                 .child(scrollbar_overlay)
-                // GPUI dispatches bubble listeners in reverse paint order. Keep
-                // this transparent wheel-only hitbox as the final child so our
-                // selection-owned controller runs before List's native listener
-                // and can stop it before logical ListState mutates.
-                .child(div().absolute().inset_0().on_scroll_wheel(cx.listener(
-                    move |this, event: &gpui::ScrollWheelEvent, window, cx| {
-                        if scroll_item_count == 0 {
-                            return;
-                        }
-                        cx.stop_propagation();
-                        this.handle_main_list_scroll_wheel(
-                            event,
-                            avg_item_height,
-                            scroll_item_count,
-                            window,
-                            cx,
-                        );
-                    },
-                )))
                 .into_any_element()
         };
 
