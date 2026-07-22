@@ -140,8 +140,8 @@ unsafe fn configure_window_vibrancy_common(
     // mode, where that base renders UNDER the NSGlassEffectView backdrop and
     // dims the whole material; use the near-clear base instead (0.0001 alpha
     // keeps the window shadow machinery alive, unlike clearColor).
-    let glass_mode =
-        tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled();
+    let glass_mode = tahoe_native_glass_composition_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled();
     let window_bg_color: id = if glass_mode {
         msg_send![
             class!(NSColor),
@@ -304,12 +304,38 @@ pub fn tahoe_liquid_glass_available() -> bool {
     false
 }
 
+/// True only when the complete one-window Liquid Glass composition can be
+/// installed. The debug no-glass switch is intentionally part of this gate so
+/// fallback launches do not keep the detached footer inset or transparent
+/// window background after the native backdrop has been disabled.
+#[cfg(target_os = "macos")]
+pub fn tahoe_native_glass_composition_available() -> bool {
+    native_glass_composition_gate(
+        tahoe_liquid_glass_available(),
+        crate::platform::glass_button_host::native_glass_container_available(),
+        std::env::var("SCRIPT_KIT_DEBUG_NO_GLASS").is_ok(),
+    )
+}
+
+fn native_glass_composition_gate(
+    effect_view_available: bool,
+    container_view_available: bool,
+    debug_no_glass: bool,
+) -> bool {
+    effect_view_available && container_view_available && !debug_no_glass
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn tahoe_native_glass_composition_available() -> bool {
+    false
+}
+
 /// Background appearance for a vibrancy-enabled window: `Transparent` when
 /// the Tahoe glass backdrop supplies the material (a `Blurred` appearance
 /// would stack the gpui fork's NSVisualEffectView above the glass and hide
 /// it), `Blurred` otherwise.
 pub fn vibrancy_window_background() -> gpui::WindowBackgroundAppearance {
-    if tahoe_liquid_glass_available() {
+    if tahoe_native_glass_composition_available() {
         gpui::WindowBackgroundAppearance::Transparent
     } else {
         gpui::WindowBackgroundAppearance::Blurred
@@ -579,6 +605,135 @@ unsafe fn tahoe_count_views_kind_of_excluding(
         }
     }
     count
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn remove_tahoe_window_backdrop(window: id, window_name: &str) {
+    if window == nil {
+        return;
+    }
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
+    if glass_view != nil {
+        let _: () = msg_send![glass_view, removeFromSuperview];
+    }
+    let _: () = msg_send![window, setHasShadow: true];
+    if window_name == "Main window" {
+        let content_layer: id = msg_send![content_view, layer];
+        if content_layer != nil {
+            let _: () = msg_send![
+                content_layer,
+                setCornerRadius: f64::from(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX)
+            ];
+            let _: () = msg_send![content_layer, setMasksToBounds: true];
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn update_tahoe_backdrop_geometry_and_shadow(
+    window: id,
+    content_view: id,
+    glass_view: id,
+    backdrop_layout: TahoeBackdropLayout,
+    corner_radius: f64,
+) {
+    use cocoa::foundation::NSRect;
+
+    let content_bounds: NSRect = msg_send![content_view, bounds];
+    let backdrop_frame = backdrop_layout.frame(content_bounds);
+    (*glass_view).set_ivar(
+        "_scriptKitBottomInset",
+        backdrop_layout.bottom_inset(),
+    );
+    let _: () = msg_send![glass_view, setFrame: backdrop_frame];
+
+    let content_layer: id = msg_send![content_view, layer];
+    if backdrop_layout.is_detached_main() {
+        let _: () = msg_send![window, setHasShadow: false];
+        if content_layer != nil {
+            let _: () = msg_send![content_layer, setCornerRadius: 0.0f64];
+            let _: () = msg_send![content_layer, setMasksToBounds: false];
+        }
+        let _: () = msg_send![glass_view, setWantsLayer: true];
+        let backdrop_layer: id = msg_send![glass_view, layer];
+        if backdrop_layer != nil {
+            let shadow = crate::theme::get_cached_theme().get_drop_shadow();
+            let shadow_opacity = if shadow.enabled { shadow.opacity } else { 0.0 };
+            let _: () = msg_send![backdrop_layer, setMasksToBounds: false];
+            let _: () = msg_send![backdrop_layer, setShadowOpacity: shadow_opacity];
+            let _: () = msg_send![backdrop_layer, setShadowRadius: f64::from(shadow.blur_radius) / 2.0];
+            let _: () = msg_send![
+                backdrop_layer,
+                setShadowOffset: cocoa::foundation::NSSize::new(
+                    f64::from(shadow.offset_x),
+                    -f64::from(shadow.offset_y)
+                )
+            ];
+            let shadow_color: id = msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: f64::from((shadow.color >> 16) & 0xff) / 255.0
+                green: f64::from((shadow.color >> 8) & 0xff) / 255.0
+                blue: f64::from(shadow.color & 0xff) / 255.0
+                alpha: 1.0f64
+            ];
+            if shadow_color != nil {
+                let cg_color: id = msg_send![shadow_color, CGColor];
+                let _: () = msg_send![backdrop_layer, setShadowColor: cg_color];
+            }
+            let backdrop_bounds: NSRect = msg_send![glass_view, bounds];
+            let path: id = msg_send![
+                class!(NSBezierPath),
+                bezierPathWithRoundedRect: backdrop_bounds
+                xRadius: corner_radius
+                yRadius: corner_radius
+            ];
+            if path != nil {
+                let cg_path: id = msg_send![path, CGPath];
+                let _: () = msg_send![backdrop_layer, setShadowPath: cg_path];
+            }
+        }
+    } else {
+        let _: () = msg_send![window, setHasShadow: true];
+        let backdrop_layer: id = msg_send![glass_view, layer];
+        if backdrop_layer != nil {
+            let _: () = msg_send![backdrop_layer, setShadowOpacity: 0.0f32];
+            let _: () = msg_send![backdrop_layer, setShadowPath: nil];
+        }
+    }
+}
+
+/// Refresh only the size-dependent pieces of the main backdrop. This is safe
+/// to call from the GPUI bounds observer while a native drag or resize is in
+/// progress; it avoids the recursive view walk and material retint performed
+/// by the full appearance configuration path.
+#[cfg(target_os = "macos")]
+unsafe fn refresh_main_tahoe_backdrop_geometry(window: id) {
+    if !tahoe_native_glass_composition_available()
+        || !crate::theme::get_cached_theme().is_vibrancy_enabled()
+    {
+        remove_tahoe_window_backdrop(window, "Main window");
+        return;
+    }
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
+    if glass_view == nil {
+        return;
+    }
+    let layout = tahoe_backdrop_layout("Main window");
+    update_tahoe_backdrop_geometry_and_shadow(
+        window,
+        content_view,
+        glass_view,
+        layout,
+        f64::from(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX),
+    );
 }
 
 /// Audit the immediate children of `content_view`: how many are glass views and
@@ -909,7 +1064,9 @@ unsafe fn begin_ns_window_exit_dematerialize(
 ) -> bool {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
-    if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
+    if !(tahoe_native_glass_composition_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled())
+    {
         return false;
     }
     if glass_morph_tuning().is_none() {
@@ -1066,7 +1223,9 @@ unsafe fn park_hidden_window_for_glass_morph(window: id) {
     // Post-hide cleanup: drop any exit-dematerialize blur so the next show
     // starts crisp.
     clear_exit_dematerialize_blur(window);
-    if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
+    if !(tahoe_native_glass_composition_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled())
+    {
         return;
     }
     let morph_opacity = crate::theme::get_cached_theme().get_opacity();
@@ -1544,7 +1703,9 @@ unsafe fn animate_tahoe_glass_disappearance(
 ) -> bool {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
-    if !(tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()) {
+    if !(tahoe_native_glass_composition_available()
+        && crate::theme::get_cached_theme().is_vibrancy_enabled())
+    {
         return false;
     }
     let morph_enabled = crate::theme::get_cached_theme()
@@ -1699,13 +1860,17 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         return false;
     }
 
-    // Debug-only: skip the glass backdrop to measure whether it contributes
-    // anything visible underneath the NSVisualEffectViews.
-    if std::env::var("SCRIPT_KIT_DEBUG_NO_GLASS").is_ok() {
+    // Reconcile capability loss as well as installation. In particular, the
+    // debug no-glass launch must remove any stale inset backdrop and restore
+    // the ordinary full-window shadow/fallback material.
+    if !tahoe_native_glass_composition_available()
+        || !crate::theme::get_cached_theme().is_vibrancy_enabled()
+    {
+        remove_tahoe_window_backdrop(window, window_name);
         logging::log(
             log_target,
             &format!(
-                "{}: DEBUG: Tahoe glass backdrop skipped via SCRIPT_KIT_DEBUG_NO_GLASS",
+                "{}: Tahoe glass composition unavailable or disabled; restored fallback backdrop",
                 window_name
             ),
         );
@@ -1793,14 +1958,13 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
             positioned: NS_WINDOW_BELOW
             relativeTo: nil
         ];
+        // The superview now owns the view. Balance `alloc` so teardown via
+        // removeFromSuperview can release it instead of leaking a native
+        // object for every main-window lifetime.
+        let _: () = msg_send![glass_view, release];
         created = true;
     }
 
-    (*glass_view).set_ivar(
-        "_scriptKitBottomInset",
-        backdrop_layout.bottom_inset(),
-    );
-    let _: () = msg_send![glass_view, setFrame: backdrop_frame];
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
@@ -1832,59 +1996,13 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     // native full-window shadow would reveal that host as one rectangular
     // slab and visually bridge the main material to the footer capsules.
     // Cast any depth from the bounded backdrop layer instead.
-    let content_layer: id = msg_send![content_view, layer];
-    if backdrop_layout.is_detached_main() {
-        let _: () = msg_send![window, setHasShadow: false];
-        if content_layer != nil {
-            let _: () = msg_send![content_layer, setCornerRadius: 0.0f64];
-            let _: () = msg_send![content_layer, setMasksToBounds: false];
-        }
-        let _: () = msg_send![glass_view, setWantsLayer: true];
-        let backdrop_layer: id = msg_send![glass_view, layer];
-        if backdrop_layer != nil {
-            let shadow = crate::theme::get_cached_theme().get_drop_shadow();
-            let shadow_opacity = if shadow.enabled { shadow.opacity } else { 0.0 };
-            let _: () = msg_send![backdrop_layer, setMasksToBounds: false];
-            let _: () = msg_send![backdrop_layer, setShadowOpacity: shadow_opacity];
-            let _: () = msg_send![backdrop_layer, setShadowRadius: f64::from(shadow.blur_radius) / 2.0];
-            let _: () = msg_send![
-                backdrop_layer,
-                setShadowOffset: cocoa::foundation::NSSize::new(
-                    f64::from(shadow.offset_x),
-                    -f64::from(shadow.offset_y)
-                )
-            ];
-            let shadow_color: id = msg_send![
-                class!(NSColor),
-                colorWithSRGBRed: f64::from((shadow.color >> 16) & 0xff) / 255.0
-                green: f64::from((shadow.color >> 8) & 0xff) / 255.0
-                blue: f64::from(shadow.color & 0xff) / 255.0
-                alpha: 1.0f64
-            ];
-            if shadow_color != nil {
-                let cg_color: id = msg_send![shadow_color, CGColor];
-                let _: () = msg_send![backdrop_layer, setShadowColor: cg_color];
-            }
-            let backdrop_bounds: NSRect = msg_send![glass_view, bounds];
-            let path: id = msg_send![
-                class!(NSBezierPath),
-                bezierPathWithRoundedRect: backdrop_bounds
-                xRadius: corner_radius
-                yRadius: corner_radius
-            ];
-            if path != nil {
-                let cg_path: id = msg_send![path, CGPath];
-                let _: () = msg_send![backdrop_layer, setShadowPath: cg_path];
-            }
-        }
-    } else {
-        let _: () = msg_send![window, setHasShadow: true];
-        let backdrop_layer: id = msg_send![glass_view, layer];
-        if backdrop_layer != nil {
-            let _: () = msg_send![backdrop_layer, setShadowOpacity: 0.0f32];
-            let _: () = msg_send![backdrop_layer, setShadowPath: nil];
-        }
-    }
+    update_tahoe_backdrop_geometry_and_shadow(
+        window,
+        content_view,
+        glass_view,
+        backdrop_layout,
+        corner_radius,
+    );
 
     tahoe_pin_glass_backdrop_backmost(content_view, glass_view);
     let _: () = msg_send![glass_view, setNeedsDisplay: true];
@@ -2330,6 +2448,14 @@ pub fn configure_hud_window_vibrancy(_window: *mut std::ffi::c_void, _is_dark: b
 
 #[cfg(test)]
 mod secondary_window_config_tests {
+    #[test]
+    fn detached_glass_requires_both_classes_and_honors_debug_fallback() {
+        assert!(super::native_glass_composition_gate(true, true, false));
+        assert!(!super::native_glass_composition_gate(false, true, false));
+        assert!(!super::native_glass_composition_gate(true, false, false));
+        assert!(!super::native_glass_composition_gate(true, true, true));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn glass_morph_tuning_drives_matching_frame_and_layer_geometry() {

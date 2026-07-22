@@ -97,7 +97,8 @@ pub fn configure_window_vibrancy_material_for_appearance(
         // ║ Glass mode: near-clear instead — the semi-opaque base renders UNDER the   ║
         // ║ NSGlassEffectView backdrop and dims the whole material.                   ║
         // ╚════════════════════════════════════════════════════════════════════════════╝
-        let glass_mode = tahoe_liquid_glass_available() && theme.is_vibrancy_enabled();
+        let glass_mode = tahoe_native_glass_composition_available()
+            && theme.is_vibrancy_enabled();
         let window_bg_color: id = if glass_mode {
             // Near-clear (NOT clearColor): the 0.0001-alpha base makes the
             // window-server shape the full rect, so the container's shadow is
@@ -161,6 +162,43 @@ pub fn configure_window_vibrancy_material_for_appearance(
     }
 }
 
+/// Reconcile the complete native main-window composition immediately before
+/// an AppKit reveal. The show path calls this outside any GPUI borrow, after
+/// the final hidden frame has been applied and before `orderFrontRegardless`,
+/// preventing a stale-size backdrop/footer flash on the first visible frame.
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_main_window_native_composition_for_show() {
+    if require_main_thread("prepare_main_window_native_composition_for_show") {
+        return;
+    }
+    let Some(window) = window_manager::get_main_window() else {
+        return;
+    };
+    unsafe {
+        let _ = configure_tahoe_window_backdrop(window, "PANEL", "Main window");
+        crate::footer_popup::sync_main_window_glass_scroll_bands(window);
+        crate::footer_popup::refresh_main_window_footer_from_last_config(window);
+    }
+}
+
+/// Refresh frame-, display-, and backing-scale-dependent native geometry
+/// without running the full material/appearance configuration on every drag
+/// tick. Called from the GPUI bounds observer.
+#[cfg(target_os = "macos")]
+pub fn refresh_main_window_native_composition_geometry() {
+    if require_main_thread("refresh_main_window_native_composition_geometry") {
+        return;
+    }
+    let Some(window) = window_manager::get_main_window() else {
+        return;
+    };
+    unsafe {
+        refresh_main_tahoe_backdrop_geometry(window);
+        crate::footer_popup::sync_main_window_glass_scroll_bands(window);
+        crate::footer_popup::refresh_main_window_footer_from_last_config(window);
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn configure_window_vibrancy_material_for_appearance(
     _is_dark: bool,
@@ -168,6 +206,9 @@ pub fn configure_window_vibrancy_material_for_appearance(
 ) {
     // No-op on non-macOS platforms
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn refresh_main_window_native_composition_geometry() {}
 
 #[cfg(target_os = "macos")]
 fn vibrancy_material_value(material: crate::theme::VibrancyMaterial) -> isize {
@@ -263,7 +304,7 @@ unsafe fn configure_visual_effect_views_recursive(
         // own blur bands on top of the glass, so hide them entirely (and
         // restore them whenever glass mode is unavailable or vibrancy is off).
         // SCRIPT_KIT_DEBUG_HIDE_VEV keeps forcing the hide for measurement.
-        let glass_mode = tahoe_liquid_glass_available()
+        let glass_mode = tahoe_native_glass_composition_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled();
         let hide_vev = glass_mode || std::env::var("SCRIPT_KIT_DEBUG_HIDE_VEV").is_ok();
         let _: () = msg_send![view, setHidden: hide_vev];

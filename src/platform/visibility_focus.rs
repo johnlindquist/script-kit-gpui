@@ -344,10 +344,16 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
             trace_main_window_native_geometry("before_order_front", cycle_id, None, None);
         }
 
+        // Final hidden-phase native reconciliation: the host frame has already
+        // been applied by the caller, so refresh every local composition
+        // region before the first visible AppKit frame.
+        prepare_main_window_native_composition_for_show();
+
         // Glass mode: set the morph start state (alpha 0, larger frame) and
         // begin animating BEFORE ordering front — ordering front first
         // flashed one full-size frame before the morph hid it (flicker).
-        if tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()
+        if tahoe_native_glass_composition_available()
+            && crate::theme::get_cached_theme().is_vibrancy_enabled()
         {
             animate_tahoe_glass_appearance(window, "PANEL", "Main window");
         }
@@ -443,8 +449,11 @@ pub fn show_main_window_background() {
             PanelInvariantPhase::BackgroundShow,
         );
 
+        prepare_main_window_native_composition_for_show();
+
         // Glass mode: morph the glass backdrop into place on background shows too.
-        if tahoe_liquid_glass_available() && crate::theme::get_cached_theme().is_vibrancy_enabled()
+        if tahoe_native_glass_composition_available()
+            && crate::theme::get_cached_theme().is_vibrancy_enabled()
         {
             animate_tahoe_glass_appearance(window, "PANEL", "Main window");
         }

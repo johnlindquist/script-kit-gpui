@@ -83,6 +83,7 @@
                             script_kit_gpui::is_main_window_visible(),
                             crate::platform::is_main_window_focused(),
                         );
+                        platform::refresh_main_window_native_composition_geometry();
                         view.sync_main_footer_popup(win, ctx);
                         // Suppress unused variable warning - we need win to access window bounds
                         let _ = win;

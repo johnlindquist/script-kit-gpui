@@ -511,7 +511,7 @@ app.run(move |cx: &mut App| {
         // Load theme to determine window background appearance (vibrancy)
         let initial_theme = theme::get_cached_theme();
         let window_background = if initial_theme.is_vibrancy_enabled() {
-            if crate::platform::tahoe_liquid_glass_available() {
+            if crate::platform::tahoe_native_glass_composition_available() {
                 // Tahoe: the native NSGlassEffectView backdrop (installed by
                 // configure_tahoe_window_backdrop) supplies the material. A
                 // Blurred appearance would stack the fork's NSVisualEffectView

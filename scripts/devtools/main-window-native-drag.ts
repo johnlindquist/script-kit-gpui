@@ -384,11 +384,12 @@ function parseCLI() {
   const trials = value("--trials", "slow-horizontal,fast-horizontal,diagonal")!
     .split(",")
     .filter(Boolean);
-  return { binary, outDir, trials };
+  const expectFallback = args.includes("--expect-fallback");
+  return { binary, outDir, trials, expectFallback };
 }
 
 async function cli() {
-  const { binary, outDir, trials } = parseCLI();
+  const { binary, outDir, trials, expectFallback } = parseCLI();
   if (!binary || !existsSync(binary)) throw new Error(`binary missing: ${binary ?? "<unset>"}`);
   mkdirSync(outDir, { recursive: true });
   const helper = join(outDir, "macos-native-drag-sampler");
@@ -416,7 +417,10 @@ async function cli() {
     sessionName: `main-window-native-drag-${process.pid}`,
     sandboxHome: true,
     defaultTimeoutMs: 15_000,
-    env: { SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat" },
+    env: {
+      SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
+      ...(expectFallback ? { SCRIPT_KIT_DEBUG_NO_GLASS: "1" } : {}),
+    },
   });
   receipt.sessionDir = driver.sessionDir;
   try {
@@ -428,6 +432,76 @@ async function cli() {
     if (!main?.pid) throw new Error("main automation window PID missing");
     receipt.pid = main.pid;
     receipt.initialAutomationWindows = windows;
+
+    const compositionSnapshot = async () => {
+      const [state, layout, automationWindows] = await Promise.all([
+        driver.getState({ timeoutMs: 15_000 }),
+        driver.getLayoutInfo(
+          { target: { type: "id", id: "main" } },
+          { timeoutMs: 15_000 },
+        ),
+        driver.listAutomationWindows({ timeoutMs: 15_000 }),
+      ]);
+      const appKit = (layout as any)?.fidelity?.appKit ?? null;
+      const processWindows = ((automationWindows as any)?.windows ?? [])
+        .filter((candidate: any) => candidate.pid === main.pid);
+      return {
+        windowVisible: (state as any)?.windowVisible ?? null,
+        windowFocused: (state as any)?.windowFocused ?? null,
+        promptType: (state as any)?.promptType ?? null,
+        mainBackdropFrame: appKit?.mainBackdropFrame ?? null,
+        footerContainerFrame: appKit?.footerContainerFrame ?? null,
+        transparentGapPoints: appKit?.transparentGapPoints ?? null,
+        backdropFooterIntersectionArea: appKit?.backdropFooterIntersectionArea ?? null,
+        outerWindowHasShadow: appKit?.outerWindowHasShadow ?? null,
+        processWindowIds: processWindows.map((candidate: any) => candidate.id),
+      };
+    };
+
+    const showHideCycles: Array<Record<string, unknown>> = [];
+    for (let cycle = 1; cycle <= 10; cycle += 1) {
+      driver.send({ type: "hide", requestId: `mwnd-hide-${cycle}` });
+      await driver.waitForState({ windowVisible: false }, { timeoutMs: 15_000 });
+      const hidden = await driver.getState({ timeoutMs: 15_000 });
+      driver.send({ type: "show", requestId: `mwnd-show-${cycle}` });
+      await driver.waitForState({ windowVisible: true }, { timeoutMs: 15_000 });
+      await driver.waitForSettle({ timeoutMs: 10_000 });
+      const shownAttempts = [await compositionSnapshot()];
+      if (shownAttempts[0]?.windowVisible !== true) {
+        // A human click/hotkey can conceal the panel between the visibility
+        // acknowledgement and the snapshot. Re-run only that sample and keep
+        // both attempts in the receipt so test interference is explicit.
+        driver.send({ type: "show", requestId: `mwnd-show-${cycle}-retry` });
+        await driver.waitForState({ windowVisible: true }, { timeoutMs: 15_000 });
+        await driver.waitForSettle({ timeoutMs: 10_000 });
+        shownAttempts.push(await compositionSnapshot());
+      }
+      showHideCycles.push({
+        cycle,
+        hiddenVisible: (hidden as any)?.windowVisible ?? null,
+        shownAttempts,
+        shown: shownAttempts.at(-1),
+      });
+    }
+
+    const modeTransitions: Array<Record<string, unknown>> = [];
+    for (let transition = 1; transition <= 20; transition += 1) {
+      const builtinId = transition % 2 === 1
+        ? "builtin/choose-theme"
+        : "builtin/main-window";
+      driver.send({
+        type: "triggerBuiltin",
+        builtinId,
+        requestId: `mwnd-mode-${transition}`,
+      });
+      await driver.waitForSettle({ timeoutMs: 10_000 });
+      modeTransitions.push({
+        transition,
+        builtinId,
+        snapshot: await compositionSnapshot(),
+      });
+    }
+    receipt.lifecycle = { showHideCycles, modeTransitions };
 
     const results: Array<Record<string, unknown>> = [];
     for (const trajectory of trials) {
@@ -480,9 +554,34 @@ async function cli() {
       { target: { type: "id", id: "main" } },
       { timeoutMs: 15_000 },
     );
-    receipt.logs = await driver.getLogs({ limit: 200, level: "warn" });
+    receipt.logs = await driver.getLogs({ limit: 500 });
+    const compositionIsValid = (snapshot: any) => {
+      if (expectFallback) {
+        return snapshot?.windowVisible === true
+          && snapshot?.mainBackdropFrame == null
+          && snapshot?.footerContainerFrame == null
+          && snapshot?.transparentGapPoints == null
+          && snapshot?.backdropFooterIntersectionArea == null
+          && snapshot?.outerWindowHasShadow === true
+          && snapshot?.processWindowIds?.includes("main");
+      }
+      return snapshot?.windowVisible === true
+        && snapshot?.transparentGapPoints === 8
+        && snapshot?.backdropFooterIntersectionArea === 0
+        && snapshot?.outerWindowHasShadow === false
+        && snapshot?.processWindowIds?.length === 1
+        && snapshot?.processWindowIds?.[0] === "main";
+    };
+    const lifecyclePass = showHideCycles.every((cycle: any) =>
+      cycle.hiddenVisible === false && compositionIsValid(cycle.shown)
+    ) && modeTransitions.every((transition: any) =>
+      compositionIsValid(transition.snapshot)
+    );
+    receipt.lifecyclePass = lifecyclePass;
+    receipt.expectFallback = expectFallback;
     receipt.valid = results.every((result: any) => result.analysis.valid);
-    receipt.pass = results.every((result: any) => result.analysis.overallPass);
+    receipt.pass = lifecyclePass
+      && results.every((result: any) => result.analysis.overallPass);
   } finally {
     try {
       driver.send({ type: "hide" });

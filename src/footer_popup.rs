@@ -995,6 +995,24 @@ fn set_main_window_footer_last_config(config: Option<&MainWindowFooterConfig>) {
         .unwrap_or_else(|poison| poison.into_inner()) = config.cloned();
 }
 
+/// Re-apply the last resolved footer config after native geometry, backing
+/// scale, appearance, or visibility changed outside a GPUI render pass.
+/// This never creates a second window: it only reconciles the footer already
+/// owned by the main NSWindow and removes it when fallback mode is active.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn refresh_main_window_footer_from_last_config(ns_window: id) {
+    let config = MAIN_WINDOW_FOOTER_LAST_CONFIG
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    sync_main_window_glass_scroll_bands(ns_window);
+    if let Some(config) = config.as_ref() {
+        let _ = refresh_main_footer_host(ns_window, config);
+    } else {
+        remove_main_window_footer_host(ns_window);
+    }
+}
+
 fn close_gpui_footer_overlay(cx: &mut App) {
     clear_main_footer_overlay_fidelity_snapshot();
     let storage = MAIN_WINDOW_GPUI_FOOTER_OVERLAY.get_or_init(|| Mutex::new(None));
@@ -1921,7 +1939,7 @@ unsafe fn configure_gpui_footer_overlay_ns_window(ns_window: id) {
 /// Keeping this policy in the native-band owner prevents AppKit installation,
 /// GPUI insets, and scroll receipts from drifting onto different gates.
 pub(crate) fn glass_scroll_bands_active() -> bool {
-    crate::platform::tahoe_liquid_glass_available()
+    crate::platform::tahoe_native_glass_composition_available()
         && crate::theme::get_cached_theme().is_vibrancy_enabled()
 }
 
@@ -2935,6 +2953,28 @@ unsafe fn refresh_window_footer_host(ns_window: id, config: &MainWindowFooterCon
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn sync_native_view_tree_contents_scale(view: id, contents_scale: f64) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if view == nil || !contents_scale.is_finite() || contents_scale <= 0.0 {
+        return;
+    }
+    let layer: id = msg_send![view, layer];
+    if layer != nil {
+        let _: () = msg_send![layer, setContentsScale: contents_scale];
+    }
+    let subviews: id = msg_send![view, subviews];
+    if subviews == nil {
+        return;
+    }
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let child: id = msg_send![subviews, objectAtIndex: index];
+        sync_native_view_tree_contents_scale(child, contents_scale);
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn refresh_footer_host_impl(
     ns_window: id,
     search_root: id,
@@ -2957,6 +2997,8 @@ unsafe fn refresh_footer_host_impl(
     if footer_view == nil {
         return false;
     }
+    let backing_scale: f64 = msg_send![ns_window, backingScaleFactor];
+    sync_native_view_tree_contents_scale(footer_view, backing_scale);
     let footer_is_glass = objc::runtime::Class::get("NSGlassEffectView")
         .map(|glass_class| {
             let is_glass: cocoa::base::BOOL = msg_send![footer_view, isKindOfClass: glass_class];

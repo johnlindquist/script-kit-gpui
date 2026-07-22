@@ -92,11 +92,21 @@ fn flatten_groups(
 }
 
 pub(crate) fn glass_buttons_enabled() -> bool {
-    crate::platform::tahoe_liquid_glass_available()
+    crate::platform::tahoe_native_glass_composition_available()
         && crate::theme::get_cached_theme().is_vibrancy_enabled()
         && std::env::var("SCRIPT_KIT_GLASS_BUTTONS")
             .map(|value| value != "0")
             .unwrap_or(true)
+}
+
+/// Whether AppKit can host a native Liquid Glass container in this process.
+///
+/// The detached main footer requires both the glass effect view (checked by
+/// the platform gate) and its container class. Keeping this as a separate
+/// capability check lets fallback mode avoid reserving an empty footer strip
+/// on systems where only part of the Tahoe API surface is present.
+pub(crate) fn native_glass_container_available() -> bool {
+    Class::get("NSGlassEffectContainerView").is_some()
 }
 
 /// Relative placement for a native glass container around GPUI's Metal view.
