@@ -420,7 +420,7 @@ impl ScriptListApp {
         };
         let began_gesture = event.phase == gpui::ScrollPhase::Began
             || event.momentum_phase == gpui::ScrollPhase::Began
-            || event.touch_phase == gpui::TouchPhase::Started;
+            || matches!(event.touch_phase, gpui::TouchPhase::Started);
         if !self
             .main_list_scroll_frame_trace
             .record_event(began_gesture, std::time::Instant::now())
