@@ -112,27 +112,26 @@ impl ScriptListApp {
 
         let filtered_notes = Self::notes_browse_filtered_notes(&filter);
         let filtered_len = filtered_notes.len();
-        let selected_index = if let Some(reanchored) =
-            Self::builtin_reanchor_selection_from_scroll_handle(
-                selected_index,
-                &self.notes_browse_scroll_handle,
-                filtered_len,
-            ) {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "notes_browse",
-                reason = "render",
-                selected_before = selected_index,
-                selected_after = reanchored,
-            );
-            if let AppView::NotesBrowseView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected_index
-        };
+        let row_keys: Vec<String> = filtered_notes
+            .iter()
+            .map(|note| note.id.to_string())
+            .collect();
+        let selected_index = crate::reconcile_dynamic_tracked_list_on_render(
+            self.tracked_builtin_list_states
+                .entry("notes_browse")
+                .or_default(),
+            &filter,
+            &row_keys,
+            selected_index,
+            &self.notes_browse_scroll_handle,
+        );
+        if let AppView::NotesBrowseView {
+            selected_index: current_selected,
+            ..
+        } = &mut self.current_view
+        {
+            *current_selected = selected_index;
+        }
         let total_notes = filtered_len;
         let preview_note = filtered_notes.get(selected_index).cloned();
         let in_portal = self.is_in_attachment_portal();
@@ -184,26 +183,28 @@ impl ScriptListApp {
                 let note_count = notes.len();
 
                 if crate::ui_foundation::is_key_up(key) {
-                    if current_selected > 0 {
+                    if note_count > 0 {
+                        let next = current_selected.saturating_sub(1);
                         if let AppView::NotesBrowseView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected - 1;
-                            this.notes_browse_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.notes_browse_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
                 } else if crate::ui_foundation::is_key_down(key) {
-                    if current_selected < note_count.saturating_sub(1) {
+                    if note_count > 0 {
+                        let next = current_selected
+                            .saturating_add(1)
+                            .min(note_count.saturating_sub(1));
                         if let AppView::NotesBrowseView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected + 1;
-                            this.notes_browse_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.notes_browse_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -238,14 +239,18 @@ impl ScriptListApp {
         } else {
             let notes_for_closure = filtered_notes.clone();
             let selected = selected_index;
+            let hovered = self.hovered_index;
             let entity = cx.entity().downgrade();
 
             crate::components::scrollbar::render_tracked_scroll_column(
                 "notes-browse-list",
                 &self.notes_browse_scroll_handle,
-                notes_for_closure.into_iter().enumerate().map(
-                    move |(display_ix, note)| {
+                notes_for_closure
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(display_ix, note)| {
                         let is_selected = display_ix == selected;
+                        let note_id = note.id.clone();
                         let title = Self::notes_browse_display_title(&note);
                         let description = format!(
                             "{} · {} chars{}",
@@ -256,14 +261,18 @@ impl ScriptListApp {
 
                         let item = ListItem::new(title, list_colors)
                             .description_opt(Some(description))
-                            .selected(is_selected);
+                            .selected(is_selected)
+                            .hovered(hovered == Some(display_ix))
+                            .semantic_id(format!("notes-browse:{note_id}"));
 
-                        let entity = entity.clone();
+                        let click_entity = entity.clone();
+                        let move_entity = entity.clone();
+                        let hover_entity = entity.clone();
                         div()
-                            .id(gpui::ElementId::Integer(display_ix as u64))
+                            .id(format!("notes-browse-row:{note_id}"))
                             .cursor_pointer()
                             .on_click(move |event, _window, cx| {
-                                if let Some(app) = entity.upgrade() {
+                                if let Some(app) = click_entity.upgrade() {
                                     app.update(cx, |this, cx| {
                                         let should_submit = if let AppView::NotesBrowseView {
                                             selected_index,
@@ -281,6 +290,7 @@ impl ScriptListApp {
                                         };
 
                                         this.notes_browse_scroll_handle.scroll_to_item(display_ix);
+                                        this.note_list_pointer_click(display_ix, cx);
 
                                         if should_submit && this.is_in_attachment_portal() {
                                             let notes = Self::notes_browse_filtered_notes(
@@ -292,15 +302,28 @@ impl ScriptListApp {
                                                 this.close_attachment_portal_with_part(part, cx);
                                             }
                                         }
-
-                                        cx.notify();
                                     });
                                 }
                                 cx.stop_propagation();
                             })
+                            .on_mouse_move(move |_event, _window, cx| {
+                                if let Some(app) = move_entity.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        this.note_list_pointer_move(display_ix, cx);
+                                    });
+                                }
+                            })
+                            .on_hover(move |is_hovered, _window, cx| {
+                                if !*is_hovered {
+                                    if let Some(app) = hover_entity.upgrade() {
+                                        app.update(cx, |this, cx| {
+                                            this.note_list_pointer_leave(display_ix, cx);
+                                        });
+                                    }
+                                }
+                            })
                             .child(item)
-                    },
-                ),
+                    }),
             )
         };
 
@@ -378,52 +401,7 @@ impl ScriptListApp {
             .py(px(design_spacing.padding_xs))
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                    let view_state = if let AppView::NotesBrowseView {
-                        filter,
-                        selected_index,
-                    } = &this.current_view
-                    {
-                        Some((filter.clone(), *selected_index))
-                    } else {
-                        None
-                    };
-
-                    let Some((current_filter, current_selected)) = view_state else {
-                        return;
-                    };
-
-                    let filtered_notes = Self::notes_browse_filtered_notes(&current_filter);
-                    let filtered_len = filtered_notes.len();
-
-                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                        event,
-                        current_selected,
-                        filtered_len,
-                    ) else {
-                        if filtered_len > 0 {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    };
-
-                    if let AppView::NotesBrowseView { selected_index, .. } = &mut this.current_view
-                    {
-                        *selected_index = new_selected;
-                    }
-
-                    this.notes_browse_scroll_handle.scroll_to_item(new_selected);
-                    Self::log_builtin_scroll_event(
-                        "notes_browse",
-                        "scroll_to_item",
-                        "wheel",
-                        filtered_len,
-                        Some(new_selected),
-                        Some(new_selected),
-                        Some(&current_filter),
-                        "mouse",
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
+                    this.observe_builtin_native_list_scroll(event, cx);
                 },
             ))
             .flex()
@@ -463,10 +441,8 @@ impl ScriptListApp {
             total_notes,
             if total_notes == 1 { "" } else { "s" }
         );
-        let main = self.render_builtin_split_main_content(
-            list_pane.into_any_element(),
-            preview_panel,
-        );
+        let main =
+            self.render_builtin_split_main_content(list_pane.into_any_element(), preview_panel);
 
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
             crate::components::main_view_chrome::render_main_view_shell()
@@ -478,9 +454,10 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(count_label),
-                ], cx),
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(count_label)],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,

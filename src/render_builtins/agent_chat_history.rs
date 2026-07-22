@@ -22,7 +22,9 @@ impl AgentChatHistoryEmptyState {
 }
 
 impl ScriptListApp {
-    fn agent_chat_history_visible_rows(filter: &str) -> Vec<crate::ai::agent_chat::ui::history::AgentChatHistoryEntry> {
+    fn agent_chat_history_visible_rows(
+        filter: &str,
+    ) -> Vec<crate::ai::agent_chat::ui::history::AgentChatHistoryEntry> {
         crate::ai::agent_chat::ui::history::search_history(filter, 100)
             .into_iter()
             .map(|hit| hit.entry)
@@ -86,29 +88,26 @@ impl ScriptListApp {
         let filtered_entries: Vec<crate::ai::agent_chat::ui::history::AgentChatHistoryEntry> =
             hits.into_iter().map(|h| h.entry).collect();
         let filtered_len = filtered_entries.len();
-        let selected_index = if let Some(reanchored) =
-            Self::builtin_reanchor_selection_from_scroll_handle(
-                selected_index,
-                &self.agent_chat_history_scroll_handle,
-                filtered_len,
-            )
+        let row_keys: Vec<String> = filtered_entries
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect();
+        let selected_index = crate::reconcile_dynamic_tracked_list_on_render(
+            self.tracked_builtin_list_states
+                .entry("agent_chat_history")
+                .or_default(),
+            &filter,
+            &row_keys,
+            selected_index,
+            &self.agent_chat_history_scroll_handle,
+        );
+        if let AppView::AgentChatHistoryView {
+            selected_index: current_selected,
+            ..
+        } = &mut self.current_view
         {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "agent_chat_history",
-                reason = "render",
-                selected_before = selected_index,
-                selected_after = reanchored,
-            );
-            if let AppView::AgentChatHistoryView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected_index
-        };
-
+            *current_selected = selected_index;
+        }
         // Load preview for selected entry
         let selected_session_id = filtered_entries
             .get(selected_index)
@@ -199,26 +198,28 @@ impl ScriptListApp {
                 let current_filtered_len = filtered.len();
 
                 if is_key_up(key) {
-                    if current_selected > 0 {
+                    if current_filtered_len > 0 {
+                        let next = current_selected.saturating_sub(1);
                         if let AppView::AgentChatHistoryView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected - 1;
-                            this.agent_chat_history_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.agent_chat_history_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
                 } else if is_key_down(key) {
-                    if current_selected < current_filtered_len.saturating_sub(1) {
+                    if current_filtered_len > 0 {
+                        let next = current_selected
+                            .saturating_add(1)
+                            .min(current_filtered_len.saturating_sub(1));
                         if let AppView::AgentChatHistoryView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected + 1;
-                            this.agent_chat_history_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.agent_chat_history_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -341,16 +342,22 @@ impl ScriptListApp {
                 .icon(crate::designs::icon_variations::IconName::MessageCircle)
                 .into_element()
         } else {
-            let entries_for_closure: Vec<crate::ai::agent_chat::ui::history::AgentChatHistoryEntry> =
-                filtered_entries.clone();
+            let entries_for_closure: Vec<
+                crate::ai::agent_chat::ui::history::AgentChatHistoryEntry,
+            > = filtered_entries.clone();
             let selected = selected_index;
+            let hovered = self.hovered_index;
+            let entity = cx.entity().downgrade();
 
             crate::components::scrollbar::render_tracked_scroll_column(
                 "agent_chat-history-list",
                 &self.agent_chat_history_scroll_handle,
-                entries_for_closure.into_iter().enumerate().map(
-                    move |(display_ix, entry)| {
+                entries_for_closure
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(display_ix, entry)| {
                         let is_selected = display_ix == selected;
+                        let session_id = entry.session_id.clone();
 
                         let name = entry.title_display().to_string();
                         let description = format!(
@@ -362,13 +369,50 @@ impl ScriptListApp {
 
                         let item = ListItem::new(name, list_colors)
                             .description_opt(Some(description))
-                            .selected(is_selected);
+                            .selected(is_selected)
+                            .hovered(hovered == Some(display_ix))
+                            .semantic_id(format!("agent-chat-history:{session_id}"));
 
+                        let click_entity = entity.clone();
+                        let move_entity = entity.clone();
+                        let hover_entity = entity.clone();
                         div()
-                            .id(gpui::ElementId::Integer(display_ix as u64))
+                            .id(format!("agent-chat-history-row:{session_id}"))
+                            .cursor_pointer()
+                            .on_click(move |_event, _window, cx| {
+                                if let Some(app) = click_entity.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        if let AppView::AgentChatHistoryView {
+                                            selected_index,
+                                            ..
+                                        } = &mut this.current_view
+                                        {
+                                            *selected_index = display_ix;
+                                        }
+                                        this.agent_chat_history_scroll_handle
+                                            .scroll_to_item(display_ix);
+                                        this.note_list_pointer_click(display_ix, cx);
+                                    });
+                                }
+                            })
+                            .on_mouse_move(move |_event, _window, cx| {
+                                if let Some(app) = move_entity.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        this.note_list_pointer_move(display_ix, cx);
+                                    });
+                                }
+                            })
+                            .on_hover(move |is_hovered, _window, cx| {
+                                if !*is_hovered {
+                                    if let Some(app) = hover_entity.upgrade() {
+                                        app.update(cx, |this, cx| {
+                                            this.note_list_pointer_leave(display_ix, cx);
+                                        });
+                                    }
+                                }
+                            })
                             .child(item)
-                    },
-                ),
+                    }),
             )
         };
 
@@ -432,6 +476,11 @@ impl ScriptListApp {
             .h_full()
             .min_h(px(0.))
             .py(px(design_spacing.padding_xs))
+            .on_scroll_wheel(cx.listener(
+                move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                    this.observe_builtin_native_list_scroll(event, cx);
+                },
+            ))
             .flex()
             .flex_col()
             .child(
@@ -479,10 +528,8 @@ impl ScriptListApp {
             all_entries.len(),
             if all_entries.len() == 1 { "" } else { "s" }
         );
-        let main = self.render_builtin_split_main_content(
-            list_pane.into_any_element(),
-            preview_panel,
-        );
+        let main =
+            self.render_builtin_split_main_content(list_pane.into_any_element(), preview_panel);
 
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
             crate::components::main_view_chrome::render_main_view_shell()
@@ -494,9 +541,10 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(count_label),
-                ], cx),
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(count_label)],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,
@@ -517,7 +565,9 @@ impl ScriptListApp {
         first_message: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(chat_entity) = crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity() {
+        if let Some(chat_entity) =
+            crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity()
+        {
             let resumed = chat_entity.update(cx, |chat_view, cx| {
                 chat_view.resume_from_history(session_id, cx)
             });
@@ -535,8 +585,9 @@ impl ScriptListApp {
         self.open_tab_ai_agent_chat_with_entry_intent(None, cx);
 
         if let AppView::AgentChatView { entity } = &self.current_view {
-            let resumed =
-                entity.update(cx, |chat_view, cx| chat_view.resume_from_history(session_id, cx));
+            let resumed = entity.update(cx, |chat_view, cx| {
+                chat_view.resume_from_history(session_id, cx)
+            });
             if !resumed {
                 entity.update(cx, |chat_view, cx| {
                     chat_view.set_input(first_message.to_string(), cx);
@@ -629,10 +680,6 @@ mod agent_chat_history_scroll_contract {
         assert!(
             SOURCE.contains("this.agent_chat_history_scroll_handle"),
             "Agent Chat history keyboard navigation should scroll the selected row into view"
-        );
-        assert!(
-            SOURCE.contains("builtin_reanchor_selection_from_scroll_handle"),
-            "Agent Chat history should reanchor selection after ScrollHandle movement"
         );
     }
 

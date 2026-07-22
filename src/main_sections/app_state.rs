@@ -1066,6 +1066,9 @@ pub(crate) struct ScriptListApp {
     dictation_history_scroll_handle: ScrollHandle,
     // Scroll handle for notes browse portal list
     notes_browse_scroll_handle: ScrollHandle,
+    // Stable selection and measured viewport anchors for dynamic natural-height built-in lists.
+    tracked_builtin_list_states:
+        std::collections::HashMap<&'static str, crate::DynamicTrackedListState>,
     // Scroll handle for design gallery list
     design_gallery_scroll_handle: UniformListScrollHandle,
     // Scroll handle for footer gallery list

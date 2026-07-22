@@ -36,12 +36,15 @@ fn render_dictation_history_row(
     main_menu_theme: crate::designs::MainMenuThemeVariant,
     layout: DictationHistoryRowLayout,
     selected: bool,
+    hovered: bool,
 ) -> impl IntoElement {
     let selector = dictation_history_row_selector(&entry.id);
     let metrics = crate::list_item::ListItemMetricsOverride::from_main_menu_theme(main_menu_theme);
     let item = ListItem::new(entry.preview.clone(), list_colors)
         .description_opt(Some(ScriptListApp::dictation_history_meta(entry)))
         .selected(selected)
+        .hovered(hovered)
+        .semantic_id(format!("dictation-history:{}", entry.id))
         .main_menu_theme(main_menu_theme);
 
     div()
@@ -200,27 +203,26 @@ impl ScriptListApp {
         let filtered_entries: Vec<crate::dictation::DictationHistoryEntry> =
             hits.into_iter().map(|hit| hit.entry).collect();
         let filtered_len = filtered_entries.len();
-        let selected_index = if let Some(reanchored) =
-            Self::builtin_reanchor_selection_from_scroll_handle(
-                selected_index,
-                &self.dictation_history_scroll_handle,
-                filtered_len,
-            ) {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "dictation_history",
-                reason = "render",
-                selected_before = selected_index,
-                selected_after = reanchored,
-            );
-            if let AppView::DictationHistoryView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected_index
-        };
+        let row_keys: Vec<String> = filtered_entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let selected_index = crate::reconcile_dynamic_tracked_list_on_render(
+            self.tracked_builtin_list_states
+                .entry("dictation_history")
+                .or_default(),
+            &filter,
+            &row_keys,
+            selected_index,
+            &self.dictation_history_scroll_handle,
+        );
+        if let AppView::DictationHistoryView {
+            selected_index: current_selected,
+            ..
+        } = &mut self.current_view
+        {
+            *current_selected = selected_index;
+        }
         let selected_entry = filtered_entries.get(selected_index).cloned();
         let in_portal = self.is_in_attachment_portal();
 
@@ -306,26 +308,28 @@ impl ScriptListApp {
                 let selected_entry = filtered.get(current_selected).cloned();
 
                 if is_key_up(key) {
-                    if current_selected > 0 {
+                    if current_filtered_len > 0 {
+                        let next = current_selected.saturating_sub(1);
                         if let AppView::DictationHistoryView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected - 1;
-                            this.dictation_history_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.dictation_history_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
                 } else if is_key_down(key) {
-                    if current_selected < current_filtered_len.saturating_sub(1) {
+                    if current_filtered_len > 0 {
+                        let next = current_selected
+                            .saturating_add(1)
+                            .min(current_filtered_len.saturating_sub(1));
                         if let AppView::DictationHistoryView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected + 1;
-                            this.dictation_history_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.dictation_history_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -393,21 +397,64 @@ impl ScriptListApp {
                 .into_element()
         } else {
             let selected = selected_index;
+            let hovered = self.hovered_index;
+            let entity = cx.entity().downgrade();
             render_dictation_history_results_list(
                 "dictation-history-list",
                 &self.dictation_history_scroll_handle,
                 filtered_entries
                     .iter()
                     .enumerate()
-                    .map(|(display_ix, entry)| {
-                        render_dictation_history_row(
-                            display_ix,
-                            entry,
-                            list_colors,
-                            main_menu_theme,
-                            row_layout,
-                            display_ix == selected,
-                        )
+                    .map(move |(display_ix, entry)| {
+                        let entry_id = entry.id.clone();
+                        let click_entity = entity.clone();
+                        let move_entity = entity.clone();
+                        let hover_entity = entity.clone();
+                        div()
+                            .id(format!("dictation-history-row:{entry_id}"))
+                            .w_full()
+                            .cursor_pointer()
+                            .on_click(move |_event, _window, cx| {
+                                if let Some(app) = click_entity.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        if let AppView::DictationHistoryView {
+                                            selected_index,
+                                            ..
+                                        } = &mut this.current_view
+                                        {
+                                            *selected_index = display_ix;
+                                        }
+                                        this.dictation_history_scroll_handle
+                                            .scroll_to_item(display_ix);
+                                        this.note_list_pointer_click(display_ix, cx);
+                                    });
+                                }
+                            })
+                            .on_mouse_move(move |_event, _window, cx| {
+                                if let Some(app) = move_entity.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        this.note_list_pointer_move(display_ix, cx);
+                                    });
+                                }
+                            })
+                            .on_hover(move |is_hovered, _window, cx| {
+                                if !*is_hovered {
+                                    if let Some(app) = hover_entity.upgrade() {
+                                        app.update(cx, |this, cx| {
+                                            this.note_list_pointer_leave(display_ix, cx);
+                                        });
+                                    }
+                                }
+                            })
+                            .child(render_dictation_history_row(
+                                display_ix,
+                                entry,
+                                list_colors,
+                                main_menu_theme,
+                                row_layout,
+                                display_ix == selected,
+                                hovered == Some(display_ix),
+                            ))
                     }),
                 row_layout,
             )
@@ -461,56 +508,7 @@ impl ScriptListApp {
             .min_h(px(0.))
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                    let view_state = if let AppView::DictationHistoryView {
-                        filter,
-                        selected_index,
-                    } = &this.current_view
-                    {
-                        Some((filter.clone(), *selected_index))
-                    } else {
-                        None
-                    };
-
-                    let Some((current_filter, current_selected)) = view_state else {
-                        return;
-                    };
-
-                    let hits = crate::dictation::search_history(&current_filter, 100);
-                    let filtered_entries: Vec<crate::dictation::DictationHistoryEntry> =
-                        hits.into_iter().map(|hit| hit.entry).collect();
-                    let filtered_len = filtered_entries.len();
-
-                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                        event,
-                        current_selected,
-                        filtered_len,
-                    ) else {
-                        if filtered_len > 0 {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    };
-
-                    if let AppView::DictationHistoryView { selected_index, .. } =
-                        &mut this.current_view
-                    {
-                        *selected_index = new_selected;
-                    }
-
-                    this.dictation_history_scroll_handle
-                        .scroll_to_item(new_selected);
-                    Self::log_builtin_scroll_event(
-                        "dictation_history",
-                        "scroll_to_item",
-                        "wheel",
-                        filtered_len,
-                        Some(new_selected),
-                        Some(new_selected),
-                        Some(&current_filter),
-                        "mouse",
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
+                    this.observe_builtin_native_list_scroll(event, cx);
                 },
             ))
             .flex()
@@ -607,19 +605,6 @@ mod dictation_history_scroll_contract {
         let source = production_source();
 
         assert!(
-            source.contains("render_tracked_scroll_column(")
-                && source.contains("&self.dictation_history_scroll_handle"),
-            "dictation history should use its dedicated handle through the shared tracked-scroll viewport"
-        );
-        assert!(
-            source.contains(".on_scroll_wheel(cx.listener("),
-            "dictation history should intercept wheel events on the list pane"
-        );
-        assert!(
-            source.contains("builtin_scroll_target_from_wheel"),
-            "dictation history wheel scrolling should use the shared builtin helper"
-        );
-        assert!(
             source.contains("render_builtin_main_input_header("),
             "dictation history should expose the shared built-in main input header"
         );
@@ -630,10 +615,6 @@ mod dictation_history_scroll_contract {
         assert!(
             source.contains("render_main_view_chrome_footer_flush("),
             "dictation history should use the shared main-view chrome"
-        );
-        assert!(
-            source.contains("builtin_reanchor_selection_from_scroll_handle"),
-            "dictation history should reanchor selection after ScrollHandle movement"
         );
         assert!(
             source.contains("\"dictation_history_paste\""),
@@ -682,7 +663,7 @@ mod dictation_history_paint_tests {
                 0.0,
             );
 
-            render_dictation_history_row(0, &entry, colors, main_menu_theme, layout, true)
+            render_dictation_history_row(0, &entry, colors, main_menu_theme, layout, true, false)
         }
     }
 
@@ -725,6 +706,7 @@ mod dictation_history_paint_tests {
                     main_menu_theme,
                     layout,
                     true,
+                    false,
                 )),
                 layout,
             );

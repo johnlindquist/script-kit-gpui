@@ -92,28 +92,26 @@ impl ScriptListApp {
             .map(|hit| hit.entry)
             .collect();
         let filtered_len = filtered_entries.len();
-        let selected_index = if let Some(reanchored) =
-            Self::builtin_reanchor_selection_from_scroll_handle(
-                selected_index,
-                &self.browser_history_scroll_handle,
-                filtered_len,
-            )
+        let row_keys: Vec<String> = filtered_entries
+            .iter()
+            .map(|entry| entry.history_key())
+            .collect();
+        let selected_index = crate::reconcile_dynamic_tracked_list_on_render(
+            self.tracked_builtin_list_states
+                .entry("browser_history")
+                .or_default(),
+            &filter,
+            &row_keys,
+            selected_index,
+            &self.browser_history_scroll_handle,
+        );
+        if let AppView::BrowserHistoryView {
+            selected_index: current_selected,
+            ..
+        } = &mut self.current_view
         {
-            tracing::info!(
-                target: "script_kit::scroll",
-                event = "builtin_selection_resynced_from_scrollbar",
-                view = "browser_history",
-                reason = "render",
-                selected_before = selected_index,
-                selected_after = reanchored,
-            );
-            if let AppView::BrowserHistoryView { selected_index, .. } = &mut self.current_view {
-                *selected_index = reanchored;
-            }
-            reanchored
-        } else {
-            selected_index
-        };
+            *current_selected = selected_index;
+        }
         let selected_entry = filtered_entries.get(selected_index).cloned();
         let in_portal = self.is_in_attachment_portal();
 
@@ -170,26 +168,28 @@ impl ScriptListApp {
                 let filtered_len = filtered_entries.len();
 
                 if crate::ui_foundation::is_key_up(key) {
-                    if current_selected > 0 {
+                    if filtered_len > 0 {
+                        let next = current_selected.saturating_sub(1);
                         if let AppView::BrowserHistoryView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected - 1;
-                            this.browser_history_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.browser_history_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
                 } else if crate::ui_foundation::is_key_down(key) {
-                    if current_selected < filtered_len.saturating_sub(1) {
+                    if filtered_len > 0 {
+                        let next = current_selected
+                            .saturating_add(1)
+                            .min(filtered_len.saturating_sub(1));
                         if let AppView::BrowserHistoryView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected + 1;
-                            this.browser_history_scroll_handle
-                                .scroll_to_item(*selected_index);
+                            *selected_index = next;
                         }
+                        this.browser_history_scroll_handle.scroll_to_item(next);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -225,6 +225,7 @@ impl ScriptListApp {
                 .into_element()
         } else {
             let selected = selected_index;
+            let hovered = self.hovered_index;
             let entity = cx.entity().downgrade();
             let app_icons: std::collections::HashMap<String, crate::app_launcher::DecodedIcon> =
                 self.apps
@@ -240,25 +241,33 @@ impl ScriptListApp {
                 "browser-history-list",
                 &self.browser_history_scroll_handle,
                 filtered_entries.iter().enumerate().map(move |(display_ix, entry)| {
+                    let history_key = entry.history_key();
                     let icon = browser_history_icon_for_render(entry, &app_icons);
                     let item = ListItem::new(entry.display_title().to_string(), list_colors)
                         .icon_kind(icon)
                         .description_opt(Some(Self::browser_history_meta(entry)))
-                        .selected(display_ix == selected);
+                        .selected(display_ix == selected)
+                        .hovered(hovered == Some(display_ix))
+                        .semantic_id(format!("browser-history:{history_key}"));
 
-                    let entity = entity.clone();
+                    let click_entity = entity.clone();
+                    let move_entity = entity.clone();
+                    let hover_entity = entity.clone();
                     let app_icons = app_icons.clone();
                     div()
-                        .id(gpui::ElementId::Integer(display_ix as u64))
+                        .id(format!("browser-history-row:{history_key}"))
                         .cursor_pointer()
                         .on_click(move |event, _window, cx| {
-                            if let Some(app) = entity.upgrade() {
+                            if let Some(app) = click_entity.upgrade() {
                                 app.update(cx, |this, cx| {
                                     if let AppView::BrowserHistoryView { selected_index, .. } =
                                         &mut this.current_view
                                     {
                                         *selected_index = display_ix;
                                     }
+                                    this.browser_history_scroll_handle
+                                        .scroll_to_item(display_ix);
+                                    this.note_list_pointer_click(display_ix, cx);
                                     if let gpui::ClickEvent::Mouse(mouse_event) = event {
                                         if mouse_event.down.click_count == 2
                                             && this.is_in_attachment_portal()
@@ -284,8 +293,23 @@ impl ScriptListApp {
                                             }
                                         }
                                     }
-                                    cx.notify();
                                 });
+                            }
+                        })
+                        .on_mouse_move(move |_event, _window, cx| {
+                            if let Some(app) = move_entity.upgrade() {
+                                app.update(cx, |this, cx| {
+                                    this.note_list_pointer_move(display_ix, cx);
+                                });
+                            }
+                        })
+                        .on_hover(move |is_hovered, _window, cx| {
+                            if !*is_hovered {
+                                if let Some(app) = hover_entity.upgrade() {
+                                    app.update(cx, |this, cx| {
+                                        this.note_list_pointer_leave(display_ix, cx);
+                                    });
+                                }
                             }
                         })
                         .child(item)
@@ -348,61 +372,7 @@ impl ScriptListApp {
             .py(px(design_spacing.padding_xs))
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                    let view_state = if let AppView::BrowserHistoryView {
-                        filter,
-                        selected_index,
-                    } = &this.current_view
-                    {
-                        Some((filter.clone(), *selected_index))
-                    } else {
-                        None
-                    };
-
-                    let Some((current_filter, current_selected)) = view_state else {
-                        return;
-                    };
-
-                    let filtered_entries: Vec<crate::browser_history::BrowserHistoryEntry> =
-                        crate::browser_history::fuzzy_search_browser_history(
-                            &this.cached_browser_history,
-                            &current_filter,
-                        )
-                        .into_iter()
-                        .map(|hit| hit.entry)
-                        .collect();
-                    let filtered_len = filtered_entries.len();
-
-                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                        event,
-                        current_selected,
-                        filtered_len,
-                    ) else {
-                        if filtered_len > 0 {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    };
-
-                    if let AppView::BrowserHistoryView { selected_index, .. } =
-                        &mut this.current_view
-                    {
-                        *selected_index = new_selected;
-                    }
-
-                    this.browser_history_scroll_handle
-                        .scroll_to_item(new_selected);
-                    Self::log_builtin_scroll_event(
-                        "browser_history",
-                        "scroll_to_item",
-                        "wheel",
-                        filtered_len,
-                        Some(new_selected),
-                        Some(new_selected),
-                        Some(&current_filter),
-                        "mouse",
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
+                    this.observe_builtin_native_list_scroll(event, cx);
                 },
             ))
             .flex()
@@ -446,10 +416,8 @@ impl ScriptListApp {
                 "ies"
             }
         );
-        let main = self.render_builtin_split_main_content(
-            list_pane.into_any_element(),
-            preview_panel,
-        );
+        let main =
+            self.render_builtin_split_main_content(list_pane.into_any_element(), preview_panel);
 
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
             crate::components::main_view_chrome::render_main_view_shell()
@@ -461,9 +429,10 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(count_label),
-                ], cx),
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(count_label)],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,
@@ -499,35 +468,5 @@ fn browser_history_icon_for_render(
         "Brave Browser" => list_item::IconKind::Emoji("🦁".to_string()),
         "Microsoft Edge" => list_item::IconKind::Emoji("🌊".to_string()),
         _ => list_item::IconKind::Emoji("🔗".to_string()),
-    }
-}
-
-#[cfg(test)]
-mod browser_history_scroll_contract {
-    const SOURCE: &str = include_str!("browser_history.rs");
-
-    #[test]
-    fn browser_history_intercepts_wheel_scrolling_with_builtin_helpers() {
-        assert!(
-            SOURCE.contains("render_tracked_scroll_column(")
-                && SOURCE.contains("&self.browser_history_scroll_handle"),
-            "browser history should use its dedicated handle through the shared tracked-scroll viewport"
-        );
-        assert!(
-            SOURCE.contains(".on_scroll_wheel(cx.listener("),
-            "browser history should intercept wheel events on the list pane"
-        );
-        assert!(
-            SOURCE.contains("builtin_scroll_target_from_wheel"),
-            "browser history wheel scrolling should use the shared builtin helper"
-        );
-        assert!(
-            SOURCE.contains("cx.stop_propagation();"),
-            "browser history wheel scrolling must stop propagation so GPUI native scrolling cannot fight selection"
-        );
-        assert!(
-            SOURCE.contains("builtin_reanchor_selection_from_scroll_handle"),
-            "browser history should reanchor selection after ScrollHandle movement"
-        );
     }
 }

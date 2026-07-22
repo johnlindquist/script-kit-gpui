@@ -42,20 +42,11 @@ fn notes_browse_portal_escape_cancels_before_clearing_filter() {
 }
 
 #[test]
-fn notes_browse_uses_selection_owned_scroll_and_clicks() {
-    for needle in [
-        "render_tracked_scroll_column(",
-        "&self.notes_browse_scroll_handle",
-        "builtin_reanchor_selection_from_scroll_handle",
-        ".on_scroll_wheel(cx.listener(",
-        "builtin_scroll_target_from_wheel",
-        "log_builtin_scroll_event(",
-        "should_submit_selected_row_click",
-        "cx.stop_propagation();",
-    ] {
+fn notes_browse_preserves_portal_click_submission() {
+    for needle in ["should_submit_selected_row_click", "cx.stop_propagation();"] {
         assert!(
             SOURCE.contains(needle),
-            "Notes Browse should keep selection, preview, wheel, and clicks synchronized: {needle}"
+            "Notes Browse should preserve portal click submission: {needle}"
         );
     }
 }

@@ -33,6 +33,159 @@ pub(crate) struct DynamicUniformListRestore {
     pub(crate) pending_reveal: Option<(usize, gpui::ScrollStrategy)>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct DynamicTrackedListState {
+    filter: String,
+    keys: Vec<String>,
+    selected_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DynamicTrackedListSnapshot {
+    selection: DynamicUniformListSelectionSnapshot<String>,
+    viewport_anchor_candidates: Vec<String>,
+    viewport_fallback_index: usize,
+    offset_in_anchor_px: f32,
+    measured_heights: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DynamicTrackedListRestore {
+    selected_index: usize,
+    viewport_index: usize,
+    offset_in_anchor_px: f32,
+    absolute_scroll_top_px: f32,
+}
+
+fn capture_dynamic_tracked_list_snapshot(
+    keys: &[String],
+    selected_index: usize,
+    handle: &gpui::ScrollHandle,
+) -> DynamicTrackedListSnapshot {
+    let (viewport_index, offset_in_anchor) = handle.logical_scroll_top();
+    let measured_heights = keys
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            handle
+                .bounds_for_item(index)
+                .map(|bounds| bounds.size.height.as_f32())
+                .filter(|height| *height > 0.0)
+                .unwrap_or(crate::list_item::LIST_ITEM_HEIGHT)
+        })
+        .collect();
+
+    DynamicTrackedListSnapshot {
+        selection: DynamicUniformListSelectionSnapshot {
+            key: keys.get(selected_index).cloned(),
+            fallback_index: selected_index,
+        },
+        viewport_anchor_candidates: keys.iter().skip(viewport_index).cloned().collect(),
+        viewport_fallback_index: viewport_index,
+        offset_in_anchor_px: offset_in_anchor.as_f32(),
+        measured_heights,
+    }
+}
+
+fn reconcile_dynamic_tracked_list_snapshot(
+    snapshot: &DynamicTrackedListSnapshot,
+    old_keys: &[String],
+    new_keys: &[String],
+) -> DynamicTrackedListRestore {
+    if new_keys.is_empty() {
+        return DynamicTrackedListRestore {
+            selected_index: 0,
+            viewport_index: 0,
+            offset_in_anchor_px: 0.0,
+            absolute_scroll_top_px: 0.0,
+        };
+    }
+
+    let selected_index = snapshot
+        .selection
+        .key
+        .as_ref()
+        .and_then(|key| new_keys.iter().position(|candidate| candidate == key))
+        .unwrap_or_else(|| {
+            snapshot
+                .selection
+                .fallback_index
+                .min(new_keys.len().saturating_sub(1))
+        });
+    let viewport_index = snapshot
+        .viewport_anchor_candidates
+        .iter()
+        .find_map(|key| new_keys.iter().position(|candidate| candidate == key))
+        .unwrap_or_else(|| {
+            snapshot
+                .viewport_fallback_index
+                .min(new_keys.len().saturating_sub(1))
+        });
+    let fallback_height = snapshot
+        .measured_heights
+        .iter()
+        .copied()
+        .filter(|height| *height > 0.0)
+        .sum::<f32>()
+        / snapshot.measured_heights.len().max(1) as f32;
+    let absolute_scroll_top_px = new_keys
+        .iter()
+        .take(viewport_index)
+        .map(|key| {
+            old_keys
+                .iter()
+                .position(|candidate| candidate == key)
+                .and_then(|old_index| snapshot.measured_heights.get(old_index).copied())
+                .unwrap_or(fallback_height)
+        })
+        .sum::<f32>()
+        - snapshot.offset_in_anchor_px;
+
+    DynamicTrackedListRestore {
+        selected_index,
+        viewport_index,
+        offset_in_anchor_px: snapshot.offset_in_anchor_px,
+        absolute_scroll_top_px: absolute_scroll_top_px.max(0.0),
+    }
+}
+
+pub(crate) fn reconcile_dynamic_tracked_list_on_render(
+    state: &mut DynamicTrackedListState,
+    filter: &str,
+    new_keys: &[String],
+    selected_index: usize,
+    handle: &gpui::ScrollHandle,
+) -> usize {
+    let selected_index = selected_index.min(new_keys.len().saturating_sub(1));
+    if state.filter != filter || state.keys.is_empty() {
+        state.filter = filter.to_string();
+        state.keys = new_keys.to_vec();
+        state.selected_key = new_keys.get(selected_index).cloned();
+        return selected_index;
+    }
+
+    if state.keys == new_keys {
+        state.selected_key = new_keys.get(selected_index).cloned();
+        return selected_index;
+    }
+
+    let old_selected_index = state
+        .selected_key
+        .as_ref()
+        .and_then(|key| state.keys.iter().position(|candidate| candidate == key))
+        .unwrap_or(selected_index.min(state.keys.len().saturating_sub(1)));
+    let snapshot = capture_dynamic_tracked_list_snapshot(&state.keys, old_selected_index, handle);
+    let restore = reconcile_dynamic_tracked_list_snapshot(&snapshot, &state.keys, new_keys);
+    handle.set_offset(gpui::point(
+        handle.offset().x,
+        gpui::px(-restore.absolute_scroll_top_px),
+    ));
+    state.filter = filter.to_string();
+    state.keys = new_keys.to_vec();
+    state.selected_key = new_keys.get(restore.selected_index).cloned();
+    restore.selected_index
+}
+
 fn dynamic_uniform_list_snapshot_from_viewport<K: Clone>(
     keys: &[K],
     selected_index: usize,
@@ -49,9 +202,8 @@ fn dynamic_uniform_list_snapshot_from_viewport<K: Clone>(
             anchor_candidates: keys.iter().skip(viewport_index).cloned().collect(),
             fallback_index: viewport_index,
             fractional_offset: fractional_offset.clamp(0.0, 0.999_999),
-            pending_reveal: pending_reveal.and_then(|(index, strategy)| {
-                keys.get(index).cloned().map(|key| (key, strategy))
-            }),
+            pending_reveal: pending_reveal
+                .and_then(|(index, strategy)| keys.get(index).cloned().map(|key| (key, strategy))),
             previous_item_count: keys.len(),
         },
     }
@@ -123,12 +275,16 @@ pub(crate) fn reconcile_dynamic_uniform_list_snapshot<K: PartialEq>(
             .fallback_index
             .min(new_keys.len().saturating_sub(1))
     });
-    let pending_reveal = snapshot.viewport.pending_reveal.as_ref().and_then(|(key, strategy)| {
-        new_keys
-            .iter()
-            .position(|candidate| candidate == key)
-            .map(|index| (index, *strategy))
-    });
+    let pending_reveal = snapshot
+        .viewport
+        .pending_reveal
+        .as_ref()
+        .and_then(|(key, strategy)| {
+            new_keys
+                .iter()
+                .position(|candidate| candidate == key)
+                .map(|index| (index, *strategy))
+        });
 
     DynamicUniformListRestore {
         selected_index,
@@ -160,13 +316,10 @@ pub(crate) fn restore_dynamic_uniform_list_viewport(
     let row_height = state
         .last_item_size
         .filter(|_| snapshot.viewport.previous_item_count > 0)
-        .map(|size| {
-            size.contents.height.as_f32() / snapshot.viewport.previous_item_count as f32
-        })
+        .map(|size| size.contents.height.as_f32() / snapshot.viewport.previous_item_count as f32)
         .filter(|height| *height > 0.0)
         .unwrap_or(crate::list_item::LIST_ITEM_HEIGHT);
-    let absolute_offset =
-        (restore.viewport_index as f32 + restore.fractional_offset) * row_height;
+    let absolute_offset = (restore.viewport_index as f32 + restore.fractional_offset) * row_height;
     state
         .base_handle
         .set_offset(gpui::point(gpui::px(0.0), gpui::px(-absolute_offset)));
@@ -322,8 +475,7 @@ mod dynamic_uniform_list_policy_tests {
                     case.fraction,
                     None,
                 );
-                let restored =
-                    reconcile_dynamic_uniform_list_snapshot(&snapshot, &case.new_keys);
+                let restored = reconcile_dynamic_uniform_list_snapshot(&snapshot, &case.new_keys);
                 assert_eq!(
                     restored.selected_index, case.expected_selected,
                     "{} via {transport:?}: viewport transport must not reinterpret selection",
@@ -358,8 +510,7 @@ mod dynamic_uniform_list_policy_tests {
             0.4,
             Some((1, gpui::ScrollStrategy::Nearest)),
         );
-        let restored =
-            reconcile_dynamic_uniform_list_snapshot(&snapshot, &[99, 13, 12, 11, 10]);
+        let restored = reconcile_dynamic_uniform_list_snapshot(&snapshot, &[99, 13, 12, 11, 10]);
         assert_eq!(restored.selected_index, 3);
         assert_eq!(restored.viewport_index, 1);
         assert_eq!(
@@ -370,13 +521,7 @@ mod dynamic_uniform_list_policy_tests {
 
     #[test]
     fn empty_refresh_is_safe_and_stationary_pointer_stays_suppressed() {
-        let snapshot = dynamic_uniform_list_snapshot_from_viewport(
-            &[1, 2, 3],
-            2,
-            2,
-            0.9,
-            None,
-        );
+        let snapshot = dynamic_uniform_list_snapshot_from_viewport(&[1, 2, 3], 2, 2, 0.9, None);
         let restored = reconcile_dynamic_uniform_list_snapshot(&snapshot, &[]);
         assert_eq!(restored.selected_index, 0);
         assert_eq!(restored.viewport_index, 0);
@@ -391,6 +536,303 @@ mod dynamic_uniform_list_policy_tests {
         assert_eq!(pointer.hovered_index, None);
         pointer.note_pointer_move(1);
         assert_eq!(pointer.hovered_index, Some(1));
+    }
+
+    #[test]
+    fn tracked_scroll_column_refresh_preserves_independent_mixed_height_anchors() {
+        let old_keys = ["short", "wrapped", "multiline", "tail"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let new_keys = ["inserted", "multiline", "short", "wrapped", "tail"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let snapshot = DynamicTrackedListSnapshot {
+            selection: DynamicUniformListSelectionSnapshot {
+                key: Some("short".to_string()),
+                fallback_index: 0,
+            },
+            viewport_anchor_candidates: vec!["multiline".to_string(), "tail".to_string()],
+            viewport_fallback_index: 2,
+            offset_in_anchor_px: -11.5,
+            measured_heights: vec![28.0, 54.0, 91.0, 36.0],
+        };
+
+        let restore = reconcile_dynamic_tracked_list_snapshot(&snapshot, &old_keys, &new_keys);
+        assert_eq!(restore.selected_index, 2, "selection follows its row ID");
+        assert_eq!(restore.viewport_index, 1, "viewport follows its own row ID");
+        assert_eq!(restore.offset_in_anchor_px, -11.5);
+        assert!(
+            restore.absolute_scroll_top_px > 11.5,
+            "a new leading row contributes measured/fallback height without coupling selection"
+        );
+
+        let filtered = vec!["tail".to_string()];
+        let filtered_restore =
+            reconcile_dynamic_tracked_list_snapshot(&snapshot, &old_keys, &filtered);
+        assert_eq!(filtered_restore.selected_index, 0);
+        assert_eq!(filtered_restore.viewport_index, 0);
+
+        let empty = reconcile_dynamic_tracked_list_snapshot(&snapshot, &old_keys, &[]);
+        assert_eq!(empty.selected_index, 0);
+        assert_eq!(empty.viewport_index, 0);
+        assert_eq!(empty.absolute_scroll_top_px, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tracked_scroll_column_behavior_tests {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
+    use gpui::{
+        div, point, prelude::*, px, size, AppContext as _, Context, Entity, IntoElement, Modifiers,
+        Render, ScrollDelta, ScrollHandle, ScrollPhase, ScrollWheelEvent, TestAppContext,
+        TouchPhase, VisualTestContext, Window,
+    };
+
+    const VIEWPORT_WIDTH: f32 = 320.0;
+    const VIEWPORT_HEIGHT: f32 = 150.0;
+
+    struct Harness {
+        handle: ScrollHandle,
+        row_heights: Rc<Vec<f32>>,
+        selected: Rc<Cell<usize>>,
+        hovered: Rc<Cell<Option<usize>>>,
+        suppress_hover: Rc<Cell<bool>>,
+        observed_sources:
+            Rc<RefCell<Vec<crate::scrolling::list_interaction::ListViewportInputSource>>>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let selected = self.selected.clone();
+            let hovered = self.hovered.clone();
+            let suppress_hover = self.suppress_hover.clone();
+            let handle = self.handle.clone();
+            let rows = self
+                .row_heights
+                .iter()
+                .enumerate()
+                .map(move |(index, height)| {
+                    let click_selected = selected.clone();
+                    let click_hovered = hovered.clone();
+                    let click_suppress = suppress_hover.clone();
+                    let click_handle = handle.clone();
+                    let move_hovered = hovered.clone();
+                    let move_suppress = suppress_hover.clone();
+                    let leave_hovered = hovered.clone();
+                    div()
+                        .id(("tracked-scroll-test-row", index))
+                        .h(px(*height))
+                        .w_full()
+                        .on_click(move |_event, _window, _cx| {
+                            click_selected.set(index);
+                            click_hovered.set(Some(index));
+                            click_suppress.set(false);
+                            click_handle.scroll_to_item(index);
+                        })
+                        .on_mouse_move(move |_event, _window, _cx| {
+                            move_hovered.set(Some(index));
+                            move_suppress.set(false);
+                        })
+                        .on_hover(move |is_hovered, _window, _cx| {
+                            if !*is_hovered && leave_hovered.get() == Some(index) {
+                                leave_hovered.set(None);
+                            }
+                        })
+                        .when(selected.get() == index, |row| {
+                            row.child(div().id("tracked-scroll-test-selection"))
+                        })
+                });
+
+            let hovered = self.hovered.clone();
+            let suppress_hover = self.suppress_hover.clone();
+            let observed_sources = self.observed_sources.clone();
+            div()
+                .relative()
+                .size_full()
+                .overflow_hidden()
+                .on_scroll_wheel(move |event: &ScrollWheelEvent, _window, _cx| {
+                    hovered.set(None);
+                    suppress_hover.set(true);
+                    observed_sources.borrow_mut().push(
+                        crate::scrolling::list_interaction::ListViewportInputSource::from_event(
+                            event,
+                        ),
+                    );
+                })
+                .child(crate::components::scrollbar::render_tracked_scroll_column(
+                    "tracked-scroll-test-list",
+                    &self.handle,
+                    rows,
+                ))
+        }
+    }
+
+    struct Fixture {
+        entity: Entity<Harness>,
+        handle: ScrollHandle,
+        selected: Rc<Cell<usize>>,
+        hovered: Rc<Cell<Option<usize>>>,
+        suppress_hover: Rc<Cell<bool>>,
+        observed_sources:
+            Rc<RefCell<Vec<crate::scrolling::list_interaction::ListViewportInputSource>>>,
+    }
+
+    fn fixture(cx: &mut TestAppContext, row_heights: Vec<f32>) -> Fixture {
+        let handle = ScrollHandle::new();
+        let selected = Rc::new(Cell::new(0));
+        let hovered = Rc::new(Cell::new(None));
+        let suppress_hover = Rc::new(Cell::new(false));
+        let observed_sources = Rc::new(RefCell::new(Vec::new()));
+        let entity = cx.new(|_| Harness {
+            handle: handle.clone(),
+            row_heights: Rc::new(row_heights),
+            selected: selected.clone(),
+            hovered: hovered.clone(),
+            suppress_hover: suppress_hover.clone(),
+            observed_sources: observed_sources.clone(),
+        });
+        Fixture {
+            entity,
+            handle,
+            selected,
+            hovered,
+            suppress_hover,
+            observed_sources,
+        }
+    }
+
+    fn draw(vcx: &mut VisualTestContext, entity: &Entity<Harness>) {
+        let entity = entity.clone();
+        vcx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(VIEWPORT_WIDTH), px(VIEWPORT_HEIGHT)),
+            move |_window, _cx| entity.into_any_element(),
+        );
+    }
+
+    fn dispatch(vcx: &mut VisualTestContext, fixture: &Fixture, event: ScrollWheelEvent) {
+        vcx.simulate_event(event);
+        draw(vcx, &fixture.entity);
+    }
+
+    fn pixel_event(delta_y: f32, momentum_phase: ScrollPhase) -> ScrollWheelEvent {
+        ScrollWheelEvent {
+            position: point(px(40.0), px(40.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(delta_y))),
+            touch_phase: TouchPhase::Moved,
+            phase: if momentum_phase == ScrollPhase::None {
+                ScrollPhase::Changed
+            } else {
+                ScrollPhase::None
+            },
+            momentum_phase,
+            ..Default::default()
+        }
+    }
+
+    fn line_event(delta_y: f32) -> ScrollWheelEvent {
+        ScrollWheelEvent {
+            position: point(px(40.0), px(40.0)),
+            delta: ScrollDelta::Lines(point(0.0, delta_y)),
+            touch_phase: TouchPhase::Moved,
+            phase: ScrollPhase::Changed,
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn tracked_scroll_column_native_pixel_line_momentum_scrollbar_and_endpoints(
+        cx: &mut TestAppContext,
+    ) {
+        for heights in [vec![28.0, 44.0], vec![28.0, 72.0, 41.0, 96.0, 35.0, 64.0]] {
+            let fixture = fixture(cx, heights);
+            let mut vcx = cx.add_empty_window();
+            draw(&mut vcx, &fixture.entity);
+            let selected_before = fixture.selected.get();
+
+            for event in [
+                pixel_event(-7.5, ScrollPhase::None),
+                line_event(-1.0),
+                pixel_event(-5.25, ScrollPhase::Began),
+                pixel_event(-4.75, ScrollPhase::Changed),
+                pixel_event(0.0, ScrollPhase::Ended),
+            ] {
+                dispatch(&mut vcx, &fixture, event);
+                assert_eq!(fixture.selected.get(), selected_before);
+            }
+
+            if fixture.handle.max_offset().y.as_f32() < 0.0 {
+                assert!(fixture.handle.offset().y.as_f32() < 0.0);
+                dispatch(
+                    &mut vcx,
+                    &fixture,
+                    pixel_event(-100_000.0, ScrollPhase::None),
+                );
+                assert_eq!(fixture.handle.offset().y, fixture.handle.max_offset().y);
+                dispatch(
+                    &mut vcx,
+                    &fixture,
+                    pixel_event(100_000.0, ScrollPhase::None),
+                );
+                assert_eq!(fixture.handle.offset().y, px(0.0));
+
+                fixture.handle.set_offset(point(px(0.0), px(-33.5)));
+                draw(&mut vcx, &fixture.entity);
+                assert_eq!(fixture.selected.get(), selected_before);
+                assert!(fixture.handle.offset().y.as_f32() < 0.0);
+            } else {
+                assert_eq!(fixture.handle.offset().y, px(0.0));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn tracked_scroll_column_stationary_pointer_click_and_keyboard_reveal(cx: &mut TestAppContext) {
+        let fixture = fixture(cx, vec![28.0, 72.0, 41.0, 96.0, 35.0, 64.0]);
+        let mut vcx = cx.add_empty_window();
+        draw(&mut vcx, &fixture.entity);
+
+        vcx.simulate_mouse_move(
+            fixture.handle.bounds_for_item(1).unwrap().center(),
+            None,
+            Modifiers::default(),
+        );
+        draw(&mut vcx, &fixture.entity);
+        assert_eq!(fixture.hovered.get(), Some(1));
+
+        dispatch(&mut vcx, &fixture, pixel_event(-18.0, ScrollPhase::None));
+        assert_eq!(fixture.selected.get(), 0);
+        assert_eq!(fixture.hovered.get(), None);
+        assert!(fixture.suppress_hover.get());
+        assert_eq!(
+            fixture.observed_sources.borrow().last().copied(),
+            Some(crate::scrolling::list_interaction::ListViewportInputSource::Wheel)
+        );
+
+        let click_bounds = fixture.handle.bounds_for_item(2).unwrap();
+        vcx.simulate_click(click_bounds.center(), Modifiers::default());
+        draw(&mut vcx, &fixture.entity);
+        assert_eq!(fixture.selected.get(), 2);
+
+        let last = 5;
+        fixture.selected.set(last);
+        fixture.handle.scroll_to_item(last);
+        draw(&mut vcx, &fixture.entity);
+        assert!(fixture.handle.bottom_item() >= last);
+
+        fixture.handle.scroll_to_item(last);
+        draw(&mut vcx, &fixture.entity);
+        assert_eq!(
+            fixture.selected.get(),
+            last,
+            "clamped endpoint reveal is repeatable"
+        );
     }
 }
 
@@ -979,10 +1421,6 @@ mod builtin_scroll_helpers_contract {
         assert!(
             SOURCE.contains("fn builtin_scroll_target_from_wheel"),
             "builtin scroll helpers should expose a reusable wheel-to-selection target"
-        );
-        assert!(
-            SOURCE.contains("fn builtin_reanchor_selection_from_scroll_handle"),
-            "builtin scroll helpers should support ScrollHandle-based selection reanchor"
         );
     }
 

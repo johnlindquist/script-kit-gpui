@@ -623,6 +623,7 @@ impl ScriptListApp {
         }
 
         let mut uniform_reset = None;
+        let mut tracked_reset = false;
         let handled = match &mut self.current_view {
             AppView::ClipboardHistoryView {
                 filter,
@@ -664,9 +665,7 @@ impl ScriptListApp {
                 filter,
                 selected_index,
             } => {
-                if Self::sync_builtin_query_state(filter, selected_index, text) {
-                    uniform_reset = Some(UniformReset::ProcessManager);
-                }
+                Self::sync_builtin_query_state(filter, selected_index, text);
                 true
             }
             AppView::FooterGalleryView {
@@ -745,21 +744,30 @@ impl ScriptListApp {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    self.agent_chat_history_scroll_handle.scroll_to_item(0);
+                    tracked_reset = true;
+                }
                 true
             }
             AppView::BrowserHistoryView {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    self.browser_history_scroll_handle.scroll_to_item(0);
+                    tracked_reset = true;
+                }
                 true
             }
             AppView::DictationHistoryView {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    self.dictation_history_scroll_handle.scroll_to_item(0);
+                    tracked_reset = true;
+                }
                 true
             }
             AppView::TipsView {
@@ -786,7 +794,10 @@ impl ScriptListApp {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    self.notes_browse_scroll_handle.scroll_to_item(0);
+                    tracked_reset = true;
+                }
                 true
             }
             AppView::EmojiPickerView {
@@ -811,6 +822,7 @@ impl ScriptListApp {
             _ => false,
         };
 
+        let reset_pointer_policy = uniform_reset.is_some() || tracked_reset;
         if let Some(reset) = uniform_reset {
             match reset {
                 UniformReset::ClipboardHistory => {
@@ -845,6 +857,8 @@ impl ScriptListApp {
                     .list_scroll_handle
                     .scroll_to_item(0, gpui::ScrollStrategy::Top),
             }
+        }
+        if reset_pointer_policy {
             self.hovered_index = None;
             self.list_suppress_hover_until_pointer_move = true;
             self.last_list_interaction_source =

@@ -129,6 +129,7 @@
             browser_history_scroll_handle: ScrollHandle::new(),
             dictation_history_scroll_handle: ScrollHandle::new(),
             notes_browse_scroll_handle: ScrollHandle::new(),
+            tracked_builtin_list_states: std::collections::HashMap::new(),
             design_gallery_scroll_handle: UniformListScrollHandle::new(),
             footer_gallery_scroll_handle: UniformListScrollHandle::new(),
             file_search_scroll_handle: UniformListScrollHandle::new(),
