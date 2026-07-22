@@ -136,14 +136,14 @@ impl ScriptListApp {
         windows: Vec<crate::window_control::WindowInfo>,
         cx: &mut Context<Self>,
     ) {
-        let selection_before = self.main_menu_selection_snapshot();
+        let interaction_before = self.main_menu_interaction_snapshot();
         self.cached_windows = windows;
         self.root_search
             .install_root_windows(&self.cached_windows, &self.apps);
         self.invalidate_grouped_cache();
         self.reconcile_script_list_after_results_refresh(
             "root_windows_refresh_complete",
-            selection_before,
+            interaction_before,
             cx,
         );
         cx.notify();
@@ -158,11 +158,11 @@ impl ScriptListApp {
             return;
         }
 
-        let selection_before = self.main_menu_selection_snapshot();
+        let interaction_before = self.main_menu_interaction_snapshot();
         self.root_search
             .rebuild_root_windows(&self.cached_windows, &self.apps);
         self.invalidate_grouped_cache();
-        self.reconcile_script_list_after_results_refresh(reason, selection_before, cx);
+        self.reconcile_script_list_after_results_refresh(reason, interaction_before, cx);
     }
 
     pub(crate) fn maybe_start_root_windows_refresh_for_query(
@@ -200,7 +200,7 @@ impl ScriptListApp {
                 match result {
                     Ok(windows) => app.install_root_windows(windows, cx),
                     Err(error) => {
-                        let selection_before = app.main_menu_selection_snapshot();
+                        let interaction_before = app.main_menu_interaction_snapshot();
                         let message = error.to_string();
                         let lower = message.to_ascii_lowercase();
                         let status =
@@ -219,7 +219,7 @@ impl ScriptListApp {
                         app.invalidate_grouped_cache();
                         app.reconcile_script_list_after_results_refresh(
                             "root_windows_refresh_error",
-                            selection_before,
+                            interaction_before,
                             cx,
                         );
                         cx.notify();
@@ -354,12 +354,12 @@ impl ScriptListApp {
                 if !changed {
                     return;
                 }
-                let selection_before = app.main_menu_selection_snapshot();
+                let interaction_before = app.main_menu_interaction_snapshot();
                 app.invalidate_root_passive_and_grouped_cache();
                 if app.current_query_can_show_root_browser_tabs(&app.computed_filter_text) {
                     app.reconcile_script_list_after_results_refresh(
                         "browser_tabs_refresh_complete",
-                        selection_before,
+                        interaction_before,
                         cx,
                     );
                 } else {
@@ -496,7 +496,7 @@ impl ScriptListApp {
                 if !changed {
                     return;
                 }
-                let selection_before = app.main_menu_selection_snapshot();
+                let interaction_before = app.main_menu_interaction_snapshot();
                 app.invalidate_root_passive_and_grouped_cache();
                 let query_text = app.computed_filter_text.clone();
                 if app
@@ -505,7 +505,7 @@ impl ScriptListApp {
                 {
                     app.reconcile_script_list_after_results_refresh(
                         "browser_history_refresh_complete",
-                        selection_before,
+                        interaction_before,
                         cx,
                     );
                 } else {
@@ -2287,7 +2287,7 @@ impl ScriptListApp {
                     let zero_idx = match_ln.saturating_sub(1);
                     let start = zero_idx.saturating_sub(7);
                     let end = (start + 15).min(total_lines);
-                    let start = if end < 15 { 0 } else { end - 15 };
+                    let start = end.saturating_sub(15);
                     (start, &all_lines[start..end])
                 } else {
                     let end = total_lines.min(15);
@@ -3866,7 +3866,7 @@ pub(crate) fn build_rich_provider_json_rows(
                     result_id: ss(format!("{rank}")),
                 },
                 title: ss(item.title.clone()),
-                subtitle: item.subtitle.clone().map(|s| ss(s)),
+                subtitle: item.subtitle.clone().map(ss),
                 meta: None,
                 icon: Some(ss(icon.to_string())),
                 badges: vec![ss("@")],

@@ -38,6 +38,14 @@ pub(crate) fn main_list_header_overlay_height(
 
 type ScriptListRowHeights = crate::scrolling::list_geometry::GroupedListRowHeights;
 
+const MAIN_MENU_VIEWPORT_ANCHOR_KEY_COUNT: usize = 4;
+
+#[derive(Debug, Clone)]
+pub(crate) enum MainListReplacementPolicy {
+    ResetToTop,
+    PreserveViewport(MainMenuViewportSnapshot),
+}
+
 pub(crate) fn script_list_content_height(items: &[GroupedListItem]) -> f32 {
     script_list_content_height_with(
         items,
@@ -109,12 +117,11 @@ fn main_list_row_stable_key(
             .get(*result_index)
             .and_then(scripts::SearchResult::stable_selection_key)
             .unwrap_or_else(|| format!("generated/item/{grouped_index}/{result_index}")),
-        GroupedListItem::SectionHeader(label, icon) => format!(
-            "section/{grouped_index}/{label}/{}",
-            icon.as_deref().unwrap_or("none")
-        ),
+        GroupedListItem::SectionHeader(label, icon) => {
+            format!("section/{label}/{}", icon.as_deref().unwrap_or("none"))
+        }
         GroupedListItem::Status(status) => format!(
-            "status/{}/{}/{grouped_index}/{}",
+            "status/{}/{}/{}",
             status.source.receipt_label(),
             status.status_kind.as_str(),
             status.label
@@ -1153,11 +1160,75 @@ impl ScriptListApp {
             selected_index = self.selected_index,
             "synced list state"
         );
+    }
 
-        if self.selected_index < item_count {
-            self.main_list_state
-                .scroll_to_reveal_item(self.selected_index);
-            self.adjust_selected_item_above_footer_overlay(self.selected_index);
+    pub(crate) fn main_menu_viewport_snapshot(&mut self) -> MainMenuViewportSnapshot {
+        let offset = self.main_list_state.logical_scroll_top();
+        let viewport_height = self.main_list_state.viewport_bounds().size.height;
+        let query = self.computed_filter_text.clone();
+        let selected_index = self.selected_index;
+        let heights = ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme());
+
+        let (first_visible_keys, fallback_item_ix, offset_in_item, selected_in_viewport) = {
+            let (grouped_items, flat_results) = self.get_grouped_results_cached();
+            if grouped_items.is_empty() {
+                (Vec::new(), 0, gpui::px(0.0), false)
+            } else {
+                let scroll_top = script_list_pixel_top_for_offset(&grouped_items, offset, heights);
+                let usable_height = (viewport_height
+                    - main_list_header_overlay_height(self.current_main_menu_theme.def())
+                    - main_list_footer_overlay_total_padding())
+                .max(gpui::px(0.0));
+                let visible = crate::scrolling::list_geometry::visible_range(
+                    grouped_items.len(),
+                    scroll_top,
+                    usable_height,
+                    |ix| heights.row_height(&grouped_items[ix], ix),
+                );
+                // Before GPUI's first measurement the viewport height is zero.
+                // The logical offset plus neutral row geometry is still enough
+                // to capture a deterministic leading identity.
+                let fallback_item_ix = visible
+                    .map(|(first, _)| first)
+                    .or_else(|| {
+                        crate::scrolling::list_geometry::first_rendered_item_at_or_after(
+                            grouped_items.len(),
+                            offset.item_ix,
+                            |ix| heights.row_height(&grouped_items[ix], ix),
+                        )
+                    })
+                    .unwrap_or_else(|| offset.item_ix.min(grouped_items.len() - 1));
+                let anchor_top =
+                    script_list_pixel_top_for_item(&grouped_items, fallback_item_ix, heights);
+                let offset_in_item = gpui::px((scroll_top - anchor_top).max(0.0));
+                let first_visible_keys = (fallback_item_ix..grouped_items.len())
+                    .take(MAIN_MENU_VIEWPORT_ANCHOR_KEY_COUNT)
+                    .map(|ix| main_list_row_stable_key(&grouped_items[ix], ix, &flat_results))
+                    .collect();
+                let selected_in_viewport =
+                    visible.is_some_and(|(first, last)| (first..last).contains(&selected_index));
+                (
+                    first_visible_keys,
+                    fallback_item_ix,
+                    offset_in_item,
+                    selected_in_viewport,
+                )
+            }
+        };
+
+        MainMenuViewportSnapshot {
+            query,
+            first_visible_keys,
+            fallback_item_ix,
+            offset_in_item,
+            selected_was_within_safe_viewport: selected_in_viewport,
+        }
+    }
+
+    pub(crate) fn main_menu_interaction_snapshot(&mut self) -> MainMenuInteractionSnapshot {
+        MainMenuInteractionSnapshot {
+            selection: self.main_menu_selection_snapshot(),
+            viewport: self.main_menu_viewport_snapshot(),
         }
     }
 
@@ -1167,7 +1238,7 @@ impl ScriptListApp {
     /// item count. `sync_list_state` keeps that path cheap for ordinary syncs,
     /// so filter changes replace the list state identity to avoid stale
     /// measured row elements being painted under fresh footer/preflight state.
-    pub fn sync_list_state_for_filter_replacement(&mut self) {
+    pub fn sync_list_state_for_filter_replacement(&mut self, policy: MainListReplacementPolicy) {
         self.reset_main_list_boundary_affordance(
             crate::scrolling::boundary_affordance::SettleReason::Reset,
         );
@@ -1176,6 +1247,8 @@ impl ScriptListApp {
         let old_list_count = self.main_list_state.item_count();
 
         self.last_scrolled_index = None;
+
+        self.main_list_row_generation = self.main_list_row_generation.wrapping_add(1);
 
         if old_list_count != item_count {
             self.main_list_state.splice(0..old_list_count, item_count);
@@ -1189,11 +1262,7 @@ impl ScriptListApp {
                     "spliced list state for filter replacement"
                 );
             }
-
-            return;
-        }
-
-        if item_count == 0 {
+        } else if item_count == 0 {
             if crate::logging::filter_perf_trace_enabled() {
                 tracing::info!(
                     target: "SCROLL_STATE",
@@ -1203,20 +1272,48 @@ impl ScriptListApp {
                     "skipped empty list state replacement for filter replacement"
                 );
             }
-
-            return;
+        } else {
+            self.main_list_state = ListState::new(
+                item_count,
+                ListAlignment::Top,
+                px(
+                    crate::list_item::effective_average_item_height_for_scroll_for_theme(
+                        crate::designs::current_main_menu_theme(),
+                    ),
+                ),
+            );
         }
 
-        self.main_list_row_generation = self.main_list_row_generation.wrapping_add(1);
-        self.main_list_state = ListState::new(
-            item_count,
-            ListAlignment::Top,
-            px(
-                crate::list_item::effective_average_item_height_for_scroll_for_theme(
-                    crate::designs::current_main_menu_theme(),
-                ),
-            ),
-        );
+        let restored_offset = match policy {
+            MainListReplacementPolicy::ResetToTop => gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: gpui::px(0.0),
+            },
+            MainListReplacementPolicy::PreserveViewport(snapshot)
+                if snapshot.query == self.computed_filter_text =>
+            {
+                let heights =
+                    ScriptListRowHeights::for_theme(crate::designs::current_main_menu_theme());
+                let (grouped_items, flat_results) = self.get_grouped_results_cached();
+                let replacement_keys: Vec<String> = grouped_items
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, item)| main_list_row_stable_key(item, ix, &flat_results))
+                    .collect();
+                crate::scrolling::list_geometry::restore_stable_viewport_offset(
+                    &snapshot.first_visible_keys,
+                    snapshot.fallback_item_ix,
+                    snapshot.offset_in_item,
+                    &replacement_keys,
+                    |ix| heights.row_height(&grouped_items[ix], ix),
+                )
+            }
+            MainListReplacementPolicy::PreserveViewport(_) => gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: gpui::px(0.0),
+            },
+        };
+        self.main_list_state.scroll_to(restored_offset);
 
         if crate::logging::filter_perf_trace_enabled() {
             tracing::info!(
@@ -1225,7 +1322,9 @@ impl ScriptListApp {
                 item_count,
                 selected_index = self.selected_index,
                 row_generation = self.main_list_row_generation,
-                "replaced list state for filter replacement"
+                restored_item_ix = restored_offset.item_ix,
+                restored_offset_in_item = restored_offset.offset_in_item.as_f32(),
+                "replaced list state with explicit viewport policy"
             );
         }
     }
@@ -1574,6 +1673,29 @@ mod scroll_fade_tests {
         assert_eq!(
             main_list_row_stable_key(&row, 11, &[]),
             "generated/item/11/7"
+        );
+    }
+
+    #[test]
+    fn section_and_status_anchor_keys_do_not_depend_on_reordered_index() {
+        let header = GroupedListItem::SectionHeader("Recent".to_string(), None);
+        assert_eq!(
+            main_list_row_stable_key(&header, 0, &[]),
+            main_list_row_stable_key(&header, 9, &[])
+        );
+
+        let status = GroupedListItem::Status(crate::list_item::SourceChipStatusRow {
+            source: crate::menu_syntax::RootUnifiedSourceFilter::Files,
+            source_name: "Files".to_string(),
+            status_kind: crate::list_item::SourceChipStatusKind::Loading,
+            label: "Loading files".to_string(),
+            shown: 0,
+            loaded: 0,
+            total: None,
+        });
+        assert_eq!(
+            main_list_row_stable_key(&status, 2, &[]),
+            main_list_row_stable_key(&status, 12, &[])
         );
     }
 }

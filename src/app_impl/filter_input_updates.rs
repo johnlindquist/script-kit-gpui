@@ -104,7 +104,8 @@ impl ScriptListApp {
     ///
     /// Called after `computed_filter_text` changes (both debounced and immediate).
     /// Syncs the GPUI list model, resets selection to the first selectable row,
-    /// reveals it, and rebuilds preflight — all outside `render()`.
+    /// resets the viewport to leading context, and rebuilds preflight — all
+    /// outside `render()`.
     pub(crate) fn reconcile_script_list_after_filter_change(
         &mut self,
         reason: &'static str,
@@ -121,15 +122,16 @@ impl ScriptListApp {
         // Keep GPUI's list model aligned with the newly computed grouped results.
         // Filter changes may replace every row while preserving the same count,
         // so force measured item rebuilding after the new selection is known.
-        self.sync_list_state_for_filter_replacement();
+        self.begin_list_viewport_scroll(
+            crate::scrolling::list_interaction::ListViewportInputSource::Filter,
+            cx,
+        );
+        self.sync_list_state_for_filter_replacement(MainListReplacementPolicy::ResetToTop);
         self.validate_selection_bounds(cx);
 
         // Clear last_scrolled_index so the reveal is never skipped —
         // filter changes always need a fresh scroll even if selected_index == 0.
         self.last_scrolled_index = None;
-
-        // Reveal the final selected row after selection coercion.
-        self.scroll_to_selected_if_needed(reason);
 
         // Preflight depends on filter, selection, and fallback state. Immediate
         // typing paths finish their final state after reconciliation, so those
@@ -150,20 +152,25 @@ impl ScriptListApp {
     pub(crate) fn reconcile_script_list_after_results_refresh(
         &mut self,
         reason: &'static str,
-        selection_before: MainMenuSelectionSnapshot,
+        interaction_before: MainMenuInteractionSnapshot,
         cx: &mut Context<Self>,
     ) {
         if !matches!(self.current_view, AppView::ScriptList) {
             return;
         }
 
-        self.sync_list_state_for_filter_replacement();
-        self.validate_selection_bounds(cx);
+        self.begin_list_viewport_scroll(
+            crate::scrolling::list_interaction::ListViewportInputSource::Refresh,
+            cx,
+        );
+        self.sync_list_state_for_filter_replacement(MainListReplacementPolicy::PreserveViewport(
+            interaction_before.viewport,
+        ));
 
         let restored = match main_menu_refresh_selection_policy(self.main_menu_selection_user_moved)
         {
             MainMenuRefreshSelectionPolicy::RestoreIdentity => {
-                self.restore_main_menu_selection_from_snapshot(selection_before)
+                self.restore_main_menu_selection_from_snapshot(interaction_before.selection)
             }
             MainMenuRefreshSelectionPolicy::SnapToFirst => false,
         };
@@ -199,8 +206,8 @@ impl ScriptListApp {
                 restored = false,
             );
         }
+        self.validate_selection_bounds(cx);
 
-        self.scroll_to_selected_if_needed(reason);
         self.rebuild_main_window_preflight_if_needed();
         self.refresh_ghost_with_input(cx);
     }
@@ -1492,11 +1499,117 @@ mod tests {
             assert_eq!(app.computed_filter_text, new_query);
             assert!(!app.main_menu_selection_user_moved);
             assert_eq!(selected_key, first_key);
+            assert_eq!(app.main_list_state.logical_scroll_top().item_ix, 0);
+            assert_eq!(
+                app.main_list_state.logical_scroll_top().offset_in_item,
+                gpui::px(0.0)
+            );
+            assert_eq!(
+                app.last_list_interaction_source,
+                crate::scrolling::list_interaction::ListViewportInputSource::Filter
+            );
             assert_ne!(selected_key.as_deref(), Some(handoff_key));
             assert!(app
                 .main_menu_result_caches
                 .search_result_for_grouped_item(app.selected_index)
                 .is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn clearing_filter_selects_first_result_and_resets_viewport(cx: &mut gpui::TestAppContext) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            app.scripts = vec![
+                main_menu_selection_test_script("zzwp5clear alpha"),
+                main_menu_selection_test_script("zzwp5clear beta"),
+            ];
+            app.scriptlets.clear();
+            app.skills.clear();
+            app.apps.clear();
+            app.apply_filter_compute_now("zzwp5clear".to_string(), cx);
+            app.main_list_state.scroll_to(gpui::ListOffset {
+                item_ix: 1,
+                offset_in_item: gpui::px(9.0),
+            });
+
+            app.apply_filter_compute_now(String::new(), cx);
+
+            assert_eq!(app.computed_filter_text, "");
+            assert_eq!(
+                selected_main_menu_stable_key(app),
+                first_selectable_main_menu_stable_key(app)
+            );
+            let cleared_offset = app.main_list_state.logical_scroll_top();
+            assert_eq!(cleared_offset.item_ix, 0);
+            assert_eq!(cleared_offset.offset_in_item, gpui::px(0.0));
+        });
+    }
+
+    #[gpui::test]
+    fn lazy_same_query_refresh_preserves_offscreen_selection_and_viewport_anchor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            app.scripts = (0..6)
+                .map(|ix| main_menu_selection_test_script(&format!("zzwp5refresh {ix}")))
+                .collect();
+            app.scriptlets.clear();
+            app.skills.clear();
+            app.apps.clear();
+            app.apply_filter_compute_now("zzwp5refresh".to_string(), cx);
+
+            app.get_grouped_results_cached();
+            let first = app
+                .main_menu_result_caches
+                .first_selectable_index()
+                .expect("refresh fixture has selectable rows");
+            let last = app
+                .main_menu_result_caches
+                .last_selectable_index()
+                .expect("refresh fixture has a trailing selectable row");
+            app.selected_index = first;
+            app.mark_main_menu_selection_user_moved();
+            let selected_key_before = selected_main_menu_stable_key(app);
+            app.main_list_state.scroll_to(gpui::ListOffset {
+                item_ix: last,
+                offset_in_item: gpui::px(9.5),
+            });
+            let interaction_before = app.main_menu_interaction_snapshot();
+            let anchor_before = interaction_before
+                .viewport
+                .first_visible_keys
+                .first()
+                .cloned()
+                .expect("lazy viewport captures a stable leading row");
+            assert!(
+                !interaction_before
+                    .viewport
+                    .selected_was_within_safe_viewport
+            );
+
+            app.scripts.reverse();
+            app.invalidate_filter_cache();
+            app.invalidate_grouped_cache();
+            app.reconcile_script_list_after_results_refresh(
+                "test_lazy_same_query_refresh",
+                interaction_before,
+                cx,
+            );
+
+            let viewport_after = app.main_menu_viewport_snapshot();
+            assert_eq!(selected_main_menu_stable_key(app), selected_key_before);
+            assert_eq!(
+                viewport_after.first_visible_keys.first(),
+                Some(&anchor_before)
+            );
+            assert_eq!(viewport_after.offset_in_item, gpui::px(9.5));
+            assert!(!viewport_after.selected_was_within_safe_viewport);
+            assert_eq!(
+                app.last_list_interaction_source,
+                crate::scrolling::list_interaction::ListViewportInputSource::Refresh
+            );
         });
     }
 }

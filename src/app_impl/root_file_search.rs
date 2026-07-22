@@ -167,11 +167,15 @@ impl ScriptListApp {
     }
 
     fn refresh_root_file_grouping_after_query_only_change(&mut self, cx: &mut Context<Self>) {
+        let interaction_before = matches!(self.current_view, AppView::ScriptList)
+            .then(|| self.main_menu_interaction_snapshot());
         self.invalidate_grouped_cache();
-        if matches!(self.current_view, AppView::ScriptList) {
-            self.sync_list_state_for_filter_replacement();
-            self.validate_selection_bounds(cx);
-            self.rebuild_main_window_preflight_if_needed();
+        if let Some(interaction_before) = interaction_before {
+            self.reconcile_script_list_after_results_refresh(
+                "root_file_query_only_grouping_change",
+                interaction_before,
+                cx,
+            );
         }
         cx.notify();
     }
@@ -205,8 +209,8 @@ impl ScriptListApp {
             return;
         }
 
-        let selection_before = if matches!(self.current_view, AppView::ScriptList) {
-            Some(self.main_menu_selection_snapshot())
+        let interaction_before = if matches!(self.current_view, AppView::ScriptList) {
+            Some(self.main_menu_interaction_snapshot())
         } else {
             None
         };
@@ -220,30 +224,11 @@ impl ScriptListApp {
         }
         self.invalidate_grouped_cache();
         if matches!(self.current_view, AppView::ScriptList) {
-            self.sync_list_state_for_filter_replacement();
-            let restored =
-                match main_menu_refresh_selection_policy(self.main_menu_selection_user_moved) {
-                    MainMenuRefreshSelectionPolicy::RestoreIdentity => selection_before
-                        .map(|snapshot| self.restore_main_menu_selection_from_snapshot(snapshot))
-                        .unwrap_or(false),
-                    MainMenuRefreshSelectionPolicy::SnapToFirst => false,
-                };
-            if !restored {
-                self.snap_main_menu_selection_to_first();
-                tracing::debug!(
-                    target: "script_kit::selection",
-                    event = "main_menu_refresh_snap_to_first_missing_identity",
-                    reason = "root_file_results_publish",
-                    selected_index = self.selected_index,
-                );
-            }
-            self.validate_selection_bounds(cx);
-            self.schedule_main_list_selection_reveal_above_footer(
-                "root_file_active_publish_deferred",
+            self.reconcile_script_list_after_results_refresh(
+                "root_file_results_publish",
+                interaction_before.expect("script-list refresh captured interaction"),
                 cx,
             );
-            self.invalidate_main_window_preflight();
-            self.rebuild_main_window_preflight_if_needed();
         }
         cx.notify();
     }
@@ -1478,14 +1463,19 @@ impl ScriptListApp {
         if self.spine_file_search_generation != generation {
             return;
         }
+        let interaction_before = matches!(self.current_view, AppView::ScriptList)
+            .then(|| self.main_menu_interaction_snapshot());
         let results = dedupe_root_file_results(results);
         self.spine_file_search_results = results;
         self.spine_file_search_loading = false;
         self.spine_file_search_cancel = None;
         self.invalidate_grouped_cache();
-        if matches!(self.current_view, AppView::ScriptList) {
-            self.sync_list_state_for_filter_replacement();
-            self.validate_selection_bounds(cx);
+        if let Some(interaction_before) = interaction_before {
+            self.reconcile_script_list_after_results_refresh(
+                "spine_file_subsearch_results",
+                interaction_before,
+                cx,
+            );
         }
         cx.notify();
     }

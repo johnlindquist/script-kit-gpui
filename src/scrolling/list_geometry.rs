@@ -123,6 +123,49 @@ pub(crate) fn clamp_offset(
     }
 }
 
+/// Resolve a captured viewport anchor against a replacement row set.
+///
+/// Stable identities win in capture order. If every captured row disappeared,
+/// the old leading row index is clamped into the replacement list. Selection is
+/// intentionally absent from this policy: viewport repair must never choose the
+/// focused row.
+pub(crate) fn restore_stable_viewport_offset(
+    captured_keys: &[String],
+    fallback_item_ix: usize,
+    offset_in_item: Pixels,
+    replacement_keys: &[String],
+    mut row_height: impl FnMut(usize) -> f32,
+) -> ListOffset {
+    if replacement_keys.is_empty() {
+        return ListOffset {
+            item_ix: 0,
+            offset_in_item: gpui::px(0.0),
+        };
+    }
+
+    let item_ix = captured_keys
+        .iter()
+        .find_map(|captured| replacement_keys.iter().position(|key| key == captured))
+        .unwrap_or_else(|| fallback_item_ix.min(replacement_keys.len() - 1));
+
+    clamp_offset(
+        replacement_keys.len(),
+        ListOffset {
+            item_ix,
+            offset_in_item,
+        },
+        &mut row_height,
+    )
+}
+
+pub(crate) fn first_rendered_item_at_or_after(
+    item_count: usize,
+    start_ix: usize,
+    mut row_height: impl FnMut(usize) -> f32,
+) -> Option<usize> {
+    (start_ix.min(item_count)..item_count).find(|&ix| row_height(ix) > 0.0)
+}
+
 /// Returns a half-open range of rows intersecting the viewport.
 pub(crate) fn visible_range(
     item_count: usize,
@@ -261,5 +304,68 @@ mod tests {
             MIXED.len(),
             0.0,
         );
+    }
+
+    #[test]
+    fn stable_anchor_survives_reorder_with_partial_offset() {
+        let captured = vec!["b".to_string(), "c".to_string()];
+        let replacement = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+        assert_offset(
+            restore_stable_viewport_offset(&captured, 1, gpui::px(7.5), &replacement, |_| 40.0),
+            2,
+            7.5,
+        );
+    }
+
+    #[test]
+    fn deleted_anchor_uses_next_visible_identity_then_nearest_index_fallback() {
+        let replacement = vec!["a".to_string(), "c".to_string(), "d".to_string()];
+        assert_offset(
+            restore_stable_viewport_offset(
+                &["b".to_string(), "c".to_string()],
+                1,
+                gpui::px(4.0),
+                &replacement,
+                |_| 20.0,
+            ),
+            1,
+            4.0,
+        );
+        assert_offset(
+            restore_stable_viewport_offset(
+                &["gone".to_string()],
+                99,
+                gpui::px(30.0),
+                &replacement,
+                |_| 20.0,
+            ),
+            2,
+            20.0,
+        );
+    }
+
+    #[test]
+    fn zero_height_anchor_clamps_fraction_without_selecting_another_row() {
+        let replacement = vec!["header".to_string(), "item".to_string()];
+        assert_offset(
+            restore_stable_viewport_offset(
+                &["header".to_string()],
+                0,
+                gpui::px(8.0),
+                &replacement,
+                |ix| if ix == 0 { 0.0 } else { 40.0 },
+            ),
+            0,
+            0.0,
+        );
+    }
+
+    #[test]
+    fn lazy_anchor_skips_zero_height_first_header() {
+        assert_eq!(
+            first_rendered_item_at_or_after(MIXED.len(), 0, height),
+            Some(1)
+        );
+        assert_eq!(first_rendered_item_at_or_after(1, 1, |_| 40.0), None);
     }
 }

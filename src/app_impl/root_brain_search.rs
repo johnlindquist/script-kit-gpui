@@ -222,14 +222,13 @@ impl ScriptListApp {
         }
         if matches!(self.current_view, AppView::ScriptList) {
             // Identity-preserving landing, matching every other async source
-            // (files/tabs/history/windows): snapshot the selection key BEFORE
-            // the re-splice so a section appearing above it cannot silently
-            // move the highlighted row.
-            let selection_before = self.main_menu_selection_snapshot();
+            // (files/tabs/history/windows): snapshot selection and viewport
+            // BEFORE the re-splice so provider timing moves neither one.
+            let interaction_before = self.main_menu_interaction_snapshot();
             self.invalidate_root_passive_and_grouped_cache();
             self.reconcile_script_list_after_results_refresh(
                 "brain_semantic_results_applied",
-                selection_before,
+                interaction_before,
                 cx,
             );
         } else {

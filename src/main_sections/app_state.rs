@@ -597,8 +597,23 @@ impl MainMenuResultCacheState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MainMenuSelectionSnapshot {
-    query: String,
-    selected_key: Option<String>,
+    pub(crate) query: String,
+    pub(crate) selected_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MainMenuViewportSnapshot {
+    pub(crate) query: String,
+    pub(crate) first_visible_keys: Vec<String>,
+    pub(crate) fallback_item_ix: usize,
+    pub(crate) offset_in_item: gpui::Pixels,
+    pub(crate) selected_was_within_safe_viewport: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MainMenuInteractionSnapshot {
+    pub(crate) selection: MainMenuSelectionSnapshot,
+    pub(crate) viewport: MainMenuViewportSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -719,13 +734,11 @@ impl ScriptListApp {
             return false;
         };
 
-        if self.selected_index == grouped_index {
-            return false;
+        if self.selected_index != grouped_index {
+            self.selected_index = grouped_index;
+            self.hovered_index = None;
+            self.last_scrolled_index = None;
         }
-
-        self.selected_index = grouped_index;
-        self.hovered_index = None;
-        self.last_scrolled_index = None;
         true
     }
 }
