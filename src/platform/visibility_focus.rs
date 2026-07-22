@@ -87,7 +87,6 @@ fn hide_main_window_with_geometry_trace(cycle_id: Option<u64>) {
         // orderOut: removes the window from the screen without affecting other windows
         // nil sender means the action is programmatic, not from a menu item
         let _: () = msg_send![window, orderOut:nil];
-        crate::footer_popup::hide_float_footer_for_window(window);
 
         // Glass mode: park at alpha 0 so the next show (whichever path wins)
         // cannot flash a full-alpha frame before the appear morph runs.
@@ -242,7 +241,6 @@ fn hide_main_window_with_completion(
         };
 
         let _: () = msg_send![window, orderOut:nil];
-        crate::footer_popup::hide_float_footer_for_window(window);
 
         if main_window_hide_was_superseded(
             expected_visibility_generation,
@@ -510,7 +508,6 @@ pub fn conceal_main_window() {
         };
 
         let _: () = msg_send![window, orderOut:nil];
-        crate::footer_popup::hide_float_footer_for_window(window);
 
         logging::log(
             "PANEL",

@@ -24,9 +24,8 @@ use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 const RESIZE_MIN_DELTA_PX: f64 = 1.0;
 const WINDOW_RESIZE_ANIMATE: bool = false;
-/// MWND-03 flips this only after the same-window footer host is installed.
-/// Keeping it false in this refactor preserves the current two-window runtime.
-const MAIN_WINDOW_SINGLE_HOST_FOOTER_ACTIVE: bool = false;
+/// Tahoe's detached footer is hosted inside the physical main NSWindow.
+const MAIN_WINDOW_SINGLE_HOST_FOOTER_ACTIVE: bool = true;
 const MAIN_WINDOW_MIN_HEIGHT: f32 = 480.0;
 const MAIN_WINDOW_MAX_HEIGHT: f32 = 480.0;
 const MAIN_WINDOW_HEADER_HEIGHT: f32 =

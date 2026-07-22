@@ -192,8 +192,12 @@ pub(crate) unsafe fn install_native_glass_container(
         let _: () = msg_send![identifier, release];
     }
 
+    let inner_frame = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(frame.size.width, frame.size.height),
+    );
     let inner: id = msg_send![nsview_class, alloc];
-    let inner: id = msg_send![inner, initWithFrame: frame];
+    let inner: id = msg_send![inner, initWithFrame: inner_frame];
     if inner == nil {
         let _: () = msg_send![container, release];
         return None;

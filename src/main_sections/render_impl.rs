@@ -729,6 +729,27 @@ impl Render for ScriptListApp {
         // Wrap content in a container that can have the debug grid overlay
         let window_bounds = window.bounds();
         let window_size = gpui::size(window_bounds.size.width, window_bounds.size.height);
+        let detached_regions = crate::footer_popup::main_window_detached_footer_regions_gpui(
+            f32::from(window_size.width),
+            f32::from(window_size.height),
+            if crate::footer_popup::glass_scroll_bands_active() {
+                crate::components::footer_chrome::current_main_menu_footer_height()
+            } else {
+                0.0
+            },
+            if crate::footer_popup::glass_scroll_bands_active() {
+                crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+            } else {
+                0.0
+            },
+            window.scale_factor(),
+        );
+        let main_content_size = gpui::size(
+            px(detached_regions.main_content.width),
+            px(detached_regions.main_content.height),
+        );
+        let main_content_width = detached_regions.main_content.width;
+        let main_content_height = detached_regions.main_content.height;
 
         // Clone grid_config for use in the closure
         let grid_config = self.grid_config.clone();
@@ -737,7 +758,7 @@ impl Render for ScriptListApp {
         // P0 FIX: Only compute bounds when grid overlay is actually enabled
         // Previously this was computed unconditionally on every frame
         let component_bounds = if grid_config.is_some() {
-            self.build_component_bounds(window_size, &*cx)
+            self.build_component_bounds(main_content_size, &*cx)
         } else {
             Vec::new()
         };
@@ -825,8 +846,7 @@ impl Render for ScriptListApp {
             // report it here from the input's last painted caret bounds
             // (dedupe in the recorder makes stationary re-reports free).
             if let Some(caret) = self.gpui_input_state.read(cx).last_cursor_bounds() {
-                let viewport = window.viewport_size();
-                let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+                let (vw, vh) = (main_content_width, main_content_height);
                 if vw > 0.0 && vh > 0.0 {
                     let center = caret.center();
                     crate::effects::note_effect_focus(
@@ -924,10 +944,9 @@ impl Render for ScriptListApp {
                 .into_any_element()
         };
 
-        // Floating footer chrome: the footer strip lives OUTSIDE the window
-        // frame (window_resize::physical_main_window_height shortens the
-        // NSWindow; the capsules ride the footer child window below it), so
-        // the container simply fills the window.
+        // The physical window is the complete main+gap+footer group. GPUI
+        // paints only the bounded main-content stage; the gutter and native
+        // footer region remain transparent above the same Metal host.
         div()
             .id("main-window-root")
             .size_full()
@@ -1079,7 +1098,7 @@ impl Render for ScriptListApp {
             .child(
                 div()
                     .w_full()
-                    .h_full()
+                    .h(px(main_content_height))
                     .relative()
                     .flex()
                     .flex_col()
@@ -1094,12 +1113,10 @@ impl Render for ScriptListApp {
                     // Show cursor when mouse moves; a moving mouse also
                     // steers the background effect focus (no notify — the
                     // effect ticker repaints while an effect is active).
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
                         this.show_mouse_cursor(cx);
                         if this.background_effect.is_some() {
-                            let viewport = window.viewport_size();
-                            let (vw, vh) =
-                                (f32::from(viewport.width), f32::from(viewport.height));
+                            let (vw, vh) = (main_content_width, main_content_height);
                             if vw > 0.0 && vh > 0.0 {
                                 crate::effects::note_effect_focus(
                                     crate::effects::EffectFocusSource::Mouse,
@@ -1147,7 +1164,7 @@ impl Render for ScriptListApp {
                     .when_some(grid_config, |container, config| {
                         let overlay_bounds = gpui::Bounds {
                             origin: gpui::point(px(0.), px(0.)),
-                            size: window_size,
+                            size: main_content_size,
                         };
                         container.child(debug_grid::render_grid_overlay(
                             &config,
