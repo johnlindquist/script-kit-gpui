@@ -1,7 +1,7 @@
 //! Native per-button Liquid Glass hosted beneath a GPUI window's Metal view.
 
 use cocoa::base::{id, nil, NO, YES};
-use cocoa::foundation::{NSPoint, NSRect, NSSize};
+use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 use cocoa::quartzcore::CATransform3D;
 use objc::rc::WeakPtr;
 use objc::runtime::Class;
@@ -97,6 +97,123 @@ pub(crate) fn glass_buttons_enabled() -> bool {
         && std::env::var("SCRIPT_KIT_GLASS_BUTTONS")
             .map(|value| value != "0")
             .unwrap_or(true)
+}
+
+/// Relative placement for a native glass container around GPUI's Metal view.
+/// The existing button host remains below GPUI; the detached main footer will
+/// use the above-GPUI variant when its topology migrates in MWND-03.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeViewOrdering {
+    BelowGpui,
+    AboveGpui,
+}
+
+impl NativeViewOrdering {
+    fn appkit_value(self) -> i64 {
+        match self {
+            Self::BelowGpui => -1,
+            Self::AboveGpui => 1,
+        }
+    }
+}
+
+/// Reusable ownership wrapper for an `NSGlassEffectContainerView` and its
+/// content view. It contains only native installation/lifetime mechanics;
+/// feature-specific glass children remain owned by the caller.
+pub(crate) struct NativeGlassContainerHost {
+    window: WeakPtr,
+    content_view: id,
+    container: id,
+    inner: id,
+}
+
+impl NativeGlassContainerHost {
+    pub(crate) fn window_is_alive(&self) -> bool {
+        !(*self.window.load()).is_null()
+    }
+
+    pub(crate) fn content_view(&self) -> id {
+        self.content_view
+    }
+
+    pub(crate) fn container(&self) -> id {
+        self.container
+    }
+
+    pub(crate) fn inner(&self) -> id {
+        self.inner
+    }
+}
+
+impl Drop for NativeGlassContainerHost {
+    fn drop(&mut self) {
+        // SAFETY: the host owns both allocated views and is dropped on the
+        // AppKit main thread by its feature-specific owner.
+        unsafe {
+            let _: () = msg_send![self.container, removeFromSuperview];
+            let _: () = msg_send![self.inner, release];
+            let _: () = msg_send![self.container, release];
+        }
+    }
+}
+
+/// Install one native glass container relative to GPUI's live Metal view.
+/// Returns `None` when Tahoe's glass class or either required native view is
+/// unavailable. The returned host owns the container and its inner view.
+pub(crate) unsafe fn install_native_glass_container(
+    ns_window: id,
+    gpui_view: id,
+    frame: NSRect,
+    ordering: NativeViewOrdering,
+    spacing: f64,
+    identifier: &str,
+) -> Option<NativeGlassContainerHost> {
+    let container_class = Class::get("NSGlassEffectContainerView")?;
+    let nsview_class = Class::get("NSView")?;
+    if ns_window == nil || gpui_view == nil {
+        return None;
+    }
+    let content_view: id = msg_send![ns_window, contentView];
+    if content_view == nil {
+        return None;
+    }
+    let resize_mask: u64 = (1 << 1) | (1 << 4); // width + height sizable
+
+    let container: id = msg_send![container_class, alloc];
+    let container: id = msg_send![container, initWithFrame: frame];
+    if container == nil {
+        return None;
+    }
+    let _: () = msg_send![container, setAutoresizingMask: resize_mask];
+    let _: () = msg_send![container, setSpacing: spacing.max(0.0)];
+    if !identifier.is_empty() {
+        let identifier = NSString::alloc(nil).init_str(identifier);
+        let _: () = msg_send![container, setIdentifier: identifier];
+        let _: () = msg_send![identifier, release];
+    }
+
+    let inner: id = msg_send![nsview_class, alloc];
+    let inner: id = msg_send![inner, initWithFrame: frame];
+    if inner == nil {
+        let _: () = msg_send![container, release];
+        return None;
+    }
+    let _: () = msg_send![inner, setAutoresizingMask: resize_mask];
+    let _: () = msg_send![container, setContentView: inner];
+
+    let _: () = msg_send![
+        content_view,
+        addSubview: container
+        positioned: ordering.appkit_value()
+        relativeTo: gpui_view
+    ];
+
+    Some(NativeGlassContainerHost {
+        window: WeakPtr::new(ns_window),
+        content_view,
+        container,
+        inner,
+    })
 }
 
 /// Sync one named capsule group in a live GPUI window. Groups are merged in
@@ -250,10 +367,7 @@ pub(crate) fn remove_for_window(window: &gpui::Window) {
 /// only the y axis is flipped when placing each effect view.
 pub(crate) struct GlassButtonHost {
     window_key: usize,
-    window: WeakPtr,
-    content_view: id,
-    container: id,
-    inner: id,
+    native: NativeGlassContainerHost,
     glass_class: &'static Class,
     views: Vec<id>,
     hovered: Vec<bool>,
@@ -264,11 +378,9 @@ impl GlassButtonHost {
     /// Returns `None` when the Tahoe-only AppKit classes or window are absent.
     pub(crate) fn install(window: &gpui::Window) -> Option<Self> {
         let glass_class = Class::get("NSGlassEffectView")?;
-        let container_class = Class::get("NSGlassEffectContainerView")?;
-        let nsview_class = Class::get("NSView")?;
         let (gpui_view, ns_window) = gpui_view_and_ns_window(window)?;
         let window_key = ns_window as usize;
-        let spacing = glass_spacing();
+        let spacing = shared_glass_spacing();
 
         // SAFETY: GPUI renders and prepaints on the AppKit main thread. The
         // raw handle supplies the live Metal NSView, and every class used here
@@ -279,27 +391,14 @@ impl GlassButtonHost {
                 return None;
             }
             let bounds: NSRect = msg_send![content_view, bounds];
-            let resize_mask: u64 = (1 << 1) | (1 << 4); // width + height sizable
-
-            let container: id = msg_send![container_class, alloc];
-            let container: id = msg_send![container, initWithFrame: bounds];
-            if container == nil {
-                return None;
-            }
-            let _: () = msg_send![container, setAutoresizingMask: resize_mask];
-            let _: () = msg_send![container, setSpacing: spacing];
-
-            let inner: id = msg_send![nsview_class, alloc];
-            let inner: id = msg_send![inner, initWithFrame: bounds];
-            if inner == nil {
-                let _: () = msg_send![container, release];
-                return None;
-            }
-            let _: () = msg_send![inner, setAutoresizingMask: resize_mask];
-            let _: () = msg_send![container, setContentView: inner];
-
-            let below: i64 = -1;
-            let _: () = msg_send![content_view, addSubview: container positioned: below relativeTo: gpui_view];
+            let native = install_native_glass_container(
+                ns_window,
+                gpui_view,
+                bounds,
+                NativeViewOrdering::BelowGpui,
+                spacing,
+                "script-kit-glass-button-container",
+            )?;
 
             tracing::info!(
                 target: "script_kit::dictation",
@@ -311,10 +410,7 @@ impl GlassButtonHost {
 
             Some(Self {
                 window_key,
-                window: WeakPtr::new(ns_window),
-                content_view,
-                container,
-                inner,
+                native,
                 glass_class,
                 views: Vec::new(),
                 hovered: Vec::new(),
@@ -341,7 +437,7 @@ impl GlassButtonHost {
                 }
                 let _: () = msg_send![view, setWantsLayer: YES];
                 let _: () = msg_send![view, setHidden: YES];
-                let _: () = msg_send![self.inner, addSubview: view];
+                let _: () = msg_send![self.native.inner(), addSubview: view];
                 view
             };
             self.views.push(view);
@@ -352,7 +448,7 @@ impl GlassButtonHost {
         // the host is installed. Bounds are in AppKit points, equal to GPUI's
         // logical pixels for this coordinate conversion (no scale factor).
         unsafe {
-            let content_bounds: NSRect = msg_send![self.content_view, bounds];
+            let content_bounds: NSRect = msg_send![self.native.content_view(), bounds];
             let content_height = content_bounds.size.height;
 
             for (index, view) in self.views.iter().copied().enumerate() {
@@ -398,7 +494,7 @@ impl GlassButtonHost {
     }
 
     fn window_is_alive(&self) -> bool {
-        !(*self.window.load()).is_null()
+        self.native.window_is_alive()
     }
 
     fn set_hover(&mut self, index: usize, hovered: bool) {
@@ -416,16 +512,12 @@ impl GlassButtonHost {
 
 impl Drop for GlassButtonHost {
     fn drop(&mut self) {
-        // SAFETY: all objects were allocated and retained by this host on the
-        // AppKit main thread. Removing the container first detaches the whole
-        // native subtree before balancing our ownership retains.
+        // SAFETY: pooled views are owned by this host. The native container
+        // drops immediately after this method and detaches/releases its tree.
         unsafe {
-            let _: () = msg_send![self.container, removeFromSuperview];
             for view in self.views.drain(..) {
                 let _: () = msg_send![view, release];
             }
-            let _: () = msg_send![self.inner, release];
-            let _: () = msg_send![self.container, release];
         }
         tracing::info!(
             target: "script_kit::dictation",
@@ -436,7 +528,7 @@ impl Drop for GlassButtonHost {
     }
 }
 
-fn glass_spacing() -> f64 {
+pub(crate) fn shared_glass_spacing() -> f64 {
     std::env::var("SCRIPT_KIT_GLASS_BUTTON_SPACING")
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
@@ -572,6 +664,14 @@ mod tests {
 
         assert_eq!(frames, vec![header]);
         assert_eq!(hovered, vec![false]);
+    }
+
+    #[test]
+    fn shared_native_container_install_options_preserve_existing_below_gpui_mode() {
+        assert_eq!(NativeViewOrdering::BelowGpui.appkit_value(), -1);
+        assert_eq!(NativeViewOrdering::AboveGpui.appkit_value(), 1);
+        assert!(shared_glass_spacing().is_finite());
+        assert!(shared_glass_spacing() >= 0.0);
     }
 
     /// A group that stops syncing (its element unmounted on a view switch)

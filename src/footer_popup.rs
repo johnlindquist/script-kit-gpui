@@ -1892,6 +1892,137 @@ pub(crate) fn glass_scroll_bands_active() -> bool {
 /// footer capsules.
 pub(crate) const FLOAT_FOOTER_CONTAINER_GAP_PX: f32 = 8.0;
 
+/// Canonical partition of the expanded main-window host used by the detached
+/// footer composition. The same physical regions are expressed in either
+/// GPUI's top-left coordinate space or AppKit's bottom-left coordinate space.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MainWindowDetachedFooterRegions {
+    pub host: crate::protocol::LayoutBounds,
+    pub main_content: crate::protocol::LayoutBounds,
+    pub transparent_gap: crate::protocol::LayoutBounds,
+    pub footer: crate::protocol::LayoutBounds,
+}
+
+fn round_footer_region_value(value: f32, backing_scale: f32) -> f32 {
+    let scale = if backing_scale.is_finite() && backing_scale > 0.0 {
+        backing_scale
+    } else {
+        1.0
+    };
+    (value * scale).round() / scale
+}
+
+fn main_window_detached_footer_region_dimensions(
+    width: f32,
+    host_height: f32,
+    footer_height: f32,
+    gap_height: f32,
+    backing_scale: f32,
+) -> (f32, f32, f32, f32) {
+    let width = round_footer_region_value(width.max(0.0), backing_scale);
+    let host_height = round_footer_region_value(host_height.max(0.0), backing_scale);
+    let footer_height =
+        round_footer_region_value(footer_height.max(0.0).min(host_height), backing_scale)
+            .min(host_height);
+    let gap_height = round_footer_region_value(
+        gap_height.max(0.0).min(host_height - footer_height),
+        backing_scale,
+    )
+    .min(host_height - footer_height);
+    let main_height = host_height - footer_height - gap_height;
+    (width, host_height, main_height, gap_height)
+}
+
+/// Partition an expanded host in GPUI's top-left, y-down coordinate space.
+pub(crate) fn main_window_detached_footer_regions_gpui(
+    width: f32,
+    host_height: f32,
+    footer_height: f32,
+    gap_height: f32,
+    backing_scale: f32,
+) -> MainWindowDetachedFooterRegions {
+    let (width, host_height, main_height, gap_height) =
+        main_window_detached_footer_region_dimensions(
+            width,
+            host_height,
+            footer_height,
+            gap_height,
+            backing_scale,
+        );
+    let footer_height = host_height - main_height - gap_height;
+    MainWindowDetachedFooterRegions {
+        host: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: host_height,
+        },
+        main_content: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: main_height,
+        },
+        transparent_gap: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: main_height,
+            width,
+            height: gap_height,
+        },
+        footer: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: main_height + gap_height,
+            width,
+            height: footer_height,
+        },
+    }
+}
+
+/// Partition an expanded host in AppKit's bottom-left, y-up coordinate space.
+pub(crate) fn main_window_detached_footer_regions_appkit(
+    width: f32,
+    host_height: f32,
+    footer_height: f32,
+    gap_height: f32,
+    backing_scale: f32,
+) -> MainWindowDetachedFooterRegions {
+    let (width, host_height, main_height, gap_height) =
+        main_window_detached_footer_region_dimensions(
+            width,
+            host_height,
+            footer_height,
+            gap_height,
+            backing_scale,
+        );
+    let footer_height = host_height - main_height - gap_height;
+    MainWindowDetachedFooterRegions {
+        host: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: host_height,
+        },
+        main_content: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: footer_height + gap_height,
+            width,
+            height: main_height,
+        },
+        transparent_gap: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: footer_height,
+            width,
+            height: gap_height,
+        },
+        footer: crate::protocol::LayoutBounds {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: footer_height,
+        },
+    }
+}
+
 /// Height of the fully transparent strip the main window reserves below its
 /// glass container so the footer capsules float over the bare desktop.
 /// Both the GPUI root (bottom padding) and the native NSGlassEffectView
@@ -4713,9 +4844,88 @@ mod footer_layout_tests {
         footer_active_dot_hex, footer_dot_hex, footer_hint_content_layout,
         footer_hint_content_layout_for_button, footer_hint_label_widths,
         footer_hint_legacy_extra_padding, footer_hint_max_item_width, footer_hint_slot_width,
-        footer_selected_background_rgba, FooterAction, FooterButtonConfig, FooterDotStatus,
-        FOOTER_HINT_KEY_LABEL_GAP, FOOTER_HINT_PADDING_X, FOOTER_RUN_HINT_PADDING_X,
+        footer_selected_background_rgba, main_window_detached_footer_regions_appkit,
+        main_window_detached_footer_regions_gpui, FooterAction, FooterButtonConfig,
+        FooterDotStatus, FOOTER_HINT_KEY_LABEL_GAP, FOOTER_HINT_PADDING_X,
+        FOOTER_RUN_HINT_PADDING_X,
     };
+
+    fn assert_partitions_host(regions: &super::MainWindowDetachedFooterRegions) {
+        let partition_height =
+            regions.main_content.height + regions.transparent_gap.height + regions.footer.height;
+        assert!((partition_height - regions.host.height).abs() < f32::EPSILON);
+        assert!(regions.main_content.height >= 0.0);
+        assert!(regions.transparent_gap.height >= 0.0);
+        assert!(regions.footer.height >= 0.0);
+    }
+
+    #[test]
+    fn detached_footer_regions_partition_host_without_overlap() {
+        let gpui = main_window_detached_footer_regions_gpui(750.0, 480.0, 32.0, 8.0, 2.0);
+        let appkit = main_window_detached_footer_regions_appkit(750.0, 480.0, 32.0, 8.0, 2.0);
+
+        assert_partitions_host(&gpui);
+        assert_partitions_host(&appkit);
+        assert_eq!(
+            gpui.main_content.y + gpui.main_content.height,
+            gpui.transparent_gap.y
+        );
+        assert_eq!(
+            gpui.transparent_gap.y + gpui.transparent_gap.height,
+            gpui.footer.y
+        );
+        assert_eq!(
+            appkit.footer.y + appkit.footer.height,
+            appkit.transparent_gap.y
+        );
+        assert_eq!(
+            appkit.transparent_gap.y + appkit.transparent_gap.height,
+            appkit.main_content.y
+        );
+    }
+
+    #[test]
+    fn detached_footer_regions_preserve_main_top_edge() {
+        let short = main_window_detached_footer_regions_appkit(750.0, 480.0, 32.0, 8.0, 2.0);
+        let tall = main_window_detached_footer_regions_appkit(750.0, 620.0, 32.0, 8.0, 2.0);
+
+        assert_eq!(
+            short.main_content.y + short.main_content.height,
+            short.host.height
+        );
+        assert_eq!(
+            tall.main_content.y + tall.main_content.height,
+            tall.host.height
+        );
+        assert_eq!(short.main_content.y, tall.main_content.y);
+    }
+
+    #[test]
+    fn detached_regions_round_to_two_x_backing_scale() {
+        let regions = main_window_detached_footer_regions_gpui(749.74, 480.24, 31.76, 8.24, 2.0);
+
+        for value in [
+            regions.host.width,
+            regions.host.height,
+            regions.main_content.height,
+            regions.transparent_gap.y,
+            regions.transparent_gap.height,
+            regions.footer.y,
+            regions.footer.height,
+        ] {
+            assert_eq!(value * 2.0, (value * 2.0).round());
+        }
+        assert_partitions_host(&regions);
+    }
+
+    #[test]
+    fn legacy_zero_strip_geometry_is_unchanged() {
+        let regions = main_window_detached_footer_regions_gpui(750.0, 480.0, 0.0, 0.0, 2.0);
+
+        assert_eq!(regions.main_content, regions.host);
+        assert_eq!(regions.transparent_gap.height, 0.0);
+        assert_eq!(regions.footer.height, 0.0);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

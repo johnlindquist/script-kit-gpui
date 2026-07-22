@@ -24,6 +24,9 @@ use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 const RESIZE_MIN_DELTA_PX: f64 = 1.0;
 const WINDOW_RESIZE_ANIMATE: bool = false;
+/// MWND-03 flips this only after the same-window footer host is installed.
+/// Keeping it false in this refactor preserves the current two-window runtime.
+const MAIN_WINDOW_SINGLE_HOST_FOOTER_ACTIVE: bool = false;
 const MAIN_WINDOW_MIN_HEIGHT: f32 = 480.0;
 const MAIN_WINDOW_MAX_HEIGHT: f32 = 480.0;
 const MAIN_WINDOW_HEADER_HEIGHT: f32 =
@@ -742,9 +745,14 @@ pub fn initial_window_height() -> Pixels {
 /// frame, so the height is shorter than the logical
 /// [`initial_window_height`] by the strip.
 pub fn initial_window_size() -> gpui::Size<Pixels> {
+    let logical_height = f32::from(initial_window_height()) as f64;
     gpui::size(
         gpui::px(MAIN_WINDOW_WIDTH),
-        initial_window_height() - px(crate::footer_popup::main_window_float_footer_strip_height()),
+        px(physical_main_window_height_for_footer_mode(
+            logical_height,
+            MAIN_WINDOW_SINGLE_HOST_FOOTER_ACTIVE,
+            f64::from(crate::footer_popup::main_window_float_footer_strip_height()),
+        ) as f32),
     )
 }
 /// Defer a window resize to the end of the current effect cycle.
@@ -838,7 +846,35 @@ pub fn reset_resize_debounce() {
 /// [`get_first_window_height`]) is the only conversion point.
 #[cfg(target_os = "macos")]
 fn physical_main_window_height(logical: f64) -> f64 {
-    (logical - f64::from(crate::footer_popup::main_window_float_footer_strip_height())).max(120.0)
+    physical_main_window_height_for_footer_mode(
+        logical,
+        MAIN_WINDOW_SINGLE_HOST_FOOTER_ACTIVE,
+        f64::from(crate::footer_popup::main_window_float_footer_strip_height()),
+    )
+}
+
+fn physical_main_window_height_for_footer_mode(
+    logical: f64,
+    single_host_active: bool,
+    strip_height: f64,
+) -> f64 {
+    if single_host_active {
+        logical.max(120.0)
+    } else {
+        (logical - strip_height.max(0.0)).max(120.0)
+    }
+}
+
+fn logical_main_window_height_for_footer_mode(
+    physical: f64,
+    single_host_active: bool,
+    strip_height: f64,
+) -> f64 {
+    if single_host_active {
+        physical
+    } else {
+        physical + strip_height.max(0.0)
+    }
 }
 
 pub fn resize_first_window_to_height(target_height: Pixels) {
@@ -921,9 +957,11 @@ pub fn get_first_window_height() -> Option<Pixels> {
         let frame: NSRect = msg_send![window, frame];
         // Inverse of `physical_main_window_height`: report the LOGICAL height
         // so callers can compare against `height_for_view` outputs.
-        Some(px(frame.size.height as f32
-            + crate::footer_popup::main_window_float_footer_strip_height(
-            )))
+        Some(px(logical_main_window_height_for_footer_mode(
+            frame.size.height,
+            MAIN_WINDOW_SINGLE_HOST_FOOTER_ACTIVE,
+            f64::from(crate::footer_popup::main_window_float_footer_strip_height()),
+        ) as f32))
     }
 }
 /// Non-macOS stub for resize function
@@ -1125,6 +1163,28 @@ mod resize_tests {
                 is_empty: false,
             })),
             MAIN_WINDOW_MAX_HEIGHT
+        );
+    }
+
+    #[test]
+    fn single_host_physical_height_equals_logical_group_height() {
+        let strip_height = 40.0;
+        assert_eq!(
+            physical_main_window_height_for_footer_mode(480.0, true, strip_height),
+            480.0
+        );
+        assert_eq!(
+            logical_main_window_height_for_footer_mode(480.0, true, strip_height),
+            480.0
+        );
+
+        assert_eq!(
+            physical_main_window_height_for_footer_mode(480.0, false, strip_height),
+            440.0
+        );
+        assert_eq!(
+            logical_main_window_height_for_footer_mode(440.0, false, strip_height),
+            480.0
         );
     }
 
