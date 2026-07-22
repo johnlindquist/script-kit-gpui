@@ -15,6 +15,7 @@
 
 use gpui::AppContext as _;
 
+pub(crate) mod capabilities;
 pub(crate) mod catalog;
 pub(crate) mod chat_window;
 pub(crate) mod components;
@@ -147,6 +148,7 @@ pub(crate) fn open_or_focus_chat_with_input(
                 launch_requirements: AgentChatLaunchRequirements::default(),
                 available_models: pi_launch.available_models.clone(),
                 selected_model_id: pi_launch.selected_model_id.clone(),
+                session_policy: capabilities::AgentChatSessionPolicy::Full,
             },
             cx,
         )

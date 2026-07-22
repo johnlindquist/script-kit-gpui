@@ -53,8 +53,6 @@ pub(crate) use window::is_confirm_window_open;
 #[allow(unused_imports)]
 pub(crate) use window::is_confirm_window_open as is_confirm_popup_window_open;
 #[allow(unused_imports)]
-pub(crate) use window::refresh_confirm_popup_for_runtime_style;
-#[allow(unused_imports)]
 pub(crate) use window::route_key_to_confirm_popup;
 #[allow(unused_imports)]
 pub(crate) use window::send_confirm_result;

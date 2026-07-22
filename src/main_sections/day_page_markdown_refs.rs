@@ -197,7 +197,7 @@ fn find_unescaped_day_page_markdown_byte(text: &str, start: usize, needle: u8) -
                 slash_count += 1;
                 cursor -= 1;
             }
-            if slash_count % 2 == 0 {
+            if slash_count.is_multiple_of(2) {
                 return Some(index);
             }
         }

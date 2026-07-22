@@ -130,7 +130,6 @@ impl ScriptListApp {
                 if is_key_enter(key) {
                     cx.stop_propagation();
                     this.select_profile_search_result(cx);
-                    return;
                 }
             },
         );

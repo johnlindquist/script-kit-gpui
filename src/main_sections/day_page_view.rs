@@ -8,7 +8,7 @@ use crate::notes::deeplink_activation::{
     resolve_activation, run_deeplink_confirm_options, Activation, ActivationErrorReason,
     ActivationSurface,
 };
-use script_kit_gpui::brain::{substrate::BrainSubstrate, wake_indexer};
+use script_kit_gpui::brain::{indexer::wake_indexer, substrate::BrainSubstrate};
 use script_kit_gpui::day_page::normalize_day_page_markdown_references;
 use script_kit_gpui::day_page::{
     parse_day_page_segments, resolve_fragment_path, DayPageBinding, DayPageSegment,
@@ -387,7 +387,7 @@ impl DayPageView {
         if !self.session.is_dirty() {
             return;
         }
-        let due = self.last_autosave.map_or(true, |at| {
+        let due = self.last_autosave.is_none_or(|at| {
             at.elapsed() >= std::time::Duration::from_millis(Self::SAVE_DEBOUNCE_MS)
         });
         if !due {
@@ -1064,7 +1064,7 @@ impl DayPageView {
             return;
         };
         window.defer(cx, move |window, cx| {
-            let _ = app.update(cx, |app, cx| {
+            app.update(cx, |app, cx| {
                 app.execute_day_page_action(action_id, window, cx);
             });
         });
@@ -1350,7 +1350,7 @@ impl DayPageView {
         let exact_cmd = cmd && !shift && !alt && !control;
 
         if exact_plain
-            && crate::ui_foundation::is_key_escape(&key)
+            && crate::ui_foundation::is_key_escape(key)
             && crate::confirm::is_confirm_window_open()
         {
             crate::confirm::route_key_to_confirm_popup("escape", cx);
@@ -1358,7 +1358,7 @@ impl DayPageView {
         }
 
         if exact_plain
-            && crate::ui_foundation::is_key_escape(&key)
+            && crate::ui_foundation::is_key_escape(key)
             && self.kit_resource_preview.is_some()
         {
             self.close_kit_resource_preview(window, cx);
@@ -1380,7 +1380,7 @@ impl DayPageView {
                 );
                 return;
             }
-            if exact_plain && crate::ui_foundation::is_key_enter(&key) {
+            if exact_plain && crate::ui_foundation::is_key_enter(key) {
                 // Swallow Enter even without a source target so it cannot
                 // leak into the hidden editor behind the preview.
                 self.execute_day_page_action_from_preview(
@@ -1391,7 +1391,7 @@ impl DayPageView {
                 return;
             }
             if exact_cmd
-                && crate::ui_foundation::is_key_enter(&key)
+                && crate::ui_foundation::is_key_enter(key)
                 && self
                     .kit_resource_preview_action_availability()
                     .is_some_and(|availability| availability.can_add_to_agent_chat)
@@ -1405,13 +1405,13 @@ impl DayPageView {
             }
         }
 
-        if self.is_day_switcher_open() {
-            if self.handle_day_switcher_key(key, cmd, shift, alt, control, window, cx) {
-                return;
-            }
+        if self.is_day_switcher_open()
+            && self.handle_day_switcher_key(key, cmd, shift, alt, control, window, cx)
+        {
+            return;
         }
 
-        if exact_plain && crate::ui_foundation::is_key_escape(&key) {
+        if exact_plain && crate::ui_foundation::is_key_escape(key) {
             if self.session.is_viewing_fragment() || self.session.is_viewing_note() {
                 self.return_to_day_page(window, cx);
                 return;

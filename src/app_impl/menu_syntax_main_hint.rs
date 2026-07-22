@@ -498,7 +498,7 @@ impl ScriptListApp {
             let Some(app) = app_entity.upgrade() else {
                 return;
             };
-            let _ = app.update(cx, |this, cx| {
+            app.update(cx, |this, cx| {
                 if !this.menu_syntax_form_input_active
                     || !this.menu_syntax_capture_form_owns_input()
                     || this.menu_syntax_form_draft_field_id.as_deref() != Some(field_id.as_str())

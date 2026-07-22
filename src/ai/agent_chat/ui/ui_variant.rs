@@ -223,3 +223,21 @@ pub(crate) enum AgentChatChromeDensity {
     Compact,
     Mini,
 }
+
+impl AgentChatChromeDensity {
+    /// In-flow content gap for the conversation middle area (transcript column
+    /// and the transcript↔sidecar row), resolved to an EXISTING chrome spacing
+    /// token — never a new one-off value. `Default` keeps the roomy panel
+    /// rhythm; `Compact`/`Mini` tighten to the dense gap so the log-style and
+    /// compact variants pack more rows. Because the default header-composer
+    /// variants render the middle column with a single child, this gap is
+    /// visually inert for them (no CLS) and only affects the multi-child
+    /// sidecar row and compact bottom-dock variants.
+    pub(crate) fn content_gap_px(self) -> f32 {
+        use crate::ui::chrome as chrome_tokens;
+        match self {
+            Self::Default => chrome_tokens::LIQUID_GLASS_PANEL_PADDING_PX,
+            Self::Compact | Self::Mini => chrome_tokens::LIQUID_GLASS_DENSE_GAP_PX,
+        }
+    }
+}

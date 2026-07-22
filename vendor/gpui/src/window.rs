@@ -64,6 +64,107 @@ mod prompts;
 use crate::util::atomic_incr_if_not_zero;
 pub use prompts::*;
 
+// =============================================================================
+// WP-B3 frame-timing hot counters (env-gated: `SCRIPT_KIT_CHAT_HOT_COUNTERS`)
+// =============================================================================
+// [`Window::draw`] is the full per-frame CPU transaction: invalidate → prepaint
+// → paint (via `draw_roots`) → text-system finish → frame swap. Timing its body
+// gives an honest per-frame `draw_busy` for a render-budget receipt. A probe
+// derives `draw_share = draw_busy / observation_wall` and reads p95 / max /
+// frames-over-33ms back through the chat hot-counter snapshot.
+//
+// Zero-cost when disabled: one cached `OnceLock` env read, then an early return
+// before any clock read or lock. Durations (microseconds) are stored in a
+// bounded `Mutex<Vec<u32>>` so p95 is exact; the cap only matters during a probe
+// run (the gate is off in production).
+use std::sync::Mutex as FrameHotMutex;
+use std::sync::OnceLock as FrameHotOnceLock;
+use std::sync::atomic::{AtomicU64 as FrameAtomicU64, Ordering as FrameHotOrdering};
+
+static FRAME_DRAW_COUNT: FrameAtomicU64 = FrameAtomicU64::new(0);
+static FRAME_DRAW_BUSY_US_TOTAL: FrameAtomicU64 = FrameAtomicU64::new(0);
+static FRAME_DRAW_MAX_US: FrameAtomicU64 = FrameAtomicU64::new(0);
+static FRAME_DRAW_OVER_33MS: FrameAtomicU64 = FrameAtomicU64::new(0);
+/// Cap on stored per-frame samples for the exact p95 (probe-only; gate off in
+/// production means this Vec never grows).
+const FRAME_SAMPLE_CAP: usize = 200_000;
+/// 33 ms in microseconds — the ~30fps budget boundary a frame is "over".
+const FRAME_OVER_BUDGET_US: u64 = 33_000;
+
+fn frame_hot_counters_enabled() -> bool {
+    static ENABLED: FrameHotOnceLock<bool> = FrameHotOnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SCRIPT_KIT_CHAT_HOT_COUNTERS")
+            .map(|v| !v.is_empty() && v != "0" && v != "false")
+            .unwrap_or(false)
+    })
+}
+
+fn frame_sample_store() -> &'static FrameHotMutex<Vec<u32>> {
+    static SAMPLES: FrameHotOnceLock<FrameHotMutex<Vec<u32>>> = FrameHotOnceLock::new();
+    SAMPLES.get_or_init(|| FrameHotMutex::new(Vec::new()))
+}
+
+/// Record one `Window::draw` transaction duration (microseconds).
+#[inline]
+fn record_frame_draw(elapsed_us: u64) {
+    if !frame_hot_counters_enabled() {
+        return;
+    }
+    FRAME_DRAW_COUNT.fetch_add(1, FrameHotOrdering::Relaxed);
+    FRAME_DRAW_BUSY_US_TOTAL.fetch_add(elapsed_us, FrameHotOrdering::Relaxed);
+    FRAME_DRAW_MAX_US.fetch_max(elapsed_us, FrameHotOrdering::Relaxed);
+    if elapsed_us >= FRAME_OVER_BUDGET_US {
+        FRAME_DRAW_OVER_33MS.fetch_add(1, FrameHotOrdering::Relaxed);
+    }
+    if let Ok(mut samples) = frame_sample_store().lock() {
+        if samples.len() < FRAME_SAMPLE_CAP {
+            samples.push(elapsed_us.min(u32::MAX as u64) as u32);
+        }
+    }
+}
+
+/// Cumulative per-frame draw-timing counters, read by the app's chat hot-counter
+/// snapshot. Times only [`Window::draw`] (the CPU frame transaction).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowFrameHotCounters {
+    /// Number of `Window::draw` transactions timed.
+    pub frame_count: u64,
+    /// Total draw-busy time across those frames (microseconds).
+    pub frame_draw_busy_us_total: u64,
+    /// Slowest single frame (microseconds).
+    pub frame_max_us: u64,
+    /// Exact p95 of frame durations (microseconds).
+    pub frame_p95_us: u64,
+    /// Frames whose draw exceeded the 33 ms (~30fps) budget.
+    pub frames_over_33ms: u64,
+}
+
+/// Snapshot the vendored per-frame draw-timing counters. All-zero when the gate
+/// is off (nothing ever recorded). The p95 is computed exactly from the stored
+/// samples at snapshot time.
+pub fn window_frame_hot_counter_snapshot() -> WindowFrameHotCounters {
+    let frame_p95_us = frame_sample_store()
+        .lock()
+        .ok()
+        .filter(|samples| !samples.is_empty())
+        .map(|samples| {
+            let mut sorted: Vec<u32> = samples.clone();
+            sorted.sort_unstable();
+            let idx = ((sorted.len() as f64) * 0.95).ceil() as usize;
+            let idx = idx.saturating_sub(1).min(sorted.len() - 1);
+            sorted[idx] as u64
+        })
+        .unwrap_or(0);
+    WindowFrameHotCounters {
+        frame_count: FRAME_DRAW_COUNT.load(FrameHotOrdering::Relaxed),
+        frame_draw_busy_us_total: FRAME_DRAW_BUSY_US_TOTAL.load(FrameHotOrdering::Relaxed),
+        frame_max_us: FRAME_DRAW_MAX_US.load(FrameHotOrdering::Relaxed),
+        frame_p95_us,
+        frames_over_33ms: FRAME_DRAW_OVER_33MS.load(FrameHotOrdering::Relaxed),
+    }
+}
+
 /// Default window size used when no explicit size is provided.
 pub const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 
@@ -2768,6 +2869,19 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        // WP-B3: time the full per-frame CPU transaction (this whole body) when
+        // the frame hot-counters are armed. Zero-cost when disabled. Uses the
+        // real wall clock (frame budget is real time; the gate is off in tests
+        // so the fake-timer clock is irrelevant here).
+        let frame_started = frame_hot_counters_enabled().then(std::time::Instant::now);
+        let result = self.draw_inner(cx);
+        if let Some(started) = frame_started {
+            record_frame_draw(started.elapsed().as_micros() as u64);
+        }
+        result
+    }
+
+    fn draw_inner(&mut self, cx: &mut App) -> ArenaClearNeeded {
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
         let _arena_scope = ElementArenaScope::enter(&cx.element_arena);

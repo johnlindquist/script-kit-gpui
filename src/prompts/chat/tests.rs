@@ -17,6 +17,155 @@ mod tests {
     const CHAT_RENDER_INPUT_SOURCE: &str = include_str!("render_input.rs");
     const CHAT_RENDER_TURNS_SOURCE: &str = include_str!("render_turns.rs");
 
+    use super::{resolve_chat_render_plan, ChatPromptHostMode, ChatTranscriptAlignment};
+    use crate::prompts::chat::types::ChatBodyKind;
+
+    /// Locks the chrome + key-handler composition for each host mode: a
+    /// Standalone host owns header/input/footer/keys (header suppressed only
+    /// in mini chrome), while a TranscriptOnly host owns none of it — the
+    /// external host is the single lifecycle/key owner.
+    #[test]
+    fn chat_prompt_host_mode() {
+        // Standalone, full chrome (transcript body): header + input + footer,
+        // and the prompt owns its Enter/Escape handlers.
+        let full =
+            resolve_chat_render_plan(ChatPromptHostMode::Standalone { mini: false }, false, false);
+        assert_eq!(full.body, ChatBodyKind::Transcript);
+        assert!(full.render_header, "standalone full renders its header");
+        assert!(full.render_input, "standalone full renders its composer");
+        assert!(full.render_footer, "standalone full renders its footer");
+        assert!(
+            full.install_key_handlers,
+            "standalone host owns its key handlers"
+        );
+        assert!(full.owns_focus, "standalone host owns first-render focus");
+        assert!(
+            full.owns_input_lifecycle,
+            "standalone host owns its input lifecycle"
+        );
+
+        // Standalone mini: borderless chrome suppresses the header, but the
+        // composer, footer, and key handlers all remain.
+        let mini =
+            resolve_chat_render_plan(ChatPromptHostMode::Standalone { mini: true }, false, false);
+        assert!(!mini.render_header, "mini chrome has no header");
+        assert!(mini.render_input, "mini still renders its composer");
+        assert!(mini.render_footer, "mini still renders its footer");
+        assert!(mini.install_key_handlers, "mini host owns its key handlers");
+
+        // Standalone setup body: header + card only (no composer, no footer),
+        // key handlers still installed for setup-card navigation.
+        let setup =
+            resolve_chat_render_plan(ChatPromptHostMode::Standalone { mini: false }, true, false);
+        assert_eq!(setup.body, ChatBodyKind::Setup);
+        assert!(setup.render_header);
+        assert!(!setup.render_input);
+        assert!(!setup.render_footer);
+        assert!(setup.install_key_handlers);
+
+        // TranscriptOnly: nothing local, no keys — the host owns everything.
+        for alignment in [
+            ChatTranscriptAlignment::Top,
+            ChatTranscriptAlignment::Bottom,
+        ] {
+            let hosted = resolve_chat_render_plan(
+                ChatPromptHostMode::TranscriptOnly { alignment },
+                false,
+                false,
+            );
+            assert!(!hosted.render_header);
+            assert!(!hosted.render_input);
+            assert!(!hosted.render_footer);
+            assert!(
+                !hosted.install_key_handlers,
+                "transcript-only host installs no key handlers"
+            );
+            assert!(
+                !hosted.owns_focus,
+                "transcript-only host never grabs first-render focus"
+            );
+            assert!(
+                !hosted.owns_input_lifecycle,
+                "transcript-only host owns no input lifecycle"
+            );
+        }
+    }
+
+    /// C-R2: a transcript-only host owns NO input lifecycle in ANY body state,
+    /// so a hidden hosted ChatPrompt can never auto-submit, start a cursor
+    /// blink, or process an initial response. Contrast: a standalone host owns
+    /// the lifecycle in every state.
+    #[test]
+    fn chat_render_plan_lifecycle_ownership_by_host() {
+        let hosted = ChatPromptHostMode::TranscriptOnly {
+            alignment: ChatTranscriptAlignment::Top,
+        };
+        for (needs_setup, loading) in [(true, false), (false, true), (false, false)] {
+            let plan = resolve_chat_render_plan(hosted, needs_setup, loading);
+            assert!(
+                !plan.owns_focus && !plan.owns_input_lifecycle,
+                "transcript-only host owns no focus/lifecycle (setup={needs_setup}, loading={loading})"
+            );
+        }
+        for (needs_setup, loading) in [(true, false), (false, true), (false, false)] {
+            let plan = resolve_chat_render_plan(
+                ChatPromptHostMode::Standalone { mini: false },
+                needs_setup,
+                loading,
+            );
+            assert!(
+                plan.owns_focus && plan.owns_input_lifecycle,
+                "standalone host owns focus/lifecycle (setup={needs_setup}, loading={loading})"
+            );
+        }
+    }
+
+    /// Regression lock for the bug WP7 fixes: a transcript-only host must
+    /// suppress ALL local chrome and key handlers in EVERY body state —
+    /// including the setup and loading early returns, which previously
+    /// composed the local header even under an external host.
+    #[test]
+    fn chat_prompt_external_host_suppresses_local_chrome_in_all_states() {
+        let mode = ChatPromptHostMode::TranscriptOnly {
+            alignment: ChatTranscriptAlignment::Top,
+        };
+        // (needs_setup, loading_providers) → every reachable body state.
+        for (needs_setup, loading, expected_body) in [
+            (true, false, ChatBodyKind::Setup),
+            (false, true, ChatBodyKind::Loading),
+            (false, false, ChatBodyKind::Transcript),
+        ] {
+            let plan = resolve_chat_render_plan(mode, needs_setup, loading);
+            assert_eq!(
+                plan.body, expected_body,
+                "body kind resolves before any early return"
+            );
+            assert!(
+                !plan.render_header,
+                "no local header in {expected_body:?} under an external host"
+            );
+            assert!(
+                !plan.render_input,
+                "no local composer in {expected_body:?} under an external host"
+            );
+            assert!(
+                !plan.render_footer,
+                "no local footer in {expected_body:?} under an external host"
+            );
+            assert!(
+                !plan.install_key_handlers,
+                "no local key handlers in {expected_body:?} under an external host"
+            );
+        }
+
+        // Contrast: a standalone host DOES compose local chrome in the same
+        // states, so the suppression above is genuinely host-driven.
+        let standalone =
+            resolve_chat_render_plan(ChatPromptHostMode::Standalone { mini: false }, true, false);
+        assert!(standalone.render_header);
+        assert!(standalone.install_key_handlers);
+    }
+
     #[test]
     fn resolve_setup_card_key_cycles_focus_for_tab_and_arrows() {
         assert_eq!(
@@ -498,6 +647,204 @@ await div("Hello");"#;
             ChatInputKeyAction::JumpToLatest
         );
     }
+}
+
+/// C-R2: rendering a real `ChatPrompt` entity under a transcript-only host
+/// must run NONE of the local input lifecycle — no auto-submit, no cursor-blink
+/// start — regardless of builder order, and the internal input must never grab
+/// focus. Contrast against a standalone host, which owns the full lifecycle.
+#[cfg(test)]
+mod chat_prompt_host_mode_lifecycle {
+    use super::super::{
+        ChatPrompt, ChatPromptHostMode, ChatSubmitCallback, ChatTranscriptAlignment,
+    };
+    use crate::protocol::ChatPromptMessage;
+    use crate::theme;
+    use gpui::{prelude::*, px};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const TRANSCRIPT_ONLY: ChatPromptHostMode = ChatPromptHostMode::TranscriptOnly {
+        alignment: ChatTranscriptAlignment::Top,
+    };
+
+    fn window_options() -> gpui::WindowOptions {
+        let mut options = gpui::WindowOptions::default();
+        options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+            gpui::point(px(0.0), px(0.0)),
+            gpui::size(px(480.0), px(320.0)),
+        )));
+        options
+    }
+
+    /// Both builder orders — `with_host_mode(...).with_mini_mode(true)` and
+    /// `with_mini_mode(true).with_host_mode(...)` — must stay TranscriptOnly.
+    /// (Before C-R2, `with_mini_mode` called `set_host_mode(Standalone)`, so the
+    /// second order silently converted the host back to Standalone.)
+    #[gpui::test]
+    fn both_builder_orders_stay_transcript_only(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (host_first, mini_first) = cx.update(|cx| {
+            let host_first = ChatPrompt::new(
+                "order-a".to_string(),
+                None,
+                Vec::new(),
+                None,
+                None,
+                cx.focus_handle(),
+                Arc::new(|_, _| {}) as ChatSubmitCallback,
+                Arc::new(theme::Theme::default()),
+            )
+            .with_host_mode(TRANSCRIPT_ONLY)
+            .with_mini_mode(true)
+            .host_mode();
+            let mini_first = ChatPrompt::new(
+                "order-b".to_string(),
+                None,
+                Vec::new(),
+                None,
+                None,
+                cx.focus_handle(),
+                Arc::new(|_, _| {}) as ChatSubmitCallback,
+                Arc::new(theme::Theme::default()),
+            )
+            .with_mini_mode(true)
+            .with_host_mode(TRANSCRIPT_ONLY)
+            .host_mode();
+            (host_first, mini_first)
+        });
+        assert!(
+            host_first.is_transcript_only(),
+            "host_mode-then-mini must stay TranscriptOnly"
+        );
+        assert!(
+            mini_first.is_transcript_only(),
+            "mini-then-host_mode must stay TranscriptOnly (C-R2 builder-order bug)"
+        );
+    }
+
+    /// WP-B3: a Flow history replay restores an entire conversation in ONE
+    /// bulk pass. `restore_messages` extends the message vector and rebuilds the
+    /// turn cache exactly once, producing the same coherent turn list a
+    /// per-message replay would — without the per-message rebuild amplification.
+    #[gpui::test]
+    fn flow_history_restore_bulk_rebuilds_once(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.update(|cx| {
+            cx.open_window(window_options(), |_, cx| {
+                let focus_handle = cx.focus_handle();
+                cx.new(|_| {
+                    ChatPrompt::new(
+                        "flow-restore".to_string(),
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        focus_handle,
+                        Arc::new(|_, _| {}) as ChatSubmitCallback,
+                        Arc::new(theme::Theme::default()),
+                    )
+                    .with_host_mode(TRANSCRIPT_ONLY)
+                })
+            })
+            .expect("flow-restore chat window opens")
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |prompt, _window, cx| {
+                let restored = vec![
+                    ChatPromptMessage::user("first ask"),
+                    ChatPromptMessage::assistant("first answer"),
+                    ChatPromptMessage::user("second ask"),
+                    ChatPromptMessage::assistant("second answer"),
+                    ChatPromptMessage::user("third ask"),
+                    ChatPromptMessage::assistant("third answer"),
+                ];
+                prompt.restore_messages(restored, cx);
+                // One coherent rebuild: three user/assistant pairs → three turns,
+                // cache no longer dirty, and each turn carries its exact text.
+                assert!(!prompt.conversation_turns_dirty);
+                assert_eq!(prompt.conversation_turns_cache.len(), 3);
+                assert_eq!(prompt.conversation_turns_cache[0].user_prompt, "first ask");
+                assert_eq!(
+                    prompt.conversation_turns_cache[2]
+                        .assistant_response
+                        .as_deref(),
+                    Some("third answer"),
+                );
+            })
+            .expect("flow-restore chat window updates");
+    }
+
+    /// A transcript-only host with a pending submit and non-empty input must NOT
+    /// fire the submit callback, must NOT start a cursor blink, and must NOT
+    /// focus its internal input across a real render pass.
+    #[gpui::test]
+    fn transcript_only_render_runs_no_input_lifecycle(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let submits = Arc::new(AtomicUsize::new(0));
+        let submits_cb = submits.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(window_options(), |_, cx| {
+                let focus_handle = cx.focus_handle();
+                cx.new(|_| {
+                    let on_submit: ChatSubmitCallback = Arc::new(move |_id, _text| {
+                        submits_cb.fetch_add(1, Ordering::SeqCst);
+                    });
+                    let mut prompt = ChatPrompt::new(
+                        "hosted".to_string(),
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        focus_handle,
+                        on_submit,
+                        Arc::new(theme::Theme::default()),
+                    )
+                    .with_pending_submit(true)
+                    .with_host_mode(TRANSCRIPT_ONLY);
+                    prompt.input.set_text("hello".to_string());
+                    prompt
+                })
+            })
+            .expect("hosted chat window opens")
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            submits.load(Ordering::SeqCst),
+            0,
+            "transcript-only host must never auto-submit"
+        );
+        window
+            .update(cx, |chat, window, _cx| {
+                assert!(
+                    chat.pending_submit(),
+                    "pending submit stays queued (host owns submission)"
+                );
+                assert!(
+                    !chat.cursor_blink_started,
+                    "transcript-only host must not start its cursor blink"
+                );
+                assert!(
+                    !chat.focus_handle.is_focused(window),
+                    "transcript-only host must not grab focus"
+                );
+            })
+            .expect("hosted chat window updates");
+    }
+
+    // Contrast: a standalone host DOES own the lifecycle. A full real-entity
+    // render is NOT exercised here — a standalone chat paints the native
+    // main-window footer slot (`render_main_window_footer_slot_for_prompt_surface`),
+    // which requires a real platform window handle the headless gpui test window
+    // panics on ("Test Windows are not backed by a real platform window"). The
+    // transcript-only host suppresses that footer, which is exactly why the
+    // hosted case above renders headlessly. Standalone lifecycle ownership is
+    // locked instead by `chat_render_plan_lifecycle_ownership_by_host`
+    // (owns_focus && owns_input_lifecycle for every Standalone body state) — the
+    // same plan the render pass gates on.
 }
 
 /// Test-only public access to `next_reveal_boundary` for cross-module tests.

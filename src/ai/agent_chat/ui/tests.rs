@@ -818,10 +818,9 @@ fn agent_chat_model_selector_migration_uses_popup_window_instead_of_inline_layer
     );
     assert!(
         AGENT_CHAT_VIEW_SOURCE.contains("fn trigger_toggle_actions_from_parent")
+            && AGENT_CHAT_VIEW_SOURCE.contains("FooterAction::AgentModel =>")
             && AGENT_CHAT_VIEW_SOURCE
-                .contains("AgentChatToolbarEvent::ToggleModelSelector(parent)")
-            && AGENT_CHAT_VIEW_SOURCE
-                .contains("this.trigger_toggle_actions_from_parent(*parent, cx);")
+                .contains("self.trigger_toggle_actions_from_parent(parent, cx);")
             && AGENT_CHAT_ACTIONS_SOURCE.contains("get_agent_chat_model_picker_actions")
             && !AGENT_CHAT_VIEW_SOURCE.contains("model_selector_open"),
         "Agent Chat model selector should route through Cmd+K actions instead of an inline or PromptPopup list"
@@ -842,8 +841,7 @@ fn agent_chat_history_migration_uses_popup_window_instead_of_inline_layer() {
                 .contains("super::popup_window::configure_popup_window")
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
                 .contains("let bounds = popup_bounds(parent_bounds, &snapshot);")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("popup_window_options(bounds, display_id)"),
+            && AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("popup_window_options(bounds, display_id)"),
         "Agent Chat history picker should render through a popup window entity using shared popup mechanics"
     );
     assert!(
@@ -2025,73 +2023,6 @@ fn agent_chat_emits_inline_mention_deleted_atomically_event() {
 }
 
 // =========================================================================
-// AI-window inline-token unification source contracts
-// =========================================================================
-//
-// These tests verify that AI-window chip rendering/input handling and Agent
-// Chat use the same shared inline-token infrastructure.
-
-const AI_WINDOW_CONTEXT_COMMANDS_SOURCE: &str = include_str!("../../window/context_commands.rs");
-const AI_WINDOW_RENDER_SOURCE: &str = include_str!("../../window/render_main_panel.rs");
-const AI_WINDOW_INPUT_SOURCE: &str = include_str!("../../window/render_keydown.rs");
-
-#[test]
-fn ai_window_context_commands_sync_inline_mentions() {
-    assert!(
-        AI_WINDOW_CONTEXT_COMMANDS_SOURCE.contains("fn sync_inline_mentions"),
-        "AI window context commands must own inline mention synchronization",
-    );
-    assert!(
-        AI_WINDOW_CONTEXT_COMMANDS_SOURCE.contains("pending_context_parts"),
-        "AI window context commands must synchronize inline tokens back into pending_context_parts",
-    );
-}
-
-#[test]
-fn ai_window_hides_inline_backed_chips() {
-    assert!(
-        AI_WINDOW_RENDER_SOURCE.contains("visible_context_chip_indices"),
-        "AI window chip rendering must hide parts already represented inline",
-    );
-}
-
-#[test]
-fn ai_window_uses_atomic_inline_delete() {
-    assert!(
-        AI_WINDOW_INPUT_SOURCE.contains("remove_inline_mention_at_cursor"),
-        "AI window input handling must use shared token-atomic delete",
-    );
-}
-
-#[test]
-fn ai_window_emits_inline_mentions_synced_event() {
-    assert!(
-        AI_WINDOW_CONTEXT_COMMANDS_SOURCE.contains("ai_inline_mentions_synced"),
-        "AI window must emit ai_inline_mentions_synced tracing event on sync",
-    );
-}
-
-#[test]
-fn ai_window_emits_inline_mention_deleted_atomically_event() {
-    assert!(
-        AI_WINDOW_INPUT_SOURCE.contains("ai_inline_mention_deleted_atomically"),
-        "AI window must emit ai_inline_mention_deleted_atomically tracing event on atomic delete",
-    );
-}
-
-#[test]
-fn agent_chat_and_ai_window_share_inline_sync_kernel() {
-    assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains("build_inline_mention_sync_plan"),
-        "Agent Chat must use shared inline sync planning",
-    );
-    assert!(
-        AI_WINDOW_CONTEXT_COMMANDS_SOURCE.contains("build_inline_mention_sync_plan"),
-        "AI window must use shared inline sync planning",
-    );
-}
-
-// =========================================================================
 // Source-aware slash command identity and resolution
 // =========================================================================
 
@@ -2569,27 +2500,13 @@ fn agent_chat_slash_and_main_menu_skill_launch_share_prompt_contract() {
     }
 }
 
-#[test]
-fn agent_chat_ui_variant_launch_suppresses_selected_launcher_row_context_contract() {
-    let body = agent_chat_source_between(
-        TAB_AI_MODE_SOURCE,
-        "pub(crate) fn open_tab_ai_agent_chat_with_entry_intent_variant(",
-        "    /// Entry point for direct prompt handoffs",
-    );
-
-    assert!(
-        body.contains(
-            "let suppress_focused_part =\n            ui_variant != crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard;"
-        ),
-        "non-standard Agent Chat UI variants are menu presets, not context sources"
-    );
-    assert!(
-        body.contains(
-            "agent_chat_entry::AgentChatEntryRequest::main_launcher_with_variant(\n                entry_intent,\n                suppress_focused_part,\n                ui_variant,"
-        ),
-        "variant launches must pass the suppress flag into Agent Chat entry staging"
-    );
-}
+// NOTE: the former source-string audit
+// `agent_chat_ui_variant_launch_suppresses_selected_launcher_row_context_contract`
+// was removed here as part of WP2 (single-source Agent entry policy). It pinned
+// a local variable name and a three-argument formatting layout rather than the
+// policy behavior. Its behavior replacement — under the same test name so CI
+// filters keep working — now lives in
+// `src/app_impl/agent_handoff/agent_chat_entry.rs`.
 
 #[test]
 fn agent_chat_main_menu_skill_stage_matches_slash_selection_without_submit() {
@@ -2720,21 +2637,18 @@ fn agent_chat_ui_variants_are_menu_addressable_and_protocol_visible() {
         "Agent Chat view must carry the active UI variant into reusable views and protocol state"
     );
 
-    assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains("fn render_composer_bar(")
-            && AGENT_CHAT_VIEW_SOURCE
-                .contains("matches!(variant_config.composer, AgentChatComposerPlacement::Default)")
-            && AGENT_CHAT_VIEW_SOURCE.contains(
-                "matches!(variant_config.composer, AgentChatComposerPlacement::BottomDock)"
-            ),
-        "Agent Chat renderer must place the shared composer at the top or bottom based on the active variant"
-    );
+    // WP6 NOTE (Oracle phase-c-shell-hostmode-audit C-R9): the one-shell
+    // invariant is NOT locked here — a substring presence check passed even
+    // while header branches still read raw variant config. It is enforced by
+    // `layout::tests` (exhaustive resolver matrix) and the
+    // chat-surfaces-layout runtime probe; per the source-audit pruning rule
+    // no renderer-substring assertion replaces it.
 
     assert!(
         AGENT_CHAT_VIEW_SOURCE.contains("fn render_variant_badge(")
             && AGENT_CHAT_VIEW_SOURCE.contains("fn render_variant_sidecar(")
-            && AGENT_CHAT_VIEW_SOURCE.contains("variant_config.show_variant_badge")
-            && AGENT_CHAT_VIEW_SOURCE.contains("variant_config.show_sidecar"),
+            && AGENT_CHAT_VIEW_SOURCE.contains("plan.layout.show_variant_badge")
+            && AGENT_CHAT_VIEW_SOURCE.contains("plan.layout.show_sidecar"),
         "Agent Chat renderer must expose visible variant badge and sidecar affordances for experiment review"
     );
 

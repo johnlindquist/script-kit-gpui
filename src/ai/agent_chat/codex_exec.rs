@@ -85,6 +85,15 @@ impl Drop for CodexQuickAiExecConnection {
 
 impl AgentChatConnection for CodexQuickAiExecConnection {
     fn start_turn(&self, request: AgentChatTurnRequest) -> Result<AgentChatEventRx> {
+        // WP-B2: this cold adapter serves ONLY the web-search-only Quick AI
+        // profile. Refuse any turn whose session policy would grant broader
+        // tools — the backend allowlist is web-search-only and must never be
+        // driven by a Full-policy request reaching this path.
+        if request.tool_policy
+            != crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy::WebSearchOnly
+        {
+            bail!("quick_ai_requires_web_search_only_tool_policy")
+        }
         let query = extract_zero_context_query(&request, &self.spec.selected_model_id)?;
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         {
@@ -658,7 +667,7 @@ fn parse_item(item: &Value) -> Result<CodexItem, CodexProtocolError> {
                 other => {
                     return Err(CodexProtocolError(format!(
                         "quick_ai_codex_unsupported_web_action:{other}"
-                    )))
+                    )));
                 }
             };
             Ok(CodexItem::WebSearch(WebSearchItem {
@@ -1305,6 +1314,8 @@ mod tests {
             cwd: PathBuf::from("/must/not/be/used"),
             blocks: vec![ContentBlock::Text(TextContent::new("latest Rust"))],
             model_id: Some(QUICK_AI_SELECTED_MODEL_ID.into()),
+            tool_policy:
+                crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy::WebSearchOnly,
         }
     }
 
@@ -1348,6 +1359,8 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             blocks: vec![ContentBlock::Text(TextContent::new("query"))],
             model_id: Some(QUICK_AI_SELECTED_MODEL_ID.into()),
+            tool_policy:
+                crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy::WebSearchOnly,
         };
         assert_eq!(
             extract_zero_context_query(&request, QUICK_AI_SELECTED_MODEL_ID).unwrap(),
@@ -1370,6 +1383,8 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             blocks: vec![ContentBlock::Image(ImageContent::new("data", "image/png"))],
             model_id: Some(QUICK_AI_SELECTED_MODEL_ID.into()),
+            tool_policy:
+                crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy::WebSearchOnly,
         };
         assert!(extract_zero_context_query(&request, QUICK_AI_SELECTED_MODEL_ID).is_err());
     }

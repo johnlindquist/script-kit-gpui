@@ -166,7 +166,7 @@ fn scriptlet_source_target(
     let path_text = file_path
         .split('#')
         .next()
-        .unwrap_or(&file_path)
+        .unwrap_or(file_path)
         .to_string();
     Ok(ScriptletSourceTarget {
         path: std::path::PathBuf::from(&path_text),

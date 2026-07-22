@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAIN_LIST_SCROLL_AFFORDANCE_FIELDS,
-  NATIVE_LIST_CONTRACT_FIELDS,
-  activeListScrollFromState,
   inspectMainListScrollAffordance,
-  inspectNativeListContract,
   mainListScrollFromState,
   normalizeScriptListScrollMeasurement,
 } from "./scroll.ts";
@@ -82,34 +79,6 @@ describe("mainListScroll affordance inspection", () => {
   });
 });
 
-describe("activeListScroll native contract inspection", () => {
-  const complete = Object.fromEntries(NATIVE_LIST_CONTRACT_FIELDS.map((field) => [field, null]));
-
-  test("prefers the active surface and falls back to Script List", () => {
-    expect(activeListScrollFromState({ activeListScroll: { surface: "tips" }, mainListScroll: { surface: "script_list" } }).surface).toBe("tips");
-    expect(activeListScrollFromState({ mainListScroll: { surface: "script_list" } }).surface).toBe("script_list");
-  });
-
-  test("requires field presence while allowing nullable empty/offscreen values", () => {
-    const result = inspectNativeListContract(complete, true);
-    expect(result.complete).toBe(true);
-    expect(result.classification).toBe("ok");
-  });
-
-  test("fails closed with exact missing semantic and viewport fields", () => {
-    const result = inspectNativeListContract({ surface: "tips" }, true);
-    expect(result.classification).toBe("blocked-by-missing-primitive");
-    expect(result.missingFields).toContain("activeListScroll.selectedSemanticId");
-    expect(result.missingFields).toContain("activeListScroll.scrollTopOffsetPx");
-  });
-
-  test("does not require ScriptList layout bounds for a built-in contract", () => {
-    const scroll = { ...complete, surface: "tips", viewportHeight: 0, scrollTop: 0 };
-    const result = inspectNativeListContract(scroll, true);
-    expect(result.classification).toBe("ok");
-  });
-});
-
 class CapturingProtocol extends ProtocolCore {
   writes: Json[] = [];
 
@@ -120,14 +89,6 @@ class CapturingProtocol extends ProtocolCore {
   protected writeCommand(payload: Json): void {
     this.writes.push(payload);
     queueMicrotask(() => {
-      if (payload.type === "getState") {
-        this.handleResponse({
-          type: "stateResult",
-          requestId: payload.requestId,
-          activeListScroll: { surface: "tips", implementation: "uniform_list" },
-        });
-        return;
-      }
       this.handleResponse({
         type: "simulateGpuiEventResult",
         requestId: payload.requestId,
@@ -162,34 +123,6 @@ test("typed scroll-wheel helper emits the exact pixel-only phased wire event", a
     phase: "moved",
   });
   expect(command.event.deltaMode).toBeUndefined();
-});
-
-test("typed scroll-wheel helper preserves direct and momentum lifecycle fields", async () => {
-  const protocol = new CapturingProtocol();
-  const phases = ["began", "changed", "ended"] as const;
-  for (const [index, phase] of phases.entries()) {
-    await protocol.simulateGpuiScrollWheel({
-      x: 10,
-      y: 20,
-      deltaX: 0,
-      deltaY: index === 1 ? 3.25 : 0,
-      phase: index === 0 ? "started" : index === 2 ? "ended" : "moved",
-      directPhase: phase,
-      momentumPhase: phase,
-      timestampSeconds: 100.5 + index,
-    });
-  }
-  expect(protocol.writes.map((command) => command.event.directPhase)).toEqual(phases);
-  expect(protocol.writes.map((command) => command.event.momentumPhase)).toEqual(phases);
-  expect(protocol.writes[1].event.deltaY).toBe(3.25);
-  expect(protocol.writes[2].event.timestampSeconds).toBe(102.5);
-});
-
-test("typed active-list helper reads the canonical state field", async () => {
-  const protocol = new CapturingProtocol();
-  const receipt = await protocol.getActiveListScroll();
-  expect(receipt.surface).toBe("tips");
-  expect(receipt.implementation).toBe("uniform_list");
 });
 
 test("an intentionally offscreen selected row keeps viewport measurement valid", () => {

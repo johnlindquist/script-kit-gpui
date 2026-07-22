@@ -65,12 +65,21 @@ impl AgentChatView {
         self.allowed_portal_kinds = kinds;
     }
 
-    /// Whether the given portal kind is allowed by the host.
+    /// Whether the given portal kind is allowed: an INTERSECTION of the
+    /// host allowlist and the surface's immutable capability policy (Oracle
+    /// 2026-07-21 WP3-B). A detached-host allowlist must never re-enable a
+    /// portal the session policy (e.g. Quick AI zero-context) forbids.
     pub(super) fn is_portal_kind_allowed(
         &self,
         kind: crate::ai::context_selector::types::ContextPortalKind,
     ) -> bool {
-        self.allowed_portal_kinds.contains(&kind)
+        // Fail-closed on the view's captured policy (no `cx` here). It is
+        // derived from the thread at construction and is tighten-only, so it
+        // is never LESS restrictive than the thread — safe for a restriction
+        // gate. The cx-based `capabilities(cx)` at the portal-open dispatch
+        // (`open_picker_portal`) is the authoritative second layer.
+        self.session_policy.capabilities().context_portals
+            && self.allowed_portal_kinds.contains(&kind)
     }
 
     pub(crate) fn prepare_for_attachment_portal_open(&mut self, cx: &mut Context<Self>) {
@@ -402,6 +411,68 @@ mod tests {
         }
     }
 
+    /// WP3-C: the detached-window host paths (`open_history_portal_with_entries`,
+    /// `open_history_popup_from_host`) must honor the same immutable session
+    /// policy as the in-view `toggle_history_popup` — a Quick AI session never
+    /// resurfaces conversation history, no matter which host asks.
+    #[gpui::test]
+    fn quick_ai_policy_refuses_host_driven_history_portal(cx: &mut TestAppContext) {
+        use crate::ai::agent_chat::ui::history::{
+            AgentChatHistoryEntry, AgentChatHistorySearchField, AgentChatHistorySearchHit,
+        };
+
+        let hit = || {
+            vec![AgentChatHistorySearchHit {
+                entry: AgentChatHistoryEntry::default(),
+                score: 0,
+                matched_field: AgentChatHistorySearchField::Title,
+                evidence: None,
+            }]
+        };
+
+        // Setup-mode popup sync clears the staged menu, so the gate contract
+        // is asserted on the return value: accepted (true) vs refused (false).
+        let full = cx.new(|cx| AgentChatView::new_setup(setup_state(), cx));
+        full.update(cx, |view, cx| {
+            assert!(
+                view.open_history_portal_with_entries("q".into(), hit(), cx),
+                "a Full-policy view must accept host-driven history portals"
+            );
+        });
+
+        // BC-1 (Oracle seat 3): the QuickAi policy is now established by the
+        // LAUNCH (a policy-changing `set_ui_variant` restyle is refused), so the
+        // QuickAi view is constructed with its policy, not laundered into it.
+        let quick = cx.new(|cx| {
+            AgentChatView::new_setup_with_policy(
+                setup_state(),
+                crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::QuickAi,
+                cx,
+            )
+        });
+        quick.update(cx, |view, cx| {
+            assert!(
+                !view.open_history_portal_with_entries("q".into(), hit(), cx),
+                "a QuickAi-policy view must refuse host-driven history portals"
+            );
+            assert!(view.history_menu.is_none());
+
+            // Attaching a prior conversation is the same retained-context
+            // capability; the policy error fires before any disk access.
+            let denied = view
+                .attach_history_session(
+                    "any-session",
+                    crate::ai::agent_chat::ui::history_attachment::AgentChatHistoryAttachMode::Summary,
+                    cx,
+                )
+                .expect_err("QuickAi policy must deny history attachments");
+            assert!(
+                denied.to_string().contains("session policy"),
+                "denial must be the policy error, not a lookup failure: {denied}"
+            );
+        });
+    }
+
     #[gpui::test]
     fn setup_mode_refuses_missing_and_disallowed_portals_without_staging(cx: &mut TestAppContext) {
         let view = cx.new(|cx| AgentChatView::new_setup(setup_state(), cx));
@@ -424,6 +495,375 @@ mod tests {
                 PortalOpenResult::Refused(PortalRefusal::UnsupportedByHost)
             );
             assert!(view.pending_portal_session.is_none());
+        });
+    }
+
+    // ── WP-B1 / C-R3: thread-owned policy authority ─────────────────────
+
+    use crate::ai::agent_chat::ui::capabilities::{AgentChatCapabilities, AgentChatSessionPolicy};
+    use crate::ai::agent_chat::ui::thread::AgentChatThread;
+    use crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant;
+    use crate::footer_popup::FooterAction;
+    use crate::spine::list::{SpineListAction, SpineListRow, SpineListRowKind, SpineListSection};
+
+    fn quick_ai_thread(cx: &mut TestAppContext) -> gpui::Entity<AgentChatThread> {
+        cx.new(|_cx| {
+            let mut thread = AgentChatThread::test_new(Vec::new(), None);
+            thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+            thread
+        })
+    }
+
+    /// C-R3: the pure footer-dispatch guard denies exactly the policy-forbidden
+    /// actions (CWD picker, profile/model switch) and allows everything else.
+    #[test]
+    fn footer_action_allowed_matrix() {
+        let full = AgentChatCapabilities::FULL;
+        let quick = AgentChatCapabilities::QUICK_AI;
+
+        // Full allows every footer action.
+        for action in [
+            FooterAction::Cwd,
+            FooterAction::Ai,
+            FooterAction::AgentModel,
+            FooterAction::Run,
+            FooterAction::Actions,
+        ] {
+            assert!(AgentChatView::footer_action_allowed(full, action));
+        }
+
+        // Quick AI denies the context/profile actions, allows the rest.
+        assert!(!AgentChatView::footer_action_allowed(
+            quick,
+            FooterAction::Cwd
+        ));
+        assert!(!AgentChatView::footer_action_allowed(
+            quick,
+            FooterAction::Ai
+        ));
+        assert!(!AgentChatView::footer_action_allowed(
+            quick,
+            FooterAction::AgentModel
+        ));
+        assert!(AgentChatView::footer_action_allowed(
+            quick,
+            FooterAction::Run
+        ));
+        assert!(AgentChatView::footer_action_allowed(
+            quick,
+            FooterAction::Actions
+        ));
+    }
+
+    /// WP-B1: a Quick AI launch FAILURE produces a Quick-AI-policy setup view,
+    /// not a default-Full one — otherwise the error card would re-advertise
+    /// denied affordances (history, CWD, profile switch).
+    #[gpui::test]
+    fn quick_ai_setup_failure_preserves_quick_policy(cx: &mut TestAppContext) {
+        let quick = cx.new(|cx| {
+            AgentChatView::new_setup_with_policy(setup_state(), AgentChatSessionPolicy::QuickAi, cx)
+        });
+        quick.update(cx, |view, cx| {
+            assert_eq!(
+                view.effective_session_policy(cx),
+                AgentChatSessionPolicy::QuickAi
+            );
+            assert_eq!(view.capabilities(cx), AgentChatCapabilities::QUICK_AI);
+        });
+
+        // Standard setup stays Full.
+        let full = cx.new(|cx| AgentChatView::new_setup(setup_state(), cx));
+        full.update(cx, |view, cx| {
+            assert_eq!(view.capabilities(cx), AgentChatCapabilities::FULL);
+        });
+    }
+
+    /// WP-B1 / BC-1: with a live thread, the THREAD's immutable policy is the
+    /// sole authority. A policy-changing restyle is now REFUSED outright (a
+    /// relaunch is required), so the view's capabilities can never diverge from
+    /// what the thread enforces — a QuickAi thread stays QuickAi and the
+    /// requested Full-policy variant never even takes effect.
+    #[gpui::test]
+    fn view_and_thread_policy_cannot_diverge(cx: &mut TestAppContext) {
+        use crate::ai::agent_chat::ui::view::AgentChatRestyleOutcome;
+
+        let thread = quick_ai_thread(cx);
+        let view = cx.new(|cx| AgentChatView::new(thread.clone(), cx));
+
+        view.update(cx, |view, cx| {
+            // Constructed policy is derived from the QuickAi thread.
+            assert_eq!(view.capabilities(cx), AgentChatCapabilities::QUICK_AI);
+            let before_variant = view.debug_ui_variant_id();
+
+            // Restyle to a Full-policy presentation variant. The restyle is
+            // refused (it would change the policy), so the variant is unchanged
+            // and capabilities stay QuickAi.
+            let outcome = view.set_ui_variant(AgentChatUiVariant::UserBold, cx);
+            assert_eq!(outcome, AgentChatRestyleOutcome::RefusedRelaunchRequired);
+            assert_eq!(
+                view.debug_ui_variant_id(),
+                before_variant,
+                "a refused restyle must not change the active variant",
+            );
+            assert_eq!(
+                view.effective_session_policy(cx),
+                AgentChatSessionPolicy::QuickAi,
+                "a view restyle must not diverge from the thread policy",
+            );
+            assert_eq!(view.capabilities(cx), AgentChatCapabilities::QUICK_AI);
+        });
+    }
+
+    /// BC-1 (Oracle seat 3): a policy-changing restyle in EITHER direction is
+    /// refused and requires a relaunch. A same-policy restyle (Standard↔UserBold,
+    /// both Full) still applies.
+    #[gpui::test]
+    fn policy_changing_restyle_requires_relaunch(cx: &mut TestAppContext) {
+        use crate::ai::agent_chat::ui::view::AgentChatRestyleOutcome;
+
+        // Full live thread: Full → QuickAi is a policy change → refused.
+        let full_thread = cx.new(|_cx| AgentChatThread::test_new(Vec::new(), None));
+        let full_view = cx.new(|cx| AgentChatView::new(full_thread.clone(), cx));
+        full_view.update(cx, |view, cx| {
+            assert_eq!(view.capabilities(cx), AgentChatCapabilities::FULL);
+            let before = view.debug_ui_variant_id();
+            let outcome = view.set_ui_variant(AgentChatUiVariant::QuickAi, cx);
+            assert_eq!(outcome, AgentChatRestyleOutcome::RefusedRelaunchRequired);
+            assert_eq!(view.debug_ui_variant_id(), before);
+            assert_eq!(
+                view.effective_session_policy(cx),
+                AgentChatSessionPolicy::Full,
+            );
+
+            // Same-policy restyle (Full → Full) applies.
+            let applied = view.set_ui_variant(AgentChatUiVariant::UserBold, cx);
+            assert_eq!(applied, AgentChatRestyleOutcome::Applied);
+            assert_eq!(
+                view.debug_ui_variant_id(),
+                AgentChatUiVariant::UserBold.state_id()
+            );
+            assert_eq!(view.capabilities(cx), AgentChatCapabilities::FULL);
+        });
+
+        // QuickAi live thread (view presents as the default Standard variant,
+        // but the thread policy is QuickAi): restyling to any Full-policy
+        // variant is a policy change → refused. Use UserBold so it is not a
+        // no-op against the current Standard variant.
+        let quick_thread = quick_ai_thread(cx);
+        let quick_view = cx.new(|cx| AgentChatView::new(quick_thread.clone(), cx));
+        quick_view.update(cx, |view, cx| {
+            assert_eq!(
+                view.effective_session_policy(cx),
+                AgentChatSessionPolicy::QuickAi,
+            );
+            let before = view.debug_ui_variant_id();
+            let outcome = view.set_ui_variant(AgentChatUiVariant::UserBold, cx);
+            assert_eq!(outcome, AgentChatRestyleOutcome::RefusedRelaunchRequired);
+            assert_eq!(view.debug_ui_variant_id(), before);
+            assert_eq!(
+                view.effective_session_policy(cx),
+                AgentChatSessionPolicy::QuickAi,
+            );
+        });
+    }
+
+    /// BC-1 (Oracle seat 3): the retained-thread machinery is hard-gated at the
+    /// method boundary for a Quick AI surface — summaries are empty and
+    /// activation is refused — so the switcher is inert by data, not merely
+    /// hidden by the UI.
+    #[gpui::test]
+    fn quick_ai_retained_thread_machinery_is_inert(cx: &mut TestAppContext) {
+        let quick_thread = quick_ai_thread(cx);
+        let view = cx.new(|cx| AgentChatView::new(quick_thread.clone(), cx));
+
+        // A second thread we attempt (and fail) to activate.
+        let other = cx.new(|_cx| AgentChatThread::test_new(Vec::new(), None));
+
+        view.update(cx, |view, cx| {
+            assert!(
+                view.retained_thread_summaries(cx).is_empty(),
+                "QuickAi reports no retained threads",
+            );
+
+            let active_before = view.thread().map(|t| t.entity_id());
+            view.activate_session_thread(other.clone(), cx);
+            assert_eq!(
+                view.thread().map(|t| t.entity_id()),
+                active_before,
+                "QuickAi refuses retained-thread activation — session thread unchanged",
+            );
+            assert!(view.retained_thread_summaries(cx).is_empty());
+        });
+    }
+
+    /// BC-2 (Oracle seat 3): the shared session-transition closer clears every
+    /// transient overlay (attach / permission / history / portal / picker).
+    #[gpui::test]
+    fn close_transient_ui_clears_every_overlay(cx: &mut TestAppContext) {
+        let thread = cx.new(|_cx| AgentChatThread::test_new(Vec::new(), None));
+        let view = cx.new(|cx| AgentChatView::new(thread.clone(), cx));
+
+        view.update(cx, |view, cx| {
+            view.attach_menu_open = true;
+            view.permission_options_open = true;
+
+            view.close_transient_ui_for_session_transition(cx);
+
+            assert!(!view.attach_menu_open, "attach menu closed");
+            assert!(!view.permission_options_open, "permission options closed");
+            assert!(view.history_menu.is_none(), "history menu closed");
+            assert!(
+                view.pending_portal_session.is_none(),
+                "pending portal cleared"
+            );
+            assert!(
+                view.composer_picker_session.is_none(),
+                "composer picker closed",
+            );
+        });
+    }
+
+    /// BC-2 (Oracle seat 3): the runtime `SetupRequired` transition edge closes
+    /// every transient overlay so a menu staged against the errored chat cannot
+    /// linger over the setup card.
+    #[gpui::test]
+    fn setup_required_transition_closes_transient_popups(cx: &mut TestAppContext) {
+        let thread = cx.new(|_cx| AgentChatThread::test_new(Vec::new(), None));
+        let view = cx.new(|cx| AgentChatView::new(thread.clone(), cx));
+
+        view.update(cx, |view, _cx| {
+            view.attach_menu_open = true;
+            view.permission_options_open = true;
+        });
+
+        // Drive the live thread into runtime setup recovery; the view observer
+        // detects the None→Some edge and closes transients.
+        thread.update(cx, |t, cx| t.replace_setup_state(setup_state(), cx));
+        cx.run_until_parked();
+
+        view.update(cx, |view, _cx| {
+            assert!(
+                view.runtime_setup_active_seen,
+                "the runtime setup edge was observed",
+            );
+            assert!(
+                !view.attach_menu_open,
+                "SetupRequired closed the attach menu"
+            );
+            assert!(
+                !view.permission_options_open,
+                "SetupRequired closed permission options",
+            );
+            assert!(view.history_menu.is_none());
+            assert!(view.pending_portal_session.is_none());
+            assert!(view.composer_picker_session.is_none());
+        });
+    }
+
+    /// C-R3: typing `>` (the CWD picker) cannot even DISPLAY a working-directory
+    /// row in a Quick AI composer — the spine projection filter drops CWD and
+    /// profile sections the policy denies.
+    #[gpui::test]
+    fn quick_ai_cwd_and_profile_spine_projection_denied(cx: &mut TestAppContext) {
+        let thread = quick_ai_thread(cx);
+        let view = cx.new(|cx| AgentChatView::new(thread.clone(), cx));
+
+        let cwd_section = SpineListSection {
+            id: "cwd".into(),
+            title: "Working Directory".into(),
+            subtitle: None,
+            icon: None,
+            rows: vec![SpineListRow {
+                id: "cwd-row".into(),
+                kind: SpineListRowKind::Hint,
+                title: "~/dev".into(),
+                subtitle: None,
+                meta: None,
+                icon: None,
+                badges: Vec::new(),
+                score: 0,
+                is_selectable: true,
+                action_label: None,
+                action: SpineListAction::ResolveSegment {
+                    segment_index: 0,
+                    segment_byte_range: 0..1,
+                    replacement: "".into(),
+                    resolution_id: "/Users/dev".into(),
+                    resolution_label: "~/dev".into(),
+                    resolution_source: "cwd".into(),
+                    trailing_space: false,
+                },
+            }],
+        };
+        let profile_section = SpineListSection {
+            id: "profile".into(),
+            title: "Profiles".into(),
+            subtitle: None,
+            icon: None,
+            rows: vec![SpineListRow {
+                id: "profile-row".into(),
+                kind: SpineListRowKind::Profile {
+                    profile_id: "p1".into(),
+                },
+                title: "Profile One".into(),
+                subtitle: None,
+                meta: None,
+                icon: None,
+                badges: Vec::new(),
+                score: 0,
+                is_selectable: true,
+                action_label: None,
+                action: SpineListAction::ResolveSegment {
+                    segment_index: 0,
+                    segment_byte_range: 0..1,
+                    replacement: "".into(),
+                    resolution_id: "p1".into(),
+                    resolution_label: "Profile One".into(),
+                    resolution_source: "profile".into(),
+                    trailing_space: false,
+                },
+            }],
+        };
+        let file_section = SpineListSection {
+            id: "files".into(),
+            title: "Files".into(),
+            subtitle: None,
+            icon: None,
+            rows: vec![SpineListRow {
+                id: "file-row".into(),
+                kind: SpineListRowKind::ContextResult {
+                    context_type: "file".into(),
+                    result_id: "/a".into(),
+                },
+                title: "a.rs".into(),
+                subtitle: None,
+                meta: None,
+                icon: None,
+                badges: Vec::new(),
+                score: 0,
+                is_selectable: true,
+                action_label: None,
+                action: SpineListAction::ResolveSegment {
+                    segment_index: 0,
+                    segment_byte_range: 0..1,
+                    replacement: "@file:a.rs".into(),
+                    resolution_id: "/a".into(),
+                    resolution_label: "a.rs".into(),
+                    resolution_source: "file".into(),
+                    trailing_space: true,
+                },
+            }],
+        };
+
+        view.update(cx, |view, _cx| {
+            let filtered = view.filter_agent_chat_spine_sections_by_policy(vec![
+                cwd_section,
+                profile_section,
+                file_section,
+            ]);
+            // Only the non-denied file section survives for Quick AI.
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].id.as_ref(), "files");
         });
     }
 }

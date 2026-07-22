@@ -12,6 +12,11 @@ pub(crate) struct AgentChatTurnRequest {
     pub cwd: PathBuf,
     pub blocks: Vec<ContentBlock>,
     pub model_id: Option<String>,
+    /// The tool-admission policy for this turn (WP-B2). Carried alongside the
+    /// blocks so the backend adapter configures its allowlist from the
+    /// authoritative session policy instead of re-deriving it. Defaults to
+    /// [`AgentChatToolPolicy::Full`] for constructions that predate the field.
+    pub tool_policy: crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy,
 }
 
 pub(crate) struct IsolatedTurnHandle {

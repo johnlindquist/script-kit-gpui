@@ -4,6 +4,141 @@ use crate::ui_foundation::{
     is_key_up,
 };
 use std::borrow::Cow;
+
+/// Where a transcript-only host anchors the message list.
+///
+/// A composer-at-top host (flow sessions) reads top-down: a short
+/// conversation must sit right under the composer, so it anchors `Top`.
+/// The stock standalone chat anchors `Bottom` (newest at the fold).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatTranscriptAlignment {
+    Bottom,
+    Top,
+}
+
+/// Exhaustive host mode for a [`ChatPrompt`].
+///
+/// Replaces the independent booleans `mini_mode`, `escape_over_stop`,
+/// `external_header`, `external_input`, and `external_footer`, which
+/// allowed incoherent combinations (e.g. an "external footer" host that
+/// still installed its own escape ladder). A ChatPrompt is either fully
+/// self-hosted or purely a transcript body — never a partial mixture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatPromptHostMode {
+    /// The prompt owns its full chrome and lifecycle: header, input area,
+    /// footer, and the Enter/Escape submission handlers. `mini` selects the
+    /// borderless mini-window chrome (matches the mini main window).
+    Standalone { mini: bool },
+    /// An external host (a flow session) owns the header, composer, footer,
+    /// and ALL lifecycle/key handling. This surface renders transcript,
+    /// empty state, setup body, or loading body ONLY — no header, no input,
+    /// no footer, no Enter/Escape handlers, and no escape callback. The host
+    /// is the single lifecycle/key owner.
+    TranscriptOnly { alignment: ChatTranscriptAlignment },
+}
+
+impl ChatPromptHostMode {
+    /// Whether an external host owns chrome + keys (transcript body only).
+    pub fn is_transcript_only(self) -> bool {
+        matches!(self, ChatPromptHostMode::TranscriptOnly { .. })
+    }
+
+    /// Whether the standalone prompt renders the borderless mini chrome.
+    /// A transcript-only host owns its own chrome, so mini never applies.
+    pub fn mini(self) -> bool {
+        matches!(self, ChatPromptHostMode::Standalone { mini: true })
+    }
+}
+
+/// Which body a ChatPrompt paints for the current provider/setup state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatBodyKind {
+    /// API-key configuration card (no providers configured).
+    Setup,
+    /// "Connecting to AI…" placeholder while providers load.
+    Loading,
+    /// The conversation transcript (or its empty state).
+    Transcript,
+}
+
+/// The chrome + key-handler composition for one render pass, resolved from
+/// the host mode and provider/setup state BEFORE any early return. This is
+/// the single source of truth the renderer follows in every body branch, so
+/// a transcript-only host can never leak local chrome through the setup or
+/// loading paths (the bug this replaces).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChatRenderPlan {
+    pub body: ChatBodyKind,
+    pub render_header: bool,
+    pub render_input: bool,
+    pub render_footer: bool,
+    pub install_key_handlers: bool,
+    /// Whether this host owns first-render focus. A transcript-only host's
+    /// composer lives in the external host, so it must NEVER grab focus (the
+    /// suppressed internal input would silently steal it). `false` for
+    /// TranscriptOnly, `true` for Standalone.
+    pub owns_focus: bool,
+    /// Whether this host owns the local input lifecycle: cursor-blink startup,
+    /// pending-submit processing, and initial-response processing. A
+    /// transcript-only host owns none of these — the external host drives
+    /// submission and there is no visible local composer to blink. `false` for
+    /// TranscriptOnly, `true` for Standalone. (C-R2: these ran unconditionally
+    /// before the plan resolved, so a hidden transcript-only host could
+    /// auto-submit or start a blink task.)
+    pub owns_input_lifecycle: bool,
+}
+
+/// Resolve the render plan from the host mode and current provider state.
+///
+/// Transcript-only hosts suppress ALL local chrome and key handlers in every
+/// body state — the host is the only lifecycle/key owner. Standalone hosts
+/// keep their key handlers in every state; the setup and loading bodies show
+/// the header only (no input, no footer), and the transcript body shows the
+/// header (unless mini), the input, and the footer.
+pub fn resolve_chat_render_plan(
+    mode: ChatPromptHostMode,
+    needs_setup: bool,
+    loading_providers: bool,
+) -> ChatRenderPlan {
+    let body = if needs_setup {
+        ChatBodyKind::Setup
+    } else if loading_providers {
+        ChatBodyKind::Loading
+    } else {
+        ChatBodyKind::Transcript
+    };
+
+    if mode.is_transcript_only() {
+        return ChatRenderPlan {
+            body,
+            render_header: false,
+            render_input: false,
+            render_footer: false,
+            install_key_handlers: false,
+            owns_focus: false,
+            owns_input_lifecycle: false,
+        };
+    }
+
+    let (render_header, render_input, render_footer) = match body {
+        // Setup card / loading placeholder: header + body only, no
+        // composer and no footer (matches the standalone chat's chrome).
+        ChatBodyKind::Setup | ChatBodyKind::Loading => (true, false, false),
+        // Transcript: header unless mini, plus composer and footer.
+        ChatBodyKind::Transcript => (!mode.mini(), true, true),
+    };
+
+    ChatRenderPlan {
+        body,
+        render_header,
+        render_input,
+        render_footer,
+        install_key_handlers: true,
+        owns_focus: true,
+        owns_input_lifecycle: true,
+    }
+}
+
 /// Available AI models for the chat
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatModel {

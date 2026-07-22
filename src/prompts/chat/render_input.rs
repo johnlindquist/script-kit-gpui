@@ -23,7 +23,7 @@ impl ChatPrompt {
         // Mini mode: match mini main window's visual input size.
         // The mini main window uses font_size_xl (20.0) on gpui-component Input, which renders
         // smaller than 20px on a raw div().text_size(). font_size_lg (16.0) is the visual match.
-        let input_font_size = if self.mini_mode { 16.0 } else { 14.0 };
+        let input_font_size = if self.mini_mode() { 16.0 } else { 14.0 };
 
         let mut input_content = div()
             .flex()
@@ -59,7 +59,7 @@ impl ChatPrompt {
         }
 
         let chrome = crate::theme::AppChromeColors::from_theme(&self.theme);
-        let field_bg = if self.mini_mode {
+        let field_bg = if self.mini_mode() {
             None
         } else if is_focused {
             Some(rgba(chrome.input_active_rgba))

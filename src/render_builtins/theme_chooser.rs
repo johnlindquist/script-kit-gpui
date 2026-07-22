@@ -131,7 +131,9 @@ pub(crate) struct ThemeChooserDeletedTheme {
 }
 
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub(crate) enum ThemeChooserManagementStatus {
+    #[default]
     Clean,
     Dirty,
     Saved { name: String },
@@ -148,11 +150,6 @@ enum ThemeChooserManagementButtonKind {
     Destructive,
 }
 
-impl Default for ThemeChooserManagementStatus {
-    fn default() -> Self {
-        Self::Clean
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ThemeChooserManagementState {
@@ -2027,7 +2024,7 @@ impl ScriptListApp {
         use std::cell::RefCell;
         thread_local! {
             static ORIGINAL_MATCH: RefCell<Option<(usize, theme::presets::PresetMatchResult)>> =
-                RefCell::new(None);
+                const { RefCell::new(None) };
         }
         let theme = theme?;
         let cache_key = std::sync::Arc::as_ptr(theme) as usize;
@@ -2510,12 +2507,10 @@ impl ScriptListApp {
                         layer.from = new_color;
                     }
                 }
+            } else if is_to {
+                gradient.to = new_color;
             } else {
-                if is_to {
-                    gradient.to = new_color;
-                } else {
-                    gradient.from = new_color;
-                }
+                gradient.from = new_color;
             }
         }
         self.apply_theme_chooser_theme(next, reason, cx);
@@ -4998,7 +4993,7 @@ impl ScriptListApp {
                     // Preview mode so theme browsing reads like the real shell.
                     div().flex_1().min_h(px(0.0)).flex().flex_col().child(
                         self.render_theme_chooser_live_preview(
-                            &selected_preset_name,
+                            selected_preset_name,
                             accent_name_str,
                             &chrome,
                         ),
@@ -5012,7 +5007,7 @@ impl ScriptListApp {
             .when(is_customize, |panel| {
                 panel.child(div().h(px(1.0)).bg(divider_bg)).child(
                     self.render_theme_chooser_live_preview(
-                        &selected_preset_name,
+                        selected_preset_name,
                         accent_name_str,
                         &chrome,
                     ),

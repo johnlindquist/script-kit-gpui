@@ -233,6 +233,8 @@ impl ScriptListApp {
                         crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
                     available_models: Vec::new(),
                     selected_model_id: None,
+                    session_policy:
+                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
                 },
                 cx,
             )
@@ -304,7 +306,7 @@ impl ScriptListApp {
         self.begin_tab_ai_harness_entry_from_source_view(
             source_view,
             None,
-            true,
+            AgentChatContextPolicy::SuppressFocused,
             None,
             crate::ai::TabAiCaptureKind::DefaultContext,
             // force_agent_chat_surface: focused-text apply semantics must not route to the terminal.
@@ -496,7 +498,7 @@ impl ScriptListApp {
         self.begin_tab_ai_harness_entry_from_source_view(
             source_view,
             None,
-            true,
+            AgentChatContextPolicy::SuppressFocused,
             None,
             crate::ai::TabAiCaptureKind::DefaultContext,
             true,

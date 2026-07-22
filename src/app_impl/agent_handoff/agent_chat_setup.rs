@@ -8,10 +8,19 @@ impl ScriptListApp {
         &mut self,
         source_view: AppView,
         setup: crate::ai::agent_chat::ui::AgentChatInlineSetupState,
+        session_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy,
         cx: &mut Context<Self>,
     ) {
-        let view_entity =
-            cx.new(|cx| crate::ai::agent_chat::ui::AgentChatView::new_setup(setup, cx));
+        // WP-B1 / C-R3: build the setup card under the REQUESTED launch policy.
+        // A Quick AI launch that fails before its thread exists must show a
+        // Quick-AI-policy setup view, not a default Full one.
+        let view_entity = cx.new(|cx| {
+            crate::ai::agent_chat::ui::AgentChatView::new_setup_with_policy(
+                setup,
+                session_policy,
+                cx,
+            )
+        });
         self.wire_embedded_agent_chat_footer_callbacks(&view_entity, cx);
         self.tab_ai_harness_return_view = Some(source_view);
         self.tab_ai_harness_return_focus_target = Some(self.tab_ai_return_focus_target());
@@ -34,20 +43,27 @@ impl ScriptListApp {
         let setup = crate::ai::agent_chat::ui::AgentChatInlineSetupState {
             reason_code: "catalogLoadFailed",
             title: "Failed to load Agent Chat catalog".into(),
-            body: format!("{error}").into(),
+            body: error.to_string().into(),
             primary_action: crate::ai::agent_chat::ui::AgentChatSetupAction::OpenCatalog,
             secondary_action: Some(crate::ai::agent_chat::ui::AgentChatSetupAction::Retry),
             selected_agent: None,
             catalog_entries: Vec::new(),
             launch_requirements: crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
         };
-        self.show_embedded_agent_chat_setup_view(source_view, setup, cx);
+        // Catalog-load failure is not a Quick-AI-specific path — default Full.
+        self.show_embedded_agent_chat_setup_view(
+            source_view,
+            setup,
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
+            cx,
+        );
     }
 
     pub(super) fn show_pi_agent_chat_unavailable_setup_view(
         &mut self,
         source_view: AppView,
         error: String,
+        session_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy,
         cx: &mut Context<Self>,
     ) {
         tracing::error!(
@@ -65,7 +81,9 @@ impl ScriptListApp {
             catalog_entries: Vec::new(),
             launch_requirements: crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
         };
-        self.show_embedded_agent_chat_setup_view(source_view, setup, cx);
+        // Preserve the REQUESTED launch policy through the failure card so a
+        // Quick AI launch failure surfaces a Quick-AI-policy setup view.
+        self.show_embedded_agent_chat_setup_view(source_view, setup, session_policy, cx);
     }
 
     pub(super) fn show_pi_agent_chat_warming_setup_view(
@@ -89,7 +107,13 @@ impl ScriptListApp {
             catalog_entries: Vec::new(),
             launch_requirements: crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
         };
-        self.show_embedded_agent_chat_setup_view(source_view, setup, cx);
+        // Warming is a Pi-general path (every variant) — default Full.
+        self.show_embedded_agent_chat_setup_view(
+            source_view,
+            setup,
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
+            cx,
+        );
     }
 
     /// Show a setup card when Agent Chat launch is blocked (missing key, model
@@ -105,6 +129,12 @@ impl ScriptListApp {
             agent_chat_launch_resolution,
             requirements,
         );
-        self.show_embedded_agent_chat_setup_view(source_view, setup, cx);
+        // Launch-blocked is a general path — default Full.
+        self.show_embedded_agent_chat_setup_view(
+            source_view,
+            setup,
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
+            cx,
+        );
     }
 }

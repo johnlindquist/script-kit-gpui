@@ -1390,8 +1390,8 @@ impl ScriptListApp {
 
                             // ChatPrompt keeps Shift+Tab for local setup
                             // navigation and leaves plain Tab local.
-                            if matches!(this.current_view, AppView::ChatPrompt { .. }) {
-                                if has_shift {
+                            if matches!(this.current_view, AppView::ChatPrompt { .. })
+                                && has_shift {
                                     if let AppView::ChatPrompt { entity, .. } = &this.current_view {
                                         let handled = entity.update(cx, |chat, cx| {
                                             chat.handle_setup_key("tab", true, cx)
@@ -1402,7 +1402,6 @@ impl ScriptListApp {
                                         }
                                     }
                                 }
-                            }
 
                             // Menu-syntax trigger picker owns Tab when it is
                             // visible — Tab applies the selected row (keep-open
@@ -1645,7 +1644,6 @@ impl ScriptListApp {
                             // Block Tab while the save-offer overlay is visible
                             if this.tab_ai_save_offer_state.is_some() {
                                 cx.stop_propagation();
-                                return;
                             }
                         });
                     }
@@ -1667,8 +1665,7 @@ impl ScriptListApp {
                             // the same way the Agent Chat composer picker does.
                             if matches!(this.current_view, AppView::ScriptList)
                                 && this.menu_syntax_object_selector_owns_main_keyboard()
-                            {
-                                if this.apply_menu_syntax_object_selector_intent(
+                                && this.apply_menu_syntax_object_selector_intent(
                                     crate::menu_syntax::InlinePickerKeyIntent::Accept,
                                     window,
                                     cx,
@@ -1676,11 +1673,9 @@ impl ScriptListApp {
                                     cx.stop_propagation();
                                     return;
                                 }
-                            }
                             if matches!(this.current_view, AppView::ScriptList)
                                 && this.menu_syntax_trigger_picker_owns_main_keyboard()
-                            {
-                                if this.apply_menu_syntax_trigger_picker_intent(
+                                && this.apply_menu_syntax_trigger_picker_intent(
                                     crate::menu_syntax::InlinePickerKeyIntent::Accept,
                                     window,
                                     cx,
@@ -1691,7 +1686,6 @@ impl ScriptListApp {
                                     cx.stop_propagation();
                                     return;
                                 }
-                            }
                             if matches!(this.current_view, AppView::ScriptList)
                                 && !this.show_actions_popup
                                 && !crate::actions::is_actions_window_open()
@@ -1744,7 +1738,7 @@ impl ScriptListApp {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(1))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(app) = app_entity_for_tab_ai_warm.upgrade() else {
                     return;
                 };
@@ -2720,7 +2714,6 @@ impl ScriptListApp {
                         target: "script_kit::keyboard",
                         event = "actions_interceptor_skipped_secondary_window",
                         is_notes = secondary_window.is_notes,
-                        is_ai = secondary_window.is_ai,
                         is_detached_agent_chat = secondary_window.is_detached_agent_chat,
                         is_actions,
                         is_shortcut_recorder = secondary_window.is_shortcut_recorder,
@@ -2803,7 +2796,6 @@ impl ScriptListApp {
                         target: "script_kit::keyboard",
                         event = "actions_interceptor_main_window_hidden",
                         is_notes = secondary_window.is_notes,
-                        is_ai = secondary_window.is_ai,
                         is_detached_agent_chat = secondary_window.is_detached_agent_chat,
                         is_actions,
                     );
@@ -3118,7 +3110,6 @@ impl ScriptListApp {
 
                         // Only handle remaining keys if in FileSearchView with actions popup open
                         if !matches!(this.current_view, AppView::FileSearchView { .. }) {
-                            return;
                         }
                     });
                 }

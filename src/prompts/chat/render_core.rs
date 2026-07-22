@@ -33,7 +33,7 @@ impl ChatPrompt {
     }
 
     fn render_gpui_footer(&self) -> AnyElement {
-        if self.mini_mode {
+        if self.mini_mode() {
             return self.render_mini_hint_strip().into_any_element();
         }
 
@@ -78,53 +78,72 @@ impl Focusable for ChatPrompt {
 
 impl Render for ChatPrompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.pending_auto_focus {
-            self.pending_auto_focus = false;
-            self.focus_handle.focus(window, cx);
+        // Resolve the chrome + key-handler + LIFECYCLE ownership plan as the
+        // FIRST operation, so a transcript-only host (flow session) suppresses
+        // ALL local chrome, key handlers, AND lifecycle work in every body
+        // state — it is the single lifecycle/key owner. (C-R2 bug this fixes:
+        // focus/cursor-blink/pending-submit/initial-response ran BEFORE the
+        // plan resolved, so a hidden transcript-only host could auto-submit,
+        // steal focus, or start a blink task; setup/loading also used to
+        // compose the local header even under an external host.)
+        let plan =
+            resolve_chat_render_plan(self.host_mode, self.needs_setup, self.loading_providers);
+
+        // Focus lifecycle: only the host that owns its composer may grab focus.
+        if plan.owns_focus {
+            if self.pending_auto_focus {
+                self.pending_auto_focus = false;
+                self.focus_handle.focus(window, cx);
+            }
+
+            // In setup mode, ensure focus handle is focused so keyboard events route here
+            if self.needs_setup {
+                self.focus_handle.focus(window, cx);
+            }
         }
 
-        // In setup mode, ensure focus handle is focused so keyboard events route here
-        if self.needs_setup {
-            self.focus_handle.focus(window, cx);
-        }
+        // Input lifecycle: cursor-blink startup, pending-submit, and
+        // initial-response only run for a host that owns its local composer.
+        if plan.owns_input_lifecycle {
+            // Start cursor blink timer on first render (only needed when not in setup mode)
+            if !self.needs_setup && !self.cursor_blink_started {
+                self.cursor_blink_started = true;
+                self.start_cursor_blink(cx);
+            }
 
-        // Start cursor blink timer on first render (only needed when not in setup mode)
-        if !self.needs_setup && !self.cursor_blink_started {
-            self.cursor_blink_started = true;
-            self.start_cursor_blink(cx);
-        }
+            // Process pending_submit on first render (used when Tab opens chat with query)
+            // Skip if in setup mode or while providers are still loading
+            if !self.needs_setup
+                && !self.loading_providers
+                && self.pending_submit
+                && !self.input.is_empty()
+            {
+                self.pending_submit = false;
+                logging::log(
+                    "CHAT",
+                    "Processing pending_submit - auto-submitting query from Tab",
+                );
+                self.handle_submit(cx);
+            }
 
-        // Process pending_submit on first render (used when Tab opens chat with query)
-        // Skip if in setup mode or while providers are still loading
-        if !self.needs_setup
-            && !self.loading_providers
-            && self.pending_submit
-            && !self.input.is_empty()
-        {
-            self.pending_submit = false;
-            logging::log(
-                "CHAT",
-                "Processing pending_submit - auto-submitting query from Tab",
-            );
-            self.handle_submit(cx);
-        }
-
-        // Process needs_initial_response on first render (used for scriptlets with pre-populated messages)
-        // Skip if in setup mode or loading providers, requires built-in AI to be enabled
-        if !self.needs_setup
-            && !self.loading_providers
-            && self.needs_initial_response
-            && self.has_builtin_ai()
-        {
-            self.needs_initial_response = false;
-            logging::log(
-                "CHAT",
-                "Processing needs_initial_response - auto-responding to initial messages",
-            );
-            self.handle_initial_response(cx);
+            // Process needs_initial_response on first render (used for scriptlets with pre-populated messages)
+            // Skip if in setup mode or loading providers, requires built-in AI to be enabled
+            if !self.needs_setup
+                && !self.loading_providers
+                && self.needs_initial_response
+                && self.has_builtin_ai()
+            {
+                self.needs_initial_response = false;
+                logging::log(
+                    "CHAT",
+                    "Processing needs_initial_response - auto-responding to initial messages",
+                );
+                self.handle_initial_response(cx);
+            }
         }
 
         self.ensure_conversation_turns_cache();
+
         let theme_colors = &self.theme.colors;
 
         let needs_setup = self.needs_setup;
@@ -180,9 +199,10 @@ impl Render for ChatPrompt {
             match resolve_chat_input_key_action(key, modifiers.platform, modifiers.shift) {
                 ChatInputKeyAction::Escape => {
                     // Escape - stop streaming if active, otherwise close chat.
-                    // Hosts with an external transport opt out of the stop
-                    // ladder: Esc always escapes (flow sessions background).
-                    if this.is_streaming() && !this.escape_over_stop {
+                    // This handler is installed for Standalone hosts only;
+                    // a transcript-only host owns its own escape ladder and
+                    // never reaches this code.
+                    if this.is_streaming() {
                         this.stop_streaming(cx);
                     } else {
                         this.handle_escape(cx);
@@ -265,38 +285,48 @@ impl Render for ChatPrompt {
         let container_bg: Option<Hsla> = get_vibrancy_background(&self.theme).map(Hsla::from);
         let input_is_focused = self.focus_handle.is_focused(window);
 
-        // If needs_setup, render setup card instead of normal chat
+        // If needs_setup, render setup card instead of normal chat.
         if self.needs_setup {
-            return div()
+            let mut root = div()
                 .id("chat-prompt-setup")
                 .flex()
                 .flex_col()
                 .w_full()
                 .h_full()
-                .when_some(container_bg, |d, bg| d.bg(bg))
-                .key_context("chat_prompt_setup")
-                .track_focus(&self.focus_handle)
-                .on_key_down(handle_key)
+                .when_some(container_bg, |d, bg| d.bg(bg));
+            if plan.install_key_handlers {
+                root = root
+                    .key_context("chat_prompt_setup")
+                    .track_focus(&self.focus_handle)
+                    .on_key_down(handle_key);
+            }
+            if plan.render_header {
                 // Header with back button and title
-                .child(self.render_header())
-                // Setup card content
-                .child(self.render_setup_card(cx))
-                .into_any_element();
+                root = root.child(self.render_header());
+            }
+            // Setup card content (the only body a transcript-only host paints).
+            return root.child(self.render_setup_card(cx)).into_any_element();
         }
 
         // If loading_providers, show a "Connecting to AI..." placeholder
         if self.loading_providers {
-            return div()
+            let mut root = div()
                 .id("chat-prompt-loading")
                 .flex()
                 .flex_col()
                 .w_full()
                 .h_full()
-                .when_some(container_bg, |d, bg| d.bg(bg))
-                .key_context("chat_prompt_loading")
-                .track_focus(&self.focus_handle)
-                .on_key_down(handle_key)
-                .child(self.render_header())
+                .when_some(container_bg, |d, bg| d.bg(bg));
+            if plan.install_key_handlers {
+                root = root
+                    .key_context("chat_prompt_loading")
+                    .track_focus(&self.focus_handle)
+                    .on_key_down(handle_key);
+            }
+            if plan.render_header {
+                root = root.child(self.render_header());
+            }
+            return root
                 .child(
                     div()
                         .flex()
@@ -326,40 +356,45 @@ impl Render for ChatPrompt {
         let divider_rgba = (theme_colors.ui.border << 8) | alpha_from_opacity(DIVIDER_OPACITY);
 
         // Mini mode: use shared mini layout tokens to match mini main window exactly
-        let input_px = if self.mini_mode {
+        let mini = self.mini_mode();
+        let input_px = if mini {
             crate::ui::chrome::HEADER_PADDING_X
         } else {
             CHAT_LAYOUT_PADDING_X
         };
-        let input_py = if self.mini_mode {
+        let input_py = if mini {
             crate::ui::chrome::HEADER_PADDING_Y
         } else {
             CHAT_LAYOUT_SECTION_PADDING_Y
         };
 
-        let input_area = div()
-            .w_full()
-            .px(px(input_px))
-            .py(px(input_py))
-            .flex()
-            .flex_col()
-            .when(!self.mini_mode, |d| d.gap(px(8.0)))
-            .when(self.mini_mode, |d| {
-                d.border_b(px(DIVIDER_HEIGHT))
-                    .border_color(rgba(divider_rgba))
-            })
-            .when(!self.mini_mode, |d| {
-                d.border_b_1().border_color(rgba(
-                    (theme_colors.ui.border << 8) | CHAT_LAYOUT_BORDER_ALPHA,
-                ))
-            })
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-                this.handle_file_drop(paths, cx);
-            }))
-            .when(has_pending_image, |d| {
-                d.child(self.render_pending_image_preview(cx))
-            })
-            .child(self.render_input(input_is_focused));
+        // A transcript-only host owns the composer; build the internal input
+        // area only when the plan says to render it.
+        let input_area = plan.render_input.then(|| {
+            div()
+                .w_full()
+                .px(px(input_px))
+                .py(px(input_py))
+                .flex()
+                .flex_col()
+                .when(!mini, |d| d.gap(px(8.0)))
+                .when(mini, |d| {
+                    d.border_b(px(DIVIDER_HEIGHT))
+                        .border_color(rgba(divider_rgba))
+                })
+                .when(!mini, |d| {
+                    d.border_b_1().border_color(rgba(
+                        (theme_colors.ui.border << 8) | CHAT_LAYOUT_BORDER_ALPHA,
+                    ))
+                })
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                    this.handle_file_drop(paths, cx);
+                }))
+                .when(has_pending_image, |d| {
+                    d.child(self.render_pending_image_preview(cx))
+                })
+                .child(self.render_input(input_is_focused))
+        });
 
         // Message list (conversation turns) - virtualized for large chats
         let has_turns = !self.conversation_turns_cache.is_empty();
@@ -475,40 +510,47 @@ impl Render for ChatPrompt {
                 .into_any_element()
         };
 
-        let prompt = div()
+        let mut prompt = div()
             .id("chat-prompt")
             .flex()
             .flex_col()
             .w_full()
             .h_full()
-            .when_some(container_bg, |d, bg| d.bg(bg))
-            .key_context("chat_prompt")
-            .track_focus(&self.focus_handle)
-            .on_key_down(handle_key);
+            .when_some(container_bg, |d, bg| d.bg(bg));
 
-        // Mini mode: no header (matches mini main window). External-header
-        // hosts (flow sessions) draw their own identity row — never stack a
-        // second title. Rich mode: show header.
-        let prompt = if self.mini_mode || self.external_header {
-            prompt
-        } else {
-            prompt.child(self.render_header())
-        };
-
-        // External-input hosts (flow sessions) own the composer — the shared
-        // main input with its context-attachment features. Never render a
-        // second input box under it.
-        let prompt = if self.external_input {
-            prompt.child(messages_content)
-        } else {
-            prompt.child(input_area).child(messages_content)
-        };
-        // Hosts that own the native footer (flow sessions) suppress the
-        // internal strip: one footer, and no transport-mismatched model label.
-        if self.external_footer {
-            return prompt.into_any_element();
+        // A transcript-only host is the single lifecycle/key owner: install
+        // NO Enter/Escape handlers here. A standalone host owns its keys.
+        if plan.install_key_handlers {
+            prompt = prompt
+                .key_context("chat_prompt")
+                .track_focus(&self.focus_handle)
+                .on_key_down(handle_key);
         }
-        prompt.child(self.render_footer(cx)).into_any_element()
+
+        // Header: suppressed in mini chrome (matches the mini main window) and
+        // under a transcript-only host (it draws its own identity row) — never
+        // stack a second title. `plan.render_header` folds both in.
+        if plan.render_header {
+            prompt = prompt.child(self.render_header());
+        }
+
+        // Composer: a transcript-only host owns the shared main input with its
+        // context-attachment features, so the internal input is never built
+        // (`input_area` is None). Never render a second input box under it.
+        if let Some(input_area) = input_area {
+            prompt = prompt.child(input_area);
+        }
+
+        prompt = prompt.child(messages_content);
+
+        // Footer: a transcript-only host owns the native footer, so the
+        // internal hint strip is suppressed — one footer, and no
+        // transport-mismatched model label.
+        if plan.render_footer {
+            prompt = prompt.child(self.render_footer(cx));
+        }
+
+        prompt.into_any_element()
     }
 }
 

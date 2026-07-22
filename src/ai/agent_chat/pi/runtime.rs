@@ -1004,6 +1004,7 @@ mod tests {
                 cwd: std::path::PathBuf::from("/tmp"),
                 blocks: Vec::new(),
                 model_id: None,
+                tool_policy: crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy::Full,
             })
             .unwrap();
         drop(event_rx);

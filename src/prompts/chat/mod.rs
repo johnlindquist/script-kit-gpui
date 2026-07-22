@@ -71,6 +71,10 @@ use self::types::next_chat_scroll_follow_state;
 pub use prompt::ChatPrompt;
 pub use types::{
     default_models, ChatClaudeCodeCallback, ChatConfigureCallback, ChatContinueCallback,
-    ChatErrorType, ChatEscapeCallback, ChatModel, ChatRetryCallback, ChatShowActionsCallback,
-    ChatSubmitCallback, ConversationStarter, ConversationTurn,
+    ChatErrorType, ChatEscapeCallback, ChatModel, ChatPromptHostMode, ChatRetryCallback,
+    ChatShowActionsCallback, ChatSubmitCallback, ChatTranscriptAlignment, ConversationStarter,
+    ConversationTurn,
 };
+
+// Internal render-plan resolution (pure logic, unit-tested).
+pub(crate) use types::resolve_chat_render_plan;

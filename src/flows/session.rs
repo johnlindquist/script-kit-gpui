@@ -56,11 +56,21 @@ impl SessionState {
 }
 
 /// One committed conversation turn, kept engine-agnostic for prompt rollup.
-#[derive(Debug, Clone)]
+///
+/// `assistant` is RAW engine output only. UI decoration (the `*Stopped.*`
+/// caption) is derived from `outcome` at display time — never stored here —
+/// so rollup and persistence stay semantically clean (Oracle 2026-07-21).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTurn {
     pub user: String,
     pub assistant: String,
+    pub outcome: PersistedTurnOutcome,
+    pub error: Option<String>,
 }
+
+/// The display caption for a user-stopped turn. Owned by the domain layer so
+/// snapshot migration and UI projection share one definition.
+pub const FLOW_STOPPED_CAPTION: &str = "*Stopped.*";
 
 /// How a session's turns reach an engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +93,15 @@ impl SessionTransport {
 
 /// Requests posted from `ChatPrompt` callbacks (which have no app access)
 /// and drained in the app render pass (window access for actions).
+/// Since the WP7 host-mode refactor made the Flow session view the only
+/// key/lifecycle owner, ChatPrompt callbacks can no longer originate Escape —
+/// the `Background` variant lost its last sender and was removed (Oracle
+/// phase-c audit follow-up). `Submit`/`ShowActions` remain only because the
+/// hosted ChatPrompt constructor still requires the callbacks; they are dead
+/// ingresses pending a callback-free transcript-only constructor.
 #[derive(Debug, Clone)]
 pub enum FlowChatRequest {
     Submit { session_id: u64, text: String },
-    Background { session_id: u64 },
     ShowActions { session_id: u64 },
 }
 
@@ -188,7 +203,18 @@ pub fn build_turn_task(turns: &[SessionTurn], message: &str) -> String {
     let mut history: Vec<String> = Vec::new();
     let mut used = 0usize;
     for turn in turns.iter().rev() {
-        let block = format!("User: {}\nAssistant: {}", turn.user, turn.assistant);
+        // Outcome-aware rollup (Oracle 2026-07-21): a stopped/failed partial
+        // must never be presented to the engine as an ordinary completed
+        // answer, and UI captions/transport errors never enter the prompt.
+        let assistant_label = match turn.outcome {
+            PersistedTurnOutcome::Ok => "Assistant",
+            PersistedTurnOutcome::Stopped => "Assistant (partial; turn stopped)",
+            PersistedTurnOutcome::Failed => "Assistant (partial; turn failed)",
+        };
+        let block = format!(
+            "User: {}\n{}: {}",
+            turn.user, assistant_label, turn.assistant
+        );
         if used + block.len() > HISTORY_CHAR_BUDGET {
             break;
         }
@@ -420,13 +446,81 @@ pub struct PersistedFlowConversation {
     #[serde(default)]
     pub flow_path: String,
     pub saved_at: String,
+    /// Snapshot format version. 0 (absent) = legacy: either two-field turns
+    /// or transitional records whose Stopped assistants carry the UI caption
+    /// baked into the text. `SNAPSHOT_VERSION` = raw assistant text with the
+    /// caption derived from `outcome` at display time.
+    #[serde(default)]
+    pub version: u32,
     pub turns: Vec<PersistedFlowTurn>,
+}
+
+/// Current snapshot format: raw assistant text + structured outcome.
+pub const SNAPSHOT_VERSION: u32 = 2;
+
+/// Convert a persisted snapshot into the ONE canonical in-memory turn vector
+/// (Oracle 2026-07-21, WP-A4): restore must render and store from this same
+/// vector, never from the raw persisted fields.
+///
+/// Normalization invariants:
+/// - `Ok`/`Stopped` ⇒ `error = None`.
+/// - `Failed` ⇒ `error = Some(nonblank)` (blank/absent → "Flow turn failed").
+/// - Pre-`SNAPSHOT_VERSION` Stopped records may carry the UI caption baked
+///   into the assistant text; strip exactly one canonical caption suffix so
+///   `assistant` is raw engine output.
+pub fn canonical_session_turns(snapshot: &PersistedFlowConversation) -> Vec<SessionTurn> {
+    snapshot
+        .turns
+        .iter()
+        .map(|turn| {
+            let mut assistant = turn.assistant.clone();
+            if snapshot.version < SNAPSHOT_VERSION && turn.outcome == PersistedTurnOutcome::Stopped
+            {
+                if assistant == FLOW_STOPPED_CAPTION {
+                    assistant.clear();
+                } else if let Some(stripped) =
+                    assistant.strip_suffix(&format!("\n\n{FLOW_STOPPED_CAPTION}"))
+                {
+                    assistant = stripped.to_string();
+                }
+            }
+            let error = match turn.outcome {
+                PersistedTurnOutcome::Ok | PersistedTurnOutcome::Stopped => None,
+                PersistedTurnOutcome::Failed => Some(
+                    turn.error
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|e| !e.is_empty())
+                        .unwrap_or("Flow turn failed")
+                        .to_string(),
+                ),
+            };
+            SessionTurn {
+                user: turn.user.clone(),
+                assistant,
+                outcome: turn.outcome,
+                error,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedFlowTurn {
     pub user: String,
     pub assistant: String,
+    #[serde(default)]
+    pub outcome: PersistedTurnOutcome,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PersistedTurnOutcome {
+    #[default]
+    Ok,
+    Stopped,
+    Failed,
 }
 
 /// Newest persisted turns kept per flow — comfortably above what
@@ -487,12 +581,15 @@ pub fn persist_conversation_to(
         .map(|turn| PersistedFlowTurn {
             user: turn.user.clone(),
             assistant: turn.assistant.clone(),
+            outcome: turn.outcome,
+            error: turn.error.clone(),
         })
         .collect();
     let snapshot = PersistedFlowConversation {
         flow_id: flow_id.to_string(),
         flow_path: flow_path.to_string(),
         saved_at: chrono::Utc::now().to_rfc3339(),
+        version: SNAPSHOT_VERSION,
         turns: kept,
     };
     std::fs::create_dir_all(dir)?;
@@ -529,6 +626,8 @@ pub fn load_persisted_conversation_from(
         .map(|turn| SessionTurn {
             user: turn.user.clone(),
             assistant: turn.assistant.clone(),
+            outcome: turn.outcome,
+            error: turn.error.clone(),
         })
         .collect();
     if persist_conversation_to(dir, flow_id, flow_path, &turns).is_ok() {
@@ -544,9 +643,145 @@ pub fn load_persisted_conversation_from(
 /// and any legacy id-only file). "Terminate Flow" promises permanent
 /// removal — before this existed, the next activation silently restored the
 /// supposedly terminated conversation (2026-07-11 audit P0).
-pub fn delete_persisted_conversation_from(dir: &std::path::Path, flow_id: &str, flow_path: &str) {
-    let _ = std::fs::remove_file(dir.join(conversation_file_name(flow_id, flow_path)));
-    let _ = std::fs::remove_file(dir.join(legacy_conversation_file_name(flow_id)));
+pub fn delete_persisted_conversation_from(
+    dir: &std::path::Path,
+    flow_id: &str,
+    flow_path: &str,
+) -> std::io::Result<()> {
+    // NotFound is success (the promise is "no transcript remains"); every
+    // other failure — e.g. permissions — must surface, because a silently
+    // surviving file resurrects a "permanently ended" conversation.
+    let mut result = Ok(());
+    for path in [
+        dir.join(conversation_file_name(flow_id, flow_path)),
+        dir.join(legacy_conversation_file_name(flow_id)),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => result = Err(err),
+        }
+    }
+    result
+}
+
+/// One FIFO worker owns every conversation-store mutation (Oracle 2026-07-21
+/// WP-A1): per-turn detached threads let an older snapshot finish AFTER a
+/// newer one (silent transcript regression) and let a pending persist
+/// resurrect a terminated conversation. Commands are enqueued synchronously
+/// from the UI thread, so on-disk order always matches user-visible order.
+pub struct FlowConversationStore {
+    tx: std::sync::mpsc::Sender<ConversationStoreCommand>,
+}
+
+enum ConversationStoreCommand {
+    Persist {
+        flow_id: String,
+        flow_path: String,
+        turns: Vec<SessionTurn>,
+    },
+    Delete {
+        flow_id: String,
+        flow_path: String,
+    },
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+impl FlowConversationStore {
+    /// Store rooted at `dir`. Tests construct their own with a temp dir; the
+    /// app uses [`conversation_store`].
+    pub fn new(dir: std::path::PathBuf) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<ConversationStoreCommand>();
+        let spawned = std::thread::Builder::new()
+            .name("flow-conversation-store".into())
+            .spawn(move || {
+                while let Ok(command) = rx.recv() {
+                    match command {
+                        ConversationStoreCommand::Persist {
+                            flow_id,
+                            flow_path,
+                            turns,
+                        } => {
+                            if turns.is_empty() {
+                                continue;
+                            }
+                            if let Err(err) =
+                                persist_conversation_to(&dir, &flow_id, &flow_path, &turns)
+                            {
+                                tracing::warn!(
+                                    target: "script_kit::flows",
+                                    event = "flow_conversation_persist_failed",
+                                    flow_id = %flow_id,
+                                    error = %err,
+                                    "Failed to persist flow conversation"
+                                );
+                            }
+                        }
+                        ConversationStoreCommand::Delete { flow_id, flow_path } => {
+                            if let Err(err) =
+                                delete_persisted_conversation_from(&dir, &flow_id, &flow_path)
+                            {
+                                tracing::warn!(
+                                    target: "script_kit::flows",
+                                    event = "flow_conversation_delete_failed",
+                                    flow_id = %flow_id,
+                                    error = %err,
+                                    "Failed to delete persisted flow conversation"
+                                );
+                            }
+                        }
+                        ConversationStoreCommand::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            });
+        if let Err(err) = spawned {
+            // Thread creation failure must be loud — a store with no worker
+            // silently drops every persistence command.
+            tracing::error!(
+                target: "script_kit::flows",
+                event = "flow_conversation_store_spawn_failed",
+                error = %err,
+                "Flow conversation store worker failed to start"
+            );
+        }
+        Self { tx }
+    }
+
+    pub fn persist(&self, flow_id: &str, flow_path: &str, turns: Vec<SessionTurn>) {
+        let _ = self.tx.send(ConversationStoreCommand::Persist {
+            flow_id: flow_id.to_string(),
+            flow_path: flow_path.to_string(),
+            turns,
+        });
+    }
+
+    pub fn delete(&self, flow_id: &str, flow_path: &str) {
+        let _ = self.tx.send(ConversationStoreCommand::Delete {
+            flow_id: flow_id.to_string(),
+            flow_path: flow_path.to_string(),
+        });
+    }
+
+    /// Barrier: returns once every previously enqueued command has reached
+    /// disk. Used by tests and shutdown.
+    pub fn flush(&self) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        if self
+            .tx
+            .send(ConversationStoreCommand::Flush(done_tx))
+            .is_ok()
+        {
+            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        }
+    }
+}
+
+/// The app-wide store rooted at the active workspace.
+pub fn conversation_store() -> &'static FlowConversationStore {
+    static STORE: std::sync::OnceLock<FlowConversationStore> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| FlowConversationStore::new(conversation_store_dir()))
 }
 
 /// Persist under the active workspace (`~/.scriptkit`, `SK_PATH` override).
@@ -574,7 +809,17 @@ pub fn load_persisted_conversation(
 }
 
 pub fn delete_persisted_conversation(flow_id: &str, flow_path: &str) {
-    delete_persisted_conversation_from(&conversation_store_dir(), flow_id, flow_path);
+    if let Err(err) =
+        delete_persisted_conversation_from(&conversation_store_dir(), flow_id, flow_path)
+    {
+        tracing::warn!(
+            target: "script_kit::flows",
+            event = "flow_conversation_delete_failed",
+            flow_id = %flow_id,
+            error = %err,
+            "Failed to delete persisted flow conversation"
+        );
+    }
 }
 
 /// Definition-file mtime in ms (0 when unreadable) — the cheap staleness
@@ -745,6 +990,8 @@ mod tests {
             .map(|i| SessionTurn {
                 user: format!("question {i}"),
                 assistant: format!("answer {i}"),
+                outcome: PersistedTurnOutcome::Ok,
+                error: None,
             })
             .collect();
         persist_conversation_to(dir.path(), "package:flow-gog-gmail", GMAIL_PATH, &turns)
@@ -759,6 +1006,198 @@ mod tests {
         assert_eq!(restored.turns.len(), 12);
         assert_eq!(restored.turns.first().unwrap().user, "question 8");
         assert_eq!(restored.turns.last().unwrap().assistant, "answer 19");
+    }
+
+    #[test]
+    fn persisted_flow_turn_roundtrips_outcome() {
+        for turn in [
+            PersistedFlowTurn {
+                user: "stop".into(),
+                assistant: "partial\n\n*Stopped.*".into(),
+                outcome: PersistedTurnOutcome::Stopped,
+                error: None,
+            },
+            PersistedFlowTurn {
+                user: "fail".into(),
+                assistant: "partial".into(),
+                outcome: PersistedTurnOutcome::Failed,
+                error: Some("transport failed".into()),
+            },
+        ] {
+            let json = serde_json::to_string(&turn).expect("serialize persisted turn");
+            let restored: PersistedFlowTurn =
+                serde_json::from_str(&json).expect("deserialize persisted turn");
+            assert_eq!(restored.outcome, turn.outcome);
+            assert_eq!(restored.error, turn.error);
+            assert_eq!(restored.assistant, turn.assistant);
+        }
+
+        let legacy: PersistedFlowTurn =
+            serde_json::from_str(r#"{"user":"old question","assistant":"old answer"}"#)
+                .expect("legacy two-field turn must deserialize");
+        assert_eq!(legacy.outcome, PersistedTurnOutcome::Ok);
+        assert_eq!(legacy.error, None);
+    }
+
+    fn snapshot_with(version: u32, turns: Vec<PersistedFlowTurn>) -> PersistedFlowConversation {
+        PersistedFlowConversation {
+            flow_id: "project:test".into(),
+            flow_path: "/w/flows/test.md".into(),
+            saved_at: "2026-07-21T00:00:00Z".into(),
+            version,
+            turns,
+        }
+    }
+
+    /// WP-A4: canonical conversion migrates transitional caption-bearing
+    /// Stopped records to raw text and normalizes outcome/error invariants.
+    #[test]
+    fn canonical_session_turns_migrates_and_normalizes() {
+        let snapshot = snapshot_with(
+            0,
+            vec![
+                // Transitional Phase-A record: caption baked into assistant.
+                PersistedFlowTurn {
+                    user: "stop".into(),
+                    assistant: format!("partial\n\n{FLOW_STOPPED_CAPTION}"),
+                    outcome: PersistedTurnOutcome::Stopped,
+                    error: None,
+                },
+                // Caption-only stopped record (empty raw output).
+                PersistedFlowTurn {
+                    user: "stop2".into(),
+                    assistant: FLOW_STOPPED_CAPTION.into(),
+                    outcome: PersistedTurnOutcome::Stopped,
+                    error: None,
+                },
+                // Failed with blank error → nonblank fallback.
+                PersistedFlowTurn {
+                    user: "fail".into(),
+                    assistant: "partial".into(),
+                    outcome: PersistedTurnOutcome::Failed,
+                    error: Some("   ".into()),
+                },
+                // Stopped with an impossible error → dropped.
+                PersistedFlowTurn {
+                    user: "odd".into(),
+                    assistant: "text".into(),
+                    outcome: PersistedTurnOutcome::Stopped,
+                    error: Some("junk".into()),
+                },
+            ],
+        );
+        let turns = canonical_session_turns(&snapshot);
+        assert_eq!(turns[0].assistant, "partial");
+        assert_eq!(turns[0].outcome, PersistedTurnOutcome::Stopped);
+        assert_eq!(turns[1].assistant, "");
+        assert_eq!(turns[2].error.as_deref(), Some("Flow turn failed"));
+        assert_eq!(turns[3].error, None, "Stopped never carries an error");
+    }
+
+    /// Current-version snapshots are NOT caption-stripped: raw text that
+    /// legitimately ends with the caption phrase stays verbatim.
+    #[test]
+    fn canonical_session_turns_leaves_current_version_raw() {
+        let raw = format!("The literal marker is\n\n{FLOW_STOPPED_CAPTION}");
+        let snapshot = snapshot_with(
+            SNAPSHOT_VERSION,
+            vec![PersistedFlowTurn {
+                user: "u".into(),
+                assistant: raw.clone(),
+                outcome: PersistedTurnOutcome::Stopped,
+                error: None,
+            }],
+        );
+        assert_eq!(canonical_session_turns(&snapshot)[0].assistant, raw);
+    }
+
+    fn turn(user: &str, assistant: &str) -> SessionTurn {
+        SessionTurn {
+            user: user.into(),
+            assistant: assistant.into(),
+            outcome: PersistedTurnOutcome::Ok,
+            error: None,
+        }
+    }
+
+    /// WP-A1: the FIFO store guarantees on-disk order matches enqueue order —
+    /// a newer snapshot can never be replaced by a stale one.
+    #[test]
+    fn conversation_store_newer_snapshot_wins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FlowConversationStore::new(dir.path().to_path_buf());
+        store.persist("project:t", "/w/flows/t.md", vec![turn("q1", "a1")]);
+        store.persist(
+            "project:t",
+            "/w/flows/t.md",
+            vec![turn("q1", "a1"), turn("q2", "a2")],
+        );
+        store.flush();
+        let loaded = load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md")
+            .expect("snapshot present");
+        assert_eq!(loaded.turns.len(), 2, "the newer 2-turn snapshot must win");
+    }
+
+    /// WP-A1: a delete enqueued after a persist is a tombstone — the pending
+    /// persist cannot resurrect the terminated conversation.
+    #[test]
+    fn conversation_store_delete_tombstone_survives_pending_persist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FlowConversationStore::new(dir.path().to_path_buf());
+        store.persist("project:t", "/w/flows/t.md", vec![turn("q1", "a1")]);
+        store.delete("project:t", "/w/flows/t.md");
+        store.flush();
+        assert!(
+            load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md").is_none(),
+            "terminated conversation must stay deleted"
+        );
+    }
+
+    /// Delete reports real I/O failures but treats NotFound as success.
+    #[test]
+    fn delete_treats_missing_files_as_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            delete_persisted_conversation_from(dir.path(), "project:none", "/w/none.md").is_ok()
+        );
+    }
+
+    /// WP-A3: rollup is outcome-aware — stopped/failed partials are labeled
+    /// as partial, and the UI caption never enters the engine prompt.
+    #[test]
+    fn build_turn_task_labels_partial_outcomes_and_excludes_caption() {
+        let turns = vec![
+            SessionTurn {
+                user: "q1".into(),
+                assistant: "full answer".into(),
+                outcome: PersistedTurnOutcome::Ok,
+                error: None,
+            },
+            SessionTurn {
+                user: "q2".into(),
+                assistant: "cut short".into(),
+                outcome: PersistedTurnOutcome::Stopped,
+                error: None,
+            },
+            SessionTurn {
+                user: "q3".into(),
+                assistant: "broke".into(),
+                outcome: PersistedTurnOutcome::Failed,
+                error: Some("transport exploded".into()),
+            },
+        ];
+        let task = build_turn_task(&turns, "next question");
+        assert!(task.contains("Assistant: full answer"));
+        assert!(task.contains("Assistant (partial; turn stopped): cut short"));
+        assert!(task.contains("Assistant (partial; turn failed): broke"));
+        assert!(
+            !task.contains(FLOW_STOPPED_CAPTION),
+            "UI caption must never enter the engine prompt"
+        );
+        assert!(
+            !task.contains("transport exploded"),
+            "transport error text must never enter the engine prompt"
+        );
     }
 
     #[test]
@@ -787,6 +1226,8 @@ mod tests {
             vec![SessionTurn {
                 user: text.to_string(),
                 assistant: format!("re: {text}"),
+                outcome: PersistedTurnOutcome::Ok,
+                error: None,
             }]
         };
         persist_conversation_to(
@@ -833,9 +1274,12 @@ mod tests {
             flow_id: "project:review".into(),
             flow_path: String::new(),
             saved_at: "2026-07-10T00:00:00Z".into(),
+            version: 0,
             turns: vec![PersistedFlowTurn {
                 user: "old question".into(),
                 assistant: "old answer".into(),
+                outcome: PersistedTurnOutcome::Ok,
+                error: None,
             }],
         };
         std::fs::write(&legacy, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
@@ -868,6 +1312,8 @@ mod tests {
         let turns = vec![SessionTurn {
             user: "q".into(),
             assistant: "a".into(),
+            outcome: PersistedTurnOutcome::Ok,
+            error: None,
         }];
         persist_conversation_to(dir.path(), "project:review", "/w/flows/review.md", &turns)
             .expect("persist");
@@ -891,6 +1337,8 @@ mod tests {
         let turns = vec![SessionTurn {
             user: "find bun shell examples".into(),
             assistant: "Here are three repos …".into(),
+            outcome: PersistedTurnOutcome::Ok,
+            error: None,
         }];
         let task = build_turn_task(&turns, "show me the second one");
         assert!(task.starts_with("Conversation so far"));
@@ -906,10 +1354,14 @@ mod tests {
             SessionTurn {
                 user: "oldest".into(),
                 assistant: big.clone(),
+                outcome: PersistedTurnOutcome::Ok,
+                error: None,
             },
             SessionTurn {
                 user: "newest".into(),
                 assistant: big,
+                outcome: PersistedTurnOutcome::Ok,
+                error: None,
             },
         ];
         let task = build_turn_task(&turns, "next");
@@ -969,6 +1421,8 @@ mod tests {
         let turns = vec![SessionTurn {
             user: "find bun shell examples".into(),
             assistant: "Here are three repos …".into(),
+            outcome: PersistedTurnOutcome::Ok,
+            error: None,
         }];
         let rollup = build_turn_task(&turns, "show me the second one");
 

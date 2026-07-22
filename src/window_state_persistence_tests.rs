@@ -152,9 +152,6 @@ mod tests {
                 main_per_display: std::collections::HashMap::new(),
                 notes: None,
                 notes_per_display: std::collections::HashMap::new(),
-                ai: None,
-                ai_per_display: std::collections::HashMap::new(),
-                ai_mini: None,
                 agent_chat: None,
             };
             assert!(save_state_file(&state));

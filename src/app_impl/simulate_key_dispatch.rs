@@ -658,25 +658,27 @@ impl ScriptListApp {
                                         crate::menu_syntax::InlinePickerKeyIntent::Accept,
                                         window,
                                         ctx,
-                                    ) {
-                                        logging::log(
-                                            "STDIN",
-                                            "SimulateKey: Enter - accept menu-syntax object selector",
-                                        );
-                                        return;
-                                    }
+                                    )
+                                {
+                                    logging::log(
+                                        "STDIN",
+                                        "SimulateKey: Enter - accept menu-syntax object selector",
+                                    );
+                                    return;
+                                }
                                 if view.menu_syntax_trigger_picker_owns_main_keyboard()
                                     && view.apply_menu_syntax_trigger_picker_intent(
                                         crate::menu_syntax::InlinePickerKeyIntent::Accept,
                                         window,
                                         ctx,
-                                    ) {
-                                        logging::log(
-                                            "STDIN",
-                                            "SimulateKey: Enter - accept menu-syntax picker",
-                                        );
-                                        return;
-                                    }
+                                    )
+                                {
+                                    logging::log(
+                                        "STDIN",
+                                        "SimulateKey: Enter - accept menu-syntax picker",
+                                    );
+                                    return;
+                                }
                                 if view.try_handle_spine_enter(window, ctx) {
                                     logging::log("STDIN", "SimulateKey: Enter - spine consumed");
                                     return;
@@ -709,9 +711,10 @@ impl ScriptListApp {
                                         crate::menu_syntax::InlinePickerKeyIntent::Close,
                                         window,
                                         ctx,
-                                    ) {
-                                        return;
-                                    }
+                                    )
+                                {
+                                    return;
+                                }
                                 if view.menu_syntax_trigger_picker_owns_main_keyboard() {
                                     if view.menu_syntax_filter_only_escape_should_clear() {
                                         view.clear_filter(window, ctx);
@@ -1985,7 +1988,7 @@ impl ScriptListApp {
                             "SimulateKey: Cmd+N - start new Agent Chat thread (retain current)",
                         );
                         entity_clone.update(ctx, |chat, cx| chat.start_new_thread(cx));
-                    } else let res = {
+                    } else if ({
                         // Spine projection in Agent Chat owns Up/Down for row selection
                         // and Escape to dismiss. These short-circuit before the
                         // legacy actions / cancel-streaming paths.
@@ -2019,7 +2022,7 @@ impl ScriptListApp {
                             );
                         }
                         spine_handled
-                    }; if res {
+                    }) {
                         // Spine handled it; no further action.
                     } else if view.show_actions_popup && key_lower == "escape" {
                         logging::log(
@@ -2042,11 +2045,11 @@ impl ScriptListApp {
                                 "STDIN",
                                 "SimulateKey: Escape - cancel Agent Chat streaming",
                             );
-                        } else let res = {
+                        } else if ({
                             let chat = entity_clone.read(ctx);
                             chat.is_focused_text_mini()
                                 || chat.focused_text_originated_from_quick_prompt()
-                        }; if res {
+                        }) {
                             logging::log(
                                 "STDIN",
                                 "SimulateKey: Escape - hide focused-text quick prompt Agent Chat",

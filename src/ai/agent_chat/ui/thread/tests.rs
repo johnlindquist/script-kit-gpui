@@ -249,6 +249,7 @@ fn test_thread_with_profile(
         notification_debounce: AgentChatNotificationDebounce::default(),
         current_turn_id: 0,
         llm_title_attempted: false,
+        session_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
         available_models: Vec::new(),
         selected_model_id: None,
         selected_model_display_name: None,
@@ -373,6 +374,71 @@ fn completed_turn_ingest_payload_is_not_brain_profile_gated() {
     assert_eq!(payload.turn_index, 0);
     assert_eq!(payload.user_text, "general profile ask");
     assert_eq!(payload.assistant_text, "general profile answer");
+}
+
+/// WP3-C (Oracle phase-b audit P0): a zero-retention thread must produce NO
+/// automatic memory — the Brain ingest + day-trace payload is retention just
+/// like the history files, and it used to be built unconditionally.
+#[test]
+fn zero_retention_thread_produces_no_brain_ingest_payload() {
+    use crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy;
+
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    thread.push_message(AgentChatThreadMessageRole::User, "quick question");
+    thread.push_message(AgentChatThreadMessageRole::Assistant, "quick answer");
+
+    assert!(
+        thread
+            .completed_chat_turn_ingest(Some("label".to_string()))
+            .is_none(),
+        "zero-retention turns must not become Brain memories or day traces"
+    );
+
+    thread.set_session_policy_test(AgentChatSessionPolicy::Full);
+    assert!(
+        thread.completed_chat_turn_ingest(None).is_some(),
+        "retention-enabled turns still produce the ingest payload"
+    );
+}
+
+/// WP-B1: a finished Quick AI turn performs ZERO automatic egress. Asserts the
+/// three thread-owned policy helpers deny (transcript retention, retained-thread
+/// reuse, fork state), that the Brain/day-trace ingest payload is suppressed,
+/// and that a Full thread retains all three — the policy is the sole authority.
+#[test]
+fn quick_ai_turn_finished_has_zero_automatic_egress() {
+    use crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy;
+
+    // Policy helpers: Quick AI denies every automatic egress vector.
+    let quick = AgentChatSessionPolicy::QuickAi;
+    assert!(!quick.allows_automatic_transcript_retention());
+    assert!(!quick.allows_retained_thread_reuse());
+    assert!(!quick.allows_fork_state());
+
+    let full = AgentChatSessionPolicy::Full;
+    assert!(full.allows_automatic_transcript_retention());
+    assert!(full.allows_retained_thread_reuse());
+    assert!(full.allows_fork_state());
+
+    // Ingest payload gate: a completed Quick AI turn produces no Brain memory
+    // or day-trace payload; the thread's live policy is the gate.
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    thread.push_message(AgentChatThreadMessageRole::User, "quick question");
+    thread.push_message(AgentChatThreadMessageRole::Assistant, "quick answer");
+    assert!(
+        thread.completed_chat_turn_ingest(None).is_none(),
+        "Quick AI turn must not produce an automatic ingest payload",
+    );
+    assert_eq!(
+        thread.session_policy_test(),
+        AgentChatSessionPolicy::QuickAi
+    );
+
+    // Fork gate: the TurnFinished path only refreshes fork points when the
+    // policy allows fork state — Quick AI never does.
+    assert!(!thread.session_policy_test().allows_fork_state());
 }
 
 #[test]
@@ -1760,4 +1826,424 @@ fn replace_pending_context_parts_clears_previous_parts_and_resets_consumption() 
         !thread.queued_submit_while_bootstrapping,
         "replacement should clear stale queued submit state"
     );
+}
+
+// ── WP-B2: context/tool admission boundary ───────────────────────────────
+
+use crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy;
+
+fn file_context_part() -> AiContextPart {
+    AiContextPart::FilePath {
+        path: "/tmp/secret.txt".to_string(),
+        label: "secret.txt".to_string(),
+    }
+}
+
+fn skill_context_part() -> AiContextPart {
+    AiContextPart::SkillFile {
+        path: "/tmp/skill.md".to_string(),
+        label: "Deploy".to_string(),
+        skill_name: "deploy".to_string(),
+        owner_label: "owner".to_string(),
+        slash_name: "deploy".to_string(),
+    }
+}
+
+fn tool_started(tool_name: &str) -> AgentChatEvent {
+    AgentChatEvent::ToolCallStarted {
+        tool_call_id: "tc-1".to_string(),
+        title: "Run".to_string(),
+        status: "in_progress".to_string(),
+        tool_name: Some(tool_name.to_string()),
+        raw_input: Some(serde_json::json!({ "command": "rm -rf /" })),
+    }
+}
+
+/// WP-B2: the constructor is a context ingress — a Quick AI launch drops every
+/// forbidden initial part, while a Full launch keeps them.
+#[test]
+fn quick_ai_init_rejects_nonempty_context_parts() {
+    let parts = vec![file_context_part(), skill_context_part()];
+    let denied = AgentChatThread::filter_admissible_parts_for_policy(
+        AgentChatSessionPolicy::QuickAi,
+        parts.clone(),
+    );
+    assert!(
+        denied.is_empty(),
+        "Quick AI must be born holding zero context parts"
+    );
+    let kept = AgentChatThread::filter_admissible_parts_for_policy(
+        AgentChatSessionPolicy::Full,
+        parts.clone(),
+    );
+    assert_eq!(kept.len(), parts.len(), "Full keeps every initial part");
+}
+
+/// WP-B2: a draft captured on a Full surface cannot smuggle its context into a
+/// Quick AI thread on restore.
+#[test]
+fn quick_ai_restore_draft_rejects_cross_policy_context() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    thread.restore_draft_snapshot_inner(AgentChatThreadDraftSnapshot {
+        input: "what is rust".to_string(),
+        input_cursor: 0,
+        pending_context_parts: vec![file_context_part()],
+        pending_context_consumed: false,
+    });
+    assert_eq!(thread.input.text(), "what is rust");
+    assert!(
+        thread.pending_context_parts().is_empty(),
+        "cross-policy draft context must be stripped on restore"
+    );
+
+    // A Full thread keeps the restored context.
+    let mut full = test_thread(Vec::new(), false);
+    full.restore_draft_snapshot_inner(AgentChatThreadDraftSnapshot {
+        input: "keep".to_string(),
+        input_cursor: 0,
+        pending_context_parts: vec![file_context_part()],
+        pending_context_consumed: false,
+    });
+    assert_eq!(full.pending_context_parts().len(), 1);
+}
+
+/// WP-B2: even if a part is force-planted into pending state, queueing the
+/// composer strips it so a later dequeue cannot resurrect forbidden context.
+#[test]
+fn quick_ai_queue_cannot_smuggle_context() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    // Bypass the ingress guard to simulate a smuggled part already resident.
+    thread.add_context_part_test(file_context_part());
+    assert_eq!(thread.pending_context_parts().len(), 1);
+
+    thread.queue_current_composer("follow up".to_string());
+    let queued = thread.queued_messages();
+    assert_eq!(queued.len(), 1);
+    assert!(
+        queued[0].context_parts.is_empty(),
+        "queued message must carry no forbidden context forward"
+    );
+}
+
+/// WP-B2: the provider boundary sees no context blocks for a Quick AI turn.
+#[test]
+fn quick_ai_turn_request_contains_no_context_blocks() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    // Replace routes through the filtering ingress → denied → empty.
+    thread.replace_pending_context_parts_test(vec![file_context_part()], "test");
+    assert!(thread.pending_context_parts().is_empty());
+
+    let blocks = thread.prepare_turn_blocks("what is rust");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "only the user-text block reaches the provider"
+    );
+    match &blocks[0] {
+        ContentBlock::Text(text) => assert_eq!(text.text, "what is rust"),
+        other => panic!("expected a single user-text block, got {other:?}"),
+    }
+}
+
+/// WP-B2: the turn request carries the web-search-only tool policy for Quick AI
+/// and the full policy otherwise.
+#[test]
+fn quick_ai_turn_request_has_web_search_only_tool_policy() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    let request = thread.turn_request(vec![ContentBlock::Text(TextContent::new("hi"))]);
+    assert_eq!(request.tool_policy, AgentChatToolPolicy::WebSearchOnly);
+
+    thread.set_session_policy_test(AgentChatSessionPolicy::Full);
+    let request = thread.turn_request(vec![ContentBlock::Text(TextContent::new("hi"))]);
+    assert_eq!(request.tool_policy, AgentChatToolPolicy::Full);
+}
+
+/// WP-B2: a forbidden tool-call start fails the turn closed and never renders
+/// the tool call (nor its raw args).
+#[test]
+fn quick_ai_forbidden_tool_event_fails_closed() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    thread.push_message(AgentChatThreadMessageRole::User, "run a command");
+
+    thread.apply_event_test(tool_started("bash"));
+
+    assert_eq!(thread.status, AgentChatThreadStatus::Error);
+    assert!(
+        thread.active_tool_calls().is_empty(),
+        "a forbidden tool call must never be tracked/rendered"
+    );
+
+    // The canonical web-search tool is allowed and IS tracked.
+    let mut allowed = test_thread(Vec::new(), false);
+    allowed.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    allowed.apply_event_test(tool_started("web_search"));
+    assert_eq!(allowed.active_tool_calls().len(), 1);
+    assert_ne!(allowed.status, AgentChatThreadStatus::Error);
+}
+
+/// WP-B2: a web-search-only session never presents a permission prompt — its
+/// single tool needs no approval, so the listener rejects any request.
+#[test]
+fn quick_ai_forbidden_permission_request_is_never_presented() {
+    let quick = AgentChatSessionPolicy::QuickAi;
+    assert!(!quick.tool_policy().allows_permission_prompts());
+    let full = AgentChatSessionPolicy::Full;
+    assert!(full.tool_policy().allows_permission_prompts());
+}
+
+/// WP-B2: skills are denied for Quick AI (Oracle seat 2 overrules the earlier
+/// slash-skill allowance) and admitted for Full.
+#[test]
+fn quick_ai_skill_file_is_denied_or_promotes_to_full() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    assert!(thread.admit_context_part(&skill_context_part()).is_err());
+
+    thread.set_session_policy_test(AgentChatSessionPolicy::Full);
+    assert!(thread.admit_context_part(&skill_context_part()).is_ok());
+}
+
+/// WP-B2: literal flow text (`-`) typed into the composer stays plain user
+/// text — it is never converted into a context part.
+#[test]
+fn quick_ai_literal_flow_staging_remains_plain_user_text() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    thread.input.set_text("- deploy the app");
+
+    let blocks = thread.prepare_turn_blocks("- deploy the app");
+    assert!(
+        thread.pending_context_parts().is_empty(),
+        "literal flow text must not become a context part"
+    );
+    assert_eq!(blocks.len(), 1);
+    match &blocks[0] {
+        ContentBlock::Text(text) => assert_eq!(text.text, "- deploy the app"),
+        other => panic!("expected plain user text, got {other:?}"),
+    }
+}
+
+// ===========================================================================
+// WP-B3 real-stream behavior contracts
+//
+// These drive the SAME reduction the live `bind_stream` drain task feeds — the
+// `StreamingTextBuffer` push/drain and `append_assistant_stream_delta` /
+// `append_chunk` coalescing — synchronously, so they are deterministic (the
+// live 16 ms `smol::Timer` drain loop cannot run under gpui's deterministic
+// test scheduler; the channel+spawn ingress is exercised end-to-end by the
+// runtime probes). Every assertion is on the EXACT final source text/bytes.
+// ===========================================================================
+
+/// Drive the real per-tick drain to completion, exactly as the live drain task
+/// loops it, and return how many drain ticks committed visible text.
+fn drain_streaming_to_completion(thread: &mut AgentChatThread) -> usize {
+    let mut committing_ticks = 0;
+    // Safety bound: far above any realistic backlog, guards a logic bug from
+    // hanging the test rather than looping forever.
+    for _ in 0..100_000 {
+        if thread.streaming_text_buffer.is_empty() {
+            break;
+        }
+        if thread.drain_streaming_text_once() {
+            committing_ticks += 1;
+        }
+    }
+    committing_ticks
+}
+
+/// The last assistant row's exact body text.
+fn assistant_body(thread: &AgentChatThread) -> String {
+    thread
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == AgentChatThreadMessageRole::Assistant)
+        .map(|m| m.body.to_string())
+        .unwrap_or_default()
+}
+
+#[test]
+fn agent_real_stream_preserves_exact_final_utf8_bytes() {
+    let mut thread = test_thread(Vec::new(), false);
+    // Multi-byte graphemes split across arbitrary chunk boundaries, markdown
+    // delimiters crossing chunks, plus an empty delta in the middle.
+    let chunks = [
+        "The **caf",
+        "é** ",
+        "",
+        "— 日本",
+        "語 — 🚀 dep",
+        "loys `na",
+        "ïve()`",
+    ];
+    let expected: String = chunks.concat();
+    for chunk in chunks {
+        thread.streaming_text_buffer.push_chunk(chunk.to_string());
+    }
+    drain_streaming_to_completion(&mut thread);
+
+    let body = assistant_body(&thread);
+    // Exact final bytes, not a length check — a mid-grapheme split would either
+    // panic in the drain or corrupt the bytes here.
+    assert_eq!(body, expected);
+    assert_eq!(body.as_bytes(), expected.as_bytes());
+}
+
+#[test]
+fn agent_queue_preserves_order_and_no_duplicate_text() {
+    let mut thread = test_thread(Vec::new(), false);
+    // Interleave pushes and drains within (simulated) separate ticks — several
+    // deltas can arrive inside one drain window and later ones after.
+    thread.streaming_text_buffer.push_chunk("one ".to_string());
+    thread.streaming_text_buffer.push_chunk("two ".to_string());
+    drain_streaming_to_completion(&mut thread);
+    thread
+        .streaming_text_buffer
+        .push_chunk("three ".to_string());
+    thread.streaming_text_buffer.push_chunk("four".to_string());
+    drain_streaming_to_completion(&mut thread);
+
+    assert_eq!(assistant_body(&thread), "one two three four");
+    // Exactly one assistant row — deltas coalesce, they never spawn duplicates.
+    let assistant_rows = thread
+        .messages
+        .iter()
+        .filter(|m| m.role == AgentChatThreadMessageRole::Assistant)
+        .count();
+    assert_eq!(
+        assistant_rows, 1,
+        "streaming deltas must not duplicate rows"
+    );
+}
+
+#[test]
+fn agent_terminal_flush_commits_exact_tail_once() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread
+        .streaming_text_buffer
+        .push_chunk("partial reveal then ".to_string());
+    // One drain tick reveals a prefix, then a terminal event flushes the rest
+    // before the next scheduled drain would have run.
+    let _ = thread.drain_streaming_text_once();
+    thread
+        .streaming_text_buffer
+        .push_chunk("the exact tail.".to_string());
+    let flushed = thread.flush_streaming_text_buffer();
+    assert!(flushed, "a non-empty terminal flush commits");
+
+    assert_eq!(
+        assistant_body(&thread),
+        "partial reveal then the exact tail."
+    );
+    // A second flush with an empty buffer must be a no-op (tail committed once).
+    assert!(!thread.flush_streaming_text_buffer());
+    assert_eq!(
+        assistant_body(&thread),
+        "partial reveal then the exact tail."
+    );
+}
+
+#[test]
+fn agent_history_resume_forces_full_reset_without_duplicate_rows() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.push_message(AgentChatThreadMessageRole::User, "first ask");
+    thread.push_message(AgentChatThreadMessageRole::Assistant, "first answer");
+    // A history resume bumps the transcript generation and repopulates rows;
+    // the freshly streamed assistant text must land in ONE new row, never
+    // re-append onto the resumed history row.
+    thread.bump_transcript_generation("history_resume_test");
+    thread.push_message(AgentChatThreadMessageRole::User, "second ask");
+    thread
+        .streaming_text_buffer
+        .push_chunk("second answer".to_string());
+    drain_streaming_to_completion(&mut thread);
+
+    assert_eq!(assistant_body(&thread), "second answer");
+    let answers: Vec<&str> = thread
+        .messages
+        .iter()
+        .filter(|m| m.role == AgentChatThreadMessageRole::Assistant)
+        .map(|m| m.body.as_ref())
+        .collect();
+    assert_eq!(answers, vec!["first answer", "second answer"]);
+}
+
+#[test]
+fn agent_fork_forces_full_reset_without_stale_append() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.push_message(AgentChatThreadMessageRole::User, "first ask");
+    thread.push_message(AgentChatThreadMessageRole::Assistant, "stale answer");
+    thread.push_message(AgentChatThreadMessageRole::User, "second ask");
+    // Stage a fork at the second user turn, then a ForkCompleted truncates back
+    // and stages the edited text into the composer.
+    thread.pending_fork_ordinal = Some(1);
+    thread.apply_event_test(AgentChatEvent::ForkCompleted {
+        text: "second ask".to_string(),
+    });
+    // The user re-submits the edited turn (a fresh User row), then a new answer
+    // streams. It must open a FRESH assistant row, never re-append onto any
+    // pre-fork assistant row.
+    thread.push_message(AgentChatThreadMessageRole::User, "second ask edited");
+    thread
+        .streaming_text_buffer
+        .push_chunk("fresh answer".to_string());
+    drain_streaming_to_completion(&mut thread);
+
+    assert_eq!(assistant_body(&thread), "fresh answer");
+    assert!(
+        !thread
+            .messages
+            .iter()
+            .any(|m| m.body.as_ref().contains("stale answerfresh answer")),
+        "streamed text must not re-append onto a forked-away row"
+    );
+}
+
+// ---- WP-B3 text-engine append contracts (bin target: `text_append`) -------
+
+#[gpui::test]
+fn text_append_updates_logical_and_parsed_source(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let state = cx.new(|cx| gpui_component::text::TextViewState::markdown_immediate("Hello ", cx));
+    state.update(cx, |state, cx| {
+        state.push_str_immediate("brave ", cx);
+        state.push_str_immediate("new world", cx);
+        assert_eq!(state.source_string_for_test(), "Hello brave new world");
+    });
+}
+
+#[gpui::test]
+fn text_full_then_append_coalescing_does_not_duplicate_source(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let state = cx.new(|cx| gpui_component::text::TextViewState::markdown_immediate("", cx));
+    state.update(cx, |state, cx| {
+        // A full replacement, then a streaming append — the prefix must appear
+        // exactly once (the coalescer/transactional-append bug would duplicate).
+        state.set_markdown_text_immediate("Base document.", cx);
+        state.push_str_immediate(" Streamed tail.", cx);
+        assert_eq!(
+            state.source_string_for_test(),
+            "Base document. Streamed tail."
+        );
+    });
+}
+
+#[gpui::test]
+fn text_append_then_full_replacement_wins(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let state = cx.new(|cx| gpui_component::text::TextViewState::markdown_immediate("start", cx));
+    state.update(cx, |state, cx| {
+        state.push_str_immediate(" appended", cx);
+        // A subsequent full replacement wins outright — no residue of the append.
+        state.set_markdown_text_immediate("completely replaced", cx);
+        assert_eq!(state.source_string_for_test(), "completely replaced");
+    });
 }

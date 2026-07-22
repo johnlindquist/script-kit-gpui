@@ -6566,7 +6566,8 @@ mod capture_mode_tests {
 #[cfg(test)]
 mod active_flow_session_section_tests {
     use super::*;
-    use crate::brain::{InboxItem, InboxKind, RootBrainInboxSectionOptions};
+    use crate::brain::inbox::InboxKind;
+    use crate::brain::{InboxItem, RootBrainInboxSectionOptions};
     use crate::flows::model::{FlowDescriptor, FlowSource};
     use crate::flows::session::{FlowSessionMeta, SessionState, SessionTransport};
 
@@ -6666,7 +6667,8 @@ mod active_flow_session_section_tests {
 #[cfg(test)]
 mod brain_inbox_section_tests {
     use super::*;
-    use crate::brain::{InboxItem, InboxKind, RootBrainInboxSectionOptions};
+    use crate::brain::inbox::InboxKind;
+    use crate::brain::{InboxItem, RootBrainInboxSectionOptions};
 
     const NOW: i64 = 1_000_000;
 

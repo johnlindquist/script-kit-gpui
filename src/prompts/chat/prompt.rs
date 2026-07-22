@@ -78,23 +78,13 @@ pub struct ChatPrompt {
     pub(super) pending_image_render: Option<Arc<RenderImage>>,
     pub(super) image_render_cache: HashMap<String, Arc<RenderImage>>,
     pub(super) pasted_text_tokens: Vec<crate::pasted_text::PastedTextToken>,
-    /// When true, renders input as a borderless text field (cursor + text + placeholder only).
-    pub(super) mini_mode: bool,
-    /// When true, Escape always invokes `on_escape`, even mid-stream. Hosts
-    /// with an external transport (flow sessions) own stop semantics — Esc
-    /// must background, never half-stop the visual stream.
-    pub(super) escape_over_stop: bool,
-    /// When true, the host renders the footer (native main-window footer);
-    /// the internal hint strip and model label are suppressed.
-    pub(super) external_footer: bool,
-    /// When true, the host renders the surface header (identity + state);
-    /// the internal back-arrow/title header is suppressed so the surface
-    /// never shows two stacked titles.
-    pub(super) external_header: bool,
-    /// When true, the host owns the composer (the shared main input, with
-    /// all its context-attachment features); the internal input area is
-    /// suppressed and this surface renders transcript only.
-    pub(super) external_input: bool,
+    /// Exhaustive host mode: the prompt is either fully self-hosted
+    /// (`Standalone`, owning header/input/footer/keys, optionally mini) or a
+    /// pure transcript body (`TranscriptOnly`, with an external host owning
+    /// all chrome + lifecycle). Replaces the old independent booleans
+    /// `mini_mode`/`escape_over_stop`/`external_header`/`external_input`/
+    /// `external_footer` that allowed incoherent combinations.
+    pub(super) host_mode: ChatPromptHostMode,
     /// Hosted empty state: replaces the stock starter chips with the
     /// hosting agent's own purpose line (flow sessions).
     pub(super) empty_state_note: Option<String>,
@@ -134,7 +124,13 @@ impl ChatPrompt {
             on_continue: None,
             on_retry: None,
             theme,
-            turns_list_state: ListState::new(0, ListAlignment::Bottom, px(200.0)).measure_all(),
+            turns_list_state: {
+                // WP-B3: chat prompt (Quick AI / Flow chat) transcript list —
+                // opt into the hot-counters so its layout passes are attributable.
+                let ls = ListState::new(0, ListAlignment::Bottom, px(200.0)).measure_all();
+                ls.set_hot_metered(true);
+                ls
+            },
             prompt_colors,
             conversation_turns_cache: Arc::new(Vec::new()),
             conversation_turns_dirty: true,
@@ -174,11 +170,7 @@ impl ChatPrompt {
             pending_image_render: None,
             image_render_cache: HashMap::new(),
             pasted_text_tokens: Vec::new(),
-            mini_mode: false,
-            escape_over_stop: false,
-            external_footer: false,
-            external_header: false,
-            external_input: false,
+            host_mode: ChatPromptHostMode::Standalone { mini: false },
             empty_state_note: None,
         }
     }
@@ -188,8 +180,30 @@ impl ChatPrompt {
         self.on_show_actions = Some(callback);
     }
 
+    /// The exhaustive host mode (Standalone vs TranscriptOnly).
+    pub fn host_mode(&self) -> ChatPromptHostMode {
+        self.host_mode
+    }
+
+    /// Whether the standalone prompt renders the borderless mini chrome.
+    /// A transcript-only host owns its own chrome, so this is always false
+    /// there.
+    pub(super) fn mini_mode(&self) -> bool {
+        self.host_mode.mini()
+    }
+
+    /// Whether an external host owns all chrome + keys (transcript body only).
+    pub(super) fn is_transcript_only(&self) -> bool {
+        self.host_mode.is_transcript_only()
+    }
+
+    /// Toggle mini chrome on a standalone prompt (e.g. main-window
+    /// mini/full transitions). A transcript-only host owns its own chrome,
+    /// so mini never applies and this is a no-op there.
     pub fn set_mini_mode(&mut self, mini: bool) {
-        self.mini_mode = mini;
+        if let ChatPromptHostMode::Standalone { mini: current } = &mut self.host_mode {
+            *current = mini;
+        }
     }
 
     pub fn set_input(&mut self, text: String, cx: &mut Context<Self>) {
@@ -212,10 +226,41 @@ impl ChatPrompt {
         self.handle_submit(cx);
     }
 
-    /// Enable mini mode — renders input as a borderless text field matching the mini main window.
+    /// Enable mini mode — renders input as a borderless text field matching the
+    /// mini main window. This mutates the mini flag ONLY when the host is
+    /// already `Standalone`; on a `TranscriptOnly` host it is a no-op (C-R2
+    /// builder-order bug: it used to `set_host_mode(Standalone { mini })`,
+    /// silently converting a transcript-only host back to a self-hosted one
+    /// regardless of builder order).
     pub fn with_mini_mode(mut self, mini: bool) -> Self {
-        self.mini_mode = mini;
+        self.set_mini_mode(mini);
         self
+    }
+
+    /// Set the exhaustive host mode. Applies the transcript alignment and,
+    /// for a transcript-only host, cancels the first-render auto-focus so the
+    /// suppressed internal input never steals focus from the host's composer.
+    pub fn with_host_mode(mut self, mode: ChatPromptHostMode) -> Self {
+        self.set_host_mode(mode);
+        self
+    }
+
+    fn set_host_mode(&mut self, mode: ChatPromptHostMode) {
+        self.host_mode = mode;
+        match mode {
+            ChatPromptHostMode::Standalone { .. } => {}
+            ChatPromptHostMode::TranscriptOnly { alignment } => {
+                // The host owns the composer; the suppressed internal input
+                // must never grab focus on first render.
+                self.pending_auto_focus = false;
+                let list_alignment = match alignment {
+                    ChatTranscriptAlignment::Bottom => ListAlignment::Bottom,
+                    ChatTranscriptAlignment::Top => ListAlignment::Top,
+                };
+                self.turns_list_state = ListState::new(0, list_alignment, px(200.0)).measure_all();
+                self.turns_list_state.set_hot_metered(true);
+            }
+        }
     }
 
     /// Set the callback for running a generated script path in the parent app.
@@ -337,54 +382,10 @@ impl ChatPrompt {
         self
     }
 
-    /// Escape always fires `on_escape`, even while a response is streaming.
-    /// For hosts whose transport outlives the visual stream (flow sessions):
-    /// Esc backgrounds; stopping is an explicit host verb.
-    pub fn with_escape_over_stop(mut self, enabled: bool) -> Self {
-        self.escape_over_stop = enabled;
-        self
-    }
-
-    /// The host owns the footer (native main-window footer). Suppresses the
-    /// internal hint strip so the surface never shows two footers or a model
-    /// label that belongs to a different transport.
-    pub fn with_external_footer(mut self, enabled: bool) -> Self {
-        self.external_footer = enabled;
-        self
-    }
-
-    /// The host owns the surface header (identity + state chips). Suppresses
-    /// the internal back-arrow/title header — one header, never two.
-    pub fn with_external_header(mut self, enabled: bool) -> Self {
-        self.external_header = enabled;
-        self
-    }
-
-    /// The host owns the composer — the shared MAIN input with its
-    /// established context-attachment features. Suppresses the internal
-    /// input area; this surface renders the transcript only. Also cancels
-    /// the first-render auto-focus: the suppressed internal input must
-    /// never steal focus from the host's composer.
-    pub fn with_external_input(mut self, enabled: bool) -> Self {
-        self.external_input = enabled;
-        if enabled {
-            self.pending_auto_focus = false;
-        }
-        self
-    }
-
     /// Empty-state purpose line for hosted surfaces (replaces the stock
     /// conversation-starter chips).
     pub fn with_empty_state_note(mut self, note: impl Into<String>) -> Self {
         self.empty_state_note = Some(note.into());
-        self
-    }
-
-    /// Anchor the transcript to the TOP of the messages area. With the
-    /// composer at the top, a short conversation must read top-down right
-    /// under it — bottom anchoring leaves a dead void between them.
-    pub fn with_top_aligned_turns(mut self) -> Self {
-        self.turns_list_state = ListState::new(0, ListAlignment::Top, px(200.0)).measure_all();
         self
     }
 

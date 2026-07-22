@@ -115,7 +115,7 @@ fn notes_embedded_agent_chat_registers_notes_parented_ai_identity() {
     assert!(NOTES_AGENT_CHAT_HOST_SOURCE.contains("\"notes:ai\""));
     assert!(NOTES_AGENT_CHAT_HOST_SOURCE
         .contains("fn sync_notes_embedded_agent_chat_automation_window("));
-    assert!(NOTES_AGENT_CHAT_HOST_SOURCE.contains("AutomationWindowKind::Ai"));
+    assert!(NOTES_AGENT_CHAT_HOST_SOURCE.contains("AutomationWindowKind::AgentChatDetached"));
     assert!(NOTES_AGENT_CHAT_HOST_SOURCE.contains("parent_window_id: Some(\"notes\".to_string())"));
     assert!(NOTES_AGENT_CHAT_HOST_SOURCE
         .contains("parent_kind: Some(crate::protocol::AutomationWindowKind::Notes)"));

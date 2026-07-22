@@ -45,7 +45,7 @@ use super::types::{
     AgentChatDismissedComposerPickerTrigger, AgentChatFocusedMentionPreview,
     AgentChatPendingPortalSession,
 };
-use super::ui_variant::{AgentChatComposerPlacement, AgentChatUiVariant};
+use super::ui_variant::{AgentChatChromeDensity, AgentChatUiVariant};
 use super::{
     AgentChatApprovalOption, AgentChatApprovalPreview, AgentChatApprovalPreviewKind,
     AgentChatApprovalRequest,
@@ -378,6 +378,13 @@ pub(crate) struct AgentChatFooterSnapshot {
     pub(crate) status_text: Option<&'static str>,
     pub(crate) buttons: Vec<AgentChatFooterButtonSpec>,
     pub(crate) cwd_display: Option<String>,
+    /// C-R3: capability-shaped footer. When the policy denies history
+    /// (Quick AI), the `⌘P History` slot is omitted entirely rather than
+    /// rendered-and-refused.
+    pub(crate) show_history: bool,
+    /// C-R3: when the policy denies profile/model switching (Quick AI), the
+    /// profile chip is inert text — no clickable `FooterAction::Ai`.
+    pub(crate) profile_switch_enabled: bool,
 }
 
 impl AgentChatFooterSnapshot {
@@ -414,7 +421,11 @@ impl AgentChatFooterSnapshot {
             keycap: None,
             bold_label: false,
             spinner_glyph: None,
-            action: Some(crate::footer_popup::FooterAction::Ai),
+            // C-R3: inert profile chip when profile switching is denied — no
+            // clickable FooterAction::Ai reaches the profile picker.
+            action: self
+                .profile_switch_enabled
+                .then_some(crate::footer_popup::FooterAction::Ai),
             selected: false,
             cwd_chip,
         }
@@ -612,6 +623,202 @@ struct PermissionPreviewChrome {
     subject_text_rgba: u32,
 }
 
+/// The single footer owner an Agent Chat surface reconciles to per frame (C-R5).
+///
+/// This is the imperative counterpart to
+/// [`crate::ai::agent_chat::ui::layout::AgentChatFooterPresentation`]: the
+/// presentation says WHAT band is reserved; the owner says WHO drives the
+/// native host and owns the transition side-effects (install / clear). Routing
+/// every footer branch (normal, setup, runtime-setup, FocusedTextMini,
+/// bottom-dock) through the one reconcile step guarantees a single owner is
+/// live at a time — a detached window can never leave an orphan native footer
+/// host behind after switching to an inline rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentChatFooterOwner {
+    /// An external host (portal / prompt shell) owns the footer.
+    External,
+    /// The native footer popup owns the pixels; the shell reserves a spacer.
+    Native,
+    /// Agent Chat renders its own in-flow config rail.
+    Inline,
+}
+
+impl AgentChatFooterOwner {
+    fn from_presentation(
+        presentation: crate::ai::agent_chat::ui::layout::AgentChatFooterPresentation,
+    ) -> Self {
+        use crate::ai::agent_chat::ui::layout::AgentChatFooterPresentation;
+        match presentation {
+            AgentChatFooterPresentation::ExternalHost => Self::External,
+            AgentChatFooterPresentation::NativeSpacer => Self::Native,
+            AgentChatFooterPresentation::InlineConfigRail => Self::Inline,
+        }
+    }
+
+    /// The automation string repr, consumed by the layout probe.
+    fn automation_repr(self) -> &'static str {
+        match self {
+            Self::External => "external",
+            Self::Native => "native",
+            Self::Inline => "inline",
+        }
+    }
+
+    /// How many in-shell footer bands this owner reserves — 0 for External, 1
+    /// for Native/Inline. Mirrors `AgentChatFooterPresentation::reserved_band_count`.
+    fn reserved_band_count(self) -> usize {
+        match self {
+            Self::External => 0,
+            Self::Native | Self::Inline => 1,
+        }
+    }
+}
+
+/// The pure outcome of transitioning the footer owner from `previous` to
+/// `desired`. Kept side-effect-free so the whole transition matrix is covered
+/// by unit tests: exactly one owner survives, the native host is explicitly
+/// cleared on any Native→non-Native move, and the reserved band count is 0 only
+/// for External.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentChatFooterOwnerTransition {
+    owner: AgentChatFooterOwner,
+    /// The native footer host must be explicitly torn down this frame.
+    clears_native_host: bool,
+    reserved_bands: usize,
+}
+
+/// The memoized native-footer presentation state (BC-2, Oracle seat 3). Captures
+/// everything a footer lifecycle side-effect depends on: the resolved owner, the
+/// host-window class (native side-effects apply only to detached windows), and
+/// the synced native config (`Some` only while a detached window owns the native
+/// footer). `transition_footer_owner` compares the next state against this so it
+/// installs / tears down / re-syncs the native host ONLY on an actual change,
+/// instead of re-driving those side-effects every render frame.
+#[derive(Clone, PartialEq)]
+struct AgentChatFooterPresentationState {
+    owner: AgentChatFooterOwner,
+    is_main_window: bool,
+    native_config: Option<crate::footer_popup::MainWindowFooterConfig>,
+}
+
+/// The pure native-footer lifecycle decision for a presentation transition
+/// (BC-2, Oracle seat 3). Kept side-effect-free so the memoization matrix is
+/// unit-tested: an unchanged presentation does nothing; leaving a detached
+/// native footer tears the previous host down; entering (or re-configuring) a
+/// detached native footer syncs it. Only DETACHED windows carry native
+/// side-effects — the embedded main window's native footer is owned elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeFooterLifecycle {
+    /// The presentation is byte-for-byte identical to the last applied one — no
+    /// side-effects run this frame (this is what stops the per-frame re-sync).
+    unchanged: bool,
+    /// Tear down the detached native footer host installed by the previous
+    /// presentation (and drop its action listener).
+    tear_down_previous_native: bool,
+    /// Ensure the action listener and sync the native popup for the next
+    /// presentation.
+    sync_next_native: bool,
+}
+
+fn plan_native_footer_lifecycle(
+    previous: Option<&AgentChatFooterPresentationState>,
+    next: &AgentChatFooterPresentationState,
+) -> NativeFooterLifecycle {
+    if previous == Some(next) {
+        return NativeFooterLifecycle {
+            unchanged: true,
+            tear_down_previous_native: false,
+            sync_next_native: false,
+        };
+    }
+    let previous_installed_detached_native = previous
+        .is_some_and(|prev| prev.owner == AgentChatFooterOwner::Native && !prev.is_main_window);
+    let next_owns_detached_native =
+        next.owner == AgentChatFooterOwner::Native && !next.is_main_window;
+    NativeFooterLifecycle {
+        unchanged: false,
+        tear_down_previous_native: previous_installed_detached_native && !next_owns_detached_native,
+        sync_next_native: next_owns_detached_native,
+    }
+}
+
+fn plan_footer_owner_transition(
+    previous: Option<AgentChatFooterOwner>,
+    desired: AgentChatFooterOwner,
+) -> AgentChatFooterOwnerTransition {
+    // Leaving Native for any non-native owner requires an explicit host
+    // teardown; entering or staying Native re-syncs the host instead.
+    let clears_native_host =
+        previous == Some(AgentChatFooterOwner::Native) && desired != AgentChatFooterOwner::Native;
+    AgentChatFooterOwnerTransition {
+        owner: desired,
+        clears_native_host,
+        reserved_bands: desired.reserved_band_count(),
+    }
+}
+
+/// The footer owner a render plan reconciles to. The conversation shell maps
+/// its resolved footer presentation to an owner; every other body (setup,
+/// runtime-setup, focused-text mini) reserves no in-shell band and reconciles
+/// to `External`, which tears down any orphan native footer host on a detached
+/// window while leaving the host window's own native footer surface untouched.
+fn desired_footer_owner_for_plan(
+    plan: crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan,
+) -> AgentChatFooterOwner {
+    if plan.body.renders_conversation_shell() {
+        AgentChatFooterOwner::from_presentation(plan.footer)
+    } else {
+        AgentChatFooterOwner::External
+    }
+}
+
+/// The automation-facing projection of the resolved render plan (C-R7). Both
+/// `automation_layout_info` and the layout probe consume this SINGLE
+/// projection, so the measured geometry is always a function of the same plan
+/// the renderer paints — a setup or focused-text body can never report the
+/// conversation geometry it does not render. Every field is a plain string /
+/// scalar so it serialises straight into the automation receipt.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentChatAutomationProjection {
+    pub(crate) body_kind: &'static str,
+    pub(crate) composer_slot: &'static str,
+    pub(crate) transcript_anchor: &'static str,
+    pub(crate) density: &'static str,
+    pub(crate) footer_owner: &'static str,
+    pub(crate) reserved_footer_bands: usize,
+    pub(crate) show_sidecar: bool,
+    pub(crate) show_variant_badge: bool,
+}
+
+impl AgentChatAutomationProjection {
+    fn from_plan(plan: crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan) -> Self {
+        use crate::ai::agent_chat::ui::layout::{AgentChatComposerSlot, AgentChatTranscriptAnchor};
+        use crate::ai::agent_chat::ui::ui_variant::AgentChatChromeDensity;
+        let owner = desired_footer_owner_for_plan(plan);
+        Self {
+            body_kind: plan.body.automation_repr(),
+            composer_slot: match plan.layout.composer_slot {
+                AgentChatComposerSlot::Header => "header",
+                AgentChatComposerSlot::Bottom => "bottom",
+            },
+            transcript_anchor: match plan.layout.transcript_anchor {
+                AgentChatTranscriptAnchor::Top => "top",
+                AgentChatTranscriptAnchor::Bottom => "bottom",
+            },
+            density: match plan.layout.density {
+                AgentChatChromeDensity::Default => "default",
+                AgentChatChromeDensity::Compact => "compact",
+                AgentChatChromeDensity::Mini => "mini",
+            },
+            footer_owner: owner.automation_repr(),
+            reserved_footer_bands: plan.reserved_footer_band_count(),
+            show_sidecar: plan.layout.show_sidecar,
+            show_variant_badge: plan.layout.show_variant_badge,
+        }
+    }
+}
+
 /// GPUI view entity wrapping an `AgentChatThread` for the Tab AI surface.
 pub(crate) struct AgentChatView {
     /// The Agent Chat session — either a live thread or inline setup state.
@@ -681,6 +888,11 @@ pub(crate) struct AgentChatView {
     setup_card: Option<Entity<AgentChatSetupCard>>,
     pub(crate) transcript: Option<Entity<AgentChatTranscript>>,
     ui_variant: AgentChatUiVariant,
+    /// Immutable capability authority (WP3-A): captured from the LAUNCH
+    /// variant and only ever tightened, never elevated — `ui_variant` is
+    /// mutable presentation, so a cached Quick AI view relabeled Standard
+    /// must keep its zero-context policy.
+    session_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy,
     focused_text: Option<FocusedTextAgentChatState>,
     focused_text_variations: Vec<FocusedTextVariationState>,
     focused_text_variation_tasks: Vec<Task<()>>,
@@ -773,6 +985,22 @@ pub(crate) struct AgentChatView {
     /// rejected at the portal-open dispatch as defense-in-depth.
     allowed_portal_kinds: Vec<crate::ai::context_selector::types::ContextPortalKind>,
     _footer_action_task: Option<gpui::Task<()>>,
+    /// The footer owner reconciled on the previous frame (C-R5). Drives the
+    /// Native→non-Native explicit host teardown so a detached window never
+    /// leaves an orphan native footer host after switching to an inline rail.
+    footer_owner: Option<AgentChatFooterOwner>,
+    /// The memoized native-footer presentation applied by the last
+    /// `transition_footer_owner` (BC-2). Lifecycle side-effects (install / clear
+    /// the native footer popup, spawn / drop the footer action listener) run
+    /// only when the next presentation differs from this — render no longer
+    /// re-syncs the native host every frame.
+    last_footer_presentation: Option<AgentChatFooterPresentationState>,
+    /// Whether the live thread was in a runtime `SetupRequired` state on the
+    /// previous observer pass (BC-2). Drives the None→Some edge that closes
+    /// transient overlays when the session flips into setup recovery, so a menu
+    /// or portal staged against the errored chat never lingers over the setup
+    /// card.
+    runtime_setup_active_seen: bool,
 }
 
 /// Bounded ring buffer for Agent Chat test probe events.
@@ -817,9 +1045,42 @@ struct AgentChatSpineProfileAcceptanceEffect {
     trailing_space: bool,
 }
 
+/// Outcome of a [`AgentChatView::set_ui_variant`] restyle request (BC-1, Oracle
+/// seat 3). A restyle is a PRESENTATION change only — it may never change the
+/// surface's effective session policy. When the requested variant would change
+/// the policy (Full↔QuickAi), the restyle is refused and the caller must route
+/// through a real relaunch instead of mutating either policy authority in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentChatRestyleOutcome {
+    /// The restyle applied (or was a no-op): the requested variant is now live.
+    Applied,
+    /// The restyle was refused because it would change the effective session
+    /// policy. The active variant is unchanged; a relaunch is required.
+    RefusedRelaunchRequired,
+}
+
 impl AgentChatView {
     pub(crate) fn with_ui_variant(mut self, ui_variant: AgentChatUiVariant) -> Self {
         self.ui_variant = ui_variant;
+        // Launch-time builder. MONOTONIC (WP-B1): it may TIGHTEN the captured
+        // policy but must never elevate an already-tightened one. `new()`
+        // derives `session_policy` from the thread, so a QuickAi thread wrapped
+        // by `.with_ui_variant(Standard)` (e.g. a reused Standard host frame)
+        // must NOT be laundered back to Full — take the more restrictive of
+        // the two.
+        use crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy;
+        let requested = AgentChatSessionPolicy::for_launch_variant(ui_variant);
+        if self.session_policy == AgentChatSessionPolicy::Full {
+            // Only a Full-so-far view may be tightened by the requested variant.
+            self.session_policy = requested;
+        } else if requested == AgentChatSessionPolicy::Full {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_policy_elevation_blocked_at_construction",
+                agent_chat_ui_variant = ui_variant.state_id(),
+                "with_ui_variant kept the tightened session policy (no QuickAi→Full elevation)"
+            );
+        }
         self
     }
 
@@ -827,9 +1088,33 @@ impl AgentChatView {
         &mut self,
         ui_variant: AgentChatUiVariant,
         cx: &mut Context<Self>,
-    ) {
+    ) -> AgentChatRestyleOutcome {
         if self.ui_variant == ui_variant {
-            return;
+            return AgentChatRestyleOutcome::Applied;
+        }
+        // BC-1 (Oracle seat 3): a restyle is a PRESENTATION change only and may
+        // never change the effective session policy. When the requested variant
+        // resolves to a different policy than the surface currently enforces
+        // (Full↔QuickAi), refuse it outright — never tighten, never elevate,
+        // never mutate either policy authority. Callers that legitimately need
+        // a different policy must relaunch (build a fresh view/thread), which is
+        // the only place policy is established. The effective policy is the
+        // THREAD's for a live session and the view-captured policy for setup.
+        {
+            use crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy;
+            let restyled = AgentChatSessionPolicy::for_launch_variant(ui_variant);
+            let effective = self.effective_session_policy(cx);
+            if restyled != effective {
+                tracing::warn!(
+                    target: "script_kit::tab_ai",
+                    event = "agent_chat_policy_restyle_refused_relaunch_required",
+                    agent_chat_ui_variant = ui_variant.state_id(),
+                    requested_session_policy = ?restyled,
+                    effective_session_policy = ?effective,
+                    "Refused a policy-changing restyle; a relaunch is required to change session policy"
+                );
+                return AgentChatRestyleOutcome::RefusedRelaunchRequired;
+            }
         }
         self.ui_variant = ui_variant;
 
@@ -859,10 +1144,48 @@ impl AgentChatView {
             agent_chat_ui_variant = ui_variant.state_id(),
         );
         cx.notify();
+        AgentChatRestyleOutcome::Applied
     }
 
     pub(crate) fn debug_ui_variant_id(&self) -> &'static str {
         self.ui_variant.state_id()
+    }
+
+    /// The affordances this surface may use for its whole lifetime (WP-B1).
+    /// Derived from the THREAD-OWNED immutable policy at the point of use when
+    /// a live thread exists — the thread is the sole authority, so a view
+    /// restyle can never make the view's capabilities diverge from what the
+    /// thread actually enforces. Setup views (no thread yet) fall back to the
+    /// requested launch policy captured on the view.
+    pub(crate) fn capabilities(
+        &self,
+        cx: &App,
+    ) -> crate::ai::agent_chat::ui::capabilities::AgentChatCapabilities {
+        self.effective_session_policy(cx).capabilities()
+    }
+
+    /// The policy that actually governs this surface (WP-B1). When a live
+    /// thread exists the THREAD's immutable policy wins — it cannot be diverged
+    /// from by any view restyle. Setup views use the view's requested policy.
+    pub(crate) fn effective_session_policy(
+        &self,
+        cx: &App,
+    ) -> crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy {
+        match &self.session {
+            AgentChatSession::Live(thread) => thread.read(cx).session_policy(),
+            AgentChatSession::Setup(_) => self.session_policy,
+        }
+    }
+
+    /// The launch-time policy captured on the view, for hosts deciding whether
+    /// a cached entity may be reused for an incoming launch (policy mismatch =
+    /// rebuild, never mutate — WP-B1 mode-laundering guard). For live views
+    /// this equals the thread policy (derived at construction, tighten-only
+    /// thereafter).
+    pub(crate) fn session_policy(
+        &self,
+    ) -> crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy {
+        self.session_policy
     }
 
     pub(crate) fn is_focused_text_mini(&self) -> bool {
@@ -1366,6 +1689,122 @@ impl AgentChatView {
         }
     }
 
+    /// The render plan as seen by automation, derived from the automation
+    /// target (window kind) rather than a live `Window`. Shares the
+    /// body/layout/footer resolution with `render` so the measured and painted
+    /// plans agree (C-R7).
+    fn automation_render_plan(
+        &self,
+        target: &crate::protocol::AutomationWindowInfo,
+        cx: &App,
+    ) -> crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan {
+        use crate::ai::agent_chat::ui::layout::{
+            AgentChatFooterInputs, ResolvedAgentChatRenderPlan,
+        };
+        let is_main_window = target.kind == crate::protocol::AutomationWindowKind::Main;
+        let is_setup_mode = self.is_setup_mode();
+        let runtime_setup_active =
+            !is_setup_mode && self.live_thread().read(cx).setup_state().is_some();
+        let focused_text_active = self.is_focused_text_mini() && !is_setup_mode;
+        let footer_inputs = AgentChatFooterInputs {
+            uses_external_footer_host: self.uses_external_footer_host(),
+            is_main_window,
+            // Automation approximates the detached glass path off; the reserved
+            // band count is identical (one local band) whether or not the glass
+            // in-window rail is used, so the measured geometry is unaffected.
+            glass_in_window_footer: false,
+            platform_native_detached_footer: cfg!(target_os = "macos"),
+            main_active_surface_is_agent_chat:
+                crate::footer_popup::active_main_window_footer_surface() == Some("agent_chat"),
+        };
+        ResolvedAgentChatRenderPlan::resolve(
+            self.ui_variant,
+            is_setup_mode,
+            runtime_setup_active,
+            focused_text_active,
+            footer_inputs,
+        )
+    }
+
+    /// The automation projection of the current render plan (C-R7). Consumed by
+    /// the layout probe so the projected body kind / composer slot / footer
+    /// owner are asserted against the same plan the renderer paints. (Body kind
+    /// is also surfaced today via `LayoutInfo::prompt_type`; the full struct is
+    /// exposed for protocol wiring and covered by `from_plan` tests.)
+    #[allow(dead_code)]
+    pub(crate) fn automation_projection(
+        &self,
+        target: &crate::protocol::AutomationWindowInfo,
+        cx: &App,
+    ) -> AgentChatAutomationProjection {
+        AgentChatAutomationProjection::from_plan(self.automation_render_plan(target, cx))
+    }
+
+    /// Layout info for a setup / runtime-setup body: a self-contained setup card
+    /// fills the window. Reports NONE of the conversation composer / transcript
+    /// / footer bands, because the setup card renders none of them (C-R7).
+    fn setup_automation_layout_info(
+        &self,
+        target: &crate::protocol::AutomationWindowInfo,
+        _plan: crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan,
+    ) -> crate::protocol::LayoutInfo {
+        use crate::protocol::{LayoutComponentInfo, LayoutComponentType, LayoutInfo};
+        use crate::ui::chrome as chrome_tokens;
+
+        let (window_width, window_height) = target
+            .bounds
+            .as_ref()
+            .map(|bounds| (bounds.width as f32, bounds.height as f32))
+            .unwrap_or((480.0, 440.0));
+        let embedded_main = target.kind == crate::protocol::AutomationWindowKind::Main;
+        let root_name = if embedded_main {
+            "MainViewShell"
+        } else {
+            "AgentChatDetachedWindow"
+        };
+
+        LayoutInfo {
+            window_width,
+            window_height,
+            prompt_type: "agentChatSetup".to_string(),
+            components: vec![
+                LayoutComponentInfo::new(root_name, LayoutComponentType::Container)
+                    .with_bounds(0.0, 0.0, window_width, window_height)
+                    .with_visual_style(
+                        chrome_tokens::CHROME_LAYER_FLOATING,
+                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
+                        Some(chrome_tokens::LIQUID_GLASS_WINDOW_RADIUS_PX),
+                    )
+                    .with_visual_token(if embedded_main {
+                        "chrome.mainViewShell"
+                    } else {
+                        "chrome.agentChatDetachedWindow"
+                    })
+                    .with_flex_column()
+                    .with_depth(0)
+                    .with_explanation(
+                        "Agent Chat setup body: the inline setup/recovery card replaces the conversation shell, so no composer/transcript/footer conversation bands are measured.",
+                    ),
+                LayoutComponentInfo::new("AgentChatSetupCard", LayoutComponentType::Panel)
+                    .with_bounds(0.0, 0.0, window_width, window_height)
+                    .with_visual_style(
+                        chrome_tokens::CHROME_LAYER_CONTENT,
+                        chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
+                        Some(chrome_tokens::LIQUID_GLASS_PANEL_RADIUS_PX),
+                    )
+                    .with_visual_token("content.agentChatSetupCard")
+                    .with_depth(1)
+                    .with_parent(root_name)
+                    .with_explanation(
+                        "Inline setup/recovery card filling the window while a blocker is resolved.",
+                    ),
+            ],
+            fidelity: None,
+            handler_form: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
     pub(crate) fn automation_layout_info(
         &self,
         target: &crate::protocol::AutomationWindowInfo,
@@ -1373,6 +1812,18 @@ impl AgentChatView {
     ) -> crate::protocol::LayoutInfo {
         if self.is_focused_text_mini() {
             return self.focused_text_mini_automation_layout_info(target, cx);
+        }
+
+        // C-R7: measure from the SAME resolved render plan the renderer paints.
+        // A session-level or runtime setup body renders a setup card, not the
+        // conversation shell, so it must not report conversation geometry.
+        let plan = self.automation_render_plan(target, cx);
+        if matches!(
+            plan.body,
+            crate::ai::agent_chat::ui::layout::AgentChatBodyKind::InitialSetup
+                | crate::ai::agent_chat::ui::layout::AgentChatBodyKind::RuntimeSetup
+        ) {
+            return self.setup_automation_layout_info(target, plan);
         }
 
         use crate::protocol::{LayoutComponentInfo, LayoutComponentType, LayoutInfo};
@@ -1387,9 +1838,21 @@ impl AgentChatView {
             target.kind == crate::protocol::AutomationWindowKind::Main,
         );
         let embedded_main = target.kind == crate::protocol::AutomationWindowKind::Main;
+        // WP6/C-R7: composer placement comes from the resolved plan's layout,
+        // not the host window kind. A header-slot composer (Standard/Quick
+        // AI/etc.) sits in the shared main-view header — top — in BOTH the
+        // embedded and detached windows, exactly as `render` paints it.
+        let resolved_layout = plan.layout;
+        let composer_in_header = resolved_layout.composer_in_header();
         let composer_height = self.composer_height(window_width, text_style, cx);
-        let footer_height = self.inline_footer_height();
-        let main_header_metrics = embedded_main.then(|| {
+        // C-R7: footer band geometry is driven by the plan's reserved band
+        // count — the same value automation and the renderer both consume.
+        let footer_height = if plan.reserved_footer_band_count() == 0 {
+            0.0
+        } else {
+            self.inline_footer_height()
+        };
+        let main_header_metrics = composer_in_header.then(|| {
             crate::components::main_view_chrome::main_view_header_metrics(
                 crate::designs::current_main_menu_theme().def(),
                 Some(composer_height),
@@ -1398,7 +1861,7 @@ impl AgentChatView {
         let message_top = main_header_metrics
             .map(|metrics| metrics.header_height)
             .unwrap_or(0.0);
-        let message_height = if embedded_main {
+        let message_height = if composer_in_header {
             (window_height - message_top - footer_height).max(0.0)
         } else {
             (window_height - composer_height - footer_height).max(0.0)
@@ -1415,7 +1878,7 @@ impl AgentChatView {
         let composer_y = main_header_metrics
             .map(|metrics| metrics.input_y)
             .unwrap_or(message_height);
-        let composer_width = if embedded_main {
+        let composer_width = if composer_in_header {
             let shell = crate::designs::current_main_menu_theme().def().shell;
             (window_width - shell.header_padding_x * 2.0).max(0.0)
         } else {
@@ -1495,10 +1958,10 @@ impl AgentChatView {
                 .with_visual_token("chrome.agent_chatComposer")
                 .with_depth(1)
                 .with_parent(root_name)
-                .with_explanation(if embedded_main {
-                    "Embedded Agent Chat composer occupies the shared MainViewInput slot at the top of the main window."
+                .with_explanation(if composer_in_header {
+                    "Header-slot Agent Chat composer occupies the shared MainViewInput slot at the top of the shell."
                 } else {
-                    "Detached Agent Chat composer row sits below the transcript with its measured multiline height."
+                    "Bottom-docked Agent Chat composer row sits below the transcript with its measured multiline height."
                 }),
         );
 
@@ -1663,9 +2126,15 @@ impl AgentChatView {
                 status_text: None,
                 buttons: Vec::new(),
                 cwd_display: None,
+                show_history: false,
+                profile_switch_enabled: false,
             };
         }
 
+        // C-R3: capability-shape the footer from the effective (thread-owned)
+        // policy so Quick AI never renders a CWD chip, History slot, or
+        // clickable profile control it would refuse at dispatch.
+        let caps = self.capabilities(cx);
         let thread = self.live_thread().read(cx);
         let visible = self.main_window_footer_visible_for_thread(thread);
         let cwd = thread.cwd().clone();
@@ -1680,6 +2149,17 @@ impl AgentChatView {
             };
             Some(display)
         };
+        // No CWD chip when the picker is denied — the chip is the click target
+        // for FooterAction::Cwd, which the policy refuses.
+        let cwd_display = if caps.cwd_picker { cwd_display } else { None };
+        let buttons = if visible {
+            let mut buttons = self.footer_buttons_for_thread(thread);
+            // Defense in depth: never surface a footer button the policy denies.
+            buttons.retain(|btn| Self::footer_action_allowed(caps, btn.action));
+            buttons
+        } else {
+            Vec::new()
+        };
         AgentChatFooterSnapshot {
             visible,
             dot_status: self.footer_dot_status(cx),
@@ -1687,12 +2167,10 @@ impl AgentChatView {
             profile_icon_name: thread.profile_icon_name().map(str::to_string),
             model_display: thread.selected_model_display().to_string(),
             status_text: self.footer_status_text(cx),
-            buttons: if visible {
-                self.footer_buttons_for_thread(thread)
-            } else {
-                Vec::new()
-            },
+            buttons,
             cwd_display,
+            show_history: caps.history,
+            profile_switch_enabled: caps.profile_switch,
         }
     }
 
@@ -1752,6 +2230,142 @@ impl AgentChatView {
                 }
             },
         )
+    }
+
+    /// The footer-owner decision inputs, resolved once from the live window and
+    /// host state. Shared by `render_resolved_footer` (the paint path) and
+    /// `automation_layout_info` (the measure path) so both agree on the footer
+    /// owner.
+    fn footer_inputs(
+        &self,
+        window: &Window,
+    ) -> crate::ai::agent_chat::ui::layout::AgentChatFooterInputs {
+        let is_main_window =
+            crate::get_main_window_handle().is_some_and(|handle| handle == window.window_handle());
+
+        #[cfg(target_os = "macos")]
+        let glass_in_window_footer = !is_main_window
+            && crate::platform::tahoe_liquid_glass_available()
+            && crate::theme::get_cached_theme().is_vibrancy_enabled();
+        #[cfg(not(target_os = "macos"))]
+        let glass_in_window_footer = false;
+
+        crate::ai::agent_chat::ui::layout::AgentChatFooterInputs {
+            uses_external_footer_host: self.uses_external_footer_host(),
+            is_main_window,
+            glass_in_window_footer,
+            platform_native_detached_footer: cfg!(target_os = "macos"),
+            main_active_surface_is_agent_chat:
+                crate::footer_popup::active_main_window_footer_surface() == Some("agent_chat"),
+        }
+    }
+
+    /// The single footer-owner state machine (C-R5). Every footer branch —
+    /// normal, setup, runtime-setup, FocusedTextMini, bottom-dock — routes
+    /// through here so exactly one owner is live per frame and the Native→*
+    /// transition tears the native host down explicitly (a detached window
+    /// otherwise leaves an orphan native footer host when it flips to an inline
+    /// rail). Native side-effects apply only to detached windows; the embedded
+    /// main window's native footer surface is owned by the main-window footer
+    /// system and is never installed or torn down from here.
+    fn reconcile_footer_owner(
+        &mut self,
+        desired: AgentChatFooterOwner,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        // Run the lifecycle side-effects (install / tear-down / re-sync the
+        // native footer host, spawn / drop the listener) — memoized, so nothing
+        // happens on a frame that did not change the footer presentation.
+        self.transition_footer_owner(desired, window, cx);
+
+        // Element construction is pure and runs every frame — the memoized
+        // transition above already reconciled the native host lifecycle.
+        match desired {
+            AgentChatFooterOwner::Native => Some(
+                crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
+            ),
+            AgentChatFooterOwner::Inline => Some(self.render_agent_chat_config_footer_rail(cx)),
+            AgentChatFooterOwner::External => None,
+        }
+    }
+
+    /// Apply the native footer lifecycle side-effects for a resolved owner,
+    /// MEMOIZED on [`Self::last_footer_presentation`] (BC-2, Oracle seat 3).
+    ///
+    /// Render side-effects used to re-sync the native footer popup and (re)spawn
+    /// the action listener every frame the owner was Native. This drives them
+    /// only on an actual transition:
+    /// - change TO a detached Native footer (or a change to its synced config):
+    ///   ensure the action listener + sync the native popup;
+    /// - change AWAY from a detached Native footer: clear the native popup +
+    ///   drop the listener task so a detached window never leaves an orphan host.
+    ///
+    /// Native side-effects apply only to detached windows; the embedded main
+    /// window's native footer surface is owned by the main-window footer system
+    /// and is never installed or torn down from here.
+    fn transition_footer_owner(
+        &mut self,
+        desired: AgentChatFooterOwner,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_main_window =
+            crate::get_main_window_handle().is_some_and(|handle| handle == window.window_handle());
+        // The native config is materialised only when a DETACHED window owns the
+        // native footer — that is the sole case with native lifecycle effects.
+        let native_config = (desired == AgentChatFooterOwner::Native && !is_main_window)
+            .then(|| self.agent_chat_detached_native_footer_config(cx));
+        let next = AgentChatFooterPresentationState {
+            owner: desired,
+            is_main_window,
+            native_config,
+        };
+
+        // Keep the C-R5 owner mirror current every frame (cheap; read by the
+        // pure transition planner and tests).
+        self.footer_owner = Some(desired);
+
+        let lifecycle = plan_native_footer_lifecycle(self.last_footer_presentation.as_ref(), &next);
+        if lifecycle.unchanged {
+            // No presentation change — no lifecycle side-effects this frame.
+            return;
+        }
+
+        if lifecycle.tear_down_previous_native {
+            // A detached native host installed by the previous presentation must
+            // be torn down when we move off it. `clear_window_footer_popup`
+            // guards on the current window and no-ops for the shared main-window
+            // host, and the listener is dropped since nothing drives it now.
+            crate::footer_popup::clear_window_footer_popup(window);
+            self._footer_action_task = None;
+        }
+
+        if lifecycle.sync_next_native {
+            self.ensure_native_footer_action_listener(window, cx);
+            if let Some(config) = next.native_config.as_ref() {
+                crate::footer_popup::sync_window_footer_popup(window, config);
+            }
+        }
+
+        self.last_footer_presentation = Some(next);
+    }
+
+    /// The ONE footer decision for the resolved shell (WP6 / C-R5). Both
+    /// composer slots and every host route through the single owner state
+    /// machine: an external host reserves no local band, a native-owned footer
+    /// reserves a spacer band, and everything else renders the inline config
+    /// rail. Returns `None` when no local footer band is reserved.
+    fn render_resolved_footer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let presentation = crate::ai::agent_chat::ui::layout::resolve_footer_presentation(
+            self.footer_inputs(window),
+        );
+        let desired = AgentChatFooterOwner::from_presentation(presentation);
+        self.reconcile_footer_owner(desired, window, cx)
     }
 
     fn ensure_native_footer_action_listener(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -3489,6 +4103,21 @@ impl AgentChatView {
         }
     }
 
+    /// C-R3: capability-shaped footer dispatch guard. Denies footer actions the
+    /// session policy forbids (Quick AI: the `>` CWD picker via `Cwd`, and the
+    /// profile/model switch via `Ai`/`AgentModel`). Everything else is allowed.
+    pub(crate) fn footer_action_allowed(
+        caps: crate::ai::agent_chat::ui::capabilities::AgentChatCapabilities,
+        action: crate::footer_popup::FooterAction,
+    ) -> bool {
+        use crate::footer_popup::FooterAction;
+        match action {
+            FooterAction::Cwd => caps.cwd_picker,
+            FooterAction::Ai | FooterAction::AgentModel => caps.profile_switch,
+            _ => true,
+        }
+    }
+
     pub(crate) fn dispatch_footer_button(
         &mut self,
         action: crate::footer_popup::FooterAction,
@@ -3525,6 +4154,19 @@ impl AgentChatView {
                 self.perform_focused_text_mini_action(action, cx);
                 return;
             }
+        }
+
+        // C-R3: deny footer actions the session policy forbids at the dispatch
+        // boundary. Defense in depth — the capability-shaped snapshot already
+        // omits these buttons for Quick AI, but a stale/duplicate footer or a
+        // programmatic dispatch must still be refused here.
+        if !Self::footer_action_allowed(self.capabilities(cx), action) {
+            tracing::warn!(
+                target: "script_kit::agent_chat",
+                event = "agent_chat_footer_action_denied_by_policy",
+                action = ?action,
+            );
+            return;
         }
 
         match action {
@@ -3772,30 +4414,33 @@ impl AgentChatView {
         }
 
         if include_history_and_close {
-            let history_view = weak_view.clone();
-            let history_click = Rc::new(
-                move |_event: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-                    if let Some(entity) = history_view.upgrade() {
-                        entity.update(cx, |chat, cx| {
-                            tracing::info!(
-                                target: "script_kit::tab_ai",
-                                event = "agent_chat_toolbar_history_clicked",
-                            );
-                            chat.trigger_open_history_command(window, cx);
-                        });
-                    }
-                },
-            );
-            row = row.child(Self::render_agent_chat_footer_hint_button(
-                "agent-chat-footer-history-slot",
-                "⌘P",
-                "History",
-                crate::components::footer_chrome::FOOTER_ACTIONS_SLOT_WIDTH_PX,
-                false,
-                true,
-                theme,
-                Some(history_click),
-            ));
+            // C-R3: omit the History slot entirely when policy denies history.
+            if snapshot.show_history {
+                let history_view = weak_view.clone();
+                let history_click = Rc::new(
+                    move |_event: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                        if let Some(entity) = history_view.upgrade() {
+                            entity.update(cx, |chat, cx| {
+                                tracing::info!(
+                                    target: "script_kit::tab_ai",
+                                    event = "agent_chat_toolbar_history_clicked",
+                                );
+                                chat.trigger_open_history_command(window, cx);
+                            });
+                        }
+                    },
+                );
+                row = row.child(Self::render_agent_chat_footer_hint_button(
+                    "agent-chat-footer-history-slot",
+                    "⌘P",
+                    "History",
+                    crate::components::footer_chrome::FOOTER_ACTIONS_SLOT_WIDTH_PX,
+                    false,
+                    true,
+                    theme,
+                    Some(history_click),
+                ));
+            }
 
             let close_view = weak_view;
             let close_click = Rc::new(
@@ -4012,6 +4657,12 @@ impl AgentChatView {
     fn paste_image_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::prompts::chat::MAX_IMAGE_BYTES;
         use base64::Engine as _;
+
+        // WP3: Quick AI accepts ordinary text paste only — local image/file
+        // attachments are a context-bearing capability it does not carry.
+        if !self.capabilities(cx).local_attachments {
+            return false;
+        }
 
         let Ok(mut clipboard) = arboard::Clipboard::new() else {
             return false;
@@ -4324,13 +4975,44 @@ impl AgentChatView {
         self.on_paste_response_requested = Some(std::sync::Arc::new(callback));
     }
 
+    /// Close every transient overlay before a hard session transition (BC-2,
+    /// Oracle seat 3): attach menu, permission options, the history menu, any
+    /// pending attachment portal, and the composer picker. Called on runtime
+    /// `SetupRequired` recovery, live-session replacement, host hide, and portal
+    /// transfer so a menu/portal staged against the OUTGOING session can never
+    /// linger over the incoming one.
+    ///
+    /// The native footer popup is deliberately NOT torn down here: it is an
+    /// AppKit subview on a specific NSWindow and is owned by the single
+    /// [`Self::transition_footer_owner`] lifecycle. A session transition changes
+    /// the resolved footer owner (e.g. to the setup body's `External`), so the
+    /// next render's memoized transition tears the native host down — no second
+    /// popup-close mechanism is introduced.
+    pub(crate) fn close_transient_ui_for_session_transition(&mut self, cx: &mut Context<Self>) {
+        let had_transient = self.attach_menu_open
+            || self.permission_options_open
+            || self.history_menu.is_some()
+            || self.pending_portal_session.is_some()
+            || self.composer_picker_session.is_some();
+
+        self.attach_menu_open = false;
+        self.permission_options_open = false;
+        self.history_menu = None;
+        self.pending_portal_session = None;
+        self.clear_composer_picker(AgentChatComposerPickerDismissReason::HostHide, cx);
+
+        if had_transient {
+            tracing::info!(
+                target: "script_kit::agent_chat",
+                event = "agent_chat_transient_ui_closed_for_session_transition",
+            );
+        }
+    }
+
     /// Prepare the embedded Agent Chat view to be hidden behind another main-panel
     /// surface while keeping its live thread/session intact for reuse.
     pub(crate) fn prepare_for_host_hide(&mut self, cx: &mut Context<Self>) {
-        self.attach_menu_open = false;
-        self.permission_options_open = false;
-        self.clear_composer_picker(AgentChatComposerPickerDismissReason::HostHide, cx);
-        self.history_menu = None;
+        self.close_transient_ui_for_session_transition(cx);
         self.opened_via_transient_trigger = None;
         if let Some(card) = &self.setup_card {
             card.update(cx, |view, cx| view.set_agent_picker(None, cx));
@@ -4545,6 +5227,20 @@ impl AgentChatView {
     }
 
     pub(crate) fn select_profile_from_popup(&mut self, profile_id: &str, cx: &mut Context<Self>) {
+        // WP3-E safe fallback: in-place profile switching is disabled for
+        // Quick AI until real relaunch/promotion ships — the live-chat path
+        // only swaps the LABEL (set_profile_display) without replacing the
+        // connection/thread, so the shown profile could diverge from the
+        // active runtime. Promotion-to-Full lands with the WP2 launch
+        // normalization in agent_chat_launch.rs.
+        if !self.capabilities(cx).profile_switch {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_profile_switch_denied_by_policy",
+                profile_id,
+            );
+            return;
+        }
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_profile_selector_selected",
@@ -4756,6 +5452,11 @@ impl AgentChatView {
         mode: super::history_attachment::AgentChatHistoryAttachMode,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        // WP3-C: attaching a prior conversation resurrects retained context;
+        // it is denied by the same immutable policy that hides the history UI.
+        if !self.capabilities(cx).history {
+            anyhow::bail!("history attachments are not available for this session policy");
+        }
         let part = self.build_history_attachment_part(session_id, mode)?;
         let (display_path, label) = match &part {
             AiContextPart::FilePath { path, label } => (path.clone(), label.clone()),
@@ -4797,6 +5498,11 @@ impl AgentChatView {
         hits: Vec<super::history::AgentChatHistorySearchHit>,
         cx: &mut Context<Self>,
     ) -> bool {
+        // WP3-C: history is a retained-context capability; host-driven portal
+        // opens must honor the same session policy as the in-view toggle.
+        if !self.capabilities(cx).history {
+            return false;
+        }
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_history_portal_opened",
@@ -4867,6 +5573,11 @@ impl AgentChatView {
         display_id: Option<gpui::DisplayId>,
         cx: &mut Context<Self>,
     ) {
+        // WP3-C: same policy gate as `toggle_history_popup` — a detached host
+        // window must not resurface history for a zero-context session.
+        if !self.capabilities(cx).history {
+            return;
+        }
         let display_bounds = display_id.and_then(|id| {
             cx.displays()
                 .into_iter()
@@ -4933,6 +5644,11 @@ impl AgentChatView {
     }
 
     pub(crate) fn toggle_history_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // WP3: the conversation history popup is a retained-context affordance
+        // Quick AI does not carry.
+        if !self.capabilities(cx).history {
+            return;
+        }
         self.cache_composer_parent_window(window, cx);
         self.toggle_history_popup_from_cached_parent(cx);
     }
@@ -5190,7 +5906,19 @@ impl AgentChatView {
 
     /// Summaries of retained background threads for the Cmd+K "Threads"
     /// section, ordered oldest-retained first.
+    ///
+    /// BC-1 (Oracle seat 3): hard-gated at the method boundary. A surface whose
+    /// effective policy has no retained-thread capability (Quick AI) reports no
+    /// threads regardless of any residue in `retained_threads`, so the switcher
+    /// is inert by data, not merely hidden by the UI.
     pub(crate) fn retained_thread_summaries(&self, cx: &gpui::App) -> Vec<AgentChatThreadSummary> {
+        if !self
+            .effective_session_policy(cx)
+            .capabilities()
+            .retained_threads
+        {
+            return Vec::new();
+        }
         self.retained_threads
             .iter()
             .map(|thread| {
@@ -5240,6 +5968,25 @@ impl AgentChatView {
         thread: Entity<AgentChatThread>,
         cx: &mut Context<Self>,
     ) {
+        // BC-1 (Oracle seat 3): the single choke point for retained-thread
+        // switching (`switch_to_thread`, `start_new_thread`). A surface whose
+        // effective policy forbids retained threads (Quick AI) must never retain
+        // its current thread or adopt another — refuse at the boundary so no
+        // un-gated caller can resurrect/retain a thread for a zero-context
+        // surface.
+        if !self
+            .effective_session_policy(cx)
+            .capabilities()
+            .retained_threads
+        {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_activate_session_thread_refused_policy",
+                effective_session_policy = ?self.effective_session_policy(cx),
+                "Refused retained-thread activation: session policy has no retained-thread capability"
+            );
+            return;
+        }
         if let AgentChatSession::Live(current) = &self.session {
             if current.entity_id() == thread.entity_id() {
                 return;
@@ -5268,6 +6015,11 @@ impl AgentChatView {
         self.thread_observers
             .entry(thread.entity_id())
             .or_insert_with(|| Self::observe_session_thread(&thread, cx));
+        // BC-2 (Oracle seat 3): a real session replacement — close every
+        // transient overlay staged against the outgoing thread so an attach /
+        // permission / history menu or pending portal cannot linger over the
+        // incoming transcript.
+        self.close_transient_ui_for_session_transition(cx);
         self.session = AgentChatSession::Live(thread.clone());
         if let Some(transcript) = &self.transcript {
             transcript.update(cx, |t, cx| t.clear_collapsed_ids(cx));
@@ -5281,6 +6033,25 @@ impl AgentChatView {
     /// Start a fresh thread on a new Pi connection. The current thread keeps
     /// streaming in the background and appears in the Cmd+K Threads section.
     pub(crate) fn start_new_thread(&mut self, cx: &mut Context<Self>) {
+        // BC-1 (Oracle seat 3): `start_new_thread` RETAINS the current thread
+        // (pushing it onto `retained_threads` via `activate_session_thread`) and
+        // spins up a persistent multi-thread surface. Both are retained-thread
+        // machinery a Quick AI (zero-retention, zero-context) session must never
+        // gain — so refuse before spawning a wasted hosted connection. A fresh
+        // quick question must relaunch a new view, not fork a retained thread.
+        if !self
+            .effective_session_policy(cx)
+            .capabilities()
+            .retained_threads
+        {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_start_new_thread_refused_policy",
+                effective_session_policy = ?self.effective_session_policy(cx),
+                "Refused new-thread start: session policy has no retained-thread capability"
+            );
+            return;
+        }
         let AgentChatSession::Live(current) = &self.session else {
             return;
         };
@@ -5896,6 +6667,7 @@ impl AgentChatView {
                 focused_text_input_locked,
                 ui_thread_id,
                 fork_points,
+                runtime_setup_active,
             ) = {
                 let thread_ref = thread.read(cx);
                 let activity = thread_ref.awaiting_first_assistant_text();
@@ -5916,8 +6688,27 @@ impl AgentChatView {
                     .map(|r| r.path);
                 let tid = thread_ref.ui_thread_id().to_string();
                 let forks = thread_ref.fork_points().to_vec();
-                (activity, msgs, st, ready, phase, locked, tid, forks)
+                let setup_active = thread_ref.setup_state().is_some();
+                (
+                    activity,
+                    msgs,
+                    st,
+                    ready,
+                    phase,
+                    locked,
+                    tid,
+                    forks,
+                    setup_active,
+                )
             };
+
+            // BC-2 (Oracle seat 3): on the None→Some edge into runtime setup
+            // recovery, close every transient overlay so a menu/portal staged
+            // against the errored chat can never linger over the setup card.
+            if runtime_setup_active && !this.runtime_setup_active_seen {
+                this.close_transient_ui_for_session_transition(cx);
+            }
+            this.runtime_setup_active_seen = runtime_setup_active;
 
             // The active thread's messages are on screen — mark them seen.
             this.thread_last_seen.insert(ui_thread_id, messages.len());
@@ -5978,6 +6769,10 @@ impl AgentChatView {
     }
 
     pub(crate) fn new(thread: Entity<AgentChatThread>, cx: &mut Context<Self>) -> Self {
+        // The view's captured policy is DERIVED from the thread (WP-B1): the
+        // thread owns the immutable launch policy, so a live view can never be
+        // constructed with a policy that diverges from the thread it wraps.
+        let session_policy = thread.read(cx).session_policy();
         // Preflight only when launch did not already provide a model list. Quick AI
         // launches with a pinned model and auto-submits immediately; an unnecessary
         // refresh can queue ahead of that turn and make the following set_model RPC
@@ -6047,6 +6842,7 @@ impl AgentChatView {
             setup_card: None,
             transcript: None,
             ui_variant: AgentChatUiVariant::Standard,
+            session_policy,
             focused_text: None,
             focused_text_variations: Vec::new(),
             focused_text_variation_tasks: Vec::new(),
@@ -6089,6 +6885,9 @@ impl AgentChatView {
             pending_focused_text_mini_focus_restore: false,
             allowed_portal_kinds: Self::all_portal_kinds(),
             _footer_action_task: None,
+            footer_owner: None,
+            last_footer_presentation: None,
+            runtime_setup_active_seen: false,
         }
     }
 
@@ -6098,10 +6897,27 @@ impl AgentChatView {
         state: super::setup_state::AgentChatInlineSetupState,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_setup_with_policy(
+            state,
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
+            cx,
+        )
+    }
+
+    /// Create an `AgentChatView` in **setup mode** with an EXPLICIT requested
+    /// launch policy (WP-B1 / C-R3). A Quick AI launch that fails before its
+    /// thread exists must surface a Quick-AI-policy setup view — otherwise the
+    /// error card would default to Full and re-advertise denied affordances.
+    pub(crate) fn new_setup_with_policy(
+        state: super::setup_state::AgentChatInlineSetupState,
+        session_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy,
+        cx: &mut Context<Self>,
+    ) -> Self {
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_setup_surface_rendered",
             title = %state.title,
+            session_policy = ?session_policy,
         );
         let noop_blink = cx.spawn(async move |_this, _cx| {});
         let noop_slash = cx.spawn(async move |_this, _cx| {});
@@ -6137,6 +6953,7 @@ impl AgentChatView {
             setup_card: None,
             transcript: None,
             ui_variant: AgentChatUiVariant::Standard,
+            session_policy,
             focused_text: None,
             focused_text_variations: Vec::new(),
             focused_text_variation_tasks: Vec::new(),
@@ -6178,6 +6995,9 @@ impl AgentChatView {
             pending_focused_text_mini_focus_restore: false,
             allowed_portal_kinds: Self::all_portal_kinds(),
             _footer_action_task: None,
+            footer_owner: None,
+            last_footer_presentation: None,
+            runtime_setup_active_seen: false,
         }
     }
 
@@ -6472,7 +7292,11 @@ impl AgentChatView {
         // (startup.rs `cwd_pick_enter_file_search_tab`). In the chat the cwd
         // chip's action is the `>` spine picker, so Tab routes there, exactly
         // like clicking the footer Cwd chip (`FooterAction::Cwd`).
+        // WP3: the empty-composer `>` cwd picker is a context-portal
+        // affordance; Quick AI (cwd_picker == false) must let Tab fall
+        // through rather than open the working-directory picker.
         if !has_shift
+            && self.capabilities(cx).cwd_picker
             && self.composer_picker_session.is_none()
             && self.live_thread().read(cx).input.text().trim().is_empty()
         {
@@ -6498,6 +7322,12 @@ impl AgentChatView {
         query: String,
         cx: &mut Context<Self>,
     ) {
+        // WP3: context portals are denied for the whole Quick AI lifetime.
+        // This is the single choke point every `@`/`>` portal launch passes
+        // through, so a Quick AI surface can never open one via any trigger.
+        if !self.capabilities(cx).context_portals {
+            return;
+        }
         let current_text = self.live_thread().read(cx).input.text().to_string();
         let contract = crate::ai::agent_chat::ui::portal_contract::AgentChatPortalLaunchContract {
             portal_kind,
@@ -7824,16 +8654,58 @@ impl AgentChatView {
             }
         }
 
-        crate::spine::list::build_spine_list_sections_full_with_resolved_tokens_and_context(
-            &self.composer_spine.input.parse,
-            projection,
-            None,
-            &|token| self.typed_mention_aliases.contains_key(token),
-            crate::spine::list::SpineListBuildContext {
-                current_cwd: self.composer_spine.project_scope_cwd.as_deref(),
-                cwd_recents: &self.composer_spine.project_scope_cwd_recents,
-            },
-        )
+        let sections =
+            crate::spine::list::build_spine_list_sections_full_with_resolved_tokens_and_context(
+                &self.composer_spine.input.parse,
+                projection,
+                None,
+                &|token| self.typed_mention_aliases.contains_key(token),
+                crate::spine::list::SpineListBuildContext {
+                    current_cwd: self.composer_spine.project_scope_cwd.as_deref(),
+                    cwd_recents: &self.composer_spine.project_scope_cwd_recents,
+                },
+            );
+        // C-R3: strip CWD + profile sections from the projection so typing `>`
+        // (cwd) or the profile trigger cannot even DISPLAY, let alone select,
+        // an affordance the session policy denies (Quick AI).
+        self.filter_agent_chat_spine_sections_by_policy(sections)
+    }
+
+    /// C-R3 projection guard: drop CWD/profile rows the session policy forbids
+    /// and any section left with no selectable row. Uses the view's captured
+    /// (thread-derived, tighten-only) policy — safe cx-free because it is never
+    /// LESS restrictive than the thread, and this is a restriction filter.
+    fn filter_agent_chat_spine_sections_by_policy(
+        &self,
+        sections: Vec<SpineListSection>,
+    ) -> Vec<SpineListSection> {
+        let caps = self.session_policy.capabilities();
+        if caps.cwd_picker && caps.profile_switch {
+            return sections;
+        }
+        sections
+            .into_iter()
+            .filter_map(|mut section| {
+                let before = section.rows.len();
+                section.rows.retain(|row| match &row.action {
+                    SpineListAction::ResolveSegment {
+                        resolution_source, ..
+                    } => match resolution_source.as_ref() {
+                        "cwd" => caps.cwd_picker,
+                        "profile" => caps.profile_switch,
+                        _ => true,
+                    },
+                    _ => true,
+                });
+                // A section that lost rows and now has nothing selectable is a
+                // denied section — drop it rather than show an orphan header.
+                if section.rows.len() != before && !section.rows.iter().any(|row| row.is_selectable)
+                {
+                    return None;
+                }
+                Some(section)
+            })
+            .collect()
     }
 
     fn agent_chat_rich_file_subsearch_section(
@@ -8297,6 +9169,17 @@ impl AgentChatView {
                 // Other sources insert the resolved replacement token like
                 // normal.
                 if resolution_source.as_ref() == "cwd" {
+                    // C-R3: the actual CWD mutation boundary. Typing `>` (or any
+                    // programmatic cwd resolution action) reaches here — deny it
+                    // for policies without the cwd picker (Quick AI) so the
+                    // working directory / live thread can never be respawned.
+                    if !self.capabilities(cx).cwd_picker {
+                        tracing::warn!(
+                            target: "script_kit::agent_chat",
+                            event = "agent_chat_cwd_resolution_denied_by_policy",
+                        );
+                        return false;
+                    }
                     let path = PathBuf::from(resolution_id.as_ref());
                     let changed = self.respawn_live_thread_for_cwd(path, cx);
                     if !changed {
@@ -8774,6 +9657,7 @@ impl AgentChatView {
         &mut self,
         is_empty: bool,
         show_sidecar: bool,
+        density: AgentChatChromeDensity,
         ui_variant: AgentChatUiVariant,
         status_label: &'static str,
         message_count: usize,
@@ -8782,6 +9666,11 @@ impl AgentChatView {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // C-R4: density is live — the middle-area content gap resolves to an
+        // existing chrome spacing token per resolved density. It is visually
+        // inert for the single-child header-composer variants and only tightens
+        // the multi-child sidecar row / compact bottom-dock layouts.
+        let content_gap = px(density.content_gap_px());
         if self.agent_chat_spine_owns_list() {
             return self.render_agent_chat_spine_projection_area(weak_view, theme, cx);
         }
@@ -8806,6 +9695,7 @@ impl AgentChatView {
                 .overflow_hidden()
                 .flex()
                 .flex_row()
+                .gap(content_gap)
                 .child(self.ensure_transcript(cx).into_any_element())
                 .child(Self::render_variant_sidecar(
                     ui_variant,
@@ -8824,6 +9714,7 @@ impl AgentChatView {
             .overflow_hidden()
             .flex()
             .flex_col()
+            .gap(content_gap)
             .child(self.ensure_transcript(cx).into_any_element())
             .into_any_element()
     }
@@ -9192,57 +10083,6 @@ impl AgentChatView {
                 expanded_composer,
                 text_style.line_height,
             )),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_composer_bar(
-        input_text: &str,
-        input_cursor: usize,
-        input_selection: TextSelection,
-        cursor_visible: bool,
-        is_empty: bool,
-        mention_highlights: &[TextHighlightRange],
-        pasted_text_pills: &[TextInlinePillRange],
-        placeholder_text: Rgba,
-        profile_icon_name: Option<&str>,
-        profile_active_pending: bool,
-        status: AgentChatThreadStatus,
-        weak_view: WeakEntity<AgentChatView>,
-        theme: &crate::theme::Theme,
-        window_width: f32,
-        composer_scroll_handle: &gpui::ScrollHandle,
-        cx: &App,
-    ) -> gpui::AnyElement {
-        let menu_def = crate::designs::current_main_menu_theme().def();
-        let input = Self::render_composer_input_shell(
-            input_text,
-            input_cursor,
-            input_selection,
-            cursor_visible,
-            is_empty,
-            mention_highlights,
-            pasted_text_pills,
-            placeholder_text,
-            profile_icon_name,
-            profile_active_pending,
-            status,
-            weak_view,
-            theme,
-            false,
-            AgentChatComposerTextStyle::legacy(),
-            window_width,
-            composer_scroll_handle,
-            cx,
-        );
-        crate::components::main_view_chrome::render_main_view_header(
-            crate::components::main_view_chrome::MainViewHeaderChrome::canonical(
-                menu_def,
-                crate::components::main_view_chrome::render_main_view_context_zone_inert(
-                    theme, menu_def, None, None,
-                ),
-                input,
-            ),
         )
     }
 
@@ -11640,7 +12480,13 @@ impl AgentChatView {
                                 }
                             }
                             AgentChatComposerPickerTrigger::Profile => {
-                                self.build_profile_picker_items(&query)
+                                // WP3-E: don't advertise profile rows the
+                                // policy will reject at selection time.
+                                if self.capabilities(cx).profile_switch {
+                                    self.build_profile_picker_items(&query)
+                                } else {
+                                    Vec::new()
+                                }
                             }
                         };
 
@@ -14797,25 +15643,59 @@ impl Render for AgentChatView {
         self.ensure_host_activation_subscription(window, cx);
         self.sync_host_window_state(window, cx);
 
-        // Setup mode: render the inline setup card instead of the chat.
-        let setup_state = if let AgentChatSession::Setup(state) = &self.session {
-            Some(state.clone())
-        } else {
-            None
-        };
-        if let Some(state) = setup_state {
-            let setup_card = self.ensure_setup_card(&state, cx);
-            return setup_card.into_any_element();
-        }
+        // C-R4: resolve the WHOLE render decision ONCE, before any body branch.
+        // The body kind selects which surface renders; the resolved layout and
+        // footer presentation drive the shell, and `automation_layout_info`
+        // consumes the same plan so painted and measured layouts can never
+        // disagree.
+        let ui_variant = self.ui_variant;
+        let is_setup_mode = self.is_setup_mode();
+        // Setup mode has no live thread, so only peek for a runtime
+        // `SetupRequired` when we are NOT already in session-level setup.
+        let runtime_setup_active =
+            !is_setup_mode && self.live_thread().read(cx).setup_state().is_some();
+        let focused_text_active =
+            ui_variant == AgentChatUiVariant::FocusedTextMini && !is_setup_mode;
+        let plan = crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan::resolve(
+            ui_variant,
+            is_setup_mode,
+            runtime_setup_active,
+            focused_text_active,
+            self.footer_inputs(window),
+        );
+        // C-R5: every body routes its footer through the one owner state
+        // machine. Setup / runtime-setup / focused-text bodies reserve no
+        // in-shell band (their footer, if any, is the host window's native
+        // surface), so they reconcile to the External owner — which also tears
+        // down any orphan native footer host on a detached window.
+        let desired_footer_owner = desired_footer_owner_for_plan(plan);
 
-        // Runtime setup recovery: if the live thread received a SetupRequired
-        // event, show the setup card instead of the errored chat transcript.
-        {
-            let thread_ref = self.live_thread().read(cx);
-            if let Some(setup) = thread_ref.setup_state().cloned() {
-                let setup_card = self.ensure_setup_card(&setup, cx);
-                return setup_card.into_any_element();
+        use crate::ai::agent_chat::ui::layout::AgentChatBodyKind;
+        match plan.body {
+            AgentChatBodyKind::InitialSetup => {
+                let setup_state = if let AgentChatSession::Setup(state) = &self.session {
+                    Some(state.clone())
+                } else {
+                    None
+                };
+                if let Some(state) = setup_state {
+                    let _ = self.reconcile_footer_owner(desired_footer_owner, window, cx);
+                    let setup_card = self.ensure_setup_card(&state, cx);
+                    return setup_card.into_any_element();
+                }
             }
+            AgentChatBodyKind::RuntimeSetup => {
+                // Runtime setup recovery: the live thread received a
+                // SetupRequired event; show the setup card instead of the
+                // errored chat transcript.
+                let setup = self.live_thread().read(cx).setup_state().cloned();
+                if let Some(setup) = setup {
+                    let _ = self.reconcile_footer_owner(desired_footer_owner, window, cx);
+                    let setup_card = self.ensure_setup_card(&setup, cx);
+                    return setup_card.into_any_element();
+                }
+            }
+            AgentChatBodyKind::FocusedTextMini | AgentChatBodyKind::Conversation => {}
         }
 
         let thread = self.live_thread().read(cx);
@@ -14868,8 +15748,12 @@ impl Render for AgentChatView {
                     .any(|msg| msg.tool_call_id.as_deref() == Some(tool_call_id))
             });
         let view_entity: WeakEntity<AgentChatView> = cx.entity().downgrade();
-        let ui_variant = self.ui_variant;
-        let variant_config = ui_variant.config();
+        // C-R4: the shell layout is the ONE resolved plan's layout — composer
+        // slot, transcript anchor, density, sidecar and badge all come from
+        // this single model, and no raw `variant.config()` shell read survives
+        // in the renderer. `automation_layout_info` consumes the same plan.
+        let resolved_layout = plan.layout;
+        let density = resolved_layout.density;
         let status = thread.status;
         let status_label = Self::agent_chat_thread_status_label(status);
         let context_chip_count = attached_parts.len();
@@ -14932,6 +15816,12 @@ impl Render for AgentChatView {
             } else {
                 None
             };
+
+            // C-R5: the focused-text body owns its own native footer spacer
+            // (main window) or none (detached); route through the single owner
+            // state machine so a detached window tears down any orphan native
+            // footer host when it flips into the compact focused-text surface.
+            let _ = self.reconcile_footer_owner(desired_footer_owner, window, cx);
 
             return div()
                 .size_full()
@@ -15009,7 +15899,7 @@ impl Render for AgentChatView {
                 this.dismiss_composer_picker(cx);
             }));
 
-        if matches!(variant_config.composer, AgentChatComposerPlacement::Default) {
+        if resolved_layout.composer_in_header() {
             let text_style = AgentChatComposerTextStyle::for_main_window(
                 self.host_window_state_for_window(window).kind == AgentChatHostWindowKind::Main,
             );
@@ -15069,7 +15959,7 @@ impl Render for AgentChatView {
             };
 
             let mut pre_main = Vec::new();
-            if variant_config.show_variant_badge {
+            if resolved_layout.show_variant_badge {
                 pre_main.push(Self::render_variant_badge(ui_variant, &theme));
             }
             if let Some(preview) = self.focused_inline_mention_preview(cx) {
@@ -15159,7 +16049,8 @@ impl Render for AgentChatView {
 
             let middle_area = self.render_agent_chat_middle_area(
                 is_empty,
-                variant_config.show_sidecar,
+                resolved_layout.show_sidecar,
+                density,
                 ui_variant,
                 status_label,
                 message_count,
@@ -15245,60 +16136,12 @@ impl Render for AgentChatView {
                 );
             }
 
-            let footer = if self.uses_external_footer_host() {
-                None
-            } else {
-                let is_main_window = crate::get_main_window_handle()
-                    .is_some_and(|handle| handle == window.window_handle());
+            // WP6: one footer owner, resolved once. Footer-flush chrome is used
+            // because a footer band (inline rail or native spacer) is always
+            // reserved through this slot when the surface owns its footer.
+            let footer = self.render_resolved_footer(window, cx);
 
-                #[cfg(target_os = "macos")]
-                {
-                    if !is_main_window {
-                        let glass_in_window_footer =
-                            crate::platform::tahoe_liquid_glass_available()
-                                && crate::theme::get_cached_theme().is_vibrancy_enabled();
-                        if glass_in_window_footer {
-                            Some(self.render_agent_chat_config_footer_rail(cx))
-                        } else {
-                            self.ensure_native_footer_action_listener(window, cx);
-                            crate::footer_popup::sync_window_footer_popup(
-                                window,
-                                &self.agent_chat_detached_native_footer_config(cx),
-                            );
-                            Some(
-                                crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
-                            )
-                        }
-                    } else {
-                        let active_surface =
-                            crate::footer_popup::active_main_window_footer_surface();
-                        let use_native_footer_spacer = active_surface == Some("agent_chat");
-                        if use_native_footer_spacer {
-                            Some(
-                                crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
-                            )
-                        } else {
-                            Some(self.render_agent_chat_config_footer_rail(cx))
-                        }
-                    }
-                }
-
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let active_surface = crate::footer_popup::active_main_window_footer_surface();
-                    let use_native_footer_spacer =
-                        is_main_window && active_surface == Some("agent_chat");
-                    if use_native_footer_spacer {
-                        Some(
-                            crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(),
-                        )
-                    } else {
-                        Some(self.render_agent_chat_config_footer_rail(cx))
-                    }
-                }
-            };
-
-            return crate::components::main_view_chrome::render_main_view_chrome(
+            return crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
                 root,
                 &theme,
                 menu_def,
@@ -15312,262 +16155,499 @@ impl Render for AgentChatView {
             );
         }
 
-        root
-            .when(variant_config.show_variant_badge, |d| {
-                d.child(Self::render_variant_badge(ui_variant, &theme))
-            })
-            .child(Self::render_reserved_transient_lane(
-                "agent_chat-message-queue-lane-top",
-                AGENT_CHAT_TRANSIENT_QUEUE_LANE_HEIGHT_PX,
-                if self.message_queue_lane_active(cx) {
-                    Some(self.render_message_queue_strip(cx))
-                } else {
-                    None
-                },
-            ))
-            .child(self.render_active_callout(cx))
-            .when(
-                matches!(variant_config.composer, AgentChatComposerPlacement::Default),
-                |d| {
-                    d.child(Self::render_composer_bar(
-                        &input_text,
-                        input_cursor,
-                        input_selection,
-                        cursor_visible,
-                        is_empty,
-                        &mention_highlights,
-                        &pasted_text_pills,
-                        placeholder_text,
-                        profile_icon_name.as_deref(),
-                        profile_active_pending,
-                        status,
-                        view_entity.clone(),
-                        &theme,
-                        window_width,
-                        &self.composer_scroll_handle,
-                        cx,
-                    ))
-                },
-            )
-            .when_some(self.focused_inline_mention_preview(cx), |d, preview| {
-                d.child(
-                    div().w_full().px(px(12.0)).pb(px(4.0)).child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(theme.colors.text.muted))
-                            .child(preview.token)
-                            .child(" ")
-                            .child(preview.detail),
-                    ),
-                )
-            })
-            // Context chips removed — all attachments are now inline @type:name tokens.
-            // .child(self.render_pending_context_chips(cx))
-            .child(Self::render_reserved_transient_lane(
-                "agent_chat-context-bootstrap-lane",
-                AGENT_CHAT_TRANSIENT_BOOTSTRAP_LANE_HEIGHT_PX,
-                if self.context_bootstrap_note_lane_active(cx) {
-                    Some(self.render_context_bootstrap_note(cx))
-                } else {
-                    None
-                },
-            ))
-            // ── Search bar (Cmd+F) ─────────────────────────
-            .when_some(self.search_state.clone(), |d, (query, current_idx)| {
-                let match_count = if query.is_empty() {
-                    0
-                } else {
-                    let q = query.to_lowercase();
-                    messages
-                        .iter()
-                        .filter(|m| m.body.to_lowercase().contains(&q))
-                        .count()
-                };
-                let display_idx = if match_count > 0 {
-                    (current_idx % match_count) + 1
-                } else {
-                    0
-                };
-                d.child(
+        // WP6: bottom-dock shell (BottomDock/DenseLog/Sidecar). The composer is
+        // resolved to the bottom slot, so the transient queue/callout lanes are
+        // reserved ONCE, just above the composer, and the footer routes through
+        // the single resolved owner. (Standard/Quick AI/header-composer
+        // variants returned above; FocusedTextMini returned earlier.)
+        root.when(resolved_layout.show_variant_badge, |d| {
+            d.child(Self::render_variant_badge(ui_variant, &theme))
+        })
+        .when_some(self.focused_inline_mention_preview(cx), |d, preview| {
+            d.child(
+                div().w_full().px(px(12.0)).pb(px(4.0)).child(
                     div()
-                        .w_full()
-                        .px(px(12.0))
-                        .py(px(4.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(div().text_xs().opacity(0.50).child("\u{1F50D}"))
-                        .child(div().flex_grow().text_sm().child(if query.is_empty() {
-                            "Search conversation\u{2026}".to_string()
-                        } else {
-                            query.clone()
-                        }))
-                        .when(!query.is_empty(), |d| {
-                            d.child(div().text_xs().opacity(0.45).child(if match_count > 0 {
-                                format!("{display_idx}/{match_count}")
-                            } else {
-                                "0 matches".to_string()
-                            }))
-                        })
-                        .when(match_count > 1, |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .opacity(0.30)
-                                    .child("\u{21A9} next \u{00b7} \u{21E7}\u{21A9} prev"),
-                            )
-                        })
-                        .child(div().text_xs().opacity(0.25).child("esc \u{00d7}")),
-                )
-            })
-            // ── Message list / Agent Chat Spine projection ───────────
-            .child(
-                crate::components::main_view_chrome::render_main_view_main_slot(
-                    menu_def,
-                    self.render_agent_chat_middle_area(
-                        is_empty,
-                        variant_config.show_sidecar,
-                        ui_variant,
-                        status_label,
-                        message_count,
-                        context_chip_count,
-                        view_entity.clone(),
-                        &theme,
-                        cx,
-                    ),
+                        .text_xs()
+                        .text_color(rgb(theme.colors.text.muted))
+                        .child(preview.token)
+                        .child(" ")
+                        .child(preview.detail),
                 ),
             )
-            // ── Plan strip ────────────────────────────────────
-            .child(Self::render_reserved_transient_lane(
-                "agent_chat-plan-strip-lane",
-                AGENT_CHAT_TRANSIENT_PLAN_LANE_HEIGHT_PX,
-                if plan_entries.is_empty() {
-                    None
-                } else {
-                    Some(
-                        div()
-                            .w_full()
-                            .px(px(8.0))
-                            .pb(px(4.0))
-                            .child(Self::render_plan_strip(&plan_entries))
-                            .into_any_element(),
-                    )
-                },
-            ))
-            // ── Pending permission fallback (non-tool-linked) ──────
-            .child(Self::render_reserved_transient_lane(
-                "agent_chat-permission-card-lane",
-                AGENT_CHAT_TRANSIENT_PERMISSION_LANE_HEIGHT_PX,
-                pending_permission
-                    .clone()
-                    .filter(|_| !pending_permission_has_message_target)
-                    .map(|request| {
-                        div()
-                            .w_full()
-                            .px(px(8.0))
-                            .pb(px(4.0))
-                            .child(Self::render_permission_inline_card(
-                                &request,
-                                self.permission_index,
-                                self.permission_options_open,
-                                view_entity.clone(),
-                            ))
-                            .into_any_element()
-                    }),
-            ))
-            .child(Self::render_reserved_transient_lane(
-                "agent_chat-message-queue-lane-bottom",
-                AGENT_CHAT_TRANSIENT_QUEUE_LANE_HEIGHT_PX,
-                if self.message_queue_lane_active(cx) {
-                    Some(self.render_message_queue_strip(cx))
-                } else {
-                    None
-                },
-            ))
-            .child(self.render_active_callout(cx))
-            .when(
-                matches!(variant_config.composer, AgentChatComposerPlacement::BottomDock),
-                |d| {
-                    d.child(Self::render_composer_bar(
-                        &input_text,
-                        input_cursor,
-                        input_selection,
-                        cursor_visible,
-                        is_empty,
-                        &mention_highlights,
-                        &pasted_text_pills,
-                        placeholder_text,
-                        profile_icon_name.as_deref(),
-                        profile_active_pending,
-                        status,
-                        view_entity.clone(),
-                        &theme,
-                        window_width,
-                        &self.composer_scroll_handle,
-                        cx,
-                    ))
-                },
+        })
+        // Context chips removed — all attachments are now inline @type:name tokens.
+        // .child(self.render_pending_context_chips(cx))
+        .child(Self::render_reserved_transient_lane(
+            "agent_chat-context-bootstrap-lane",
+            AGENT_CHAT_TRANSIENT_BOOTSTRAP_LANE_HEIGHT_PX,
+            if self.context_bootstrap_note_lane_active(cx) {
+                Some(self.render_context_bootstrap_note(cx))
+            } else {
+                None
+            },
+        ))
+        // ── Search bar (Cmd+F) ─────────────────────────
+        .when_some(self.search_state.clone(), |d, (query, current_idx)| {
+            let match_count = if query.is_empty() {
+                0
+            } else {
+                let q = query.to_lowercase();
+                messages
+                    .iter()
+                    .filter(|m| m.body.to_lowercase().contains(&q))
+                    .count()
+            };
+            let display_idx = if match_count > 0 {
+                (current_idx % match_count) + 1
+            } else {
+                0
+            };
+            d.child(
+                div()
+                    .w_full()
+                    .px(px(12.0))
+                    .py(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().text_xs().opacity(0.50).child("\u{1F50D}"))
+                    .child(div().flex_grow().text_sm().child(if query.is_empty() {
+                        "Search conversation\u{2026}".to_string()
+                    } else {
+                        query.clone()
+                    }))
+                    .when(!query.is_empty(), |d| {
+                        d.child(div().text_xs().opacity(0.45).child(if match_count > 0 {
+                            format!("{display_idx}/{match_count}")
+                        } else {
+                            "0 matches".to_string()
+                        }))
+                    })
+                    .when(match_count > 1, |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .opacity(0.30)
+                                .child("\u{21A9} next \u{00b7} \u{21E7}\u{21A9} prev"),
+                        )
+                    })
+                    .child(div().text_xs().opacity(0.25).child("esc \u{00d7}")),
             )
-            // ── Attach menu popup ──────────────────────────
-            .when(self.attach_menu_open, |d| {
-                d.child(self.render_attach_menu(cx))
-            })
-            .when(history_popup_open, |d| {
-                d.child(
+        })
+        // ── Message list / Agent Chat Spine projection ───────────
+        .child(
+            crate::components::main_view_chrome::render_main_view_main_slot(
+                menu_def,
+                self.render_agent_chat_middle_area(
+                    is_empty,
+                    resolved_layout.show_sidecar,
+                    density,
+                    ui_variant,
+                    status_label,
+                    message_count,
+                    context_chip_count,
+                    view_entity.clone(),
+                    &theme,
+                    cx,
+                ),
+            ),
+        )
+        // ── Plan strip ────────────────────────────────────
+        .child(Self::render_reserved_transient_lane(
+            "agent_chat-plan-strip-lane",
+            AGENT_CHAT_TRANSIENT_PLAN_LANE_HEIGHT_PX,
+            if plan_entries.is_empty() {
+                None
+            } else {
+                Some(
                     div()
-                        .id("agent_chat-history-popup-backdrop")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(self.inline_footer_height()))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.dismiss_history_popup(cx);
-                                cx.stop_propagation();
-                            }),
-                        ),
+                        .w_full()
+                        .px(px(8.0))
+                        .pb(px(4.0))
+                        .child(Self::render_plan_strip(&plan_entries))
+                        .into_any_element(),
                 )
-            })
-            .when(!self.uses_external_footer_host(), |d| {
-                let is_main_window = crate::get_main_window_handle()
-                    .is_some_and(|handle| handle == window.window_handle());
-
-                #[cfg(target_os = "macos")]
-                {
-                    if !is_main_window {
-                        let glass_in_window_footer =
-                            crate::platform::tahoe_liquid_glass_available()
-                                && crate::theme::get_cached_theme().is_vibrancy_enabled();
-                        if glass_in_window_footer {
-                            return d.child(self.render_agent_chat_config_footer_rail(cx));
-                        }
-                        self.ensure_native_footer_action_listener(window, cx);
-                        crate::footer_popup::sync_window_footer_popup(
-                            window,
-                            &self.agent_chat_detached_native_footer_config(cx),
-                        );
-                        return d.child(crate::components::prompt_layout_shell::render_native_main_window_footer_spacer());
-                    }
-                }
-
-                let active_surface = crate::footer_popup::active_main_window_footer_surface();
-                let use_native_footer_spacer = is_main_window && active_surface == Some("agent_chat");
-
-                if use_native_footer_spacer {
-                    d.child(crate::components::prompt_layout_shell::render_native_main_window_footer_spacer())
-                } else {
-                    d.child(self.render_agent_chat_config_footer_rail(cx))
-                }
-            })
-            .into_any_element()
+            },
+        ))
+        // ── Pending permission fallback (non-tool-linked) ──────
+        .child(Self::render_reserved_transient_lane(
+            "agent_chat-permission-card-lane",
+            AGENT_CHAT_TRANSIENT_PERMISSION_LANE_HEIGHT_PX,
+            pending_permission
+                .clone()
+                .filter(|_| !pending_permission_has_message_target)
+                .map(|request| {
+                    div()
+                        .w_full()
+                        .px(px(8.0))
+                        .pb(px(4.0))
+                        .child(Self::render_permission_inline_card(
+                            &request,
+                            self.permission_index,
+                            self.permission_options_open,
+                            view_entity.clone(),
+                        ))
+                        .into_any_element()
+                }),
+        ))
+        .child(Self::render_reserved_transient_lane(
+            "agent_chat-message-queue-lane-bottom",
+            AGENT_CHAT_TRANSIENT_QUEUE_LANE_HEIGHT_PX,
+            if self.message_queue_lane_active(cx) {
+                Some(self.render_message_queue_strip(cx))
+            } else {
+                None
+            },
+        ))
+        .child(self.render_active_callout(cx))
+        // WP6: bottom docking renders ONLY the input shell (no second
+        // header context zone) — the resolved model owns the placement.
+        .when(resolved_layout.composer_at_bottom(), |d| {
+            d.child(Self::render_composer_input_shell(
+                &input_text,
+                input_cursor,
+                input_selection,
+                cursor_visible,
+                is_empty,
+                &mention_highlights,
+                &pasted_text_pills,
+                placeholder_text,
+                profile_icon_name.as_deref(),
+                profile_active_pending,
+                status,
+                view_entity.clone(),
+                &theme,
+                self.expanded_composer,
+                AgentChatComposerTextStyle::legacy(),
+                window_width,
+                &self.composer_scroll_handle,
+                cx,
+            ))
+        })
+        // ── Attach menu popup ──────────────────────────
+        .when(self.attach_menu_open, |d| {
+            d.child(self.render_attach_menu(cx))
+        })
+        .when(history_popup_open, |d| {
+            d.child(
+                div()
+                    .id("agent_chat-history-popup-backdrop")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(self.inline_footer_height()))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.dismiss_history_popup(cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+        })
+        // WP6: one footer owner, resolved once (shared with the header-slot
+        // path).
+        .when_some(self.render_resolved_footer(window, cx), |d, footer| {
+            d.child(footer)
+        })
+        .into_any_element()
     }
 }
 
 #[cfg(test)]
 #[path = "view/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod footer_owner_tests {
+    use super::{
+        desired_footer_owner_for_plan, plan_footer_owner_transition, plan_native_footer_lifecycle,
+        AgentChatAutomationProjection, AgentChatFooterOwner, AgentChatFooterPresentationState,
+    };
+    use crate::ai::agent_chat::ui::layout::{AgentChatFooterInputs, ResolvedAgentChatRenderPlan};
+    use crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant;
+    use crate::footer_popup::MainWindowFooterConfig;
+
+    fn detached_native_state(surface_tag: &'static str) -> AgentChatFooterPresentationState {
+        AgentChatFooterPresentationState {
+            owner: AgentChatFooterOwner::Native,
+            is_main_window: false,
+            native_config: Some(MainWindowFooterConfig::new(surface_tag, Vec::new())),
+        }
+    }
+
+    fn external_state() -> AgentChatFooterPresentationState {
+        AgentChatFooterPresentationState {
+            owner: AgentChatFooterOwner::External,
+            is_main_window: false,
+            native_config: None,
+        }
+    }
+
+    /// BC-2: leaving a detached native footer tears the previous host down; the
+    /// memo also means an IDENTICAL presentation runs no side-effects (the
+    /// per-frame re-sync is gone), while a config-only change re-syncs in place.
+    #[test]
+    fn agent_chat_footer_owner_transition_closes_stale_native_popup() {
+        let native = detached_native_state("agent_chat");
+
+        // Detached Native → External: tear down the previous native host.
+        let leaving = plan_native_footer_lifecycle(Some(&native), &external_state());
+        assert!(!leaving.unchanged);
+        assert!(
+            leaving.tear_down_previous_native,
+            "leaving a detached native footer must tear down the stale host",
+        );
+        assert!(!leaving.sync_next_native);
+
+        // Identical presentation → fully memoized, no side-effects this frame.
+        let unchanged = plan_native_footer_lifecycle(Some(&native), &native.clone());
+        assert!(unchanged.unchanged);
+        assert!(!unchanged.tear_down_previous_native);
+        assert!(!unchanged.sync_next_native);
+
+        // Config-only change while staying detached Native → re-sync in place,
+        // never a spurious teardown.
+        let reconfigured = detached_native_state("agent_chat_reconfigured");
+        let resync = plan_native_footer_lifecycle(Some(&native), &reconfigured);
+        assert!(!resync.unchanged);
+        assert!(!resync.tear_down_previous_native);
+        assert!(resync.sync_next_native, "a config change re-syncs the host");
+
+        // First entry (no previous) into a detached native footer → sync only.
+        let first = plan_native_footer_lifecycle(None, &native);
+        assert!(!first.unchanged);
+        assert!(!first.tear_down_previous_native);
+        assert!(first.sync_next_native);
+    }
+
+    fn native_conversation_owner() -> AgentChatFooterOwner {
+        // Main window where Agent Chat owns the native footer surface.
+        let plan = ResolvedAgentChatRenderPlan::resolve(
+            AgentChatUiVariant::Standard,
+            false,
+            false,
+            false,
+            AgentChatFooterInputs {
+                uses_external_footer_host: false,
+                is_main_window: true,
+                glass_in_window_footer: false,
+                platform_native_detached_footer: true,
+                main_active_surface_is_agent_chat: true,
+            },
+        );
+        desired_footer_owner_for_plan(plan)
+    }
+
+    fn inline_conversation_owner() -> AgentChatFooterOwner {
+        // Main window where Agent Chat is NOT the active native surface.
+        let plan = ResolvedAgentChatRenderPlan::resolve(
+            AgentChatUiVariant::Standard,
+            false,
+            false,
+            false,
+            AgentChatFooterInputs {
+                uses_external_footer_host: false,
+                is_main_window: true,
+                glass_in_window_footer: false,
+                platform_native_detached_footer: true,
+                main_active_surface_is_agent_chat: false,
+            },
+        );
+        desired_footer_owner_for_plan(plan)
+    }
+
+    fn focused_text_body_owner() -> AgentChatFooterOwner {
+        let plan = ResolvedAgentChatRenderPlan::resolve(
+            AgentChatUiVariant::FocusedTextMini,
+            false,
+            false,
+            true,
+            AgentChatFooterInputs {
+                uses_external_footer_host: false,
+                is_main_window: true,
+                glass_in_window_footer: false,
+                platform_native_detached_footer: true,
+                main_active_surface_is_agent_chat: true,
+            },
+        );
+        desired_footer_owner_for_plan(plan)
+    }
+
+    fn setup_body_owner() -> AgentChatFooterOwner {
+        let plan = ResolvedAgentChatRenderPlan::resolve(
+            AgentChatUiVariant::Standard,
+            true,
+            false,
+            false,
+            AgentChatFooterInputs {
+                uses_external_footer_host: false,
+                is_main_window: true,
+                glass_in_window_footer: false,
+                platform_native_detached_footer: true,
+                main_active_surface_is_agent_chat: true,
+            },
+        );
+        desired_footer_owner_for_plan(plan)
+    }
+
+    #[test]
+    fn agent_chat_footer_owner_transition_native_to_inline_clears_native() {
+        let t = plan_footer_owner_transition(
+            Some(AgentChatFooterOwner::Native),
+            AgentChatFooterOwner::Inline,
+        );
+        assert_eq!(t.owner, AgentChatFooterOwner::Inline);
+        assert!(
+            t.clears_native_host,
+            "Native→Inline must record an explicit native clear"
+        );
+        assert_eq!(t.reserved_bands, 1);
+    }
+
+    #[test]
+    fn agent_chat_footer_owner_transition_native_to_external_clears_native() {
+        let t = plan_footer_owner_transition(
+            Some(AgentChatFooterOwner::Native),
+            AgentChatFooterOwner::External,
+        );
+        assert_eq!(t.owner, AgentChatFooterOwner::External);
+        assert!(
+            t.clears_native_host,
+            "Native→External must record an explicit native clear"
+        );
+        assert_eq!(t.reserved_bands, 0);
+    }
+
+    #[test]
+    fn agent_chat_footer_owner_transition_inline_to_native_syncs_without_clear() {
+        let t = plan_footer_owner_transition(
+            Some(AgentChatFooterOwner::Inline),
+            AgentChatFooterOwner::Native,
+        );
+        assert_eq!(t.owner, AgentChatFooterOwner::Native);
+        assert!(
+            !t.clears_native_host,
+            "entering Native re-syncs the host, never clears it"
+        );
+        assert_eq!(t.reserved_bands, 1);
+    }
+
+    #[test]
+    fn agent_chat_footer_owner_transition_external_to_inline_no_native_clear() {
+        let t = plan_footer_owner_transition(
+            Some(AgentChatFooterOwner::External),
+            AgentChatFooterOwner::Inline,
+        );
+        assert_eq!(t.owner, AgentChatFooterOwner::Inline);
+        assert!(!t.clears_native_host, "no native host existed to clear");
+        assert_eq!(t.reserved_bands, 1);
+    }
+
+    #[test]
+    fn agent_chat_footer_owner_transition_conversation_to_setup_clears_native() {
+        // The conversation shell owns the native footer; switching to the setup
+        // body reconciles to External and tears the native host down.
+        let conversation = native_conversation_owner();
+        let setup = setup_body_owner();
+        assert_eq!(conversation, AgentChatFooterOwner::Native);
+        assert_eq!(setup, AgentChatFooterOwner::External);
+        let t = plan_footer_owner_transition(Some(conversation), setup);
+        assert_eq!(t.owner, AgentChatFooterOwner::External);
+        assert!(t.clears_native_host);
+        assert_eq!(t.reserved_bands, 0);
+    }
+
+    #[test]
+    fn agent_chat_footer_owner_transition_standard_to_focused_text_mini() {
+        // Standard (inline rail) → FocusedTextMini body (External owner).
+        let standard = inline_conversation_owner();
+        let focused = focused_text_body_owner();
+        assert_eq!(standard, AgentChatFooterOwner::Inline);
+        assert_eq!(focused, AgentChatFooterOwner::External);
+        let t = plan_footer_owner_transition(Some(standard), focused);
+        assert_eq!(t.owner, AgentChatFooterOwner::External);
+        // Inline→External did not own a native host, so no native clear.
+        assert!(!t.clears_native_host);
+        assert_eq!(t.reserved_bands, 0);
+    }
+
+    /// Over the entire previous×desired matrix, exactly one owner survives (the
+    /// desired one), the native host is cleared ONLY when leaving Native, and
+    /// reserved bands are 0 exactly for External.
+    #[test]
+    fn agent_chat_footer_owner_transition_matrix_has_one_owner() {
+        let owners = [
+            AgentChatFooterOwner::External,
+            AgentChatFooterOwner::Native,
+            AgentChatFooterOwner::Inline,
+        ];
+        for &desired in &owners {
+            for previous in [None, Some(owners[0]), Some(owners[1]), Some(owners[2])] {
+                let t = plan_footer_owner_transition(previous, desired);
+                assert_eq!(t.owner, desired, "exactly one (desired) owner survives");
+                assert_eq!(
+                    t.clears_native_host,
+                    previous == Some(AgentChatFooterOwner::Native)
+                        && desired != AgentChatFooterOwner::Native,
+                    "native clear only on Native→non-Native",
+                );
+                assert_eq!(
+                    t.reserved_bands == 0,
+                    desired == AgentChatFooterOwner::External,
+                    "reserved bands are 0 exactly for External",
+                );
+            }
+        }
+    }
+
+    /// The automation projection is a pure function of the plan: body kind,
+    /// composer slot, transcript anchor, density, footer owner and reserved
+    /// bands all round-trip from the resolved plan.
+    #[test]
+    fn agent_chat_footer_owner_transition_projection_reflects_plan() {
+        let conversation = ResolvedAgentChatRenderPlan::resolve(
+            AgentChatUiVariant::BottomDock,
+            false,
+            false,
+            false,
+            AgentChatFooterInputs {
+                uses_external_footer_host: false,
+                is_main_window: true,
+                glass_in_window_footer: false,
+                platform_native_detached_footer: true,
+                main_active_surface_is_agent_chat: true,
+            },
+        );
+        let projection = AgentChatAutomationProjection::from_plan(conversation);
+        assert_eq!(projection.body_kind, "conversation");
+        assert_eq!(projection.composer_slot, "bottom");
+        assert_eq!(projection.transcript_anchor, "bottom");
+        assert_eq!(projection.density, "compact");
+        assert_eq!(projection.footer_owner, "native");
+        assert_eq!(projection.reserved_footer_bands, 1);
+
+        // A setup body reports the setup body kind and reserves no band.
+        let setup = ResolvedAgentChatRenderPlan::resolve(
+            AgentChatUiVariant::Standard,
+            true,
+            false,
+            false,
+            AgentChatFooterInputs {
+                uses_external_footer_host: false,
+                is_main_window: true,
+                glass_in_window_footer: false,
+                platform_native_detached_footer: true,
+                main_active_surface_is_agent_chat: true,
+            },
+        );
+        let setup_projection = AgentChatAutomationProjection::from_plan(setup);
+        assert_eq!(setup_projection.body_kind, "initial-setup");
+        assert_eq!(setup_projection.footer_owner, "external");
+        assert_eq!(setup_projection.reserved_footer_bands, 0);
+    }
+}
 
 #[cfg(test)]
 mod composer_sizing_tests {

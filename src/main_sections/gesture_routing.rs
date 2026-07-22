@@ -79,7 +79,7 @@ pub(crate) fn spawn_main_hotkey_gesture_listener(
             let _guard = correlation_id.map(logging::set_correlation_id);
             let app_entity_inner = app_entity.clone();
             let window_inner = window;
-            let _ = cx.update(move |cx: &mut App| {
+            cx.update(move |cx: &mut App| {
                 for gesture in events {
                     dispatch_main_gesture_event(
                         gesture,

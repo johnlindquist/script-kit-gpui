@@ -92,9 +92,8 @@ fn shortcut_recorder_and_confirm_popup_use_the_same_shell() {
     assert!(
         shortcut.contains("shortcut-cancel-button")
             && shortcut.contains("shortcut-save-button")
-            && shell.contains("key_first: false")
-            && shortcut.contains("CONFIRM_MODAL_ACTIONS_EDGE_PADDING_X_KNOB_ID"),
-        "shortcut recorder buttons must follow confirm modal action ordering and designer controls"
+            && shell.contains("key_first: false"),
+        "shortcut recorder buttons must follow confirm modal action ordering"
     );
 }
 
@@ -133,8 +132,6 @@ fn confirm_popup_uses_shortcut_modal_button_and_chrome_tokens() {
             && confirm.contains("footer_button_height")
             && confirm.contains("current_main_menu_footer_height")
             && confirm.contains("current_main_menu_footer_metrics().item_gap_px")
-            && confirm.contains("CONFIRM_MODAL_ACTIONS_BUTTON_HEIGHT_KNOB_ID")
-            && confirm.contains("CONFIRM_MODAL_ACTIONS_EDGE_PADDING_X_KNOB_ID")
             && confirm.contains("edge_padding_x_px")
             && confirm.contains("footer_centered_action_button_layout")
             && confirm.contains("shrink_frame_to_content_px")

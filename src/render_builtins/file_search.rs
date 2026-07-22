@@ -804,111 +804,108 @@ impl ScriptListApp {
                                         &query, sel_idx, has_shift, cx,
                                     ) {
                                         cx.stop_propagation();
-                                        return;
                                     }
                                 }
-                            } else {
-                                if let Some(file) = get_selected_file() {
-                                    // cwd-pick mode: Enter on a directory sets
-                                    // spine_cwd and returns to ScriptList. Enter
-                                    // on a file is a no-op so the user can keep
-                                    // navigating until they pick a directory.
-                                    if this.cwd_pick_mode {
-                                        if file.file_type == FileType::Directory {
-                                            // Footer chip shows the full path
-                                            // (~/dev rather than just "dev") so
-                                            // the user can tell sibling-named
-                                            // directories apart.
-                                            let label = file_search::shorten_path(&file.path)
-                                                .trim_end_matches('/')
-                                                .to_string();
-                                            tracing::info!(
-                                                target: "script_kit::spine",
-                                                event = "cwd_pick_resolve",
-                                                path = %file.path,
-                                                label = %label,
-                                                "Enter in cwd-pick FileSearchView set spine_cwd"
-                                            );
-                                            this.spine_cwd =
-                                                Some(std::path::PathBuf::from(&file.path));
-                                            this.spine_cwd_label = Some(label);
-                                            this.spine_cwd_revision =
-                                                this.spine_cwd_revision.wrapping_add(1);
-                                            this.cwd_pick_mode = false;
-                                            this.invalidate_grouped_cache();
-                                            // Warm a Pi session for this cwd now
-                                            // so the next Cmd+Enter launches the
-                                            // agent in the chosen directory
-                                            // without a cold-start "try again".
-                                            this.prewarm_agent_chat_for_spine_cwd(cx);
-                                            this.persist_spine_cwd();
-                                            this.reset_to_script_list(cx);
-                                            this.clear_filter(window, cx);
-                                            // Sentinel: prevents the shared
-                                            // gpui input's `InputEvent::PressEnter`
-                                            // subscriber from firing
-                                            // `execute_selected` on the freshly
-                                            // restored ScriptList view.
-                                            this.record_return_to_script_list_submit(
-                                                "cwd_pick",
-                                                "file_search_enter_keydown",
-                                                Some(&file.path),
-                                            );
-                                        }
-                                        cx.stop_propagation();
-                                        return;
-                                    }
-
-                                    // Portal mode: attach file to Agent Chat chat and return.
-                                    if this.is_in_attachment_portal() {
-                                        if file.file_type == FileType::Directory {
-                                            let next_query = format!(
-                                                "{}/",
-                                                file_search::shorten_path(&file.path)
-                                                    .trim_end_matches('/')
-                                            );
-                                            let next_presentation = match &this.current_view {
-                                                AppView::FileSearchView {
-                                                    presentation, ..
-                                                } => *presentation,
-                                                _ => FileSearchPresentation::Full,
-                                            };
-                                            this.open_file_search_view_preserving_current_results(
-                                                next_query,
-                                                next_presentation,
-                                                cx,
-                                            );
-                                            cx.stop_propagation();
-                                            return;
-                                        }
-
-                                        let part =
-                                            crate::ai::message_parts::AiContextPart::FilePath {
-                                                path: file.path.clone(),
-                                                label: std::path::Path::new(&file.path)
-                                                    .file_name()
-                                                    .map(|n| n.to_string_lossy().to_string())
-                                                    .unwrap_or_else(|| file.path.clone()),
-                                            };
-                                        this.close_attachment_portal_with_part(part, cx);
-                                        cx.stop_propagation();
-                                        return;
-                                    }
-
-                                    // Standard file search: open with the default app and close,
-                                    // even when the selected item is a directory.
-                                    // Journal the query → choice pair so the brain
-                                    // can answer "what did I just search for?".
-                                    let query = this.filter_text.trim();
-                                    if !query.is_empty() {
-                                        crate::brain::record_activity(
-                                            "searched files for",
-                                            &format!("\"{}\" and opened {}", query, file.path),
+                            } else if let Some(file) = get_selected_file() {
+                                // cwd-pick mode: Enter on a directory sets
+                                // spine_cwd and returns to ScriptList. Enter
+                                // on a file is a no-op so the user can keep
+                                // navigating until they pick a directory.
+                                if this.cwd_pick_mode {
+                                    if file.file_type == FileType::Directory {
+                                        // Footer chip shows the full path
+                                        // (~/dev rather than just "dev") so
+                                        // the user can tell sibling-named
+                                        // directories apart.
+                                        let label = file_search::shorten_path(&file.path)
+                                            .trim_end_matches('/')
+                                            .to_string();
+                                        tracing::info!(
+                                            target: "script_kit::spine",
+                                            event = "cwd_pick_resolve",
+                                            path = %file.path,
+                                            label = %label,
+                                            "Enter in cwd-pick FileSearchView set spine_cwd"
+                                        );
+                                        this.spine_cwd =
+                                            Some(std::path::PathBuf::from(&file.path));
+                                        this.spine_cwd_label = Some(label);
+                                        this.spine_cwd_revision =
+                                            this.spine_cwd_revision.wrapping_add(1);
+                                        this.cwd_pick_mode = false;
+                                        this.invalidate_grouped_cache();
+                                        // Warm a Pi session for this cwd now
+                                        // so the next Cmd+Enter launches the
+                                        // agent in the chosen directory
+                                        // without a cold-start "try again".
+                                        this.prewarm_agent_chat_for_spine_cwd(cx);
+                                        this.persist_spine_cwd();
+                                        this.reset_to_script_list(cx);
+                                        this.clear_filter(window, cx);
+                                        // Sentinel: prevents the shared
+                                        // gpui input's `InputEvent::PressEnter`
+                                        // subscriber from firing
+                                        // `execute_selected` on the freshly
+                                        // restored ScriptList view.
+                                        this.record_return_to_script_list_submit(
+                                            "cwd_pick",
+                                            "file_search_enter_keydown",
+                                            Some(&file.path),
                                         );
                                     }
-                                    let _ = file_search::open_file(&file.path);
-                                    this.close_and_reset_window(cx);
+                                    cx.stop_propagation();
+                                    return;
                                 }
+
+                                // Portal mode: attach file to Agent Chat chat and return.
+                                if this.is_in_attachment_portal() {
+                                    if file.file_type == FileType::Directory {
+                                        let next_query = format!(
+                                            "{}/",
+                                            file_search::shorten_path(&file.path)
+                                                .trim_end_matches('/')
+                                        );
+                                        let next_presentation = match &this.current_view {
+                                            AppView::FileSearchView {
+                                                presentation, ..
+                                            } => *presentation,
+                                            _ => FileSearchPresentation::Full,
+                                        };
+                                        this.open_file_search_view_preserving_current_results(
+                                            next_query,
+                                            next_presentation,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+
+                                    let part =
+                                        crate::ai::message_parts::AiContextPart::FilePath {
+                                            path: file.path.clone(),
+                                            label: std::path::Path::new(&file.path)
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| file.path.clone()),
+                                        };
+                                    this.close_attachment_portal_with_part(part, cx);
+                                    cx.stop_propagation();
+                                    return;
+                                }
+
+                                // Standard file search: open with the default app and close,
+                                // even when the selected item is a directory.
+                                // Journal the query → choice pair so the brain
+                                // can answer "what did I just search for?".
+                                let query = this.filter_text.trim();
+                                if !query.is_empty() {
+                                    crate::brain::record_activity(
+                                        "searched files for",
+                                        &format!("\"{}\" and opened {}", query, file.path),
+                                    );
+                                }
+                                let _ = file_search::open_file(&file.path);
+                                this.close_and_reset_window(cx);
                             }
                         }
                         _ => {
@@ -948,7 +945,6 @@ impl ScriptListApp {
                                 {
                                     this.file_search_actions_path = Some(file.path.clone());
                                     this.handle_action(action_id.to_string(), window, cx);
-                                    return;
                                 }
                             }
                         }

@@ -105,7 +105,7 @@ impl ScriptListApp {
                 .await;
 
             let mut keep_polling = false;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let _ = this.update(cx, |app, cx| {
                     keep_polling =
                         matches!(app.current_view, AppView::PermissionsWizardView { .. });

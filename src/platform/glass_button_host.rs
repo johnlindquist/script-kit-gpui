@@ -146,18 +146,15 @@ pub(crate) fn sync_for_window(
             return;
         }
 
-        if !registry.contains_key(&window_key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = registry.entry(window_key) {
             let Some(host) = GlassButtonHost::install(window) else {
                 return;
             };
-            registry.insert(
-                window_key,
-                WindowGlassState {
-                    host,
-                    groups: BTreeMap::new(),
-                    hovered: BTreeMap::new(),
-                },
-            );
+            e.insert(WindowGlassState {
+                host,
+                groups: BTreeMap::new(),
+                hovered: BTreeMap::new(),
+            });
         }
         if let Some(state) = registry.get_mut(&window_key) {
             state.groups.insert(

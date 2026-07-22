@@ -225,11 +225,21 @@ impl ChatPrompt {
         if !self.conversation_turns_dirty {
             return;
         }
+        // WP-B3: bytes scanned by the rebuild = the message content it walks.
+        let bytes_scanned: usize = self.messages.iter().map(|m| m.get_content().len()).sum();
+        let input_messages = self.messages.len();
         self.conversation_turns_cache = Arc::new(build_conversation_turns(
             &self.messages,
             &self.image_render_cache,
         ));
         self.conversation_turns_dirty = false;
+        // WP-B3: one rebuild tagged with input messages consumed, rows produced,
+        // and bytes scanned — the amplification WP8/WP9 target.
+        crate::chat_hot_counters::record_chat_turn_cache_rebuild(
+            input_messages,
+            self.conversation_turns_cache.len(),
+            bytes_scanned,
+        );
         self.sync_turns_list_state();
     }
 
@@ -336,6 +346,27 @@ impl ChatPrompt {
         cx.notify();
     }
 
+    /// WP-B3: bulk-restore a whole conversation (e.g. Flow history replay) in a
+    /// single pass. Extends the message vector, marks the turn cache dirty ONCE,
+    /// and rebuilds ONCE — versus calling [`Self::add_message`] per message,
+    /// which (through render-time `ensure_conversation_turns_cache`) can rebuild
+    /// the whole cache once per restored message.
+    pub fn restore_messages(
+        &mut self,
+        messages: impl IntoIterator<Item = ChatPromptMessage>,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.messages.len();
+        self.messages.extend(messages);
+        if self.messages.len() == before {
+            return;
+        }
+        self.mark_conversation_turns_dirty();
+        self.ensure_conversation_turns_cache();
+        self.force_scroll_turns_to_bottom();
+        cx.notify();
+    }
+
     pub fn start_streaming(
         &mut self,
         message_id: String,
@@ -415,6 +446,9 @@ impl ChatPrompt {
     }
 
     fn flush_stream_updates(&mut self, cx: &mut Context<Self>) {
+        // WP-B3: one scheduled visible stream flush (the throttled 33 ms clock).
+        crate::chat_hot_counters::record_chat_scheduled_flush();
+        crate::chat_hot_counters::maybe_log_snapshot("chat_stream_flush");
         self.last_stream_flush_at = Some(std::time::Instant::now());
         self.mark_conversation_turns_dirty();
         self.scroll_turns_to_bottom();
@@ -433,8 +467,11 @@ impl ChatPrompt {
         if self.streaming_message_id.as_deref() == Some(message_id) {
             self.streaming_message_id = None;
         }
+        // WP-B3: terminal flush — forces a final rebuild off the scheduled clock.
+        crate::chat_hot_counters::record_chat_terminal_flush();
         self.mark_conversation_turns_dirty();
         self.ensure_conversation_turns_cache();
+        crate::chat_hot_counters::log_snapshot("chat_complete_streaming");
         cx.notify();
     }
 
@@ -475,8 +512,11 @@ impl ChatPrompt {
         self.builtin_streaming_content.clear();
         self.builtin_accumulated_content.clear();
         self.builtin_reveal_offset = 0;
+        // WP-B3: terminal flush — forces a final rebuild off the scheduled clock.
+        crate::chat_hot_counters::record_chat_terminal_flush();
         self.mark_conversation_turns_dirty();
         self.ensure_conversation_turns_cache();
+        crate::chat_hot_counters::log_snapshot("chat_stop_streaming");
 
         cx.notify();
     }

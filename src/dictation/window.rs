@@ -1121,7 +1121,7 @@ impl DictationOverlay {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(135))
                     .await;
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     let _ = any_handle.update(cx, |_view, window, _cx| {
                         prepare_overlay_window_for_close(window);
                         window.remove_window();

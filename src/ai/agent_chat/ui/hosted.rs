@@ -52,6 +52,7 @@ pub(crate) fn spawn_hosted_thread(
                 launch_requirements: requirements,
                 available_models: pi_launch.available_models.clone(),
                 selected_model_id: pi_launch.selected_model_id.clone(),
+                session_policy: super::capabilities::AgentChatSessionPolicy::Full,
             },
             cx,
         )

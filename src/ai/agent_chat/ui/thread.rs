@@ -21,6 +21,9 @@ use crate::protocol::AiMessageInfo;
 
 use crate::ai::agent_chat::runtime::{AgentChatConnection, AgentChatTurnRequest};
 
+use super::capabilities::{
+    classify_context_part, AgentChatContextClass, AgentChatSessionPolicy, ContextAdmissionError,
+};
 use super::notifications::{
     dispatch_agent_chat_notification, should_notify_agent_chat_event, truncate_notification_body,
     AgentChatNotificationDebounce, AgentChatNotificationEvent, AgentChatNotificationVisibility,
@@ -30,6 +33,7 @@ use super::{
     build_tab_ai_agent_chat_context_blocks, AgentChatApprovalRequest, AgentChatEvent,
     AgentChatEventRx,
 };
+use crate::ai::message_parts::AiContextPart;
 
 fn truncate_chars_for_title_prompt(value: &str, max_chars: usize) -> String {
     let mut out: String = value.chars().take(max_chars).collect();
@@ -396,6 +400,12 @@ pub(crate) struct AgentChatThreadInit {
     /// Preserved through runtime recovery so agent switching stays
     /// capability-driven.
     pub launch_requirements: super::preflight::AgentChatLaunchRequirements,
+    /// The immutable, thread-owned session policy (WP-B1, Oracle phase-b
+    /// audit). SOLE authority for every automatic retention/egress/reuse
+    /// decision — replaces the old `retain_history: bool`. Quick AI launches
+    /// pass [`AgentChatSessionPolicy::QuickAi`] (zero-context ⇒ zero-retention);
+    /// every other variant passes `Full`.
+    pub session_policy: AgentChatSessionPolicy,
 }
 
 /// One-shot context payload consumed by `prepare_turn_blocks()`.
@@ -607,6 +617,11 @@ pub(crate) struct AgentChatThread {
     notification_debounce: AgentChatNotificationDebounce,
     current_turn_id: u64,
     llm_title_attempted: bool,
+    /// The immutable, thread-owned session policy (WP-B1). SOLE authority for
+    /// every automatic retention/egress/reuse decision. Set once at
+    /// construction from the launch variant and never mutated (Quick AI stays
+    /// Quick AI for the whole thread lifetime).
+    session_policy: AgentChatSessionPolicy,
 
     // ── Model selection ──────────────────────────────────────
     /// Available models for this agent.
@@ -638,6 +653,138 @@ impl AgentChatThread {
 
     pub(crate) fn profile_id(&self) -> &str {
         &self.profile_id
+    }
+
+    /// The immutable, thread-owned session policy — the SOLE authority the
+    /// view derives its capabilities from when a live thread exists (WP-B1).
+    pub(crate) fn session_policy(&self) -> AgentChatSessionPolicy {
+        self.session_policy
+    }
+
+    // ── Context admission boundary (WP-B2) ───────────────────────
+    //
+    // Every context ingress on the thread routes through this one adjudication
+    // so the session policy is the AUTHORITATIVE layer beneath the view's UX
+    // affordance gates: even if a call site (or a stale draft, or a queued
+    // message) tries to smuggle context into a Quick AI thread, it is dropped
+    // here before it can reach `pending_context_parts` or the provider.
+
+    /// Adjudicate a single typed context part against the session policy.
+    fn admit_context_part(&self, part: &AiContextPart) -> Result<(), ContextAdmissionError> {
+        self.session_policy
+            .admit_context(classify_context_part(part))
+    }
+
+    /// Retain only the context parts this session policy admits, logging each
+    /// denial. Order is preserved.
+    fn filter_admissible_parts(&self, parts: Vec<AiContextPart>) -> Vec<AiContextPart> {
+        Self::filter_admissible_parts_for_policy(self.session_policy, parts)
+    }
+
+    fn filter_admissible_parts_for_policy(
+        policy: AgentChatSessionPolicy,
+        parts: Vec<AiContextPart>,
+    ) -> Vec<AiContextPart> {
+        parts
+            .into_iter()
+            .filter(|part| {
+                let class = classify_context_part(part);
+                match policy.admit_context(class) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "script_kit::quick_ai",
+                            event = "agent_chat_context_part_denied_by_policy",
+                            policy = ?policy,
+                            context_class = ?class,
+                            reason = error.as_str(),
+                            source = %part.source(),
+                            label = %part.label(),
+                        );
+                        false
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Whether this session admits ambient / block-staged desktop context at
+    /// all. Block-staging ingresses (`stage_context`, `stage_ask_anything_context`)
+    /// carry no `AiContextPart` to classify, so they adjudicate against the
+    /// ambient class directly.
+    fn admits_staged_context_blocks(&self) -> bool {
+        self.session_policy
+            .admit_context(AgentChatContextClass::Ambient)
+            .is_ok()
+    }
+
+    /// Final backstop before context is consumed into a turn: for a session
+    /// that forbids ambient context (Quick AI), any residual pending parts or
+    /// hidden blocks are a leak — clear them and log loudly. Guarantees the
+    /// provider boundary sees zero context blocks for a zero-context session.
+    fn enforce_zero_context_before_turn(&mut self, site: &'static str) {
+        if self.admits_staged_context_blocks() {
+            return;
+        }
+        if self.pending_context_parts.is_empty() && self.pending_context_blocks.is_empty() {
+            return;
+        }
+        tracing::error!(
+            target: "script_kit::quick_ai",
+            event = "quick_ai_context_leak_prevented",
+            site,
+            policy = ?self.session_policy,
+            pending_part_count = self.pending_context_parts.len(),
+            pending_block_count = self.pending_context_blocks.len(),
+        );
+        self.pending_context_parts.clear();
+        self.pending_context_blocks.clear();
+        self.pending_ambient_context_enabled = false;
+    }
+
+    /// Build a turn request stamped with this session's tool-admission policy
+    /// (WP-B2). The single construction point so no start-turn site can forget
+    /// to carry the policy to the backend.
+    fn turn_request(&self, blocks: Vec<ContentBlock>) -> AgentChatTurnRequest {
+        AgentChatTurnRequest {
+            ui_thread_id: self.ui_thread_id.clone(),
+            cwd: self.cwd.clone(),
+            blocks,
+            model_id: self.selected_model_id.clone(),
+            tool_policy: self.session_policy.tool_policy(),
+        }
+    }
+
+    /// Whether a backend tool event names a tool this session forbids. Matches
+    /// on the canonical backend tool id ONLY (never a display title). A `None`
+    /// name rides on an already-admitted tool-call start and is not re-judged.
+    fn tool_event_is_forbidden(&self, tool_name: Option<&str>) -> bool {
+        match tool_name {
+            Some(name) => !self.session_policy.tool_policy().allows_tool(name),
+            None => false,
+        }
+    }
+
+    /// Fail the current turn closed because the backend tried to run a tool the
+    /// session policy forbids. Cancels the live turn and surfaces a generic
+    /// policy error — the raw tool args are NEVER rendered.
+    fn fail_turn_forbidden_tool(&mut self, tool_name: Option<&str>) {
+        tracing::error!(
+            target: "script_kit::quick_ai",
+            event = "quick_ai_forbidden_tool_rejected",
+            policy = ?self.session_policy,
+            tool_name = ?tool_name,
+        );
+        let _ = self.connection.cancel_turn(self.ui_thread_id.clone());
+        self.active_callout = Some(AgentChatCallout::failed(
+            "This response tried to use a tool that isn't available here.",
+            false,
+        ));
+        self.push_message(
+            AgentChatThreadMessageRole::Error,
+            "Blocked a tool call that isn't allowed in this mode.",
+        );
+        self.set_status(AgentChatThreadStatus::Error);
     }
 
     pub(crate) fn set_notice_callout(
@@ -722,7 +869,13 @@ impl AgentChatThread {
             pending_permission: None,
             pending_context_blocks: Vec::new(),
             pending_context_consumed: false,
-            pending_context_parts: init.initial_context_parts,
+            // WP-B2: the constructor is a context ingress. Drop any initial
+            // parts the launch policy forbids so a Quick AI thread can never be
+            // born holding ambient/file/skill context.
+            pending_context_parts: Self::filter_admissible_parts_for_policy(
+                init.session_policy,
+                init.initial_context_parts,
+            ),
             pending_ambient_context_enabled: false,
             context_bootstrap_state: AgentChatContextBootstrapState::Preparing,
             queued_submit_while_bootstrapping: false,
@@ -757,6 +910,7 @@ impl AgentChatThread {
             notification_debounce: AgentChatNotificationDebounce::default(),
             current_turn_id: 0,
             llm_title_attempted: false,
+            session_policy: init.session_policy,
             selected_model_display_name: {
                 let id = init.selected_model_id.as_deref();
                 id.and_then(|sel| {
@@ -897,6 +1051,12 @@ impl AgentChatThread {
         title: &'static str,
         body: String,
     ) {
+        // Content-bearing OS notifications leak the full response/error text
+        // into Notification Center history — that is automatic egress, denied
+        // for zero-retention Quick AI (WP-B1, Oracle phase-b audit).
+        if !self.session_policy.allows_automatic_transcript_retention() {
+            return;
+        }
         if should_notify_agent_chat_event(
             event,
             self.notification_visibility(),
@@ -917,6 +1077,17 @@ impl AgentChatThread {
         context: &crate::ai::TabAiContextBlob,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        // WP-B2: block-staging is a context ingress. A session that forbids
+        // ambient context (Quick AI) must never stage desktop context blocks.
+        if !self.admits_staged_context_blocks() {
+            tracing::warn!(
+                target: "script_kit::quick_ai",
+                event = "agent_chat_stage_context_denied_by_policy",
+                policy = ?self.session_policy,
+            );
+            self.finish_bootstrap(AgentChatContextBootstrapState::Ready, "Ready", cx);
+            return Ok(());
+        }
         self.pending_context_blocks = build_tab_ai_agent_chat_context_blocks(context)?;
         self.pending_ambient_context_enabled = false;
         self.arm_pending_context("stage_context");
@@ -939,6 +1110,18 @@ impl AgentChatThread {
         context: &crate::ai::TabAiContextBlob,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        // WP-B2: ambient capture is denied outright for zero-context sessions.
+        if !self.admits_staged_context_blocks() {
+            tracing::warn!(
+                target: "script_kit::quick_ai",
+                event = "agent_chat_stage_ask_anything_denied_by_policy",
+                policy = ?self.session_policy,
+            );
+            self.clear_pending_ambient_context("ask_anything_denied_by_policy");
+            self.finish_bootstrap(AgentChatContextBootstrapState::Ready, "Ready", cx);
+            return Ok(());
+        }
+
         let ambient_label = self
             .current_ambient_chip_label()
             .unwrap_or_else(|| crate::ai::message_parts::ASK_ANYTHING_LABEL.to_string());
@@ -1162,8 +1345,10 @@ impl AgentChatThread {
 
         // Feed the shell-style Up/Down prompt recall (view-level cycling
         // reads this store lazily). Queued submits count too — the user
-        // typed and sent them.
-        super::history::append_prompt_history(trimmed);
+        // typed and sent them. Zero-retention sessions contribute nothing.
+        if self.session_policy.allows_automatic_transcript_retention() {
+            super::history::append_prompt_history(trimmed);
+        }
 
         self.resume_queue_for_manual_submit();
 
@@ -1197,10 +1382,13 @@ impl AgentChatThread {
     }
 
     fn queue_current_composer(&mut self, text: String) {
-        self.queued_messages.push_back(AgentChatQueuedMessage::new(
-            text,
-            std::mem::take(&mut self.pending_context_parts),
-        ));
+        // WP-B2 backstop: pending parts were already admitted at ingress, but
+        // re-filter so a queued message can never carry policy-forbidden
+        // context forward to its later submit.
+        let taken = std::mem::take(&mut self.pending_context_parts);
+        let parts = self.filter_admissible_parts(taken);
+        self.queued_messages
+            .push_back(AgentChatQueuedMessage::new(text, parts));
         self.input.clear();
     }
 
@@ -1215,12 +1403,7 @@ impl AgentChatThread {
     ) -> Result<(), String> {
         let rx = self
             .connection
-            .start_turn(AgentChatTurnRequest {
-                ui_thread_id: self.ui_thread_id.clone(),
-                cwd: self.cwd.clone(),
-                blocks,
-                model_id: self.selected_model_id.clone(),
-            })
+            .start_turn(self.turn_request(blocks))
             .map_err(|error| error.to_string())?;
 
         if push_user_message {
@@ -1384,16 +1567,17 @@ impl AgentChatThread {
         message: AgentChatQueuedMessage,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let context_job =
-            (!message.context_parts.is_empty()).then(|| PendingContextResolutionJob {
-                attachments: message
-                    .context_parts
-                    .iter()
-                    .map(AgentChatMessageAttachment::from_part)
-                    .collect(),
-                blocks: Vec::new(),
-                parts: message.context_parts,
-            });
+        // WP-B2 backstop: adjudicate the queued message's parts once more at
+        // dequeue so nothing forbidden survives to the provider.
+        let context_parts = self.filter_admissible_parts(message.context_parts);
+        let context_job = (!context_parts.is_empty()).then(|| PendingContextResolutionJob {
+            attachments: context_parts
+                .iter()
+                .map(AgentChatMessageAttachment::from_part)
+                .collect(),
+            blocks: Vec::new(),
+            parts: context_parts,
+        });
         self.submit_captured_turn(message.text, context_job, false, cx)
     }
 
@@ -1460,12 +1644,7 @@ impl AgentChatThread {
 
         let rx = self
             .connection
-            .start_turn(AgentChatTurnRequest {
-                ui_thread_id: self.ui_thread_id.clone(),
-                cwd: self.cwd.clone(),
-                blocks,
-                model_id: self.selected_model_id.clone(),
-            })
+            .start_turn(self.turn_request(blocks))
             .map_err(|error| error.to_string())?;
 
         self.active_callout = None;
@@ -1883,6 +2062,7 @@ impl AgentChatThread {
     fn take_pending_context_for_background_resolution(
         &mut self,
     ) -> Option<PendingContextResolutionJob> {
+        self.enforce_zero_context_before_turn("take_pending_context_for_background_resolution");
         let has_pending_parts = !self.pending_context_parts.is_empty();
         let has_pending_blocks = !self.pending_context_blocks.is_empty();
         if self.pending_context_consumed || (!has_pending_parts && !has_pending_blocks) {
@@ -2025,6 +2205,7 @@ impl AgentChatThread {
     where
         F: FnMut(&crate::ai::message_parts::AiContextPart) -> Result<Option<ContentBlock>, String>,
     {
+        self.enforce_zero_context_before_turn("take_pending_context_for_turn");
         let has_pending_parts = !self.pending_context_parts.is_empty();
         let has_pending_blocks = !self.pending_context_blocks.is_empty();
 
@@ -2188,6 +2369,13 @@ impl AgentChatThread {
         &self,
         history_trace_label: Option<String>,
     ) -> Option<CompletedChatTurnIngest> {
+        // Zero-retention sessions produce NO automatic memory: Brain ingestion
+        // and the day trace are retention, same as the history files (Oracle
+        // phase-b-counters-quickai-audit P0 — this ran unconditionally and
+        // turned every Quick AI "quick question" into recallable Brain state).
+        if !self.session_policy.allows_automatic_transcript_retention() {
+            return None;
+        }
         let user_text = self
             .messages
             .iter()
@@ -2276,6 +2464,8 @@ impl AgentChatThread {
         self.stream_task = Some(cx.spawn(async move |_this, cx| {
             let mut terminal_event_seen = false;
             while let Ok(event) = rx.recv().await {
+                // WP-B3: raw backend ingress rate (one event off the channel).
+                crate::chat_hot_counters::record_agent_event_received();
                 let should_stop = matches!(
                     event,
                     AgentChatEvent::TurnFinished { .. } | AgentChatEvent::Failed { .. }
@@ -2290,6 +2480,10 @@ impl AgentChatThread {
                 cx.update(|cx| {
                     if let Some(entity) = entity_ref.upgrade() {
                         entity.update(cx, |this, cx| {
+                            // WP-B3: one foreground apply batch per cx.update
+                            // (size 1 here; the delta coalescing that shrinks
+                            // real work happens in `streaming_text_buffer`).
+                            crate::chat_hot_counters::record_agent_foreground_batch(1);
                             if this.transcript_generation != generation {
                                 tracing::debug!(
                                     target: "script_kit::tab_ai",
@@ -2299,6 +2493,9 @@ impl AgentChatThread {
                                 );
                                 return;
                             }
+                            // WP-B3: counted only AFTER the generation guard — a
+                            // stale-generation event is received but not applied.
+                            crate::chat_hot_counters::record_agent_event_applied();
                             this.apply_event(event, cx);
                         });
                     }
@@ -2309,6 +2506,10 @@ impl AgentChatThread {
                     break;
                 }
             }
+
+            // WP5: settle boundary — always publish a fresh counter reading when
+            // the backend stream closes so a probe never races the throttle.
+            crate::chat_hot_counters::log_snapshot("agent_stream_end");
 
             if !terminal_event_seen {
                 let entity_ref = entity.clone();
@@ -2353,6 +2554,25 @@ impl AgentChatThread {
                 cx.update(|cx| {
                     if let Some(entity) = entity_ref.upgrade() {
                         entity.update(cx, |this, cx| {
+                            // WP-B2: a web-search-only session's single tool
+                            // never needs approval, so ANY approval request is
+                            // for a forbidden tool. Reject it before showing UI
+                            // or recording a standing approval, and never render
+                            // its (raw-arg-bearing) preview.
+                            if !this
+                                .session_policy
+                                .tool_policy()
+                                .allows_permission_prompts()
+                            {
+                                tracing::error!(
+                                    target: "script_kit::quick_ai",
+                                    event = "quick_ai_forbidden_permission_request_rejected",
+                                    policy = ?this.session_policy,
+                                    request_id = request.id,
+                                );
+                                let _ = request.reply_tx.send_blocking(None);
+                                return;
+                            }
                             this.status = AgentChatThreadStatus::WaitingForPermission;
                             // Compute the notification body and id from the owned
                             // request before moving it into `pending_permission`,
@@ -2415,7 +2635,14 @@ impl AgentChatThread {
         let Some(delta) = self.streaming_text_buffer.drain_next(budget) else {
             return false;
         };
-        self.append_assistant_stream_delta(delta)
+        let delta_bytes = delta.len();
+        let changed = self.append_assistant_stream_delta(delta);
+        if changed {
+            // WP-B3: a drained delta that actually mutated a visible row, plus
+            // the committed byte count.
+            crate::chat_hot_counters::record_agent_assistant_commit(delta_bytes);
+        }
+        changed
     }
 
     fn append_assistant_stream_delta(&mut self, delta: String) -> bool {
@@ -2434,7 +2661,13 @@ impl AgentChatThread {
         if delta.is_empty() {
             return false;
         }
-        self.append_assistant_stream_delta(delta)
+        let delta_bytes = delta.len();
+        let changed = self.append_assistant_stream_delta(delta);
+        if changed {
+            // WP-B3: a synchronous flush that committed buffered text to a row.
+            crate::chat_hot_counters::record_agent_assistant_commit(delta_bytes);
+        }
+        changed
     }
 
     /// Apply a single Agent Chat event to thread state.
@@ -2447,6 +2680,10 @@ impl AgentChatThread {
     /// Only calls `cx.notify()` when state actually changes, avoiding redundant
     /// repaints for duplicate plan, mode, command, or tool-call updates.
     fn apply_event(&mut self, event: AgentChatEvent, cx: &mut Context<Self>) {
+        // WP-B3: throttled snapshot keeps steady readings flowing mid-stream.
+        // (Received/applied/batch counts are recorded at the bind_stream ingress
+        // site so a stale-generation event never counts as applied.)
+        crate::chat_hot_counters::maybe_log_snapshot("agent_apply_event");
         let mut changed = false;
 
         match event {
@@ -2474,9 +2711,22 @@ impl AgentChatThread {
                 tool_name,
                 raw_input,
             } => {
-                changed |=
-                    self.upsert_tool_call_start(tool_call_id, title, status, tool_name, raw_input);
-                changed |= self.set_status(AgentChatThreadStatus::Streaming);
+                // WP-B2: validate the canonical tool id against the session's
+                // tool policy BEFORE tracking/rendering. A forbidden tool fails
+                // the turn closed; its raw args are never rendered.
+                if self.tool_event_is_forbidden(tool_name.as_deref()) {
+                    self.fail_turn_forbidden_tool(tool_name.as_deref());
+                    changed = true;
+                } else {
+                    changed |= self.upsert_tool_call_start(
+                        tool_call_id,
+                        title,
+                        status,
+                        tool_name,
+                        raw_input,
+                    );
+                    changed |= self.set_status(AgentChatThreadStatus::Streaming);
+                }
             }
             AgentChatEvent::ToolCallUpdated {
                 tool_call_id,
@@ -2487,6 +2737,11 @@ impl AgentChatThread {
                 diff,
                 is_error,
             } => {
+                // `ToolCallUpdated` carries no canonical `tool_name`, so the
+                // authoritative tool-id validation happens on `ToolCallStarted`
+                // (which cancels the turn for a forbidden tool, leaving no
+                // tracked call for updates to land on). Updates to an
+                // already-admitted call proceed normally.
                 changed |= self.apply_tool_call_update(
                     tool_call_id,
                     title,
@@ -2578,50 +2833,56 @@ impl AgentChatThread {
                 // Save conversation summary + full messages to history.
                 // Build a rich index entry from the full conversation so
                 // search_history() can match on later transcript content.
-                let history_trace_label = if self
-                    .messages
-                    .iter()
-                    .any(|m| matches!(m.role, AgentChatThreadMessageRole::User))
-                {
-                    let timestamp = chrono::Utc::now().to_rfc3339();
-                    let existing_custom_title =
-                        super::history::load_conversation(&self.ui_thread_id)
-                            .and_then(|conversation| conversation.custom_title);
-                    let conversation = super::history::SavedConversation {
-                        session_id: self.ui_thread_id.clone(),
-                        timestamp,
-                        custom_title: existing_custom_title.clone(),
-                        messages: self
+                // Zero-retention sessions (Quick AI) skip both writes.
+                let history_trace_label =
+                    if self.session_policy.allows_automatic_transcript_retention()
+                        && self
                             .messages
                             .iter()
-                            .map(|m| super::history::SavedMessage {
-                                role: format!("{:?}", m.role),
-                                body: m.body.to_string(),
-                            })
-                            .collect(),
-                    };
-                    super::history::save_conversation(&conversation);
-                    self.maybe_spawn_auto_title(&conversation);
+                            .any(|m| matches!(m.role, AgentChatThreadMessageRole::User))
+                    {
+                        let timestamp = chrono::Utc::now().to_rfc3339();
+                        let existing_custom_title =
+                            super::history::load_conversation(&self.ui_thread_id)
+                                .and_then(|conversation| conversation.custom_title);
+                        let conversation = super::history::SavedConversation {
+                            session_id: self.ui_thread_id.clone(),
+                            timestamp,
+                            custom_title: existing_custom_title.clone(),
+                            messages: self
+                                .messages
+                                .iter()
+                                .map(|m| super::history::SavedMessage {
+                                    role: format!("{:?}", m.role),
+                                    body: m.body.to_string(),
+                                })
+                                .collect(),
+                        };
+                        super::history::save_conversation(&conversation);
+                        self.maybe_spawn_auto_title(&conversation);
 
-                    super::history::build_history_entry(&conversation).map(|entry| {
-                        tracing::info!(
-                            target: "script_kit::tab_ai",
-                            event = "agent_chat_history_index_entry_built",
-                            session_id = %entry.session_id,
-                            title = %entry.title_display(),
-                            preview_len = entry.preview.len(),
-                            message_count = entry.message_count,
-                        );
-                        super::history::save_history_entry(&entry);
-                        entry.title_display().to_string()
-                    })
-                } else {
-                    None
-                };
+                        super::history::build_history_entry(&conversation).map(|entry| {
+                            tracing::info!(
+                                target: "script_kit::tab_ai",
+                                event = "agent_chat_history_index_entry_built",
+                                session_id = %entry.session_id,
+                                title = %entry.title_display(),
+                                preview_len = entry.preview.len(),
+                                message_count = entry.message_count,
+                            );
+                            super::history::save_history_entry(&entry);
+                            entry.title_display().to_string()
+                        })
+                    } else {
+                        None
+                    };
 
                 // The finished turn appended a user message; refresh the
                 // rewind checkpoints so Cmd+K can offer it for editing.
-                self.refresh_fork_points(cx);
+                // Zero-retention Quick AI has no editable history — no forks.
+                if self.session_policy.allows_fork_state() {
+                    self.refresh_fork_points(cx);
+                }
 
                 // --- Brain ingestion: every finished turn becomes memory ---
                 // The last user/assistant exchange is written into the brain
@@ -2832,6 +3093,14 @@ impl AgentChatThread {
     }
 
     fn publish_sdk_new_message(&self, id: u64, role: AgentChatThreadMessageRole, content: String) {
+        // policy note (WP-B1 / needs-investigation): this and the sibling
+        // `publish_stream_chunk`/`publish_stream_complete`/`publish_error`
+        // calls emit full user+assistant content to `crate::ai::subscriptions`
+        // (SDK/MCP subscription clients). Whether those sinks retain a
+        // replayable buffer is outside this file's owned set and was NOT
+        // proven transient. NOT gated here to avoid breaking live streaming UI
+        // for Full surfaces; flagged for the subscriptions-sink audit before
+        // Quick AI can be declared fully zero-egress.
         let Some(role) = Self::sdk_role(role) else {
             return;
         };
@@ -3278,12 +3547,15 @@ impl AgentChatThread {
         ui_thread_id: String,
         blocks: Vec<ContentBlock>,
     ) -> Result<crate::ai::agent_chat::runtime::IsolatedTurnHandle, String> {
+        // Auxiliary turns use a caller-supplied `ui_thread_id`, so build the
+        // request directly but still stamp the session's tool policy.
         self.connection
             .start_isolated_turn(AgentChatTurnRequest {
                 ui_thread_id,
                 cwd: self.cwd.clone(),
                 blocks,
                 model_id: self.selected_model_id.clone(),
+                tool_policy: self.session_policy.tool_policy(),
             })
             .map_err(|error| error.to_string())
     }
@@ -3783,6 +4055,18 @@ impl AgentChatThread {
         saved: &[super::history::SavedMessage],
         cx: &mut Context<Self>,
     ) {
+        // Restoring a saved conversation into a zero-retention thread would
+        // resurrect retained content the policy forbids. Fail closed — Quick
+        // AI never loads history (WP-B1). Full surfaces are unaffected.
+        if !self.session_policy.allows_automatic_transcript_retention() {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_saved_message_load_denied_by_policy",
+                policy = ?self.session_policy,
+                saved_message_count = saved.len(),
+            );
+            return;
+        }
         self.bump_transcript_generation("load_saved_messages");
         self.flush_streaming_text_buffer();
         self.stream_task = None;
@@ -3833,17 +4117,24 @@ impl AgentChatThread {
         snapshot: AgentChatThreadDraftSnapshot,
         cx: &mut Context<Self>,
     ) {
+        self.restore_draft_snapshot_inner(snapshot);
+        cx.notify();
+    }
+
+    fn restore_draft_snapshot_inner(&mut self, snapshot: AgentChatThreadDraftSnapshot) {
         let input_len = snapshot.input.chars().count();
         let cursor = snapshot.input_cursor.min(input_len);
         self.input.set_text(snapshot.input);
         self.input.set_cursor(cursor);
-        self.pending_context_parts = snapshot.pending_context_parts;
+        // WP-B2: a restored draft is a context ingress. A snapshot captured
+        // under a different (Full) surface must not smuggle context into a
+        // Quick AI thread — admit only the policy-allowed parts.
+        self.pending_context_parts = self.filter_admissible_parts(snapshot.pending_context_parts);
         self.pending_context_consumed = snapshot.pending_context_consumed;
         self.pending_context_blocks.clear();
         self.context_bootstrap_state = AgentChatContextBootstrapState::Ready;
         self.context_bootstrap_note = None;
         self.queued_submit_while_bootstrapping = false;
-        cx.notify();
     }
 
     fn reset_pending_context_for_new_entry_intent(&mut self) {
@@ -3918,6 +4209,20 @@ impl AgentChatThread {
         part: crate::ai::message_parts::AiContextPart,
         cx: &mut Context<Self>,
     ) {
+        // WP-B2: authoritative admission beneath the view's affordance gates.
+        if let Err(error) = self.admit_context_part(&part) {
+            tracing::warn!(
+                target: "script_kit::quick_ai",
+                event = "agent_chat_context_part_denied_by_policy",
+                policy = ?self.session_policy,
+                context_class = ?classify_context_part(&part),
+                reason = error.as_str(),
+                source = %part.source(),
+                label = %part.label(),
+            );
+            return;
+        }
+
         let already_present = self
             .pending_context_parts
             .iter()
@@ -3981,6 +4286,20 @@ impl AgentChatThread {
         part: crate::ai::message_parts::AiContextPart,
         cx: &mut Context<Self>,
     ) {
+        // WP-B2: skills are denied for Quick AI (Oracle seat 2 overrules the
+        // earlier slash-skill allowance). Refuse before mutating pending state.
+        if let Err(error) = self.admit_context_part(&part) {
+            tracing::warn!(
+                target: "script_kit::quick_ai",
+                event = "agent_chat_skill_context_denied_by_policy",
+                policy = ?self.session_policy,
+                reason = error.as_str(),
+                thread_id = %identity.thread_id,
+                skill_id = %identity.skill_id,
+            );
+            return;
+        }
+
         let crate::ai::message_parts::AiContextPart::SkillFile {
             path, slash_name, ..
         } = &part
@@ -4039,6 +4358,9 @@ impl AgentChatThread {
         parts: Vec<crate::ai::message_parts::AiContextPart>,
         reason: &'static str,
     ) {
+        // WP-B2: host handoffs are a bulk context ingress — filter to the
+        // policy-admissible subset before adopting them.
+        let parts = self.filter_admissible_parts(parts);
         self.clear_all_pending_context(reason);
         self.pending_context_parts = parts;
         self.pending_context_consumed = false;
@@ -4177,12 +4499,23 @@ impl AgentChatThread {
             notification_debounce: AgentChatNotificationDebounce::default(),
             current_turn_id: 0,
             llm_title_attempted: false,
+            session_policy: AgentChatSessionPolicy::Full,
             available_models: Vec::new(),
             selected_model_id: None,
             selected_model_display_name: None,
             profile_display_name: None,
             profile_icon_name: None,
         }
+    }
+
+    /// Test seam for the thread-owned session policy (WP-B1). Replaces the
+    /// old `set_retain_history_test` retain-history boolean seam.
+    pub(super) fn set_session_policy_test(&mut self, policy: AgentChatSessionPolicy) {
+        self.session_policy = policy;
+    }
+
+    pub(super) fn session_policy_test(&self) -> AgentChatSessionPolicy {
+        self.session_policy
     }
 
     pub(super) fn dismiss_active_callout_test(&mut self) {
@@ -4202,12 +4535,7 @@ impl AgentChatThread {
         };
         let prepared = self.prepare_turn_blocks_with_receipt(display_text.trim());
         self.set_context_resolution_note(prepared.receipt.as_ref());
-        let _request = AgentChatTurnRequest {
-            ui_thread_id: self.ui_thread_id.clone(),
-            cwd: self.cwd.clone(),
-            blocks: prepared.blocks,
-            model_id: self.selected_model_id.clone(),
-        };
+        let _request = self.turn_request(prepared.blocks);
         self.stream_started_at = Some(std::time::Instant::now());
         self.ttft_pending = true;
         self.status = AgentChatThreadStatus::Streaming;
@@ -4322,8 +4650,14 @@ impl AgentChatThread {
                 tool_name,
                 raw_input,
             } => {
-                self.upsert_tool_call_start(tool_call_id, title, status, tool_name, raw_input);
-                self.set_status(AgentChatThreadStatus::Streaming);
+                // Mirror `apply_event`'s WP-B2 forbidden-tool guard so tests can
+                // exercise the fail-closed path without a GPUI context.
+                if self.tool_event_is_forbidden(tool_name.as_deref()) {
+                    self.fail_turn_forbidden_tool(tool_name.as_deref());
+                } else {
+                    self.upsert_tool_call_start(tool_call_id, title, status, tool_name, raw_input);
+                    self.set_status(AgentChatThreadStatus::Streaming);
+                }
             }
             super::AgentChatEvent::ToolCallUpdated {
                 tool_call_id,

@@ -126,7 +126,7 @@ impl ScriptListApp {
         explicit_ambient_chip_label: Option<String>,
         auto_submit: bool,
         pending_script_list_trigger: Option<char>,
-        suppress_focused_part: bool,
+        context_policy: &AgentChatContextPolicy,
         stage_instruction_notes: bool,
         source_view: &AppView,
         cx: &mut Context<Self>,
@@ -155,7 +155,7 @@ impl ScriptListApp {
                 focused_part.is_some(),
                 use_ask_anything_fallback,
                 pending_script_list_trigger,
-                suppress_focused_part,
+                context_policy,
             )
         {
             view_entity_for_staging.update(cx, |view, cx| {
@@ -174,7 +174,7 @@ impl ScriptListApp {
                         uri: crate::notes::NOTES_INSTRUCTIONS_RESOURCE_URI.to_string(),
                         label: crate::notes::NOTES_INSTRUCTIONS_LABEL.to_string(),
                     };
-                    let _ = thread.update(cx, |thread, cx| {
+                    thread.update(cx, |thread, cx| {
                         thread.add_context_part(part, cx);
                     });
                     tracing::info!(
@@ -197,7 +197,7 @@ impl ScriptListApp {
         // --- Stage context part + insert inline @type:name token ---
         if let Some(part) = focused_part.clone() {
             let inline_token = crate::ai::context_mentions::part_to_inline_token(&part);
-            let _ = thread.update(cx, |thread, cx| {
+            thread.update(cx, |thread, cx| {
                 if let Some(ref token) = inline_token {
                     let text = format!("{token} ");
                     thread.input.set_text(text.clone());
@@ -224,7 +224,7 @@ impl ScriptListApp {
                 uri: crate::ai::message_parts::ASK_ANYTHING_RESOURCE_URI.to_string(),
                 label: crate::ai::message_parts::ASK_ANYTHING_LABEL.to_string(),
             };
-            let _ = thread.update(cx, |thread, cx| {
+            thread.update(cx, |thread, cx| {
                 thread.add_context_part(part, cx);
             });
             tracing::info!(
@@ -242,7 +242,7 @@ impl ScriptListApp {
                 uri: crate::ai::message_parts::ASK_ANYTHING_RESOURCE_URI.to_string(),
                 label: chip_label,
             };
-            let _ = thread.update(cx, |thread, cx| {
+            thread.update(cx, |thread, cx| {
                 thread.add_context_part(part, cx);
             });
             tracing::info!(
@@ -259,7 +259,7 @@ impl ScriptListApp {
         // --- Focused-target path: mark bootstrap ready immediately ---
         // No deferred capture needed; the chip is already staged.
         if !use_ask_anything_fallback && explicit_ambient_chip_label.is_none() {
-            let _ = thread.update(cx, |thread, cx| {
+            thread.update(cx, |thread, cx| {
                 thread.mark_context_bootstrap_ready(cx);
                 // Auto-submit if effective intent was resolved (Shift+Tab path)
                 if auto_submit {
@@ -361,7 +361,7 @@ impl ScriptListApp {
             };
 
             // Apply the captured context
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(app) = app_weak.upgrade() else {
                     return;
                 };
@@ -430,7 +430,7 @@ impl ScriptListApp {
 
                     // Stage context on the AgentChatThread
                     let stage_context_started_at = std::time::Instant::now();
-                    let _ = thread_entity.update(cx, |thread, cx| {
+                    thread_entity.update(cx, |thread, cx| {
                         if let Err(e) = thread.stage_ask_anything_context(&context, cx) {
                             tracing::warn!(
                                 event = "tab_ai_agent_chat_stage_context_failed",
@@ -471,12 +471,14 @@ impl ScriptListApp {
         has_focused_part: bool,
         use_ask_anything_fallback: bool,
         pending_script_list_trigger: Option<char>,
-        suppress_focused_part: bool,
+        context_policy: &AgentChatContextPolicy,
     ) -> bool {
+        // Clean chat (SuppressFocused / explicit parts) must not prime the
+        // /new-script slash entry, just as it suppresses the focused chip.
         !auto_submit
             && !has_focused_part
             && !use_ask_anything_fallback
-            && !suppress_focused_part
+            && context_policy.admits_implicit_focused_part()
             && !matches!(pending_script_list_trigger, Some('/' | '@' | '|'))
     }
 }

@@ -765,7 +765,10 @@ mod tests {
                 auto_sizing_enabled,
             });
             let ids: Vec<&str> = actions.iter().map(|action| action.id.as_str()).collect();
-            assert_eq!(ids, expected_ids, "unexpected action plan for selection={has_selection}, trash={is_trash_view}, auto_sizing={auto_sizing_enabled}");
+            assert_eq!(
+                ids, expected_ids,
+                "unexpected action plan for selection={has_selection}, trash={is_trash_view}, auto_sizing={auto_sizing_enabled}"
+            );
 
             let toggle = actions
                 .iter()

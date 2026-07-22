@@ -20,6 +20,88 @@ use sum_tree::{Bias, Dimensions, SumTree};
 
 type RenderItemFn = dyn FnMut(usize, &mut Window, &mut App) -> AnyElement + 'static;
 
+// =============================================================================
+// WP5 hot-path counters (env-gated: `SCRIPT_KIT_CHAT_HOT_COUNTERS`)
+// =============================================================================
+// The chat/flow transcript engines run on this list. The single biggest
+// one-frame cost (WP8) is the synchronous all-row `measure_all()` pass, so the
+// instrumentation gate has to distinguish an all-row layout (every item
+// measured this frame) from an ordinary bounded visible-window layout. These
+// counters live in the vendor crate because `layout_all_items` /`layout_items`
+// are the only sites that know which path ran; the app reads them back through
+// `list_hot_counter_snapshot()` (re-exported at `gpui::`).
+//
+// Zero-cost when disabled: `list_hot_counters_enabled()` is a one-time
+// `OnceLock` env read, and every increment early-returns before touching an
+// atomic when the gate is off.
+
+use std::sync::OnceLock as HotOnceLock;
+use std::sync::atomic::{AtomicU64, Ordering as HotOrdering};
+
+static LIST_ALL_ROW_PASSES: AtomicU64 = AtomicU64::new(0);
+static LIST_ALL_ROW_ITEMS: AtomicU64 = AtomicU64::new(0);
+static LIST_VISIBLE_ROW_PASSES: AtomicU64 = AtomicU64::new(0);
+static LIST_VISIBLE_ROW_ITEMS: AtomicU64 = AtomicU64::new(0);
+
+fn list_hot_counters_enabled() -> bool {
+    static ENABLED: HotOnceLock<bool> = HotOnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SCRIPT_KIT_CHAT_HOT_COUNTERS")
+            .map(|v| !v.is_empty() && v != "0" && v != "false")
+            .unwrap_or(false)
+    })
+}
+
+/// One all-row layout pass that measured `items` rows (the O(total) frame cost
+/// WP8 removes). `metered` gates on whether this `ListState` was tagged with a
+/// chat scope via [`ListState::set_hot_metered`]; an unscoped list (main menu,
+/// unrelated views) never counts, so the chat reading stays attributable.
+#[inline]
+fn record_list_all_row_layout(metered: bool, items: usize) {
+    if !metered || !list_hot_counters_enabled() {
+        return;
+    }
+    LIST_ALL_ROW_PASSES.fetch_add(1, HotOrdering::Relaxed);
+    LIST_ALL_ROW_ITEMS.fetch_add(items as u64, HotOrdering::Relaxed);
+}
+
+/// One bounded visible-window layout pass that touched `items` rows (including
+/// the off-screen focused item forced into layout for keyboard interaction).
+#[inline]
+fn record_list_visible_row_layout(metered: bool, items: usize) {
+    if !metered || !list_hot_counters_enabled() {
+        return;
+    }
+    LIST_VISIBLE_ROW_PASSES.fetch_add(1, HotOrdering::Relaxed);
+    LIST_VISIBLE_ROW_ITEMS.fetch_add(items as u64, HotOrdering::Relaxed);
+}
+
+/// Cumulative `List` layout counters, read by the app's chat hot-counter
+/// snapshot. Fields mirror `record_list_*` above.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ListHotCounters {
+    /// Number of all-row (`measure_all`) layout passes performed.
+    pub all_row_passes: u64,
+    /// Total rows measured (`layout_as_root`) across those all-row passes.
+    pub all_row_items_touched: u64,
+    /// Number of bounded visible-window layout passes performed.
+    pub visible_row_passes: u64,
+    /// Total rows touched across those visible-window passes, including the
+    /// off-screen focused item.
+    pub visible_row_items_touched: u64,
+}
+
+/// Snapshot the vendored `List` layout hot counters. Returns all-zero when the
+/// gate is off (nothing ever incremented).
+pub fn list_hot_counter_snapshot() -> ListHotCounters {
+    ListHotCounters {
+        all_row_passes: LIST_ALL_ROW_PASSES.load(HotOrdering::Relaxed),
+        all_row_items_touched: LIST_ALL_ROW_ITEMS.load(HotOrdering::Relaxed),
+        visible_row_passes: LIST_VISIBLE_ROW_PASSES.load(HotOrdering::Relaxed),
+        visible_row_items_touched: LIST_VISIBLE_ROW_ITEMS.load(HotOrdering::Relaxed),
+    }
+}
+
 /// Construct a new list element
 pub fn list(
     state: ListState,
@@ -73,6 +155,9 @@ struct StateInner {
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScrollFraction>,
     follow_tail: bool,
+    /// WP-B3: when true, this list's layout passes contribute to the chat
+    /// hot-counters. Default false (unscoped ⇒ do not count).
+    hot_metered: bool,
 }
 
 /// Keeps track of a fractional scroll position within an item for restoration
@@ -241,9 +326,17 @@ impl ListState {
             measuring_behavior: ListMeasuringBehavior::default(),
             pending_scroll: None,
             follow_tail: false,
+            hot_metered: false,
         })));
         this.splice(0..0, item_count);
         this
+    }
+
+    /// WP-B3: opt this list's layout passes into the chat hot-counters. A chat
+    /// transcript surface (Agent Chat, Quick AI, Flow) calls this so only its
+    /// list contributes to the layout counters; unscoped lists never count.
+    pub fn set_hot_metered(&self, metered: bool) {
+        self.0.borrow_mut().hot_metered = metered;
     }
 
     /// Set the list to measure all items in the list in the first layout phase.
@@ -696,6 +789,8 @@ impl StateInner {
             });
         }
 
+        // WP5: this is the O(total rows) all-row measurement WP8 removes.
+        record_list_all_row_layout(self.hot_metered, measured_items.len());
         self.items = SumTree::from_iter(measured_items, ());
     }
 
@@ -860,6 +955,10 @@ impl StateInner {
             }
         }
 
+        // WP5/WP-B3: bounded visible-window layout — the desired steady-state
+        // path. Count now, then add the off-screen focused item below if one is
+        // forced into layout (it is still a real `layout_as_root` this frame).
+        let mut visible_items_touched = measured_items.len();
         let measured_range = cursor.start().0..(cursor.start().0 + measured_items.len());
         let mut cursor = old_items.cursor::<Count>(());
         let mut new_items = cursor.slice(&Count(measured_range.start), Bias::Right);
@@ -886,11 +985,16 @@ impl StateInner {
                         element,
                         size,
                     });
+                    // WP-B3: the off-screen focused item is a real layout this
+                    // frame; attribute it to the visible-row touch count.
+                    visible_items_touched += 1;
                     break;
                 }
                 cursor.next();
             }
         }
+
+        record_list_visible_row_layout(self.hot_metered, visible_items_touched);
 
         LayoutItemsResponse {
             max_item_width,

@@ -199,7 +199,9 @@ fn full_agent_chat_profile_icon_moves_to_header_focused_text_keeps_icon() {
     let composer_fn = source_between(
         AGENT_CHAT_VIEW,
         "fn render_composer_input_shell",
-        "fn render_composer_bar",
+        // WP6 deleted `render_composer_bar`; the composer input shell is now
+        // immediately followed by `focused_text_mini_sizing_count`.
+        "fn focused_text_mini_sizing_count",
     );
     let mini_render_fn = source_between(
         AGENT_CHAT_VIEW,

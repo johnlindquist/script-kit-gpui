@@ -26,27 +26,6 @@ const UNIFIED_LIST_ITEM_RENDER_SOURCE: &str =
 const WARNING_BANNER_SOURCE: &str = include_str!("../src/warning_banner.rs");
 
 // ---------------------------------------------------------------------------
-// AI action strip: unconditional GPUI hover
-// ---------------------------------------------------------------------------
-
-#[test]
-fn ai_action_buttons_use_unconditional_gpui_hover() {
-    assert!(
-        AI_ACTIONS_SOURCE
-            .contains(".hover(|s| s.bg(muted_bg.opacity(OPACITY_HOVER)).text_color(muted_fg))"),
-        "action_btn_base should always apply GPUI hover styling"
-    );
-    assert!(
-        !AI_ACTIONS_SOURCE.contains("mouse_mode"),
-        "AI action buttons should not gate hover on a local mouse_mode flag"
-    );
-    assert!(
-        !AI_ACTIONS_SOURCE.contains("InputMode::Mouse"),
-        "AI action buttons should not gate hover on InputMode::Mouse"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // ChatPrompt: native follow-tail via ListState::set_follow_tail
 // ---------------------------------------------------------------------------
 
@@ -82,28 +61,6 @@ fn chat_prompt_follow_paths_do_not_use_manual_item_scrolling() {
         !CHAT_RENDER_CORE_SOURCE.contains("scroll_to_item(")
             && !CHAT_RENDER_CORE_SOURCE.contains("scroll_to_reveal_item("),
         "render_core.rs follow-tail paths should not use manual item scrolling"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// AI window: native follow-tail via ListState::set_follow_tail
-// ---------------------------------------------------------------------------
-
-#[test]
-fn ai_window_uses_native_follow_tail() {
-    assert!(
-        AI_MESSAGES_SOURCE
-            .contains(".set_follow_tail(!self.user_has_scrolled_up && item_count > 0);"),
-        "AI window append/stream path should drive native follow-tail"
-    );
-    assert!(
-        AI_MESSAGES_SOURCE.contains("self.messages_list_state.set_follow_tail(item_count > 0);"),
-        "AI window force-scroll path should use native follow-tail"
-    );
-    assert!(
-        !AI_MESSAGES_SOURCE.contains("scroll_to_item(")
-            && !AI_MESSAGES_SOURCE.contains("scroll_to_reveal_item("),
-        "AI window follow-tail paths should not use manual item scrolling"
     );
 }
 

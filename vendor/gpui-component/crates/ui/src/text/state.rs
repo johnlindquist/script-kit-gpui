@@ -28,6 +28,110 @@ use crate::{
 
 const UPDATE_DELAY: Duration = Duration::from_millis(50);
 
+// =============================================================================
+// WP5 hot-path counters (env-gated: `SCRIPT_KIT_CHAT_HOT_COUNTERS`)
+// =============================================================================
+// Markdown streaming re-parses are the second amplification WP8/WP10 target: a
+// naive streaming surface re-parses the *whole* document on every delta (a full
+// parse), while the append fast-path only parses the changed tail. These
+// counters live at `parse_content`, the single site that knows which path ran
+// and exactly how many source bytes it fed the parser. The app reads them back
+// through `text_state_hot_counter_snapshot()` (re-exported at
+// `gpui_component::text::`). Zero-cost when the gate is unset: one cached
+// `OnceLock` env read, then an early return before any atomic is touched.
+use std::sync::OnceLock as HotOnceLock;
+use std::sync::atomic::{AtomicU64, Ordering as HotOrdering};
+
+static TEXT_FULL_PARSES: AtomicU64 = AtomicU64::new(0);
+static TEXT_FULL_PARSE_BYTES: AtomicU64 = AtomicU64::new(0);
+static TEXT_APPEND_PARSES: AtomicU64 = AtomicU64::new(0);
+static TEXT_APPEND_PARSE_BYTES: AtomicU64 = AtomicU64::new(0);
+static TEXT_SOURCE_REBUILD_BYTES: AtomicU64 = AtomicU64::new(0);
+static TEXT_SELECTION_REBUILD_BYTES: AtomicU64 = AtomicU64::new(0);
+
+fn text_hot_counters_enabled() -> bool {
+    static ENABLED: HotOnceLock<bool> = HotOnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SCRIPT_KIT_CHAT_HOT_COUNTERS")
+            .map(|v| !v.is_empty() && v != "0" && v != "false")
+            .unwrap_or(false)
+    })
+}
+
+/// One parse pass. `append` distinguishes the tail fast-path from a full
+/// re-parse; `parse_bytes` is the actual byte count handed to the parser (for an
+/// append that is only the last block + delta, NOT the whole document). Gated on
+/// `metered`: an unscoped text view (main menu, previews) never counts, so the
+/// chat reading stays attributable (WP-B3).
+#[inline]
+fn record_text_parse(metered: bool, append: bool, parse_bytes: usize) {
+    if !metered || !text_hot_counters_enabled() {
+        return;
+    }
+    if append {
+        TEXT_APPEND_PARSES.fetch_add(1, HotOrdering::Relaxed);
+        TEXT_APPEND_PARSE_BYTES.fetch_add(parse_bytes as u64, HotOrdering::Relaxed);
+    } else {
+        TEXT_FULL_PARSES.fetch_add(1, HotOrdering::Relaxed);
+        TEXT_FULL_PARSE_BYTES.fetch_add(parse_bytes as u64, HotOrdering::Relaxed);
+    }
+}
+
+/// The full-document source string rebuild that happens *around* the parse. On
+/// every append the whole `document.source` is reallocated (`format!`), so this
+/// grows O(total document) per delta even when the parse itself stayed bounded —
+/// the copy amplification separate from parse cost (WP8/WP10).
+#[inline]
+fn record_text_source_rebuild(metered: bool, bytes: usize) {
+    if !metered || !text_hot_counters_enabled() {
+        return;
+    }
+    TEXT_SOURCE_REBUILD_BYTES.fetch_add(bytes as u64, HotOrdering::Relaxed);
+}
+
+/// The flattened selection document rebuild (`build_selection_document`) that
+/// re-walks the whole document after every parse. Separate from parse + source
+/// copy so each amplification is attributable on its own.
+#[inline]
+fn record_text_selection_rebuild(metered: bool, bytes: usize) {
+    if !metered || !text_hot_counters_enabled() {
+        return;
+    }
+    TEXT_SELECTION_REBUILD_BYTES.fetch_add(bytes as u64, HotOrdering::Relaxed);
+}
+
+/// Cumulative `TextViewState` markdown-parse counters, read by the app's chat
+/// hot-counter snapshot.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TextStateHotCounters {
+    /// Whole-document re-parses (the expensive path WP8/WP10 want rare).
+    pub full_parses: u64,
+    /// Source bytes fed to the parser across full parses.
+    pub full_parse_bytes: u64,
+    /// Tail-only append parses (the streaming fast-path).
+    pub append_parses: u64,
+    /// Source bytes fed to the parser across append parses (last block + delta).
+    pub append_parse_bytes: u64,
+    /// Bytes copied rebuilding `document.source` around parses (the O(total)
+    /// per-delta reallocation, distinct from parse bytes).
+    pub source_rebuild_bytes: u64,
+    /// Bytes re-walked rebuilding the flattened selection document per parse.
+    pub selection_rebuild_bytes: u64,
+}
+
+/// Snapshot the vendored markdown-parse hot counters. All-zero when the gate is
+/// off (nothing ever incremented).
+pub fn text_state_hot_counter_snapshot() -> TextStateHotCounters {
+    TextStateHotCounters {
+        full_parses: TEXT_FULL_PARSES.load(HotOrdering::Relaxed),
+        full_parse_bytes: TEXT_FULL_PARSE_BYTES.load(HotOrdering::Relaxed),
+        append_parses: TEXT_APPEND_PARSES.load(HotOrdering::Relaxed),
+        append_parse_bytes: TEXT_APPEND_PARSE_BYTES.load(HotOrdering::Relaxed),
+        source_rebuild_bytes: TEXT_SOURCE_REBUILD_BYTES.load(HotOrdering::Relaxed),
+        selection_rebuild_bytes: TEXT_SELECTION_REBUILD_BYTES.load(HotOrdering::Relaxed),
+    }
+}
+
 const CONTEXT: &'static str = "TextView";
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys(vec![
@@ -79,6 +183,9 @@ pub struct TextViewState {
     pub(super) parsed_content: Arc<Mutex<ParsedContent>>,
     text: SharedString,
     parsed_error: Option<SharedString>,
+    /// WP-B3: opt this text view into the chat hot-counters (default false ⇒
+    /// unscoped, does not count). Threaded into every `UpdateOptions`.
+    hot_metered: bool,
     tx: smol::channel::Sender<UpdateOptions>,
     _parse_task: Task<()>,
     _receive_task: Task<()>,
@@ -156,6 +263,7 @@ impl TextViewState {
             is_selecting: false,
             parsed_content: Default::default(),
             parsed_error: None,
+            hot_metered: false,
             text: text.to_string().into(),
             tx,
             _parse_task,
@@ -169,6 +277,7 @@ impl TextViewState {
                 highlight_theme: cx.theme().highlight_theme.clone(),
                 code_block_actions: this.code_block_actions.clone(),
                 text_view_style: this.text_view_style.clone(),
+                hot_metered: this.hot_metered,
             };
             if let Err(err) = parse_content(format, &options) {
                 this.parsed_error = Some(err);
@@ -184,6 +293,13 @@ impl TextViewState {
         self.parsed_content.lock().unwrap().document.source.clone()
     }
 
+    /// WP-B3: public parsed-document source accessor for cross-crate app tests
+    /// (the app asserts the exact streamed source; `source` is crate-private).
+    #[cfg(any(test, feature = "fidelity"))]
+    pub fn source_string_for_test(&self) -> String {
+        self.source().to_string()
+    }
+
     /// Set whether the text is selectable, default false.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
@@ -194,6 +310,14 @@ impl TextViewState {
     pub fn set_selectable(&mut self, selectable: bool, cx: &mut Context<Self>) {
         self.selectable = selectable;
         cx.notify();
+    }
+
+    /// WP-B3: opt this text view (and its internal scroll list) into the chat
+    /// hot-counters so only a metered chat surface contributes parse/layout
+    /// counts. Unscoped text views (main menu, previews) never count.
+    pub fn set_hot_metered(&mut self, metered: bool) {
+        self.hot_metered = metered;
+        self.list_state.set_hot_metered(metered);
     }
 
     /// Set whether the text is selectable, default false.
@@ -246,6 +370,35 @@ impl TextViewState {
             highlight_theme: cx.theme().highlight_theme.clone(),
             code_block_actions: self.code_block_actions.clone(),
             text_view_style: self.text_view_style.clone(),
+            hot_metered: self.hot_metered,
+        };
+        self.parsed_error = parse_content(TextViewFormat::Markdown, &options).err();
+        self.clear_selection();
+        cx.notify();
+    }
+
+    /// WP-B3: append Markdown text and parse it before returning — the
+    /// deterministic streaming-append test/settle seam. The normal streaming
+    /// path debounces through a `smol::Timer` background task that gpui's
+    /// deterministic test scheduler cannot drive; this drives the exact same
+    /// `parse_content(append = true)` reduction synchronously so a test can
+    /// assert the coalesced/appended document without real async-io.
+    #[cfg(any(test, feature = "fidelity"))]
+    pub fn push_str_immediate(&mut self, new_text: &str, cx: &mut Context<Self>) {
+        if new_text.is_empty() {
+            return;
+        }
+        let mut combined = self.text.to_string();
+        combined.push_str(new_text);
+        self.text = combined.into();
+        let options = UpdateOptions {
+            append: true,
+            content: self.parsed_content.clone(),
+            pending_text: new_text.to_string(),
+            highlight_theme: cx.theme().highlight_theme.clone(),
+            code_block_actions: self.code_block_actions.clone(),
+            text_view_style: self.text_view_style.clone(),
+            hot_metered: self.hot_metered,
         };
         self.parsed_error = parse_content(TextViewFormat::Markdown, &options).err();
         self.clear_selection();
@@ -264,6 +417,12 @@ impl TextViewState {
         if new_text.is_empty() {
             return;
         }
+        // WP-B3: keep the logical `text` coherent with the streamed document so
+        // `set_text`'s identity guard and any reader of the source see the full
+        // accumulated string, not just the initial content.
+        let mut combined = self.text.to_string();
+        combined.push_str(new_text);
+        self.text = combined.into();
         self.increment_update(new_text, true, cx);
     }
 
@@ -287,6 +446,7 @@ impl TextViewState {
             highlight_theme: cx.theme().highlight_theme.clone(),
             code_block_actions: code_block_actions.clone(),
             text_view_style: self.text_view_style.clone(),
+            hot_metered: self.hot_metered,
         };
 
         // Parse at first time by blocking.
@@ -458,6 +618,9 @@ struct UpdateFuture {
     format: TextViewFormat,
     options: UpdateOptions,
     pending_text: String,
+    /// WP-B3: whether a coalesced update is buffered behind the debounce timer.
+    /// Reset to false once the timer fires and the update is dispatched.
+    has_pending: bool,
     timer: Timer,
     rx: Pin<Box<smol::channel::Receiver<UpdateOptions>>>,
     tx_result: smol::channel::Sender<Result<(), SharedString>>,
@@ -474,6 +637,7 @@ impl UpdateFuture {
         Self {
             format,
             pending_text: String::new(),
+            has_pending: false,
             options: UpdateOptions {
                 append: false,
                 pending_text: String::new(),
@@ -481,6 +645,7 @@ impl UpdateFuture {
                 highlight_theme: cx.theme().highlight_theme.clone(),
                 code_block_actions: None,
                 text_view_style: TextViewStyle::default(),
+                hot_metered: false,
             },
             timer: Timer::never(),
             rx: Box::pin(rx),
@@ -498,12 +663,22 @@ impl Future for UpdateFuture {
             match self.rx.poll_next(cx) {
                 Poll::Ready(Some(options)) => {
                     let delay = self.delay;
-                    if options.append {
-                        self.pending_text.push_str(options.pending_text.as_str());
-                    } else {
-                        self.pending_text = options.pending_text.clone();
-                    }
-                    self.options = options;
+                    // WP-B3: coalesce preserving Full-vs-Append so a pending Full
+                    // followed by an Append never duplicates the full source.
+                    let (append, text) = coalesce_pending_update(
+                        self.has_pending,
+                        self.options.append,
+                        &self.pending_text,
+                        options.append,
+                        options.pending_text.as_str(),
+                    );
+                    self.pending_text = text;
+                    self.options = UpdateOptions {
+                        append,
+                        pending_text: String::new(),
+                        ..options
+                    };
+                    self.has_pending = true;
                     self.timer.set_after(delay);
                     continue;
                 }
@@ -514,6 +689,7 @@ impl Future for UpdateFuture {
             match self.timer.poll_next(cx) {
                 Poll::Ready(Some(_)) => {
                     let pending_text = std::mem::take(&mut self.pending_text);
+                    self.has_pending = false;
 
                     let res = parse_content(
                         self.format,
@@ -539,6 +715,45 @@ struct UpdateOptions {
     highlight_theme: Arc<HighlightTheme>,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     text_view_style: TextViewStyle,
+    /// WP-B3: this text view opted into the chat hot-counters. Default false
+    /// (unscoped ⇒ do not count).
+    hot_metered: bool,
+}
+
+/// WP-B3: coalesce a newly-arrived streaming update into the one already
+/// buffered behind the debounce timer, preserving Full-vs-Append semantics.
+///
+/// The old poll loop concatenated an incoming append onto whatever text was
+/// pending but then stamped the *incoming* `append` flag onto the coalesced
+/// update — so a pending Full followed by an Append became an Append of
+/// `full + delta` onto the existing document, duplicating the full text. The
+/// safe shape:
+///
+/// - nothing pending → the incoming update starts the buffer verbatim;
+/// - incoming Full → replaces whatever was pending (Full always wins);
+/// - incoming Append → merges into the pending text but keeps the pending
+///   *mode*, so appending onto a pending Full stays a Full replacement and
+///   Append+Append concatenates.
+///
+/// Returns `(is_append, text)` for the coalesced buffered update.
+fn coalesce_pending_update(
+    has_pending: bool,
+    pending_is_append: bool,
+    pending_text: &str,
+    incoming_is_append: bool,
+    incoming_text: &str,
+) -> (bool, String) {
+    if !has_pending {
+        return (incoming_is_append, incoming_text.to_string());
+    }
+    if !incoming_is_append {
+        // Full replaces everything buffered so far.
+        return (false, incoming_text.to_string());
+    }
+    // Incoming append: merge, preserving the pending mode (Full wins).
+    let mut text = pending_text.to_string();
+    text.push_str(incoming_text);
+    (pending_is_append, text)
 }
 
 fn parse_content(format: TextViewFormat, options: &UpdateOptions) -> Result<(), SharedString> {
@@ -550,17 +765,31 @@ fn parse_content(format: TextViewFormat, options: &UpdateOptions) -> Result<(), 
 
     let mut content = options.content.lock().unwrap();
     let mut source = String::new();
-    if options.append
-        && let Some(last_block) = content.document.blocks.pop()
-        && let Some(span) = last_block.span()
-    {
-        node_cx.offset = span.start;
-        let last_source = &content.document.source[span.start..];
-        source.push_str(last_source);
-        source.push_str(&options.pending_text);
-    } else {
+    // WP-B3: transactional append. The old code `pop()`ped the last block off
+    // the live document BEFORE parsing, so a parse error (the `?` below) left
+    // the document permanently missing its tail. Instead we PEEK the last
+    // block's span to assemble the parse source, and only mutate `content`
+    // AFTER the parse succeeds. `append_from_last_block` records whether the
+    // append fast-path (re-parse of last block + delta) applied.
+    let append_from_last_block = options.append
+        && content
+            .document
+            .blocks
+            .last()
+            .and_then(|last_block| last_block.span())
+            .map(|span| {
+                node_cx.offset = span.start;
+                source.push_str(&content.document.source[span.start..]);
+                source.push_str(&options.pending_text);
+            })
+            .is_some();
+    if !append_from_last_block {
         source = options.pending_text.to_string();
     }
+
+    // WP-B3: record the real parse-byte cost (append = last block + delta;
+    // full = whole doc), split from the source-copy and selection rebuilds.
+    record_text_parse(options.hot_metered, options.append, source.len());
 
     let new_content = match format {
         TextViewFormat::Markdown => {
@@ -569,7 +798,11 @@ fn parse_content(format: TextViewFormat, options: &UpdateOptions) -> Result<(), 
         TextViewFormat::Html => format::html::parse(&source, &mut node_cx),
     }?;
 
+    // Parse succeeded: only now mutate the live document (transactional).
     if options.append {
+        if append_from_last_block {
+            content.document.blocks.pop();
+        }
         content.document.source =
             format!("{}{}", content.document.source, options.pending_text).into();
         content.document.blocks.extend(new_content.blocks);
@@ -577,9 +810,13 @@ fn parse_content(format: TextViewFormat, options: &UpdateOptions) -> Result<(), 
         content.document = new_content;
     }
     content.node_cx = node_cx;
+    // WP-B3: the full-source reallocation above is O(total doc) per delta even
+    // when the parse stayed bounded — count it separately from parse bytes.
+    record_text_source_rebuild(options.hot_metered, content.document.source.len());
     // Rebuild the flattened selection document and re-stamp every run's
     // document range in the same pass the renderer will read from.
     content.selection = selection::build_selection_document(&content.document);
+    record_text_selection_rebuild(options.hot_metered, content.document.source.len());
 
     Ok(())
 }
@@ -596,6 +833,71 @@ mod tests {
         state.update(cx, |state, cx| {
             state.set_markdown_text_immediate("First token", cx);
             assert_eq!(state.source().as_ref(), "First token");
+        });
+    }
+
+    // ---- WP-B3 coalescer: Full-vs-Append preservation ---------------------
+
+    #[test]
+    fn coalesce_nothing_pending_takes_incoming_verbatim() {
+        assert_eq!(
+            coalesce_pending_update(false, false, "", true, "delta"),
+            (true, "delta".to_string())
+        );
+        assert_eq!(
+            coalesce_pending_update(false, false, "", false, "full"),
+            (false, "full".to_string())
+        );
+    }
+
+    #[test]
+    fn coalesce_full_then_append_stays_full_and_does_not_duplicate() {
+        // Pending Full("Hello"), incoming Append(" world") → Full("Hello world"),
+        // NOT an append that would re-add "Hello" onto the live document.
+        assert_eq!(
+            coalesce_pending_update(true, false, "Hello", true, " world"),
+            (false, "Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn coalesce_append_then_append_concatenates() {
+        assert_eq!(
+            coalesce_pending_update(true, true, "ab", true, "cd"),
+            (true, "abcd".to_string())
+        );
+    }
+
+    #[test]
+    fn coalesce_append_then_full_replacement_wins() {
+        assert_eq!(
+            coalesce_pending_update(true, true, "ab", false, "brand new"),
+            (false, "brand new".to_string())
+        );
+    }
+
+    // ---- WP-B3 immediate append seam --------------------------------------
+
+    #[gpui::test]
+    fn immediate_append_grows_logical_and_parsed_source(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let state = cx.new(|cx| TextViewState::markdown_immediate("Hello ", cx));
+        state.update(cx, |state, cx| {
+            state.push_str_immediate("world", cx);
+            // Both the parsed document source and the logical `text` grow.
+            assert_eq!(state.source().as_ref(), "Hello world");
+            assert_eq!(state.text.as_ref(), "Hello world");
+        });
+    }
+
+    #[gpui::test]
+    fn immediate_append_never_duplicates_prefix(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let state = cx.new(|cx| TextViewState::markdown_immediate("The quick ", cx));
+        state.update(cx, |state, cx| {
+            state.push_str_immediate("brown ", cx);
+            state.push_str_immediate("fox", cx);
+            assert_eq!(state.source().as_ref(), "The quick brown fox");
         });
     }
 }

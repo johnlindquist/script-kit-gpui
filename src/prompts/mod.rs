@@ -45,7 +45,7 @@ mod webcam_stub;
 pub use base::{DesignContext, PromptBase, ResolvedColors};
 pub use chat::{
     ChatClaudeCodeCallback, ChatConfigureCallback, ChatEscapeCallback, ChatPrompt,
-    ChatSubmitCallback,
+    ChatPromptHostMode, ChatSubmitCallback, ChatTranscriptAlignment,
 };
 pub use creation_feedback::{
     CreationFeedbackPanel, CreationFeedbackPayload, CreationFeedbackReceiptStatus,

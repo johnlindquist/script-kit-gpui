@@ -23,7 +23,7 @@ impl crate::menu_syntax::CaptureHandlerScaffoldEffects for AppCaptureHandlerScaf
 
     fn open_in_editor(&self, path: &Path) -> io::Result<()> {
         crate::script_creation::open_in_editor(path, self.config)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))
+            .map_err(|error| io::Error::other(error))
             .or_else(|_| {
                 let _child = std::process::Command::new("open").arg(path).spawn()?;
                 Ok(())

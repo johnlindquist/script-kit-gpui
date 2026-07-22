@@ -772,9 +772,9 @@ pub(crate) fn render_main_view_context_zone_required(
     let text_alpha = (info.opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
     let border = rgba((theme.colors.ui.border << 8) | info.pill_border_alpha);
     let rest_bg = rgba((theme.colors.background.search_box << 8) | info.pill_bg_alpha);
-    let hover_bg = rgba((theme.colors.text.primary << 8) | info.pill_hover_bg_alpha);
+    let _hover_bg = rgba((theme.colors.text.primary << 8) | info.pill_hover_bg_alpha);
     let text_color = rgba((theme.colors.text.primary << 8) | text_alpha);
-    let hover_text_color = rgba((theme.colors.text.primary << 8) | info.pill_hover_text_alpha);
+    let _hover_text_color = rgba((theme.colors.text.primary << 8) | info.pill_hover_text_alpha);
     let show_pills = info.pill_padding_x > 0.0 || info.pill_border_alpha > 0;
     let header_keycap_font_size = context_zone_keycap_font_size(&info);
     let header_keycap_height = context_zone_keycap_height(&info);

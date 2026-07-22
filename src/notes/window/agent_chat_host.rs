@@ -28,7 +28,7 @@ impl NotesApp {
 
         crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
             id: NOTES_EMBEDDED_AI_AUTOMATION_ID.to_string(),
-            kind: crate::protocol::AutomationWindowKind::Ai,
+            kind: crate::protocol::AutomationWindowKind::AgentChatDetached,
             title: Some("Script Kit Notes AI".to_string()),
             focused: false,
             visible: true,

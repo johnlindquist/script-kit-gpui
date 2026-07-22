@@ -51,13 +51,13 @@ mod brain;
 mod branding;
 pub mod calculator;
 mod camera;
+pub mod chat_hot_counters;
 mod components;
 mod config;
 mod confirm;
 mod context_snapshot;
 mod designs;
 mod dev_marker;
-mod flows;
 mod dictation;
 mod editor;
 mod effects;
@@ -66,6 +66,7 @@ mod error;
 mod executor;
 mod fidelity_capture;
 mod filter_coalescer;
+mod flows;
 mod focus_coordinator;
 mod footer_popup;
 mod form_prompt;
@@ -254,7 +255,7 @@ use prompts::{
 use tray::{TrayManager, TrayMenuAction};
 use ui_foundation::get_vibrancy_background;
 use warning_banner::{WarningBanner, WarningBannerColors};
-use window_resize::{initial_window_height, reset_resize_debounce, resize_to_view_sync, ViewType};
+use window_resize::{reset_resize_debounce, resize_to_view_sync, ViewType};
 
 use components::{FormFieldColors, PromptFooterColors, PromptFooterConfig};
 use designs::{get_tokens, render_design_item, DesignVariant};
@@ -266,12 +267,9 @@ use list_item::{
 // strip_html_tags removed - DivPrompt now renders HTML properly
 
 use actions::{
-    close_actions_window, is_actions_window_open, notify_actions_window, open_actions_window,
-    ActionsDialog, ScriptInfo,
+    close_actions_window, is_actions_window_open, open_actions_window, ActionsDialog, ScriptInfo,
 };
-use panel::{
-    CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y, CURSOR_WIDTH, HEADER_GAP, HEADER_PADDING_X, HEADER_PADDING_Y,
-};
+use panel::{CURSOR_HEIGHT_LG, CURSOR_MARGIN_Y, CURSOR_WIDTH, HEADER_PADDING_X, HEADER_PADDING_Y};
 use parking_lot::Mutex as ParkingMutex;
 use protocol::{Choice, Message, ProtocolAction};
 use std::sync::{mpsc, Arc, Mutex};

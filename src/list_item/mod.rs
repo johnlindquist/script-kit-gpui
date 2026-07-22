@@ -216,9 +216,9 @@ impl ListItemMetricsOverride {
     }
 
     /// Metrics from an explicit main-menu def. The design-contract exporter
-    /// passes `base_def()` here so checked-in artifacts ignore dev-style
-    /// runtime overrides; production rendering keeps using
-    /// [`Self::from_main_menu_theme`] (which resolves overrides via `def()`).
+    /// passes `base_def()` here so checked-in artifacts always match the base
+    /// token definition; production rendering keeps using
+    /// [`Self::from_main_menu_theme`].
     pub fn from_main_menu_def(def: crate::designs::MainMenuThemeDef) -> Self {
         Self {
             item_height: def.list.item_height,

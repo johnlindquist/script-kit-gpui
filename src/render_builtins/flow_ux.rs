@@ -46,6 +46,169 @@ pub(crate) enum FlowTurnOutcome {
     Failed(String),
 }
 
+use crate::flows::session::FLOW_STOPPED_CAPTION;
+
+/// One display projection for a settled turn, used by BOTH live finalization
+/// and restore (Oracle 2026-07-21, WP-A3/A4): raw engine output decorated
+/// from the structured outcome. `SessionTurn.assistant` itself stays raw —
+/// the caption never enters persistence or the engine rollup.
+pub(crate) fn flow_turn_display_assistant(turn: &crate::flows::session::SessionTurn) -> String {
+    match turn.outcome {
+        crate::flows::session::PersistedTurnOutcome::Ok
+        | crate::flows::session::PersistedTurnOutcome::Failed => turn.assistant.clone(),
+        crate::flows::session::PersistedTurnOutcome::Stopped => {
+            let raw = turn.assistant.as_str();
+            // Whitespace-aware caption join: reuse an existing trailing break
+            // rather than stacking a second blank line after item boundaries.
+            if raw.is_empty() {
+                FLOW_STOPPED_CAPTION.to_string()
+            } else if raw.ends_with("\n\n") {
+                format!("{raw}{FLOW_STOPPED_CAPTION}")
+            } else if raw.ends_with('\n') {
+                format!("{raw}\n{FLOW_STOPPED_CAPTION}")
+            } else {
+                format!("{raw}\n\n{FLOW_STOPPED_CAPTION}")
+            }
+        }
+    }
+}
+
+/// A settled turn plus the exact suffix the live streaming row still needs.
+/// The finalizer computes the display projection ONCE and hands the caller
+/// the literal delta, so there is no hidden "finalization only appends"
+/// prefix invariant to violate later (Oracle 2026-07-21).
+struct FinalizedFlowTurn {
+    turn: crate::flows::session::SessionTurn,
+    live_suffix: String,
+}
+
+fn finalize_flow_session_turn(
+    active: crate::flows::session::ActiveTurn,
+    outcome: FlowTurnOutcome,
+) -> FinalizedFlowTurn {
+    use crate::flows::session::PersistedTurnOutcome;
+
+    let (outcome, error) = match outcome {
+        FlowTurnOutcome::Ok => (PersistedTurnOutcome::Ok, None),
+        FlowTurnOutcome::Stopped => (PersistedTurnOutcome::Stopped, None),
+        FlowTurnOutcome::Failed(error) => {
+            let error = error.trim();
+            let error = if error.is_empty() {
+                "Flow turn failed".to_string()
+            } else {
+                error.to_string()
+            };
+            (PersistedTurnOutcome::Failed, Some(error))
+        }
+    };
+    let turn = crate::flows::session::SessionTurn {
+        user: active.user_text,
+        assistant: active.assistant_acc,
+        outcome,
+        error,
+    };
+    let display = flow_turn_display_assistant(&turn);
+    let live_suffix = display[turn.assistant.len()..].to_string();
+    FinalizedFlowTurn { turn, live_suffix }
+}
+
+/// Footer grammar for a flow session (Oracle audit 2026-07-21, Footer-A):
+/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working = `⌘K Actions · Esc Desk`.
+/// No permanent Terminate — it is a destructive expert command that lives in
+/// the ⌘K Actions menu (with its ⇧⌘⎋ shortcut still handled); the leading
+/// status text already communicates Working/Connecting.
+fn flow_session_footer_hints(working: bool) -> Vec<gpui::SharedString> {
+    let mut hints = Vec::with_capacity(3);
+    if !working {
+        hints.push(gpui::SharedString::from("↵ Send"));
+    }
+    hints.push(gpui::SharedString::from("⌘K Actions"));
+    hints.push(gpui::SharedString::from("Esc Desk"));
+    hints
+}
+
+/// Exactly one action a flow-session key press resolves to (C-R1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlowSessionKeyAction {
+    /// ⇧⌘⎋ — permanently end the conversation (destructive).
+    Terminate,
+    /// ⎋ — leave the session view without touching the process.
+    Background,
+    /// ⌘. — cancel the in-flight turn only (conversation survives).
+    Stop,
+    /// ⌘K — open/close the session actions menu.
+    ToggleActions,
+    /// Plain, unmodified ↵ — send the composer draft as the next turn.
+    Submit,
+    /// No shell-level action; the key falls through to the composer input.
+    Ignore,
+}
+
+/// The single exhaustive key owner for a flow session (C-R1).
+///
+/// WP7 deleted `ChatPrompt`'s own key handling for transcript-only hosts, so
+/// the flow-session parent handler is now the ONE lifecycle/key owner. It must
+/// therefore resolve every binding here — including ⌘. Stop, which WP7 dropped,
+/// and the plain-Enter guard that keeps Shift+Enter / Cmd+Enter from
+/// over-submitting the draft. See `resolve_chat_input_key_action` for the
+/// standalone-host parity reference.
+///
+/// Precedence: while the actions popup is open, ⎋/⇧⌘⎋ belong to the popup, so
+/// Terminate and Background require `!actions_open`. ⌘. Stop only fires while a
+/// turn is in flight; ⌘K always toggles; only a bare Enter submits.
+fn resolve_flow_session_key_action(
+    key: &str,
+    platform: bool,
+    shift: bool,
+    turn_active: bool,
+    actions_open: bool,
+) -> FlowSessionKeyAction {
+    if platform && shift && is_key_escape(key) && !actions_open {
+        return FlowSessionKeyAction::Terminate;
+    }
+    if is_key_escape(key) && !actions_open {
+        return FlowSessionKeyAction::Background;
+    }
+    if platform && key == "." && turn_active {
+        return FlowSessionKeyAction::Stop;
+    }
+    if platform && key.eq_ignore_ascii_case("k") {
+        return FlowSessionKeyAction::ToggleActions;
+    }
+    if is_key_enter(key) && !platform && !shift {
+        return FlowSessionKeyAction::Submit;
+    }
+    FlowSessionKeyAction::Ignore
+}
+
+/// Outcome of `submit_flow_chat_message`, so the caller can decide whether to
+/// clear the composer. Callers must only clear the draft when
+/// `consumes_draft()` — clearing before submit destroys the user's message
+/// when the session is busy (WP1, 2026-07-21 Oracle panel P0).
+#[must_use = "the result determines whether the composer draft was consumed"]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlowChatSubmitResult {
+    /// The turn was accepted and dispatched to the engine.
+    Dispatched,
+    /// The flow definition was unreadable: the message was consumed into one
+    /// failed-closed turn (user row + structured error) without dispatch.
+    FailedClosed,
+    /// The submitted text was empty after trimming; nothing happened.
+    Empty,
+    /// A turn is already in flight on this session; the draft is preserved.
+    Busy,
+    /// The session id no longer resolves to a live session.
+    MissingSession,
+}
+
+impl FlowChatSubmitResult {
+    /// True when the message was committed to the transcript (dispatched or
+    /// failed closed) and the composer draft should therefore clear.
+    pub(crate) fn consumes_draft(self) -> bool {
+        matches!(self, Self::Dispatched | Self::FailedClosed)
+    }
+}
+
 /// What the Flow Desk ⌘K dialog acts on. Derived fresh from view state at
 /// toggle/execute time so the popup never captures a stale row.
 #[derive(Clone)]
@@ -172,6 +335,11 @@ impl ScriptListApp {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(120))
                     .await;
+                // WP5: one 8 Hz tick wake. WP9 wants this to stop after a
+                // session settles; the throttled snapshot also gives the
+                // quiet-idle probe phase a steady reading to sample.
+                crate::chat_hot_counters::record_flow_tick_wake();
+                crate::chat_hot_counters::maybe_log_snapshot("flow_tick");
                 let keep_going = cx.update(|cx| {
                     this.update(cx, |app, cx| {
                         let registry = crate::flows::run_registry::flow_run_registry();
@@ -226,6 +394,14 @@ impl ScriptListApp {
                         }
 
                         if dirty {
+                            // WP5/C-R8: a tick that requested a root
+                            // invalidation via `cx.notify()`. This is NOT a
+                            // render — flow-session ticks force `dirty` every
+                            // wake, so this rises even when nothing paints. The
+                            // actual repaint is counted by the split
+                            // desk/session render counters at the top of the
+                            // real Flow render functions.
+                            crate::chat_hot_counters::record_flow_render_request();
                             cx.notify();
                         }
                         let view_active = matches!(
@@ -524,7 +700,8 @@ impl ScriptListApp {
             );
             self.open_flow_session(session_id, cx);
             if let Some(message) = initial_message {
-                self.submit_flow_chat_message(session_id, message, cx);
+                let result = self.submit_flow_chat_message(session_id, message.clone(), cx);
+            self.stage_unconsumed_flow_message(message, result, cx);
             }
             return;
         }
@@ -552,29 +729,40 @@ impl ScriptListApp {
             return;
         };
         let entity = self.flow_sessions[index].1.clone();
+        // ONE canonical conversion (WP-A4): migrate/normalize the snapshot
+        // into canonical turns, then render AND store from that same vector,
+        // so the restored session is semantically identical to the live one.
+        let turns = crate::flows::session::canonical_session_turns(&snapshot);
         entity.update(cx, |chat, cx| {
-            for turn in &snapshot.turns {
+            for (turn_index, turn) in turns.iter().enumerate() {
                 chat.add_message(
                     crate::protocol::ChatPromptMessage::user(turn.user.clone()),
                     cx,
                 );
-                if !turn.assistant.is_empty() {
+                let display = flow_turn_display_assistant(turn);
+                let failed =
+                    turn.outcome == crate::flows::session::PersistedTurnOutcome::Failed;
+                if !display.is_empty() || failed {
+                    let message_id = format!("flow-{session_id}-restored-turn-{turn_index}");
                     chat.add_message(
-                        crate::protocol::ChatPromptMessage::assistant(turn.assistant.clone()),
+                        crate::protocol::ChatPromptMessage::assistant(display)
+                            .with_id(message_id.clone()),
                         cx,
                     );
+                    if failed {
+                        chat.set_message_error(
+                            &message_id,
+                            turn.error
+                                .clone()
+                                .unwrap_or_else(|| "Flow turn failed".to_string()),
+                            cx,
+                        );
+                    }
                 }
             }
         });
         let meta = &mut self.flow_sessions[index].0;
-        meta.turns = snapshot
-            .turns
-            .iter()
-            .map(|turn| crate::flows::session::SessionTurn {
-                user: turn.user.clone(),
-                assistant: turn.assistant.clone(),
-            })
-            .collect();
+        meta.turns = turns;
         meta.needs_rethread = true;
         tracing::info!(
             target: "script_kit::flows",
@@ -587,7 +775,8 @@ impl ScriptListApp {
         self.open_flow_session(session_id, cx);
         self.start_flow_ux_tick(cx);
         if let Some(message) = initial_message {
-            self.submit_flow_chat_message(session_id, message, cx);
+            let result = self.submit_flow_chat_message(session_id, message.clone(), cx);
+            self.stage_unconsumed_flow_message(message, result, cx);
         }
     }
 
@@ -604,7 +793,8 @@ impl ScriptListApp {
         self.open_flow_session(session_id, cx);
         self.start_flow_ux_tick(cx);
         if let Some(message) = initial_message {
-            self.submit_flow_chat_message(session_id, message, cx);
+            let result = self.submit_flow_chat_message(session_id, message.clone(), cx);
+            self.stage_unconsumed_flow_message(message, result, cx);
         }
     }
 
@@ -637,13 +827,11 @@ impl ScriptListApp {
                 let _ = submit_sender
                     .try_send(crate::flows::session::FlowChatRequest::Submit { session_id, text });
             });
-        let escape_sender = self.flow_chat_sender.clone();
-        let escape_callback: crate::prompts::ChatEscapeCallback =
-            std::sync::Arc::new(move |_id: String| {
-                let _ = escape_sender
-                    .try_send(crate::flows::session::FlowChatRequest::Background { session_id });
-            });
-
+        // The flow session (this view) is the SINGLE lifecycle/key owner:
+        // Esc backgrounds, ⇧⌘⎋ terminates, Enter submits the shared draft —
+        // all handled by the `flow_session` key handler below. The hosted
+        // ChatPrompt runs as a pure transcript body (TranscriptOnly), so it
+        // installs no key handlers and needs no escape callback of its own.
         let mut chat = crate::prompts::ChatPrompt::new(
             format!("flow-session-{session_id}"),
             Some(format!("Message {friendly}…")),
@@ -656,17 +844,14 @@ impl ScriptListApp {
         )
         .with_title(friendly.clone())
         .with_save_history(false)
-        .with_escape_callback(escape_callback)
-        .with_escape_over_stop(true)
-        .with_external_footer(true)
-        .with_external_header(true)
-        .with_external_input(true)
+        .with_host_mode(crate::prompts::ChatPromptHostMode::TranscriptOnly {
+            alignment: crate::prompts::ChatTranscriptAlignment::Top,
+        })
         .with_empty_state_note(
             flow.description
                 .clone()
                 .unwrap_or_else(|| format!("Converse with {friendly}.")),
-        )
-        .with_top_aligned_turns();
+        );
         let actions_sender = self.flow_chat_sender.clone();
         chat.set_on_show_actions(std::sync::Arc::new(move |_id: String| {
             let _ = actions_sender
@@ -731,14 +916,16 @@ impl ScriptListApp {
         session_id: u64,
         text: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> FlowChatSubmitResult {
         let Some(index) = self.flow_session_index(session_id) else {
-            return;
+            return FlowChatSubmitResult::MissingSession;
         };
         let text = text.trim().to_string();
         if text.is_empty() {
-            return;
+            return FlowChatSubmitResult::Empty;
         }
+        // Busy check runs BEFORE any input/transcript mutation so a rejected
+        // submit leaves the composer draft untouched for the caller to keep.
         if self.flow_sessions[index].0.active_turn.is_some() {
             self.toast_manager.push(
                 crate::components::toast::Toast::error(
@@ -748,7 +935,7 @@ impl ScriptListApp {
                 .duration_ms(Some(2500)),
             );
             cx.notify();
-            return;
+            return FlowChatSubmitResult::Busy;
         }
 
         let mut thread_profile: Option<crate::flows::session::FlowThreadProfile> = None;
@@ -835,7 +1022,9 @@ impl ScriptListApp {
                 cx,
             );
             cx.notify();
-            return;
+            // The message was consumed into a failed-closed turn, so the
+            // composer draft should still clear.
+            return FlowChatSubmitResult::FailedClosed;
         }
 
         tracing::info!(
@@ -847,38 +1036,13 @@ impl ScriptListApp {
             "Submitting flow turn"
         );
 
-        let run_id = match transport {
-            crate::flows::session::SessionTransport::CodexThread => {
-                let meta = &self.flow_sessions[index].0;
-                crate::flows::codex_client::codex_app_server().converse(
-                    session_id,
-                    &meta.cwd,
-                    thread_profile.take(),
-                    prompt,
-                );
-                None
-            }
-            crate::flows::session::SessionTransport::MdflowTurns => {
-                let meta = &self.flow_sessions[index].0;
-                Some(crate::flows::runner::launch_flow(
-                    &meta.flow_id,
-                    &meta.flow_name,
-                    &meta.flow_path,
-                    &meta.cwd,
-                    crate::flows::model::FlowUxVariant::Flash,
-                    crate::flows::model::EngagementMode::Background,
-                    vec![("task".to_string(), prompt)],
-                    std::time::Instant::now(),
-                    // Conversation turn: stream from the append-only capture,
-                    // never the bounded display tail (cursor corruption P0).
-                    true,
-                ))
-            }
-        };
-
+        // Install the active turn and Working state BEFORE backend dispatch so
+        // even a synchronously queued failure event observes a valid turn
+        // (Oracle audit 2026-07-21). The mdflow run id is filled in after
+        // launch, before returning to the event loop.
         let meta = &mut self.flow_sessions[index].0;
         meta.active_turn = Some(crate::flows::session::ActiveTurn {
-            run_id,
+            run_id: None,
             message_id,
             assistant_acc: String::new(),
             current_item_id: None,
@@ -887,12 +1051,98 @@ impl ScriptListApp {
         });
         meta.needs_rethread = false;
         meta.state = crate::flows::session::SessionState::Working;
+
+        match transport {
+            crate::flows::session::SessionTransport::CodexThread => {
+                let meta = &self.flow_sessions[index].0;
+                crate::flows::codex_client::codex_app_server().converse(
+                    session_id,
+                    &meta.cwd,
+                    thread_profile.take(),
+                    prompt,
+                );
+            }
+            crate::flows::session::SessionTransport::MdflowTurns => {
+                let run_id = {
+                    let meta = &self.flow_sessions[index].0;
+                    crate::flows::runner::launch_flow(
+                        &meta.flow_id,
+                        &meta.flow_name,
+                        &meta.flow_path,
+                        &meta.cwd,
+                        crate::flows::model::FlowUxVariant::Flash,
+                        crate::flows::model::EngagementMode::Background,
+                        vec![("task".to_string(), prompt)],
+                        std::time::Instant::now(),
+                        // Conversation turn: stream from the append-only capture,
+                        // never the bounded display tail (cursor corruption P0).
+                        true,
+                    )
+                };
+                if let Some(active) = self.flow_sessions[index].0.active_turn.as_mut() {
+                    active.run_id = Some(run_id);
+                }
+            }
+        }
         self.start_flow_ux_tick(cx);
+        cx.notify();
+        FlowChatSubmitResult::Dispatched
+    }
+
+    /// The ONE draft-consumption transaction for a flow session: submit the
+    /// current main-input draft and clear it only when the submit consumed it.
+    /// Both the keyboard Enter handler and the native footer Send button MUST
+    /// route through this method — a caller that clears first destroys the
+    /// draft on a Busy race (Oracle audit 2026-07-21, Footer-B).
+    pub(crate) fn submit_flow_session_draft(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> FlowChatSubmitResult {
+        let draft = self.filter_text.clone();
+        let result = self.submit_flow_chat_message(session_id, draft, cx);
+        if result.consumes_draft() {
+            self.set_filter_text_immediate(String::new(), window, cx);
+        }
+        result
+    }
+
+    /// A routed `initial_message` that could not be submitted (session busy,
+    /// or vanished) must NOT be silently dropped: stage it as the main-input
+    /// draft so the user's message is waiting in the composer (Oracle audit
+    /// 2026-07-21: a busy reattach used to swallow the routed message).
+    fn stage_unconsumed_flow_message(
+        &mut self,
+        message: String,
+        result: FlowChatSubmitResult,
+        cx: &mut Context<Self>,
+    ) {
+        if result.consumes_draft() || matches!(result, FlowChatSubmitResult::Empty) {
+            return;
+        }
+        tracing::warn!(
+            target: "script_kit::flows",
+            event = "flow_initial_message_staged_as_draft",
+            result = ?result,
+            "Initial flow message could not submit — staged as composer draft"
+        );
+        self.filter_text =
+            crate::components::text_input::normalize_single_line_text(message);
+        self.pending_filter_sync = true;
         cx.notify();
     }
 
-    /// Append streamed assistant text to a session's open turn.
+    /// Append streamed assistant text to a session's open turn. The single
+    /// visible-commit helper for a session's child ChatPrompt: both streamed
+    /// deltas and the finalized display suffix route through here so they count
+    /// identically (WP-B3). Empty deltas are rejected before any commit count.
     fn append_flow_turn_text(&mut self, session_id: u64, delta: &str, cx: &mut Context<Self>) {
+        // WP-B3: reject an empty child delta before counting — an empty commit
+        // is not effective work and must not inflate the child-commit rate.
+        if delta.is_empty() {
+            return;
+        }
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
@@ -904,6 +1154,10 @@ impl ScriptListApp {
         active.item_acc.push_str(delta);
         let message_id = active.message_id.clone();
         let delta = delta.to_string();
+        // WP-B3: a non-empty text delta committed into the child ChatPrompt
+        // entity, plus its byte count. An effective flow event.
+        crate::chat_hot_counters::record_flow_child_commit(delta.len());
+        crate::chat_hot_counters::record_flow_event_effective();
         entity.update(cx, |chat, cx| {
             chat.append_chunk(&message_id, &delta, cx);
         });
@@ -951,43 +1205,41 @@ impl ScriptListApp {
         };
         let entity = self.flow_sessions[index].1.clone();
         let message_id = active.message_id.clone();
-        let had_error = matches!(outcome, FlowTurnOutcome::Failed(_));
-        let stopped_caption = match &outcome {
-            FlowTurnOutcome::Stopped if active.assistant_acc.is_empty() => {
-                Some("*Stopped.*".to_string())
-            }
-            FlowTurnOutcome::Stopped => Some("\n\n*Stopped.*".to_string()),
-            _ => None,
-        };
+        // Build the finalized turn ONCE: raw assistant + structured outcome
+        // for persistence/rollup, plus the exact display suffix for the live
+        // row. Both sides come from the same projection (WP-A3).
+        let FinalizedFlowTurn { turn, live_suffix } =
+            finalize_flow_session_turn(active, outcome);
+        let error = turn.error.clone();
+        let had_error = error.is_some();
+        // WP-B3: the finalized display suffix is a visible commit too — count it
+        // through the same child-commit helper semantics as streamed deltas.
+        if !live_suffix.is_empty() {
+            crate::chat_hot_counters::record_flow_child_commit(live_suffix.len());
+        }
         entity.update(cx, |chat, cx| {
-            // append_chunk is gated on the live stream — captions go in
-            // before the stream closes.
-            if let Some(caption) = stopped_caption {
-                chat.append_chunk(&message_id, &caption, cx);
+            // append_chunk is gated on the live stream, so project any
+            // finalized caption before closing the same assistant row.
+            if !live_suffix.is_empty() {
+                chat.append_chunk(&message_id, &live_suffix, cx);
             }
             chat.complete_streaming(&message_id, cx);
-            if let FlowTurnOutcome::Failed(note) = outcome {
+            if let Some(note) = error {
                 chat.set_message_error(&message_id, note, cx);
             }
         });
         let meta = &mut self.flow_sessions[index].0;
-        meta.turns.push(crate::flows::session::SessionTurn {
-            user: active.user_text,
-            assistant: active.assistant_acc,
-        });
+        meta.turns.push(turn);
         meta.state = state;
-        // Snapshot the conversation off-thread so an app restart can restore
-        // it (resume_or_start_flow_session); in-memory sessions die with the
-        // process.
-        let flow_id = meta.flow_id.clone();
-        let flow_path = meta.flow_path.clone();
-        let turns = meta.turns.clone();
-        std::thread::Builder::new()
-            .name("flow-conversation-persist".into())
-            .spawn(move || {
-                crate::flows::session::persist_conversation(&flow_id, &flow_path, &turns)
-            })
-            .ok();
+        // Snapshot the conversation through the FIFO store so an app restart
+        // can restore it. Enqueued synchronously: on-disk order always
+        // matches the order turns settled (WP-A1 — detached per-turn threads
+        // let an older snapshot overwrite a newer one).
+        crate::flows::session::conversation_store().persist(
+            &meta.flow_id,
+            &meta.flow_path,
+            meta.turns.clone(),
+        );
         tracing::info!(
             target: "script_kit::flows",
             event = "flow_turn_settled",
@@ -996,6 +1248,11 @@ impl ScriptListApp {
             had_error,
             "Flow turn settled"
         );
+        // WP-B3: a settled turn is an effective state transition.
+        crate::chat_hot_counters::record_flow_event_effective();
+        // WP5: settle boundary — publish a fresh counter reading when a flow
+        // turn finalizes so a probe never races the throttled tick snapshot.
+        crate::chat_hot_counters::log_snapshot("flow_turn_settled");
     }
 
     /// Apply one codex app-server event to its session.
@@ -1006,6 +1263,11 @@ impl ScriptListApp {
     ) {
         use crate::flows::codex_client::FlowThreadEvent;
         use crate::flows::session::SessionState;
+        // WP-B3: one codex app-server transport event pulled off the stream
+        // (ingress). Effective mutations are counted at the sites that actually
+        // change session state (child commits, turn settle), so an empty/no-op
+        // event never counts as effective work.
+        crate::chat_hot_counters::record_flow_event_received();
         match event {
             FlowThreadEvent::ThreadStarted { session_id, model } => {
                 if let Some(index) = self.flow_session_index(session_id) {
@@ -1103,6 +1365,8 @@ impl ScriptListApp {
         let registry = crate::flows::run_registry::flow_run_registry();
         let mut dirty = false;
         for index in 0..self.flow_sessions.len() {
+            // WP-B3: one session scanned per sync pass (the O(sessions) walk).
+            crate::chat_hot_counters::record_flow_session_scanned();
             let (session_id, run_id, acc_len) = {
                 let meta = &self.flow_sessions[index].0;
                 let Some(active) = &meta.active_turn else {
@@ -1132,6 +1396,9 @@ impl ScriptListApp {
             if full.len() > acc_len {
                 if let Some(delta) = full.get(acc_len..) {
                     let delta = delta.to_string();
+                    // WP-B3: bytes copied out of the mdflow child's stdout
+                    // capture into the transcript this tick.
+                    crate::chat_hot_counters::record_flow_stdout_bytes_copied(delta.len());
                     self.append_flow_turn_text(session_id, &delta, cx);
                     dirty = true;
                 }
@@ -1297,14 +1564,11 @@ impl ScriptListApp {
         // erase the persisted transcript too, or the next activation would
         // silently restore it (2026-07-11 audit P0: UI-contract violation).
         if let Some(removed) = remove_flow_session(&mut self.flow_sessions, session_id) {
-            let flow_id = removed.0.flow_id.clone();
-            let flow_path = removed.0.flow_path.clone();
-            std::thread::Builder::new()
-                .name("flow-conversation-delete".into())
-                .spawn(move || {
-                    crate::flows::session::delete_persisted_conversation(&flow_id, &flow_path)
-                })
-                .ok();
+            // FIFO store (WP-A1): the delete is ordered AFTER any pending
+            // persist for this conversation, so a straggling snapshot can
+            // never resurrect a terminated transcript.
+            crate::flows::session::conversation_store()
+                .delete(&removed.0.flow_id, &removed.0.flow_path);
         }
         if viewing {
             self.background_flow_session(window, cx);
@@ -1465,6 +1729,9 @@ impl ScriptListApp {
         _inline_run: Option<u64>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // C-R8/WP-B3: one honest Flow *desk* surface render (on screen and
+        // painting). Distinct from tick invalidation requests.
+        crate::chat_hot_counters::record_flow_desk_render();
         let chrome = crate::theme::AppChromeColors::from_theme(&self.theme);
         let list_colors = crate::list_item::ListItemColors::from_theme(&self.theme);
         let cwd = self.flow_ux_cwd();
@@ -1821,6 +2088,9 @@ impl ScriptListApp {
         session_id: u64,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // C-R8/WP-B3: one honest Flow *session* surface render (the session
+        // transcript is on screen and painting). Distinct from tick requests.
+        crate::chat_hot_counters::record_flow_session_render();
         let chrome = crate::theme::AppChromeColors::from_theme(&self.theme);
         let Some(index) = self.flow_session_index(session_id) else {
             // Session vanished (dismissed elsewhere) — fall back to the desk.
@@ -1832,6 +2102,11 @@ impl ScriptListApp {
                 cx,
             );
         };
+        // WP-B3: one session scanned + the per-render `FlowSessionMeta` clone.
+        // The clone is O(turns) and happens every session render; count it so
+        // WP9 can see the per-render allocation cost (the borrow checker forces
+        // it here because `entity` and `meta` both borrow `self.flow_sessions`).
+        crate::chat_hot_counters::record_flow_session_scanned();
         let (meta, entity) = {
             let (meta, entity) = &self.flow_sessions[index];
             (meta.clone(), entity.clone())
@@ -1846,9 +2121,12 @@ impl ScriptListApp {
         // surfaces, never a status bar.
         let trailing: Vec<gpui::AnyElement> = Vec::new();
 
-        // Enter = send the main-input draft as the next turn; Esc =
-        // background to the desk; ⌘K = session actions. Same shell-level
-        // key routing the desk uses while the main input is focused.
+        // Single exhaustive key owner (C-R1): WP7 removed ChatPrompt's own key
+        // handling for this transcript-only host, so every binding — Terminate,
+        // Background, Stop, ToggleActions, Submit — is resolved here and exactly
+        // ONE action runs per press. Plain ↵ submits; Shift/Cmd+Enter fall
+        // through to the composer (never silently submit); ⌘. cancels the
+        // in-flight turn without backgrounding or terminating.
         let handle_key = cx.listener(
             move |this: &mut Self,
                   event: &gpui::KeyDownEvent,
@@ -1858,33 +2136,53 @@ impl ScriptListApp {
                     return;
                 };
                 let key = event.keystroke.key.as_str();
-                let has_cmd = event.keystroke.modifiers.platform;
-                let has_shift = event.keystroke.modifiers.shift;
-                // ⇧⌘⎋ terminates — exactly what the footer advertises. Plain
-                // ⌘⎋ must NOT destroy a conversation (2026-07-11 audit: the
-                // handler fired on ⌘⎋ while the hint said ⇧⌘⎋).
-                if has_cmd && has_shift && is_key_escape(key) && !this.show_actions_popup {
-                    this.terminate_flow_session(session_id, window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if is_key_escape(key) && !this.show_actions_popup {
-                    this.background_flow_session(window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if has_cmd && key.eq_ignore_ascii_case("k") {
-                    this.dispatch_actions_toggle_for_current_view(window, cx, "flow_session_chat");
-                    cx.stop_propagation();
-                    return;
-                }
-                if is_key_enter(key) {
-                    let text = this.filter_text.trim().to_string();
-                    if !text.is_empty() {
-                        this.set_filter_text_immediate(String::new(), window, cx);
-                        this.submit_flow_chat_message(session_id, text, cx);
+                let platform = event.keystroke.modifiers.platform;
+                let shift = event.keystroke.modifiers.shift;
+                let turn_active = this
+                    .flow_session_index(session_id)
+                    .and_then(|index| this.flow_sessions[index].0.active_turn.as_ref())
+                    .is_some();
+                let actions_open = this.show_actions_popup;
+
+                match resolve_flow_session_key_action(
+                    key,
+                    platform,
+                    shift,
+                    turn_active,
+                    actions_open,
+                ) {
+                    FlowSessionKeyAction::Terminate => {
+                        // ⇧⌘⎋ terminates — exactly what the ⌘K Actions menu
+                        // advertises. Plain ⌘⎋ must NOT destroy a conversation.
+                        this.terminate_flow_session(session_id, window, cx);
+                        cx.stop_propagation();
                     }
-                    cx.stop_propagation();
+                    FlowSessionKeyAction::Background => {
+                        this.background_flow_session(window, cx);
+                        cx.stop_propagation();
+                    }
+                    FlowSessionKeyAction::Stop => {
+                        // ⌘. cancels the in-flight turn only; the conversation
+                        // survives and the composer stays usable.
+                        this.stop_flow_session(session_id, cx);
+                        cx.stop_propagation();
+                    }
+                    FlowSessionKeyAction::ToggleActions => {
+                        this.dispatch_actions_toggle_for_current_view(
+                            window,
+                            cx,
+                            "flow_session_chat",
+                        );
+                        cx.stop_propagation();
+                    }
+                    FlowSessionKeyAction::Submit => {
+                        // One shared draft transaction: clears the composer ONLY
+                        // when the submit consumed the draft (WP1 P0: clearing
+                        // before submit destroyed the message on a Busy race).
+                        let _ = this.submit_flow_session_draft(session_id, window, cx);
+                        cx.stop_propagation();
+                    }
+                    FlowSessionKeyAction::Ignore => {}
                 }
             },
         );
@@ -1899,12 +2197,11 @@ impl ScriptListApp {
         } else {
             meta.engine.clone()
         };
-        let hints: Vec<gpui::SharedString> = vec![
-            gpui::SharedString::from("↵ Send"),
-            gpui::SharedString::from("⇧⌘⎋ Terminate Flow"),
-            gpui::SharedString::from("Esc Desk"),
-            gpui::SharedString::from("⌘K Actions"),
-        ];
+        // Truthful footer (WP1): a busy/connecting session cannot accept a
+        // submit, so it must NOT advertise `↵ Send`; the leading status text
+        // already carries "Working/Connecting". The pure `flow_session_footer_hints`
+        // helper owns this rule so it can be unit-tested without a window.
+        let hints = flow_session_footer_hints(meta.active_turn.is_some());
         let footer = self.main_window_footer_slot(crate::components::render_simple_hint_strip(
             hints,
             Some(crate::components::render_hint_strip_leading_text(
@@ -2096,5 +2393,311 @@ mod flow_session_escape_origin {
             "mid-turn termination is allowed"
         );
         assert!(sessions.is_empty());
+    }
+}
+
+/// C-R1: the flow session is the single exhaustive key owner. WP7 deleted
+/// ChatPrompt's key handling for transcript-only hosts, so this resolver must
+/// cover every binding — and its Enter branch must reject modified Enter so
+/// Shift+Enter / Cmd+Enter never silently submit.
+#[cfg(test)]
+mod flow_session_key_owner {
+    use super::{resolve_flow_session_key_action, FlowSessionKeyAction};
+
+    /// (key, platform, shift, turn_active, actions_open) → action.
+    fn action(
+        key: &str,
+        platform: bool,
+        shift: bool,
+        turn_active: bool,
+        actions_open: bool,
+    ) -> FlowSessionKeyAction {
+        resolve_flow_session_key_action(key, platform, shift, turn_active, actions_open)
+    }
+
+    #[test]
+    fn shift_cmd_escape_terminates() {
+        assert_eq!(
+            action("escape", true, true, false, false),
+            FlowSessionKeyAction::Terminate
+        );
+        assert_eq!(
+            action("escape", true, true, true, false),
+            FlowSessionKeyAction::Terminate
+        );
+    }
+
+    #[test]
+    fn plain_escape_backgrounds() {
+        assert_eq!(
+            action("escape", false, false, false, false),
+            FlowSessionKeyAction::Background
+        );
+        // Plain ⌘⎋ (no shift) must NOT terminate — it backgrounds.
+        assert_eq!(
+            action("escape", true, false, false, false),
+            FlowSessionKeyAction::Background
+        );
+    }
+
+    #[test]
+    fn escape_ignored_while_actions_open() {
+        // The actions popup owns Escape/⇧⌘⎋ while it is open.
+        assert_eq!(
+            action("escape", false, false, false, true),
+            FlowSessionKeyAction::Ignore
+        );
+        assert_eq!(
+            action("escape", true, true, false, true),
+            FlowSessionKeyAction::Ignore
+        );
+    }
+
+    #[test]
+    fn cmd_period_stops_only_while_turn_active() {
+        assert_eq!(
+            action(".", true, false, true, false),
+            FlowSessionKeyAction::Stop
+        );
+        // No turn in flight ⇒ nothing to stop.
+        assert_eq!(
+            action(".", true, false, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        // Bare `.` (no Cmd) is composer input.
+        assert_eq!(
+            action(".", false, false, true, false),
+            FlowSessionKeyAction::Ignore
+        );
+    }
+
+    #[test]
+    fn cmd_k_toggles_actions_regardless_of_state() {
+        assert_eq!(
+            action("k", true, false, false, false),
+            FlowSessionKeyAction::ToggleActions
+        );
+        assert_eq!(
+            action("K", true, false, true, true),
+            FlowSessionKeyAction::ToggleActions
+        );
+        // Bare `k` is composer input.
+        assert_eq!(
+            action("k", false, false, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+    }
+
+    #[test]
+    fn only_unmodified_enter_submits() {
+        assert_eq!(
+            action("enter", false, false, false, false),
+            FlowSessionKeyAction::Submit
+        );
+        assert_eq!(
+            action("return", false, false, false, false),
+            FlowSessionKeyAction::Submit
+        );
+        // Shift+Enter and Cmd+Enter MUST NOT submit (regression: the old
+        // handler submitted on any Enter). They fall through to the composer.
+        assert_eq!(
+            action("enter", false, true, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        assert_eq!(
+            action("enter", true, false, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        assert_eq!(
+            action("enter", true, true, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+    }
+
+    #[test]
+    fn ordinary_typed_keys_fall_through() {
+        assert_eq!(
+            action("a", false, false, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        assert_eq!(
+            action("1", false, false, true, false),
+            FlowSessionKeyAction::Ignore
+        );
+    }
+}
+
+#[cfg(test)]
+mod flow_session_footer_and_finalize {
+    use super::{
+        finalize_flow_session_turn, flow_session_footer_hints, flow_turn_display_assistant,
+        FlowTurnOutcome, FLOW_STOPPED_CAPTION,
+    };
+    use crate::flows::session::{ActiveTurn, PersistedTurnOutcome, SessionTurn};
+
+    fn active_turn(assistant_acc: &str) -> ActiveTurn {
+        ActiveTurn {
+            run_id: None,
+            message_id: "message".into(),
+            assistant_acc: assistant_acc.to_string(),
+            current_item_id: None,
+            item_acc: String::new(),
+            user_text: "hello".into(),
+        }
+    }
+
+    /// Footer grammar (Oracle 2026-07-21 adjudication): idle is exactly
+    /// `↵ Send · ⌘K Actions · Esc Desk`; working is exactly
+    /// `⌘K Actions · Esc Desk` — no Send while busy, no permanent Terminate.
+    #[test]
+    fn flow_session_footer_matches_idle_and_working_grammar() {
+        let idle = flow_session_footer_hints(false);
+        let idle: Vec<&str> = idle.iter().map(|h| h.as_ref()).collect();
+        assert_eq!(idle, vec!["↵ Send", "⌘K Actions", "Esc Desk"]);
+
+        let working = flow_session_footer_hints(true);
+        let working: Vec<&str> = working.iter().map(|h| h.as_ref()).collect();
+        assert_eq!(working, vec!["⌘K Actions", "Esc Desk"]);
+    }
+
+    /// WP-B3: a streamed flow turn (many deltas accumulated into
+    /// `assistant_acc`, exactly as `append_flow_turn_text` builds it) finalizes
+    /// to the EXACT concatenated assistant text, and the display projection
+    /// round-trips as `assistant + live_suffix` — so the finalize suffix that
+    /// `finish_flow_turn` routes through the child-commit helper is precisely
+    /// the tail the live row still needs, with no duplication or loss.
+    #[test]
+    fn flow_real_stream_preserves_exact_final_text_and_suffix() {
+        // Multi-byte graphemes and item breaks split across "deltas".
+        let deltas = ["Deploying ", "the ", "café ", "→ 日本語 ", "🚀 done"];
+        let mut acc = String::new();
+        for delta in deltas {
+            acc.push_str(delta);
+        }
+        let expected: String = deltas.concat();
+
+        // Ok outcome: display == raw assistant, so the suffix is empty.
+        let ok = finalize_flow_session_turn(active_turn(&acc), FlowTurnOutcome::Ok);
+        assert_eq!(ok.turn.assistant, expected);
+        assert_eq!(ok.turn.outcome, PersistedTurnOutcome::Ok);
+        assert_eq!(ok.live_suffix, "");
+        assert_eq!(
+            flow_turn_display_assistant(&ok.turn),
+            format!("{}{}", ok.turn.assistant, ok.live_suffix),
+            "display must round-trip as assistant + suffix"
+        );
+
+        // Stopped outcome: raw text is preserved verbatim and the suffix is the
+        // ONLY added tail — assistant + suffix reconstructs the display exactly.
+        let stopped = finalize_flow_session_turn(active_turn(&acc), FlowTurnOutcome::Stopped);
+        assert_eq!(stopped.turn.assistant, expected);
+        assert_eq!(
+            format!("{}{}", stopped.turn.assistant, stopped.live_suffix),
+            flow_turn_display_assistant(&stopped.turn),
+        );
+    }
+
+    /// WP-A3: finalization persists RAW assistant text + structured outcome;
+    /// the caption is only the live display suffix, never stored content.
+    #[test]
+    fn finalize_stopped_turn_keeps_assistant_raw() {
+        let finalized =
+            finalize_flow_session_turn(active_turn("partial answer"), FlowTurnOutcome::Stopped);
+        assert_eq!(finalized.turn.assistant, "partial answer");
+        assert_eq!(finalized.turn.outcome, PersistedTurnOutcome::Stopped);
+        assert_eq!(finalized.turn.error, None);
+        assert_eq!(finalized.live_suffix, format!("\n\n{FLOW_STOPPED_CAPTION}"));
+
+        let empty = finalize_flow_session_turn(active_turn(""), FlowTurnOutcome::Stopped);
+        assert_eq!(empty.turn.assistant, "");
+        assert_eq!(empty.live_suffix, FLOW_STOPPED_CAPTION);
+    }
+
+    /// The display projection reuses an existing trailing paragraph break
+    /// instead of stacking a second blank line after item boundaries.
+    #[test]
+    fn stopped_projection_reuses_existing_newlines() {
+        let turn = |raw: &str| SessionTurn {
+            user: "u".into(),
+            assistant: raw.into(),
+            outcome: PersistedTurnOutcome::Stopped,
+            error: None,
+        };
+        assert_eq!(
+            flow_turn_display_assistant(&turn("body\n\n")),
+            format!("body\n\n{FLOW_STOPPED_CAPTION}")
+        );
+        assert_eq!(
+            flow_turn_display_assistant(&turn("body\n")),
+            format!("body\n\n{FLOW_STOPPED_CAPTION}")
+        );
+        assert_eq!(
+            flow_turn_display_assistant(&turn("body")),
+            format!("body\n\n{FLOW_STOPPED_CAPTION}")
+        );
+        assert_eq!(flow_turn_display_assistant(&turn("")), FLOW_STOPPED_CAPTION);
+    }
+
+    /// Structured outcome — not content sniffing — decides decoration: model
+    /// output that naturally ends with the caption text still gets the real
+    /// caption appended, and an Ok turn is never decorated.
+    #[test]
+    fn projection_is_outcome_driven_not_content_sniffed() {
+        let natural = SessionTurn {
+            user: "u".into(),
+            assistant: format!("The literal marker is {FLOW_STOPPED_CAPTION}"),
+            outcome: PersistedTurnOutcome::Stopped,
+            error: None,
+        };
+        assert!(flow_turn_display_assistant(&natural)
+            .ends_with(&format!("\n\n{FLOW_STOPPED_CAPTION}")));
+
+        let ok = SessionTurn {
+            user: "u".into(),
+            assistant: "done".into(),
+            outcome: PersistedTurnOutcome::Ok,
+            error: None,
+        };
+        assert_eq!(flow_turn_display_assistant(&ok), "done");
+    }
+
+    /// WP-A3: a Failed turn persists a normalized nonblank error and no
+    /// caption; unicode raw text round-trips through the projection safely.
+    #[test]
+    fn finalize_failed_turn_normalizes_error() {
+        let finalized = finalize_flow_session_turn(
+            active_turn("partial 🚀"),
+            FlowTurnOutcome::Failed("boom".into()),
+        );
+        assert_eq!(finalized.turn.assistant, "partial 🚀");
+        assert_eq!(finalized.turn.outcome, PersistedTurnOutcome::Failed);
+        assert_eq!(finalized.turn.error.as_deref(), Some("boom"));
+        assert_eq!(finalized.live_suffix, "");
+
+        let blank = finalize_flow_session_turn(
+            active_turn("partial"),
+            FlowTurnOutcome::Failed("   ".into()),
+        );
+        assert_eq!(blank.turn.error.as_deref(), Some("Flow turn failed"));
+    }
+
+    /// WP-A3: an ordinary completion persists the accumulator verbatim with
+    /// no display suffix; unicode stays prefix-safe.
+    #[test]
+    fn finalize_ok_turn_is_verbatim() {
+        let finalized =
+            finalize_flow_session_turn(active_turn("done ✅"), FlowTurnOutcome::Ok);
+        assert_eq!(finalized.turn.assistant, "done ✅");
+        assert_eq!(finalized.turn.outcome, PersistedTurnOutcome::Ok);
+        assert_eq!(finalized.turn.error, None);
+        assert_eq!(finalized.live_suffix, "");
+
+        let stopped_unicode =
+            finalize_flow_session_turn(active_turn("emoji 🎯"), FlowTurnOutcome::Stopped);
+        assert_eq!(
+            flow_turn_display_assistant(&stopped_unicode.turn),
+            format!("emoji 🎯{}", stopped_unicode.live_suffix),
+            "display must equal raw + live suffix exactly"
+        );
     }
 }

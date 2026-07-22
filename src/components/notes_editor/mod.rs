@@ -16,8 +16,8 @@ mod types;
 pub(crate) use component::should_activate_deeplink_from_mouse_up;
 pub use component::NotesEditor;
 pub use toolbar::{
-    notes_editor_toolbar_action_by_id, notes_editor_toolbar_action_title, run_toolbar_action,
-    NotesEditorToolbarAction, NOTES_EDITOR_TOOLBAR_ACTIONS,
+    notes_editor_toolbar_action_by_id, notes_editor_toolbar_action_title, NotesEditorToolbarAction,
+    NOTES_EDITOR_TOOLBAR_ACTIONS,
 };
 pub use types::{
     NotesEditorConfig, NotesEditorInputSizing, NotesEditorLayout, NotesEditorMarkdownConfig,

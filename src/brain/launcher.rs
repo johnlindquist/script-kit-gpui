@@ -730,7 +730,7 @@ mod tests {
     fn inbox_item(detail: &str, created_at: i64) -> crate::brain::InboxItem {
         crate::brain::InboxItem {
             id: 7,
-            kind: crate::brain::InboxKind::Commitment,
+            kind: crate::brain::inbox::InboxKind::Commitment,
             title: "Ship the launcher inbox".to_string(),
             detail: detail.to_string(),
             source: "chat_turn".to_string(),

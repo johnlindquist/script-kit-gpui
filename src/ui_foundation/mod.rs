@@ -1068,22 +1068,31 @@ mod tests {
 
     #[test]
     fn test_resolve_window_vibrancy_opacity_uses_mode_defaults_when_unset() {
-        // Create themes with opacity.vibrancy_background = None to test fallback
+        // With no overrides set, resolution falls back to the per-mode
+        // vibrancy default — except in glass mode (Tahoe hardware, vibrancy
+        // enabled), where the bare-glass veil cap owns the default.
+        let expected_dark = if crate::platform::tahoe_liquid_glass_available() {
+            crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP
+        } else {
+            VIBRANCY_DARK_OPACITY
+        };
+        let expected_light = if crate::platform::tahoe_liquid_glass_available() {
+            crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP
+        } else {
+            VIBRANCY_LIGHT_OPACITY
+        };
+
         let mut dark_theme = Theme::dark_default();
         if let Some(ref mut opacity) = dark_theme.opacity {
             opacity.vibrancy_background = None;
         }
-        assert!(
-            (resolve_window_vibrancy_opacity(&dark_theme) - VIBRANCY_DARK_OPACITY).abs() < 0.0001
-        );
+        assert!((resolve_window_vibrancy_opacity(&dark_theme) - expected_dark).abs() < 0.0001);
 
         let mut light_theme = Theme::light_default();
         if let Some(ref mut opacity) = light_theme.opacity {
             opacity.vibrancy_background = None;
         }
-        assert!(
-            (resolve_window_vibrancy_opacity(&light_theme) - VIBRANCY_LIGHT_OPACITY).abs() < 0.0001
-        );
+        assert!((resolve_window_vibrancy_opacity(&light_theme) - expected_light).abs() < 0.0001);
     }
 
     #[test]
@@ -1091,6 +1100,10 @@ mod tests {
         let mut theme = Theme::dark_default();
         let mut opacity = theme.get_opacity();
         opacity.vibrancy_background = Some(0.62);
+        // Glass mode (Tahoe hardware) resolves through the glass_veil_opacity
+        // slider instead of vibrancy_background; set both so the "theme
+        // override wins" invariant holds in either environment.
+        opacity.glass_veil_opacity = Some(0.62);
         theme.opacity = Some(opacity);
 
         assert!((resolve_window_vibrancy_opacity(&theme) - 0.62).abs() < 0.0001);
@@ -1098,14 +1111,18 @@ mod tests {
 
     #[test]
     fn test_resolve_window_vibrancy_opacity_clamps_theme_override() {
+        // Set both sliders (vibrancy + glass veil) so the clamp invariant
+        // holds in glass and non-glass environments alike.
         let mut theme = Theme::dark_default();
         let mut opacity = theme.get_opacity();
         opacity.vibrancy_background = Some(1.4);
+        opacity.glass_veil_opacity = Some(1.4);
         theme.opacity = Some(opacity);
         assert!((resolve_window_vibrancy_opacity(&theme) - 1.0).abs() < 0.0001);
 
         let mut opacity = theme.get_opacity();
         opacity.vibrancy_background = Some(-0.2);
+        opacity.glass_veil_opacity = Some(-0.2);
         theme.opacity = Some(opacity);
         assert!((resolve_window_vibrancy_opacity(&theme) - 0.0).abs() < 0.0001);
     }

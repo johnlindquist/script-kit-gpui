@@ -120,7 +120,7 @@ impl ScriptListApp {
         std::sync::Arc::new(move |activation, window, cx| {
             let app_entity = app_entity.clone();
             window.defer(cx, move |window, cx| {
-                let _ = app_entity.update(cx, |app, cx| {
+                app_entity.update(cx, |app, cx| {
                     app.handle_actions_dialog_activation(host, activation.clone(), window, cx);
                 });
             });
@@ -2115,6 +2115,8 @@ mod agent_chat_spine_dispatch_tests {
                                     crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
                                 available_models: Vec::new(),
                                 selected_model_id: None,
+                                session_policy:
+                                    crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
                             },
                             cx,
                         )

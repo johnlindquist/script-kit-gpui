@@ -791,7 +791,7 @@ pub fn dematerialize_then_remove_gpui_window<V: 'static>(
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let _ = any_handle.update(cx, |_view, window, _cx| {
                     window.remove_window();
                 });
@@ -826,7 +826,7 @@ pub fn remove_gpui_window_after_glass_exit_from_app(window: &mut gpui::Window, c
         cx.background_executor()
             .timer(std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS))
             .await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let _ = any_handle.update(cx, |_view, window, _cx| {
                 window.remove_window();
             });

@@ -686,7 +686,7 @@ fn open_notes_window_with_close_behavior(
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(135))
                             .await;
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             let _ = any_handle.update(cx, |_root, window, _cx| {
                                 window.remove_window();
                             });
@@ -1267,7 +1267,7 @@ pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(135))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let _ = any_handle.update(cx, |_root, window, _cx| {
                     window.remove_window();
                 });
@@ -1305,7 +1305,7 @@ pub fn close_notes_window(cx: &mut App) {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(135))
                         .await;
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         let _ = any_handle.update(cx, |_root, window, _cx| {
                             window.remove_window();
                         });

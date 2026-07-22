@@ -366,7 +366,7 @@ impl ScriptListApp {
             return;
         }
 
-        let input_already_matches = self.gpui_input_state.read(cx).value().to_string() == text;
+        let input_already_matches = self.gpui_input_state.read(cx).value() == text;
         if matches!(self.current_view, AppView::ScriptList)
             && self.filter_text == text
             && self.computed_filter_text == text
@@ -545,8 +545,8 @@ impl ScriptListApp {
         // Skip when a subview handled the filter: `get_filtered_results_cached`
         // and `collect_fallbacks` are ScriptList-only and would incorrectly
         // flip a builtin subview into the script-list fallback mode.
-        if !handled_by_subview && !text.is_empty() {
-            if !handler_form_owns_input
+        if !handled_by_subview && !text.is_empty()
+            && !handler_form_owns_input
                 && !self.menu_syntax_mode.is_menu_syntax_for(&text)
                 && !crate::menu_syntax::active_filter_head_owns_main_list(&text)
                 && self.menu_syntax_trigger_picker_state.snapshot.is_none()
@@ -562,7 +562,6 @@ impl ScriptListApp {
                     }
                 }
             }
-        }
 
         // Single final preflight rebuild for immediate input changes. This must
         // stay after fallback state updates so submit diagnostics/preflight see

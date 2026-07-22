@@ -133,8 +133,7 @@ const BRAIN_APPEND_SYSTEM_PROMPT: &str = "You are the Brain profile: Script Kit'
 
 const GENERAL_APPEND_SYSTEM_PROMPT: &str = "You are the General Agent Chat profile for Script Kit. Answer everyday questions directly and helpfully. You may search the web, search the desktop, read files, create new files inside the General workspace, and inspect local context. Do not load skills, modify Script Kit, run shell commands, edit existing files, or write outside the General workspace. If a tool or requested action is blocked, say: \"This action is blocked in the General profile. Please switch profiles to modify Script Kit.\"";
 const SCRIPT_KIT_APPEND_SYSTEM_PROMPT: &str = "You are the Script Kit Agent Chat profile. Help manage ~/.scriptkit, including config.ts, scripts, scriptlets, plugins, and package.json. Make focused minimal edits. Explain risks before destructive file operations. Do not install packages or run long commands unless the user asks.";
-pub const QUICK_AI_BLOCKED_ACTION_MESSAGE: &str =
-    "Quick AI answers from the model plus web search only — no files or local context. Open Agent Chat for anything more.";
+pub const QUICK_AI_BLOCKED_ACTION_MESSAGE: &str = "Quick AI answers from the model plus web search only — no files or local context. Open Agent Chat for anything more.";
 
 /// Quick AI mirrors the Text profile's network posture: exactly one read-only
 /// network tool — `web_search` — so live questions ("who does the USA play

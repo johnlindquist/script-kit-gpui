@@ -19,12 +19,11 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
 pub use day::DayEntry;
-pub use fragment::{FragmentReference, FRAGMENT_EXCERPT_WORDS, FRAGMENT_WORD_THRESHOLD};
+pub use fragment::FragmentReference;
 pub use frontmatter::BrainFrontmatter;
 pub use paths::BrainPaths;
-pub use slug::{dedupe_slug_in_dir, slugify, source_slug};
+pub use slug::dedupe_slug_in_dir;
 pub use trash::{restore_file, trash_file};
-pub use words::{excerpt_words, word_count};
 
 /// Which brain subdirectory a slug allocation targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -691,6 +690,7 @@ mod tests {
 
     #[test]
     fn excerpt_words_never_cuts_mid_word() {
+        use crate::brain::substrate::words::excerpt_words;
         let text = "one two three four five";
         assert_eq!(excerpt_words(text, 3), "one two three...");
         assert_eq!(excerpt_words("short", 10), "short");

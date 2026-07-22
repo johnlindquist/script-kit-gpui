@@ -1192,13 +1192,8 @@ impl ScriptListApp {
             let footer_padding = main_list_footer_overlay_total_padding();
             let row_generation = self.main_list_row_generation;
 
-            let header_overlay_height = px(
-                crate::components::main_view_chrome::main_view_header_metrics(
-                    current_main_menu_theme.def(),
-                    Some(current_main_menu_theme.def().search.height),
-                )
-                .header_height,
-            );
+            let header_overlay_height =
+                main_list_header_overlay_height(current_main_menu_theme.def());
             let variable_height_list =
                 list(self.main_list_state.clone(), move |ix, _window, cx| {
                     let _item_render_start = std::time::Instant::now();
@@ -1422,7 +1417,6 @@ impl ScriptListApp {
                                                             cx,
                                                         );
                                                         cx.stop_propagation();
-                                                        return;
                                                     }
                                                 } else {
                                                     logging::log(
@@ -1955,8 +1949,8 @@ impl ScriptListApp {
                             cx.stop_propagation();
                             return;
                         }
-                    } else if sk_is_key_escape(key_str) {
-                        if this.try_apply_pending_menu_syntax_ai_proposal(
+                    } else if sk_is_key_escape(key_str)
+                        && this.try_apply_pending_menu_syntax_ai_proposal(
                             crate::menu_syntax_ai_apply::ProposalApplyAction::Dismiss,
                             window,
                             cx,
@@ -1964,7 +1958,6 @@ impl ScriptListApp {
                             cx.stop_propagation();
                             return;
                         }
-                    }
                 }
 
                 // ── Spine projection Enter intercept ──────────────
@@ -1977,12 +1970,10 @@ impl ScriptListApp {
                     && !event.keystroke.modifiers.shift
                     && !event.keystroke.modifiers.alt
                     && !event.keystroke.modifiers.control
-                {
-                    if this.try_handle_spine_enter(window, cx) {
+                    && this.try_handle_spine_enter(window, cx) {
                         cx.stop_propagation();
                         return;
                     }
-                }
 
                 // Normal script list navigation
                 // NOTE: Arrow keys are now handled by the arrow_interceptor in app_impl.rs
@@ -2020,15 +2011,14 @@ impl ScriptListApp {
                         ) {
                             return;
                         }
-                        if this.menu_syntax_object_selector_owns_main_keyboard() {
-                            if this.apply_menu_syntax_object_selector_intent(
+                        if this.menu_syntax_object_selector_owns_main_keyboard()
+                            && this.apply_menu_syntax_object_selector_intent(
                                 crate::menu_syntax::InlinePickerKeyIntent::Close,
                                 window,
                                 cx,
                             ) {
                                 return;
                             }
-                        }
                         if this.menu_syntax_trigger_picker_owns_main_keyboard() {
                             if this.menu_syntax_filter_only_escape_should_clear() {
                                 this.clear_filter(window, cx);

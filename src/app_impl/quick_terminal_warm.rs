@@ -33,7 +33,7 @@ impl ScriptListApp {
                 })
                 .await;
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(app) = app.upgrade() else {
                     return;
                 };

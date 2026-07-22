@@ -1,5 +1,68 @@
 use super::super::AppView;
 
+/// Single-source policy describing how an Agent Chat launch treats the source
+/// surface's implicit focused row and any explicit context.
+///
+/// This is the one authority for context staging: it replaces the former
+/// suppression bool + staging enum pair, which could encode contradictions
+/// (a false suppression flag beside a suppressing staging). There is
+/// deliberately NO `Default`; every request constructor must choose a policy
+/// explicitly.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum AgentChatContextPolicy {
+    /// The source surface may contribute its focused row. If it has no focused
+    /// row, the existing Ask Anything / ambient fallback may run.
+    AmbientOrFocused,
+    /// Do not inherit the source surface's implicit focused row.
+    ///
+    /// This does NOT suppress explicit context parts or an explicit
+    /// FullScreen/FocusedWindow/etc. capture kind — it is not `NoContext`.
+    SuppressFocused,
+    /// Explicit host-provided context parts. The supported contract is exactly
+    /// one part; the dispatcher fails closed on any other cardinality.
+    Parts {
+        parts: Vec<crate::ai::message_parts::AiContextPart>,
+        source: &'static str,
+    },
+    /// Explicit actions-payload target (Cmd+Enter from an actions dialog etc.).
+    ActionsPayload {
+        target: crate::ai::TabAiTargetContext,
+    },
+}
+
+impl AgentChatContextPolicy {
+    /// Derive the launcher policy for a given Agent Chat UI variant.
+    ///
+    /// Standard launcher entry may inherit the selected launcher row; every
+    /// other (nonstandard) variant is a menu preset / launch mode, not a
+    /// context source, so it suppresses the implicit focused row. This match is
+    /// exhaustive over all eight variants and contains no wildcard arm.
+    pub(crate) fn for_main_launcher_variant(
+        variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+    ) -> Self {
+        use crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant;
+        match variant {
+            AgentChatUiVariant::Standard => Self::AmbientOrFocused,
+            AgentChatUiVariant::UserBold
+            | AgentChatUiVariant::RoleSplit
+            | AgentChatUiVariant::BottomDock
+            | AgentChatUiVariant::DenseLog
+            | AgentChatUiVariant::Sidecar
+            | AgentChatUiVariant::FocusedTextMini
+            | AgentChatUiVariant::QuickAi => Self::SuppressFocused,
+        }
+    }
+
+    /// Whether this policy permits staging the source surface's implicit
+    /// focused row. Only `AmbientOrFocused` does.
+    pub(crate) fn admits_implicit_focused_part(&self) -> bool {
+        match self {
+            Self::AmbientOrFocused => true,
+            Self::SuppressFocused | Self::Parts { .. } | Self::ActionsPayload { .. } => false,
+        }
+    }
+}
+
 /// Resolved Tab AI context payload ready for harness submission.
 #[derive(Debug, Clone)]
 pub(crate) struct TabAiResolvedContext {
@@ -21,9 +84,9 @@ pub(crate) struct TabAiLaunchRequest {
     pub(crate) entry_intent: Option<String>,
     /// Agent Chat presentation variant. Standard preserves the existing UI.
     pub(crate) ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
-    /// Plain launcher Tab should submit only the current text and never
-    /// translate the focused row into an Agent Chat context chip.
-    pub(crate) suppress_focused_part: bool,
+    /// Single-source context policy: whether this launch inherits the source
+    /// surface's implicit focused row, suppresses it, or carries explicit parts.
+    pub(crate) context_policy: AgentChatContextPolicy,
     /// Quick-submit plan from the deterministic planner (fallback / dictation).
     pub(crate) quick_submit_plan: Option<crate::ai::TabAiQuickSubmitPlan>,
     /// UI snapshot taken synchronously before the view switch.

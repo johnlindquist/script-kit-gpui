@@ -19,6 +19,7 @@ pub mod branding;
 pub mod calculator;
 #[cfg(target_os = "macos")]
 pub mod camera;
+pub mod chat_hot_counters;
 pub mod components;
 pub mod config;
 pub mod dictation;

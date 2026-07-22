@@ -6,11 +6,11 @@ use gpui::{
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::{MarkdownLinkLabelPolicy, TextView, TextViewState, TextViewStyle};
 use gpui_component::tooltip::Tooltip;
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::super::events::AgentChatForkPoint;
+use super::super::layout::{AgentChatTranscriptAnchor, ResolvedAgentChatLayout};
 use super::super::style_contract::{
     self, resolved_agent_chat_transcript_colors, AgentChatStyleDef,
 };
@@ -228,18 +228,26 @@ pub struct AgentChatTranscript {
     fork_points: Vec<AgentChatForkPoint>,
     thread_status: AgentChatThreadStatus,
     ui_variant: AgentChatUiVariant,
+    /// Transcript content anchor, resolved from the layout model (WP6). A
+    /// header composer top-anchors; a bottom-docked composer bottom-anchors.
+    /// Drives the `ListState` alignment; the tail is auto-followed regardless.
+    anchor: AgentChatTranscriptAnchor,
     /// While a turn is streaming with no assistant text yet, render content in
     /// the permanent synthetic tail row so visibility changes do not reset the
     /// whole measured list.
     show_activity_row: bool,
-    follow_tail: Cell<bool>,
 }
 
 impl AgentChatTranscript {
     pub fn new(messages: Vec<AgentChatThreadMessage>, cx: &mut Context<Self>) -> Self {
+        let anchor = AgentChatTranscriptAnchor::Bottom;
         let total = messages.len() + 1;
-        let list_state = ListState::new(total, ListAlignment::Bottom, px(200.0)).measure_all();
+        let list_state =
+            ListState::new(total, Self::list_alignment_for(anchor), px(200.0)).measure_all();
         list_state.set_follow_tail(true);
+        // WP-B3: opt the transcript list into the chat hot-counters so its
+        // all-row `measure_all` passes are attributable (WP8's red baseline).
+        list_state.set_hot_metered(true);
 
         let mut transcript = Self {
             list_state,
@@ -254,11 +262,49 @@ impl AgentChatTranscript {
             fork_points: Vec::new(),
             thread_status: AgentChatThreadStatus::Idle,
             ui_variant: AgentChatUiVariant::Standard,
+            anchor,
             show_activity_row: false,
-            follow_tail: Cell::new(true),
         };
         transcript.reconcile_message_views(cx);
         transcript
+    }
+
+    fn list_alignment_for(anchor: AgentChatTranscriptAnchor) -> ListAlignment {
+        match anchor {
+            AgentChatTranscriptAnchor::Top => ListAlignment::Top,
+            AgentChatTranscriptAnchor::Bottom => ListAlignment::Bottom,
+        }
+    }
+
+    /// Rebuild the `ListState` with the resolved-layout anchor's alignment.
+    ///
+    /// The `ListState` is the SOLE follow-tail authority (C-R6): the transcript
+    /// keeps no duplicate flag that could re-enable following after a manual
+    /// scroll. When the anchor changes we must build a fresh `ListState` (the
+    /// alignment is fixed at construction), so we carry the *current* follow
+    /// state across the rebuild. If the user was following the tail we resume
+    /// following (`set_follow_tail(true)` snaps to the end); if they had
+    /// manually scrolled we preserve their logical offset so an anchor switch
+    /// never snaps a history reader back to the latest message.
+    fn apply_anchor(&mut self, anchor: AgentChatTranscriptAnchor) {
+        if self.anchor == anchor {
+            return;
+        }
+        let was_following = self.list_state.is_following_tail();
+        let old_offset = self.list_state.logical_scroll_top();
+        let next = ListState::new(
+            self.row_count(),
+            Self::list_alignment_for(anchor),
+            px(200.0),
+        )
+        .measure_all();
+        next.set_follow_tail(was_following);
+        next.set_hot_metered(true);
+        if !was_following {
+            next.scroll_to(old_offset);
+        }
+        self.anchor = anchor;
+        self.list_state = next;
     }
 
     fn row_count(&self) -> usize {
@@ -271,6 +317,7 @@ impl AgentChatTranscript {
         cx: &mut Context<Self>,
     ) -> Self {
         self.ui_variant = ui_variant;
+        self.apply_anchor(ResolvedAgentChatLayout::resolve(ui_variant).transcript_anchor);
         self.reconcile_message_views(cx);
         self
     }
@@ -278,6 +325,7 @@ impl AgentChatTranscript {
     pub fn set_ui_variant(&mut self, ui_variant: AgentChatUiVariant, cx: &mut Context<Self>) {
         if self.ui_variant != ui_variant {
             self.ui_variant = ui_variant;
+            self.apply_anchor(ResolvedAgentChatLayout::resolve(ui_variant).transcript_anchor);
             self.reconcile_message_views(cx);
             cx.notify();
         }
@@ -390,9 +438,15 @@ impl AgentChatTranscript {
     }
 
     fn reconcile_message_views(&mut self, cx: &mut Context<Self>) {
+        // WP-B3: one reconcile pass, counted before the per-row scan so the
+        // scanned/changed row counts attribute to it.
+        crate::chat_hot_counters::record_transcript_reconcile_pass();
         let message_count = self.messages.len();
         for (message_index, msg) in self.messages.iter().enumerate() {
             let display_text = Self::display_body(msg);
+            // WP-B3: every row inspected this pass, whether or not it changed —
+            // the scan cost WP8 must bound to the changed tail.
+            crate::chat_hot_counters::record_transcript_row_scanned(display_text.len());
             let stats = HeavyMarkdownStats::from_text(&display_text);
             let use_preview =
                 Self::should_use_heavy_markdown_preview_for(self.ui_variant, msg, stats);
@@ -425,12 +479,18 @@ impl AgentChatTranscript {
                     let parse_initially = parse_immediately
                         || (matches!(msg.role, AgentChatThreadMessageRole::Assistant)
                             && display_text.trim().is_empty());
+                    // WP-B3: a row whose TextViewState was freshly built + parsed.
+                    crate::chat_hot_counters::record_transcript_row_changed(display_text.len());
                     entry.insert(cx.new(|cx| {
-                        if parse_initially {
+                        let mut state = if parse_initially {
                             TextViewState::markdown_immediate(&display_text, cx)
                         } else {
                             TextViewState::markdown(&display_text, cx)
-                        }
+                        };
+                        // WP-B3: opt this chat transcript text view into the hot
+                        // counters so only chat surfaces contribute parse counts.
+                        state.set_hot_metered(true);
+                        state
                     }));
                     self.message_texts.insert(msg.id, display_text);
                 }
@@ -438,6 +498,8 @@ impl AgentChatTranscript {
                     let text_changed =
                         previous_text.is_none_or(|last_text| last_text != display_text);
                     if text_changed {
+                        // WP-B3: a row re-parsed because its display text changed.
+                        crate::chat_hot_counters::record_transcript_row_changed(display_text.len());
                         entry.get().update(cx, |state, cx| {
                             if parse_immediately {
                                 state.set_markdown_text_immediate(&display_text, cx);
@@ -573,7 +635,8 @@ impl AgentChatTranscript {
     }
 
     pub fn scroll_to_reveal_item(&self, index: usize) {
-        self.follow_tail.set(false);
+        // Revealing a specific item is a manual navigation: stop following the
+        // tail so a later stream chunk does not snap the reader away.
         self.list_state.set_follow_tail(false);
         self.list_state.scroll_to_reveal_item(index);
     }
@@ -583,13 +646,13 @@ impl AgentChatTranscript {
     }
 
     pub fn scroll_to(&self, offset: ListOffset) {
-        self.follow_tail.set(false);
         self.list_state.set_follow_tail(false);
         self.list_state.scroll_to(offset);
     }
 
+    /// Explicitly resume tail-following. `set_follow_tail(true)` snaps the list
+    /// to the end, so the next paint shows the newest message.
     pub fn scroll_to_end(&self) {
-        self.follow_tail.set(true);
         self.list_state.set_follow_tail(true);
     }
 
@@ -651,8 +714,12 @@ impl AgentChatTranscript {
             thumb_bottom_px: thumb_bottom,
             thumb_position_ratio,
             measurement_source: "listState".to_string(),
-            follow_tail: self.follow_tail.get(),
-            manual_scroll: !self.follow_tail.get(),
+            // C-R6: the `ListState` is the sole follow-tail authority. Wheel-up
+            // and scrollbar drags disable following inside `ListState` itself,
+            // so reading it here keeps the reported metric truthful and makes
+            // `manual_scroll` exactly the negation of the live follow state.
+            follow_tail: self.list_state.is_following_tail(),
+            manual_scroll: !self.list_state.is_following_tail(),
             pending_indicator_count: usize::from(!matches!(
                 pending_activity_placement(
                     &self.messages,
@@ -1682,6 +1749,10 @@ impl AgentChatTranscript {
 
 impl Render for AgentChatTranscript {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // WP5: one transcript root-render pass (throttled snapshot piggybacks so
+        // active-stream frames keep a fresh counter reading in the log ring).
+        crate::chat_hot_counters::record_transcript_render();
+        crate::chat_hot_counters::maybe_log_snapshot("transcript_render");
         let render_started =
             crate::logging::agent_chat_render_trace_enabled().then(std::time::Instant::now);
         let theme = theme::get_cached_theme();
@@ -2152,5 +2223,346 @@ mod tests {
             &msg,
             stats
         ));
+    }
+
+    // =========================================================================
+    // C-R6: `ListState` is the SOLE follow-tail authority.
+    //
+    // The transcript no longer keeps a duplicate `Cell<bool>` that could lie
+    // about (or silently re-enable) tail-following after a manual scroll. These
+    // tests pin the observable contract: every follow/manual metric is read
+    // from `ListState::is_following_tail()`, wheel-up and scrollbar drags
+    // disable following inside `ListState` (and the transcript reports it), and
+    // switching the anchor preserves whatever follow/offset state was live.
+    // =========================================================================
+    mod follow_tail_authority {
+        use super::*;
+        use gpui::{
+            point, size, AppContext as _, ListOffset, Pixels, ScrollDelta, ScrollWheelEvent, Size,
+            TestAppContext, VisualTestContext,
+        };
+
+        fn seeded(role: AgentChatThreadMessageRole, id: u64, body: &str) -> AgentChatThreadMessage {
+            let mut msg = message(role, body.to_string());
+            msg.id = id;
+            msg
+        }
+
+        /// A small idle transcript: alternating user/assistant rows with unique
+        /// ids so the message-view map stays 1:1.
+        fn conversation(count: usize) -> Vec<AgentChatThreadMessage> {
+            (0..count)
+                .map(|ix| {
+                    let role = if ix % 2 == 0 {
+                        AgentChatThreadMessageRole::User
+                    } else {
+                        AgentChatThreadMessageRole::Assistant
+                    };
+                    seeded(role, ix as u64 + 1, &format!("Message {ix}"))
+                })
+                .collect()
+        }
+
+        fn build(
+            cx: &mut TestAppContext,
+            count: usize,
+            variant: AgentChatUiVariant,
+        ) -> Entity<AgentChatTranscript> {
+            // `TextViewState` (built during message reconciliation) reads the
+            // gpui-component `Theme` global, so install component defaults first.
+            cx.update(|cx| gpui_component::init(cx));
+            cx.new(|cx| {
+                AgentChatTranscript::new(conversation(count), cx).with_ui_variant(variant, cx)
+            })
+        }
+
+        /// A minimal `Render` view that hosts a `list()` over a shared
+        /// `ListState` with fixed-height rows. Drawing the list inside a real
+        /// view is required because `List::paint` reads `window.current_view()`.
+        struct ListProbe {
+            state: ListState,
+            row_height: f32,
+        }
+
+        impl Render for ListProbe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let row_height = self.row_height;
+                list(self.state.clone(), move |_ix, _window, _cx| {
+                    div().h(px(row_height)).w_full().into_any()
+                })
+                .with_sizing_behavior(ListSizingBehavior::Auto)
+                .size_full()
+            }
+        }
+
+        /// Draw a `list()` backed by the transcript's SHARED `ListState` so the
+        /// real vendored layout/scroll machinery runs (registering the wheel
+        /// handler and setting `last_layout_bounds`) without paying the cost of
+        /// rendering the markdown transcript itself. Because the `ListState` is
+        /// an `Rc<RefCell<..>>`, every follow-tail transition the list makes is
+        /// observed by the transcript through `is_following_tail()`.
+        fn draw_shared_list(
+            vcx: &mut VisualTestContext,
+            state: &ListState,
+            viewport: Size<Pixels>,
+            row_height: f32,
+        ) {
+            let state = state.clone();
+            vcx.draw(point(px(0.0), px(0.0)), viewport, move |_window, cx| {
+                cx.new(|_| ListProbe {
+                    state: state.clone(),
+                    row_height,
+                })
+                .into_any_element()
+            });
+        }
+
+        /// (1) A short Standard/Quick AI transcript is Top-anchored and rests at
+        /// the top (item 0) when the content fits the viewport.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_short_top_rests_at_top(
+            cx: &mut TestAppContext,
+        ) {
+            for variant in [AgentChatUiVariant::Standard, AgentChatUiVariant::QuickAi] {
+                let entity = build(cx, 3, variant);
+                assert_eq!(
+                    cx.read_entity(&entity, |t, _| t.anchor),
+                    AgentChatTranscriptAnchor::Top,
+                    "{variant:?} must be top-anchored",
+                );
+                let state = cx.read_entity(&entity, |t, _| t.list_state());
+                let vcx = cx.add_empty_window();
+                // Content (4 rows x 20px = 80px) is far shorter than the 400px
+                // viewport, so the resting position is governed by alignment.
+                draw_shared_list(vcx, &state, size(px(300.0), px(400.0)), 20.0);
+                assert_eq!(
+                    state.logical_scroll_top().item_ix,
+                    0,
+                    "{variant:?}: short top-anchored transcript must rest at the top",
+                );
+            }
+        }
+
+        /// (2) A short bottom-docked transcript is Bottom-anchored and rests at
+        /// the bottom (past the last item) when the content fits.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_short_bottom_rests_at_bottom(
+            cx: &mut TestAppContext,
+        ) {
+            let entity = build(cx, 3, AgentChatUiVariant::BottomDock);
+            assert_eq!(
+                cx.read_entity(&entity, |t, _| t.anchor),
+                AgentChatTranscriptAnchor::Bottom,
+                "BottomDock must be bottom-anchored",
+            );
+            let row_count = cx.read_entity(&entity, |t, _| t.row_count());
+            let state = cx.read_entity(&entity, |t, _| t.list_state());
+            let vcx = cx.add_empty_window();
+            draw_shared_list(vcx, &state, size(px(300.0), px(400.0)), 20.0);
+            assert_eq!(
+                state.logical_scroll_top().item_ix,
+                row_count,
+                "short bottom-anchored transcript must rest past the last item",
+            );
+        }
+
+        /// (3) While at the latest message, a Top-anchored transcript keeps
+        /// following as new streaming chunks arrive.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_top_streams_at_latest(cx: &mut TestAppContext) {
+            let entity = build(cx, 2, AgentChatUiVariant::Standard);
+            assert!(
+                cx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail,
+                "fresh transcript follows"
+            );
+
+            // Append a streaming chunk (tail-only splice).
+            let mut next = conversation(2);
+            next.push(seeded(AgentChatThreadMessageRole::Assistant, 99, "chunk"));
+            cx.update(|cx| entity.update(cx, |t, cx| t.set_messages(next, cx)));
+
+            let m = cx.read_entity(&entity, |t, _| t.scroll_metrics());
+            assert!(m.follow_tail, "an at-latest stream must keep following");
+            assert!(!m.manual_scroll);
+            assert_eq!(
+                cx.read_entity(&entity, |t, _| t.logical_scroll_top().item_ix),
+                cx.read_entity(&entity, |t, _| t.row_count()),
+                "following pins the logical top to the tail",
+            );
+        }
+
+        /// (4) Same at-latest streaming follow, for a Bottom-anchored transcript.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_bottom_streams_at_latest(
+            cx: &mut TestAppContext,
+        ) {
+            let entity = build(cx, 2, AgentChatUiVariant::BottomDock);
+            assert!(
+                cx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail
+            );
+
+            let mut next = conversation(2);
+            next.push(seeded(AgentChatThreadMessageRole::Assistant, 99, "chunk"));
+            cx.update(|cx| entity.update(cx, |t, cx| t.set_messages(next, cx)));
+
+            let m = cx.read_entity(&entity, |t, _| t.scroll_metrics());
+            assert!(
+                m.follow_tail,
+                "bottom-anchored at-latest stream keeps following"
+            );
+            assert!(!m.manual_scroll);
+        }
+
+        /// (5) A wheel-up gesture disables follow inside `ListState`, and the
+        /// transcript reports it through the shared authority.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_wheel_up_disables_follow(
+            cx: &mut TestAppContext,
+        ) {
+            let entity = build(cx, 6, AgentChatUiVariant::Standard);
+            let state = cx.read_entity(&entity, |t, _| t.list_state());
+            let vcx = cx.add_empty_window();
+            // Tall rows overflow the viewport so a wheel gesture is meaningful.
+            draw_shared_list(vcx, &state, size(px(300.0), px(200.0)), 80.0);
+
+            assert!(
+                vcx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail,
+                "transcript follows before the wheel gesture",
+            );
+
+            // Positive delta.y scrolls toward the top (wheel-up); the vendored
+            // list disables follow on the first upward wheel event.
+            vcx.simulate_event(ScrollWheelEvent {
+                position: point(px(20.0), px(20.0)),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(80.0))),
+                ..Default::default()
+            });
+
+            let m = vcx.read_entity(&entity, |t, _| t.scroll_metrics());
+            assert!(!m.follow_tail, "wheel-up must disable follow-tail");
+            assert!(
+                m.manual_scroll,
+                "manual_scroll must equal !is_following_tail"
+            );
+        }
+
+        /// (6) A scrollbar drag disables follow inside `ListState`, and the
+        /// transcript reports it.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_scrollbar_drag_disables_follow(
+            cx: &mut TestAppContext,
+        ) {
+            let entity = build(cx, 6, AgentChatUiVariant::Standard);
+            let state = cx.read_entity(&entity, |t, _| t.list_state());
+            let vcx = cx.add_empty_window();
+            // A draw is required so `set_offset_from_scrollbar` has layout bounds.
+            draw_shared_list(vcx, &state, size(px(300.0), px(200.0)), 80.0);
+            assert!(
+                vcx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail
+            );
+
+            // This is the exact call the scrollbar element makes while dragging.
+            state.set_offset_from_scrollbar(point(px(0.0), px(50.0)));
+
+            let m = vcx.read_entity(&entity, |t, _| t.scroll_metrics());
+            assert!(!m.follow_tail, "scrollbar drag must disable follow-tail");
+            assert!(m.manual_scroll);
+        }
+
+        /// (7) New chunks do NOT snap a manually-scrolled reader back to the
+        /// tail, and switching the anchor (Top↔Bottom) preserves both the
+        /// manual (not-following) state and the logical offset.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_manual_scroll_survives_chunks_and_anchor_switch(
+            cx: &mut TestAppContext,
+        ) {
+            let entity = build(cx, 4, AgentChatUiVariant::Standard);
+
+            // Reader scrolls up into history: follow off, parked at item 1.
+            let parked = ListOffset {
+                item_ix: 1,
+                offset_in_item: px(0.0),
+            };
+            cx.read_entity(&entity, |t, _| t.scroll_to(parked));
+            let m = cx.read_entity(&entity, |t, _| t.scroll_metrics());
+            assert!(!m.follow_tail, "manual scroll clears follow");
+            assert!(m.manual_scroll);
+
+            // A streaming chunk arrives; it must not snap the reader.
+            let mut next = conversation(4);
+            next.push(seeded(AgentChatThreadMessageRole::Assistant, 99, "chunk"));
+            cx.update(|cx| entity.update(cx, |t, cx| t.set_messages(next, cx)));
+            assert!(
+                !cx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail,
+                "a new chunk must not re-enable follow while manually scrolled",
+            );
+            assert_eq!(
+                cx.read_entity(&entity, |t, _| t.logical_scroll_top().item_ix),
+                1,
+                "the manual offset survives an appended chunk",
+            );
+
+            // Switch Top -> Bottom: follow state and offset must be preserved.
+            cx.update(|cx| {
+                entity.update(cx, |t, _| t.apply_anchor(AgentChatTranscriptAnchor::Bottom))
+            });
+            assert!(
+                !cx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail,
+                "an anchor change must not re-enable follow after a manual scroll",
+            );
+            assert_eq!(
+                cx.read_entity(&entity, |t, _| t.logical_scroll_top().item_ix),
+                1,
+                "anchor switch preserves the manual logical offset",
+            );
+
+            // And back Bottom -> Top: still preserved.
+            cx.update(|cx| {
+                entity.update(cx, |t, _| t.apply_anchor(AgentChatTranscriptAnchor::Top))
+            });
+            assert!(
+                !cx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail
+            );
+            assert_eq!(
+                cx.read_entity(&entity, |t, _| t.logical_scroll_top().item_ix),
+                1,
+            );
+        }
+
+        /// (8) `scroll_to_end` explicitly resumes following after a manual scroll.
+        #[gpui::test]
+        fn agent_chat_transcript_anchor_follow_tail_scroll_to_end_resumes_following(
+            cx: &mut TestAppContext,
+        ) {
+            let entity = build(cx, 4, AgentChatUiVariant::Standard);
+
+            cx.read_entity(&entity, |t, _| {
+                t.scroll_to(ListOffset {
+                    item_ix: 1,
+                    offset_in_item: px(0.0),
+                })
+            });
+            assert!(
+                !cx.read_entity(&entity, |t, _| t.scroll_metrics())
+                    .follow_tail,
+                "manual scroll clears follow"
+            );
+
+            cx.read_entity(&entity, |t, _| t.scroll_to_end());
+            let m = cx.read_entity(&entity, |t, _| t.scroll_metrics());
+            assert!(m.follow_tail, "scroll_to_end resumes following");
+            assert!(!m.manual_scroll);
+        }
     }
 }

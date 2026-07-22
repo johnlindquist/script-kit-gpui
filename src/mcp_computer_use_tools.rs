@@ -2553,7 +2553,7 @@ fn automation_window_target_schema() -> Value {
                     "type": { "const": "kind" },
                     "kind": {
                         "type": "string",
-                        "enum": ["main", "notes", "ai", "miniAi", "agentChatDetached", "actionsDialog", "promptPopup"]
+                        "enum": ["main", "notes", "agentChatDetached", "actionsDialog", "promptPopup"]
                     },
                     "index": { "type": "integer", "minimum": 0 }
                 },
@@ -2608,7 +2608,7 @@ fn computer_see_input_schema() -> Value {
                             "type": { "const": "kind" },
                             "kind": {
                                 "type": "string",
-                                "enum": ["main", "notes", "ai", "miniAi", "agentChatDetached", "actionsDialog", "promptPopup"]
+                                "enum": ["main", "notes", "agentChatDetached", "actionsDialog", "promptPopup"]
                             },
                             "index": { "type": "integer", "minimum": 0 }
                         },

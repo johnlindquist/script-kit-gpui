@@ -2495,7 +2495,6 @@ mod tab_ai_agent_doc_contract_tests {
             "//! AI surfaces and shared contracts.",
             "//! - User-facing AI chat surface: Agent Chat",
             "//! - Entry points should route to `open_tab_ai_agent_chat_with_entry_intent(...)` when they need the canonical chat UI",
-            "//! - The legacy `window/` module remains only for deprecated compatibility flows and should not be used for new entry points",
         ] {
             assert!(
                 AI_MOD_SOURCE.contains(needle),

@@ -49,14 +49,44 @@ fn paste_into_frontmost_app_label_falls_back_to_active_app() {
     );
 }
 
+/// Flow session native footer grammar (Oracle 2026-07-21 adjudication):
+/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working = `⌘K Actions · Esc Desk`.
+/// No permanent Terminate (destructive expert command → ⌘K Actions, shortcut
+/// ⇧⌘⎋ still handled) and no disabled "Working…" pseudo-button (the leading
+/// status text carries Working/Connecting).
 #[test]
-fn flow_session_footer_includes_left_pinned_terminate() {
-    let buttons = flow_session_footer_buttons(true, true, false);
-    let terminate = &buttons[0];
-    assert_eq!(terminate.label.as_ref(), "Terminate Flow");
-    assert_eq!(terminate.key.as_ref(), "⇧⌘⎋");
-    assert!(terminate.left_pinned);
-    assert!(terminate.enabled, "termination remains available mid-turn");
+fn flow_session_native_footer_matches_idle_and_working_contract() {
+    use crate::footer_popup::FooterAction;
+
+    let idle = flow_session_footer_buttons(false, true, false);
+    let idle_shape: Vec<(FooterAction, &str, &str)> = idle
+        .iter()
+        .map(|b| (b.action, b.key.as_ref(), b.label.as_ref()))
+        .collect();
+    assert_eq!(
+        idle_shape,
+        vec![
+            (FooterAction::Run, "↵", "Send"),
+            (FooterAction::Actions, "⌘K", "Actions"),
+            (FooterAction::Close, "Esc", "Desk"),
+        ],
+        "idle flow footer must be exactly Send · Actions · Desk"
+    );
+    assert!(idle.iter().all(|b| b.enabled));
+
+    let working = flow_session_footer_buttons(true, true, false);
+    let working_shape: Vec<(FooterAction, &str, &str)> = working
+        .iter()
+        .map(|b| (b.action, b.key.as_ref(), b.label.as_ref()))
+        .collect();
+    assert_eq!(
+        working_shape,
+        vec![
+            (FooterAction::Actions, "⌘K", "Actions"),
+            (FooterAction::Close, "Esc", "Desk"),
+        ],
+        "working flow footer must be exactly Actions · Desk — no Send, no Terminate"
+    );
 }
 
 #[test]

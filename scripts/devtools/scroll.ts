@@ -38,7 +38,7 @@ type NormalizedScrollMeasurement = {
 };
 
 function usage() {
-  return "Usage:\n  bun scripts/devtools/scroll.ts inspect [target args] [--require-affordance] [--require-native-list-contract]";
+  return "Usage:\n  bun scripts/devtools/scroll.ts inspect [target args] [--require-affordance]";
 }
 
 function asObject(value: unknown): JsonObject {
@@ -98,36 +98,6 @@ export function notesScrollFromState(state: JsonObject): JsonObject {
 
 export function mainListScrollFromState(state: JsonObject) {
   return asObject(state.mainListScroll);
-}
-
-export function activeListScrollFromState(state: JsonObject) {
-  const active = asObject(state.activeListScroll);
-  return Object.keys(active).length > 0 ? active : mainListScrollFromState(state);
-}
-
-export const NATIVE_LIST_CONTRACT_FIELDS = [
-  "surface", "implementation", "listKind", "selectedIndex", "selectedSemanticId",
-  "hoveredIndex", "hoveredSemanticId", "hoverSuppressedUntilPointerMove",
-  "focusedSemanticId", "logicalScrollTop", "scrollTopItem", "scrollTopOffsetItems",
-  "scrollTopOffsetPx", "firstVisibleIndex", "lastVisibleIndexExclusive",
-  "firstVisibleSemanticId", "lastVisibleSemanticId", "itemCount", "contentHeight",
-  "viewportHeight", "safeViewportHeight", "maxScrollTop", "selectedRowVisible",
-  "selectedRowWithinSafeViewport", "inputMode", "lastInteractionSource",
-] as const;
-
-export function inspectNativeListContract(scroll: JsonObject, required: boolean) {
-  const missingFields = NATIVE_LIST_CONTRACT_FIELDS
-    .filter((field) => !Object.prototype.hasOwnProperty.call(scroll, field))
-    .map((field) => `activeListScroll.${field}`);
-  return {
-    required,
-    present: Object.keys(scroll).length > 0,
-    complete: missingFields.length === 0,
-    missingFields,
-    classification: required && missingFields.length > 0
-      ? "blocked-by-missing-primitive"
-      : "ok",
-  };
 }
 
 export const MAIN_LIST_SCROLL_AFFORDANCE_FIELDS = [
@@ -277,8 +247,6 @@ function classify(
   scroll: JsonObject,
   measurementClassification?: string | null,
   affordanceClassification?: string | null,
-  nativeContractClassification?: string | null,
-  nativeContractRequired = false,
 ) {
   if (targetReceipt.classification !== "ok") {
     return targetReceipt.classification ?? "blocked-by-target-ambiguity";
@@ -293,11 +261,7 @@ function classify(
   if (affordanceClassification && affordanceClassification !== "ok") {
     return affordanceClassification;
   }
-  if (nativeContractClassification && nativeContractClassification !== "ok") {
-    return nativeContractClassification;
-  }
-  if (Object.keys(scroll).length === 0
-    || (!nativeContractRequired && (scroll.scrollTop == null || scroll.viewportHeight == null))) {
+  if (Object.keys(scroll).length === 0 || scroll.scrollTop == null || scroll.viewportHeight == null) {
     return "blocked-by-missing-primitive";
   }
   return "ok";
@@ -314,13 +278,9 @@ async function main() {
     process.exit(2);
   }
   const { args, extras, warnings: argWarnings } = parseTargetArgs(argv.slice(1), {
-    extras: {
-      "--require-affordance": "boolean",
-      "--require-native-list-contract": "boolean",
-    },
+    extras: { "--require-affordance": "boolean" },
   });
   const requireAffordance = extras["--require-affordance"] === true;
-  const requireNativeListContract = extras["--require-native-list-contract"] === true;
   if (args.help) {
     console.log(usage());
     process.exit(0);
@@ -341,9 +301,8 @@ async function main() {
   const resolvedKind = String(resolved.targetKind ?? "").toLowerCase();
   const resolvedSurface = String(resolved.semanticSurface ?? resolved.surfaceKind ?? "").toLowerCase();
   const isNotesTarget = resolvedKind === "notes" || resolvedSurface === "notes";
-  const rawScroll = isNotesTarget ? notesScrollFromState(state) : activeListScrollFromState(state);
-  const isScriptList = !isNotesTarget && (rawScroll.surface == null || rawScroll.surface === "script_list");
-  const normalized: NormalizedScrollMeasurement = isNotesTarget || !isScriptList
+  const rawScroll = isNotesTarget ? notesScrollFromState(state) : mainListScrollFromState(state);
+  const normalized: NormalizedScrollMeasurement = isNotesTarget
     ? {
         scroll: rawScroll,
         classification: null,
@@ -351,7 +310,7 @@ async function main() {
         listStateViewportHeight: asNumber(rawScroll.viewportHeight),
         effectiveViewportHeight: asNumber(rawScroll.viewportHeight),
         effectiveSafeViewportHeight: asNumber(rawScroll.safeViewportHeight),
-        viewportMeasurementSource: isNotesTarget ? "listState" : "activeListScroll",
+        viewportMeasurementSource: "listState",
         viewportMeasurementWarning: null,
         selectedRowVisible: rawScroll.selectedRowVisible ?? null,
         selectedRowAboveFooter: rawScroll.selectedRowAboveFooter ?? null,
@@ -372,18 +331,12 @@ async function main() {
     isNotesTarget ? {} : scroll,
     requireAffordance,
   );
-  const nativeContractInspection = inspectNativeListContract(
-    isNotesTarget ? {} : scroll,
-    requireNativeListContract,
-  );
   const classification = classify(
     targetReceipt,
     stateEnvelope,
     scroll,
     normalized.classification,
     affordanceInspection.classification,
-    nativeContractInspection.classification,
-    requireNativeListContract,
   );
 
   printReceipt(finishReceipt(
@@ -393,15 +346,9 @@ async function main() {
       requestedTarget: targetReceipt.requestedTarget ?? { selector },
       target: targetReceipt.resolvedTarget ?? null,
       scroll: {
-        surface: scroll.surface ?? null,
-        implementation: scroll.implementation ?? null,
-        listKind: scroll.listKind ?? null,
-        logicalScrollTop: scroll.logicalScrollTop ?? null,
         scrollTop,
         scrollTopItem: scroll.scrollTopItem ?? null,
         scrollTopOffset: scroll.scrollTopOffset ?? null,
-        scrollTopOffsetItems: scroll.scrollTopOffsetItems ?? null,
-        scrollTopOffsetPx: scroll.scrollTopOffsetPx ?? null,
         firstVisibleIndex: scroll.firstVisibleIndex ?? null,
         lastVisibleIndexExclusive: scroll.lastVisibleIndexExclusive ?? null,
         firstVisibleSemanticId: scroll.firstVisibleSemanticId ?? null,
@@ -449,7 +396,6 @@ async function main() {
         complete: affordanceInspection.complete,
         missingFields: affordanceInspection.missingFields,
       },
-      nativeListContractRequirement: nativeContractInspection,
       missingPrimitive: normalized.missingPrimitive,
       resizePressure: {
         overflowY: canScrollY,
@@ -460,15 +406,13 @@ async function main() {
           || scroll.selectedRowAboveFooter === false,
       },
       missingPrimitives: [
-        Object.keys(scroll).length === 0
-          || (!requireNativeListContract && (scroll.scrollTop == null || scroll.viewportHeight == null))
+        Object.keys(scroll).length === 0 || scroll.scrollTop == null || scroll.viewportHeight == null
           ? isNotesTarget ? "notesScrollMetrics" : "mainListScroll"
           : "",
         stateEnvelope.status === "error" ? "stateResult" : "",
         targetReceipt.classification !== "ok" ? "strictTargetIdentity" : "",
         normalized.missingPrimitive ?? "",
         ...(requireAffordance ? affordanceInspection.missingFields : []),
-        ...(requireNativeListContract ? nativeContractInspection.missingFields : []),
       ].filter(Boolean),
       warnings: argWarnings,
       errors: [

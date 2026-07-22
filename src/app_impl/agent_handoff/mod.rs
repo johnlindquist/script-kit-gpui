@@ -233,7 +233,7 @@ impl ScriptListApp {
                 .timer(std::time::Duration::from_millis(50))
                 .await;
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if AGENT_CHAT_OBSERVED_STATE_SYNC_GENERATION
                     .load(std::sync::atomic::Ordering::Relaxed)
                     != generation
@@ -307,7 +307,7 @@ impl ScriptListApp {
         self.open_tab_ai_chat_with_capture_kind_and_options(
             entry_intent,
             crate::ai::TabAiCaptureKind::DefaultContext,
-            false,
+            AgentChatContextPolicy::AmbientOrFocused,
             cx,
         );
     }
@@ -320,7 +320,7 @@ impl ScriptListApp {
         self.open_tab_ai_chat_with_capture_kind_and_options(
             entry_intent,
             crate::ai::TabAiCaptureKind::DefaultContext,
-            true,
+            AgentChatContextPolicy::SuppressFocused,
             cx,
         );
     }
@@ -686,12 +686,9 @@ impl ScriptListApp {
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
         cx: &mut Context<Self>,
     ) {
-        let suppress_focused_part =
-            ui_variant != crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard;
         self.open_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest::main_launcher_with_variant(
                 entry_intent,
-                suppress_focused_part,
                 ui_variant,
             ),
             cx,
@@ -703,8 +700,8 @@ impl ScriptListApp {
     /// no tools/skills/memories/context) and clears the launcher filter so
     /// returning from the chat lands on a clean list.
     ///
-    /// The `QuickAi` ui variant does the heavy lifting downstream: it forces
-    /// `suppress_focused_part`, skips detached/embedded chat reuse, and routes
+    /// The `QuickAi` ui variant does the heavy lifting downstream: it derives a
+    /// suppressed context policy, skips detached/embedded chat reuse, and routes
     /// launch resolution to `resolve_quick_ai_pi_launch`.
     pub(crate) fn open_quick_ai_from_launcher(
         &mut self,
@@ -748,7 +745,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         self.open_agent_chat_from_entry_request(
-            agent_chat_entry::AgentChatEntryRequest::main_launcher(entry_intent, true),
+            agent_chat_entry::AgentChatEntryRequest::clean_main_launcher(entry_intent),
             cx,
         );
     }
@@ -771,8 +768,7 @@ impl ScriptListApp {
                 seed_text: Some(seed_text),
                 ui_variant,
                 seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
-                suppress_focused_part: true,
-                context_staging: agent_chat_entry::AgentChatContextStaging::SuppressFocused,
+                context_policy: AgentChatContextPolicy::SuppressFocused,
                 return_origin: None,
             },
             cx,
@@ -865,19 +861,6 @@ impl ScriptListApp {
         entry_intent: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.open_tab_ai_agent_chat_with_entry_intent_preserving_return_and_options(
-            entry_intent,
-            false,
-            cx,
-        );
-    }
-
-    fn open_tab_ai_agent_chat_with_entry_intent_preserving_return_and_options(
-        &mut self,
-        entry_intent: Option<String>,
-        suppress_focused_part: bool,
-        cx: &mut Context<Self>,
-    ) {
         let previous_return_view = self.tab_ai_harness_return_view.clone();
         let previous_return_focus_target = self.tab_ai_harness_return_focus_target;
         let source_view = self.current_view.clone();
@@ -886,7 +869,7 @@ impl ScriptListApp {
             target: "script_kit::tab_ai",
             event = "tab_ai_entry_intent_return_seeded",
             source_view = ?source_view,
-            suppress_focused_part,
+            context_policy = ?AgentChatContextPolicy::AmbientOrFocused,
             auto_submit = entry_intent
                 .as_ref()
                 .is_some_and(|value| !value.trim().is_empty()),
@@ -899,12 +882,7 @@ impl ScriptListApp {
                 seed_text: entry_intent,
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
                 seed_policy: agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
-                suppress_focused_part,
-                context_staging: if suppress_focused_part {
-                    agent_chat_entry::AgentChatContextStaging::SuppressFocused
-                } else {
-                    agent_chat_entry::AgentChatContextStaging::AmbientOrFocused
-                },
+                context_policy: AgentChatContextPolicy::AmbientOrFocused,
                 return_origin: Some(source_view.clone()),
             },
             cx,
@@ -923,7 +901,7 @@ impl ScriptListApp {
     fn open_tab_ai_agent_chat_with_options(
         &mut self,
         entry_intent: Option<String>,
-        suppress_focused_part: bool,
+        context_policy: AgentChatContextPolicy,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
         cx: &mut Context<Self>,
     ) {
@@ -985,7 +963,7 @@ impl ScriptListApp {
 
         self.begin_tab_ai_harness_entry(
             entry_intent,
-            suppress_focused_part,
+            context_policy,
             None,
             crate::ai::TabAiCaptureKind::DefaultContext,
             true,
@@ -1017,6 +995,11 @@ impl ScriptListApp {
             label = %label,
         );
 
+        // Keep the request's context policy truthful (explicit actions target),
+        // even though the prebuilt focused part is passed separately through the
+        // launch seam below.
+        let context_policy =
+            AgentChatContextPolicy::ActionsPayload { target: target.clone() };
         let focused_part =
             Some(crate::ai::message_parts::AiContextPart::FocusedTarget { target, label });
 
@@ -1049,7 +1032,7 @@ impl ScriptListApp {
             source_view: self.current_view.clone(),
             entry_intent: None,
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-            suppress_focused_part: false,
+            context_policy,
             quick_submit_plan: None,
             ui_snapshot,
             invocation_receipt,
@@ -1095,8 +1078,7 @@ impl ScriptListApp {
                 seed_text: None,
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
                 seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
-                suppress_focused_part: true,
-                context_staging: agent_chat_entry::AgentChatContextStaging::ActionsPayload {
+                context_policy: AgentChatContextPolicy::ActionsPayload {
                     target,
                 },
                 return_origin: Some(source_view.clone()),
@@ -1134,11 +1116,17 @@ impl ScriptListApp {
         let (ui_snapshot, invocation_receipt) = self.snapshot_tab_ai_ui(cx);
         self.tab_ai_harness_capture_generation += 1;
 
+        // Keep the request's context policy truthful (explicit single part),
+        // even though the part is also passed separately through the launch seam.
+        let context_policy = AgentChatContextPolicy::Parts {
+            parts: vec![part.clone()],
+            source,
+        };
         let request = TabAiLaunchRequest {
             source_view: self.current_view.clone(),
             entry_intent: None,
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-            suppress_focused_part: false,
+            context_policy,
             quick_submit_plan: None,
             ui_snapshot,
             invocation_receipt,
@@ -1233,7 +1221,7 @@ impl ScriptListApp {
             return true;
         };
 
-        let _ = entity.update(cx, |term, _cx| {
+        entity.update(cx, |term, _cx| {
             let _ = term.terminate_session();
         });
         tracing::info!(
@@ -1408,8 +1396,7 @@ impl ScriptListApp {
                 seed_text: None,
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
                 seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
-                suppress_focused_part: true,
-                context_staging: agent_chat_entry::AgentChatContextStaging::SuppressFocused,
+                context_policy: AgentChatContextPolicy::SuppressFocused,
                 return_origin: Some(self.current_view.clone()),
             },
             cx,
@@ -1505,6 +1492,46 @@ impl ScriptListApp {
         .detach();
     }
 
+    /// Whether a cached embedded Agent Chat view may be reused for a launch of
+    /// `incoming_variant`.
+    ///
+    /// Reuse is permitted ONLY when the cached view's immutable session policy
+    /// equals the policy the incoming launch requires. A view's
+    /// [`AgentChatSessionPolicy`] is captured once at construction and is
+    /// tighten-only (`set_ui_variant` can restrict but never elevate), so a
+    /// cached Quick AI view relabeled Standard would keep its zero-context
+    /// restrictions while presenting as a full chat — and a cached full view
+    /// relabeled Quick AI would leak retained context into a surface that
+    /// promises none. Both are mode-laundering. On mismatch the caller must
+    /// discard the cache and build a fresh view rather than mutate policy.
+    fn embedded_reuse_policy_matches(
+        cached_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy,
+        incoming_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+    ) -> bool {
+        cached_policy
+            == crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(
+                incoming_variant,
+            )
+    }
+
+    /// Whether a cached embedded view MAY be reused for an incoming launch
+    /// (WP-B1). Two conditions must both hold:
+    ///   1. The incoming policy allows retained-thread reuse. Quick AI never
+    ///      does — a closed Quick AI view must not resurrect its prior
+    ///      transcript/draft, even for another Quick AI launch (QuickAi→QuickAi).
+    ///   2. The cached policy equals the incoming policy (no mode-laundering).
+    fn embedded_cache_reuse_allowed(
+        cached_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy,
+        incoming_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+    ) -> bool {
+        let incoming =
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(
+                incoming_variant,
+            );
+        incoming.allows_retained_thread_reuse()
+            && Self::embedded_reuse_policy_matches(cached_policy, incoming_variant)
+    }
+
     fn try_reuse_embedded_agent_chat_view(
         &mut self,
         entry_intent: Option<String>,
@@ -1518,6 +1545,31 @@ impl ScriptListApp {
             );
             return false;
         };
+
+        // Reuse rejection (WP-B1, merging Oracle phase-a cross-policy guard).
+        // TWO independent bans, both evicting the cache + warm lease:
+        //   1. The incoming policy forbids retained-thread reuse (Quick AI) —
+        //      a closed Quick AI view must NEVER be reopened with its prior
+        //      transcript/draft, even QuickAi→QuickAi.
+        //   2. Cross-policy mismatch — the cached view's policy is immutable and
+        //      tighten-only; restyling it would launder the mode.
+        let cached_policy = entity.read(cx).session_policy();
+        let incoming_policy =
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(
+                ui_variant,
+            );
+        if !Self::embedded_cache_reuse_allowed(cached_policy, ui_variant) {
+            self.evict_embedded_agent_chat_session();
+            tracing::info!(
+                target: "script_kit::tab_ai",
+                event = "tab_ai_embedded_agent_chat_reuse_rejected",
+                cached_session_policy = ?cached_policy,
+                requested_session_policy = ?incoming_policy,
+                retained_reuse_allowed = incoming_policy.allows_retained_thread_reuse(),
+                agent_chat_ui_variant = ui_variant.state_id(),
+            );
+            return false;
+        }
 
         let is_setup_mode = entity.read(cx).is_setup_mode();
         let normalized_intent = entry_intent
@@ -1647,14 +1699,19 @@ impl ScriptListApp {
         capture_kind: crate::ai::TabAiCaptureKind,
         cx: &mut Context<Self>,
     ) {
-        self.open_tab_ai_chat_with_capture_kind_and_options(entry_intent, capture_kind, false, cx);
+        self.open_tab_ai_chat_with_capture_kind_and_options(
+            entry_intent,
+            capture_kind,
+            AgentChatContextPolicy::AmbientOrFocused,
+            cx,
+        );
     }
 
     fn open_tab_ai_chat_with_capture_kind_and_options(
         &mut self,
         entry_intent: Option<String>,
         capture_kind: crate::ai::TabAiCaptureKind,
-        suppress_focused_part: bool,
+        context_policy: AgentChatContextPolicy,
         cx: &mut Context<Self>,
     ) {
         if self.tab_ai_save_offer_state.is_some() {
@@ -1663,7 +1720,7 @@ impl ScriptListApp {
 
         self.begin_tab_ai_harness_entry(
             entry_intent,
-            suppress_focused_part,
+            context_policy,
             None,
             capture_kind,
             false,
@@ -1688,7 +1745,7 @@ impl ScriptListApp {
         let intent = Some(plan.submission_intent().to_string());
         self.begin_tab_ai_harness_entry(
             intent,
-            false,
+            AgentChatContextPolicy::AmbientOrFocused,
             Some(plan),
             capture_kind,
             false,
@@ -1797,7 +1854,7 @@ impl ScriptListApp {
             self.begin_tab_ai_harness_entry_from_source_view(
                 source_view,
                 entry_intent,
-                false,
+                AgentChatContextPolicy::AmbientOrFocused,
                 Some(plan),
                 capture_kind,
                 false,
@@ -1874,7 +1931,7 @@ impl ScriptListApp {
             source_view,
             entry_intent: Some(entry_intent),
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-            suppress_focused_part: false,
+            context_policy: AgentChatContextPolicy::AmbientOrFocused,
             quick_submit_plan: Some(plan),
             ui_snapshot,
             invocation_receipt,
@@ -1904,7 +1961,7 @@ impl ScriptListApp {
                 }
             };
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(app) = app_weak.upgrade() else {
                     return;
                 };
@@ -2180,11 +2237,10 @@ impl ScriptListApp {
     ) -> bool {
         let explicit_spine_prompt_plan =
             self.script_list_cmd_enter_has_explicit_spine_prompt_plan();
-        if explicit_spine_prompt_plan {
-            if self.try_submit_spine_prompt_plan_from_enter(cx) {
+        if explicit_spine_prompt_plan
+            && self.try_submit_spine_prompt_plan_from_enter(cx) {
                 return true;
             }
-        }
         // Run 12 Pass 11 — `cmd-enter-inline-ai-proposal`. When the user is
         // composing power syntax, Cmd+Enter generates an INLINE proposal
         // shown in the hint card (NOT a full Agent Chat chat handoff). Intercept
@@ -2246,16 +2302,14 @@ impl ScriptListApp {
         // than staging that auto-selected row as an `@cmd:` context chip. Staging
         // is still preserved when the filter is non-empty OR the user
         // deliberately moved the selection off the default first-selectable row.
-        let suppress_default_script_list_selection =
-            matches!(self.current_view, AppView::ScriptList)
-                && self.filter_text.trim().is_empty()
-                && self
-                    .main_menu_result_caches
-                    .first_selectable_index()
-                    .map_or(self.selected_index == 0, |first| {
-                        self.selected_index == first
-                    });
-        if suppress_default_script_list_selection {
+        // File Search (not ScriptList) always keeps its selected item as context.
+        let context_policy = Self::cmd_enter_context_policy_for_launcher_selection(
+            matches!(self.current_view, AppView::ScriptList),
+            self.filter_text.trim().is_empty(),
+            self.selected_index,
+            self.main_menu_result_caches.first_selectable_index(),
+        );
+        if context_policy == AgentChatContextPolicy::SuppressFocused {
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "tab_ai_script_list_empty_default_selection_not_staged",
@@ -2263,7 +2317,6 @@ impl ScriptListApp {
                 first_selectable_index = ?self.main_menu_result_caches.first_selectable_index(),
             );
         }
-        let suppress_focused_part = suppress_default_script_list_selection;
 
         self.open_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest {
@@ -2272,19 +2325,35 @@ impl ScriptListApp {
                 seed_text: None,
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
                 seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
-                suppress_focused_part,
-                context_staging: if is_file_search {
-                    agent_chat_entry::AgentChatContextStaging::FileSearchSelection
-                } else if suppress_focused_part {
-                    agent_chat_entry::AgentChatContextStaging::SuppressFocused
-                } else {
-                    agent_chat_entry::AgentChatContextStaging::AmbientOrFocused
-                },
+                context_policy,
                 return_origin: Some(self.current_view.clone()),
             },
             cx,
         );
         true
+    }
+
+    /// Pure policy for the global Cmd+Enter launcher-selection guard.
+    ///
+    /// Preserves the CLAUDE.md contract exactly: a default auto-selected
+    /// ScriptList row (empty filter, selection still on `first_selectable_index`,
+    /// falling back to index 0 when the cache is unseeded) is NOT staged as
+    /// context; every other case — non-empty filter, a user-moved row, or a
+    /// non-ScriptList surface like File Search — keeps ambient/focused context.
+    fn cmd_enter_context_policy_for_launcher_selection(
+        is_script_list: bool,
+        input_is_empty: bool,
+        selected_index: usize,
+        first_selectable_index: Option<usize>,
+    ) -> AgentChatContextPolicy {
+        let default_auto_selected = is_script_list
+            && input_is_empty
+            && first_selectable_index.map_or(selected_index == 0, |first| selected_index == first);
+        if default_auto_selected {
+            AgentChatContextPolicy::SuppressFocused
+        } else {
+            AgentChatContextPolicy::AmbientOrFocused
+        }
     }
 
     fn script_list_cmd_enter_has_explicit_spine_prompt_plan(&mut self) -> bool {
@@ -2362,7 +2431,7 @@ impl ScriptListApp {
     fn begin_tab_ai_harness_entry(
         &mut self,
         entry_intent: Option<String>,
-        suppress_focused_part: bool,
+        context_policy: AgentChatContextPolicy,
         quick_submit_plan: Option<crate::ai::TabAiQuickSubmitPlan>,
         capture_kind: crate::ai::TabAiCaptureKind,
         force_agent_chat_surface: bool,
@@ -2372,7 +2441,7 @@ impl ScriptListApp {
         self.begin_tab_ai_harness_entry_from_source_view(
             self.current_view.clone(),
             entry_intent,
-            suppress_focused_part,
+            context_policy,
             quick_submit_plan,
             capture_kind,
             force_agent_chat_surface,
@@ -2391,7 +2460,7 @@ impl ScriptListApp {
         &mut self,
         source_view: AppView,
         entry_intent: Option<String>,
-        suppress_focused_part: bool,
+        context_policy: AgentChatContextPolicy,
         quick_submit_plan: Option<crate::ai::TabAiQuickSubmitPlan>,
         capture_kind: crate::ai::TabAiCaptureKind,
         force_agent_chat_surface: bool,
@@ -2441,7 +2510,7 @@ impl ScriptListApp {
             source_view,
             entry_intent,
             ui_variant,
-            suppress_focused_part,
+            context_policy,
             quick_submit_plan,
             ui_snapshot,
             invocation_receipt,
@@ -2487,7 +2556,7 @@ impl ScriptListApp {
         let should_stage_focused_part = Self::should_stage_focused_part_for_request(
             &request.source_view,
             pending_script_list_trigger,
-            request.suppress_focused_part,
+            &request.context_policy,
         );
         // let use_ask_anything_fallback = self.should_use_tab_ai_ask_anything_fallback(
         let use_ask_anything_fallback = self
@@ -2680,9 +2749,9 @@ impl ScriptListApp {
     fn should_stage_focused_part_for_request(
         source_view: &AppView,
         pending_script_list_trigger: Option<char>,
-        suppress_focused_part: bool,
+        context_policy: &AgentChatContextPolicy,
     ) -> bool {
-        if suppress_focused_part {
+        if !context_policy.admits_implicit_focused_part() {
             return false;
         }
 
@@ -2690,6 +2759,8 @@ impl ScriptListApp {
             return true;
         }
 
+        // Independent ScriptList transient-trigger rule: /, @, and | suppress a
+        // launcher row even under AmbientOrFocused.
         !matches!(pending_script_list_trigger, Some('/' | '@' | '|'))
     }
 
@@ -2866,7 +2937,7 @@ impl ScriptListApp {
             };
 
             // Apply the captured context
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(app) = app_weak.upgrade() else {
                     return;
                 };
@@ -3353,7 +3424,7 @@ impl ScriptListApp {
                 }
             }
 
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(entity) = entity_weak.upgrade() else {
                     return;
                 };
@@ -3460,7 +3531,7 @@ impl ScriptListApp {
             return_is_script_list = self
                 .tab_ai_harness_return_view
                 .as_ref()
-                .map_or(true, |v| matches!(v, AppView::ScriptList)),
+                .is_none_or(|v| matches!(v, AppView::ScriptList)),
             has_pending_script_list_trigger = pending_script_list_trigger.is_some(),
             pending_script_list_trigger = ?pending_script_list_trigger,
             filter_text = %self.filter_text,
@@ -3792,6 +3863,16 @@ impl ScriptListApp {
         }
     }
 
+    /// Drop the cached embedded Agent Chat view together with the warm Pi lease
+    /// tied to it (WP-B1). Used when a launch must NOT reuse the cache — a
+    /// cross-policy mismatch, or a non-reusable incoming policy such as Quick
+    /// AI (which never resurrects a prior transcript/draft, even QuickAi→
+    /// QuickAi). Dropping the entity releases its pending retry/draft state.
+    fn evict_embedded_agent_chat_session(&mut self) {
+        self.embedded_agent_chat = None;
+        self.dismiss_active_agent_chat_warm_lease();
+    }
+
     /// Schedule a deferred prewarm of the Tab AI harness so the next Tab
     /// press gets an instant fresh session after a close cycle.
     fn schedule_tab_ai_harness_prewarm(
@@ -3802,7 +3883,7 @@ impl ScriptListApp {
         let app_weak = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
             cx.background_executor().timer(delay).await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if let Some(app) = app_weak.upgrade() {
                     app.update(cx, |this, cx| {
                         this.warm_tab_ai_harness_after_close(cx);
@@ -5948,7 +6029,7 @@ impl ScriptListApp {
                         })
                         .await;
 
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         let Some(app) = app_weak.upgrade() else {
                             return;
                         };
@@ -6031,7 +6112,7 @@ impl ScriptListApp {
 
                 match state {
                     WaitState::Ready(route) => {
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             let Some(app) = app_weak.upgrade() else {
                                 return;
                             };
@@ -6042,7 +6123,7 @@ impl ScriptListApp {
                         break;
                     }
                     WaitState::TimedOut => {
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             let Some(app) = app_weak.upgrade() else {
                                 return;
                             };
@@ -6097,7 +6178,7 @@ impl ScriptListApp {
                     Self::TAB_AI_APPLY_BACK_CLIPBOARD_PRIME_MS,
                 ))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(app) = app.upgrade() else {
                     return;
                 };
@@ -6490,20 +6571,21 @@ mod tests {
 
     #[test]
     fn script_list_explicit_triggers_do_not_stage_focused_parts() {
+        use super::AgentChatContextPolicy::{AmbientOrFocused, SuppressFocused};
         assert!(!ScriptListApp::should_stage_focused_part_for_request(
             &AppView::ScriptList,
             Some('@'),
-            false,
+            &AmbientOrFocused,
         ));
         assert!(!ScriptListApp::should_stage_focused_part_for_request(
             &AppView::ScriptList,
             Some('/'),
-            false,
+            &AmbientOrFocused,
         ));
         assert!(ScriptListApp::should_stage_focused_part_for_request(
             &AppView::ScriptList,
             None,
-            false,
+            &AmbientOrFocused,
         ));
         assert!(ScriptListApp::should_stage_focused_part_for_request(
             &AppView::ThemeChooserView {
@@ -6511,12 +6593,134 @@ mod tests {
                 selected_index: 0,
             },
             Some('@'),
-            false,
+            &AmbientOrFocused,
         ));
         assert!(!ScriptListApp::should_stage_focused_part_for_request(
             &AppView::ScriptList,
             None,
-            true,
+            &SuppressFocused,
+        ));
+    }
+
+    #[test]
+    fn clean_context_policy_does_not_prime_script_authoring_slash() {
+        use super::AgentChatContextPolicy::{AmbientOrFocused, SuppressFocused};
+        assert!(ScriptListApp::should_prime_script_authoring_slash(
+            false,
+            false,
+            false,
+            None,
+            &AmbientOrFocused,
+        ));
+        assert!(!ScriptListApp::should_prime_script_authoring_slash(
+            false,
+            false,
+            false,
+            None,
+            &SuppressFocused,
+        ));
+    }
+
+    #[test]
+    fn empty_script_list_cmd_enter_suppresses_default_auto_selected_row() {
+        use super::AgentChatContextPolicy::{AmbientOrFocused, SuppressFocused};
+        assert_eq!(
+            ScriptListApp::cmd_enter_context_policy_for_launcher_selection(true, true, 0, Some(0),),
+            SuppressFocused,
+        );
+        assert_eq!(
+            ScriptListApp::cmd_enter_context_policy_for_launcher_selection(true, true, 0, None,),
+            SuppressFocused,
+            "uncached first-selectable fallback preserves selected-index-zero behavior",
+        );
+        assert_eq!(
+            ScriptListApp::cmd_enter_context_policy_for_launcher_selection(true, true, 1, Some(0),),
+            AmbientOrFocused,
+            "a user-moved non-default row remains meaningful context",
+        );
+        assert_eq!(
+            ScriptListApp::cmd_enter_context_policy_for_launcher_selection(true, false, 0, Some(0),),
+            AmbientOrFocused,
+        );
+    }
+
+    #[test]
+    fn file_search_cmd_enter_keeps_selected_row_context() {
+        assert_eq!(
+            ScriptListApp::cmd_enter_context_policy_for_launcher_selection(false, true, 0, Some(0),),
+            super::AgentChatContextPolicy::AmbientOrFocused,
+            "File Search must keep its selected file or directory as context",
+        );
+    }
+
+    #[test]
+    fn embedded_cache_rejects_cross_policy_reuse() {
+        use crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::{Full, QuickAi};
+        use crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant;
+
+        // A cached Quick AI view must NOT be reused for a Standard relaunch —
+        // set_ui_variant is tighten-only, so the reused view would stay
+        // capability-restricted while presenting as a full chat. Reject → fresh.
+        assert!(
+            !ScriptListApp::embedded_reuse_policy_matches(QuickAi, AgentChatUiVariant::Standard),
+            "cached Quick AI view must not be reused by a Standard launch",
+        );
+        // Reverse mode-laundering: a cached full view must not be reused by a
+        // Quick AI launch (would leak retained context into a zero-context surface).
+        assert!(
+            !ScriptListApp::embedded_reuse_policy_matches(Full, AgentChatUiVariant::QuickAi),
+            "cached full view must not be reused by a Quick AI launch",
+        );
+
+        // Matching policies may reuse the cached view.
+        assert!(ScriptListApp::embedded_reuse_policy_matches(
+            Full,
+            AgentChatUiVariant::Standard
+        ));
+        assert!(ScriptListApp::embedded_reuse_policy_matches(
+            QuickAi,
+            AgentChatUiVariant::QuickAi
+        ));
+        // Full policy is shared across every nonstandard non-Quick-AI variant,
+        // so a cached full view may be reused across those restyles.
+        assert!(ScriptListApp::embedded_reuse_policy_matches(
+            Full,
+            AgentChatUiVariant::UserBold
+        ));
+    }
+
+    /// WP-B1: Quick AI NEVER reuses a retained embedded thread — not even for
+    /// another Quick AI launch (same-policy). Combined with the cross-policy
+    /// mismatch ban this closes every embedded-cache resurrection path.
+    #[test]
+    fn quick_ai_never_reuses_same_policy_embedded_cache() {
+        use crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::{Full, QuickAi};
+        use crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant;
+
+        // The banned same-policy case: a closed Quick AI view must NOT be
+        // reused by another Quick AI launch, even though the policies match.
+        assert!(
+            ScriptListApp::embedded_reuse_policy_matches(QuickAi, AgentChatUiVariant::QuickAi),
+            "sanity: QuickAi↔QuickAi policies do match",
+        );
+        assert!(
+            !ScriptListApp::embedded_cache_reuse_allowed(QuickAi, AgentChatUiVariant::QuickAi),
+            "a Quick AI launch must never reuse a cached view — start fresh",
+        );
+        // Any incoming Quick AI launch is non-reusable regardless of the cache.
+        assert!(!ScriptListApp::embedded_cache_reuse_allowed(
+            Full,
+            AgentChatUiVariant::QuickAi
+        ));
+        // Full reuse still works for matching policies.
+        assert!(ScriptListApp::embedded_cache_reuse_allowed(
+            Full,
+            AgentChatUiVariant::Standard
+        ));
+        // Cross-policy is still refused.
+        assert!(!ScriptListApp::embedded_cache_reuse_allowed(
+            QuickAi,
+            AgentChatUiVariant::Standard
         ));
     }
 

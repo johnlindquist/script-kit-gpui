@@ -128,6 +128,8 @@ impl ScriptListApp {
                         crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
                     available_models: Vec::new(),
                     selected_model_id: None,
+                    session_policy:
+                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
                 },
                 cx,
             )
@@ -192,28 +194,42 @@ impl ScriptListApp {
                         crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
                     available_models: Vec::new(),
                     selected_model_id: None,
+                    session_policy:
+                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
                 },
                 cx,
             )
         });
         thread.update(cx, |thread, cx| {
             thread.mark_context_bootstrap_ready(cx);
+            let _ = thread.apply_test_fixture(
+                "assistantText",
+                Some("Can you summarize this fixture?".to_string()),
+                Some("This is a deterministic Agent Chat fixture response.".to_string()),
+                None,
+                cx,
+            );
         });
 
-        let view_entity = cx.new(|cx| {
-            crate::ai::agent_chat::ui::AgentChatView::new(thread, cx).with_ui_variant(
-                crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-            )
-        });
-        self.wire_embedded_agent_chat_footer_callbacks(&view_entity, cx);
-        self.embedded_agent_chat = Some(view_entity.clone());
-        self.tab_ai_harness_return_view = Some(source_view);
-        self.tab_ai_harness_return_focus_target = Some(self.tab_ai_return_focus_target());
-        self.enter_embedded_agent_chat_surface(view_entity, cx);
-        self.request_focus(FocusTarget::ChatPrompt, cx);
-        script_kit_gpui::set_main_window_visible(true);
-        script_kit_gpui::mark_window_shown();
-        cx.notify();
+        // Open AT the fixture size so the first transcript paint happens at
+        // the final viewport — resizing after open leaves automation reporting
+        // the stale pre-resize painted viewport (chat_window_bounds offsets
+        // the inherited origin by +20px, so pre-compensate to land at 585,177).
+        crate::ai::agent_chat::ui::chat_window::open_chat_window_with_thread(
+            thread,
+            Some(gpui::Bounds {
+                origin: gpui::point(gpui::px(565.0), gpui::px(157.0)),
+                size: gpui::size(gpui::px(640.0), gpui::px(520.0)),
+            }),
+            cx,
+        )?;
+        Ok(crate::ai::agent_chat::ui::chat_window::set_chat_window_fixture_bounds(
+            gpui::Bounds {
+                origin: gpui::point(gpui::px(585.0), gpui::px(177.0)),
+                size: gpui::size(gpui::px(640.0), gpui::px(520.0)),
+            },
+            cx,
+        ))
     }
 
     /// **Contract:** `AppView::AgentChatView` and `cx.notify()` happen
@@ -375,6 +391,7 @@ impl ScriptListApp {
                     self.show_pi_agent_chat_unavailable_setup_view(
                         source_view,
                         error.to_string(),
+                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(request.ui_variant),
                         cx,
                     );
                 }
@@ -424,7 +441,6 @@ impl ScriptListApp {
                     open_started_at,
                     cx,
                 );
-                return;
             }
             Err(error) => {
                 tracing::warn!(
@@ -442,10 +458,61 @@ impl ScriptListApp {
                         .duration_ms(Some(TOAST_ERROR_MS)),
                     );
                 }
-                self.show_pi_agent_chat_unavailable_setup_view(source_view, error.to_string(), cx);
-                return;
+                self.show_pi_agent_chat_unavailable_setup_view(
+                source_view,
+                error.to_string(),
+                crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(request.ui_variant),
+                cx,
+            );
             }
         }
+    }
+
+    /// WP-B2: whether a Quick AI launch carries context it promised never to
+    /// touch. Only a `QuickAi` variant can violate this — every other variant
+    /// legitimately stages a focused row, ambient capture, or fallback.
+    fn quick_ai_context_invariant_violated(
+        ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+        focused_part: &Option<crate::ai::message_parts::AiContextPart>,
+        use_ask_anything_fallback: bool,
+        explicit_ambient_chip_label: &Option<String>,
+    ) -> bool {
+        ui_variant == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi
+            && (focused_part.is_some()
+                || use_ask_anything_fallback
+                || explicit_ambient_chip_label.is_some())
+    }
+
+    /// Fail a Quick AI launch closed BEFORE any thread is created, because the
+    /// launch request smuggled context into a zero-context surface. Shared by
+    /// the Codex and Pi Quick AI sites so both refuse identically (production
+    /// refusal, not a debug assert). The caller owns dropping `capture_rx`.
+    fn fail_quick_ai_context_invariant(
+        &mut self,
+        source_view: AppView,
+        ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+        has_focused_part: bool,
+        use_ask_anything_fallback: bool,
+        has_ambient_chip: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let error = "quick_ai_zero_context_launch_invariant_violated";
+        tracing::error!(
+            target: "script_kit::quick_ai",
+            event = "quick_ai_zero_context_launch_invariant_violated",
+            backend = ui_variant.state_id(),
+            has_focused_part,
+            use_ask_anything_fallback,
+            has_ambient_chip,
+        );
+        self.show_pi_agent_chat_unavailable_setup_view(
+            source_view,
+            error.to_string(),
+            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(
+                ui_variant,
+            ),
+            cx,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -466,20 +533,21 @@ impl ScriptListApp {
         open_started_at: std::time::Instant,
         cx: &mut Context<Self>,
     ) {
-        if focused_part.is_some()
-            || use_ask_anything_fallback
-            || explicit_ambient_chip_label.is_some()
-        {
-            let error = "quick_ai_zero_context_launch_invariant_violated";
-            tracing::error!(
-                target: "script_kit::quick_ai",
-                event = "quick_ai_zero_context_launch_invariant_violated",
-                has_focused_part = focused_part.is_some(),
-                use_ask_anything_fallback,
-                has_ambient_chip = explicit_ambient_chip_label.is_some(),
-            );
+        if Self::quick_ai_context_invariant_violated(
+            request.ui_variant,
+            &focused_part,
+            use_ask_anything_fallback,
+            &explicit_ambient_chip_label,
+        ) {
             drop(capture_rx);
-            self.show_pi_agent_chat_unavailable_setup_view(source_view, error.to_string(), cx);
+            self.fail_quick_ai_context_invariant(
+                source_view,
+                request.ui_variant,
+                focused_part.is_some(),
+                use_ask_anything_fallback,
+                explicit_ambient_chip_label.is_some(),
+                cx,
+            );
             return;
         }
         drop(capture_rx);
@@ -511,6 +579,10 @@ impl ScriptListApp {
                         crate::ai::agent_chat::ui::AgentChatLaunchRequirements::default(),
                     available_models: launch.available_models.clone(),
                     selected_model_id: launch.selected_model_id.clone(),
+                    // WP-B1: Quick AI is zero-retention — the thread-owned
+                    // policy denies every automatic egress for quick questions.
+                    session_policy:
+                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::QuickAi,
                 },
                 cx,
             )
@@ -532,6 +604,13 @@ impl ScriptListApp {
         self.enter_embedded_agent_chat_surface(view_entity.clone(), cx);
         cx.notify();
 
+        // Quick AI is a second embedded policy decision no longer: it must
+        // enter with the request's own zero-implicit-context policy.
+        debug_assert_eq!(
+            request.context_policy,
+            AgentChatContextPolicy::SuppressFocused,
+            "Quick AI must enter with a zero-implicit-context policy",
+        );
         let needs_deferred = self.stage_agent_chat_initial_context_parts(
             None,
             &view_entity,
@@ -541,7 +620,7 @@ impl ScriptListApp {
             None,
             auto_submit,
             pending_script_list_trigger,
-            true,
+            &request.context_policy,
             false,
             &source_view,
             cx,
@@ -579,6 +658,27 @@ impl ScriptListApp {
         open_started_at: std::time::Instant,
         cx: &mut Context<Self>,
     ) {
+        // WP-B2: the Pi path serves every variant, so fail a Quick AI launch
+        // closed here — mirroring the Codex site — before any thread exists if
+        // the request smuggled a focused/ambient/fallback context payload.
+        if Self::quick_ai_context_invariant_violated(
+            request.ui_variant,
+            &focused_part,
+            use_ask_anything_fallback,
+            &explicit_ambient_chip_label,
+        ) {
+            drop(capture_rx);
+            self.fail_quick_ai_context_invariant(
+                source_view,
+                request.ui_variant,
+                focused_part.is_some(),
+                use_ask_anything_fallback,
+                explicit_ambient_chip_label.is_some(),
+                cx,
+            );
+            return;
+        }
+
         let requirements = crate::ai::agent_chat::ui::AgentChatLaunchRequirements {
             needs_embedded_context: focused_part.is_some(),
             needs_image: focused_part
@@ -636,7 +736,12 @@ impl ScriptListApp {
                     warm_key = %pi_launch.warm_key,
                     error = %error,
                 );
-                self.show_pi_agent_chat_unavailable_setup_view(source_view, error.to_string(), cx);
+                self.show_pi_agent_chat_unavailable_setup_view(
+                source_view,
+                error.to_string(),
+                crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(request.ui_variant),
+                cx,
+            );
                 return;
             }
         };
@@ -676,6 +781,12 @@ impl ScriptListApp {
                     launch_requirements: requirements,
                     available_models: pi_launch.available_models.clone(),
                     selected_model_id: pi_launch.selected_model_id.clone(),
+                    // The immutable launch policy is the SOLE authority: the
+                    // Pi path serves every variant, so Quick AI stays ephemeral.
+                    session_policy:
+                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(
+                            request.ui_variant,
+                        ),
                 },
                 cx,
             )
@@ -721,7 +832,7 @@ impl ScriptListApp {
             explicit_ambient_chip_label.clone(),
             auto_submit,
             pending_script_list_trigger,
-            request.suppress_focused_part,
+            &request.context_policy,
             request.ui_variant
                 != crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
             &source_view,
@@ -960,7 +1071,7 @@ impl ScriptListApp {
                 if snapshot.state == AgentChatWarmSessionState::Preparing {
                     continue;
                 }
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     if dismissed.load(std::sync::atomic::Ordering::SeqCst)
                         || !crate::confirm::is_confirm_window_open()
                     {
@@ -1046,7 +1157,7 @@ impl ScriptListApp {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(16))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(app) = app_weak_for_teardown.upgrade() else {
                     return;
                 };
