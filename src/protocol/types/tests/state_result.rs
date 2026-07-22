@@ -40,6 +40,7 @@ fn test_state_result_empty_state_omits_optional_fields() {
         None,
         None,
         None,
+        None,
     );
     let actual = to_json(response);
     assert_eq!(
@@ -77,6 +78,7 @@ fn test_state_result_minimal_state_shape() {
         None,
         true,
         true,
+        None,
         None,
         None,
         None,
@@ -157,6 +159,11 @@ fn test_state_result_representative_with_optional_fields() {
         })),
         Some(json!({ "provider": "root", "query": "app", "loading": false })),
         Some(json!({ "offset": 12, "viewportHeight": 320, "contentHeight": 900 })),
+        Some(json!({
+            "surface": "script_list",
+            "implementation": "variable_list",
+            "selectedIndex": 1
+        })),
         Some("tab-ai-2026-05-25.png".to_string()),
         Some(json!({
             "count": 2,
@@ -212,6 +219,11 @@ fn test_state_result_representative_with_optional_fields() {
             },
             "rootFileSearch": { "provider": "root", "query": "app", "loading": false },
             "mainListScroll": { "offset": 12, "viewportHeight": 320, "contentHeight": 900 },
+            "activeListScroll": {
+                "surface": "script_list",
+                "implementation": "variable_list",
+                "selectedIndex": 1
+            },
             "screenshotIdentity": "tab-ai-2026-05-25.png",
             "drop": {
                 "count": 2,

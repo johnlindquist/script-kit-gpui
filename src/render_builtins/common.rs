@@ -837,6 +837,414 @@ mod tracked_scroll_column_behavior_tests {
 }
 
 impl ScriptListApp {
+    fn active_list_input_mode(&self) -> &'static str {
+        match self.input_mode {
+            InputMode::Keyboard => "keyboard",
+            InputMode::Mouse => "mouse",
+        }
+    }
+
+    fn active_uniform_list_scroll_receipt(
+        &self,
+        surface: &'static str,
+        handle: &UniformListScrollHandle,
+        semantic_ids: Vec<String>,
+        selected_index: usize,
+        focused_semantic_id: &'static str,
+    ) -> serde_json::Value {
+        let item_count = semantic_ids.len();
+        let selected_index =
+            (!semantic_ids.is_empty()).then_some(selected_index.min(item_count - 1));
+        let hovered_index = self.hovered_index.filter(|index| *index < item_count);
+        let state = handle.0.borrow();
+        let (scroll_top_item, offset_in_item) = state.base_handle.logical_scroll_top();
+        let scroll_top_item = scroll_top_item.min(item_count.saturating_sub(1));
+        let measured = state.last_item_size.filter(|_| item_count > 0);
+        let row_height = measured
+            .map(|size| size.contents.height.as_f32() / item_count as f32)
+            .filter(|height| height.is_finite() && *height > 0.0);
+        let viewport_height = measured.map(|size| size.item.height.as_f32().max(0.0));
+        let content_height = measured.map(|size| size.contents.height.as_f32().max(0.0));
+        let scroll_top_offset_px =
+            row_height.map(|height| (-offset_in_item.as_f32()).clamp(0.0, height));
+        let scroll_top_offset_items = scroll_top_offset_px
+            .zip(row_height)
+            .map(|(offset, height)| (offset / height).clamp(0.0, 0.999_999));
+        let logical_scroll_top =
+            scroll_top_offset_items.map(|offset| scroll_top_item as f32 + offset);
+        let scroll_top_px = row_height
+            .zip(scroll_top_offset_px)
+            .map(|(height, offset)| scroll_top_item as f32 * height + offset);
+        let last_visible_index_exclusive = viewport_height
+            .zip(row_height)
+            .zip(scroll_top_offset_px)
+            .map(|((viewport, height), offset)| {
+                (scroll_top_item + ((viewport + offset) / height).ceil() as usize).min(item_count)
+            });
+        let first_visible_index = (!semantic_ids.is_empty()).then_some(scroll_top_item);
+        let selected_row_top = selected_index
+            .zip(row_height)
+            .zip(scroll_top_offset_px)
+            .map(|((selected, height), offset)| {
+                (selected as isize - scroll_top_item as isize) as f32 * height - offset
+            });
+        let selected_row_within_safe_viewport = selected_row_top
+            .zip(row_height)
+            .zip(viewport_height)
+            .map(|((top, height), viewport)| top >= 0.0 && top + height <= viewport);
+
+        serde_json::json!({
+            "surface": surface,
+            "implementation": "uniform_list",
+            "listKind": "uniform_list",
+            "selectedIndex": selected_index,
+            "selectedSemanticId": selected_index.and_then(|index| semantic_ids.get(index).cloned()),
+            "hoveredIndex": hovered_index,
+            "hoveredSemanticId": hovered_index.and_then(|index| semantic_ids.get(index).cloned()),
+            "hoverSuppressedUntilPointerMove": self.list_suppress_hover_until_pointer_move,
+            "focusedSemanticId": (self.focused_input == FocusedInput::MainFilter).then_some(focused_semantic_id),
+            "logicalScrollTop": logical_scroll_top,
+            "scrollTopItem": first_visible_index,
+            "scrollTopOffsetItems": scroll_top_offset_items,
+            "scrollTopOffsetPx": scroll_top_offset_px,
+            "scrollTop": scroll_top_px,
+            "firstVisibleIndex": first_visible_index,
+            "lastVisibleIndexExclusive": last_visible_index_exclusive,
+            "firstVisibleSemanticId": first_visible_index.and_then(|index| semantic_ids.get(index).cloned()),
+            "lastVisibleSemanticId": last_visible_index_exclusive
+                .and_then(|exclusive| exclusive.checked_sub(1))
+                .and_then(|index| semantic_ids.get(index).cloned()),
+            "itemCount": item_count,
+            "contentHeight": content_height,
+            "viewportHeight": viewport_height,
+            "safeViewportHeight": viewport_height,
+            "maxScrollTop": content_height.zip(viewport_height).map(|(content, viewport)| (content - viewport).max(0.0)),
+            "selectedRowVisible": selected_row_within_safe_viewport,
+            "selectedRowWithinSafeViewport": selected_row_within_safe_viewport,
+            "inputMode": self.active_list_input_mode(),
+            "lastInteractionSource": self.last_list_interaction_source.as_str(),
+        })
+    }
+
+    fn active_tracked_list_scroll_receipt(
+        &self,
+        surface: &'static str,
+        handle: &gpui::ScrollHandle,
+        semantic_ids: Vec<String>,
+        selected_index: usize,
+        focused_semantic_id: &'static str,
+    ) -> serde_json::Value {
+        let item_count = semantic_ids.len();
+        let selected_index =
+            (!semantic_ids.is_empty()).then_some(selected_index.min(item_count - 1));
+        let hovered_index = self.hovered_index.filter(|index| *index < item_count);
+        let (scroll_top_item, offset_in_item) = handle.logical_scroll_top();
+        let scroll_top_item = scroll_top_item.min(item_count.saturating_sub(1));
+        let row_height = handle
+            .bounds_for_item(scroll_top_item)
+            .map(|bounds| bounds.size.height.as_f32())
+            .filter(|height| height.is_finite() && *height > 0.0);
+        let scroll_top_offset_px =
+            row_height.map(|height| (-offset_in_item.as_f32()).clamp(0.0, height));
+        let scroll_top_offset_items = scroll_top_offset_px
+            .zip(row_height)
+            .map(|(offset, height)| (offset / height).clamp(0.0, 0.999_999));
+        let logical_scroll_top =
+            scroll_top_offset_items.map(|offset| scroll_top_item as f32 + offset);
+        let first_visible_index = (!semantic_ids.is_empty()).then_some(scroll_top_item);
+        let last_visible_index_exclusive = (!semantic_ids.is_empty())
+            .then_some(handle.bottom_item().saturating_add(1).min(item_count));
+        let viewport_height = handle.bounds().size.height.as_f32().max(0.0);
+        let scroll_top_px = (-handle.offset().y.as_f32()).max(0.0);
+        let max_scroll_top = (-handle.max_offset().y.as_f32()).max(0.0);
+        let selected_row_within_safe_viewport = selected_index
+            .and_then(|index| handle.bounds_for_item(index))
+            .map(|bounds| {
+                let viewport = handle.bounds();
+                let top = bounds.top().as_f32() + handle.offset().y.as_f32();
+                let bottom = bounds.bottom().as_f32() + handle.offset().y.as_f32();
+                top >= viewport.top().as_f32() && bottom <= viewport.bottom().as_f32()
+            });
+
+        serde_json::json!({
+            "surface": surface,
+            "implementation": "tracked_column",
+            "listKind": "tracked_column",
+            "selectedIndex": selected_index,
+            "selectedSemanticId": selected_index.and_then(|index| semantic_ids.get(index).cloned()),
+            "hoveredIndex": hovered_index,
+            "hoveredSemanticId": hovered_index.and_then(|index| semantic_ids.get(index).cloned()),
+            "hoverSuppressedUntilPointerMove": self.list_suppress_hover_until_pointer_move,
+            "focusedSemanticId": (self.focused_input == FocusedInput::MainFilter).then_some(focused_semantic_id),
+            "logicalScrollTop": logical_scroll_top,
+            "scrollTopItem": first_visible_index,
+            "scrollTopOffsetItems": scroll_top_offset_items,
+            "scrollTopOffsetPx": scroll_top_offset_px,
+            "scrollTop": scroll_top_px,
+            "firstVisibleIndex": first_visible_index,
+            "lastVisibleIndexExclusive": last_visible_index_exclusive,
+            "firstVisibleSemanticId": first_visible_index.and_then(|index| semantic_ids.get(index).cloned()),
+            "lastVisibleSemanticId": last_visible_index_exclusive
+                .and_then(|exclusive| exclusive.checked_sub(1))
+                .and_then(|index| semantic_ids.get(index).cloned()),
+            "bottomItem": (!semantic_ids.is_empty()).then_some(handle.bottom_item().min(item_count - 1)),
+            "itemCount": item_count,
+            "contentHeight": viewport_height + max_scroll_top,
+            "viewportHeight": viewport_height,
+            "safeViewportHeight": viewport_height,
+            "maxScrollTop": max_scroll_top,
+            "selectedRowVisible": selected_row_within_safe_viewport,
+            "selectedRowWithinSafeViewport": selected_row_within_safe_viewport,
+            "inputMode": self.active_list_input_mode(),
+            "lastInteractionSource": self.last_list_interaction_source.as_str(),
+        })
+    }
+
+    /// One stable semantic/viewport schema for every native-scrolling builtin.
+    /// Returns `None` for non-migrated or non-list surfaces so callers fail
+    /// closed instead of projecting unrelated state onto this contract.
+    pub(crate) fn active_builtin_list_scroll_receipt(&self) -> Option<serde_json::Value> {
+        match &self.current_view {
+            AppView::AppLauncherView {
+                filter,
+                selected_index,
+            } => {
+                let ids = Self::app_launcher_filtered_entries(&self.apps, filter)
+                    .into_iter()
+                    .map(|(_, app)| {
+                        app.bundle_id
+                            .clone()
+                            .unwrap_or_else(|| app.path.to_string_lossy().into_owned())
+                    })
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "app_launcher",
+                    &self.list_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:app-filter",
+                ))
+            }
+            AppView::BrowserTabsView {
+                filter,
+                selected_index,
+            } => {
+                let ids = self
+                    .browser_tabs_visible_rows(filter)
+                    .iter()
+                    .map(crate::browser_tabs::browser_tab_stable_key)
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "browser_tabs",
+                    &self.browser_tabs_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:browser-tabs-filter",
+                ))
+            }
+            AppView::CurrentAppCommandsView {
+                filter,
+                selected_index,
+            } => {
+                let ids = Self::current_app_commands_filtered_entries(
+                    &self.cached_current_app_entries,
+                    filter,
+                )
+                .into_iter()
+                .map(|(source_index, entry)| {
+                    format!("current-app-command-{source_index}-{}", entry.id)
+                })
+                .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "current_app_commands",
+                    &self.current_app_commands_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:current-app-commands-filter",
+                ))
+            }
+            AppView::TipsView {
+                filter,
+                selected_index,
+                entries,
+            } => {
+                let ids = script_kit_gpui::tips::visible_tip_indices(entries, filter)
+                    .into_iter()
+                    .filter_map(|source_index| {
+                        entries
+                            .get(source_index)
+                            .map(|tip| format!("tip-{source_index}-{}", tip.title))
+                    })
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "tips",
+                    &self.tips_list_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:tips-filter",
+                ))
+            }
+            AppView::WindowSwitcherView {
+                filter,
+                selected_index,
+            } => {
+                let needle = filter.to_lowercase();
+                let ids = self
+                    .cached_windows
+                    .iter()
+                    .filter(|window| {
+                        filter.is_empty()
+                            || window.title.to_lowercase().contains(&needle)
+                            || window.app.to_lowercase().contains(&needle)
+                    })
+                    .map(|window| format!("window-switcher:{}", window.id))
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "window_switcher",
+                    &self.window_list_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:window-filter",
+                ))
+            }
+            AppView::ClipboardHistoryView {
+                filter,
+                selected_index,
+            } => {
+                let ids = self
+                    .clipboard_history_visible_rows(filter)
+                    .into_iter()
+                    .map(|(_, entry)| format!("clipboard-history:{}", entry.id))
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "clipboard_history",
+                    &self.clipboard_list_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:clipboard-filter",
+                ))
+            }
+            AppView::ProcessManagerView {
+                filter,
+                selected_index,
+            } => {
+                let ids = Self::process_manager_filtered_entries(&self.cached_processes, filter)
+                    .into_iter()
+                    .map(|(_, process)| format!("process-manager:{}", process.pid))
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "process_manager",
+                    &self.process_list_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:process-filter",
+                ))
+            }
+            AppView::BrowseKitsView {
+                selected_index,
+                results,
+                ..
+            } => {
+                let ids = Self::kit_store_browse_visible_rows(results)
+                    .into_iter()
+                    .map(|(_, result)| Self::kit_store_browse_row_semantic_id(result))
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "kit_store_browse",
+                    &self.list_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:kit-search",
+                ))
+            }
+            AppView::InstalledKitsView {
+                filter,
+                selected_index,
+                kits,
+            } => {
+                let ids = Self::kit_store_installed_visible_rows(kits, filter)
+                    .into_iter()
+                    .map(|(_, kit)| Self::kit_store_installed_row_semantic_id(kit))
+                    .collect();
+                Some(self.active_uniform_list_scroll_receipt(
+                    "kit_store_installed",
+                    &self.list_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:installed-kits-filter",
+                ))
+            }
+            AppView::BrowserHistoryView {
+                filter,
+                selected_index,
+            } => {
+                let ids = crate::browser_history::fuzzy_search_browser_history(
+                    &self.cached_browser_history,
+                    filter,
+                )
+                .into_iter()
+                .map(|hit| format!("browser-history:{}", hit.entry.history_key()))
+                .collect();
+                Some(self.active_tracked_list_scroll_receipt(
+                    "browser_history",
+                    &self.browser_history_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:browser-history-filter",
+                ))
+            }
+            AppView::NotesBrowseView {
+                filter,
+                selected_index,
+            } => {
+                let ids = Self::notes_browse_visible_rows(filter)
+                    .into_iter()
+                    .map(|note| format!("notes-browse:{}", note.id))
+                    .collect();
+                Some(self.active_tracked_list_scroll_receipt(
+                    "notes_browse",
+                    &self.notes_browse_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:notes-browse-filter",
+                ))
+            }
+            AppView::DictationHistoryView {
+                filter,
+                selected_index,
+            } => {
+                let ids = Self::dictation_history_visible_rows(filter)
+                    .into_iter()
+                    .map(|entry| format!("dictation-history:{}", entry.id))
+                    .collect();
+                Some(self.active_tracked_list_scroll_receipt(
+                    "dictation_history",
+                    &self.dictation_history_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:dictation-history-filter",
+                ))
+            }
+            AppView::AgentChatHistoryView {
+                filter,
+                selected_index,
+            } => {
+                let ids = Self::agent_chat_history_visible_rows(filter)
+                    .into_iter()
+                    .map(|entry| format!("agent-chat-history:{}", entry.session_id))
+                    .collect();
+                Some(self.active_tracked_list_scroll_receipt(
+                    "agent_chat_history",
+                    &self.agent_chat_history_scroll_handle,
+                    ids,
+                    *selected_index,
+                    "input:agent_chat-history-filter",
+                ))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn begin_list_viewport_scroll(
         &mut self,
         source: crate::scrolling::list_interaction::ListViewportInputSource,

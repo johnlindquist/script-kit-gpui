@@ -644,6 +644,15 @@ impl ScriptListApp {
             let (grouped_items, _) = self.get_grouped_results_cached();
             script_list_pixel_top_for_offset(&grouped_items, scroll_offset, heights)
         };
+        let scroll_top_offset_px = scroll_offset.offset_in_item.as_f32().max(0.0);
+        let scroll_top_offset_items = {
+            let (grouped_items, _) = self.get_grouped_results_cached();
+            grouped_items
+                .get(scroll_offset.item_ix)
+                .map(|item| heights.row_height(item, scroll_offset.item_ix))
+                .filter(|height| height.is_finite() && *height > 0.0)
+                .map(|height| (scroll_top_offset_px / height).clamp(0.0, 0.999_999))
+        };
         let geometry = main_list_scroll_geometry_values(
             content_height,
             viewport_height.as_f32(),
@@ -706,9 +715,15 @@ impl ScriptListApp {
         };
 
         let mut receipt = serde_json::json!({
+            "surface": "script_list",
+            "implementation": "variable_list",
+            "listKind": "variable_list",
+            "logicalScrollTop": scroll_top_offset_items.map(|offset| scroll_offset.item_ix as f32 + offset),
             "scrollTop": geometry.scroll_top,
             "scrollTopItem": scroll_offset.item_ix,
             "scrollTopOffset": scroll_offset.offset_in_item.as_f32(),
+            "scrollTopOffsetItems": scroll_top_offset_items,
+            "scrollTopOffsetPx": scroll_top_offset_px,
             "firstVisibleIndex": first_visible_index,
             "lastVisibleIndexExclusive": last_visible_index_exclusive,
             "firstVisibleSemanticId": first_visible_semantic_id,
@@ -738,7 +753,7 @@ impl ScriptListApp {
                 InputMode::Keyboard => "keyboard",
                 InputMode::Mouse => "mouse",
             },
-            "focusedSemanticId": "input:filter",
+            "focusedSemanticId": (self.focused_input == FocusedInput::MainFilter).then_some("input:filter"),
             "lastInteractionSource": self.last_list_interaction_source.as_str(),
             "performance": self.main_list_scroll_frame_trace.receipt(),
             "affordance": {

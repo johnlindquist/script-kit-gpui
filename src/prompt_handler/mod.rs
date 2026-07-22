@@ -2668,6 +2668,7 @@ impl ScriptListApp {
                                 None,
                                 None,
                                 None,
+                                None,
                                 Some(notes_state),
                                 None,
                                 None,
@@ -2705,6 +2706,7 @@ impl ScriptListApp {
                                 None,
                                 None,
                                 Some(actions_state),
+                                None,
                                 None,
                                 None,
                                 None,
@@ -2755,6 +2757,7 @@ impl ScriptListApp {
                                 None,
                                 None,
                                 None,
+                                None,
                             ));
                         }
                         return;
@@ -2777,6 +2780,7 @@ impl ScriptListApp {
                                 None,
                                 false,
                                 false,
+                                None,
                                 None,
                                 None,
                                 None,
@@ -3988,6 +3992,9 @@ impl ScriptListApp {
                 } else {
                     None
                 };
+                let active_list_scroll = main_list_scroll
+                    .clone()
+                    .or_else(|| self.active_builtin_list_scroll_receipt());
                 let actions_dialog =
                     if self.show_actions_popup || crate::actions::is_actions_window_open() {
                         self.actions_dialog
@@ -4094,6 +4101,7 @@ impl ScriptListApp {
                     actions_dialog,
                     root_file_search,
                     main_list_scroll,
+                    active_list_scroll,
                     crate::ai::harness::screenshot_files::current_screenshot_identity(),
                     drop_state,
                     path_state,

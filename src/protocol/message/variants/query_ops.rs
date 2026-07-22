@@ -219,6 +219,14 @@ macro_rules! protocol_message_variants_query_ops {
             skip_serializing_if = "Option::is_none"
         )]
         main_list_scroll: Option<serde_json::Value>,
+        /// Stable native-list semantic and viewport contract for the active
+        /// Script List or migrated built-in list surface.
+        #[serde(
+            rename = "activeListScroll",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        active_list_scroll: Option<serde_json::Value>,
         /// Identity (bare filename) of the most recent Tab AI screenshot
         /// captured in this process lifetime. `None` when no capture has
         /// occurred. Lets automation verify the identity-threading chain

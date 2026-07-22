@@ -134,6 +134,30 @@ export interface GpuiScrollWheelEvent {
   timestampSeconds?: number;
 }
 
+/** Stable semantic + viewport contract emitted for the currently active native list. */
+export interface ActiveListScrollReceipt extends Json {
+  surface: string;
+  implementation: "variable_list" | "uniform_list" | "tracked_column";
+  listKind: "variable_list" | "uniform_list" | "tracked_column";
+  selectedIndex: number | null;
+  selectedSemanticId: string | null;
+  hoveredIndex: number | null;
+  hoveredSemanticId: string | null;
+  hoverSuppressedUntilPointerMove: boolean;
+  focusedSemanticId: string | null;
+  logicalScrollTop: number | null;
+  scrollTopItem: number | null;
+  scrollTopOffsetItems: number | null;
+  scrollTopOffsetPx: number | null;
+  firstVisibleIndex: number | null;
+  lastVisibleIndexExclusive: number | null;
+  firstVisibleSemanticId: string | null;
+  lastVisibleSemanticId: string | null;
+  itemCount: number;
+  inputMode: "keyboard" | "mouse";
+  lastInteractionSource: string;
+}
+
 let launchCounter = 0;
 
 export interface DriverOptions {
@@ -353,6 +377,15 @@ export abstract class ProtocolCore {
       { type: "getState" },
       { expect: "stateResult", ...opts },
     );
+  }
+
+  async getActiveListScroll(opts: { timeoutMs?: number } = {}): Promise<ActiveListScrollReceipt> {
+    const state = await this.getState(opts);
+    const receipt = state.activeListScroll ?? state.mainListScroll;
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) {
+      throw new Error("activeListScroll missing from stateResult");
+    }
+    return receipt as ActiveListScrollReceipt;
   }
 
   getElements(
