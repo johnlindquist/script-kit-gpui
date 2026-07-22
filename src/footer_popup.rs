@@ -1221,11 +1221,11 @@ pub(crate) fn sync_main_footer_popup(
         // SAFETY: `ns_window` comes from the live GPUI main window currently
         // being rendered/observed on the AppKit thread.
         unsafe {
-            use objc::{msg_send, sel, sel_impl};
             if let Some(config) = config {
-                let content_view: id = msg_send![ns_window, contentView];
-                let existed = content_view != nil
-                    && find_subview_by_identifier(content_view, FOOTER_EFFECT_ID) != nil;
+                let existed = find_subview_by_identifier(
+                    main_footer_search_root(ns_window),
+                    FOOTER_EFFECT_ID,
+                ) != nil;
                 let installed_host = ensure_main_footer_host(ns_window);
                 if installed_host && !existed {
                     clear_main_window_footer_refresh_signature();
@@ -1767,18 +1767,21 @@ pub(crate) fn collect_main_footer_appkit_fidelity_snapshot(
                     crate::protocol::FidelityCaptureStatus::MissingContentView,
                 );
             }
-            let footer_view = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
+            // Float mode hosts the footer in the child window; the snapshot
+            // is captured relative to whichever root actually holds it.
+            let search_root = main_footer_search_root(ns_window);
+            let footer_view = find_subview_by_identifier(search_root, FOOTER_EFFECT_ID);
             if footer_view == nil {
                 return AppKitFidelityCaptureOutcome::blocked(
                     crate::protocol::FidelityCaptureStatus::MissingFooterHost,
                 );
             }
-            let content_bounds: cocoa::foundation::NSRect = msg_send![content_view, bounds];
+            let content_bounds: cocoa::foundation::NSRect = msg_send![search_root, bounds];
             let mut nodes = Vec::new();
-            let footer_order = appkit_subview_order(content_view, footer_view);
+            let footer_order = appkit_subview_order(search_root, footer_view);
             collect_identified_appkit_views(
                 footer_view,
-                content_view,
+                search_root,
                 None,
                 footer_order,
                 content_bounds.size.height,
@@ -1912,70 +1915,6 @@ pub(crate) fn main_window_float_footer_strip_height() -> f32 {
     }
 }
 
-#[cfg(target_os = "macos")]
-unsafe fn main_window_gpui_metal_view(content_view: id, glass_class: &objc::runtime::Class) -> id {
-    use objc::{class, msg_send, sel, sel_impl};
-
-    let subviews: id = msg_send![content_view, subviews];
-    if subviews == nil {
-        return nil;
-    }
-
-    let count: usize = msg_send![subviews, count];
-    let mut fallback = nil;
-    for index in 0..count {
-        let view: id = msg_send![subviews, objectAtIndex: index];
-        if view == nil {
-            continue;
-        }
-        let is_glass: cocoa::base::BOOL = msg_send![view, isKindOfClass: glass_class];
-        let is_visual_effect: cocoa::base::BOOL =
-            msg_send![view, isKindOfClass: class!(NSVisualEffectView)];
-        if is_glass == YES || is_visual_effect == YES {
-            continue;
-        }
-
-        let view_class: id = msg_send![view, class];
-        let class_name: id = msg_send![view_class, className];
-        let utf8: *const std::os::raw::c_char = msg_send![class_name, UTF8String];
-        let class_name = if utf8.is_null() {
-            ""
-        } else {
-            std::ffi::CStr::from_ptr(utf8).to_str().unwrap_or("")
-        };
-        if class_name.contains("Metal") || class_name.contains("GPUI") {
-            return view;
-        }
-        fallback = view;
-    }
-    fallback
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn add_main_window_glass_band_above_metal(content_view: id, band: id) -> bool {
-    use objc::{msg_send, sel, sel_impl};
-
-    let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
-        return false;
-    };
-    let gpui_view = main_window_gpui_metal_view(content_view, glass_class);
-    if gpui_view == nil {
-        tracing::warn!(
-            target: "script_kit::footer_popup",
-            event = "glass_scroll_band_missing_metal_view",
-            "Unable to order main-window glass band above the GPUI Metal view"
-        );
-        return false;
-    }
-    let _: () = msg_send![
-        content_view,
-        addSubview: band
-        positioned: 1isize
-        relativeTo: gpui_view
-    ];
-    true
-}
-
 /// Reconcile the platform-managed footer band and header edge strip with the
 /// main window's current glass mode and frame. Called beside Tahoe backdrop
 /// recreation and again when the footer host is created/refreshed.
@@ -1995,9 +1934,11 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
     }
 
     let active = glass_scroll_bands_active();
-    let mut footer_view = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
+    let search_root = main_footer_search_root(ns_window);
+    let mut footer_view = find_subview_by_identifier(search_root, FOOTER_EFFECT_ID);
     if footer_view != nil {
-        // Mode changed (float host <-> blur-era VEV): recreate the host.
+        // Mode changed (float child-window host <-> blur-era in-window VEV):
+        // recreate the host (and drop the child window when leaving float).
         let float_ok = float_footer_host_view_class()
             .map(|cls| {
                 let is_float: cocoa::base::BOOL = msg_send![footer_view, isKindOfClass: cls];
@@ -2006,6 +1947,9 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
             .unwrap_or(false);
         if float_ok != active {
             let _: () = msg_send![footer_view, removeFromSuperview];
+            if !active {
+                remove_float_footer_child_window(ns_window);
+            }
             clear_main_window_footer_refresh_signature();
             footer_view = nil;
         }
@@ -2019,7 +1963,305 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
         );
         let _: () = msg_send![footer_view, setFrame: footer_frame];
     }
+    sync_float_footer_child_frame(ns_window);
+    log_strip_views_debug(ns_window);
     let _ = NSViewWidthSizable;
+}
+
+/// Identifier for the content view of the floating-footer child window.
+#[cfg(target_os = "macos")]
+const FLOAT_FOOTER_LAYER_ID: &str = "script-kit-float-footer-layer";
+
+/// Registry of the floating-footer window per parent (`(parent_ptr, footer_ptr)`).
+///
+/// The footer window is deliberately NOT attached via `addChildWindow:` —
+/// attached children join the parent's window-server SHADOW GROUP, which puts
+/// the capsule shapes back into the parent's shadow shape (the hairline
+/// bridge between capsules, probe-proven). Ordering and visibility are
+/// managed manually instead: frame/order in `sync_float_footer_child_frame`
+/// (render-driven) and hide in the platform `orderOut:` choke points.
+#[cfg(target_os = "macos")]
+static FLOAT_FOOTER_WINDOWS: std::sync::Mutex<Vec<(usize, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Find the floating-footer window registered for `ns_window`, if any.
+#[cfg(target_os = "macos")]
+unsafe fn float_footer_child_window(ns_window: id) -> id {
+    let guard = FLOAT_FOOTER_WINDOWS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    guard
+        .iter()
+        .find(|(parent, _)| *parent == ns_window as usize)
+        .map(|(_, footer)| *footer as id)
+        .unwrap_or(nil)
+}
+
+/// Create (or reuse) the borderless, non-activating child panel that carries
+/// the ENTIRE floating footer (host view: buttons, keycaps, left-info, and
+/// their per-button glass capsules) below the main container.
+///
+/// Why a separate window:
+/// - NSGlassEffectViews in the SAME window as the Tahoe backdrop auto-merge
+///   with it across the 8px container gap (a full-width meniscus "shelf"
+///   line bridging the capsules — user-reported).
+/// - Any pixels left in the main window's strip (button text, keycaps) put
+///   those rows back into the window-server shadow shape, which bridges them
+///   into a rectangular rim around the strip.
+/// Moving the whole footer out empties the strip completely: the main
+/// window's shadow hugs the container, and the footer's glass samples the
+/// desktop directly. The child has no shadow of its own.
+#[cfg(target_os = "macos")]
+unsafe fn ensure_float_footer_child_window(ns_window: id) -> id {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let existing = float_footer_child_window(ns_window);
+    if existing != nil {
+        return existing;
+    }
+
+    let frame: NSRect = msg_send![ns_window, frame];
+    let child_frame = NSRect::new(
+        NSPoint::new(frame.origin.x, frame.origin.y),
+        NSSize::new(frame.size.width, footer_height()),
+    );
+    let child: id = msg_send![class!(NSPanel), alloc];
+    // styleMask 128 = borderless non-activating panel; backing 2 = buffered.
+    let child: id = msg_send![
+        child,
+        initWithContentRect: child_frame
+        styleMask: 128u64
+        backing: 2u64
+        defer: NO
+    ];
+    if child == nil {
+        return nil;
+    }
+    let clear: id = msg_send![class!(NSColor), clearColor];
+    let _: () = msg_send![child, setBackgroundColor: clear];
+    let _: () = msg_send![child, setOpaque: NO];
+    let _: () = msg_send![child, setHasShadow: NO];
+    let _: () = msg_send![child, setReleasedWhenClosed: NO];
+    let _: () = msg_send![child, setBecomesKeyOnlyIfNeeded: YES];
+    let level: isize = msg_send![ns_window, level];
+    let _: () = msg_send![child, setLevel: level];
+
+    let content: id = msg_send![child, contentView];
+    if content != nil {
+        let identifier = ns_string(FLOAT_FOOTER_LAYER_ID);
+        if identifier != nil {
+            let _: () = msg_send![content, setIdentifier: identifier];
+        }
+        let _: () = msg_send![content, setWantsLayer: YES];
+    }
+
+    // Match the parent's Spaces/collection behavior so the footer follows the
+    // launcher across Spaces and fullscreen setups.
+    let collection_behavior: u64 = msg_send![ns_window, collectionBehavior];
+    let _: () = msg_send![child, setCollectionBehavior: collection_behavior];
+
+    FLOAT_FOOTER_WINDOWS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push((ns_window as usize, child as usize));
+
+    tracing::info!(
+        target: "script_kit::footer_popup",
+        event = "float_footer_child_window_installed",
+        height = footer_height(),
+        "Installed floating-footer window (unattached, shadow-group-free) below the main container"
+    );
+    child
+}
+
+/// Hide and unregister the floating-footer window, if present.
+#[cfg(target_os = "macos")]
+unsafe fn remove_float_footer_child_window(ns_window: id) {
+    use objc::{msg_send, sel, sel_impl};
+
+    let child = float_footer_child_window(ns_window);
+    if child != nil {
+        let _: () = msg_send![child, orderOut: nil];
+        FLOAT_FOOTER_WINDOWS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .retain(|(parent, _)| *parent != ns_window as usize);
+    }
+}
+
+/// Hide the floating-footer window alongside its parent (called from the
+/// platform `orderOut:` choke points — the footer is unattached, so AppKit
+/// will not hide it for us). Keeps the registration for the next show.
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_float_footer_for_window(ns_window: id) {
+    use objc::{msg_send, sel, sel_impl};
+
+    // SAFETY: called on the main thread from the platform hide paths; the
+    // registered footer window pointer is retained for the process lifetime.
+    unsafe {
+        let child = float_footer_child_window(ns_window);
+        if child != nil {
+            let _: () = msg_send![child, orderOut: nil];
+        }
+    }
+}
+
+/// Keep the floating-footer window glued to the bottom band of the main
+/// window's frame (congruent coordinates: host-view rects are 1:1) and
+/// mirror the parent's on-screen state (unattached window: manual ordering).
+#[cfg(target_os = "macos")]
+unsafe fn sync_float_footer_child_frame(ns_window: id) {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use objc::{msg_send, sel, sel_impl};
+
+    let child = float_footer_child_window(ns_window);
+    if child == nil {
+        return;
+    }
+    let main_frame: NSRect = msg_send![ns_window, frame];
+    let child_frame = NSRect::new(
+        NSPoint::new(main_frame.origin.x, main_frame.origin.y),
+        NSSize::new(main_frame.size.width, footer_height()),
+    );
+    let _: () = msg_send![child, setFrame: child_frame display: YES];
+
+    // Re-assert shadowlessness every pass: the capsule shapes otherwise get a
+    // window-server shadow whose row spans bridge the gaps between capsules
+    // into a hairline shelf (probe-proven).
+    let child_has_shadow: cocoa::base::BOOL = msg_send![child, hasShadow];
+    if child_has_shadow == YES {
+        let _: () = msg_send![child, setHasShadow: NO];
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "float_footer_shadow_reasserted",
+            "Floating footer window shadow was re-enabled by AppKit; disabled again"
+        );
+    }
+    let _: () = msg_send![child, invalidateShadow];
+
+    let parent_visible: cocoa::base::BOOL = msg_send![ns_window, isVisible];
+    let child_visible: cocoa::base::BOOL = msg_send![child, isVisible];
+    if parent_visible == YES {
+        let parent_number: isize = msg_send![ns_window, windowNumber];
+        let _: () = msg_send![child, orderWindow: 1isize relativeTo: parent_number];
+    } else if child_visible == YES {
+        let _: () = msg_send![child, orderOut: nil];
+    }
+}
+
+/// Resolve the view that footer host lookups should search: the floating
+/// child window's contentView when the float footer is active, otherwise the
+/// main window's contentView (blur-era in-window host).
+#[cfg(target_os = "macos")]
+unsafe fn main_footer_search_root(ns_window: id) -> id {
+    use objc::{msg_send, sel, sel_impl};
+
+    let child = float_footer_child_window(ns_window);
+    if child != nil {
+        let content: id = msg_send![child, contentView];
+        if content != nil {
+            return content;
+        }
+    }
+    msg_send![ns_window, contentView]
+}
+
+/// Debug aid (SCRIPT_KIT_GLASS_BAND_DEBUG=1): walk the contentView tree and
+/// log every view whose frame intersects the transparent footer strip, with
+/// visibility/alpha/layer state — used to find what still contributes pixels
+/// (and therefore window-server shape) inside the strip.
+#[cfg(target_os = "macos")]
+unsafe fn log_strip_views_debug(ns_window: id) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if std::env::var("SCRIPT_KIT_GLASS_BAND_DEBUG").is_err() {
+        return;
+    }
+    let content_view: id = msg_send![ns_window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let strip = f64::from(main_window_float_footer_strip_height());
+    if strip <= 0.0 {
+        return;
+    }
+
+    unsafe fn walk(view: id, content_view: id, strip: f64, depth: usize, out: &mut Vec<String>) {
+        use objc::{msg_send, sel, sel_impl};
+        let subviews: id = msg_send![view, subviews];
+        if subviews == nil {
+            return;
+        }
+        let count: usize = msg_send![subviews, count];
+        for index in 0..count {
+            let child: id = msg_send![subviews, objectAtIndex: index];
+            if child == nil {
+                continue;
+            }
+            let frame: cocoa::foundation::NSRect = msg_send![child, frame];
+            let superview: id = msg_send![child, superview];
+            let origin_in_content: cocoa::foundation::NSPoint = msg_send![
+                content_view,
+                convertPoint: frame.origin
+                fromView: superview
+            ];
+            if origin_in_content.y < strip + 2.0 {
+                let hidden: cocoa::base::BOOL = msg_send![child, isHidden];
+                let alpha: f64 = msg_send![child, alphaValue];
+                let cls: id = msg_send![child, class];
+                let cls_name: id = msg_send![cls, className];
+                let utf8: *const std::os::raw::c_char = msg_send![cls_name, UTF8String];
+                let cls_name = if utf8.is_null() {
+                    String::new()
+                } else {
+                    std::ffi::CStr::from_ptr(utf8)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                let layer: id = msg_send![child, layer];
+                let layer_bg_alpha = if layer != nil {
+                    let bg: *const std::ffi::c_void = msg_send![layer, backgroundColor];
+                    if bg.is_null() {
+                        -1.0
+                    } else {
+                        #[link(name = "CoreGraphics", kind = "framework")]
+                        extern "C" {
+                            fn CGColorGetAlpha(color: *const std::ffi::c_void) -> f64;
+                        }
+                        CGColorGetAlpha(bg)
+                    }
+                } else {
+                    -2.0
+                };
+                out.push(format!(
+                    "{}{} y={:.1} frame=({:.1},{:.1},{:.1},{:.1}) hidden={} alpha={:.4} layer_bg_alpha={:.4}",
+                    "  ".repeat(depth),
+                    cls_name,
+                    origin_in_content.y,
+                    frame.origin.x,
+                    frame.origin.y,
+                    frame.size.width,
+                    frame.size.height,
+                    hidden == YES,
+                    alpha,
+                    layer_bg_alpha,
+                ));
+            }
+            walk(child, content_view, strip, depth + 1, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(content_view, content_view, strip, 0, &mut out);
+    let has_shadow: cocoa::base::BOOL = msg_send![ns_window, hasShadow];
+    tracing::info!(
+        target: "script_kit::footer_popup",
+        event = "glass_strip_view_dump",
+        window_has_shadow = has_shadow == YES,
+        views = %out.join(" | "),
+        "Views intersecting the transparent footer strip"
+    );
 }
 
 /// One-shot introspection: log NSGlassEffectView's declared properties so we
@@ -2094,7 +2336,7 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
 
     sync_main_window_glass_scroll_bands(ns_window);
 
-    let existing = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
+    let existing = find_subview_by_identifier(main_footer_search_root(ns_window), FOOTER_EFFECT_ID);
     if existing != nil {
         return true;
     }
@@ -2178,7 +2420,21 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     }
 
     let installed = if glass_mode {
-        add_main_window_glass_band_above_metal(content_view, footer_view)
+        // Float mode: the host lives in a dedicated child window so the main
+        // window's strip stays completely empty (shadow shape hugs the
+        // container) and the capsule glass cannot merge with the backdrop.
+        let child = ensure_float_footer_child_window(ns_window);
+        let child_content: id = if child == nil {
+            nil
+        } else {
+            msg_send![child, contentView]
+        };
+        if child_content != nil {
+            let _: () = msg_send![child_content, addSubview: footer_view];
+            true
+        } else {
+            false
+        }
     } else {
         let _: () = msg_send![
             content_view,
@@ -2196,18 +2452,18 @@ unsafe fn ensure_main_footer_host(ns_window: id) -> bool {
     tracing::info!(
         target: "script_kit::footer_popup",
         event = "native_footer_host_installed",
-        "Installed native footer host inside the main window contentView"
+        "Installed native footer host"
     );
     if glass_mode {
         tracing::info!(
             target: "script_kit::footer_popup",
             event = "glass_footer_float_host_installed",
             height = footer_height(),
-            "Installed floating footer chrome host (passthrough, per-button glass capsules) above the GPUI Metal view"
+            "Installed floating footer host in the non-activating child window below the container"
         );
     }
 
-    find_subview_by_identifier(content_view, FOOTER_EFFECT_ID) != nil
+    find_subview_by_identifier(main_footer_search_root(ns_window), FOOTER_EFFECT_ID) != nil
 }
 
 /// Hex (0xRRGGBB) for the native footer's label / hint text.
@@ -2337,7 +2593,8 @@ unsafe fn refresh_footer_host_impl(
         return false;
     }
 
-    let footer_view = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
+    let footer_view =
+        find_subview_by_identifier(main_footer_search_root(ns_window), FOOTER_EFFECT_ID);
     if footer_view == nil {
         return false;
     }
@@ -2658,17 +2915,12 @@ unsafe fn remove_main_footer_host(ns_window: id) {
 
     clear_main_window_footer_refresh_signature();
 
-    let content_view: id = msg_send![ns_window, contentView];
-    if content_view == nil {
-        return;
+    let footer_view =
+        find_subview_by_identifier(main_footer_search_root(ns_window), FOOTER_EFFECT_ID);
+    if footer_view != nil {
+        let _: () = msg_send![footer_view, removeFromSuperview];
     }
-
-    let footer_view = find_subview_by_identifier(content_view, FOOTER_EFFECT_ID);
-    if footer_view == nil {
-        return;
-    }
-
-    let _: () = msg_send![footer_view, removeFromSuperview];
+    remove_float_footer_child_window(ns_window);
 }
 
 #[cfg(target_os = "macos")]
@@ -2907,6 +3159,9 @@ unsafe fn ensure_footer_left_info_capsule(left_info_view: id, content_width: f64
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{msg_send, sel, sel_impl};
 
+    // Safe in-window: the whole footer host (including this view) lives in
+    // the floating-footer child window, so this glass cannot merge with the
+    // main window's Tahoe backdrop.
     const CAPSULE_ID: &str = "script-kit-footer-left-info-capsule";
     const PAD_X: f64 = 8.0;
     let existing = find_subview_by_identifier(left_info_view, CAPSULE_ID);
@@ -3964,8 +4219,10 @@ unsafe fn make_footer_hint_item(
         return nil;
     }
 
-    // Floating-chrome mode: each button rides its own glass capsule (rows
-    // refract through the control itself; there is no footer band).
+    // Floating-chrome mode: each button rides its own glass capsule. The
+    // whole host lives in the floating-footer CHILD window, so this glass
+    // cannot merge with the main window's Tahoe backdrop (same-window glass
+    // bridges the 8px container gap into a full-width meniscus shelf).
     if glass_scroll_bands_active() {
         if let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") {
             let capsule: id = msg_send![glass_class, alloc];

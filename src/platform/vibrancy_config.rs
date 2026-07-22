@@ -99,8 +99,13 @@ pub fn configure_window_vibrancy_material_for_appearance(
         // ╚════════════════════════════════════════════════════════════════════════════╝
         let glass_mode = tahoe_liquid_glass_available() && theme.is_vibrancy_enabled();
         let window_bg_color: id = if glass_mode {
-            // Matches the gpui fork's Transparent path (0.0001 alpha keeps
-            // the window shadow machinery alive, unlike clearColor).
+            // Near-clear (NOT clearColor): the 0.0001-alpha base makes the
+            // window-server shape the full rect, so the container's shadow is
+            // drawn OUTSIDE the window bounds only. With clearColor the shape
+            // hugs the container and its shadow renders INSIDE the transparent
+            // footer strip with hard clip artifacts (dense-core boundary line
+            // ~22pt below the container, hard cutoff at the window bottom —
+            // probe-measured). Matches the gpui fork's Transparent path.
             msg_send![
                 class!(NSColor),
                 colorWithSRGBRed: 0.0f64 green: 0.0f64 blue: 0.0f64 alpha: 0.0001f64
@@ -111,7 +116,11 @@ pub fn configure_window_vibrancy_material_for_appearance(
         let _: () = msg_send![window, setBackgroundColor: window_bg_color];
 
         // Enable shadow for native depth perception (Raycast/Spotlight have shadows)
-        let _: () = msg_send![window, setHasShadow: true];
+        // Debug: SCRIPT_KIT_DEBUG_NO_SHADOW=1 disables it to isolate
+        // window-server shadow/rim artifacts (e.g. row-span bridging across
+        // the floating footer capsules).
+        let has_shadow = std::env::var("SCRIPT_KIT_DEBUG_NO_SHADOW").is_err();
+        let _: () = msg_send![window, setHasShadow: has_shadow];
 
         // Mark window as non-opaque to allow transparency/vibrancy
         let _: () = msg_send![window, setOpaque: false];
