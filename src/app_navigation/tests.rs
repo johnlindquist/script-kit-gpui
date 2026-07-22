@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod app_navigation_tests {
-    use super::{page_down_target_index, validated_selection_index, wheel_scroll_target_index};
+    use super::{page_down_target_index, validated_selection_index};
     use crate::list_item::GroupedListItem;
 
     #[test]
@@ -27,20 +27,6 @@ mod app_navigation_tests {
         ];
 
         assert_eq!(page_down_target_index(&rows, 1, 0, Some(2)), 1);
-    }
-
-    #[test]
-    fn test_handle_scroll_wheel_coalesces_rapid_deltas() {
-        let item_count = 20;
-        let start = 7;
-
-        let after_first = wheel_scroll_target_index(start, item_count, 0.2);
-        let after_second = wheel_scroll_target_index(after_first, item_count, 0.2);
-        let after_third = wheel_scroll_target_index(after_second, item_count, -0.2);
-
-        assert_eq!(after_first, start);
-        assert_eq!(after_second, start);
-        assert_eq!(after_third, start);
     }
 
     #[test]

@@ -1526,7 +1526,7 @@ mod tests {
     }
 
     #[test]
-    fn unsuppressed_momentum_preserves_selection_owned_delta() {
+    fn unsuppressed_momentum_preserves_native_delta() {
         let tuning = BoundaryAffordanceTuning::default();
         let mut state = BoundaryAffordanceState::default();
         let decision = state.handle_scroll_lifecycle(

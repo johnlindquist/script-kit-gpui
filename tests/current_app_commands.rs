@@ -174,21 +174,6 @@ fn do_in_current_app_submission_clears_any_plain_launcher_filter_when_switching_
 }
 
 #[test]
-fn current_app_commands_scroll_does_not_render_reanchor_selection() {
-    let source = std::fs::read_to_string("src/render_builtins/current_app_commands.rs")
-        .expect("must read current_app_commands renderer");
-    let production_source = source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production source should exist");
-
-    assert!(
-        !production_source.contains("builtin_reanchor_selection_from_scroll("),
-        "current app commands should not reanchor selection during render; main-menu-style selection is owned by keyboard/wheel movement"
-    );
-}
-
-#[test]
 fn do_in_current_app_execution_uses_effective_query_for_list_switching() {
     let source = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("must read builtin execution source");

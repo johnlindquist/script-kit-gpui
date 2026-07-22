@@ -39,17 +39,6 @@ fn page_down_target_index(
 }
 
 #[inline]
-fn wheel_scroll_target_index(current_item: usize, item_count: usize, delta_lines: f32) -> usize {
-    if item_count == 0 {
-        return 0;
-    }
-
-    let max_item = item_count.saturating_sub(1);
-    let items_to_scroll = (-delta_lines).round() as i32;
-    (current_item as i32 + items_to_scroll).clamp(0, max_item as i32) as usize
-}
-
-#[inline]
 fn validated_selection_index(grouped_items: &[GroupedListItem], selected_index: usize) -> usize {
     list_item::coerce_selection(grouped_items, selected_index).unwrap_or(0)
 }

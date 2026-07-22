@@ -56,16 +56,12 @@ fn process_manager_render_and_keyboard_use_visible_entry_helper() {
 }
 
 #[test]
-fn process_manager_scroll_and_refresh_are_visible_row_owned() {
+fn process_manager_refresh_is_visible_row_owned() {
     for required in [
-        ".on_scroll_wheel(cx.listener(",
-        "builtin_scroll_target_from_wheel(",
-        "Self::builtin_reanchor_selection_from_scroll(",
         "self.builtin_uniform_list_scrollbar(&self.process_list_scroll_handle",
         "Clamp selection index against the visible filtered rows.",
         "Self::process_manager_filtered_entries(\n                                        &app.cached_processes,\n                                        filter,",
         "Self::process_manager_filtered_entries(\n                                        &this.cached_processes,\n                                        &current_filter,",
-        "cx.stop_propagation();",
     ] {
         assert!(
             PROCESS_MANAGER.contains(required),

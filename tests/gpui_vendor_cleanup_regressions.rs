@@ -308,21 +308,11 @@ fn kit_store_consumes_owned_keyboard_events() {
 }
 
 #[test]
-fn kit_store_uniform_lists_use_selection_owned_wheel_contract() {
-    for needle in [
-        ".on_scroll_wheel(cx.listener(",
-        "builtin_scroll_target_from_wheel(",
-        "Self::builtin_reanchor_selection_from_scroll(",
-        "this.list_scroll_handle\n                                        .scroll_to_item(new_selected, ScrollStrategy::Nearest);",
-        "this.list_scroll_handle\n                            .scroll_to_item(0, ScrollStrategy::Nearest);",
-        "self.builtin_uniform_list_scrollbar(&self.list_scroll_handle",
-        "cx.stop_propagation();",
-    ] {
-        assert!(
-            KIT_STORE_SOURCE.contains(needle),
-            "Kit Store uniform lists should keep wheel scrolling selection-owned: {needle}"
-        );
-    }
+fn kit_store_uniform_lists_use_vendor_scrollbar() {
+    assert!(
+        KIT_STORE_SOURCE.contains("self.builtin_uniform_list_scrollbar(&self.list_scroll_handle"),
+        "Kit Store uniform lists should attach the shared vendor scrollbar"
+    );
 }
 
 #[test]

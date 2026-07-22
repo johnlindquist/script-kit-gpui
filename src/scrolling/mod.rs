@@ -6,4 +6,3 @@ pub(crate) mod list_geometry;
 pub(crate) mod list_interaction;
 #[cfg(test)]
 mod native_script_list_scroll_tests;
-pub(crate) mod selection_owned;

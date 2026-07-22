@@ -206,7 +206,7 @@ fn process_manager_uses_minimal_prompt_chrome() {
 }
 
 #[test]
-fn launcher_family_uniform_lists_use_vendor_scrollbars_and_wheel_contract() {
+fn launcher_family_uniform_lists_use_vendor_scrollbars() {
     for (label, source) in [
         ("app_launcher", APP_LAUNCHER_SOURCE),
         ("window_switcher", WINDOW_SWITCHER_SOURCE),
@@ -216,18 +216,6 @@ fn launcher_family_uniform_lists_use_vendor_scrollbars_and_wheel_contract() {
         ),
         ("current_app_commands", CURRENT_APP_COMMANDS_SOURCE),
     ] {
-        assert!(
-            source.contains(".on_scroll_wheel(cx.listener("),
-            "{label} should intercept wheel events on its list pane"
-        );
-        assert!(
-            source.contains("builtin_scroll_target_from_wheel("),
-            "{label} should use the shared wheel-to-selection helper"
-        );
-        assert!(
-            source.contains("builtin_reanchor_selection_from_scroll("),
-            "{label} should reanchor selection after handle movement"
-        );
         assert!(
             source.contains("builtin_uniform_list_scrollbar("),
             "{label} should attach the shared vendor scrollbar helper"

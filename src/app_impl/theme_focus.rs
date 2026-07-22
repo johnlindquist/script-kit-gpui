@@ -47,7 +47,6 @@ impl ScriptListApp {
         );
         self.main_list_row_generation = self.main_list_row_generation.wrapping_add(1);
         self.last_scrolled_index = None;
-        self.wheel_accum = 0.0;
         tracing::info!(
             target: "THEME",
             reason,

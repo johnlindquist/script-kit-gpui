@@ -94,18 +94,10 @@ fn current_app_commands_header_uses_bounded_flex_for_filter_and_count() {
 }
 
 #[test]
-fn current_app_commands_uses_wheel_contract_and_vendor_scrollbar() {
+fn current_app_commands_uses_vendor_scrollbar() {
     let source = production_source();
-    for needle in [
-        ".on_scroll_wheel(cx.listener(",
-        "builtin_scroll_target_from_wheel(",
-        "builtin_reanchor_selection_from_scroll(",
-        "builtin_uniform_list_scrollbar(",
-        "cx.stop_propagation();",
-    ] {
-        assert!(
-            source.contains(needle),
-            "Current App Commands should keep selection-owned wheel/scrollbar contract: {needle}"
-        );
-    }
+    assert!(
+        source.contains("builtin_uniform_list_scrollbar("),
+        "Current App Commands should attach the shared vendor scrollbar"
+    );
 }

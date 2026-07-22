@@ -179,32 +179,6 @@ fn main_list_footer_reveal_clearance_comes_from_theme_tokens() {
 }
 
 #[test]
-fn main_list_scroll_row_math_uses_current_theme_variant() {
-    let content = read("src/app_navigation/impl_scroll.rs");
-    let selection_owned = read("src/scrolling/selection_owned.rs");
-
-    assert!(
-        content.contains("fn script_list_row_height_for_theme(")
-            && content.contains("effective_first_section_header_height_for_theme(theme)")
-            && content.contains("effective_section_header_height_for_theme(theme)")
-            && content.contains("effective_source_status_row_height_for_theme(theme)")
-            && content.contains("effective_list_item_height_for_theme(theme)"),
-        "impl_scroll row math should use the same theme-specific heights as the renderer"
-    );
-    assert!(
-        content.contains("script_list_content_height_for_theme(items, theme)")
-            && content.contains("let theme = crate::designs::current_main_menu_theme();"),
-        "content-height calculations should capture the current theme once and pass it through"
-    );
-    assert!(
-        selection_owned.contains("fn row_height_for_theme(")
-            && selection_owned.contains("effective_first_section_header_height_for_theme(theme)")
-            && selection_owned.contains("effective_list_item_height_for_theme(theme)"),
-        "selection-owned reanchor logic should use theme-specific row heights too"
-    );
-}
-
-#[test]
 fn main_list_render_uses_pure_selection_snapshot() {
     let content = read("src/render_script_list/mod.rs");
 
@@ -216,10 +190,6 @@ fn main_list_render_uses_pure_selection_snapshot() {
                 "let spine_selection_render_index = selected_index_for_script_list_render("
             ),
         "render must coerce selection through a pure snapshot before row closures are captured"
-    );
-    assert!(
-        !content.contains("sync_main_list_selection_to_visible_window(\"render\")"),
-        "render must not mutate selection after rows have already captured the selected index"
     );
 }
 
@@ -359,25 +329,6 @@ fn footer_safe_scroll_offset_uses_footer_reduced_viewport_for_trailing_scroll_bu
 }
 
 #[test]
-fn script_list_scroll_wheel_handler_stops_native_list_propagation() {
-    let content = read("src/render_script_list/mod.rs");
-
-    let handler_start = content
-        .find(".on_scroll_wheel(cx.listener(")
-        .expect("script list scroll wheel handler not found");
-    let handler_body = &content[handler_start..content.len().min(handler_start + 3200)];
-
-    assert!(
-        handler_body.contains("if scroll_item_count == 0 {"),
-        "script list wheel handler should keep empty-list behavior explicit"
-    );
-    assert!(
-        handler_body.contains("cx.stop_propagation();"),
-        "script list wheel handler must stop propagation so GPUI native list scrolling cannot drift past selection"
-    );
-}
-
-#[test]
 fn script_list_scrollbar_overlay_uses_footer_safe_viewport_and_content_height() {
     let content = read("src/render_script_list/mod.rs");
 
@@ -404,28 +355,5 @@ fn script_list_scrollbar_overlay_uses_footer_safe_viewport_and_content_height() 
     assert!(
         !content.contains(".scrollbar_show(ScrollbarShow::Always)"),
         "script list scrollbar should not force always-visible mode"
-    );
-}
-
-#[test]
-fn browser_history_wheel_handler_intercepts_and_stops_native_scroll() {
-    let content = read("src/render_builtins/browser_history.rs");
-
-    let handler_start = content
-        .find(".on_scroll_wheel(cx.listener(")
-        .expect("browser history scroll wheel handler not found");
-    let handler_body = &content[handler_start..content.len().min(handler_start + 2600)];
-
-    assert!(
-        handler_body.contains("builtin_scroll_target_from_wheel"),
-        "browser history wheel handler should use the shared builtin wheel helper"
-    );
-    assert!(
-        handler_body.contains("this.browser_history_scroll_handle"),
-        "browser history wheel handler should drive the browser-history scroll handle"
-    );
-    assert!(
-        handler_body.contains("cx.stop_propagation();"),
-        "browser history wheel handler must stop propagation so GPUI native scrolling cannot fight selection"
     );
 }

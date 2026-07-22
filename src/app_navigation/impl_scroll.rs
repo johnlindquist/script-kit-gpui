@@ -1088,43 +1088,6 @@ impl ScriptListApp {
         }
     }
 
-    /// Handle mouse wheel scroll events by converting to item-based scrolling.
-    ///
-    /// This bypasses GPUI's pixel-based scroll which has height calculation issues
-    /// with variable-height items. Instead, we convert the scroll delta to item
-    /// indices and use scroll_to_reveal_item() like keyboard navigation does.
-    ///
-    /// # Arguments
-    /// * `delta_lines` - Scroll delta in "lines" (positive = scroll content up/view down)
-    #[allow(dead_code)]
-    pub fn handle_scroll_wheel(&mut self, delta_lines: f32, cx: &mut Context<Self>) {
-        // Compute wheel movement targets while grouped results are borrowed.
-        let (current_item, new_item, items_to_scroll) = {
-            let current_item = self.main_list_state.logical_scroll_top().item_ix;
-            let (grouped_items, _) = self.get_grouped_results_cached();
-            let item_count = grouped_items.len();
-            let new_item = wheel_scroll_target_index(current_item, item_count, delta_lines);
-            let items_to_scroll = (-delta_lines).round() as i32;
-            (current_item, new_item, items_to_scroll)
-        };
-
-        tracing::debug!(
-            target: "SCROLL_STATE",
-            delta_lines,
-            current_item,
-            new_item,
-            items_to_scroll,
-            "Mouse wheel scroll"
-        );
-
-        // Only scroll if we're moving to a different item
-        if new_item != current_item {
-            self.main_list_state.scroll_to_reveal_item(new_item);
-            self.trigger_scroll_activity(cx);
-            cx.notify();
-        }
-    }
-
     /// Synchronize the GPUI list component state with the current grouped results.
     ///
     /// Call this method after any operation that may change the number of items

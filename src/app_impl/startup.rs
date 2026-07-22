@@ -796,7 +796,6 @@ impl ScriptListApp {
             scrollbar_visibility: crate::transitions::Opacity::INVISIBLE,
             scrollbar_fade_gen: 0,
             last_scroll_time: None,
-            builtin_wheel_owned_selected_index: None,
             current_view: AppView::ScriptList,
             last_logged_app_view_variant: None,
             submit_diagnostics: SubmitDiagnosticsState::default(),
@@ -974,8 +973,6 @@ impl ScriptListApp {
             },
             // Navigation coalescing for rapid arrow key events
             nav_coalescer: NavCoalescer::new(),
-            // Wheel scroll accumulator starts at 0
-            wheel_accum: 0.0,
             main_list_boundary_affordance:
                 crate::scrolling::boundary_affordance::BoundaryAffordanceState::new(
                     crate::platform::prefers_reduced_motion(),

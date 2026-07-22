@@ -974,8 +974,6 @@ pub(crate) struct ScriptListApp {
     scrollbar_fade_gen: u64,
     /// Timestamp of last scroll activity (for fade-out timer)
     last_scroll_time: Option<std::time::Instant>,
-    /// Selected index most recently chosen by a selection-owned builtin wheel scroll.
-    builtin_wheel_owned_selected_index: Option<usize>,
     // Interactive script state
     current_view: AppView,
     last_logged_app_view_variant: Option<&'static str>,
@@ -1345,9 +1343,6 @@ pub(crate) struct ScriptListApp {
     // NOTE: Currently unused - arrow keys handled in interceptor without coalescing
     #[allow(dead_code)]
     nav_coalescer: NavCoalescer,
-    // Wheel scroll accumulator for smooth trackpad scrolling
-    // Accumulates fractional deltas until they cross 1.0, then converts to item steps
-    wheel_accum: f32,
     /// Visual-only boundary gesture state. Logical ListState and selection stay clamped.
     main_list_boundary_affordance: crate::scrolling::boundary_affordance::BoundaryAffordanceState,
     list_suppress_hover_until_pointer_move: bool,
