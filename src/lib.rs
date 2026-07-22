@@ -35,7 +35,6 @@ pub mod debug_grid;
 pub mod design_contract;
 pub mod designs;
 pub mod dev_marker;
-pub mod dev_style_tool;
 pub mod editor;
 pub mod effects;
 pub mod emoji;

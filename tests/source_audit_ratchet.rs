@@ -23,10 +23,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "violation detector: count>0 reports diagnostics, equivalent to contains",
     ),
     (
-        "tests/actions_popup_kitchen_sink_fixture_contract.rs",
-        "singleton on stable call token `match open_actions_window(`",
-    ),
-    (
         "tests/app_launcher_visible_rows_contract.rs",
         "pre-policy survivor: floor over stable call token (render + keyboard paths)",
     ),
@@ -110,10 +106,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "pre-policy survivor: floor over stable JS error-bridge token",
     ),
     (
-        "tests/agent_chat_kitchen_sink_fixture_contract.rs",
-        "pre-policy survivor: fixture struct literal count",
-    ),
-    (
         "tests/agent_chat_markdown_blocked_reason_contract.rs",
         "pre-policy survivor: floor over stable call token",
     ),
@@ -136,10 +128,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "tests/dictation_background_sync_contract.rs",
         "pre-policy survivor: exact count over stable qualified call token",
-    ),
-    (
-        "tests/embedded_ai_window_agent_handoff_sites_contract.rs",
-        "pre-policy survivor: exact counts over stable qualified call tokens",
     ),
     (
         "tests/filter_input_preflight_contract.rs",

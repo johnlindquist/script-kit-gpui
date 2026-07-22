@@ -27,7 +27,6 @@ pub mod catalog;
 pub mod codex_client;
 pub mod eval_ledger;
 pub mod explain_cache;
-pub mod manager_window;
 pub mod model;
 pub mod package_source;
 pub mod router;
@@ -35,8 +34,23 @@ pub mod run_registry;
 pub mod runner;
 pub mod session;
 
-/// THE cwd resolver for every flow surface (Flow UX variations, Flow
-/// Manager, automation snapshots). Precedence:
+/// Last cwd a flow was launched from; updated on every launch so flow
+/// surfaces follow the user's working context. Retained from the removed
+/// detached Flow Manager window — the Flow Desk still resolves through it.
+static LAST_FLOW_CWD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn remember_flow_cwd(cwd: &str) {
+    if let Ok(mut guard) = LAST_FLOW_CWD.lock() {
+        *guard = Some(cwd.to_string());
+    }
+}
+
+pub fn last_flow_cwd() -> Option<String> {
+    LAST_FLOW_CWD.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// THE cwd resolver for every flow surface (Flow UX variations, automation
+/// snapshots). Precedence:
 /// 1. `SCRIPT_KIT_FLOW_UX_CWD` (probe/test seam),
 /// 2. the caller's context cwd (spine chip) when it has one,
 /// 3. the last cwd a flow was launched from,
@@ -54,7 +68,7 @@ pub fn resolve_flow_cwd(context_cwd: Option<String>) -> String {
             return cwd;
         }
     }
-    if let Some(remembered) = manager_window::last_flow_cwd() {
+    if let Some(remembered) = last_flow_cwd() {
         return remembered;
     }
     std::env::var("HOME").unwrap_or_else(|_| "/".to_string())

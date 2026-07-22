@@ -157,7 +157,6 @@ fn apply_filterable_route_plan_is_the_single_assignment_step() {
     );
 
     for forbidden in [
-        "self.current_view = AppView::DesignGalleryView",
         "self.current_view = AppView::ClipboardHistoryView",
         "self.current_view = AppView::AppLauncherView",
         "self.current_view = AppView::BrowserTabsView",

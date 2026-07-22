@@ -54,8 +54,6 @@ pub fn is_save_suppressed() -> bool {
 pub enum WindowRole {
     Main,
     Notes,
-    Ai,
-    AiMini,
     AgentChat,
 }
 impl WindowRole {
@@ -64,8 +62,6 @@ impl WindowRole {
         match self {
             WindowRole::Main => "main",
             WindowRole::Notes => "notes",
-            WindowRole::Ai => "ai",
-            WindowRole::AiMini => "ai_mini",
             WindowRole::AgentChat => "agent_chat",
         }
     }
@@ -75,8 +71,6 @@ impl WindowRole {
         match self {
             WindowRole::Main => "Main",
             WindowRole::Notes => "Notes",
-            WindowRole::Ai => "AI",
-            WindowRole::AiMini => "AI Mini",
             WindowRole::AgentChat => "Agent Chat",
         }
     }
@@ -168,14 +162,6 @@ pub struct WindowStateFile {
     /// Notes window positions stored per display
     #[serde(default)]
     pub notes_per_display: HashMap<String, PersistedWindowBounds>,
-    /// Legacy AI window position (for backwards compatibility)
-    pub ai: Option<PersistedWindowBounds>,
-    /// AI window positions stored per display
-    #[serde(default)]
-    pub ai_per_display: HashMap<String, PersistedWindowBounds>,
-    /// Mini AI window position (separate from full AI)
-    #[serde(default)]
-    pub ai_mini: Option<PersistedWindowBounds>,
     /// Agent Chat chat detached window position
     #[serde(default)]
     pub agent_chat: Option<PersistedWindowBounds>,
@@ -260,8 +246,6 @@ pub fn load_window_bounds(role: WindowRole) -> Option<PersistedWindowBounds> {
     match role {
         WindowRole::Main => state.main,
         WindowRole::Notes => state.notes,
-        WindowRole::Ai => state.ai,
-        WindowRole::AiMini => state.ai_mini,
         WindowRole::AgentChat => state.agent_chat,
     }
 }
@@ -282,8 +266,6 @@ pub fn save_window_bounds(role: WindowRole, bounds: PersistedWindowBounds) {
     match role {
         WindowRole::Main => state.main = Some(bounds),
         WindowRole::Notes => state.notes = Some(bounds),
-        WindowRole::Ai => state.ai = Some(bounds),
-        WindowRole::AiMini => state.ai_mini = Some(bounds),
         WindowRole::AgentChat => state.agent_chat = Some(bounds),
     }
     save_state_file(&state);
@@ -312,9 +294,8 @@ pub fn reset_all_positions() {
 }
 /// Check if any window positions have been customized
 pub fn has_custom_positions() -> bool {
-    load_state_file().is_some_and(|s| {
-        s.main.is_some() || !s.main_per_display.is_empty() || s.notes.is_some() || s.ai.is_some()
-    })
+    load_state_file()
+        .is_some_and(|s| s.main.is_some() || !s.main_per_display.is_empty() || s.notes.is_some())
 }
 // ============================================================================
 // Per-Display Position Storage (Main Window)

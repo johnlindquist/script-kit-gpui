@@ -517,7 +517,7 @@ impl ScriptListApp {
         std::path::Path::new(path)
             .parent()
             .and_then(|parent| parent.to_str())
-            .map(|s| crate::file_search::ensure_trailing_slash(s))
+            .map(crate::file_search::ensure_trailing_slash)
     }
 
     /// After a mutation (trash, rename, move, etc.), patch the cached directory
@@ -884,10 +884,10 @@ impl ScriptListApp {
                         FileSearchHandlerAction::OpenWith => crate::file_search::open_with(&path),
                         FileSearchHandlerAction::ShowInfo => crate::file_search::show_info(&path),
                         FileSearchHandlerAction::AttachToAi => {
-                            self.open_ai_window_after_main_hide(
+                            self.open_agent_chat_after_main_hide(
                                 action_id,
                                 &dctx.trace_id,
-                                DeferredAiWindowAction::AddAttachment { path: path.clone() },
+                                DeferredAgentChatAction::AddAttachment { path: path.clone() },
                                 cx,
                             );
 

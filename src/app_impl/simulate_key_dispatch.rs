@@ -653,8 +653,8 @@ impl ScriptListApp {
                                 view.main_menu_arrow_key_with_history(false, window, ctx);
                             }
                             "enter" => {
-                                if view.menu_syntax_object_selector_owns_main_keyboard() {
-                                    if view.apply_menu_syntax_object_selector_intent(
+                                if view.menu_syntax_object_selector_owns_main_keyboard()
+                                    && view.apply_menu_syntax_object_selector_intent(
                                         crate::menu_syntax::InlinePickerKeyIntent::Accept,
                                         window,
                                         ctx,
@@ -665,9 +665,8 @@ impl ScriptListApp {
                                         );
                                         return;
                                     }
-                                }
-                                if view.menu_syntax_trigger_picker_owns_main_keyboard() {
-                                    if view.apply_menu_syntax_trigger_picker_intent(
+                                if view.menu_syntax_trigger_picker_owns_main_keyboard()
+                                    && view.apply_menu_syntax_trigger_picker_intent(
                                         crate::menu_syntax::InlinePickerKeyIntent::Accept,
                                         window,
                                         ctx,
@@ -678,7 +677,6 @@ impl ScriptListApp {
                                         );
                                         return;
                                     }
-                                }
                                 if view.try_handle_spine_enter(window, ctx) {
                                     logging::log("STDIN", "SimulateKey: Enter - spine consumed");
                                     return;
@@ -706,15 +704,14 @@ impl ScriptListApp {
                                 ) {
                                     return;
                                 }
-                                if view.menu_syntax_object_selector_owns_main_keyboard() {
-                                    if view.apply_menu_syntax_object_selector_intent(
+                                if view.menu_syntax_object_selector_owns_main_keyboard()
+                                    && view.apply_menu_syntax_object_selector_intent(
                                         crate::menu_syntax::InlinePickerKeyIntent::Close,
                                         window,
                                         ctx,
                                     ) {
                                         return;
                                     }
-                                }
                                 if view.menu_syntax_trigger_picker_owns_main_keyboard() {
                                     if view.menu_syntax_filter_only_escape_should_clear() {
                                         view.clear_filter(window, ctx);
@@ -1117,83 +1114,6 @@ impl ScriptListApp {
                         }
                     }
                 }
-                AppView::DesignGalleryView { .. } => {
-                    logging::log(
-                        "STDIN",
-                        &format!(
-                            "SimulateKey: Dispatching '{}' to DesignGalleryView",
-                            key_lower
-                        ),
-                    );
-
-                    match key_lower.as_str() {
-                        "up" | "arrowup" | "down" | "arrowdown" => {
-                            let is_up = matches!(key_lower.as_str(), "up" | "arrowup");
-                            let view_state = if let AppView::DesignGalleryView {
-                                filter,
-                                selected_index,
-                            } = &view.current_view
-                            {
-                                Some((filter.clone(), *selected_index))
-                            } else {
-                                None
-                            };
-
-                            let Some((filter, old_index)) = view_state else {
-                                return;
-                            };
-
-                            let filtered_len = Self::design_gallery_visible_rows(&filter).len();
-                            let mut new_index = old_index;
-                            if filtered_len == 0 {
-                                new_index = 0;
-                            } else {
-                                if new_index >= filtered_len {
-                                    new_index = filtered_len - 1;
-                                }
-                                if is_up && new_index > 0 {
-                                    new_index -= 1;
-                                } else if !is_up && new_index + 1 < filtered_len {
-                                    new_index += 1;
-                                }
-                            }
-
-                            if let AppView::DesignGalleryView { selected_index, .. } =
-                                &mut view.current_view
-                            {
-                                *selected_index = new_index;
-                            }
-                            if filtered_len > 0 {
-                                view.design_gallery_scroll_handle
-                                    .scroll_to_item(new_index, ScrollStrategy::Nearest);
-                            }
-                            view.input_mode = InputMode::Keyboard;
-                            view.hovered_index = None;
-                            ctx.notify();
-
-                            logging::log(
-                                "STDIN",
-                                &format!(
-                                    "SimulateKey: DesignGallery selection {} -> {} of {}",
-                                    old_index, new_index, filtered_len
-                                ),
-                            );
-                        }
-                        "escape" => {
-                            logging::log("STDIN", "SimulateKey: Escape - close DesignGalleryView");
-                            view.go_back_or_close(window, ctx);
-                        }
-                        _ => {
-                            logging::log(
-                                "STDIN",
-                                &format!(
-                                    "SimulateKey: Unhandled key '{}' in DesignGalleryView",
-                                    key_lower
-                                ),
-                            );
-                        }
-                    }
-                }
                 AppView::ThemeChooserView { .. } => {
                     logging::log(
                         "STDIN",
@@ -1203,85 +1123,6 @@ impl ScriptListApp {
                         ),
                     );
                     view.simulate_theme_chooser_key(&key_lower, has_cmd, window, ctx);
-                }
-                AppView::FooterGalleryView { .. } => {
-                    logging::log(
-                        "STDIN",
-                        &format!(
-                            "SimulateKey: Dispatching '{}' to FooterGalleryView",
-                            key_lower
-                        ),
-                    );
-
-                    match key_lower.as_str() {
-                        "up" | "arrowup" | "down" | "arrowdown" => {
-                            let is_up = matches!(key_lower.as_str(), "up" | "arrowup");
-                            let view_state = if let AppView::FooterGalleryView {
-                                filter,
-                                selected_index,
-                            } = &view.current_view
-                            {
-                                Some((filter.clone(), *selected_index))
-                            } else {
-                                None
-                            };
-
-                            let Some((filter, old_index)) = view_state else {
-                                return;
-                            };
-
-                            let filtered_len = Self::footer_gallery_visible_rows(&filter).len();
-                            let mut new_index = old_index;
-                            if filtered_len == 0 {
-                                new_index = 0;
-                            } else {
-                                if new_index >= filtered_len {
-                                    new_index = filtered_len - 1;
-                                }
-                                if is_up && new_index > 0 {
-                                    new_index -= 1;
-                                } else if !is_up && new_index + 1 < filtered_len {
-                                    new_index += 1;
-                                }
-                            }
-
-                            if let AppView::FooterGalleryView { selected_index, .. } =
-                                &mut view.current_view
-                            {
-                                *selected_index = new_index;
-                            }
-                            if filtered_len > 0 {
-                                view.footer_gallery_scroll_handle
-                                    .scroll_to_item(new_index, ScrollStrategy::Nearest);
-                            }
-                            view.input_mode = InputMode::Keyboard;
-                            view.hovered_index = None;
-                            ctx.notify();
-
-                            logging::log(
-                                "STDIN",
-                                &format!(
-                                    "SimulateKey: FooterGallery selection {} -> {} of {}",
-                                    old_index, new_index, filtered_len
-                                ),
-                            );
-                        }
-                        "escape" => {
-                            logging::log("STDIN", "SimulateKey: Escape - close FooterGalleryView");
-                            if !view.clear_builtin_view_filter(ctx) {
-                                view.go_back_or_close(window, ctx);
-                            }
-                        }
-                        _ => {
-                            logging::log(
-                                "STDIN",
-                                &format!(
-                                    "SimulateKey: Unhandled key '{}' in FooterGalleryView",
-                                    key_lower
-                                ),
-                            );
-                        }
-                    }
                 }
                 AppView::PathPrompt { entity, .. } => {
                     // Path prompt key handling
@@ -2144,7 +1985,7 @@ impl ScriptListApp {
                             "SimulateKey: Cmd+N - start new Agent Chat thread (retain current)",
                         );
                         entity_clone.update(ctx, |chat, cx| chat.start_new_thread(cx));
-                    } else if {
+                    } else let res = {
                         // Spine projection in Agent Chat owns Up/Down for row selection
                         // and Escape to dismiss. These short-circuit before the
                         // legacy actions / cancel-streaming paths.
@@ -2178,7 +2019,7 @@ impl ScriptListApp {
                             );
                         }
                         spine_handled
-                    } {
+                    }; if res {
                         // Spine handled it; no further action.
                     } else if view.show_actions_popup && key_lower == "escape" {
                         logging::log(
@@ -2201,11 +2042,11 @@ impl ScriptListApp {
                                 "STDIN",
                                 "SimulateKey: Escape - cancel Agent Chat streaming",
                             );
-                        } else if {
+                        } else let res = {
                             let chat = entity_clone.read(ctx);
                             chat.is_focused_text_mini()
                                 || chat.focused_text_originated_from_quick_prompt()
-                        } {
+                        }; if res {
                             logging::log(
                                 "STDIN",
                                 "SimulateKey: Escape - hide focused-text quick prompt Agent Chat",
@@ -2371,29 +2212,6 @@ impl ScriptListApp {
                             "STDIN",
                             &format!(
                                 "SimulateKey: Unhandled key '{}' in FlowSessionView (use simulateGpuiEvent)",
-                                key_lower
-                            ),
-                        );
-                    }
-                }
-                AppView::NonListStatesView { .. } => {
-                    if crate::ui_foundation::is_key_left(&key_lower) {
-                        logging::log("STDIN", "SimulateKey: Left - previous non-list state");
-                        view.move_non_list_showcase_selection(-1, ctx);
-                    } else if crate::ui_foundation::is_key_right(&key_lower) {
-                        logging::log("STDIN", "SimulateKey: Right - next non-list state");
-                        view.move_non_list_showcase_selection(1, ctx);
-                    } else if crate::ui_foundation::is_key_escape(&key_lower) {
-                        logging::log(
-                            "STDIN",
-                            "SimulateKey: Escape - return from non-list states to main menu",
-                        );
-                        view.go_back_or_close(window, ctx);
-                    } else {
-                        logging::log(
-                            "STDIN",
-                            &format!(
-                                "SimulateKey: Unhandled key '{}' in NonListStatesView",
                                 key_lower
                             ),
                         );

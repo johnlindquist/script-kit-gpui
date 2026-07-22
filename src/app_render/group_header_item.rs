@@ -28,11 +28,6 @@ fn builtin_feature_annotation(feature: &builtins::BuiltInFeature) -> String {
         builtins::BuiltInFeature::WindowSwitcher => "Window Manager".to_string(),
         builtins::BuiltInFeature::BrowserTabs => "Browser Tabs".to_string(),
         builtins::BuiltInFeature::SyncToGithub => "Sync to GitHub".to_string(),
-        builtins::BuiltInFeature::DesignGallery => "Design Gallery".to_string(),
-        builtins::BuiltInFeature::FooterGallery => "Footer Gallery".to_string(),
-        builtins::BuiltInFeature::DesignNonListStates => "Non-List States".to_string(),
-        #[cfg(feature = "storybook")]
-        builtins::BuiltInFeature::DesignExplorer => "Design Explorer".to_string(),
         builtins::BuiltInFeature::AiChat => "Agent Chat".to_string(),
         builtins::BuiltInFeature::AiChatVariant(_) => "Agent Chat".to_string(),
         builtins::BuiltInFeature::Notes => "Notes & Scratchpad".to_string(),
@@ -64,7 +59,6 @@ fn builtin_feature_annotation(feature: &builtins::BuiltInFeature) -> String {
         builtins::BuiltInFeature::Tips => "Tips".to_string(),
         builtins::BuiltInFeature::MigrateV1Scripts => "Migration".to_string(),
         builtins::BuiltInFeature::FlowUxVariant(_) => "Flow Launcher".to_string(),
-        builtins::BuiltInFeature::FlowManager => "Flow Manager".to_string(),
         builtins::BuiltInFeature::BackgroundEffectNext
         | builtins::BuiltInFeature::BackgroundEffectPrevious
         | builtins::BuiltInFeature::BackgroundEffectOff => "Background Effect".to_string(),

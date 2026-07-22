@@ -9,20 +9,17 @@
 //! agent-chat slice).
 //!
 //! Contract rules:
-//! - `src/dev_style_tool/agent_chat_catalog.rs` is a CONSUMER of this
-//!   module (knob metadata over these types), never the owner. The
-//!   dependency points dev-tool → production, not the other way around.
+//! - This module is the single owner of the Agent Chat style values; the
+//!   former Dev Style Tool knob catalog was a consumer, never the owner
+//!   (the Dev Style Tool has since been removed).
 //! - Checked-in export artifacts read `production_agent_chat_style()`
-//!   directly; runtime dev-style overrides
-//!   (`effective_agent_chat_style()`) apply on top for live rendering
-//!   only and MUST NOT reach the exporter
-//!   (`agent_chat_runtime_override_cannot_change_checked_in_export`).
+//!   directly; nothing else may reach the exporter.
 //! - All theme-color + authored-alpha packing shared by the renderer and
 //!   the exporter routes through [`pack_rgb_alpha`] / the resolvers below,
 //!   so rounding/cast behavior (0x7F borders, 0x14 diff tints, the
 //!   decimal-50 error background, send-state bytes) has exactly one owner.
 
-// ── Style definition (moved from dev_style_tool/agent_chat_catalog.rs) ────
+// ── Style definition ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AgentChatStyleDef {
@@ -115,9 +112,8 @@ pub struct AgentChatSystemStyle {
     pub border_alpha: f32,
 }
 
-/// The production Agent Chat base style. Checked-in design artifacts read
-/// this function; live rendering layers dev-style runtime overrides on top
-/// via `dev_style_tool::runtime_overrides::effective_agent_chat_style()`.
+/// The production Agent Chat base style. Checked-in design artifacts and
+/// live rendering both read this function directly.
 pub fn production_agent_chat_style() -> AgentChatStyleDef {
     AgentChatStyleDef {
         transcript: AgentChatTranscriptStyle {
@@ -219,8 +215,8 @@ pub(crate) const AGENT_CHAT_INPUT_FONT_FAMILY: &str = ".SystemUIFont";
 
 /// Composer placeholder while the transcript is empty.
 pub(crate) const AGENT_CHAT_PLACEHOLDER_ASK: &str = "Ask anything\u{2026}";
-/// Composer placeholder once the transcript has messages (the
-/// kitchen-sink fixture state: cleared input + non-empty transcript).
+/// Composer placeholder once the transcript has messages (cleared input +
+/// non-empty transcript).
 pub(crate) const AGENT_CHAT_PLACEHOLDER_FOLLOW_UP: &str = "Follow up\u{2026}";
 
 // ── Send button constants ──────────────────────────────────────────────────
@@ -257,17 +253,6 @@ pub(crate) const AGENT_CHAT_ACTIVITY_DOT_SIZE: f32 = 7.0;
 pub(crate) const AGENT_CHAT_ACTIVITY_GAP: f32 = 8.0;
 /// Activity row "Thinking…" label alpha (`text.primary @ 0xB0`).
 pub(crate) const AGENT_CHAT_ACTIVITY_LABEL_ALPHA: f32 = 0xB0 as f32;
-
-// ── Kitchen-sink fixture determinism ───────────────────────────────────────
-
-/// Pinned working directory for `openAgentChatKitchenSinkFixture`.
-///
-/// Deliberately LONG and environment-independent: the previous
-/// `std::env::temp_dir()`-derived cwd made the header bytes machine-specific
-/// (`/var/folders/<hash>/…`). The long path is now a deterministic stress case
-/// proving that the cwd lane ellipsizes without crossing the trailing lane.
-pub(crate) const AGENT_CHAT_KITCHEN_SINK_FIXTURE_CWD: &str =
-    "/var/tmp/script-kit-agent-chat-reference/agent-chat-kitchen-sink-long-workspace";
 
 // ── Shared alpha packing ───────────────────────────────────────────────────
 

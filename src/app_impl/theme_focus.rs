@@ -82,28 +82,6 @@ impl ScriptListApp {
         cx.notify();
     }
 
-    pub(crate) fn refresh_runtime_style_controls(&mut self, cx: &mut Context<Self>) {
-        self.update_theme(cx);
-        self.refresh_main_menu_theme_layout_metrics("refresh_runtime_style_controls", cx);
-        self.pending_placeholder = Some(
-            crate::dev_style_tool::runtime_overrides::effective_copy_value(
-                crate::dev_style_tool::MAIN_INPUT_PLACEHOLDER_COPY_ID,
-            ),
-        );
-        if let Some(window_handle) = crate::get_main_window_handle() {
-            let _ = window_handle.update(cx, |_root, window, cx| {
-                crate::footer_popup::refresh_main_footer_popup_for_runtime_style(window, cx);
-            });
-        }
-        if let Some(dialog) = crate::actions::get_actions_dialog_entity(cx) {
-            dialog.update(cx, |_dialog, cx| cx.notify());
-            crate::actions::resize_actions_window(cx, &dialog);
-            crate::actions::notify_actions_window(cx);
-        }
-        crate::confirm::refresh_confirm_popup_for_runtime_style(cx);
-        cx.notify();
-    }
-
     pub(crate) fn update_config(&mut self, cx: &mut Context<Self>) {
         self.config = config::load_config();
         clipboard_history::set_max_text_content_len(

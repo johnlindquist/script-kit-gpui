@@ -52,7 +52,6 @@ const cases: CaseSpec[] = [
   { id: "create-flow", command: { type: "triggerBuiltin", builtinId: "builtin/new-script" }, expectSurface: "naming_prompt", expectOwner: "native", expectRows: 1 },
   { id: "sdk-browser", command: { type: "triggerBuiltin", builtinId: "builtin/sdk-reference" }, expectSurface: null, expectOwner: "prompt", expectRows: 1 },
   { id: "sdk-terminal", command: { type: "term", id: "footer-sdk-term", command: "printf sdk", actions: [action] }, expectSurface: null, expectOwner: "prompt", expectRows: 1 },
-  { id: "design-gallery", command: { type: "triggerBuiltin", name: "design-gallery" }, expectSurface: "design_gallery", expectOwner: "native", expectRows: 1 },
   { id: "kit-store", command: { type: "triggerBuiltin", builtinId: "builtin/browse-kit-store" }, expectSurface: "kit_store_browse", expectOwner: "native", expectRows: 1 },
   { id: "theme-chooser", command: { type: "triggerBuiltin", builtinId: "builtin/choose-theme" }, expectSurface: "theme_chooser", expectOwner: "native", expectRows: 1 },
   { id: "quick-terminal", command: { type: "triggerBuiltin", builtinId: "builtin/quick-terminal" }, expectSurface: "quick_terminal", expectOwner: "native", expectRows: 1 },

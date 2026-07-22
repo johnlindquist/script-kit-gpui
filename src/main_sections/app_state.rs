@@ -1067,10 +1067,6 @@ pub(crate) struct ScriptListApp {
     // Stable selection and measured viewport anchors for dynamic natural-height built-in lists.
     tracked_builtin_list_states:
         std::collections::HashMap<&'static str, crate::DynamicTrackedListState>,
-    // Scroll handle for design gallery list
-    design_gallery_scroll_handle: UniformListScrollHandle,
-    // Scroll handle for footer gallery list
-    footer_gallery_scroll_handle: UniformListScrollHandle,
     // Scroll handle for file search list
     file_search_scroll_handle: UniformListScrollHandle,
     // Variable-height list state for the theme chooser
@@ -1383,8 +1379,6 @@ pub(crate) struct ScriptListApp {
     last_scrolled_clipboard: Option<usize>,
     #[allow(dead_code)]
     last_scrolled_window: Option<usize>,
-    #[allow(dead_code)]
-    last_scrolled_design_gallery: Option<usize>,
     // Menu bar integration: Now handled by frontmost_app_tracker module
     // which pre-fetches menu items in background when apps activate
     /// Shortcut recorder state - when Some, shows the inline recorder overlay

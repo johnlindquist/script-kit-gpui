@@ -90,17 +90,6 @@ fn supported_command_lists_are_named_by_target_kind() {
             "AutomationBatchTargetKind::PromptPopup",
             &["\"selectByValue\"", "\"selectBySemanticId\"", "\"waitFor\""][..],
         ),
-        (
-            "AutomationBatchTargetKind::DevStyleTool",
-            &[
-                "\"setThemeControl\"",
-                "\"selectBySemanticId\"",
-                "\"undoStyleChange\"",
-                "\"redoStyleChange\"",
-                "\"resetStyleControls\"",
-                "\"saveCurrentStyleSettings\"",
-            ][..],
-        ),
     ] {
         let arm = source_between(body, kind, "concise_unsupported_message:");
         for command in commands {

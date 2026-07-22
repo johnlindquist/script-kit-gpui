@@ -60,16 +60,7 @@ const coverageSurfaceAliases = [
   { alias: "notes-agent_chat", resolvesTo: { surfaceKind: "AgentChat", hostKind: "NotesWindow" }, countsAsCoverage: false },
 ] as const;
 
-const liquidGlassAuditExclusions = [
-  {
-    surfaceKind: "DesignGallery",
-    reason: "Outdated Storybook/design-lab surface; do not use as Liquid Glass runtime proof.",
-  },
-  {
-    surfaceKind: "DesignExplorer",
-    reason: "Outdated Storybook/design-lab surface; do not use as Liquid Glass runtime proof.",
-  },
-] as const;
+const liquidGlassAuditExclusions: readonly { surfaceKind: string; reason: string }[] = [];
 
 function aliasesForSurfaceKind(surfaceKind: string) {
   return coverageSurfaceAliases.filter((alias) => alias.resolvesTo.surfaceKind === surfaceKind).map((alias) => alias.alias);

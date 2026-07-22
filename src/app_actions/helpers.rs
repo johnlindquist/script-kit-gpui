@@ -23,7 +23,7 @@
 // | **Side-effect: OCR** | HUD (via copy)| Text extracted and copied                 |
 // | **View transition**  | Silent        | Opening ClipboardHistory, EmojiPicker,    |
 // |                      |               | AppLauncher, WindowSwitcher, FileSearch,  |
-// |                      |               | ThemeChooser, DesignGallery, Webcam,      |
+// |                      |               | ThemeChooser, Webcam,                   |
 // |                      |               | ScratchPad, QuickTerminal, ShortcutRec,   |
 // |                      |               | AliasInput, NamingDialog, ActionsDialog   |
 // | **Info / coming soon**| Toast (info) | Feature not yet available, empty state     |

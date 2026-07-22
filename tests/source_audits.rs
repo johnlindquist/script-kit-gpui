@@ -119,9 +119,6 @@ mod arrow_interceptor_filtered_bounds;
 #[path = "source_audits/mini_main_window.rs"]
 mod mini_main_window;
 
-#[path = "source_audits/mini_ai_window.rs"]
-mod mini_ai_window;
-
 #[path = "source_audits/scroll_reveal.rs"]
 mod scroll_reveal;
 
@@ -148,9 +145,6 @@ mod main_window_header_input_parity;
 
 #[path = "source_audits/scriptlist_hide_bounds_reset.rs"]
 mod scriptlist_hide_bounds_reset;
-
-#[path = "source_audits/embedded_ai_agent_chat_read_target.rs"]
-mod embedded_ai_agent_chat_read_target;
 
 #[path = "source_audits/stdin_check_accessibility_wired.rs"]
 mod stdin_check_accessibility_wired;
@@ -226,12 +220,6 @@ mod removed_inline_context_selector;
 
 #[path = "source_audits/day_page_no_inline_spine_overlay.rs"]
 mod day_page_no_inline_spine_overlay;
-
-#[path = "source_audits/dev_style_tool_knob_catalog.rs"]
-mod dev_style_tool_knob_catalog;
-
-#[path = "source_audits/dev_style_tool_slider_drag.rs"]
-mod dev_style_tool_slider_drag;
 
 #[path = "source_audits/root_unified_dictation_history_contract.rs"]
 mod root_unified_dictation_history_contract;

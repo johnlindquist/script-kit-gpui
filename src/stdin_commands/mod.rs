@@ -476,11 +476,6 @@ pub enum ExternalCommand {
     /// Open the Agent Chat window with mock data (for visual testing)
     /// This inserts sample conversations to test the UI layout
     OpenAiWithMockData,
-    /// Open the provider-free Agent Chat kitchen sink transcript fixture.
-    OpenAgentChatKitchenSinkFixture {
-        #[serde(default, rename = "requestId")]
-        request_id: Option<ExternalCommandRequestId>,
-    },
     /// Open the Mini Agent Chat window with mock data (for visual testing)
     OpenMiniAiWithMockData,
     /// Open focused-text mini Agent Chat with fixture focused text and deterministic output.
@@ -840,7 +835,6 @@ impl ExternalCommand {
             | Self::OpenCreationFeedback { request_id, .. }
             | Self::OpenConfirmPrompt { request_id, .. }
             | Self::OpenAgentChatDetachedFixture { request_id, .. }
-            | Self::OpenAgentChatKitchenSinkFixture { request_id, .. }
             | Self::PasteClipboardIntoAgentChat { request_id, .. } => {
                 request_id.as_ref().map(ExternalCommandRequestId::as_str)
             }
@@ -866,7 +860,6 @@ impl ExternalCommand {
             Self::OpenAi => "openAi",
             Self::OpenMiniAi => "openMiniAi",
             Self::OpenAiWithMockData => "openAiWithMockData",
-            Self::OpenAgentChatKitchenSinkFixture { .. } => "openAgentChatKitchenSinkFixture",
             Self::OpenMiniAiWithMockData => "openMiniAiWithMockData",
             Self::OpenFocusedTextAgentChatWithMockData { .. } => {
                 "openFocusedTextAgentChatWithMockData"
@@ -924,7 +917,6 @@ pub const EXTERNAL_COMMAND_VERBS: &[&str] = &[
     "openAi",
     "openMiniAi",
     "openAiWithMockData",
-    "openAgentChatKitchenSinkFixture",
     "openMiniAiWithMockData",
     "openFocusedTextAgentChatWithMockData",
     "openFocusedTextAgentChatFromFocusedFieldWithMockData",
@@ -1463,7 +1455,6 @@ mod tests {
             ExternalCommand::OpenAi,
             ExternalCommand::OpenMiniAi,
             ExternalCommand::OpenAiWithMockData,
-            ExternalCommand::OpenAgentChatKitchenSinkFixture { request_id: None },
             ExternalCommand::OpenMiniAiWithMockData,
             ExternalCommand::OpenFocusedTextAgentChatWithMockData {
                 text: None,
@@ -2291,20 +2282,6 @@ mod tests {
         let json = r#"{"type": "openAiWithMockData"}"#;
         let cmd: ExternalCommand = serde_json::from_str(json)?;
         assert!(matches!(cmd, ExternalCommand::OpenAiWithMockData));
-        Ok(())
-    }
-
-    #[test]
-    fn test_external_command_open_agent_chat_kitchen_sink_fixture_deserialization(
-    ) -> anyhow::Result<()> {
-        let json = r#"{"type": "openAgentChatKitchenSinkFixture", "requestId": "req-kitchen"}"#;
-        let cmd: ExternalCommand = serde_json::from_str(json)?;
-        assert_eq!(cmd.command_type(), "openAgentChatKitchenSinkFixture");
-        assert_eq!(cmd.request_id(), Some("req-kitchen"));
-        assert!(matches!(
-            cmd,
-            ExternalCommand::OpenAgentChatKitchenSinkFixture { .. }
-        ));
         Ok(())
     }
 

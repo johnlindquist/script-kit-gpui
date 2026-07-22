@@ -9,8 +9,6 @@ use script_kit_gpui::{
     warning_banner::WarningBannerColors,
 };
 
-const AI_ACTIONS_SOURCE: &str = include_str!("../src/ai/window/render_message_actions.rs");
-const AI_MESSAGES_SOURCE: &str = include_str!("../src/ai/window/render_messages.rs");
 const CHAT_STATE_SOURCE: &str = include_str!("../src/prompts/chat/state.rs");
 const CHAT_RENDER_CORE_SOURCE: &str = include_str!("../src/prompts/chat/render_core.rs");
 const ACTIONS_DIALOG_SOURCE: &str = include_str!("../src/actions/dialog.rs");

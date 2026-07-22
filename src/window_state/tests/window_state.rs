@@ -287,8 +287,8 @@ mod tests {
         let prepare_body = &content[prepare_start..close_start];
         assert!(
             prepare_body.contains("notes::is_notes_window_open()")
-                && prepare_body.contains("ai::is_ai_window_open()"),
-            "the shared main-window close preparation must inspect Notes and AI window state"
+                && prepare_body.contains("agent_chat_open"),
+            "the shared main-window close preparation must inspect Notes and Agent Chat window state"
         );
 
         let close_body = content[close_start..]

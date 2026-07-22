@@ -58,8 +58,6 @@ fn automation_window_target_round_trip_all_kinds() {
     let kinds = [
         AutomationWindowKind::Main,
         AutomationWindowKind::Notes,
-        AutomationWindowKind::Ai,
-        AutomationWindowKind::MiniAi,
         AutomationWindowKind::AgentChatDetached,
         AutomationWindowKind::ActionsDialog,
         AutomationWindowKind::PromptPopup,

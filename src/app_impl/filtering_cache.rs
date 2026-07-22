@@ -1202,34 +1202,6 @@ impl ScriptListApp {
             );
         }
 
-        if computed_filter_text == crate::MAIN_WINDOW_KITCHEN_SINK_QUERY
-            || computed_filter_text == crate::MAIN_WINDOW_KITCHEN_SINK_NO_MATCH_QUERY
-        {
-            if self
-                .main_menu_result_caches
-                .has_grouped_results_for(computed_filter_text)
-            {
-                return self.main_menu_result_caches.clone_grouped_results();
-            }
-
-            let (grouped_items, flat_results) =
-                if computed_filter_text == crate::MAIN_WINDOW_KITCHEN_SINK_QUERY {
-                    crate::main_window_kitchen_sink_grouped_results()
-                } else {
-                    crate::main_window_kitchen_sink_no_match_grouped_results()
-                };
-            self.main_menu_result_caches
-                .store_filtered_results(computed_filter_text.to_string(), flat_results.clone());
-            self.main_menu_result_caches.store_grouped_results(
-                computed_filter_text.to_string(),
-                grouped_items,
-                flat_results,
-                None,
-                None,
-            );
-            return self.main_menu_result_caches.clone_grouped_results();
-        }
-
         // ── Spine projection path ──────────────────────────────────────
         // When a sigil segment owns the list, build rows from the Spine
         // model instead of running normal fuzzy/root grouping.

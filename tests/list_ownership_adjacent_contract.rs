@@ -2,7 +2,6 @@
 
 const CLIPBOARD: &str = include_str!("../src/render_builtins/clipboard.rs");
 const BROWSER_TABS: &str = include_str!("../src/render_builtins/browser_tabs.rs");
-const DESIGN_GALLERY: &str = include_str!("../src/render_builtins/design_gallery.rs");
 const DICTATION_HISTORY: &str = include_str!("../src/render_builtins/dictation_history.rs");
 const NOTES_BROWSE: &str = include_str!("../src/render_builtins/notes_browse.rs");
 const AGENT_CHAT_HISTORY: &str = include_str!("../src/render_builtins/agent_chat_history.rs");
@@ -29,15 +28,6 @@ fn adjacent_surfaces_define_visible_row_helper_families() {
                 "browser_tabs_selected_visible_row",
                 "browser_tabs_dataset_and_visible_counts",
                 "browser_tabs_visible_row_labels",
-            ],
-        ),
-        (
-            DESIGN_GALLERY,
-            [
-                "design_gallery_visible_rows",
-                "design_gallery_selected_visible_row",
-                "design_gallery_dataset_and_visible_counts",
-                "design_gallery_visible_row_labels",
             ],
         ),
         (
@@ -81,8 +71,6 @@ fn adjacent_get_state_paths_use_visible_row_helpers() {
         "clipboard_history_selected_visible_row",
         "browser_tabs_dataset_and_visible_counts",
         "browser_tabs_selected_visible_row",
-        "design_gallery_dataset_and_visible_counts",
-        "design_gallery_selected_visible_row",
         "dictation_history_dataset_and_visible_counts",
         "dictation_history_selected_visible_row",
         "notes_browse_dataset_and_visible_counts",
@@ -102,7 +90,6 @@ fn adjacent_get_elements_paths_use_visible_row_label_helpers() {
     for helper in [
         "clipboard_history_visible_row_labels",
         "browser_tabs_visible_row_labels",
-        "design_gallery_visible_row_labels",
         "dictation_history_visible_row_labels",
         "notes_browse_visible_row_labels",
         "agent_chat_history_visible_row_labels",

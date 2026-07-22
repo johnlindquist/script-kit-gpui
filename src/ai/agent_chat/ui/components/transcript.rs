@@ -1686,7 +1686,7 @@ impl Render for AgentChatTranscript {
             crate::logging::agent_chat_render_trace_enabled().then(std::time::Instant::now);
         let theme = theme::get_cached_theme();
         let colors = PromptColors::from_theme(&theme);
-        let style_def = crate::dev_style_tool::runtime_overrides::effective_agent_chat_style();
+        let style_def = super::super::style_contract::production_agent_chat_style();
 
         let focused_text_preview = matches!(
             self.ui_variant.config().transcript,

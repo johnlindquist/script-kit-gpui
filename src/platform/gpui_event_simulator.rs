@@ -188,17 +188,13 @@ fn automation_kind_to_window_role(
     match kind {
         AutomationWindowKind::Main => Some(WindowRole::Main),
         AutomationWindowKind::Notes => Some(WindowRole::Notes),
-        AutomationWindowKind::Ai => Some(WindowRole::Ai),
-        AutomationWindowKind::MiniAi => Some(WindowRole::AiMini),
         AutomationWindowKind::AgentChatDetached => Some(WindowRole::AgentChat),
         // Attached surfaces and popup-only windows use exact runtime handles
         // when available and do not map to the shared role registry.
-        AutomationWindowKind::DevStyleTool
-        | AutomationWindowKind::ActionsDialog
+        AutomationWindowKind::ActionsDialog
         | AutomationWindowKind::Dictation
         | AutomationWindowKind::PromptPopup
-        | AutomationWindowKind::Hud
-        | AutomationWindowKind::FlowManager => None,
+        | AutomationWindowKind::Hud => None,
     }
 }
 
@@ -345,29 +341,53 @@ fn apply_simulated_event(
             momentum_phase,
             timestamp_seconds,
         } => {
-            let position = gpui::point(gpui::px(*x as f32), gpui::px(*y as f32));
-            let delta = gpui::point(gpui::px(*delta_x as f32), gpui::px(*delta_y as f32));
             window.dispatch_event(
-                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                    position,
-                    delta: gpui::ScrollDelta::Pixels(delta),
-                    modifiers: gpui::Modifiers::default(),
-                    touch_phase: simulated_touch_phase_to_gpui(*phase),
-                    phase: direct_phase
-                        .map(simulated_scroll_phase_to_gpui)
-                        .unwrap_or_else(|| match simulated_touch_phase_to_gpui(*phase) {
-                            gpui::TouchPhase::Started => gpui::ScrollPhase::Began,
-                            gpui::TouchPhase::Moved => gpui::ScrollPhase::Changed,
-                            gpui::TouchPhase::Ended => gpui::ScrollPhase::Ended,
-                        }),
-                    momentum_phase: momentum_phase
-                        .map(simulated_scroll_phase_to_gpui)
-                        .unwrap_or(gpui::ScrollPhase::None),
-                    timestamp_seconds: timestamp_seconds.filter(|value| value.is_finite()),
-                }),
+                gpui::PlatformInput::ScrollWheel(simulated_scroll_wheel_to_gpui(
+                    *x,
+                    *y,
+                    *delta_x,
+                    *delta_y,
+                    *phase,
+                    *direct_phase,
+                    *momentum_phase,
+                    *timestamp_seconds,
+                )),
                 cx,
             );
         }
+    }
+}
+
+fn simulated_scroll_wheel_to_gpui(
+    x: f64,
+    y: f64,
+    delta_x: f64,
+    delta_y: f64,
+    touch_phase: crate::protocol::SimulatedTouchPhase,
+    direct_phase: Option<crate::protocol::SimulatedScrollPhase>,
+    momentum_phase: Option<crate::protocol::SimulatedScrollPhase>,
+    timestamp_seconds: Option<f64>,
+) -> gpui::ScrollWheelEvent {
+    let touch_phase = simulated_touch_phase_to_gpui(touch_phase);
+    gpui::ScrollWheelEvent {
+        position: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(
+            gpui::px(delta_x as f32),
+            gpui::px(delta_y as f32),
+        )),
+        modifiers: gpui::Modifiers::default(),
+        touch_phase,
+        phase: direct_phase
+            .map(simulated_scroll_phase_to_gpui)
+            .unwrap_or(match touch_phase {
+                gpui::TouchPhase::Started => gpui::ScrollPhase::Began,
+                gpui::TouchPhase::Moved => gpui::ScrollPhase::Changed,
+                gpui::TouchPhase::Ended => gpui::ScrollPhase::Ended,
+            }),
+        momentum_phase: momentum_phase
+            .map(simulated_scroll_phase_to_gpui)
+            .unwrap_or(gpui::ScrollPhase::None),
+        timestamp_seconds: timestamp_seconds.filter(|value| value.is_finite()),
     }
 }
 
@@ -382,6 +402,62 @@ fn simulated_scroll_phase_to_gpui(
         crate::protocol::SimulatedScrollPhase::Stationary => gpui::ScrollPhase::Stationary,
         crate::protocol::SimulatedScrollPhase::Ended => gpui::ScrollPhase::Ended,
         crate::protocol::SimulatedScrollPhase::Cancelled => gpui::ScrollPhase::Cancelled,
+    }
+}
+
+#[cfg(test)]
+mod simulated_scroll_wheel_tests {
+    use super::*;
+    use crate::protocol::{SimulatedScrollPhase, SimulatedTouchPhase};
+
+    #[test]
+    fn preserves_direct_and_momentum_phases_pixel_delta_and_timestamp() {
+        let phases = [
+            SimulatedScrollPhase::Began,
+            SimulatedScrollPhase::Changed,
+            SimulatedScrollPhase::Ended,
+        ];
+        for phase in phases {
+            let event = simulated_scroll_wheel_to_gpui(
+                11.0,
+                22.0,
+                -1.25,
+                3.5,
+                SimulatedTouchPhase::Moved,
+                Some(phase),
+                Some(phase),
+                Some(42.25),
+            );
+            assert_eq!(event.phase, simulated_scroll_phase_to_gpui(phase));
+            assert_eq!(event.momentum_phase, simulated_scroll_phase_to_gpui(phase));
+            assert_eq!(event.timestamp_seconds, Some(42.25));
+            match event.delta {
+                gpui::ScrollDelta::Pixels(delta) => {
+                    assert_eq!(delta.x, gpui::px(-1.25));
+                    assert_eq!(delta.y, gpui::px(3.5));
+                }
+                gpui::ScrollDelta::Lines(_) => {
+                    panic!("simulated native wheel must stay pixel-only")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn derives_direct_phase_from_touch_phase_and_rejects_non_finite_timestamp() {
+        let event = simulated_scroll_wheel_to_gpui(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            SimulatedTouchPhase::Started,
+            None,
+            None,
+            Some(f64::NAN),
+        );
+        assert_eq!(event.phase, gpui::ScrollPhase::Began);
+        assert_eq!(event.momentum_phase, gpui::ScrollPhase::None);
+        assert_eq!(event.timestamp_seconds, None);
     }
 }
 

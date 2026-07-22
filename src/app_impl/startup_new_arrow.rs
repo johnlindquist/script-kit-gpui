@@ -14,20 +14,18 @@
                 // Keep main list arrow routing scoped to the main window so notes/AI/actions
                 // windows receive their own navigation key events.
                 let is_notes = crate::notes::is_notes_window(window);
-                let is_ai = crate::ai::is_ai_window(window);
                 let is_detached_agent_chat = crate::ai::agent_chat::ui::chat_window::is_chat_window(window);
                 let is_actions = crate::actions::is_actions_window(window);
-                let skip_secondary = is_notes || is_ai || is_detached_agent_chat || is_actions;
+                let skip_secondary = is_notes || is_detached_agent_chat || is_actions;
                 if skip_secondary {
                     tracing::debug!(
                         target: "script_kit::keyboard",
                         event = "arrow_interceptor_skipped_secondary_window",
                         is_notes,
-                        is_ai,
                         is_detached_agent_chat,
                         is_actions,
                         skip_secondary,
-                        detached_agent_chat_explicit_skip = is_detached_agent_chat && !is_ai,
+                        detached_agent_chat_explicit_skip = is_detached_agent_chat,
                     );
                     return;
                 }
@@ -196,98 +194,6 @@
                                         );
 
                                         this.list_scroll_handle.scroll_to_item(
-                                            *selected_index,
-                                            gpui::ScrollStrategy::Nearest,
-                                        );
-                                        this.input_mode = InputMode::Keyboard;
-                                        this.hovered_index = None;
-                                        cx.notify();
-                                    }
-
-                                    cx.stop_propagation();
-                                }
-                                AppView::DesignGalleryView {
-                                    selected_index,
-                                    filter,
-                                } => {
-                                    let filtered_len =
-                                        Self::design_gallery_visible_rows(filter).len();
-                                    let old_index = *selected_index;
-
-                                    if filtered_len == 0 {
-                                        *selected_index = 0;
-                                        cx.stop_propagation();
-                                        return;
-                                    }
-
-                                    if *selected_index >= filtered_len {
-                                        *selected_index = filtered_len - 1;
-                                    }
-
-                                    if is_up && *selected_index > 0 {
-                                        *selected_index -= 1;
-                                    } else if is_down && *selected_index + 1 < filtered_len {
-                                        *selected_index += 1;
-                                    }
-
-                                    if *selected_index != old_index {
-                                        tracing::debug!(
-                                            target: "script_kit::scroll",
-                                            event = "builtin_selection_nav",
-                                            view = "design_gallery",
-                                            old_index,
-                                            new_index = *selected_index,
-                                            total_items = filtered_len,
-                                            strategy = "nearest",
-                                        );
-
-                                        this.design_gallery_scroll_handle.scroll_to_item(
-                                            *selected_index,
-                                            gpui::ScrollStrategy::Nearest,
-                                        );
-                                        this.input_mode = InputMode::Keyboard;
-                                        this.hovered_index = None;
-                                        cx.notify();
-                                    }
-
-                                    cx.stop_propagation();
-                                }
-                                AppView::FooterGalleryView {
-                                    selected_index,
-                                    filter,
-                                } => {
-                                    let filtered_len =
-                                        Self::footer_gallery_visible_rows(filter).len();
-                                    let old_index = *selected_index;
-
-                                    if filtered_len == 0 {
-                                        *selected_index = 0;
-                                        cx.stop_propagation();
-                                        return;
-                                    }
-
-                                    if *selected_index >= filtered_len {
-                                        *selected_index = filtered_len - 1;
-                                    }
-
-                                    if is_up && *selected_index > 0 {
-                                        *selected_index -= 1;
-                                    } else if is_down && *selected_index + 1 < filtered_len {
-                                        *selected_index += 1;
-                                    }
-
-                                    if *selected_index != old_index {
-                                        tracing::debug!(
-                                            target: "script_kit::scroll",
-                                            event = "builtin_selection_nav",
-                                            view = "footer_gallery",
-                                            old_index,
-                                            new_index = *selected_index,
-                                            total_items = filtered_len,
-                                            strategy = "nearest",
-                                        );
-
-                                        this.footer_gallery_scroll_handle.scroll_to_item(
                                             *selected_index,
                                             gpui::ScrollStrategy::Nearest,
                                         );
@@ -829,23 +735,19 @@
                 }
 
                 // Skip processing if this keystroke is from a secondary window.
-                // Observe detached Agent Chat explicitly so runtime proof can tell whether
-                // `is_ai_window()` already subsumes it.
                 let is_notes = crate::notes::is_notes_window(window);
-                let is_ai = crate::ai::is_ai_window(window);
                 let is_detached_agent_chat = crate::ai::agent_chat::ui::chat_window::is_chat_window(window);
                 let is_actions = crate::actions::is_actions_window(window);
-                let skip_secondary = is_notes || is_ai || is_detached_agent_chat || is_actions;
+                let skip_secondary = is_notes || is_detached_agent_chat || is_actions;
                 if skip_secondary {
                     tracing::debug!(
                         target: "script_kit::keyboard",
                         event = "home_end_interceptor_skipped_secondary_window",
                         is_notes,
-                        is_ai,
                         is_detached_agent_chat,
                         is_actions,
                         skip_secondary,
-                        detached_agent_chat_explicit_skip = is_detached_agent_chat && !is_ai,
+                        detached_agent_chat_explicit_skip = is_detached_agent_chat,
                     );
                     return;
                 }

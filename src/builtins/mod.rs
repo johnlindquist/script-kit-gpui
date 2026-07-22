@@ -140,15 +140,6 @@ pub enum AiCommandType {
     SendScreenAreaToAi,
 }
 
-impl AiCommandType {
-    /// Returns `true` for legacy AI enum variants that now simply open the harness.
-    pub fn is_legacy_harness_alias(self) -> bool {
-        matches!(
-            self,
-            Self::OpenAi | Self::MiniAi | Self::NewConversation | Self::ClearConversation
-        )
-    }
-}
 /// Script creation command types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptCommandType {
@@ -250,14 +241,6 @@ pub enum BuiltInFeature {
     WindowSwitcher,
     /// Browser tabs switcher for searching and activating open tabs
     BrowserTabs,
-    /// Design gallery for viewing separator and icon variations
-    DesignGallery,
-    FooterGallery,
-    /// Main-window non-list state design language showcase
-    DesignNonListStates,
-    /// In-app StoryBrowser compare/adopt tool (storybook feature only)
-    #[cfg(feature = "storybook")]
-    DesignExplorer,
     /// Agent Chat window for conversing with AI assistants
     AiChat,
     /// Agent Chat presentation experiment backed by the same Agent Chat runtime.
@@ -329,8 +312,6 @@ pub enum BuiltInFeature {
     /// variations for finding/launching mdflow flows. See
     /// docs/ai/flow-ux-protocol.md.
     FlowUxVariant(crate::flows::model::FlowUxVariant),
-    /// Detached Flow Manager window (runs supervision + Mission Control).
-    FlowManager,
     /// Create a new mdflow flow: opens `md create` in the Quick Terminal
     /// (the same path as the Flow Desk's "Create a flow…" row).
     NewFlow,
@@ -459,11 +440,6 @@ impl BuiltInEntry {
             BuiltInFeature::App(_) => "Launch App",
             BuiltInFeature::WindowSwitcher => "Open Window Switcher",
             BuiltInFeature::BrowserTabs => "Open Browser Tabs",
-            BuiltInFeature::DesignGallery => "Open Gallery",
-            BuiltInFeature::FooterGallery => "Open Footer Gallery",
-            BuiltInFeature::DesignNonListStates => "Open Non-List States",
-            #[cfg(feature = "storybook")]
-            BuiltInFeature::DesignExplorer => "Open Explorer",
             BuiltInFeature::AiChat | BuiltInFeature::AiChatVariant(_) => "Open Agent Chat",
             BuiltInFeature::Notes => "Open Notes",
             BuiltInFeature::EmojiPicker => "Open Emoji Picker",
@@ -572,7 +548,6 @@ impl BuiltInEntry {
             }
             BuiltInFeature::BackgroundEffectOff => "Turn Off Background Effect",
             BuiltInFeature::FlowUxVariant(_) => "Open Flow Launcher",
-            BuiltInFeature::FlowManager => "Open Flow Manager",
             BuiltInFeature::NewFlow => "Create Flow",
         }
     }
@@ -586,11 +561,6 @@ impl BuiltInEntry {
             BuiltInFeature::App(_) => "Launch",
             BuiltInFeature::WindowSwitcher => "Switch",
             BuiltInFeature::BrowserTabs => "Tabs",
-            BuiltInFeature::DesignGallery => "Gallery",
-            BuiltInFeature::FooterGallery => "Footer Gallery",
-            BuiltInFeature::DesignNonListStates => "Non-List States",
-            #[cfg(feature = "storybook")]
-            BuiltInFeature::DesignExplorer => "Explorer",
             BuiltInFeature::AiChat => "Agent",
             BuiltInFeature::AiChatVariant(variant) => variant.footer_label(),
             BuiltInFeature::Notes => "Notes",
@@ -697,7 +667,6 @@ impl BuiltInEntry {
             BuiltInFeature::BackgroundEffectPrevious => "Previous Effect",
             BuiltInFeature::BackgroundEffectOff => "Effect Off",
             BuiltInFeature::FlowUxVariant(_) => "Flows",
-            BuiltInFeature::FlowManager => "Runs",
             BuiltInFeature::NewFlow => "New Flow",
         }
     }
@@ -974,28 +943,6 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
             "github",
         ));
         debug!("Added Sync to GitHub built-in entry");
-
-        // Design Explorer is only available when storybook feature is enabled
-        #[cfg(feature = "storybook")]
-        {
-            entries.push(BuiltInEntry::new_with_icon(
-                "builtin/design-explorer",
-                "Design Explorer",
-                "Open the in-app explorer to compare story variants and adopt a winner",
-                vec![
-                    "design",
-                    "explorer",
-                    "storybook",
-                    "compare",
-                    "variant",
-                    "adopt",
-                    "ui",
-                ],
-                BuiltInFeature::DesignExplorer,
-                "flask-conical",
-            ));
-            debug!("Added Design Explorer built-in entry");
-        }
 
         // =========================================================================
     }

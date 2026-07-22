@@ -998,9 +998,8 @@ fn reset_to_script_list_runs_embedded_agent_chat_teardown() {
 
     assert!(
         reset_body.contains("view.prepare_for_host_hide(cx);")
-            && reset_body.contains("crate::windows::ensure_embedded_ai_window(false);")
             && reset_body.contains("AgentChatSurfaceEvent::EmbeddedClosed"),
-        "reset_to_script_list must close embedded Agent Chat popups and automation state before returning to ScriptList"
+        "reset_to_script_list must close embedded Agent Chat popups and surface state before returning to ScriptList"
     );
 }
 
@@ -1598,23 +1597,6 @@ fn events_have_setup_required_variant() {
     assert!(
         EVENTS_SOURCE.contains("SetupRequired"),
         "AgentChatEvent must have a SetupRequired variant"
-    );
-}
-
-#[test]
-fn ai_setup_surface_no_longer_mentions_claude_only_copy() {
-    const SETUP_RENDER_SOURCE: &str = include_str!("../../../ai/window/render_setup.rs");
-    assert!(
-        SETUP_RENDER_SOURCE.contains("Agent Required"),
-        "setup card title must say Agent Required"
-    );
-    assert!(
-        SETUP_RENDER_SOURCE.contains("Open Agent Catalog"),
-        "setup card must offer Open Agent Catalog"
-    );
-    assert!(
-        !SETUP_RENDER_SOURCE.contains("Connect to Claude Code"),
-        "setup card must NOT mention Claude Code specifically"
     );
 }
 

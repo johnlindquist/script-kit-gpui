@@ -1848,8 +1848,8 @@ fn generate_script_builtin_routes_to_harness_not_chat_prompt() {
 }
 
 #[test]
-fn legacy_ai_window_commands_route_to_harness() {
-    // OpenAi, MiniAi, NewConversation, ClearConversation must all route to harness.
+fn agent_chat_open_commands_route_to_agent_chat() {
+    // OpenAi, MiniAi, NewConversation, ClearConversation must all route to Agent Chat.
     // Scope to the AI command match block.
     let ai_block_start = BUILTIN_EXECUTION_SOURCE
         .find("BuiltInFeature::AiCommand(cmd_type) =>")
@@ -1857,14 +1857,6 @@ fn legacy_ai_window_commands_route_to_harness() {
     let ai_block = &BUILTIN_EXECUTION_SOURCE
         [ai_block_start..(ai_block_start + 4000).min(BUILTIN_EXECUTION_SOURCE.len())];
 
-    assert!(
-        !ai_block.contains("open_ai_window_after_already_hidden"),
-        "AI command block must not call the legacy open_ai_window_after_already_hidden"
-    );
-    assert!(
-        !ai_block.contains("open_mini_ai_window_from"),
-        "AI command block must not call the legacy open_mini_ai_window_from"
-    );
     assert!(
         !ai_block.contains("clear_all_chats"),
         "AI command block must not call legacy clear_all_chats"

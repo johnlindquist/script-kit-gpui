@@ -1,28 +1,20 @@
 struct SecondarySurfaceWindowState {
     is_notes: bool,
-    is_ai: bool,
     is_detached_agent_chat: bool,
     is_shortcut_recorder: bool,
-    is_flow_manager: bool,
 }
 
 impl SecondarySurfaceWindowState {
     fn inspect(window: &Window) -> Self {
         Self {
             is_notes: crate::notes::is_notes_window(window),
-            is_ai: crate::ai::is_ai_window(window),
             is_detached_agent_chat: crate::ai::agent_chat::ui::chat_window::is_chat_window(window),
             is_shortcut_recorder: super::shortcut_recorder::is_shortcut_recorder_window(window),
-            is_flow_manager: crate::flows::manager_window::is_flow_manager_window(window),
         }
     }
 
     fn is_secondary(&self) -> bool {
-        self.is_notes
-            || self.is_ai
-            || self.is_detached_agent_chat
-            || self.is_shortcut_recorder
-            || self.is_flow_manager
+        self.is_notes || self.is_detached_agent_chat || self.is_shortcut_recorder
     }
 }
 

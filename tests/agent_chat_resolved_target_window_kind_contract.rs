@@ -2,13 +2,13 @@
 //! `build_agent_chat_resolved_target` in `src/prompt_handler/mod.rs`.
 //!
 //! Background: `getAgentChatState {target:{type:"id",id:"ai"}}` (or
-//! `{type:"kind",kind:"ai"}`) is routed by `resolve_agent_chat_read_target` to
+//! `{type:"kind",kind:"ai"}`) was routed by `resolve_agent_chat_read_target` to
 //! `AgentChatReadTarget::Main { info: Some(resolved) }` because the embedded
-//! AI is a subview of main (see
-//! `tests/source_audits/embedded_ai_agent_chat_read_target.rs`). Before this
+//! AI was a subview of main. Before this
 //! Fix, `build_agent_chat_resolved_target` hardcoded `window_kind: "main"`
 //! for that arm, so the receipt reported `windowKind:"main"` even when
-//! the resolved `AutomationWindowInfo.kind` was `AutomationWindowKind::Ai`.
+//! the resolved `AutomationWindowInfo.kind` was the legacy embedded-AI kind
+//! (removed with the legacy AI window).
 //! Agentic callers reading the receipt could not tell from the receipt
 //! alone whether they had reached the embedded AI subview or the
 //! ambient scriptList main surface.
@@ -66,8 +66,6 @@ fn as_camel_case_matches_serde_for_every_variant() {
     let cases: &[(AutomationWindowKind, &str)] = &[
         (AutomationWindowKind::Main, "main"),
         (AutomationWindowKind::Notes, "notes"),
-        (AutomationWindowKind::Ai, "ai"),
-        (AutomationWindowKind::MiniAi, "miniAi"),
         (AutomationWindowKind::AgentChatDetached, "agentChatDetached"),
         (AutomationWindowKind::Dictation, "dictation"),
         (AutomationWindowKind::ActionsDialog, "actionsDialog"),

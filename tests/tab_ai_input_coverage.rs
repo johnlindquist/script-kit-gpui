@@ -85,7 +85,6 @@ fn current_input_text_has_no_wildcard_catchall() {
     let fn_body = &TAB_AI_SOURCE[fn_start..fn_start + 3000.min(TAB_AI_SOURCE.len() - fn_start)];
 
     // The wildcard `_ =>` should not appear — all variants are explicit
-    // (except the cfg(feature = "storybook") variant which is conditional)
     let lines: Vec<&str> = fn_body.lines().collect();
     let wildcard_lines: Vec<&&str> = lines
         .iter()

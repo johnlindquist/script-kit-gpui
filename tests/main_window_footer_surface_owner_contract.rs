@@ -70,11 +70,7 @@ fn app_view_owns_native_footer_surface_map() {
 /// legacy view means DELETING its entry — never add one.
 #[test]
 fn main_window_views_without_native_footer_are_ratcheted() {
-    const LEGACY_GPUI_FOOTER_VIEWS: &[&str] = &[
-        "ActionsDialog",
-        // storybook-only surface
-        "DesignExplorerView",
-    ];
+    const LEGACY_GPUI_FOOTER_VIEWS: &[&str] = &["ActionsDialog"];
 
     let body = function_body(APP_VIEW_STATE_SOURCE, "pub(crate) fn native_footer_surface");
     let segments: Vec<&str> = body.split("=>").collect();

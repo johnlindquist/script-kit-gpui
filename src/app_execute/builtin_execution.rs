@@ -918,9 +918,6 @@ enum SurfaceOpenBuiltinAction {
     ClipboardHistory,
     Favorites,
     AppLauncher,
-    DesignGallery,
-    FooterGallery,
-    NonListStates,
     AiChat(crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant),
     EmojiPicker,
     Webcam,
@@ -941,9 +938,6 @@ impl SurfaceOpenBuiltinAction {
             builtins::BuiltInFeature::ClipboardHistory => Some(Self::ClipboardHistory),
             builtins::BuiltInFeature::Favorites => Some(Self::Favorites),
             builtins::BuiltInFeature::AppLauncher => Some(Self::AppLauncher),
-            builtins::BuiltInFeature::DesignGallery => Some(Self::DesignGallery),
-            builtins::BuiltInFeature::FooterGallery => Some(Self::FooterGallery),
-            builtins::BuiltInFeature::DesignNonListStates => Some(Self::NonListStates),
             builtins::BuiltInFeature::AiChat => Some(Self::AiChat(
                 crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
             )),
@@ -968,9 +962,6 @@ impl SurfaceOpenBuiltinAction {
             Self::ClipboardHistory => "open_clipboard_history",
             Self::Favorites => "open_favorites_view",
             Self::AppLauncher => "open_app_launcher",
-            Self::DesignGallery => "open_design_gallery",
-            Self::FooterGallery => "open_footer_gallery",
-            Self::NonListStates => "open_non_list_states",
             Self::AiChat(crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard) => {
                 "open_ai_harness_dispatched"
             }
@@ -994,9 +985,6 @@ impl SurfaceOpenBuiltinAction {
             Self::ClipboardHistory => "Opening Clipboard History",
             Self::Favorites => "Opening Favorites browse view",
             Self::AppLauncher => "Opening App Launcher",
-            Self::DesignGallery => "Opening Design Gallery",
-            Self::FooterGallery => "Opening Footer Gallery",
-            Self::NonListStates => "Opening Non-List States",
             Self::AiChat(_) => "Opening Agent Chat",
             Self::EmojiPicker => "Opening Emoji Picker",
             Self::Webcam => "Opening Webcam",
@@ -1241,28 +1229,6 @@ impl SyncToGithubBuiltinAction {
     fn failure_message(self, error: &dyn std::fmt::Display) -> String {
         match self {
             Self::Dispatch => format!("GitHub sync failed: {error}"),
-        }
-    }
-}
-
-#[cfg(feature = "storybook")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DesignExplorerBuiltinAction {
-    Open,
-}
-
-#[cfg(feature = "storybook")]
-impl DesignExplorerBuiltinAction {
-    fn from_feature(feature: &builtins::BuiltInFeature) -> Option<Self> {
-        match feature {
-            builtins::BuiltInFeature::DesignExplorer => Some(Self::Open),
-            _ => None,
-        }
-    }
-
-    fn success_detail(self) -> &'static str {
-        match self {
-            Self::Open => "open_design_explorer",
         }
     }
 }
@@ -1556,14 +1522,14 @@ impl AiUnavailableBuiltinAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AiLegacyHarnessBuiltinAction {
+enum AiAgentChatBuiltinAction {
     OpenAi,
     MiniAi,
     NewConversation,
     ClearConversation,
 }
 
-impl AiLegacyHarnessBuiltinAction {
+impl AiAgentChatBuiltinAction {
     fn from_command(command: builtins::AiCommandType) -> Option<Self> {
         match command {
             builtins::AiCommandType::OpenAi => Some(Self::OpenAi),
@@ -1574,12 +1540,18 @@ impl AiLegacyHarnessBuiltinAction {
         }
     }
 
+    /// NewConversation and ClearConversation both land on a fresh Agent Chat
+    /// conversation: the current thread is retained in the Threads section.
+    fn starts_new_conversation(self) -> bool {
+        matches!(self, Self::NewConversation | Self::ClearConversation)
+    }
+
     fn success_detail(self) -> &'static str {
         match self {
-            Self::OpenAi => "ai_OpenAi_routed_to_harness",
-            Self::MiniAi => "ai_MiniAi_routed_to_harness",
-            Self::NewConversation => "ai_NewConversation_routed_to_harness",
-            Self::ClearConversation => "ai_ClearConversation_routed_to_harness",
+            Self::OpenAi => "ai_OpenAi_routed_to_agent_chat",
+            Self::MiniAi => "ai_MiniAi_routed_to_agent_chat",
+            Self::NewConversation => "ai_NewConversation_routed_to_agent_chat",
+            Self::ClearConversation => "ai_ClearConversation_routed_to_agent_chat",
         }
     }
 }
@@ -1589,7 +1561,7 @@ enum AiCommandBuiltinAction {
     Generate(AiGenerateBuiltinAction),
     Capture(AiCaptureBuiltinAction),
     Unavailable(AiUnavailableBuiltinAction),
-    LegacyHarness(AiLegacyHarnessBuiltinAction),
+    AgentChat(AiAgentChatBuiltinAction),
 }
 
 impl AiCommandBuiltinAction {
@@ -1626,9 +1598,9 @@ impl AiCommandBuiltinAction {
             builtins::AiCommandType::OpenAi
             | builtins::AiCommandType::MiniAi
             | builtins::AiCommandType::NewConversation
-            | builtins::AiCommandType::ClearConversation => Self::LegacyHarness(
-                AiLegacyHarnessBuiltinAction::from_command(command)
-                    .expect("legacy command should map to legacy harness action"),
+            | builtins::AiCommandType::ClearConversation => Self::AgentChat(
+                AiAgentChatBuiltinAction::from_command(command)
+                    .expect("agent chat command should map to agent chat action"),
             ),
         }
     }
@@ -1829,7 +1801,7 @@ enum AiCommandWindowPlan {
 
 impl AiCommandWindowPlan {
     fn from_command(cmd_type: &builtins::AiCommandType) -> Self {
-        // All active AI commands now route to the harness terminal, which is
+        // All active AI commands route to Agent Chat, which is
         // a view inside the main window — keep it visible.
         match cmd_type {
             builtins::AiCommandType::GenerateScript
@@ -1839,9 +1811,13 @@ impl AiCommandWindowPlan {
             | builtins::AiCommandType::SendSelectedTextToAi
             | builtins::AiCommandType::SendBrowserTabToAi
             | builtins::AiCommandType::SendScreenAreaToAi => Self::KeepMainWindowVisible,
-            // Legacy aliases (OpenAi, MiniAi, NewConversation, ClearConversation)
-            // also open the harness terminal inside the main window.
-            cmd if cmd.is_legacy_harness_alias() => Self::KeepMainWindowVisible,
+            // Agent Chat open/conversation commands (OpenAi, MiniAi,
+            // NewConversation, ClearConversation) also open Agent Chat
+            // inside the main window.
+            builtins::AiCommandType::OpenAi
+            | builtins::AiCommandType::MiniAi
+            | builtins::AiCommandType::NewConversation
+            | builtins::AiCommandType::ClearConversation => Self::KeepMainWindowVisible,
             // Preset commands (debug-only) retain their original behavior.
             _ => Self::HideMainWindowDeferred,
         }
@@ -2030,10 +2006,10 @@ impl ScriptListApp {
                     );
 
                     this.update(cx, |this, cx| {
-                        this.open_ai_window_after_already_hidden(
+                        this.open_agent_chat_after_already_hidden(
                             "SendScreenToAi",
                             &trace_id,
-                            DeferredAiWindowAction::SetInputWithImage {
+                            DeferredAgentChatAction::SetInputWithImage {
                                 text: message,
                                 image_base64: base64_data,
                                 submit: false,
@@ -2152,10 +2128,10 @@ impl ScriptListApp {
                             cx.notify();
                         }
 
-                        this.open_ai_window_after_already_hidden(
+                        this.open_agent_chat_after_already_hidden(
                             "SendFocusedWindowToAi",
                             &trace_id,
-                            DeferredAiWindowAction::SetInputWithImage {
+                            DeferredAgentChatAction::SetInputWithImage {
                                 text: message,
                                 image_base64: base64_data,
                                 submit: false,
@@ -2254,10 +2230,10 @@ impl ScriptListApp {
                     );
 
                     this.update(cx, |this, cx| {
-                        this.open_ai_window_after_already_hidden(
+                        this.open_agent_chat_after_already_hidden(
                             "SendScreenAreaToAi",
                             &trace_id,
-                            DeferredAiWindowAction::SetInputWithImage {
+                            DeferredAgentChatAction::SetInputWithImage {
                                 text: message,
                                 image_base64: base64_data,
                                 submit: false,
@@ -2364,10 +2340,10 @@ impl ScriptListApp {
 
             let _ = this.update(cx, |this, cx| match result {
                 Ok(DeferredAiCapturedText::Ready(captured)) => {
-                    this.open_ai_window_after_already_hidden(
+                    this.open_agent_chat_after_already_hidden(
                         source_action,
                         &trace_id,
-                        DeferredAiWindowAction::SetInput {
+                        DeferredAgentChatAction::SetInput {
                             text: format_fn(captured),
                             submit: false,
                         },
@@ -3823,27 +3799,6 @@ impl ScriptListApp {
                     .expect("browser tabs arm should only receive BrowserTabs");
                 self.execute_browser_tabs_builtin(browser_tabs_action, dctx, cx)
             }
-            builtins::BuiltInFeature::DesignGallery => {
-                let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive DesignGallery");
-                self.execute_surface_open_builtin(open_action, dctx, cx)
-            }
-            builtins::BuiltInFeature::FooterGallery => {
-                let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive FooterGallery");
-                self.execute_surface_open_builtin(open_action, dctx, cx)
-            }
-            builtins::BuiltInFeature::DesignNonListStates => {
-                let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive DesignNonListStates");
-                self.execute_surface_open_builtin(open_action, dctx, cx)
-            }
-            #[cfg(feature = "storybook")]
-            builtins::BuiltInFeature::DesignExplorer => {
-                let design_action = DesignExplorerBuiltinAction::from_feature(&entry.feature)
-                    .expect("design explorer arm should only receive design explorer features");
-                self.execute_design_explorer_builtin(design_action, dctx, cx)
-            }
             builtins::BuiltInFeature::AiChat | builtins::BuiltInFeature::AiChatVariant(_) => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
                     .expect("surface open arm should only receive AiChat");
@@ -3941,26 +3896,6 @@ impl ScriptListApp {
                 );
                 self.start_flow_ux_tick(cx);
                 Self::builtin_success(dctx, format!("flow_ux::{}", variant.automation_id()))
-            }
-            builtins::BuiltInFeature::FlowManager => {
-                // The detached Flow Manager is dead (Conversation Desk
-                // decision 2026-07-09): supervision lives in the main-window
-                // desk. Route any stale trigger to the desk instead.
-                let cwd = self.flow_ux_cwd();
-                crate::flows::catalog::flow_catalog().refresh(&cwd);
-                self.open_builtin_filterable_view(
-                    AppView::FlowUxView {
-                        variant: crate::flows::model::FlowUxVariant::Flash,
-                        filter: String::new(),
-                        selected_index: 0,
-                        inline_run: None,
-                    },
-                    "Search flows...",
-                    false,
-                    cx,
-                );
-                self.start_flow_ux_tick(cx);
-                Self::builtin_success(dctx, "flow_ux::desk_from_manager_alias")
             }
             builtins::BuiltInFeature::NewFlow => {
                 // Same creation path as the desk's "Create a flow…" row:
@@ -4272,55 +4207,6 @@ impl ScriptListApp {
                     cx,
                 );
             }
-            SurfaceOpenBuiltinAction::DesignGallery => {
-                tracing::info!(
-                    category = "BUILTIN",
-                    trace_id = %dctx.trace_id,
-                    "{}",
-                    action.log_message()
-                );
-
-                self.open_builtin_filterable_view(
-                    AppView::DesignGalleryView {
-                        filter: String::new(),
-                        selected_index: 0,
-                    },
-                    "Search designs...",
-                    false,
-                    cx,
-                );
-            }
-            SurfaceOpenBuiltinAction::FooterGallery => {
-                tracing::info!(
-                    category = "BUILTIN",
-                    trace_id = %dctx.trace_id,
-                    "{}",
-                    action.log_message()
-                );
-
-                self.open_builtin_filterable_view(
-                    AppView::FooterGalleryView {
-                        filter: String::new(),
-                        selected_index: 0,
-                    },
-                    "Search footer variations...",
-                    false,
-                    cx,
-                );
-            }
-            SurfaceOpenBuiltinAction::NonListStates => {
-                tracing::info!(
-                    category = "BUILTIN",
-                    trace_id = %dctx.trace_id,
-                    "{}",
-                    action.log_message()
-                );
-
-                self.current_view = AppView::NonListStatesView { selected_index: 0 };
-                self.filter_text.clear();
-                self.pending_focus = Some(FocusTarget::AppRoot);
-                cx.notify();
-            }
             SurfaceOpenBuiltinAction::AiChat(variant) => {
                 tracing::info!(
                     category = "BUILTIN",
@@ -4536,7 +4422,7 @@ impl ScriptListApp {
                                 crate::favicons::fetch_favicons_blocking(&domains);
                             })
                             .await;
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             let _ = this.update(cx, |_, cx| cx.notify());
                         });
                     });
@@ -4708,50 +4594,6 @@ impl ScriptListApp {
         Self::builtin_success(dctx, action.success_detail())
     }
 
-    #[cfg(feature = "storybook")]
-    fn execute_design_explorer_builtin(
-        &mut self,
-        action: DesignExplorerBuiltinAction,
-        dctx: &crate::action_helpers::DispatchContext,
-        cx: &mut Context<Self>,
-    ) -> crate::action_helpers::DispatchOutcome {
-        tracing::info!(
-            category = "BUILTIN",
-            trace_id = %dctx.trace_id,
-            "Opening Design Explorer"
-        );
-
-        let explorer = cx.new(|cx| {
-            let mut browser = script_kit_gpui::storybook::StoryBrowser::new(cx);
-            match action {
-                DesignExplorerBuiltinAction::Open => {
-                    browser.configure_for_design_explorer(Some(
-                        script_kit_gpui::storybook::StorySurface::MainMenu,
-                    ));
-                    browser.open_compare_mode();
-                    let _ = browser.select_variant_id("current-main-menu");
-                }
-            }
-            tracing::info!(
-                event = "design_explorer_opened",
-                surface = match action {
-                    DesignExplorerBuiltinAction::Open => "main-menu",
-                },
-                preview_mode = "compare",
-                variant_id = match action {
-                    DesignExplorerBuiltinAction::Open => Some("current-main-menu"),
-                },
-                "Opened in-app design explorer"
-            );
-            browser
-        });
-
-        self.current_view = AppView::DesignExplorerView { entity: explorer };
-        cx.notify();
-
-        Self::builtin_success(dctx, action.success_detail())
-    }
-
     fn apply_ai_command_window_plan(
         &mut self,
         plan: AiCommandWindowPlan,
@@ -4857,8 +4699,8 @@ impl ScriptListApp {
             AiCommandBuiltinAction::Unavailable(unavailable_action) => {
                 self.execute_ai_unavailable_builtin(unavailable_action, dctx, cx)
             }
-            AiCommandBuiltinAction::LegacyHarness(legacy_action) => {
-                self.execute_ai_legacy_harness_builtin(legacy_action, dctx, cx)
+            AiCommandBuiltinAction::AgentChat(agent_chat_action) => {
+                self.execute_ai_agent_chat_builtin(agent_chat_action, dctx, cx)
             }
         }
     }
@@ -4901,13 +4743,18 @@ impl ScriptListApp {
         )
     }
 
-    fn execute_ai_legacy_harness_builtin(
+    fn execute_ai_agent_chat_builtin(
         &mut self,
-        action: AiLegacyHarnessBuiltinAction,
+        action: AiAgentChatBuiltinAction,
         dctx: &crate::action_helpers::DispatchContext,
         cx: &mut Context<Self>,
     ) -> crate::action_helpers::DispatchOutcome {
         self.open_tab_ai_agent_chat_with_entry_intent(None, cx);
+        if action.starts_new_conversation() {
+            if let Some(entity) = self.active_agent_chat_entity() {
+                entity.update(cx, |chat, cx| chat.start_new_thread(cx));
+            }
+        }
         Self::builtin_success(dctx, action.success_detail())
     }
 
@@ -6574,7 +6421,7 @@ impl ScriptListApp {
                         self.try_set_prompt_input(transcript.clone(), cx)
                     }
                     crate::dictation::DictationTarget::NotesEditor => {
-                        match notes::inject_text_into_notes(&mut **cx, &transcript) {
+                        match notes::inject_text_into_notes(cx, &transcript) {
                             Ok(insertion_range) => {
                                 delivery_insertion_range = Some(insertion_range);
                                 true
@@ -6590,17 +6437,13 @@ impl ScriptListApp {
                         }
                     }
                     crate::dictation::DictationTarget::AiChatComposer => {
-                        match ai::set_ai_input(&mut **cx, &transcript, false) {
-                            Ok(()) => true,
-                            Err(error) => {
-                                tracing::warn!(
-                                    category = "DICTATION",
-                                    error = %error,
-                                    "AI chat delivery failed, falling back to frontmost app"
-                                );
-                                false
-                            }
-                        }
+                        self.seed_agent_chat_dictation_return_origin();
+                        self.open_agent_chat_with_composer_seed(
+                            transcript.clone(),
+                            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+                            cx,
+                        );
+                        true
                     }
                     crate::dictation::DictationTarget::TabAiHarness => {
                         self.seed_agent_chat_dictation_return_origin();
@@ -6644,26 +6487,23 @@ impl ScriptListApp {
                         let submit = crate::config::load_user_preferences()
                             .dictation
                             .quick_ai_answers();
-                        let opened = if submit {
-                            ai::open_mini_ai_window_from("dictation_quick_ai", &mut **cx)
+                        self.seed_agent_chat_dictation_return_origin();
+                        if submit {
+                            // Quick AI first turn: fresh zero-context session.
+                            self.open_tab_ai_agent_chat_with_entry_intent_variant(
+                                Some(transcript.clone()),
+                                crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
+                                cx,
+                            );
                         } else {
-                            ai::open_ai_window(&mut **cx)
-                        };
-                        match opened
-                            .map_err(|error| error.to_string())
-                            .and_then(|()| ai::set_ai_input(&mut **cx, &transcript, submit))
-                        {
-                            Ok(()) => true,
-                            Err(error) => {
-                                tracing::warn!(
-                                    category = "DICTATION",
-                                    error = %error,
-                                    submit,
-                                    "Quick AI delivery failed, falling back to frontmost app"
-                                );
-                                false
-                            }
+                            // Stage the question in the Quick AI composer unsubmitted.
+                            self.open_agent_chat_with_composer_seed(
+                                transcript.clone(),
+                                crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
+                                cx,
+                            );
                         }
+                        true
                     }
                     crate::dictation::DictationTarget::ExternalApp => false,
                 };
@@ -7332,7 +7172,7 @@ impl ScriptListApp {
                             crate::dictation::DictationModelStatus::Available,
                             cx,
                         );
-                        let pending = pending_dictation_model_action().lock().clone();
+                        let pending = *pending_dictation_model_action().lock();
                         let message = pending
                             .map(|action| {
                                 format!(
@@ -7613,7 +7453,7 @@ impl ScriptListApp {
                 ],
             ),
             DictationModelStatus::Available => {
-                let pending = pending_dictation_model_action().lock().clone();
+                let pending = *pending_dictation_model_action().lock();
                 let mut choices = Vec::new();
                 if let Some(action) = pending {
                     choices.push(Choice {
@@ -8408,7 +8248,7 @@ impl ScriptListApp {
     /// Determine the delivery target for a new dictation session based on
     /// which Script Kit surface is currently active.
     ///
-    /// Priority: notes editor > AI chat composer > active prompt >
+    /// Priority: notes editor > Agent Chat composer > active prompt >
     /// tracked frontmost app > launcher main filter fallback > external app.
     fn resolve_dictation_target(&self) -> crate::dictation::DictationTarget {
         let has_frontmost_app_target = Self::has_dictation_frontmost_target();
@@ -8416,7 +8256,7 @@ impl ScriptListApp {
             crate::dictation::DictationTarget::TabAiHarness
         } else if notes::is_notes_window_open() {
             crate::dictation::DictationTarget::NotesEditor
-        } else if ai::is_ai_window_open() {
+        } else if self.agent_chat_dictation_target_active() {
             crate::dictation::DictationTarget::AiChatComposer
         } else if self.can_accept_dictation_into_prompt() {
             crate::dictation::DictationTarget::MainWindowPrompt
@@ -8432,13 +8272,20 @@ impl ScriptListApp {
             ?target,
             current_view = ?std::mem::discriminant(&self.current_view),
             notes_open = notes::is_notes_window_open(),
-            ai_open = ai::is_ai_window_open(),
+            agent_chat_open = self.agent_chat_dictation_target_active(),
             has_frontmost_app_target,
             accepts_main_filter = self.can_accept_dictation_into_main_filter(),
             accepts_prompt = self.can_accept_dictation_into_prompt(),
             "Resolved dictation target"
         );
         target
+    }
+
+    /// Whether dictation can deliver into an Agent Chat composer: the detached
+    /// chat window is open or the embedded Agent Chat view is active.
+    fn agent_chat_dictation_target_active(&self) -> bool {
+        ai::agent_chat::ui::chat_window::is_chat_window_open()
+            || matches!(self.current_view, AppView::AgentChatView { .. })
     }
 
     /// Close the dictation overlay, hide Script Kit, and activate the tracked

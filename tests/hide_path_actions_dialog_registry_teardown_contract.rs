@@ -54,21 +54,16 @@
 //!      the Pass #29 full teardown. Grep for the fully-qualified call
 //!      prefix so a contributor renaming the variable from `ctx`/`cx`
 //!      doesn't silently break the pin.
-//!   2. That call is AFTER `ensure_embedded_ai_window(false)` (the
-//!      Pass #21 teardown) — the two sibling writes must stay adjacent
-//!      so neither drifts independently under a refactor.
-//!   3. The gap between the two teardown lines stays under ~1100 bytes —
-//!      any growth beyond that means they are no longer co-located and
-//!      the lock-step pairing has weakened. (Widened from 900 to 1100
-//!      because the Pass #29 explanation comment is denser than the
-//!      Pass #23 comment it replaces.)
+//!
+//! (The former pins 2 and 3 — lock-step ordering against the
+//! `ensure_embedded_ai_window(false)` teardown — were removed with the
+//! legacy AI window; that registry entry no longer exists.)
 //!
 //! **Refactor threat**: a contributor consolidating the four hide
 //! dispatchers into a shared "reset-main-and-teardown-children" helper
 //! (plausible — the bodies are already 30+ lines of near-identical
 //! sibling teardown) could easily drop the
-//! `crate::actions::close_actions_window(cx)` line from the extraction
-//! while keeping the louder `ensure_embedded_ai_window(false)` call.
+//! `crate::actions::close_actions_window(cx)` line from the extraction.
 //! Or — more dangerous — could "optimize" the upgrade back down to
 //! `remove_automation_window("actions-dialog")` on the grounds that the
 //! OS child is already gone, not realizing that the `ACTIONS_WINDOW`
@@ -142,96 +137,5 @@ fn no_hide_site_uses_legacy_bare_registry_teardown() {
              `remove_automation_window(\"actions-dialog\")` internally \
              on its first line AND clears the static."
         );
-    }
-}
-
-#[test]
-fn actions_dialog_teardown_follows_embedded_ai_teardown_in_every_site() {
-    for (name, src) in HIDE_SITES {
-        let ai_positions: Vec<usize> = src
-            .match_indices("crate::windows::ensure_embedded_ai_window(false)")
-            .map(|(idx, _)| idx)
-            .collect();
-        let actions_positions: Vec<usize> = src
-            .match_indices(CLOSE_ACTIONS_CALL_PREFIX)
-            .map(|(idx, _)| idx)
-            .collect();
-        assert!(
-            !ai_positions.is_empty(),
-            "{name} has no `ensure_embedded_ai_window(false)` teardown \
-             — the Pass #21 contract should have failed first; fix that \
-             before this one."
-        );
-        assert!(
-            !actions_positions.is_empty(),
-            "{name} has no `{CLOSE_ACTIONS_CALL_PREFIX}` teardown \
-             (covered by every_hide_site_closes_actions_window_fully — \
-             fix that first)."
-        );
-        assert_eq!(
-            ai_positions.len(),
-            actions_positions.len(),
-            "{name} has {} embedded-AI teardowns but {} \
-             close_actions_window calls — the two sibling writes must \
-             appear in lock-step, one close_actions_window per \
-             embedded-AI teardown. A mismatch means a hide arm was \
-             added/removed without updating its partner.",
-            ai_positions.len(),
-            actions_positions.len()
-        );
-        for (ai_idx, actions_idx) in ai_positions.iter().zip(actions_positions.iter()) {
-            assert!(
-                ai_idx < actions_idx,
-                "In {name}, a `{CLOSE_ACTIONS_CALL_PREFIX}` call at \
-                 offset {actions_idx} precedes its paired \
-                 `ensure_embedded_ai_window(false)` call at offset \
-                 {ai_idx}. The actions-window close must follow the \
-                 embedded-AI teardown so the two sibling writes remain \
-                 in lock-step and a future refactor cannot split them \
-                 silently."
-            );
-        }
-    }
-}
-
-#[test]
-fn actions_dialog_teardown_is_adjacent_to_embedded_ai_teardown() {
-    for (name, src) in HIDE_SITES {
-        let ai_positions: Vec<usize> = src
-            .match_indices("crate::windows::ensure_embedded_ai_window(false)")
-            .map(|(idx, _)| idx)
-            .collect();
-        let actions_positions: Vec<usize> = src
-            .match_indices(CLOSE_ACTIONS_CALL_PREFIX)
-            .map(|(idx, _)| idx)
-            .collect();
-        assert_eq!(
-            ai_positions.len(),
-            actions_positions.len(),
-            "{name} lock-step mismatch (covered by \
-             actions_dialog_teardown_follows_embedded_ai_teardown_in_every_site)."
-        );
-        for (ai_idx, actions_idx) in ai_positions.iter().zip(actions_positions.iter()) {
-            let gap = actions_idx.saturating_sub(*ai_idx);
-            assert!(
-                gap < 1100,
-                "In {name}, the gap between \
-                 `ensure_embedded_ai_window(false)` (offset {ai_idx}) \
-                 and the following `{CLOSE_ACTIONS_CALL_PREFIX}` is \
-                 {gap} bytes — must stay under 1100 so the two sibling \
-                 teardowns remain lexically co-located. A refactor \
-                 that pushes them apart breaks this invariant."
-            );
-            let between = &src[*ai_idx..*actions_idx];
-            assert!(
-                !between.contains("\n    pub fn ")
-                    && !between.contains("\n    pub(crate) fn ")
-                    && !between.contains("\n    fn "),
-                "In {name}, a function boundary appears between the \
-                 `ensure_embedded_ai_window(false)` teardown and the \
-                 `{CLOSE_ACTIONS_CALL_PREFIX}` call. They must live in \
-                 the same function body. Intervening text:\n{between}"
-            );
-        }
     }
 }

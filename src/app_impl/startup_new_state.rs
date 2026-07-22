@@ -129,8 +129,6 @@
             dictation_history_scroll_handle: ScrollHandle::new(),
             notes_browse_scroll_handle: ScrollHandle::new(),
             tracked_builtin_list_states: std::collections::HashMap::new(),
-            design_gallery_scroll_handle: UniformListScrollHandle::new(),
-            footer_gallery_scroll_handle: UniformListScrollHandle::new(),
             file_search_scroll_handle: UniformListScrollHandle::new(),
             theme_chooser_list_state: ListState::new(0, ListAlignment::Top, px(100.)).measure_all(),
             file_search_loading: false,
@@ -257,7 +255,6 @@
             last_scrolled_arg: None,
             last_scrolled_clipboard: None,
             last_scrolled_window: None,
-            last_scrolled_design_gallery: None,
             // Show warning banner when bun is not available
             show_bun_warning: !bun_available,
             // Menu bar integration: Now handled by frontmost_app_tracker module

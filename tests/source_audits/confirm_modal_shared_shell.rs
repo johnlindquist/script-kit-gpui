@@ -396,24 +396,6 @@ fn destructive_confirm_safety_scenario_uses_dry_run_confirm_fixture() {
 }
 
 #[test]
-fn confirm_modal_dev_style_preview_uses_shared_confirm_prompt_route() {
-    let source = read("src/main_sections/kitchen_sink_fixture.rs");
-    let block = source
-        .split("open_confirm_modal_kitchen_sink_fixture")
-        .nth(1)
-        .expect("confirm modal preview fixture should exist");
-
-    assert!(
-        block.contains("open_confirm_prompt")
-            && block.contains("ParentConfirmOptions")
-            && block.contains("Confirm Modal Preview")
-            && !block.contains("confirm_with_parent_dialog")
-            && !block.contains("confirm_modal_shell("),
-        "dev style confirm modal preview must open the real shared ConfirmPrompt route instead of rendering a local fake modal"
-    );
-}
-
-#[test]
 fn sdk_confirm_runtime_proof_uses_real_script_run_route() {
     let scenario = read("scripts/agentic/scenario.ts");
     let index = read("scripts/agentic/index.ts");

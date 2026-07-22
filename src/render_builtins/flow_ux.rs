@@ -616,7 +616,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) -> u64 {
         let cwd = self.flow_ux_cwd();
-        crate::flows::manager_window::remember_flow_cwd(&cwd);
+        crate::flows::remember_flow_cwd(&cwd);
         self.flow_session_counter += 1;
         let session_id = self.flow_session_counter;
         let transport = crate::flows::session::SessionTransport::for_engine(&flow.engine);
@@ -1319,7 +1319,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) -> u64 {
         let cwd = self.flow_ux_cwd();
-        crate::flows::manager_window::remember_flow_cwd(&cwd);
+        crate::flows::remember_flow_cwd(&cwd);
         let run_id = crate::flows::runner::launch_flow(
             &flow.id,
             &flow.name,

@@ -80,15 +80,11 @@ fn automation_window_kind_all_variants_round_trip() {
     let kinds = vec![
         (AutomationWindowKind::Main, "main"),
         (AutomationWindowKind::Notes, "notes"),
-        (AutomationWindowKind::Ai, "ai"),
-        (AutomationWindowKind::MiniAi, "miniAi"),
         (AutomationWindowKind::AgentChatDetached, "agentChatDetached"),
         (AutomationWindowKind::Dictation, "dictation"),
-        (AutomationWindowKind::DevStyleTool, "devStyleTool"),
         (AutomationWindowKind::ActionsDialog, "actionsDialog"),
         (AutomationWindowKind::PromptPopup, "promptPopup"),
         (AutomationWindowKind::Hud, "hud"),
-        (AutomationWindowKind::FlowManager, "flowManager"),
     ];
     for (kind, expected_str) in kinds {
         let json = serde_json::to_string(&kind).expect("serialize kind");

@@ -40,11 +40,6 @@ impl ScriptListApp {
             AppView::AppLauncherView { .. } => "AppLauncher",
             AppView::WindowSwitcherView { .. } => "WindowSwitcher",
             AppView::BrowserTabsView { .. } => "BrowserTabs",
-            AppView::DesignGalleryView { .. } => "DesignGallery",
-            AppView::FooterGalleryView { .. } => "FooterGallery",
-            AppView::NonListStatesView { .. } => "NonListStates",
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => "DesignExplorer",
             AppView::ScratchPadView { .. } => "ScratchPad",
             AppView::QuickTerminalView { .. } => "QuickTerminal",
             AppView::FlowSessionView { .. } => "FlowSession",

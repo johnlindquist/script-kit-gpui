@@ -4,7 +4,7 @@
 //!
 //! Run 9 Pass #16's A30 live-verified (fresh binary pid 30544) that
 //! firing `triggerBuiltin browser-tabs` from INSIDE an active
-//! `DesignGalleryView` session — with no intervening `hide`, `escape`,
+//! `ThemeChooserView` session — with no intervening `hide`, `escape`,
 //! or return-to-main — successfully flips the prompt to `browserTabs`
 //! with `choiceCount:39, visible:39`. The cross-view in-place switch is
 //! a documented design behavior: the single umbrella dispatcher does

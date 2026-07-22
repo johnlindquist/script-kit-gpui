@@ -46,7 +46,6 @@ impl ScriptListApp {
         let previous_view = self.current_view.clone();
         self.embedded_agent_chat_focus_handle = Some(entity.read(cx).focus_handle(cx));
         self.current_view = AppView::AgentChatView { entity };
-        crate::windows::ensure_embedded_ai_window(true);
         let main_rekeyed = self.rekey_main_automation_surface_from_current_view();
         self.transition_agent_chat_surface(AgentChatSurfaceEvent::EmbeddedOpened);
         self.focused_input = FocusedInput::None;
@@ -84,7 +83,6 @@ impl ScriptListApp {
         let return_focus_debug = format!("{return_focus_target:?}");
         self.restore_current_view_with_focus(return_view.clone(), return_focus_target);
         let main_rekeyed = self.rekey_main_automation_surface_from_current_view();
-        crate::windows::ensure_embedded_ai_window(false);
         self.embedded_agent_chat_focus_handle = None;
         self.clear_actions_popup_state();
         self.transition_agent_chat_surface(AgentChatSurfaceEvent::EmbeddedClosed);

@@ -243,8 +243,6 @@ fn filterable_view_builtins_use_shared_helper() {
     for view in [
         "AppView::FavoritesBrowseView",
         "AppView::AppLauncherView",
-        "AppView::DesignGalleryView",
-        "AppView::FooterGalleryView",
         "AppView::EmojiPickerView",
     ] {
         assert!(
@@ -301,7 +299,6 @@ fn deferred_sizing_keeps_mini_filterable_builtins_narrow() {
         "AppView::EmojiPickerView{",
         "AppView::AppLauncherView{",
         "AppView::WindowSwitcherView{",
-        "AppView::DesignGalleryView{",
         "AppView::ProcessManagerView{",
         "AppView::CurrentAppCommandsView{",
         "AppView::BrowserTabsView{",
@@ -386,12 +383,6 @@ fn surface_contracts_match_main_window_sizing_shape() {
 
     for (kind, preview, visual, view_type) in [
         (
-            "SurfaceKind::DesignGallery",
-            "NoPersistentPreview",
-            "CompactLauncherVisual",
-            "AppView::DesignGalleryView{..}|",
-        ),
-        (
             "SurfaceKind::ThemeChooser",
             "RequiredSplitPreview",
             "SplitPreviewVisual",
@@ -431,7 +422,6 @@ fn filterable_view_builtins_are_silent_on_success() {
         "builtins::BuiltInFeature::Favorites",
         "builtins::BuiltInFeature::AppLauncher",
         "builtins::BuiltInFeature::WindowSwitcher",
-        "builtins::BuiltInFeature::DesignGallery",
     ] {
         let start = content
             .find(needle)

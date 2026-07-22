@@ -337,106 +337,6 @@ impl ScriptListApp {
                 .into()
             }
 
-            AppView::DesignGalleryView {
-                filter,
-                selected_index,
-            } => {
-                let filter_lower = filter.to_lowercase();
-                let rows: Vec<String> = crate::build_gallery_items()
-                    .into_iter()
-                    .filter(|item| {
-                        filter.is_empty() || crate::gallery_item_matches(item, &filter_lower)
-                    })
-                    .map(|item| crate::design_gallery_item_label(&item))
-                    .collect();
-                self.collect_named_rows(
-                    "design-gallery-filter",
-                    filter.clone(),
-                    "design-gallery",
-                    &rows,
-                    *selected_index,
-                    limit,
-                )
-                .into()
-            }
-
-            AppView::FooterGalleryView {
-                filter,
-                selected_index,
-            } => {
-                let rows = Self::footer_gallery_visible_row_labels(filter);
-                self.collect_named_rows(
-                    "footer-gallery-filter",
-                    filter.clone(),
-                    "footer-gallery",
-                    &rows,
-                    *selected_index,
-                    limit,
-                )
-                .into()
-            }
-
-            AppView::NonListStatesView { selected_index } => {
-                let rows = [
-                    ("empty", "Empty"),
-                    ("help", "Help"),
-                    ("form", "Form"),
-                    ("setup", "Setup"),
-                    ("permission", "Permission"),
-                    ("recovery", "Recovery"),
-                    ("about", "About"),
-                    ("density", "Density"),
-                ];
-                let mut elements = vec![protocol::ElementInfo {
-                    semantic_id: "non-list-states:surface".to_string(),
-                    element_type: protocol::ElementType::Panel,
-                    text: rows
-                        .get(*selected_index)
-                        .map(|(_, label)| (*label).to_string())
-                        .or_else(|| Some("Non-list state language".to_string())),
-                    value: Some("main-window-showcase".to_string()),
-                    selected: None,
-                    focused: Some(true),
-                    index: None,
-                    role: Some("region".to_string()),
-                    kind: Some("designLanguageShowcase".to_string()),
-                    source: Some("nonListStates".to_string()),
-                    source_name: Some("Non-List States".to_string()),
-                    selectable: Some(false),
-                    status_kind: None,
-                    action_disabled: None,
-                    style: None,
-                }];
-
-                for (index, (value, label)) in rows.iter().enumerate() {
-                    if !Self::push_limited_element(
-                        &mut elements,
-                        limit,
-                        protocol::ElementInfo {
-                            semantic_id: format!("non-list-states:{value}"),
-                            element_type: protocol::ElementType::Panel,
-                            text: Some((*label).to_string()),
-                            value: Some((*value).to_string()),
-                            selected: Some(index == *selected_index),
-                            focused: None,
-                            index: Some(index),
-                            role: Some("example".to_string()),
-                            kind: Some("nonListState".to_string()),
-                            source: Some("nonListStates".to_string()),
-                            source_name: Some("Non-List States".to_string()),
-                            selectable: Some(false),
-                            status_kind: None,
-                            action_disabled: None,
-                            style: None,
-                        },
-                    ) {
-                        break;
-                    }
-                }
-
-                ElementCollectionOutcome::new(elements, rows.len() + 1)
-            }
-
             AppView::AgentChatHistoryView {
                 filter,
                 selected_index,
@@ -1658,13 +1558,13 @@ impl ScriptListApp {
                 let confirm_selected = matches!(focused_button, ConfirmFocusedButton::Confirm);
                 let cancel_selected = matches!(focused_button, ConfirmFocusedButton::Cancel);
                 let mut confirm_button =
-                    protocol::ElementInfo::button(0, &options.confirm_text.to_string());
+                    protocol::ElementInfo::button(0, options.confirm_text.as_ref());
                 confirm_button.selected = Some(confirm_selected);
                 confirm_button.role = Some("footer".to_string());
                 confirm_button.kind = Some("confirm".to_string());
                 confirm_button.selectable = Some(true);
                 let mut cancel_button =
-                    protocol::ElementInfo::button(1, &options.cancel_text.to_string());
+                    protocol::ElementInfo::button(1, options.cancel_text.as_ref());
                 cancel_button.selected = Some(cancel_selected);
                 cancel_button.role = Some("footer".to_string());
                 cancel_button.kind = Some("cancel".to_string());
@@ -1874,7 +1774,7 @@ impl ScriptListApp {
         limit: usize,
         cx: &Context<Self>,
     ) {
-        let footer = self.active_footer_snapshot(&**cx);
+        let footer = self.active_footer_snapshot(cx);
         let row_kind = match footer.owner.as_str() {
             "native" => Some("nativeFooterRow"),
             "prompt" => Some("promptFooterRow"),
@@ -3341,7 +3241,7 @@ impl ScriptListApp {
                         semantic_id: protocol::generate_semantic_id("choice", row_index, &label),
                         element_type: protocol::ElementType::Choice,
                         text: Some(label.clone()),
-                        value: subtitle.or_else(|| Some(label)),
+                        value: subtitle.or(Some(label)),
                         selected: Some(Some(grouped_index) == selected_grouped_index),
                         focused: None,
                         index: Some(row_index),

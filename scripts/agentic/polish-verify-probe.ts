@@ -53,9 +53,11 @@ try {
   driver.simulateKey("escape");
   await driver.waitForSettle();
 
-  // ── 3. Agent Chat kitchen sink fixture: footer leading slot + actions ──
+  // ── 3. Agent Chat surface: footer leading slot + actions ──
+  // (was driven by the removed kitchen-sink fixture command; a plain Agent
+  // Chat open exercises the same current-surface footer chrome)
   await driver
-    .request({ type: "openAgentChatKitchenSinkFixture" })
+    .request({ type: "openAi" })
     .catch((e: unknown) => (receipt.chatOpenError = String(e)));
   await driver.waitForSettle();
   const chatState = await driver.request({ type: "getAgentChatState" }).catch((e: unknown) => ({ error: String(e) }));

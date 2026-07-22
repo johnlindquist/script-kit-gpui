@@ -23,8 +23,6 @@
   "src/builtins/mod.rs": 2224,
   "src/components/prompt_layout_shell.rs": 2446,
   "src/config/types.rs": 2801,
-  "src/dev_style_tool/catalog.rs": 3239,
-  "src/dev_style_tool/render.rs": 3540,
   "src/dictation/window.rs": 3411,
   "src/execute_script/mod.rs": 3024,
   "src/file_search/mod.rs": 2968,

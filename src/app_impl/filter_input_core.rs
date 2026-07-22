@@ -45,8 +45,6 @@ impl ScriptListApp {
                 | AppView::AppLauncherView { .. }
                 | AppView::WindowSwitcherView { .. }
                 | AppView::BrowserTabsView { .. }
-                | AppView::DesignGalleryView { .. }
-                | AppView::FooterGalleryView { .. }
                 | AppView::ThemeChooserView { .. }
                 | AppView::FileSearchView { .. }
                 | AppView::ProfileSearchView { .. }
@@ -566,8 +564,6 @@ mod tests {
             "AppView::AppLauncherView",
             "AppView::WindowSwitcherView",
             "AppView::BrowserTabsView",
-            "AppView::DesignGalleryView",
-            "AppView::FooterGalleryView",
             "AppView::ThemeChooserView",
             "AppView::FileSearchView",
             "AppView::SettingsView",

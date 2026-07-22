@@ -108,9 +108,6 @@ const DT_037_NONDESTRUCTIVE_BUILTINS_COPY: &str = include_str!(
 const DT_038_NONDESTRUCTIVE_BUILTINS_COPY: &str = include_str!(
     "../.agents/skills/script-kit-devtools/references/devtools-truth-scenarios/receipts/direct-actions-nondestructive-builtins-copy-v1/dt-truth-038-actions-emoji-copy-deeplink-truth/scenario.receipt.json"
 );
-const DT_039_NONDESTRUCTIVE_BUILTINS_COPY: &str = include_str!(
-    "../.agents/skills/script-kit-devtools/references/devtools-truth-scenarios/receipts/direct-actions-nondestructive-builtins-copy-v1/dt-truth-039-actions-design-gallery-copy-deeplink-truth/scenario.receipt.json"
-);
 const DT_040_NONDESTRUCTIVE_BUILTINS_COPY: &str = include_str!(
     "../.agents/skills/script-kit-devtools/references/devtools-truth-scenarios/receipts/direct-actions-nondestructive-builtins-copy-v1/dt-truth-040-actions-notes-copy-deeplink-truth/scenario.receipt.json"
 );
@@ -1697,25 +1694,6 @@ fn direct_devtools_non_destructive_launcher_submit_uses_named_allowlist() {
 }
 
 #[test]
-fn direct_devtools_dev_style_kitchen_sink_submit_uses_named_allowlist() {
-    let source = include_str!("../scripts/devtools/act.ts");
-    for expected in [
-        "devStyleKitchenSinkSubmitIds",
-        "\"button:dev-style-tool-open-main-window-kitchen-sink\"",
-        "\"button:dev-style-tool-open-actions-popup-kitchen-sink\"",
-        "\"button:dev-style-tool-open-agent-chat-kitchen-sink\"",
-        "isDevStyleToolTargetReceipt",
-        "submitIntent:style-fixture",
-        "args.submitIntent === \"style-fixture\"",
-    ] {
-        assert!(
-            source.contains(expected),
-            "direct DevTools submit safety should expose dev style fixture allowlist state {expected}"
-        );
-    }
-}
-
-#[test]
 fn direct_actions_nondestructive_builtins_copy_slice_has_exact_scenarios_and_no_runner() {
     let manifest = parse(NONDESTRUCTIVE_BUILTINS_COPY_MANIFEST);
     assert_eq!(manifest["schemaVersion"], 1);
@@ -1731,7 +1709,7 @@ fn direct_actions_nondestructive_builtins_copy_slice_has_exact_scenarios_and_no_
     assert_eq!(manifest["executor"], "direct-devtools-primitives");
     assert_eq!(manifest["hasRunner"], false);
     assert_eq!(manifest["forbiddenExecutorsUsed"], false);
-    assert_eq!(manifest["summary"]["pass"], 4);
+    assert_eq!(manifest["summary"]["pass"], 3);
     assert_eq!(manifest["summary"]["fail"], 0);
     assert_eq!(manifest["summary"]["blockedByMissingPrimitive"], 0);
     assert_eq!(manifest["summary"]["blockedByUnsafeOperation"], 0);
@@ -1747,7 +1725,6 @@ fn direct_actions_nondestructive_builtins_copy_slice_has_exact_scenarios_and_no_
         vec![
             "dt-truth-037-actions-app-launcher-copy-deeplink-truth",
             "dt-truth-038-actions-emoji-copy-deeplink-truth",
-            "dt-truth-039-actions-design-gallery-copy-deeplink-truth",
             "dt-truth-040-actions-notes-copy-deeplink-truth",
         ]
     );
@@ -1763,10 +1740,6 @@ fn direct_actions_nondestructive_builtins_copy_receipts_have_truth_schema_safety
         (
             "dt-truth-038-actions-emoji-copy-deeplink-truth",
             DT_038_NONDESTRUCTIVE_BUILTINS_COPY,
-        ),
-        (
-            "dt-truth-039-actions-design-gallery-copy-deeplink-truth",
-            DT_039_NONDESTRUCTIVE_BUILTINS_COPY,
         ),
         (
             "dt-truth-040-actions-notes-copy-deeplink-truth",
@@ -1876,16 +1849,6 @@ fn direct_actions_nondestructive_builtins_copy_records_expected_truth_checks() {
             ],
         ),
         (
-            DT_039_NONDESTRUCTIVE_BUILTINS_COPY,
-            vec![
-                "designGalleryParentSelectionStable",
-                "designGalleryCopyDeepLinkVisible",
-                "designGalleryRejectsInstallStaleCopy",
-                "designGalleryKeyboardPrimitiveDoesNotChangeActionTruth",
-                "designGalleryCopySubmitAllowedByNamedPair",
-            ],
-        ),
-        (
             DT_040_NONDESTRUCTIVE_BUILTINS_COPY,
             vec![
                 "openNotesParentSelectionStable",
@@ -1928,12 +1891,6 @@ fn direct_actions_nondestructive_builtins_copy_records_exact_parent_action_pairs
             "Emoji Picker",
             "choice:35:emoji-picker",
             "builtin-emoji-picker",
-        ),
-        (
-            DT_039_NONDESTRUCTIVE_BUILTINS_COPY,
-            "Design Gallery",
-            "choice:31:design-gallery",
-            "builtin-design-gallery",
         ),
         (
             DT_040_NONDESTRUCTIVE_BUILTINS_COPY,

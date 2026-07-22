@@ -565,19 +565,16 @@ const PROTOCOL_MESSAGES: ProtocolMessage[] = [
   {
     name: 'captureScreenshot',
     category: 'Screenshot',
-    status: 'tested',
-    testFiles: [
-      'tests/smoke/audit-capture-all.ts',
-      'tests/smoke/audit-visual-test.ts',
-    ],
-    notes: 'Capture app window screenshot - used in visual tests',
+    status: 'untested',
+    testFiles: [],
+    notes: 'Capture app window screenshot - visual-audit drivers removed 2026-07 (dead-test-cleanup)',
   },
   {
     name: 'screenshotResult',
     category: 'Screenshot',
-    status: 'tested',
-    testFiles: ['tests/smoke/audit-capture-all.ts'],
-    notes: 'Screenshot response with base64 PNG',
+    status: 'untested',
+    testFiles: [],
+    notes: 'Screenshot response with base64 PNG - visual-audit drivers removed 2026-07 (dead-test-cleanup)',
   },
 
   // ============================================================
@@ -622,16 +619,16 @@ const PROTOCOL_MESSAGES: ProtocolMessage[] = [
   {
     name: 'getLayoutInfo',
     category: 'Layout Info',
-    status: 'partial',
-    testFiles: ['tests/smoke/test-layout-info-simple.ts'],
-    notes: 'Layout information request',
+    status: 'untested',
+    testFiles: [],
+    notes: 'Layout information request - grid-debug drivers removed 2026-07 (dead-test-cleanup)',
   },
   {
     name: 'layoutInfoResult',
     category: 'Layout Info',
-    status: 'partial',
-    testFiles: ['tests/smoke/test-layout-info-simple.ts'],
-    notes: 'Layout information response',
+    status: 'untested',
+    testFiles: [],
+    notes: 'Layout information response - grid-debug drivers removed 2026-07 (dead-test-cleanup)',
   },
 
   // ============================================================
@@ -707,24 +704,16 @@ const PROTOCOL_MESSAGES: ProtocolMessage[] = [
   {
     name: 'showGrid',
     category: 'Debug',
-    status: 'partial',
-    testFiles: [
-      'tests/smoke/test-grid-div.ts',
-      'tests/smoke/test-grid-dimensions.ts',
-      'tests/smoke/test-grid-final.ts',
-      'tests/smoke/test-grid-simple.ts',
-      'tests/smoke/test-grid-now.ts',
-      'tests/smoke/test-grid-quick.ts',
-      'tests/smoke/test-debug-grid-bounds.ts',
-    ],
-    notes: 'Show debug grid overlay',
+    status: 'untested',
+    testFiles: [],
+    notes: 'Show debug grid overlay - grid-debug drivers removed 2026-07 (dead-test-cleanup)',
   },
   {
     name: 'hideGrid',
     category: 'Debug',
-    status: 'partial',
-    testFiles: ['tests/smoke/test-grid-div.ts'],
-    notes: 'Hide debug grid overlay',
+    status: 'untested',
+    testFiles: [],
+    notes: 'Hide debug grid overlay - grid-debug drivers removed 2026-07 (dead-test-cleanup)',
   },
 
   // ============================================================

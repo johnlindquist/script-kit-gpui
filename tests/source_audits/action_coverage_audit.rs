@@ -545,7 +545,7 @@ fn clipboard_attach_to_ai_handles_all_content_types() {
 }
 
 #[test]
-fn clipboard_attach_to_ai_uses_deferred_ai_window_action() {
+fn clipboard_attach_to_ai_uses_deferred_agent_chat_action() {
     let content = handle_action_content();
 
     let attach_pos = content
@@ -554,14 +554,14 @@ fn clipboard_attach_to_ai_uses_deferred_ai_window_action() {
     let block = &content[attach_pos..content.len().min(attach_pos + 5000)];
 
     assert!(
-        block.contains("open_ai_window_after_main_hide("),
-        "clipboard_attach_to_ai should use open_ai_window_after_main_hide"
+        block.contains("open_agent_chat_after_main_hide("),
+        "clipboard_attach_to_ai should use open_agent_chat_after_main_hide"
     );
     assert!(
-        content.contains("DeferredAiWindowAction::SetInput")
-            && content.contains("DeferredAiWindowAction::AddAttachment")
-            && block.contains("DeferredAiWindowAction::SetInputWithImage"),
-        "clipboard_attach_to_ai should route clipboard content through a deferred AI handoff action"
+        content.contains("DeferredAgentChatAction::SetInput")
+            && content.contains("DeferredAgentChatAction::AddAttachment")
+            && block.contains("DeferredAgentChatAction::SetInputWithImage"),
+        "clipboard_attach_to_ai should route clipboard content through a deferred Agent Chat handoff action"
     );
 }
 

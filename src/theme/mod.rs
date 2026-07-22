@@ -22,12 +22,7 @@
 //! 1. **theme.json on disk** - `~/.scriptkit/theme.json` (with user-preference
 //!    and appearance fallbacks) is parsed by `types::load_theme()`. This is the
 //!    only step that touches the filesystem.
-//! 2. **Dev tool color overrides** - `reload_theme_cache()` layers
-//!    `dev_style_tool::runtime_overrides::apply_to_theme` on top of the loaded
-//!    theme, applying any live `theme.colors.*` overrides from the styling
-//!    sidecar's Theme inspector tab (devtools `setThemeControl`). A no-op when
-//!    the override channel is empty.
-//! 3. **THEME_CACHE** - the layered `Theme` is stored in the global cache in
+//! 2. **THEME_CACHE** - the loaded `Theme` is stored in the global cache in
 //!    `types.rs`. `service.rs` owns `THEME_REVISION`, bumped whenever the cache
 //!    reloads: by the theme.json file watcher, by appearance flips, or by
 //!    `service::reapply_runtime_theme_overrides` after a dev-tool color edit.

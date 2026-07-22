@@ -27,7 +27,6 @@ impl ScriptListApp {
                 | AppView::CreateAiPresetView { .. }
                 | AppView::SettingsView { .. }
                 | AppView::FavoritesBrowseView { .. }
-                | AppView::DesignGalleryView { .. }
                 | AppView::BrowseKitsView { .. }
                 | AppView::MigrateV1View { .. }
                 | AppView::InstalledKitsView { .. }
@@ -70,7 +69,6 @@ impl ScriptListApp {
             | AppView::SearchAiPresetsView { .. }
             | AppView::CreateAiPresetView { .. }
             | AppView::SettingsView { .. }
-            | AppView::DesignGalleryView { .. }
             | AppView::BrowseKitsView { .. }
             | AppView::MigrateV1View { .. }
             | AppView::InstalledKitsView { .. } => Some(ActionsDialogHost::BuiltinList),
@@ -1875,15 +1873,6 @@ mod actions_host_mapping_tests {
         };
         assert_eq!(
             ScriptListApp::live_actions_host_for_view(&current_app_commands),
-            None
-        );
-
-        let design_gallery = AppView::DesignGalleryView {
-            filter: String::new(),
-            selected_index: 0,
-        };
-        assert_eq!(
-            ScriptListApp::live_actions_host_for_view(&design_gallery),
             None
         );
 

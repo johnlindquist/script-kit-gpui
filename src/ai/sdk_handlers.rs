@@ -11,7 +11,6 @@ use crate::protocol::{AiChatInfo, AiContextPartInput, AiMessageInfo, Message};
 
 use super::model::{Chat, ChatId, ImageAttachment, Message as AiMessage, MessageRole};
 use super::storage;
-use super::window::{get_active_chat_id, get_streaming_snapshot};
 
 /// Convert a Chat from storage to AiChatInfo for protocol
 fn chat_to_info(chat: &Chat, message_count: usize) -> AiChatInfo {
@@ -93,10 +92,12 @@ fn parse_message_role(request_id: &str, role: &str) -> std::result::Result<Messa
     })
 }
 
-/// Handle AiIsOpen request - check if AI window is open
+/// Handle AiIsOpen request - check if a chat surface is open
 pub fn handle_ai_is_open(request_id: String) -> Message {
-    let is_open = super::is_ai_window_open();
-    let active_chat_id = if is_open { get_active_chat_id() } else { None };
+    // The legacy AI window is gone; the detached Agent Chat window is the
+    // remaining standalone chat surface.
+    let is_open = crate::ai::agent_chat::ui::chat_window::is_chat_window_open();
+    let active_chat_id = None;
 
     info!(
         request_id = %request_id,
@@ -114,30 +115,13 @@ pub fn handle_ai_is_open(request_id: String) -> Message {
 
 /// Handle AiGetActiveChat request - get info about active chat
 pub fn handle_ai_get_active_chat(request_id: String) -> Message {
-    // Read the actual active chat ID from window state
-    let active_id = get_active_chat_id().and_then(|id_str| ChatId::parse(&id_str));
-
-    let chat = match active_id {
-        Some(id) => match storage::get_chat(&id) {
-            Ok(Some(c)) => Some(c),
-            Ok(None) => {
-                debug!(chat_id = %id, "Active chat not found in storage");
-                None
-            }
-            Err(e) => {
-                error!(error = %e, chat_id = %id, "Failed to get active chat from storage");
-                None
-            }
-        },
-        None => {
-            // Fallback: return the most recently updated chat
-            match storage::get_all_chats() {
-                Ok(chats) => chats.into_iter().next(),
-                Err(e) => {
-                    error!(error = %e, "Failed to get chats for AiGetActiveChat fallback");
-                    None
-                }
-            }
+    // The legacy AI window's active-chat tracking is gone; report the most
+    // recently updated chat as the active one.
+    let chat = match storage::get_all_chats() {
+        Ok(chats) => chats.into_iter().next(),
+        Err(e) => {
+            error!(error = %e, "Failed to get chats for AiGetActiveChat");
+            None
         }
     };
 
@@ -151,7 +135,6 @@ pub fn handle_ai_get_active_chat(request_id: String) -> Message {
     info!(
         request_id = %request_id,
         has_chat = chat_info.is_some(),
-        from_window_state = active_id.is_some(),
         "ai_sdk.get_active_chat"
     );
 
@@ -237,24 +220,11 @@ pub fn handle_ai_get_conversation(
             }
         },
         None => {
-            // Try the active chat from window state first, then fall back to most recent
-            let active = get_active_chat_id().and_then(|id_str| ChatId::parse(&id_str));
-            match active {
-                Some(id) => id,
-                None => match storage::get_all_chats() {
-                    Ok(chats) => match chats.into_iter().next() {
-                        Some(c) => c.id,
-                        None => {
-                            return Message::AiConversationResult {
-                                request_id,
-                                chat_id: String::new(),
-                                messages: vec![],
-                                has_more: false,
-                            };
-                        }
-                    },
-                    Err(e) => {
-                        error!(error = %e, "Failed to get chats for conversation");
+            // Fall back to the most recently updated chat
+            match storage::get_all_chats() {
+                Ok(chats) => match chats.into_iter().next() {
+                    Some(c) => c.id,
+                    None => {
                         return Message::AiConversationResult {
                             request_id,
                             chat_id: String::new(),
@@ -263,6 +233,15 @@ pub fn handle_ai_get_conversation(
                         };
                     }
                 },
+                Err(e) => {
+                    error!(error = %e, "Failed to get chats for conversation");
+                    return Message::AiConversationResult {
+                        request_id,
+                        chat_id: String::new(),
+                        messages: vec![],
+                        has_more: false,
+                    };
+                }
             }
         }
     };
@@ -505,20 +484,10 @@ pub fn handle_ai_get_streaming_status(
     request_id: String,
     query_chat_id: Option<String>,
 ) -> Message {
-    let snapshot = get_streaming_snapshot();
-
-    // If a specific chat_id was requested, only report streaming for that chat
-    let is_relevant = match (&query_chat_id, &snapshot.chat_id) {
-        (Some(query), Some(active)) => query == active,
-        (None, _) => true,        // No filter, report global status
-        (Some(_), None) => false, // Querying specific chat but nothing is streaming
-    };
-
-    let (is_streaming, chat_id, partial_content) = if is_relevant && snapshot.is_streaming {
-        (true, snapshot.chat_id, snapshot.partial_content)
-    } else {
-        (false, None, None)
-    };
+    // The legacy AI window published a global streaming snapshot; with it gone
+    // there is no cross-window streaming state to report.
+    let (is_streaming, chat_id, partial_content) = (false, None, None);
+    let _ = query_chat_id;
 
     info!(
         request_id = %request_id,

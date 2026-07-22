@@ -362,7 +362,7 @@ pub(crate) fn intent_from_part(
         })
     } else {
         let description = preview_only_part_description(part).unwrap_or_else(|| {
-            crate::ai::window::context_preview::derive_context_preview_info(part).description
+            crate::ai::context_preview::derive_context_preview_info(part).description
         });
         AgentChatPortalIntent::PreviewOnly {
             description,

@@ -47,7 +47,7 @@ fn handler_slice() -> &'static str {
 }
 
 #[test]
-fn ai_chat_composer_delivery_uses_set_ai_input_without_auto_submit() {
+fn ai_chat_composer_delivery_stages_agent_chat_composer_without_auto_submit() {
     let handler = handler_slice();
     assert!(
         handler.contains("DictationTarget::AiChatComposer =>"),
@@ -55,11 +55,19 @@ fn ai_chat_composer_delivery_uses_set_ai_input_without_auto_submit() {
          arm so Agent Chat-adjacent dictation has a routed delivery path"
     );
     assert!(
-        handler.contains("ai::set_ai_input(&mut **cx, &transcript, false)"),
-        "AiChatComposer delivery must call set_ai_input with submit=false — \
-         that `false` is the 'nothing else changed' invariant from the story. \
-         Flipping it to `true` would auto-submit the transcript and break the \
-         story's acceptance."
+        handler.contains("open_agent_chat_with_composer_seed("),
+        "AiChatComposer delivery must stage the transcript through the \
+         composer-seed entry — that path uses AgentChatSeedPolicy::ComposerOnly, \
+         the 'nothing else changed' invariant from the story. An auto-submit \
+         entry would send the transcript without the user reviewing it."
+    );
+    let arm_start = handler
+        .find("DictationTarget::AiChatComposer =>")
+        .expect("AiChatComposer arm must exist");
+    let arm = &handler[arm_start..arm_start + 1200.min(handler.len() - arm_start)];
+    assert!(
+        arm.contains("AgentChatUiVariant::Standard"),
+        "AiChatComposer delivery must open the standard Agent Chat surface"
     );
 }
 
@@ -110,8 +118,8 @@ fn quick_ai_delivery_submit_flag_comes_from_config() {
          break the 'composer' config mode"
     );
     assert!(
-        handler.contains("open_mini_ai_window_from(\"dictation_quick_ai\""),
-        "fire-and-show must open the mini AI window with a traceable source tag"
+        handler.contains("AgentChatUiVariant::QuickAi"),
+        "fire-and-show must route the question to a Quick AI Agent Chat session"
     );
 }
 

@@ -17,8 +17,8 @@ use gpui_component::button::ButtonVariant as ConfirmButtonVariant;
 
 use crate::{
     components::confirm_modal_shell::{
-        confirm_modal_header, confirm_modal_number_override, confirm_modal_shell, modal_action_row,
-        ConfirmModalShellConfig, ModalActionRowButton, CONFIRM_MODAL_RADIUS, MODAL_WIDTH_PX,
+        confirm_modal_header, confirm_modal_shell, modal_action_row, ConfirmModalShellConfig,
+        ModalActionRowButton, CONFIRM_MODAL_RADIUS, MODAL_WIDTH_PX,
     },
     components::footer_chrome::{
         current_main_menu_footer_height, current_main_menu_footer_metrics,
@@ -26,17 +26,6 @@ use crate::{
         footer_centered_action_edge_padding_x, FooterActionSlot, FooterHintButtonLayoutOverrides,
     },
     components::overlay_modal::MODAL_PADDING,
-    dev_style_tool::{
-        ConfirmModalKnobId, CONFIRM_MODAL_ACTIONS_BUTTON_HEIGHT_KNOB_ID,
-        CONFIRM_MODAL_ACTIONS_BUTTON_RADIUS_KNOB_ID,
-        CONFIRM_MODAL_ACTIONS_CANCEL_SLOT_WIDTH_KNOB_ID,
-        CONFIRM_MODAL_ACTIONS_CONFIRM_SLOT_WIDTH_KNOB_ID,
-        CONFIRM_MODAL_ACTIONS_CONTENT_GAP_KNOB_ID, CONFIRM_MODAL_ACTIONS_EDGE_PADDING_X_KNOB_ID,
-        CONFIRM_MODAL_ACTIONS_GAP_KNOB_ID, CONFIRM_MODAL_ACTIONS_PADDING_X_KNOB_ID,
-        CONFIRM_MODAL_ACTIONS_PADDING_Y_KNOB_ID, CONFIRM_MODAL_ANATOMY_BODY_ACTIONS_GAP_KNOB_ID,
-        CONFIRM_MODAL_ANATOMY_BODY_LINE_HEIGHT_KNOB_ID,
-        CONFIRM_MODAL_ANATOMY_HEADER_BODY_GAP_KNOB_ID,
-    },
     platform,
     theme::get_cached_theme,
     ui_foundation::{is_key_enter, is_key_escape, is_key_left, is_key_tab},
@@ -46,6 +35,7 @@ const CONFIRM_PADDING_X: f32 = MODAL_PADDING;
 const CONFIRM_PADDING_Y: f32 = 20.0;
 const CONFIRM_SECTION_GAP: f32 = 10.0;
 const CONFIRM_TITLE_LINE_HEIGHT: f32 = 16.0;
+const CONFIRM_MODAL_DEFAULT_BODY_LINE_HEIGHT: f32 = 16.0;
 const CONFIRM_MIN_HEIGHT: f32 = 132.0;
 const CONFIRM_MAX_HEIGHT: f32 = 240.0;
 const CONFIRM_BODY_MAX_LINES: usize = 5;
@@ -196,93 +186,59 @@ fn confirm_window_dynamic_height(width: Pixels, body: &str, cx: &App) -> f32 {
     confirm_window_height_from_body_lines(has_body, body_lines)
 }
 
-fn confirm_modal_number(id: ConfirmModalKnobId, fallback: f32) -> f32 {
-    confirm_modal_number_override(id, fallback)
-}
-
 fn confirm_shell_padding_x() -> f32 {
-    confirm_modal_number(
-        crate::dev_style_tool::CONFIRM_MODAL_PADDING_X_KNOB_ID,
-        CONFIRM_PADDING_X,
-    )
+    CONFIRM_PADDING_X
 }
 
 fn confirm_shell_padding_y() -> f32 {
-    confirm_modal_number(
-        crate::dev_style_tool::CONFIRM_MODAL_PADDING_Y_KNOB_ID,
-        CONFIRM_PADDING_Y,
-    )
+    CONFIRM_PADDING_Y
 }
 
 fn confirm_shell_gap() -> f32 {
-    confirm_modal_number(
-        crate::dev_style_tool::CONFIRM_MODAL_GAP_KNOB_ID,
-        CONFIRM_SECTION_GAP,
-    )
+    CONFIRM_SECTION_GAP
 }
 
 fn confirm_action_button_height() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ACTIONS_BUTTON_HEIGHT_KNOB_ID,
-        footer_button_height(current_main_menu_footer_height()),
-    )
+    footer_button_height(current_main_menu_footer_height())
 }
 
 fn confirm_action_button_gap() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ACTIONS_GAP_KNOB_ID,
-        current_main_menu_footer_metrics().item_gap_px,
-    )
+    current_main_menu_footer_metrics().item_gap_px
 }
 
 fn confirm_cancel_slot_width() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ACTIONS_CANCEL_SLOT_WIDTH_KNOB_ID,
-        footer_action_slot_width(FooterActionSlot::Close),
-    )
+    footer_action_slot_width(FooterActionSlot::Close)
 }
 
 fn confirm_confirm_slot_width() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ACTIONS_CONFIRM_SLOT_WIDTH_KNOB_ID,
-        footer_action_slot_width(FooterActionSlot::Run),
-    )
+    footer_action_slot_width(FooterActionSlot::Run)
 }
 
 fn confirm_action_button_radius() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ACTIONS_BUTTON_RADIUS_KNOB_ID,
-        current_main_menu_footer_metrics().button_radius,
-    )
+    current_main_menu_footer_metrics().button_radius
 }
 
 fn confirm_action_button_layout() -> FooterHintButtonLayoutOverrides {
     let footer_layout = footer_centered_action_button_layout();
     let metrics = current_main_menu_footer_metrics();
     FooterHintButtonLayoutOverrides {
-        button_padding_x_px: Some(confirm_modal_number(
-            CONFIRM_MODAL_ACTIONS_PADDING_X_KNOB_ID,
+        button_padding_x_px: Some(
             footer_layout
                 .button_padding_x_px
                 .unwrap_or(metrics.button_padding_x),
-        )),
-        button_padding_y_px: Some(confirm_modal_number(
-            CONFIRM_MODAL_ACTIONS_PADDING_Y_KNOB_ID,
+        ),
+        button_padding_y_px: Some(
             footer_layout
                 .button_padding_y_px
                 .unwrap_or(metrics.button_padding_y),
-        )),
-        content_gap_px: Some(confirm_modal_number(
-            CONFIRM_MODAL_ACTIONS_CONTENT_GAP_KNOB_ID,
-            footer_layout.content_gap_px.unwrap_or(metrics.content_gap),
-        )),
+        ),
+        content_gap_px: Some(footer_layout.content_gap_px.unwrap_or(metrics.content_gap)),
         button_radius_px: Some(confirm_action_button_radius()),
-        edge_padding_x_px: Some(confirm_modal_number(
-            CONFIRM_MODAL_ACTIONS_EDGE_PADDING_X_KNOB_ID,
+        edge_padding_x_px: Some(
             footer_layout
                 .edge_padding_x_px
                 .unwrap_or_else(footer_centered_action_edge_padding_x),
-        )),
+        ),
         // Confirm/cancel labels are caller-supplied ("Move to Trash", custom
         // cancel copy) — a fixed footer slot ellipsizes them. Hug the rendered
         // content like render_universal_footer_action_buttons while keeping
@@ -293,24 +249,15 @@ fn confirm_action_button_layout() -> FooterHintButtonLayoutOverrides {
 }
 
 fn confirm_anatomy_header_body_gap() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ANATOMY_HEADER_BODY_GAP_KNOB_ID,
-        confirm_shell_gap(),
-    )
+    confirm_shell_gap()
 }
 
 fn confirm_anatomy_body_actions_gap() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ANATOMY_BODY_ACTIONS_GAP_KNOB_ID,
-        confirm_shell_gap(),
-    )
+    confirm_shell_gap()
 }
 
 fn confirm_body_line_height() -> f32 {
-    confirm_modal_number(
-        CONFIRM_MODAL_ANATOMY_BODY_LINE_HEIGHT_KNOB_ID,
-        crate::dev_style_tool::CONFIRM_MODAL_DEFAULT_BODY_LINE_HEIGHT,
-    )
+    CONFIRM_MODAL_DEFAULT_BODY_LINE_HEIGHT
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -637,12 +584,6 @@ fn notify_confirm_parent_window(cx: &mut App) {
             }
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn refresh_confirm_popup_for_runtime_style(cx: &mut App) {
-    notify_confirm_window(cx);
-    notify_confirm_parent_window(cx);
 }
 
 #[allow(dead_code)]

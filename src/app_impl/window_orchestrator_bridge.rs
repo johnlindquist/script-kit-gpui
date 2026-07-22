@@ -31,8 +31,6 @@ impl ScriptListApp {
                 | AppView::DictationHistoryView { .. }
                 | AppView::NotesBrowseView { .. }
                 | AppView::CurrentAppCommandsView { .. }
-                | AppView::DesignGalleryView { .. }
-                | AppView::FooterGalleryView { .. }
                 | AppView::CreationFeedback { .. }
                 | AppView::ScriptIssuesView { .. }
                 | AppView::SdkReferenceView { .. }
@@ -65,10 +63,7 @@ impl ScriptListApp {
                 AppView::DayPage { .. } => FocusTarget::EditorPrompt,
                 AppView::NamingPrompt { .. } => FocusTarget::NamingPrompt,
                 AppView::ConfirmPrompt { .. } => FocusTarget::AppRoot,
-                AppView::NonListStatesView { .. } => FocusTarget::AppRoot,
                 AppView::PermissionsWizardView { .. } => FocusTarget::AppRoot,
-                #[cfg(feature = "storybook")]
-                AppView::DesignExplorerView { .. } => FocusTarget::AppRoot,
             }),
             crate::window_orchestrator::FocusToken::ChatComposer => Some(FocusTarget::AgentChat),
             crate::window_orchestrator::FocusToken::TermInput => Some(FocusTarget::TermPrompt),

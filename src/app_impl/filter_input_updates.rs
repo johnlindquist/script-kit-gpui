@@ -661,20 +661,6 @@ impl ScriptListApp {
                 }
                 true
             }
-            AppView::DesignGalleryView {
-                filter,
-                selected_index,
-            } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
-                true
-            }
-            AppView::FooterGalleryView {
-                filter,
-                selected_index,
-            } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
-                true
-            }
             AppView::ThemeChooserView {
                 filter,
                 selected_index,
@@ -1505,17 +1491,6 @@ impl ScriptListApp {
         });
         self.suppress_filter_events = false;
         self.pending_filter_sync = false;
-    }
-
-    pub(crate) fn refresh_runtime_copy_controls(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.pending_placeholder =
-            Some(crate::dev_style_tool::runtime_overrides::effective_main_input_placeholder());
-        self.sync_filter_input_if_needed(window, cx);
-        cx.notify();
     }
 }
 

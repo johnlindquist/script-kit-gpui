@@ -2000,10 +2000,7 @@ pub fn get_cached_theme() -> Theme {
 /// Call this when you need to refresh the cached theme (e.g., from the theme watcher).
 /// This function loads the theme from disk and updates the cache.
 pub fn reload_theme_cache() -> Theme {
-    // Layer any live dev style tool theme color overrides on top of the theme
-    // from disk so cache reloads (file watcher, appearance flips, devtools)
-    // never drop in-flight Theme Inspector edits. No-op when no overrides exist.
-    let theme = crate::dev_style_tool::runtime_overrides::apply_to_theme(load_theme());
+    let theme = load_theme();
 
     let cache = &*THEME_CACHE;
     let mut guard = cache.lock().unwrap_or_else(|error| {

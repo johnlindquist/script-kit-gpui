@@ -63,82 +63,6 @@ fn select_main_window_semantic_id_for_batch(
     })?
 }
 
-fn run_dev_style_tool_semantic_action_for_batch(
-    this: &gpui::WeakEntity<ScriptListApp>,
-    main_window_handle: Option<gpui::AnyWindowHandle>,
-    semantic_id: &str,
-    submit: bool,
-    cx: &mut gpui::AsyncApp,
-) -> anyhow::Result<String> {
-    use crate::dev_style_tool::{
-        OPEN_ACTIONS_POPUP_KITCHEN_SINK_BUTTON, OPEN_ACTIONS_POPUP_NO_MATCH_KITCHEN_SINK_BUTTON,
-        OPEN_AGENT_CHAT_KITCHEN_SINK_BUTTON, OPEN_CONFIRM_MODAL_KITCHEN_SINK_BUTTON,
-        OPEN_MAIN_WINDOW_KITCHEN_SINK_BUTTON, OPEN_MAIN_WINDOW_NO_MATCH_KITCHEN_SINK_BUTTON,
-    };
-
-    let action_value = match semantic_id {
-        value if value == OPEN_MAIN_WINDOW_KITCHEN_SINK_BUTTON => "openMainWindowKitchenSink",
-        value if value == OPEN_MAIN_WINDOW_NO_MATCH_KITCHEN_SINK_BUTTON => {
-            "openMainWindowNoMatchKitchenSink"
-        }
-        value if value == OPEN_ACTIONS_POPUP_KITCHEN_SINK_BUTTON => "openActionsPopupKitchenSink",
-        value if value == OPEN_ACTIONS_POPUP_NO_MATCH_KITCHEN_SINK_BUTTON => {
-            "openActionsPopupNoMatchKitchenSink"
-        }
-        value if value == OPEN_AGENT_CHAT_KITCHEN_SINK_BUTTON => "openAgentChatKitchenSink",
-        value if value == OPEN_CONFIRM_MODAL_KITCHEN_SINK_BUTTON => "openConfirmModalKitchenSink",
-        _ => anyhow::bail!("unknown dev style semantic id '{semantic_id}'"),
-    };
-
-    if !submit {
-        return Ok(action_value.to_string());
-    }
-
-    match semantic_id {
-        value if value == OPEN_MAIN_WINDOW_KITCHEN_SINK_BUTTON => {
-            this.update(cx, |app, cx| app.open_main_window_kitchen_sink_fixture(cx))?;
-        }
-        value if value == OPEN_MAIN_WINDOW_NO_MATCH_KITCHEN_SINK_BUTTON => {
-            this.update(cx, |app, cx| {
-                app.open_main_window_no_match_kitchen_sink_fixture(cx)
-            })?;
-        }
-        value if value == OPEN_ACTIONS_POPUP_KITCHEN_SINK_BUTTON => {
-            let Some(handle) = main_window_handle else {
-                anyhow::bail!("main window handle unavailable for actions popup kitchen sink");
-            };
-            handle.update(cx, |_root, window, cx| {
-                this.update(cx, |app, cx| {
-                    app.open_actions_popup_kitchen_sink_fixture(window, cx);
-                })
-            })??;
-        }
-        value if value == OPEN_ACTIONS_POPUP_NO_MATCH_KITCHEN_SINK_BUTTON => {
-            let Some(handle) = main_window_handle else {
-                anyhow::bail!(
-                    "main window handle unavailable for actions popup no-match kitchen sink"
-                );
-            };
-            handle.update(cx, |_root, window, cx| {
-                this.update(cx, |app, cx| {
-                    app.open_actions_popup_no_match_kitchen_sink_fixture(window, cx);
-                })
-            })??;
-        }
-        value if value == OPEN_AGENT_CHAT_KITCHEN_SINK_BUTTON => {
-            this.update(cx, |app, cx| app.open_agent_chat_kitchen_sink_fixture(cx))?;
-        }
-        value if value == OPEN_CONFIRM_MODAL_KITCHEN_SINK_BUTTON => {
-            this.update(cx, |app, cx| {
-                app.open_confirm_modal_kitchen_sink_fixture(cx)
-            })?;
-        }
-        _ => unreachable!("semantic id was validated above"),
-    }
-
-    Ok(action_value.to_string())
-}
-
 fn should_restore_main_window_after_script_exit(
     script_hid_window: bool,
     keep_tab_ai_save_offer_open: bool,
@@ -330,10 +254,6 @@ enum AutomationReadTarget {
     PromptPopup {
         info: crate::protocol::AutomationWindowInfo,
     },
-    /// Dev style sidecar window.
-    DevStyleTool {
-        info: crate::protocol::AutomationWindowInfo,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -343,7 +263,6 @@ enum AutomationBatchTargetKind {
     Notes,
     ActionsDialog,
     PromptPopup,
-    DevStyleTool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -402,19 +321,6 @@ impl BatchTargetCapabilities {
                 supported_commands: &["selectByValue", "selectBySemanticId", "waitFor"],
                 concise_unsupported_message: false,
             },
-            AutomationBatchTargetKind::DevStyleTool => Self {
-                display_name: "DevStyleTool",
-                unsupported_target_name: "DevStyleTool",
-                supported_commands: &[
-                    "setThemeControl",
-                    "selectBySemanticId",
-                    "undoStyleChange",
-                    "redoStyleChange",
-                    "resetStyleControls",
-                    "saveCurrentStyleSettings",
-                ],
-                concise_unsupported_message: true,
-            },
         }
     }
 }
@@ -430,7 +336,6 @@ fn batch_target_kind_for_resolved_target(
         AutomationReadTarget::Notes { .. } => AutomationBatchTargetKind::Notes,
         AutomationReadTarget::ActionsDialog { .. } => AutomationBatchTargetKind::ActionsDialog,
         AutomationReadTarget::PromptPopup { .. } => AutomationBatchTargetKind::PromptPopup,
-        AutomationReadTarget::DevStyleTool { .. } => AutomationBatchTargetKind::DevStyleTool,
     }
 }
 
@@ -451,9 +356,6 @@ fn unsupported_batch_command_error(
         }
         AutomationBatchTargetKind::PromptPopup => {
             format!("PromptPopup batch supports: {supported}. Got: {command}")
-        }
-        AutomationBatchTargetKind::DevStyleTool => {
-            format!("DevStyleTool batch supports: {supported}. Got: {command}")
         }
         _ => format!(
             "{} is not supported for {} batch targets",
@@ -566,28 +468,6 @@ fn resolve_automation_read_target(
                 ))),
             }
         }
-        crate::protocol::AutomationWindowKind::Ai => {
-            match active_agent_chat_entity(embedded_agent_chat) {
-                Some(entity) => {
-                    tracing::info!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        kind = ?resolved.kind,
-                        "automation.target.ai_routed_to_agent_chat_entity"
-                    );
-                    Ok(AutomationReadTarget::AgentChatDetached {
-                        info: resolved,
-                        entity,
-                    })
-                }
-                None => Err(crate::protocol::TransactionError::action_failed(format!(
-                    "{op} resolved Ai target {} but no live Agent Chat chat view is available",
-                    resolved.id
-                ))),
-            }
-        }
         crate::protocol::AutomationWindowKind::Notes => {
             match crate::notes::get_notes_app_entity_and_handle() {
                 Some((entity, handle)) => {
@@ -655,9 +535,6 @@ fn resolve_automation_read_target(
                     resolved.id
                 )))
             }
-        }
-        crate::protocol::AutomationWindowKind::DevStyleTool => {
-            Ok(AutomationReadTarget::DevStyleTool { info: resolved })
         }
         other_kind => {
             tracing::warn!(
@@ -781,37 +658,6 @@ fn resolve_agent_chat_read_target(
                         "{op} resolved Notes target {} but no embedded Agent Chat view is available",
                         resolved.id
                     )))
-                }
-            }
-        }
-        crate::protocol::AutomationWindowKind::Ai => {
-            match active_agent_chat_entity(embedded_agent_chat) {
-                Some(entity) => {
-                    tracing::info!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        kind = ?resolved.kind,
-                        "automation.agent_chat_target.ai_resolved_to_entity"
-                    );
-                    Ok(AgentChatReadTarget::Detached {
-                        info: resolved,
-                        entity,
-                    })
-                }
-                None => {
-                    tracing::info!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        kind = ?resolved.kind,
-                        "automation.agent_chat_target.ai_fallback_main_collector"
-                    );
-                    Ok(AgentChatReadTarget::Main {
-                        info: Some(resolved),
-                    })
                 }
             }
         }
@@ -3427,80 +3273,6 @@ impl ScriptListApp {
                             selected_value,
                         )
                     }
-                    AppView::DesignGalleryView {
-                        filter,
-                        selected_index,
-                    } => {
-                        let dataset_count = crate::design_gallery_total_items();
-                        let visible_count = crate::design_gallery_filtered_len(filter);
-                        let selected_value =
-                            Self::design_gallery_selected_visible_row(filter, *selected_index)
-                                .map(|item| crate::design_gallery_item_label(&item));
-                        (
-                            "designGallery".to_string(),
-                            None,
-                            None,
-                            filter.clone(),
-                            dataset_count,
-                            visible_count,
-                            *selected_index as i32,
-                            selected_value,
-                        )
-                    }
-                    AppView::FooterGalleryView {
-                        filter,
-                        selected_index,
-                    } => {
-                        let dataset_count = crate::FOOTER_VARIATIONS.len();
-                        let visible_rows = Self::footer_gallery_visible_row_labels(filter);
-                        let visible_count = visible_rows.len();
-                        let selected_value = visible_rows.get(*selected_index).cloned();
-                        (
-                            "footerGallery".to_string(),
-                            None,
-                            None,
-                            filter.clone(),
-                            dataset_count,
-                            visible_count,
-                            *selected_index as i32,
-                            selected_value,
-                        )
-                    }
-                    AppView::NonListStatesView { selected_index } => (
-                        "nonListStates".to_string(),
-                        Some("non-list-states".to_string()),
-                        None,
-                        String::new(),
-                        8,
-                        8,
-                        *selected_index as i32,
-                        Some(
-                            [
-                                "Empty",
-                                "Help",
-                                "Form",
-                                "Setup",
-                                "Permission",
-                                "Recovery",
-                                "About",
-                                "Density",
-                            ]
-                            .get(*selected_index)
-                            .unwrap_or(&"Empty")
-                            .to_string(),
-                        ),
-                    ),
-                    #[cfg(feature = "storybook")]
-                    AppView::DesignExplorerView { .. } => (
-                        "designExplorer".to_string(),
-                        None,
-                        None,
-                        String::new(),
-                        0,
-                        0,
-                        0,
-                        None,
-                    ),
                     AppView::ScratchPadView { .. } => (
                         "scratchPad".to_string(),
                         Some("scratch-pad".to_string()),
@@ -4426,7 +4198,7 @@ impl ScriptListApp {
                     request_id = %request_id,
                     status = %state.status,
                     cursor_index = state.cursor_index,
-                    picker_open = state.picker.as_ref().map_or(false, |p| p.open),
+                    picker_open = state.picker.as_ref().is_some_and(|p| p.open),
                     message_count = state.message_count,
                     context_ready = state.context_ready,
                     "agent_chat_state.result"
@@ -4498,8 +4270,8 @@ impl ScriptListApp {
                 };
 
                 // For Main targets, verify the main window is actually showing AgentChatView.
-                if matches!(agent_chat_target, AgentChatReadTarget::Main { .. }) {
-                    if !matches!(self.current_view, AppView::AgentChatView { .. }) {
+                if matches!(agent_chat_target, AgentChatReadTarget::Main { .. })
+                    && !matches!(self.current_view, AppView::AgentChatView { .. }) {
                         tracing::warn!(
                             target: "script_kit::automation",
                             request_id = %request_id,
@@ -4514,7 +4286,6 @@ impl ScriptListApp {
                         }
                         return;
                     }
-                }
 
                 tracing::info!(
                     target: "script_kit::automation",
@@ -6672,7 +6443,7 @@ impl ScriptListApp {
                                             cx.background_executor().timer(wait_poll).await;
                                             if wait_start.elapsed() >= wait_timeout {
                                                 wait_result = Err(protocol::TransactionError::wait_timeout(
-                                                    &format!("Timeout after {}ms", wait_timeout.as_millis()),
+                                                    format!("Timeout after {}ms", wait_timeout.as_millis()),
                                                 ));
                                                 break;
                                             }
@@ -6992,7 +6763,7 @@ impl ScriptListApp {
                                             cx.background_executor().timer(wait_poll).await;
                                             if wait_start.elapsed() >= wait_timeout {
                                                 wait_result = Err(protocol::TransactionError::wait_timeout(
-                                                    &format!("Timeout after {}ms", wait_timeout.as_millis()),
+                                                    format!("Timeout after {}ms", wait_timeout.as_millis()),
                                                 ));
                                                 break;
                                             }
@@ -7150,36 +6921,6 @@ impl ScriptListApp {
                             break;
                         }
 
-                        if batch_target_kind == AutomationBatchTargetKind::DevStyleTool
-                            && !matches!(
-                                cmd,
-                                protocol::BatchCommand::SetThemeControl { .. }
-                                    | protocol::BatchCommand::UndoStyleChange
-                                    | protocol::BatchCommand::RedoStyleChange
-                                    | protocol::BatchCommand::ResetStyleControls
-                                    | protocol::BatchCommand::SaveCurrentStyleSettings
-                                    | protocol::BatchCommand::SelectBySemanticId { .. }
-                            )
-                        {
-                            let command = batch_command_name(cmd);
-                            results.push(protocol::BatchResultEntry {
-                                index,
-                                success: false,
-                                command,
-                                elapsed: Some(0),
-                                value: None,
-                                error: Some(unsupported_batch_command_error(
-                                    batch_target_kind,
-                                    cmd,
-                                )),
-                            });
-                            failed = true;
-                            if opts.stop_on_error {
-                                break;
-                            }
-                            continue;
-                        }
-
                         let cmd_start = std::time::Instant::now();
                         match cmd {
                             protocol::BatchCommand::SetInput { text } => {
@@ -7261,51 +7002,6 @@ impl ScriptListApp {
                             protocol::BatchCommand::SelectBySemanticId { semantic_id, submit } => {
                                 let submit = *submit;
                                 let semantic_id = semantic_id.clone();
-                                if batch_target_kind == AutomationBatchTargetKind::DevStyleTool {
-                                    match run_dev_style_tool_semantic_action_for_batch(
-                                        &this,
-                                        main_batch_window_handle,
-                                        &semantic_id,
-                                        submit,
-                                        cx,
-                                    ) {
-                                        Ok(v) => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "selectBySemanticId", value = %v, "batch.step.ok");
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: true,
-                                                command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(
-                                                    cmd_start.elapsed().as_millis() as u64,
-                                                ),
-                                                value: Some(v),
-                                                error: None,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "selectBySemanticId", error = %e, "batch.step.error");
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: false,
-                                                command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(
-                                                    cmd_start.elapsed().as_millis() as u64,
-                                                ),
-                                                value: None,
-                                                error: Some(
-                                                    protocol::TransactionError::selection_not_found(
-                                                        format!("{e}"),
-                                                    ),
-                                                ),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    continue;
-                                }
                                 match select_main_window_semantic_id_for_batch(
                                     &this,
                                     main_batch_window_handle,
@@ -7343,131 +7039,6 @@ impl ScriptListApp {
                                 let control = control.clone();
                                 let value = value.clone();
                                 match this.update(cx, |this, cx| {
-                                    if batch_target_kind == AutomationBatchTargetKind::DevStyleTool {
-                                        let applied = if control
-                                            .strip_prefix("control:dev-style-tool-copy:")
-                                            .or_else(|| {
-                                                control
-                                                    .strip_prefix("input:dev-style-tool-copy:")
-                                            })
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "button:dev-style-tool-copy-reset:",
-                                                )
-                                            })
-                                            .is_some()
-                                            || control.starts_with("main.input.")
-                                        {
-                                            crate::dev_style_tool::runtime_overrides::set_copy_from_devtools(
-                                                &control,
-                                                &value,
-                                            )?
-                                        } else if control
-                                            .strip_prefix("control:dev-style-tool-actions:")
-                                            .or_else(|| {
-                                                control
-                                                    .strip_prefix("input:dev-style-tool-actions:")
-                                            })
-                                            .or_else(|| {
-                                                control
-                                                    .strip_prefix("slider:dev-style-tool-actions:")
-                                            })
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "button:dev-style-tool-actions-reset:",
-                                                )
-                                            })
-                                            .is_some()
-                                            || control.starts_with("actions.")
-                                        {
-                                            crate::dev_style_tool::runtime_overrides::set_actions_number_from_devtools(
-                                                &control,
-                                                &value,
-                                            )?
-                                        } else if control
-                                            .strip_prefix("control:dev-style-tool-agent-chat:")
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "input:dev-style-tool-agent-chat:",
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "slider:dev-style-tool-agent-chat:",
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "button:dev-style-tool-agent-chat-reset:",
-                                                )
-                                            })
-                                            .is_some()
-                                            || control.starts_with("agentChat.")
-                                        {
-                                            crate::dev_style_tool::runtime_overrides::set_agent_chat_number_from_devtools(
-                                                &control,
-                                                &value,
-                                            )?
-                                        } else if control
-                                            .strip_prefix("control:dev-style-tool-confirm-modal:")
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "input:dev-style-tool-confirm-modal:",
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "slider:dev-style-tool-confirm-modal:",
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "button:dev-style-tool-confirm-modal-reset:",
-                                                )
-                                            })
-                                            .is_some()
-                                            || control.starts_with("confirmModal.")
-                                        {
-                                            crate::dev_style_tool::runtime_overrides::set_confirm_modal_number_from_devtools(
-                                                &control,
-                                                &value,
-                                            )?
-                                        } else if control
-                                            .strip_prefix("control:dev-style-tool-theme:")
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "input:dev-style-tool-theme:",
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                control.strip_prefix(
-                                                    "button:dev-style-tool-theme-reset:",
-                                                )
-                                            })
-                                            .is_some()
-                                            || control.starts_with("theme.colors.")
-                                        {
-                                            let applied = crate::dev_style_tool::runtime_overrides::set_theme_color_from_devtools(
-                                                &control,
-                                                &value,
-                                            )?;
-                                            // Theme colors live in the cached Theme, not a
-                                            // design def: rebuild the cache (which layers the
-                                            // override) and propagate to every window.
-                                            crate::theme::service::reapply_runtime_theme_overrides(
-                                                cx,
-                                            );
-                                            applied
-                                        } else {
-                                            crate::dev_style_tool::runtime_overrides::set_number_from_devtools(
-                                                &control,
-                                                &value,
-                                            )?
-                                        };
-                                        this.update_theme(cx);
-                                        this.refresh_runtime_style_controls(cx);
-                                        return Ok(applied);
-                                    }
                                     if !matches!(
                                         this.current_view,
                                         AppView::ThemeChooserView { .. }
@@ -7509,214 +7080,75 @@ impl ScriptListApp {
                                 }
                             }
                             protocol::BatchCommand::UndoStyleChange => {
-                                if batch_target_kind != AutomationBatchTargetKind::DevStyleTool {
-                                    let command = batch_command_name(cmd);
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command,
-                                        elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            batch_target_kind,
-                                            cmd,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error {
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                match this.update(cx, |this, cx| {
-                                    let result = crate::dev_style_tool::runtime_overrides::undo_last()
-                                        .ok_or_else(|| anyhow::anyhow!("no dev style change to undo"))?;
-                                    this.refresh_runtime_style_controls(cx);
-                                    Ok::<String, anyhow::Error>(result)
-                                }) {
-                                    Ok(Ok(value)) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "undoStyleChange", value = %value, "batch.step.ok");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: true,
-                                            command: "undoStyleChange".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: Some(value),
-                                            error: None,
-                                        });
-                                    }
-                                    Ok(Err(e)) | Err(e) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "undoStyleChange", error = %e, "batch.step.error");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: false,
-                                            command: "undoStyleChange".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                        });
-                                        failed = true;
-                                        if opts.stop_on_error { break; }
-                                    }
+                                let command = batch_command_name(cmd);
+                                results.push(protocol::BatchResultEntry {
+                                    index,
+                                    success: false,
+                                    command,
+                                    elapsed: Some(cmd_start.elapsed().as_millis() as u64),
+                                    value: None,
+                                    error: Some(unsupported_batch_command_error(
+                                        batch_target_kind,
+                                        cmd,
+                                    )),
+                                });
+                                failed = true;
+                                if opts.stop_on_error {
+                                    break;
                                 }
                             }
                             protocol::BatchCommand::RedoStyleChange => {
-                                if batch_target_kind != AutomationBatchTargetKind::DevStyleTool {
-                                    let command = batch_command_name(cmd);
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command,
-                                        elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            batch_target_kind,
-                                            cmd,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error {
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                match this.update(cx, |this, cx| {
-                                    let result = crate::dev_style_tool::runtime_overrides::redo_last()
-                                        .ok_or_else(|| anyhow::anyhow!("no dev style change to redo"))?;
-                                    this.refresh_runtime_style_controls(cx);
-                                    Ok::<String, anyhow::Error>(result)
-                                }) {
-                                    Ok(Ok(value)) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "redoStyleChange", value = %value, "batch.step.ok");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: true,
-                                            command: "redoStyleChange".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: Some(value),
-                                            error: None,
-                                        });
-                                    }
-                                    Ok(Err(e)) | Err(e) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "redoStyleChange", error = %e, "batch.step.error");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: false,
-                                            command: "redoStyleChange".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                        });
-                                        failed = true;
-                                        if opts.stop_on_error { break; }
-                                    }
+                                let command = batch_command_name(cmd);
+                                results.push(protocol::BatchResultEntry {
+                                    index,
+                                    success: false,
+                                    command,
+                                    elapsed: Some(cmd_start.elapsed().as_millis() as u64),
+                                    value: None,
+                                    error: Some(unsupported_batch_command_error(
+                                        batch_target_kind,
+                                        cmd,
+                                    )),
+                                });
+                                failed = true;
+                                if opts.stop_on_error {
+                                    break;
                                 }
                             }
                             protocol::BatchCommand::ResetStyleControls => {
-                                if batch_target_kind != AutomationBatchTargetKind::DevStyleTool {
-                                    let command = batch_command_name(cmd);
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command,
-                                        elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            batch_target_kind,
-                                            cmd,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error {
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                match this.update(cx, |this, cx| {
-                                    let generation =
-                                        crate::dev_style_tool::runtime_overrides::reset_all();
-                                    this.refresh_runtime_style_controls(cx);
-                                    Ok::<String, anyhow::Error>(format!(
-                                        "resetStyleControls generation={generation}"
-                                    ))
-                                }) {
-                                    Ok(Ok(value)) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "resetStyleControls", value = %value, "batch.step.ok");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: true,
-                                            command: "resetStyleControls".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: Some(value),
-                                            error: None,
-                                        });
-                                    }
-                                    Ok(Err(e)) | Err(e) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "resetStyleControls", error = %e, "batch.step.error");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: false,
-                                            command: "resetStyleControls".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                        });
-                                        failed = true;
-                                        if opts.stop_on_error { break; }
-                                    }
+                                let command = batch_command_name(cmd);
+                                results.push(protocol::BatchResultEntry {
+                                    index,
+                                    success: false,
+                                    command,
+                                    elapsed: Some(cmd_start.elapsed().as_millis() as u64),
+                                    value: None,
+                                    error: Some(unsupported_batch_command_error(
+                                        batch_target_kind,
+                                        cmd,
+                                    )),
+                                });
+                                failed = true;
+                                if opts.stop_on_error {
+                                    break;
                                 }
                             }
                             protocol::BatchCommand::SaveCurrentStyleSettings => {
-                                if batch_target_kind != AutomationBatchTargetKind::DevStyleTool {
-                                    let command = batch_command_name(cmd);
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command,
-                                        elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            batch_target_kind,
-                                            cmd,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error {
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                match crate::dev_style_tool::export::save_current_settings_markdown()
-                                {
-                                    Ok(path) => {
-                                        let saved_path = path.to_string_lossy().into_owned();
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "saveCurrentStyleSettings", path = %saved_path, "batch.step.ok");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: true,
-                                            command: "saveCurrentStyleSettings".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: Some(saved_path),
-                                            error: None,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "saveCurrentStyleSettings", error = %e, "batch.step.error");
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: false,
-                                            command: "saveCurrentStyleSettings".to_string(),
-                                            elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed(
-                                                format!("{e}"),
-                                            )),
-                                        });
-                                        failed = true;
-                                        if opts.stop_on_error {
-                                            break;
-                                        }
-                                    }
+                                let command = batch_command_name(cmd);
+                                results.push(protocol::BatchResultEntry {
+                                    index,
+                                    success: false,
+                                    command,
+                                    elapsed: Some(cmd_start.elapsed().as_millis() as u64),
+                                    value: None,
+                                    error: Some(unsupported_batch_command_error(
+                                        batch_target_kind,
+                                        cmd,
+                                    )),
+                                });
+                                failed = true;
+                                if opts.stop_on_error {
+                                    break;
                                 }
                             }
                             protocol::BatchCommand::FilterAndSelect {
@@ -8513,7 +7945,7 @@ impl ScriptListApp {
                     ..Default::default()
                 };
 
-                if let Some(window) = current_window.as_deref_mut() {
+                if let Some(window) = current_window {
                     crate::confirm::open_parent_confirm_dialog(
                         window,
                         cx,
@@ -9006,12 +8438,12 @@ impl ScriptListApp {
                     "AiStartChat request"
                 );
 
-                // Open the AI window (creates new if not open, brings to front if open)
-                if let Err(e) = crate::ai::open_ai_window(cx) {
+                // Open Agent Chat (creates new if not open, brings to front if open)
+                if let Err(e) = crate::ai::agent_chat::ui::chat_window::open_chat_window(cx) {
                     tracing::error!(
                         category = "ERROR",
                         error = %e,
-                        "Failed to open AI window for AiStartChat"
+                        "Failed to open Agent Chat for AiStartChat"
                     );
                     // Still send response so SDK doesn't hang
                     if let Some(ref sender) = self.response_sender {
@@ -9036,7 +8468,7 @@ impl ScriptListApp {
                     ));
                     resolve_ai_start_chat_provider(&registry, selected_model_id)
                 });
-                let context_parts = parts
+                let context_parts: Vec<crate::ai::AiContextPart> = parts
                     .into_iter()
                     .map(|part| match part {
                         crate::protocol::AiContextPartInput::ResourceUri { uri, label } => {
@@ -9048,20 +8480,69 @@ impl ScriptListApp {
                     })
                     .collect();
 
-                // Queue the StartChat command — the AI window will create the chat,
-                // save the user message (with optional image), and optionally stream.
-                crate::ai::start_ai_chat(
-                    cx,
-                    chat_id,
-                    &message,
-                    context_parts,
-                    image.as_deref(),
-                    system_prompt.as_deref(),
-                    model_id.as_deref(),
-                    provider.as_deref(),
-                    None,
-                    should_submit,
-                );
+                if system_prompt.is_some() || image.is_some() {
+                    tracing::warn!(
+                        category = "AI",
+                        request_id = %request_id,
+                        has_system_prompt = system_prompt.is_some(),
+                        has_image = image.is_some(),
+                        "AiStartChat system prompt and image are not carried into Agent Chat"
+                    );
+                }
+
+                // Stage the message in the Agent Chat composer once the view is
+                // ready, then optionally submit it as the first turn.
+                let message_for_chat = message.clone();
+                cx.spawn(async move |_this, cx| {
+                    let mut waits_completed = 0usize;
+                    loop {
+                        let ready = cx.update(|_cx| {
+                            crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity()
+                                .is_some()
+                        });
+                        if ready || waits_completed >= 8 {
+                            break;
+                        }
+                        waits_completed += 1;
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(16))
+                            .await;
+                    }
+                    cx.update(|cx| {
+                        let Some(entity) = crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity() else {
+                            tracing::error!(
+                                category = "ERROR",
+                                "Agent Chat view unavailable for AiStartChat handoff"
+                            );
+                            return;
+                        };
+                        entity.update(cx, |chat, cx| {
+                            if chat.is_setup_mode() {
+                                tracing::error!(
+                                    category = "ERROR",
+                                    "Agent Chat is in setup mode; cannot start chat"
+                                );
+                                return;
+                            }
+                            chat.live_thread().update(cx, |thread, cx| {
+                                for part in context_parts {
+                                    thread.add_context_part(part, cx);
+                                }
+                                thread.set_input(message_for_chat, cx);
+                                if should_submit {
+                                    if let Err(error) = thread.submit_input(cx) {
+                                        tracing::error!(
+                                            category = "ERROR",
+                                            error = %error,
+                                            "AiStartChat submit failed"
+                                        );
+                                    }
+                                }
+                            });
+                        });
+                    });
+                })
+                .detach();
 
                 // Build title from message content
                 let title = if message.trim().is_empty() && image.is_some() {
@@ -9110,20 +8591,20 @@ impl ScriptListApp {
             PromptMessage::AiFocus { request_id } => {
                 tracing::info!(category = "AI", request_id = %request_id, "AiFocus request");
 
-                // Check if window was already open before we open/focus it
-                let was_open = crate::ai::is_ai_window_open();
+                // Check if the chat window was already open before we open/focus it
+                let was_open = crate::ai::agent_chat::ui::chat_window::is_chat_window_open();
 
-                // Open the AI window (creates new if not open, brings to front if open)
-                let success = match crate::ai::open_ai_window(cx) {
+                // Open Agent Chat (creates new if not open, brings to front if open)
+                let success = match crate::ai::agent_chat::ui::chat_window::open_chat_window(cx) {
                     Ok(()) => {
-                        tracing::info!(category = "AI", "AI window focused successfully");
+                        tracing::info!(category = "AI", "Agent Chat focused successfully");
                         true
                     }
                     Err(e) => {
                         tracing::error!(
                             category = "ERROR",
                             error = %e,
-                            "Failed to focus AI window"
+                            "Failed to focus Agent Chat"
                         );
                         false
                     }

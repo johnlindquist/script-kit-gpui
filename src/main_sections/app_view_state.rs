@@ -19,19 +19,16 @@ pub(crate) const ABOUT_SURFACE_EXEMPTION: &str =
 pub(crate) const BRAIN_MEMORY_PREVIEW_PROMPT_ID: &str = "brain-memory-preview";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 enum MigrateBoardPhase {
     Unavailable(String),
+    #[default]
     Scanning,
     Report,
     Porting,
     Done,
 }
 
-impl Default for MigrateBoardPhase {
-    fn default() -> Self {
-        Self::Scanning
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 struct MigrateBoardState {
@@ -196,23 +193,6 @@ enum AppView {
     BrowserTabsView {
         filter: String,
         selected_index: usize,
-    },
-    /// Showing design gallery (separator and icon variations)
-    DesignGalleryView {
-        filter: String,
-        selected_index: usize,
-    },
-    /// Showing footer gallery (shortcut glyph and font variations)
-    FooterGalleryView {
-        filter: String,
-        selected_index: usize,
-    },
-    /// Showing one main-window non-list state design language example
-    NonListStatesView { selected_index: usize },
-    /// Showing the in-app storybook compare view for design exploration
-    #[cfg(feature = "storybook")]
-    DesignExplorerView {
-        entity: Entity<script_kit_gpui::storybook::StoryBrowser>,
     },
     /// Showing webcam prompt
     WebcamView {
@@ -516,11 +496,6 @@ pub(crate) enum SurfaceKind {
     FlowUx,
     CurrentAppCommands,
     PermissionsWizard,
-    DesignGallery,
-    FooterGallery,
-    NonListStates,
-    #[cfg(feature = "storybook")]
-    DesignExplorer,
     UtilityChildContent,
     /// Main-window Threadline flow conversation. Split from
     /// `UtilityChildContent` because its blur semantics differ: clicking
@@ -920,11 +895,6 @@ impl AppView {
             AppView::ProcessManagerView { .. } => "ProcessManagerView",
             AppView::FlowUxView { .. } => "FlowUxView",
             AppView::CurrentAppCommandsView { .. } => "CurrentAppCommandsView",
-            AppView::DesignGalleryView { .. } => "DesignGalleryView",
-            AppView::FooterGalleryView { .. } => "FooterGalleryView",
-            AppView::NonListStatesView { .. } => "NonListStatesView",
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => "DesignExplorerView",
             AppView::ScratchPadView { .. } => "ScratchPadView",
             AppView::QuickTerminalView { .. } => "QuickTerminalView",
             AppView::FlowSessionView { .. } => "FlowSessionView",
@@ -992,11 +962,6 @@ impl AppView {
             AppView::ProcessManagerView { .. } => SurfaceKind::ProcessManager,
             AppView::FlowUxView { .. } => SurfaceKind::FlowUx,
             AppView::CurrentAppCommandsView { .. } => SurfaceKind::CurrentAppCommands,
-            AppView::DesignGalleryView { .. } => SurfaceKind::DesignGallery,
-            AppView::FooterGalleryView { .. } => SurfaceKind::FooterGallery,
-            AppView::NonListStatesView { .. } => SurfaceKind::NonListStates,
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => SurfaceKind::DesignExplorer,
             AppView::ScratchPadView { .. } | AppView::QuickTerminalView { .. } => {
                 SurfaceKind::UtilityChildContent
             }
@@ -1046,8 +1011,6 @@ impl AppView {
             | AppView::AppLauncherView { .. }
             | AppView::WindowSwitcherView { .. }
             | AppView::BrowserTabsView { .. }
-            | AppView::DesignGalleryView { .. }
-            | AppView::FooterGalleryView { .. }
             | AppView::FileSearchView { .. }
             | AppView::ProfileSearchView { .. }
             | AppView::ThemeChooserView { .. }
@@ -1092,15 +1055,12 @@ impl AppView {
             | AppView::NamingPrompt { .. }
             | AppView::CreateAiPresetView { .. }
             | AppView::WebcamView { .. }
-            | AppView::NonListStatesView { .. }
             | AppView::ScratchPadView { .. }
             | AppView::QuickTerminalView { .. }
             | AppView::CreationFeedback { .. }
             | AppView::ScriptIssuesView { .. }
             | AppView::PermissionsWizardView { .. }
             | AppView::ConfirmPrompt { .. } => MainViewHeaderInputPolicy::RootContextOnly,
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => MainViewHeaderInputPolicy::RootContextOnly,
         }
     }
 
@@ -1171,9 +1131,6 @@ impl AppView {
             AppView::AppLauncherView { .. } => Some("app_launcher"),
             AppView::WindowSwitcherView { .. } => Some("window_switcher"),
             AppView::BrowserTabsView { .. } => Some("browser_tabs"),
-            AppView::DesignGalleryView { .. } => Some("design_gallery"),
-            AppView::FooterGalleryView { .. } => Some("footer_gallery"),
-            AppView::NonListStatesView { .. } => Some("non_list_states"),
             AppView::ScratchPadView { .. } => Some("scratch_pad"),
             AppView::ThemeChooserView { .. } => Some("theme_chooser"),
             AppView::ProcessManagerView { .. } => Some("process_manager"),
@@ -1200,8 +1157,6 @@ impl AppView {
             // This dead full-view variant stores no host identity, so it stays
             // deferred rather than advertising a decorative dialog footer.
             AppView::ActionsDialog => None,
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => None,
         }
     }
 }
@@ -1540,55 +1495,6 @@ impl SurfaceKind {
                 "permissionsWizard",
             ),
 
-            SurfaceKind::DesignGallery => LauncherSurfaceContract::new(
-                LauncherSurfaceContractVocabulary::new(
-                    UtilityWorkspace,
-                    LauncherFilter,
-                    NoPersistentPreview,
-                ),
-                LauncherFilterFocus,
-                LauncherListKeyboard,
-                HostRowActions,
-                StateAndElementsProof,
-                CompactLauncherVisual,
-                standard,
-                "designGallery",
-            ),
-            SurfaceKind::FooterGallery => LauncherSurfaceContract::new(
-                LauncherSurfaceContractVocabulary::new(
-                    UtilityWorkspace,
-                    LauncherFilter,
-                    NoPersistentPreview,
-                ),
-                LauncherFilterFocus,
-                LauncherListKeyboard,
-                HostRowActions,
-                StateAndElementsProof,
-                CompactLauncherVisual,
-                standard,
-                "footerGallery",
-            ),
-            SurfaceKind::NonListStates => LauncherSurfaceContract::new(
-                LauncherSurfaceContractVocabulary::new(UtilityWorkspace, ChildView, ContentPane),
-                ChildViewFocus,
-                ChildViewKeyboard,
-                ChildViewActions,
-                ChildViewStateProof,
-                ContentPaneVisual,
-                standard,
-                "nonListStates",
-            ),
-            #[cfg(feature = "storybook")]
-            SurfaceKind::DesignExplorer => LauncherSurfaceContract::new(
-                LauncherSurfaceContractVocabulary::new(UtilityWorkspace, ChildView, ContentPane),
-                ChildViewFocus,
-                ChildViewKeyboard,
-                ChildViewActions,
-                ChildViewStateProof,
-                ContentPaneVisual,
-                standard,
-                "scriptList",
-            ),
             SurfaceKind::UtilityChildContent => LauncherSurfaceContract::new(
                 LauncherSurfaceContractVocabulary::new(UtilityWorkspace, ChildView, ContentPane),
                 ChildViewFocus,

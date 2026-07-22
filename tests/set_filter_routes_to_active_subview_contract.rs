@@ -168,8 +168,6 @@ fn write_filter_to_current_subview_covers_all_shared_input_builtin_views() {
         "AppView::AppLauncherView",
         "AppView::WindowSwitcherView",
         "AppView::BrowserTabsView",
-        "AppView::DesignGalleryView",
-        "AppView::FooterGalleryView",
         "AppView::ThemeChooserView",
         "AppView::ProcessManagerView",
         "AppView::SettingsView",

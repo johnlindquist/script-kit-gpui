@@ -267,7 +267,6 @@ fn enable_claude_code_in_config_shows_install_instructions_when_cli_missing() {
 
 #[test]
 fn agent_chat_setup_copy_points_to_catalog_and_config_ts_not_direct_provider_keys() {
-    let setup = read("src/ai/window/render_setup.rs");
     let readme = read("README.md");
     let agent_config_section = readme
         .split("### Agent Chat Configuration")
@@ -275,14 +274,6 @@ fn agent_chat_setup_copy_points_to_catalog_and_config_ts_not_direct_provider_key
         .and_then(|rest| rest.split("### Legacy Direct-Provider API Keys").next())
         .expect("README must document Agent Chat Configuration before legacy API keys");
 
-    assert!(
-        setup.contains("Open Agent Catalog"),
-        "setup card must offer the Agent Catalog"
-    );
-    assert!(
-        setup.contains("config.ts"),
-        "setup card must point users to config.ts"
-    );
     assert!(
         agent_config_section.contains("Agent Catalog")
             && agent_config_section.contains("selectedProfileId")
@@ -298,10 +289,6 @@ fn agent_chat_setup_copy_points_to_catalog_and_config_ts_not_direct_provider_key
         "Vercel AI Gateway",
         "Agent Chat Chat",
     ] {
-        assert!(
-            !setup.contains(stale),
-            "setup card must not expose stale copy: {stale}"
-        );
         assert!(
             !agent_config_section.contains(stale),
             "README Agent Chat config section must not expose stale copy: {stale}"
@@ -326,12 +313,8 @@ fn builtin_execution_content() -> String {
 fn ai_open_and_new_conversation_use_deferred_helper() {
     let content = builtin_execution_content();
     assert!(
-        content.contains("cmd.is_legacy_harness_alias()"),
-        "Expected legacy AI window aliases to be centralized via is_legacy_harness_alias"
-    );
-    assert!(
         content.contains("self.open_tab_ai_agent_chat_with_entry_intent(None, cx);"),
-        "Expected legacy AI window aliases to route to Agent Chat"
+        "Expected OpenAi/MiniAi/NewConversation/ClearConversation to route to Agent Chat"
     );
 }
 
@@ -339,13 +322,9 @@ fn ai_open_and_new_conversation_use_deferred_helper() {
 fn ai_clear_conversation_uses_deferred_helper() {
     let content = builtin_execution_content();
     assert!(
-        content.contains("cmd.is_legacy_harness_alias()"),
-        "Expected ClearConversation to be classified as a legacy harness alias"
-    );
-    assert!(
-        content.contains("AiLegacyHarnessBuiltinAction")
-            && content.contains("ai_ClearConversation_routed_to_harness"),
-        "Expected legacy AI aliases to report named routed_to_harness success outcomes"
+        content.contains("AiAgentChatBuiltinAction")
+            && content.contains("ai_ClearConversation_routed_to_agent_chat"),
+        "Expected ClearConversation to report a named routed_to_agent_chat success outcome"
     );
 }
 
@@ -353,8 +332,8 @@ fn ai_clear_conversation_uses_deferred_helper() {
 fn ai_clear_conversation_shows_hud_on_success() {
     let content = builtin_execution_content();
     assert!(
-        content.contains("Self::ClearConversation => \"ai_ClearConversation_routed_to_harness\""),
-        "Expected ClearConversation success to be reported through the named routed_to_harness outcome"
+        content.contains("Self::ClearConversation => \"ai_ClearConversation_routed_to_agent_chat\""),
+        "Expected ClearConversation success to be reported through the named routed_to_agent_chat outcome"
     );
 }
 
@@ -364,23 +343,6 @@ fn ai_clear_conversation_shows_toast_when_clear_fails() {
     assert!(
         !content.contains("Failed to clear AI conversations"),
         "ClearConversation no longer uses the legacy clear-all-chats failure path"
-    );
-}
-
-#[test]
-fn no_direct_ai_open_window_in_user_facing_branches() {
-    let content = builtin_execution_content();
-
-    // The only allowed `ai::open_ai_window` usage is inside internal helpers
-    // (spawn_send_screen_to_ai_after_hide etc.), not in user-facing match arms.
-    // Count direct calls outside the helper functions.
-    let ai_chat_section = content
-        .find("BuiltInFeature::AiChat")
-        .expect("Expected AiChat arm");
-    let ai_chat_block = &content[ai_chat_section..ai_chat_section + 600];
-    assert!(
-        !ai_chat_block.contains("ai::open_ai_window("),
-        "AiChat should not directly call ai::open_ai_window — use deferred helper"
     );
 }
 

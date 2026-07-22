@@ -58,36 +58,6 @@ fn actions_window_render_falls_back_to_autoclose_when_inactive() {
 }
 
 #[test]
-fn actions_window_preserves_popup_when_dev_style_tool_is_open() {
-    let preserve = source_between(
-        ACTIONS_WINDOW,
-        "fn should_auto_close_actions_window(",
-        "fn should_preserve_actions_window_for_dev_style_tool()",
-    );
-    assert!(
-        preserve.contains("should_preserve_actions_window_for_dev_style_tool()"),
-        "actions popup auto-close must consult the dev style tool guard"
-    );
-    let preserve_index = preserve
-        .find("should_preserve_actions_window_for_dev_style_tool()")
-        .expect("preserve guard call should be present");
-    let generic_close_index = preserve
-        .find("!parent_window_focused && !actions_window_active")
-        .expect("generic close expression should be present");
-    assert!(
-        preserve_index < generic_close_index,
-        "dev style preservation must run before the generic focus-loss close"
-    );
-
-    let guard = source_between(
-        ACTIONS_WINDOW,
-        "fn should_preserve_actions_window_for_dev_style_tool()",
-        "enum ActionsParentFocusState",
-    );
-    assert!(guard.contains("crate::dev_style_tool::window::is_dev_style_tool_open()"));
-}
-
-#[test]
 fn actions_window_tracks_parent_identity_for_focus_lifecycle() {
     let actions_window = source_between(
         ACTIONS_WINDOW,

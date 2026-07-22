@@ -4741,8 +4741,8 @@ fn resolve_dictation_target_exists_in_builtin_execution() {
         "resolver must check notes window"
     );
     assert!(
-        resolver_src.contains("ai::is_ai_window_open()"),
-        "resolver must check AI window"
+        resolver_src.contains("agent_chat_dictation_target_active()"),
+        "resolver must check Agent Chat availability"
     );
     assert!(
         resolver_src.contains("can_accept_dictation_into_prompt()"),
@@ -4769,19 +4769,19 @@ fn resolve_dictation_target_checks_notes_before_ai() {
         .find("notes::is_notes_window_open()")
         .expect("resolver must check notes");
     let ai_pos = resolver_src
-        .find("ai::is_ai_window_open()")
-        .expect("resolver must check AI");
+        .find("agent_chat_dictation_target_active()")
+        .expect("resolver must check Agent Chat");
     let prompt_pos = resolver_src
         .find("can_accept_dictation_into_prompt()")
         .expect("resolver must check prompt");
 
     assert!(
         notes_pos < ai_pos,
-        "notes must be checked before AI (notes_pos={notes_pos}, ai_pos={ai_pos})"
+        "notes must be checked before Agent Chat (notes_pos={notes_pos}, ai_pos={ai_pos})"
     );
     assert!(
         ai_pos < prompt_pos,
-        "AI must be checked before prompt (ai_pos={ai_pos}, prompt_pos={prompt_pos})"
+        "Agent Chat must be checked before prompt (ai_pos={ai_pos}, prompt_pos={prompt_pos})"
     );
 }
 
@@ -4822,7 +4822,7 @@ fn delivery_routes_notes_transcript_via_inject_text() {
 }
 
 #[test]
-fn delivery_routes_ai_chat_transcript_via_set_ai_input() {
+fn delivery_routes_ai_chat_transcript_to_agent_chat_composer() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
 
@@ -4832,8 +4832,8 @@ fn delivery_routes_ai_chat_transcript_via_set_ai_input() {
     let handler_src = &src[handler_start..handler_start + 8000.min(src.len() - handler_start)];
 
     assert!(
-        handler_src.contains("ai::set_ai_input"),
-        "handler must deliver to AI chat via set_ai_input"
+        handler_src.contains("open_agent_chat_with_composer_seed"),
+        "handler must deliver to Agent Chat via the composer-seed entry"
     );
     assert!(
         handler_src.contains("DictationTarget::AiChatComposer"),
@@ -4851,14 +4851,12 @@ fn internal_delivery_failure_falls_back_to_frontmost_app() {
         .expect("handler must exist");
     let handler_src = &src[handler_start..handler_start + 8000.min(src.len() - handler_start)];
 
-    // Both notes and AI delivery must have fallback logging on failure.
+    // Notes delivery must have fallback logging on failure. (The Agent Chat
+    // composer route delivers through the entry-request orchestrator, which
+    // stages the seed itself and has no synchronous failure branch.)
     assert!(
         handler_src.contains("Notes delivery failed, falling back"),
         "notes delivery must log fallback on failure"
-    );
-    assert!(
-        handler_src.contains("AI chat delivery failed, falling back"),
-        "AI chat delivery must log fallback on failure"
     );
 }
 

@@ -10,7 +10,7 @@
 //! `cx.stop_propagation()` BEFORE the Input widget can consume the
 //! keystroke for text-cursor movement. The Up/Down match that runs next
 //! had arms for every other grid/list view (ClipboardHistoryView,
-//! AppLauncherView, WindowSwitcherView, BrowserTabsView, DesignGalleryView,
+//! AppLauncherView, WindowSwitcherView, BrowserTabsView,
 //! ThemeChooserView, ProcessManagerView, SettingsView, AgentChatHistoryView,
 //! BrowserHistoryView, DictationHistoryView, NotesBrowseView,
 //! CurrentAppCommandsView, SearchAiPresetsView, ScriptList) but NO arm

@@ -712,13 +712,12 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
 
     // 3. Check secondary windows BEFORE the update closure
     let notes_open = notes::is_notes_window_open();
-    let ai_open = ai::is_ai_window_open();
     let agent_chat_open = ai::agent_chat::ui::chat_window::is_chat_window_open();
     logging::log(
         "VISIBILITY",
         &format!(
-            "Secondary windows: notes_open={}, ai_open={}, agent_chat_open={}",
-            notes_open, ai_open, agent_chat_open
+            "Secondary windows: notes_open={}, agent_chat_open={}",
+            notes_open, agent_chat_open
         ),
     );
 
@@ -733,16 +732,6 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
         }
         was_mini
     });
-    // Sibling teardown for the embedded AI (`kind: Ai`, `id: "ai"`) entry.
-    // Matches the `ensure_embedded_ai_window(false)` call in
-    // `close_agent_chat_to_script_list` (the in-app Escape/close-flow path)
-    // so the hide path doesn't leave a stale `ai` child entry behind main
-    // once the view is back on ScriptList. Without this, `listAutomationWindows`
-    // post-hide reports `{id:"ai", visible:true, semanticSurface:"agentChatChat"}`
-    // even though main is hidden + re-keyed to `"scriptList"` — the anomaly
-    // filed by Run 9 Pass #20 as `attacker-hide-path-embedded-ai-registry-stale`.
-    // Idempotent no-op if the entry isn't present (safe to call on any hide).
-    crate::windows::ensure_embedded_ai_window(false);
     // Full teardown for actions-dialog (`id: "actions-dialog"`).
     // Pass #29 fix (`cmd-k-on-unfocused-clipboard-pops-overlay-not-actions`):
     // upgraded from bare `remove_automation_window("actions-dialog")` to
@@ -765,7 +754,7 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
 
     // 5. Hide only the main panel. `cx.hide()` app-hides all windows, so any
     // false-negative secondary-window check can take Notes down with main.
-    let secondary_windows_open = notes_open || ai_open || agent_chat_open;
+    let secondary_windows_open = notes_open || agent_chat_open;
     logging::log(
         "VISIBILITY",
         &format!(
@@ -784,7 +773,7 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(135))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if crate::is_main_window_visible() {
                     logging::log(
                         "VISIBILITY",

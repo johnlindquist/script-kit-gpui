@@ -517,6 +517,10 @@ impl ScriptListApp {
                 if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
                     self.agent_chat_history_scroll_handle
                         .scroll_to_top_of_item(0);
+                    self.begin_list_viewport_scroll(
+                        crate::scrolling::list_interaction::ListViewportInputSource::Filter,
+                        cx,
+                    );
                     cx.notify();
                 }
                 return; // Don't run main menu filter logic
@@ -528,6 +532,10 @@ impl ScriptListApp {
                 self.filter_text = new_text.clone();
                 if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
                     self.browser_history_scroll_handle.scroll_to_top_of_item(0);
+                    self.begin_list_viewport_scroll(
+                        crate::scrolling::list_interaction::ListViewportInputSource::Filter,
+                        cx,
+                    );
                     cx.notify();
                 }
                 return; // Don't run main menu filter logic
@@ -540,6 +548,10 @@ impl ScriptListApp {
                 if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
                     self.dictation_history_scroll_handle
                         .scroll_to_top_of_item(0);
+                    self.begin_list_viewport_scroll(
+                        crate::scrolling::list_interaction::ListViewportInputSource::Filter,
+                        cx,
+                    );
                     cx.notify();
                 }
                 return; // Don't run main menu filter logic
@@ -564,30 +576,10 @@ impl ScriptListApp {
                 self.filter_text = new_text.clone();
                 if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
                     self.notes_browse_scroll_handle.scroll_to_top_of_item(0);
-                    cx.notify();
-                }
-                return; // Don't run main menu filter logic
-            }
-            AppView::DesignGalleryView {
-                filter,
-                selected_index,
-            } => {
-                self.filter_text = new_text.clone();
-                if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
-                    self.design_gallery_scroll_handle
-                        .scroll_to_item(0, ScrollStrategy::Top);
-                    cx.notify();
-                }
-                return; // Don't run main menu filter logic
-            }
-            AppView::FooterGalleryView {
-                filter,
-                selected_index,
-            } => {
-                self.filter_text = new_text.clone();
-                if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
-                    self.footer_gallery_scroll_handle
-                        .scroll_to_item(0, ScrollStrategy::Top);
+                    self.begin_list_viewport_scroll(
+                        crate::scrolling::list_interaction::ListViewportInputSource::Filter,
+                        cx,
+                    );
                     cx.notify();
                 }
                 return; // Don't run main menu filter logic

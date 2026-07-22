@@ -8,9 +8,9 @@
 //! ├── tab_context.rs - Tab AI context, receipts, memory lookup, compatibility types
 //! ├── message_parts.rs - MCP/file context-part composition
 //! ├── context_contract.rs - Shared context contract enforcement
+//! ├── context_preview.rs - Shared context-part preview derivation (used by Agent Chat portals)
 //! ├── current_app_automation_memory.rs - Bundle-scoped prior-automation memory
-//! ├── model.rs / storage.rs / providers.rs - Deprecated legacy AI window data + BYOK providers
-//! └── window/      - Deprecated legacy AI window UI and interactions
+//! └── model.rs / storage.rs / providers.rs - Chat data + BYOK providers
 //! ```
 //!
 //! # Primary Agent Chat contract
@@ -18,7 +18,6 @@
 //! - User-facing AI chat surface: Agent Chat
 //! - Entry points should route to `open_tab_ai_agent_chat_with_entry_intent(...)` when they need the canonical chat UI
 //! - Compatibility-named `tab_ai_*` helpers and harness/context types still back Agent Chat plumbing
-//! - The legacy `window/` module remains only for deprecated compatibility flows and should not be used for new entry points
 
 // Re-exports intentionally cover the module's API surface.
 #![allow(unused_imports)]
@@ -32,6 +31,7 @@ pub(crate) mod context_contract;
 #[cfg(test)]
 mod context_contract_integration_tests;
 pub(crate) mod context_mentions;
+pub(crate) mod context_preview;
 pub(crate) mod context_selector;
 pub(crate) mod context_selector_row;
 pub(crate) mod current_app_automation_memory;
@@ -53,7 +53,6 @@ pub(crate) mod session;
 pub(crate) mod storage;
 pub(crate) mod subscriptions;
 pub(crate) mod tab_context;
-pub(crate) mod window;
 
 // Re-export commonly used types
 pub use self::agent_task_dock::{
@@ -94,6 +93,7 @@ pub use self::preflight_audit::{
     append_preflight_audit, build_actionable_preflight_error, log_preflight_audit,
     ActionableContextFailure, AiPreflightAudit, AI_PREFLIGHT_AUDIT_SCHEMA_VERSION,
 };
+pub use self::presets::{resolve_agent_chat_preset, AgentChatPresetPlan};
 pub use self::providers::{AiProvider, ProviderMessage, ProviderRegistry};
 pub use self::result_cards::{
     derive_agent_chat_result_cards_from_assistant_message, AgentChatResultArtifact,
@@ -138,13 +138,6 @@ pub use self::tab_context::{
     TAB_AI_EXECUTION_RECORD_SCHEMA_VERSION, TAB_AI_INVOCATION_RECEIPT_SCHEMA_VERSION,
     TAB_AI_MEMORY_ENTRY_SCHEMA_VERSION, TAB_AI_TARGET_AUDIT_SCHEMA_VERSION,
 };
-pub use self::window::{
-    add_ai_attachment, apply_ai_preset, close_ai_window, get_ai_window_state, is_ai_window,
-    is_ai_window_open, is_ai_window_ready, open_ai_window, open_ai_window_with_chat,
-    open_mini_ai_window, open_mini_ai_window_from, reload_ai_presets, set_ai_input,
-    set_ai_input_with_image, set_ai_pending_chat, set_ai_search, show_ai_command_bar,
-    simulate_ai_key, start_ai_chat, AiMiniDebugSnapshot, PendingChatMessage,
-};
 
 // Re-export context-composer types for integration tests
 pub use self::context_contract::{
@@ -161,10 +154,6 @@ pub use self::context_selector::{
     context_selector_rows, score_builtin, score_builtin_with_trigger, slash_command_rows,
 };
 pub(crate) use self::explicit_target_handoff::request_explicit_agent_chat_handoff_from_secondary_window;
-pub use self::window::context_preflight::{
-    estimate_tokens_from_text, preflight_state_from_receipt, status_from_decision,
-    ContextPreflightSnapshot, ContextPreflightState, ContextPreflightStatus,
-};
 
 // ---------------------------------------------------------------------------
 // Pending explicit Agent Chat target — cross-window handoff slot

@@ -253,9 +253,9 @@ impl ClipboardAttachToAiHandlerAction {
         }
     }
 
-    fn deferred_action(self, content: String) -> Result<Option<DeferredAiWindowAction>, String> {
+    fn deferred_action(self, content: String) -> Result<Option<DeferredAgentChatAction>, String> {
         match self {
-            Self::TextInput => Ok(Some(DeferredAiWindowAction::SetInput {
+            Self::TextInput => Ok(Some(DeferredAgentChatAction::SetInput {
                 text: content,
                 submit: false,
             })),
@@ -264,7 +264,7 @@ impl ClipboardAttachToAiHandlerAction {
                 if attachment_path.is_empty() {
                     return Err(Self::empty_file_path_message().to_string());
                 }
-                Ok(Some(DeferredAiWindowAction::AddAttachment {
+                Ok(Some(DeferredAgentChatAction::AddAttachment {
                     path: attachment_path,
                 }))
             }
@@ -679,10 +679,10 @@ impl ScriptListApp {
                             };
                             let _ = this.update(cx, |this, cx| match result {
                                 Ok(image_base64) => {
-                                    this.open_ai_window_after_main_hide(
+                                    this.open_agent_chat_after_main_hide(
                                         &action_id_owned2,
                                         &trace_id,
-                                        DeferredAiWindowAction::SetInputWithImage {
+                                        DeferredAgentChatAction::SetInputWithImage {
                                             text: String::new(),
                                             image_base64,
                                             submit: false,
@@ -718,7 +718,7 @@ impl ScriptListApp {
                     }
                 };
 
-                self.open_ai_window_after_main_hide(action_id, &dctx.trace_id, deferred_action, cx);
+                self.open_agent_chat_after_main_hide(action_id, &dctx.trace_id, deferred_action, cx);
                 DispatchOutcome::success()
             }
             "clipboard_quick_look" => {

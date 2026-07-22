@@ -231,15 +231,7 @@ fn should_auto_close_actions_window(
     {
         return false;
     }
-    if should_preserve_actions_window_for_dev_style_tool() {
-        return false;
-    }
     !parent_window_focused && !actions_window_active
-}
-
-#[inline]
-fn should_preserve_actions_window_for_dev_style_tool() -> bool {
-    crate::dev_style_tool::window::is_dev_style_tool_open()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1014,14 +1006,6 @@ mod window_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("actions window runtime test mutex should not be poisoned")
-    }
 
     #[test]
     fn test_actions_window_key_intent_supports_aliases_and_jump_keys() {
@@ -1055,10 +1039,6 @@ mod tests {
 
     #[test]
     fn test_actions_window_dynamic_height_matches_single_row_when_empty() {
-        // Reads the live theme: serialize against sibling tests that install
-        // devtools runtime overrides under the same guard.
-        let _guard = runtime_test_guard();
-        crate::dev_style_tool::runtime_overrides::reset_all();
         let row_height = crate::designs::current_actions_popup_theme()
             .list
             .row_height;
@@ -1089,10 +1069,6 @@ mod tests {
 
     #[test]
     fn test_actions_window_dynamic_height_includes_footer_height() {
-        // Reads the live theme: serialize against sibling tests that install
-        // devtools runtime overrides under the same guard.
-        let _guard = runtime_test_guard();
-        crate::dev_style_tool::runtime_overrides::reset_all();
         let row_height = crate::designs::current_actions_popup_theme()
             .list
             .row_height;
@@ -1123,31 +1099,16 @@ mod tests {
 
     #[test]
     fn test_actions_window_dynamic_height_clamps_to_live_shell_max_height() {
-        let _guard = runtime_test_guard();
-        crate::dev_style_tool::runtime_overrides::reset_all();
-        crate::dev_style_tool::runtime_overrides::set_actions_number_from_devtools(
-            "actions.shell.maxHeight",
-            "240px",
-        )
-        .expect("actions shell max height should be settable");
-        crate::dev_style_tool::runtime_overrides::set_actions_number_from_devtools(
-            "actions.list.paddingTop",
-            "10px",
-        )
-        .expect("actions list top padding should be settable");
-        crate::dev_style_tool::runtime_overrides::set_actions_number_from_devtools(
-            "actions.list.paddingBottom",
-            "14px",
-        )
-        .expect("actions list bottom padding should be settable");
+        let mut tokens = crate::designs::base_actions_popup_theme();
+        tokens.shell.max_height = 240.0;
+        tokens.list.padding_top = 10.0;
+        tokens.list.padding_bottom = 14.0;
 
-        let row_height = crate::designs::current_actions_popup_theme()
-            .list
-            .row_height;
-        let height = actions_window_dynamic_height(20, 4, false, true, false, 400.0, row_height);
+        let row_height = tokens.list.row_height;
+        let height =
+            resolved_actions_popup_height(&tokens, 20, 4, false, true, false, 400.0, row_height);
 
         assert_eq!(height, 242.0);
-        crate::dev_style_tool::runtime_overrides::reset_all();
     }
 }
 
@@ -1179,9 +1140,9 @@ pub(super) fn actions_window_dynamic_height(
 }
 
 /// Pure popup-height formula over an explicit token definition. Production
-/// passes `current_actions_popup_theme()` (runtime overrides apply); the
-/// design-contract exporter passes `base_actions_popup_theme()` so checked-in
-/// artifacts never depend on local dev-style state.
+/// passes `current_actions_popup_theme()`; the design-contract exporter passes
+/// `base_actions_popup_theme()` so checked-in artifacts always match the base
+/// token definition.
 pub(crate) fn resolved_actions_popup_height(
     tokens: &crate::designs::ActionsPopupThemeDef,
     num_actions: usize,
@@ -1552,15 +1513,11 @@ fn record_actions_popup_automation_snapshot(
         "host": match parent_kind {
             AutomationWindowKind::Notes => "notes.actions",
             AutomationWindowKind::Main => "main.actions",
-            AutomationWindowKind::Ai => "ai.actions",
-            AutomationWindowKind::MiniAi => "miniAi.actions",
             AutomationWindowKind::AgentChatDetached => "agentChatDetached.actions",
             AutomationWindowKind::Dictation => "dictation.actions",
-            AutomationWindowKind::DevStyleTool => "devStyleTool.actions",
             AutomationWindowKind::ActionsDialog => "actionsDialog.actions",
             AutomationWindowKind::PromptPopup => "promptPopup.actions",
             AutomationWindowKind::Hud => "hud.actions",
-            AutomationWindowKind::FlowManager => "flowManager.actions",
         },
         "parentAutomationId": parent_automation_id,
         "parentKind": format!("{parent_kind:?}"),

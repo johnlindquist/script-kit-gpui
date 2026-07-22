@@ -115,20 +115,23 @@ pub(crate) fn flow_session_footer_buttons(
 ) -> Vec<crate::footer_popup::FooterButtonConfig> {
     use crate::footer_popup::{FooterAction, FooterButtonConfig};
 
-    let send_label = if working { "Working…" } else { "Send" };
-    vec![
-        // ⇧⌘⎋, not ⌘⎋: macOS consumes Cmd+Escape at the window-server level
-        // before ANY app sees it (verified 2026-07-11 — even a plain active
-        // AppKit app never receives the keyDown), so plain Cmd+Escape is
-        // undeliverable as an app shortcut.
-        FooterButtonConfig::new(FooterAction::Close, "⇧⌘⎋", "Terminate Flow")
-            .left_pinned()
-            .enabled(enabled),
-        FooterButtonConfig::new(FooterAction::Run, "↵", send_label).enabled(enabled && !working),
+    // Footer grammar (Oracle 2026-07-21, Footer-A): idle = Send · Actions ·
+    // Desk; working = Actions · Desk. No permanent Terminate — it is a
+    // destructive expert command that lives in ⌘K Actions (the ⇧⌘⎋ shortcut
+    // still works; macOS eats plain ⌘⎋ at the window server, verified
+    // 2026-07-11). No disabled "Working…" pseudo-button either: the leading
+    // status text already says Working/Connecting.
+    let mut buttons = Vec::with_capacity(3);
+    if !working {
+        buttons.push(FooterButtonConfig::new(FooterAction::Run, "↵", "Send").enabled(enabled));
+    }
+    buttons.push(
         FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
             .selected(actions_open)
             .enabled(enabled),
-    ]
+    );
+    buttons.push(FooterButtonConfig::new(FooterAction::Close, "Esc", "Desk").enabled(enabled));
+    buttons
 }
 
 /// Footer left slot for the shared main-list loading treatment: the braille
@@ -307,7 +310,7 @@ impl ScriptListApp {
         }
 
         let Some(selected_index) = crate::list_item::coerce_selection(
-            &self.main_menu_result_caches.grouped_items(),
+            self.main_menu_result_caches.grouped_items(),
             self.selected_index,
         ) else {
             return "Run".to_string();
@@ -503,13 +506,11 @@ impl ScriptListApp {
                         window,
                         cx,
                     );
-                    return;
                 } else if let AppView::AgentChatView { entity } = &self.current_view {
                     let entity = entity.clone();
                     entity.update(cx, |chat, cx| {
                         chat.submit_with_expanded_tokens(cx);
                     });
-                    return;
                 } else if let AppView::TermPrompt { entity, .. } = &self.current_view {
                     let entity = entity.clone();
                     entity.update(cx, |term, _cx| {
@@ -522,63 +523,42 @@ impl ScriptListApp {
                             );
                         }
                     });
-                    return;
                 } else if let AppView::MicroPrompt { id, .. } = &self.current_view {
                     let prompt_id = id.clone();
                     self.submit_arg_prompt_from_current_state(&prompt_id, cx);
-                    return;
                 } else if matches!(self.current_view, AppView::SdkReferenceView { .. }) {
                     let _ = self.copy_selected_sdk_reference_markdown(cx);
-                    return;
                 } else if matches!(self.current_view, AppView::ScriptTemplateCatalogView { .. }) {
                     if let Some(template) = self.selected_script_template() {
                         self.show_naming_dialog_for_script_template(template, window, cx);
                     }
-                    return;
                 } else if matches!(self.current_view, AppView::CreateAiPresetView { .. }) {
                     self.handle_create_ai_preset_key("enter", window, cx);
-                    return;
                 } else if matches!(self.current_view, AppView::NotesBrowseView { .. }) {
                     let _ = self.attach_selected_note_from_footer(cx);
-                    return;
                 } else if let AppView::FlowSessionView { session_id } = self.current_view {
-                    // The MAIN input is the composer: send its draft.
-                    let text = self.filter_text.trim().to_string();
-                    if !text.is_empty() {
-                        self.set_filter_text_immediate(String::new(), window, cx);
-                        self.submit_flow_chat_message(session_id, text, cx);
-                    }
-                    return;
+                    // One shared draft transaction with the keyboard Enter
+                    // path: the draft clears only when the submit consumed it,
+                    // so a Busy race can never destroy it (Oracle 2026-07-21).
+                    let _ = self.submit_flow_session_draft(session_id, window, cx);
                 } else if matches!(self.current_view, AppView::FlowUxView { .. }) {
                     self.flow_desk_activate_selected(false, window, cx);
-                    return;
                 } else if let AppView::ScriptIssuesView { report } = &self.current_view {
                     let report = report.clone();
                     self.fix_script_issues_in_agent(&report, cx);
-                    return;
                 } else if self.dispatch_day_page_preview_footer_action(action, window, cx) {
-                    return;
-                } else if self.dispatch_design_gallery_select_footer_action(cx) {
-                    return;
-                } else if self.dispatch_footer_gallery_select_footer_action(cx) {
-                    return;
                 } else if self.dispatch_kit_store_primary_footer_action(cx) {
-                    return;
                 } else if self.dispatch_migrate_v1_primary_footer_action(cx) {
-                    return;
                 } else if matches!(self.current_view, AppView::ThemeChooserView { .. }) {
                     self.submit_theme_chooser_from_input_enter(window, cx);
-                    return;
                 } else if matches!(self.current_view, AppView::TipsView { .. }) {
                     self.tips_copy_selected_example(cx);
-                    return;
                 } else if let AppView::TemplatePrompt { entity, .. } = &self.current_view {
                     let entity = entity.clone();
                     entity.update(cx, |prompt, cx| prompt.submit(cx));
                 } else if let AppView::EditorPrompt { entity, .. } = &self.current_view {
                     let entity = entity.clone();
                     entity.update(cx, |editor, cx| editor.submit(cx));
-                    return;
                 } else if matches!(self.current_view, AppView::WebcamView { .. }) {
                     if self.capture_webcam_photo(cx) {
                         self.hide_main_and_reset(cx);
@@ -622,14 +602,12 @@ impl ScriptListApp {
             crate::footer_popup::FooterAction::Ai => {
                 if matches!(self.current_view, AppView::CreateAiPresetView { .. }) {
                     self.handle_create_ai_preset_key("tab", window, cx);
-                    return;
                 } else if let AppView::AgentChatView { entity } = &self.current_view {
                     let entity = entity.clone();
                     entity.update(cx, |chat, cx| {
                         chat.open_profile_trigger_picker_in_window(window, cx);
                     });
                 } else if self.dispatch_day_page_preview_footer_action(action, window, cx) {
-                    return;
                 } else if self.day_page_context_return.is_some() {
                     tracing::info!(
                         target: "script_kit::footer_popup",
@@ -703,13 +681,10 @@ impl ScriptListApp {
             crate::footer_popup::FooterAction::Apply => {
                 if matches!(self.current_view, AppView::FlowUxView { .. }) {
                     self.flow_desk_activate_selected(true, window, cx);
-                    return;
                 } else if let AppView::ScriptIssuesView { report } = &self.current_view {
                     let report = report.clone();
                     self.copy_script_issues_to_clipboard(&report, cx);
-                    return;
                 } else if self.dispatch_kit_store_remove_footer_action(cx) {
-                    return;
                 } else if matches!(self.current_view, AppView::ConfirmPrompt { .. }) {
                     tracing::info!(
                         target: "script_kit::footer_popup",
@@ -737,10 +712,8 @@ impl ScriptListApp {
             crate::footer_popup::FooterAction::Close => {
                 if matches!(self.current_view, AppView::About { .. }) {
                     self.dismiss_about(cx);
-                    return;
                 } else if matches!(self.current_view, AppView::MicroPrompt { .. }) {
                     self.go_back_or_close(window, cx);
-                    return;
                 } else if matches!(
                     self.current_view,
                     AppView::SdkReferenceView { .. } | AppView::ScriptTemplateCatalogView { .. }
@@ -748,31 +721,30 @@ impl ScriptListApp {
                     if !self.clear_builtin_view_filter(cx) {
                         self.go_back_or_close(window, cx);
                     }
-                    return;
                 } else if matches!(self.current_view, AppView::CreateAiPresetView { .. }) {
                     self.go_back_or_close(window, cx);
-                    return;
                 } else if matches!(self.current_view, AppView::NotesBrowseView { .. }) {
                     if self.is_in_attachment_portal() {
                         self.close_attachment_portal_cancel(cx);
                     } else if !self.clear_builtin_view_filter(cx) {
                         self.go_back_or_close(window, cx);
                     }
-                    return;
-                } else if let AppView::FlowSessionView { session_id } = self.current_view {
-                    self.terminate_flow_session(session_id, window, cx);
-                    return;
+                } else if matches!(self.current_view, AppView::FlowSessionView { .. }) {
+                    // Native `Esc Desk` matches keyboard Esc: BACKGROUND the
+                    // session (keep it alive in the Desk). Terminate is the
+                    // destructive expert command in ⌘K Actions with the ⇧⌘⎋
+                    // shortcut (Oracle 2026-07-21 footer adjudication — the
+                    // native Close used to terminate, destroying conversations
+                    // from a non-destructive-looking control).
+                    self.background_flow_session(window, cx);
                 } else if matches!(self.current_view, AppView::PermissionsWizardView { .. }) {
                     self.dispatch_permissions_wizard_action(
                         crate::permissions_wizard::PermissionsWizardAction::Done,
                         window,
                         cx,
                     );
-                    return;
                 } else if self.dispatch_kit_store_browse_back_footer_action(window, cx) {
-                    return;
                 } else if self.dispatch_day_page_preview_footer_action(action, window, cx) {
-                    return;
                 } else if matches!(self.current_view, AppView::ConfirmPrompt { .. }) {
                     tracing::info!(
                         target: "script_kit::footer_popup",
@@ -802,8 +774,6 @@ impl ScriptListApp {
                     );
                     self.submit_prompt_response(id.clone(), None, cx);
                     self.cancel_script_execution(cx);
-                } else if matches!(self.current_view, AppView::NonListStatesView { .. }) {
-                    self.go_back_or_close(window, cx);
                 } else if let AppView::EditorPrompt { entity, .. } = &self.current_view {
                     tracing::info!(
                         target: "script_kit::footer_popup",
@@ -971,34 +941,6 @@ impl ScriptListApp {
         };
 
         entity.read(cx).pastable_response_text(cx)
-    }
-
-    fn dispatch_design_gallery_select_footer_action(&mut self, cx: &mut Context<Self>) -> bool {
-        if !matches!(self.current_view, AppView::DesignGalleryView { .. }) {
-            return false;
-        }
-
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "design_gallery_footer_select_ignored",
-            "Design Gallery native footer Select preserves current no-op selection behavior"
-        );
-        cx.notify();
-        true
-    }
-
-    fn dispatch_footer_gallery_select_footer_action(&mut self, cx: &mut Context<Self>) -> bool {
-        if !matches!(self.current_view, AppView::FooterGalleryView { .. }) {
-            return false;
-        }
-
-        tracing::info!(
-            target: "script_kit::footer_popup",
-            event = "footer_gallery_footer_select_ignored",
-            "Footer Gallery native footer Select preserves current no-op selection behavior"
-        );
-        cx.notify();
-        true
     }
 
     /// Start a one-time async bridge that drains `footer_action_channel()` and
@@ -1445,15 +1387,6 @@ impl ScriptListApp {
             return buttons;
         }
 
-        if matches!(self.current_view, AppView::NonListStatesView { .. }) {
-            use crate::footer_popup::{FooterAction, FooterButtonConfig};
-
-            let enabled = !self.main_window_footer_buttons_blocked();
-            return vec![
-                FooterButtonConfig::new(FooterAction::Close, "Esc", "Back").enabled(enabled)
-            ];
-        }
-
         if matches!(self.current_view, AppView::ScriptIssuesView { .. }) {
             use crate::footer_popup::{FooterAction, FooterButtonConfig};
 
@@ -1566,23 +1499,6 @@ impl ScriptListApp {
                 button_count = buttons.len(),
                 has_files,
                 "Resolved DropPrompt footer buttons"
-            );
-            return buttons;
-        }
-
-        if matches!(self.current_view, AppView::DesignGalleryView { .. }) {
-            use crate::footer_popup::{FooterAction, FooterButtonConfig};
-
-            let footer_disabled = self.main_window_footer_buttons_blocked();
-            let buttons =
-                vec![FooterButtonConfig::new(FooterAction::Run, "↵", "Select")
-                    .enabled(!footer_disabled)];
-            tracing::debug!(
-                target: "script_kit::footer_popup",
-                event = "main_window_footer_buttons_resolved",
-                view = ?self.current_view,
-                button_count = buttons.len(),
-                "Resolved Design Gallery footer buttons"
             );
             return buttons;
         }
@@ -1875,7 +1791,8 @@ impl ScriptListApp {
     }
 
     /// When the native main-window footer is active, replace the GPUI footer
-    /// with a transparent spacer so content stays clear of the AppKit footer.
+    /// with either the blur-era spacer or, in Tahoe glass mode, an absolute
+    /// hover blocker that lets scroll content continue beneath the glass band.
     pub(crate) fn main_window_footer_slot(
         &self,
         gpui_footer: gpui::AnyElement,
@@ -1889,7 +1806,16 @@ impl ScriptListApp {
             return None;
         }
         if self.main_window_uses_native_footer() {
-            Some(crate::components::prompt_layout_shell::render_native_main_window_footer_spacer())
+            if crate::footer_popup::glass_scroll_bands_active() {
+                Some(
+                    crate::components::prompt_layout_shell::render_native_main_window_footer_hover_blocker(),
+                )
+            } else {
+                Some(
+                    crate::components::prompt_layout_shell::render_native_main_window_footer_spacer(
+                    ),
+                )
+            }
         } else {
             Some(gpui_footer)
         }
@@ -2258,7 +2184,6 @@ impl ScriptListApp {
             // stale Agent Chat left-info state cannot reintroduce duplicate model/cwd
             // chips beside the footer buttons.
             config.left_info = None;
-            return;
         }
     }
 
@@ -2426,17 +2351,6 @@ impl ScriptListApp {
                 };
                 Some((ViewType::MainWindow, filtered_count))
             }
-            AppView::DesignGalleryView { filter, .. } => Some((
-                ViewType::MainWindow,
-                crate::design_gallery_filtered_len(filter),
-            )),
-            AppView::FooterGalleryView { filter, .. } => Some((
-                ViewType::MainWindow,
-                crate::footer_gallery_filtered_len(filter),
-            )),
-            AppView::NonListStatesView { .. } => Some((ViewType::DivPrompt, 0)),
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => Some((ViewType::DivPrompt, 0)),
             AppView::ProcessManagerView { filter, .. } => {
                 let filtered_count = if filter.is_empty() {
                     self.cached_processes.len()

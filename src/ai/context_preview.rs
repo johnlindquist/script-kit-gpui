@@ -1,5 +1,3 @@
-use super::*;
-
 /// Summary information for previewing a context part before submission.
 ///
 /// Derived synchronously from the `AiContextPart` metadata — no network
@@ -251,50 +249,6 @@ fn format_byte_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
-impl AiApp {
-    /// Toggle the context preview panel for the chip at `index`.
-    ///
-    /// If the same index is already previewed, close the preview.
-    /// If a different index is previewed, switch to the new one.
-    pub(super) fn toggle_context_preview(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.context_preview_index == Some(index) {
-            tracing::info!(
-                checkpoint = "context_preview_closed",
-                index = index,
-                "context preview toggled off"
-            );
-            self.context_preview_index = None;
-        } else {
-            tracing::info!(
-                checkpoint = "context_preview_opened",
-                index = index,
-                "context preview toggled on"
-            );
-            self.context_preview_index = Some(index);
-        }
-        cx.notify();
-    }
-
-    /// Close the context preview panel if open.
-    pub(super) fn close_context_preview(&mut self, cx: &mut Context<Self>) {
-        if self.context_preview_index.is_some() {
-            tracing::info!(
-                checkpoint = "context_preview_closed",
-                "context preview dismissed"
-            );
-            self.context_preview_index = None;
-            cx.notify();
-        }
-    }
-
-    /// Returns the preview info for the currently previewed context part, if any.
-    pub(super) fn active_context_preview(&self) -> Option<(usize, ContextPreviewInfo)> {
-        let idx = self.context_preview_index?;
-        let part = self.pending_context_parts.get(idx)?;
-        Some((idx, derive_context_preview_info(part)))
     }
 }
 

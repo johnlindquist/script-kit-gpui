@@ -5,8 +5,6 @@ const AGENT_CHAT_VIEW: &str = include_str!("../src/ai/agent_chat/ui/view.rs");
 const AGENT_CHAT_WINDOW: &str = include_str!("../src/ai/agent_chat/ui/chat_window.rs");
 const NOTES_AGENT_CHAT_HOST: &str = include_str!("../src/notes/window/agent_chat_host.rs");
 const AGENT_CHAT_TESTS: &str = include_str!("../src/ai/agent_chat/ui/tests.rs");
-const AI_PRESETS_OVERLAYS: &str = include_str!("../src/ai/window/render_overlays_dropdowns.rs");
-const AI_PRESETS_DROPDOWNS: &str = include_str!("../src/ai/window/dropdowns.rs");
 const DICTATION_MIC_POPUP: &str = include_str!("../src/dictation/microphone_popup_window.rs");
 
 fn function_body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -86,76 +84,6 @@ fn dictation_microphone_popup_keeps_legacy_compact_rows_and_attached_popup_shell
         assert!(
             !DICTATION_MIC_POPUP.contains(forbidden),
             "dictation microphone popup must not reintroduce bespoke row chrome: {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn ai_presets_dropdown_rows_use_shared_list_item_chrome() {
-    let row_body = function_body(
-        AI_PRESETS_OVERLAYS,
-        "pub(super) fn render_presets_dropdown",
-        "let dropdown = InlineDropdown::new",
-    );
-
-    for required in [
-        "crate::list_item::ListItem::new",
-        "crate::list_item::ListItemColors::from_theme",
-        ".selected(is_selected)",
-        ".main_menu_theme(",
-        ".semantic_id(format!(\"preset-{idx}\"",
-        "crate::list_item::effective_list_item_height_for_theme",
-    ] {
-        assert!(
-            row_body.contains(required),
-            "missing shared ListItem row contract: {required}"
-        );
-    }
-
-    for forbidden in [
-        "render_dense_monoline_picker_row_with_leading_visual",
-        "render_dense_monoline_picker_row",
-        "render_soft_compact_picker_row",
-        ".border_l(gpui::px(2.0))",
-        "selected_row_bg",
-        "hover_row_bg",
-    ] {
-        assert!(
-            !row_body.contains(forbidden),
-            "must not reintroduce bespoke row chrome: {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn ai_presets_dropdown_preserves_shell_navigation_and_activation_contract() {
-    for required in [
-        "InlineDropdown::new(SharedString::from(\"presets-dropdown\")",
-        ".empty_state_opt(",
-        ".synopsis(synopsis)",
-        "\"presets-dropdown-overlay\"",
-        "\"presets-dropdown-container\"",
-        "this.presets_selected_index = idx;",
-        "this.confirm_presets_selection(window, cx);",
-    ] {
-        assert!(
-            AI_PRESETS_OVERLAYS.contains(required),
-            "missing shell/click contract: {required}"
-        );
-    }
-
-    for required in [
-        "pub(super) fn presets_select_prev",
-        "pub(super) fn presets_select_next",
-        "inline_dropdown_select_prev",
-        "inline_dropdown_select_next",
-        "inline_dropdown_visible_range",
-        "pub(super) fn confirm_presets_selection",
-        "create_chat_with_preset(window, cx)",
-    ] {
-        assert!(
-            AI_PRESETS_DROPDOWNS.contains(required),
-            "missing navigation/activation contract: {required}"
         );
     }
 }

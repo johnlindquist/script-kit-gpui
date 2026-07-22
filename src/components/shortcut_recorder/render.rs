@@ -4,20 +4,13 @@ use gpui::{
 };
 
 use crate::components::confirm_modal_shell::{
-    confirm_modal_header, confirm_modal_number_override, confirm_modal_shell, modal_action_row,
-    ConfirmModalShellConfig, ModalActionRowButton, CONFIRM_MODAL_RADIUS,
-    MODAL_ACTION_ROW_TOP_MARGIN_PX, MODAL_WIDTH_PX,
+    confirm_modal_header, confirm_modal_shell, modal_action_row, ConfirmModalShellConfig,
+    ModalActionRowButton, CONFIRM_MODAL_RADIUS, MODAL_ACTION_ROW_TOP_MARGIN_PX, MODAL_WIDTH_PX,
 };
 use crate::components::footer_chrome::{
     current_main_menu_footer_height, current_main_menu_footer_metrics, footer_action_slot_width,
     footer_button_height, footer_centered_action_button_layout,
     footer_centered_action_edge_padding_x, FooterActionSlot, FooterHintButtonLayoutOverrides,
-};
-use crate::dev_style_tool::{
-    ConfirmModalKnobId, CONFIRM_MODAL_ACTIONS_BUTTON_HEIGHT_KNOB_ID,
-    CONFIRM_MODAL_ACTIONS_BUTTON_RADIUS_KNOB_ID, CONFIRM_MODAL_ACTIONS_CONTENT_GAP_KNOB_ID,
-    CONFIRM_MODAL_ACTIONS_EDGE_PADDING_X_KNOB_ID, CONFIRM_MODAL_ACTIONS_GAP_KNOB_ID,
-    CONFIRM_MODAL_ACTIONS_PADDING_X_KNOB_ID, CONFIRM_MODAL_ACTIONS_PADDING_Y_KNOB_ID,
 };
 use crate::logging;
 use crate::ui_foundation::{is_key_enter, is_key_escape};
@@ -25,56 +18,39 @@ use crate::ui_foundation::{is_key_enter, is_key_escape};
 use super::types::{ShortcutRecorderFocusedAction, RECORDER_MODAL_PADDING};
 use super::ShortcutRecorder;
 
-fn recorder_modal_number(id: ConfirmModalKnobId, fallback: f32) -> f32 {
-    confirm_modal_number_override(id, fallback)
-}
-
 fn recorder_action_button_height() -> f32 {
-    recorder_modal_number(
-        CONFIRM_MODAL_ACTIONS_BUTTON_HEIGHT_KNOB_ID,
-        footer_button_height(current_main_menu_footer_height()),
-    )
+    footer_button_height(current_main_menu_footer_height())
 }
 
 fn recorder_action_button_gap() -> f32 {
-    recorder_modal_number(
-        CONFIRM_MODAL_ACTIONS_GAP_KNOB_ID,
-        current_main_menu_footer_metrics().item_gap_px,
-    )
+    current_main_menu_footer_metrics().item_gap_px
 }
 
 fn recorder_action_button_layout() -> FooterHintButtonLayoutOverrides {
     let footer_layout = footer_centered_action_button_layout();
     let metrics = current_main_menu_footer_metrics();
     FooterHintButtonLayoutOverrides {
-        button_padding_x_px: Some(recorder_modal_number(
-            CONFIRM_MODAL_ACTIONS_PADDING_X_KNOB_ID,
+        button_padding_x_px: Some(
             footer_layout
                 .button_padding_x_px
                 .unwrap_or(metrics.button_padding_x),
-        )),
-        button_padding_y_px: Some(recorder_modal_number(
-            CONFIRM_MODAL_ACTIONS_PADDING_Y_KNOB_ID,
+        ),
+        button_padding_y_px: Some(
             footer_layout
                 .button_padding_y_px
                 .unwrap_or(metrics.button_padding_y),
-        )),
-        content_gap_px: Some(recorder_modal_number(
-            CONFIRM_MODAL_ACTIONS_CONTENT_GAP_KNOB_ID,
-            footer_layout.content_gap_px.unwrap_or(metrics.content_gap),
-        )),
-        button_radius_px: Some(recorder_modal_number(
-            CONFIRM_MODAL_ACTIONS_BUTTON_RADIUS_KNOB_ID,
+        ),
+        content_gap_px: Some(footer_layout.content_gap_px.unwrap_or(metrics.content_gap)),
+        button_radius_px: Some(
             footer_layout
                 .button_radius_px
                 .unwrap_or(metrics.button_radius),
-        )),
-        edge_padding_x_px: Some(recorder_modal_number(
-            CONFIRM_MODAL_ACTIONS_EDGE_PADDING_X_KNOB_ID,
+        ),
+        edge_padding_x_px: Some(
             footer_layout
                 .edge_padding_x_px
                 .unwrap_or_else(footer_centered_action_edge_padding_x),
-        )),
+        ),
         // Save/Clear/Cancel must never ellipsize inside a fixed footer slot:
         // hug the rendered content like render_universal_footer_action_buttons
         // while keeping the shared footer metrics above.

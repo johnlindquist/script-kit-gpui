@@ -286,16 +286,6 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 // Pass #19 automation re-key fix without rendering a
                                 // visible ScriptList frame while AppKit is still
                                 // closing the panel.
-                                // Sibling teardown for the embedded AI (`kind: Ai`,
-                                // `id: "ai"`) registry entry. See the matching
-                                // `ensure_embedded_ai_window(false)` in
-                                // `src/app_impl/agent_handoff/mod.rs::close_agent_chat_to_script_list`
-                                // and the three-site lock-step across the Hide dispatchers
-                                // (this file, runtime_stdin_match_core.rs, app_run_setup.rs,
-                                // + window_visibility.rs::hide_main_window_helper).
-                                // Idempotent no-op when the entry isn't present. Closes
-                                // Run 9 Pass #20 `attacker-hide-path-embedded-ai-registry-stale`.
-                                crate::windows::ensure_embedded_ai_window(false);
                                 // Full teardown for actions-dialog
                                 // (`id: "actions-dialog"`). Pass #29 fix
                                 // (`cmd-k-on-unfocused-clipboard-pops-overlay-not-actions`):
@@ -317,9 +307,8 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 // Pure registry op; idempotent.
                                 crate::windows::remove_automation_window("confirm-popup");
 
-                                // Check if Notes or AI windows are open for logging only.
+                                // Check if Notes is open for logging only.
                                 let notes_open = notes::is_notes_window_open();
-                                let ai_open = ai::is_ai_window_open();
 
                                 // CRITICAL: Always hide only the main panel. `ctx.hide()`
                                 // app-hides all windows, so a stale/false-negative Notes
@@ -328,7 +317,7 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                     "STDIN",
                                     &format!(
                                         "Using defer_hide_main_window() - main-only hide, secondary_windows_open={}",
-                                        notes_open || ai_open
+                                        notes_open
                                     ),
                                 );
                                 platform::defer_hide_main_window(ctx);
@@ -536,16 +525,7 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                             }
                             ExternalCommand::OpenAgentChatDetachedFixture { ref request_id } => {
                                 let rid = request_id.as_ref().map(|id| id.as_str());
-                                let result = crate::ai::agent_chat::ui::chat_window::open_chat_window(ctx)
-                                    .map(|_| {
-                                        crate::ai::agent_chat::ui::chat_window::set_chat_window_fixture_bounds(
-                                            gpui::Bounds {
-                                                origin: gpui::point(gpui::px(585.0), gpui::px(177.0)),
-                                                size: gpui::size(gpui::px(640.0), gpui::px(520.0)),
-                                            },
-                                            ctx,
-                                        )
-                                    });
+                                let result = view.open_detached_agent_chat_mock_fixture(ctx);
                                 tracing::info!(
                                     category = "STDIN",
                                     event = "agent_chat_detached_fixture_opened",
@@ -563,31 +543,6 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                             ExternalCommand::OpenAiWithMockData => {
                                 logging::log("STDIN", "Opening standard Agent Chat mock fixture");
                                 view.open_standard_agent_chat_mock_fixture(ctx);
-                            }
-                            ExternalCommand::OpenAgentChatKitchenSinkFixture { ref request_id } => {
-                                logging::log("STDIN", "Opening Agent Chat kitchen sink fixture");
-                                let rid = request_id.as_ref().map(|id| id.as_str());
-                                view.open_agent_chat_kitchen_sink_fixture(ctx);
-                                platform::show_main_window_without_activation();
-                                sync_main_automation_window(None, true, true);
-                                if let (Some(request_id), Some(sender)) =
-                                    (request_id.as_ref(), view.response_sender.as_ref())
-                                {
-                                    let _ = sender.try_send(crate::protocol::Message::external_command_result(
-                                        request_id.to_string(),
-                                        "openAgentChatKitchenSinkFixture".to_string(),
-                                        true,
-                                        None,
-                                        None,
-                                    ));
-                                }
-                                tracing::info!(
-                                    category = "STDIN",
-                                    event = "agent_chat_kitchen_sink_fixture_opened",
-                                    command = "openAgentChatKitchenSinkFixture",
-                                    request_id = ?rid,
-                                    "Agent Chat kitchen sink fixture open result"
-                                );
                             }
                             ExternalCommand::OpenMiniAiWithMockData => {
                                 logging::log(
@@ -740,15 +695,13 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 }
                             }
                             ExternalCommand::ShowAiCommandBar => {
-                                logging::log("STDIN", "Showing AI command bar via stdin command");
-                                ai::show_ai_command_bar(ctx);
+                                logging::log("STDIN", "Ignoring showAiCommandBar: legacy AI window removed");
                             }
                             ExternalCommand::SimulateAiKey { key, modifiers } => {
                                 logging::log(
                                     "STDIN",
-                                    &format!("Simulating AI key: '{}' with modifiers: {:?}", key, modifiers),
+                                    &format!("Ignoring simulateAiKey '{}' (modifiers: {:?}): legacy AI window removed", key, modifiers),
                                 );
-                                ai::simulate_ai_key(ctx, &key, modifiers);
                             }
                             ExternalCommand::CaptureWindow { title, path } => {
                                 // Extend grace period to prevent auto-hide during capture.
@@ -842,30 +795,14 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                     text_len = text.len(),
                                     "STDIN AI command received"
                                 );
-                                match ai::set_ai_search(ctx, &text) {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            category = "STDIN",
-                                            event = "stdin_ai_command_finished",
-                                            command = "setAiSearch",
-                                            request_id = ?request_id,
-                                            status = "success",
-                                            "STDIN AI command finished"
-                                        );
-                                    }
-                                    Err(error) => {
-                                        logging::log("STDIN", &format!("Failed to set AI search filter: {}", error));
-                                        tracing::error!(
-                                            category = "STDIN",
-                                            event = "stdin_ai_command_finished",
-                                            command = "setAiSearch",
-                                            request_id = ?request_id,
-                                            status = "error",
-                                            error = %error,
-                                            "STDIN AI command finished"
-                                        );
-                                    }
-                                }
+                                tracing::info!(
+                                    category = "STDIN",
+                                    event = "stdin_ai_command_finished",
+                                    command = "setAiSearch",
+                                    request_id = ?request_id,
+                                    status = "unsupported",
+                                    "setAiSearch removed with the legacy AI window"
+                                );
                             }
                             ExternalCommand::SetAiInput { text, submit, ref request_id } => {
                                 let request_id = request_id.as_ref().map(|id| id.as_str());
@@ -878,32 +815,15 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                     text_len = text.len(),
                                     "STDIN AI command received"
                                 );
-                                match ai::set_ai_input(ctx, &text, submit) {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            category = "STDIN",
-                                            event = "stdin_ai_command_finished",
-                                            command = "setAiInput",
-                                            request_id = ?request_id,
-                                            submit,
-                                            status = "success",
-                                            "STDIN AI command finished"
-                                        );
-                                    }
-                                    Err(error) => {
-                                        logging::log("STDIN", &format!("Failed to set AI input: {}", error));
-                                        tracing::error!(
-                                            category = "STDIN",
-                                            event = "stdin_ai_command_finished",
-                                            command = "setAiInput",
-                                            request_id = ?request_id,
-                                            submit,
-                                            status = "error",
-                                            error = %error,
-                                            "STDIN AI command finished"
-                                        );
-                                    }
-                                }
+                                tracing::info!(
+                                    category = "STDIN",
+                                    event = "stdin_ai_command_finished",
+                                    command = "setAiInput",
+                                    request_id = ?request_id,
+                                    submit,
+                                    status = "unsupported",
+                                    "setAiInput removed with the legacy AI window; use setAgentChatInput"
+                                );
                             }
                             ExternalCommand::SetAgentChatInput { text, submit, ref request_id } => {
                                 let request_id_value = request_id.clone();
@@ -1361,31 +1281,15 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                             }
                             ExternalCommand::GetAiWindowState { ref request_id } => {
                                 let request_id = request_id.as_ref().map(|id| id.as_str());
-                                match ai::get_ai_window_state(ctx) {
-                                    Some(snapshot) => {
-                                        let json = serde_json::to_string(&snapshot).unwrap_or_default();
-                                        tracing::info!(
-                                            category = "STDIN",
-                                            event = "ai_window_state_result",
-                                            command = "getAiWindowState",
-                                            request_id = ?request_id,
-                                            ok = true,
-                                            state = %json,
-                                            "AI window state snapshot"
-                                        );
-                                    }
-                                    None => {
-                                        tracing::info!(
-                                            category = "STDIN",
-                                            event = "ai_window_state_result",
-                                            command = "getAiWindowState",
-                                            request_id = ?request_id,
-                                            ok = false,
-                                            error_code = "ai_window_not_open",
-                                            "AI window not open or entity dropped"
-                                        );
-                                    }
-                                }
+                                tracing::info!(
+                                    category = "STDIN",
+                                    event = "ai_window_state_result",
+                                    command = "getAiWindowState",
+                                    request_id = ?request_id,
+                                    ok = false,
+                                    error_code = "ai_window_removed",
+                                    "legacy AI window removed"
+                                );
                             }
                             ExternalCommand::OpenDictationOverlayFixture { ref request_id } => {
                                 let rid = request_id.as_ref().map(|id| id.as_str());

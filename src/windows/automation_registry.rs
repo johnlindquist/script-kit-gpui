@@ -49,15 +49,11 @@ fn kind_rank(kind: AutomationWindowKind) -> u8 {
     match kind {
         AutomationWindowKind::Main => 0,
         AutomationWindowKind::Notes => 1,
-        AutomationWindowKind::Ai => 2,
-        AutomationWindowKind::MiniAi => 3,
         AutomationWindowKind::AgentChatDetached => 4,
         AutomationWindowKind::Dictation => 5,
-        AutomationWindowKind::DevStyleTool => 6,
         AutomationWindowKind::ActionsDialog => 7,
         AutomationWindowKind::PromptPopup => 8,
         AutomationWindowKind::Hud => 9,
-        AutomationWindowKind::FlowManager => 10,
     }
 }
 
@@ -192,45 +188,6 @@ pub fn register_attached_popup(
     );
 
     Ok(())
-}
-
-/// Sync the embedded AI surface entry to match the active view.
-///
-/// The embedded Agent Chat chat is a subview of the main panel (not a separate
-/// OS window), so automation previously could only observe it via
-/// `listAutomationWindows.windows[0].semanticSurface == "agentChatChat"` on
-/// main. This helper adds a parallel `kind: Ai` entry with a stable
-/// `id = "ai"` whenever the embedded AI surface is active, so automation
-/// can enumerate and target it as a first-class logical window.
-///
-/// When `active` is true, upserts an entry with `id = "ai"`, kind
-/// [`AutomationWindowKind::Ai`], parent `"main"`, and semantic surface
-/// `"agentChatChat"`. When `active` is false, removes the entry. Call this
-/// from every view transition that flips into or out of the embedded
-/// Agent Chat chat surface.
-pub fn ensure_embedded_ai_window(active: bool) {
-    if active {
-        // Deliberately `focused: false` — the embedded AI surface is a
-        // subview of the main panel, not a separate OS window. OS focus
-        // stays with the host. Setting focused=true here would also
-        // de-focus every other registered window (see `upsert_automation_window`
-        // above) and break any concurrent caller that expects main to
-        // stay focused.
-        upsert_automation_window(AutomationWindowInfo {
-            id: "ai".to_string(),
-            kind: AutomationWindowKind::Ai,
-            title: Some("Script Kit AI".to_string()),
-            focused: false,
-            visible: true,
-            semantic_surface: Some("agentChatChat".to_string()),
-            bounds: None,
-            parent_window_id: Some("main".to_string()),
-            parent_kind: Some(AutomationWindowKind::Main),
-            pid: Some(std::process::id()),
-        });
-    } else {
-        let _ = remove_automation_window("ai");
-    }
 }
 
 /// Remove an automation window entry by its stable ID.
@@ -714,7 +671,7 @@ mod tests {
         let _registry_guard = registry_guard();
         let p = test_prefix();
 
-        let info = make_info(&p, "ai", AutomationWindowKind::Ai);
+        let info = make_info(&p, "ai", AutomationWindowKind::AgentChatDetached);
         upsert_automation_window(info);
 
         set_automation_visibility(&format!("{p}:ai"), false);
@@ -808,7 +765,7 @@ mod tests {
 
         upsert_automation_window(make_info(&p, "main", AutomationWindowKind::Main));
         upsert_automation_window(make_info(&p, "notes", AutomationWindowKind::Notes));
-        upsert_automation_window(make_info(&p, "ai", AutomationWindowKind::Ai));
+        upsert_automation_window(make_info(&p, "ai", AutomationWindowKind::AgentChatDetached));
 
         let all = list_automation_windows();
         let our_windows: Vec<_> = all.iter().filter(|w| w.id.starts_with(&p)).collect();
@@ -971,7 +928,7 @@ mod tests {
 
         // Targeting a non-existent kind fails with an error, not a silent fallback
         let missing = AutomationWindowTarget::Kind {
-            kind: AutomationWindowKind::MiniAi,
+            kind: AutomationWindowKind::Hud,
             index: None,
         };
         let err = resolve_automation_window(Some(&missing));
@@ -1245,75 +1202,5 @@ mod tests {
 
         remove_automation_window(&format!("{p}:popup-with-parent"));
         remove_automation_window(&format!("{p}:main"));
-    }
-
-    // -- Embedded AI surface -----------------------------------------------
-
-    // `ensure_embedded_ai_window` writes a fixed id `"ai"`; the module-wide
-    // registry_guard() serializes it like every other registry test.
-
-    #[test]
-    fn ensure_embedded_ai_window_upserts_and_removes_ai_entry() {
-        let _registry_guard = registry_guard();
-
-        // Baseline: no `ai` entry.
-        let before: Vec<AutomationWindowInfo> = list_automation_windows()
-            .into_iter()
-            .filter(|w| w.id == "ai")
-            .collect();
-        assert!(
-            before.is_empty(),
-            "precondition: no `ai` entry should be registered, got {before:?}"
-        );
-
-        // Activate: entry appears with expected shape.
-        ensure_embedded_ai_window(true);
-        let after_activate: AutomationWindowInfo = list_automation_windows()
-            .into_iter()
-            .find(|w| w.id == "ai")
-            .expect("ensure_embedded_ai_window(true) should upsert an `ai` entry");
-        assert_eq!(after_activate.kind, AutomationWindowKind::Ai);
-        assert_eq!(
-            after_activate.semantic_surface.as_deref(),
-            Some("agentChatChat")
-        );
-        assert_eq!(after_activate.parent_window_id.as_deref(), Some("main"));
-        assert_eq!(after_activate.parent_kind, Some(AutomationWindowKind::Main));
-        assert!(after_activate.visible);
-        assert!(
-            !after_activate.focused,
-            "`ai` entry must not be OS-focused — the subview does not own key focus, main does"
-        );
-
-        // Deactivate: entry is gone.
-        ensure_embedded_ai_window(false);
-        let after_deactivate: Vec<AutomationWindowInfo> = list_automation_windows()
-            .into_iter()
-            .filter(|w| w.id == "ai")
-            .collect();
-        assert!(
-            after_deactivate.is_empty(),
-            "ensure_embedded_ai_window(false) should remove the `ai` entry, still present: {after_deactivate:?}"
-        );
-    }
-
-    #[test]
-    fn ensure_embedded_ai_window_idempotent_activations_keep_one_entry() {
-        let _registry_guard = registry_guard();
-
-        ensure_embedded_ai_window(true);
-        ensure_embedded_ai_window(true);
-        ensure_embedded_ai_window(true);
-        let count = list_automation_windows()
-            .into_iter()
-            .filter(|w| w.id == "ai")
-            .count();
-        assert_eq!(
-            count, 1,
-            "repeated activations should upsert a single `ai` entry, got {count}"
-        );
-
-        // Cleanup so we don't leak state into other suites.
-        ensure_embedded_ai_window(false);
     }
 }

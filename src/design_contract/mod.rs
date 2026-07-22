@@ -237,7 +237,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         .create_theme();
 
     let variant = MainMenuThemeVariant::InfoBarBase;
-    // Checked-in artifacts must not read local dev-style runtime overrides.
+    // Checked-in artifacts always read the base definition.
     let def: MainMenuThemeDef = variant.base_def();
     let opacity = theme.get_opacity();
     let chrome = AppChromeColors::from_theme(&theme);
@@ -1101,8 +1101,8 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     );
 
     // ── Actions dialog (Cmd+K popup) ────────────────────────────────────
-    // Base definition only — checked-in artifacts never read the
-    // dev-style runtime overrides that `current_actions_popup_theme` applies.
+    // Base definition only — checked-in artifacts always match the base
+    // token definition from `base_actions_popup_theme`.
     let popup = crate::designs::base_actions_popup_theme();
     let default_spacing =
         crate::designs::get_tokens(crate::designs::DesignVariant::Default).spacing();
@@ -3014,12 +3014,9 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
          painted truth for the bottom band needs an activeFooter probe + pixel check.",
     );
 
-    // ── Agent Chat (embedded Pi chat surface, kitchen-sink fixture) ─────
-    // Production contract only: `style_contract::production_agent_chat_style()`
-    // — NEVER the dev-style runtime overrides `effective_agent_chat_style()`
-    // layers on top (locked by
-    // `agent_chat_runtime_override_cannot_change_checked_in_export`). Every
-    // theme-color × authored-alpha byte routes through the SAME
+    // ── Agent Chat (embedded Pi chat surface) ────────────────────────────
+    // Production contract only: `style_contract::production_agent_chat_style()`.
+    // Every theme-color × authored-alpha byte routes through the SAME
     // `style_contract` resolvers `components/transcript.rs` and `view.rs`
     // paint with, so exporter and renderer literally share bytes.
     use crate::ai::agent_chat::ui::style_contract as agent_chat_contract;
@@ -3743,7 +3740,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         (
             "agentChat.composer.placeholderFollowUp",
             agent_chat_contract::AGENT_CHAT_PLACEHOLDER_FOLLOW_UP.to_string(),
-            "style_contract::AGENT_CHAT_PLACEHOLDER_FOLLOW_UP (the kitchen-sink fixture state)",
+            "style_contract::AGENT_CHAT_PLACEHOLDER_FOLLOW_UP (non-empty transcript state)",
         ),
         (
             "agentChat.legacyComposer.fontFamily",
@@ -3764,11 +3761,6 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
             "agentChat.tool.defaultExpansion",
             "collapsedExceptDiffOrError".to_string(),
             "AgentChatTranscript::default_expanded — tools with a diff or is_error start expanded",
-        ),
-        (
-            "agentChat.fixture.kitchenSinkCwd",
-            agent_chat_contract::AGENT_CHAT_KITCHEN_SINK_FIXTURE_CWD.to_string(),
-            "style_contract::AGENT_CHAT_KITCHEN_SINK_FIXTURE_CWD — pinned long path so reference captures are byte-reproducible and exercise clipped context lanes without visible overlap",
         ),
     ] {
         b.add(
@@ -5580,10 +5572,6 @@ mod tests {
             text("agentChat.tool.defaultExpansion"),
             "collapsedExceptDiffOrError"
         );
-        assert_eq!(
-            text("agentChat.fixture.kitchenSinkCwd"),
-            "/var/tmp/script-kit-agent-chat-reference/agent-chat-kitchen-sink-long-workspace"
-        );
         // Variant-limited numbers stay JSON-only facts.
         assert_eq!(number("agentChat.user.maxWidthRoleSplitOnly"), 520.0);
         assert_eq!(number("agentChat.assistant.maxWidthRoleSplitOnly"), 620.0);
@@ -5600,7 +5588,6 @@ mod tests {
             "agentChat.transcript.alignment",
             "agentChat.footer.presentation",
             "agentChat.tool.defaultExpansion",
-            "agentChat.fixture.kitchenSinkCwd",
             "agentChat.user.maxWidthRoleSplitOnly",
             "agentChat.assistant.maxWidthRoleSplitOnly",
             "agentChat.assistant.radius",
@@ -5739,45 +5726,6 @@ mod tests {
                 !css.contains(rejected),
                 "rejected Agent Chat var {rejected} must not exist"
             );
-        }
-    }
-
-    /// A live dev-style runtime override must NEVER change checked-in
-    /// export output: the exporter reads `production_agent_chat_style()`
-    /// directly, not `effective_agent_chat_style()`. This is the lock the
-    /// 2026-07-11 Oracle review demanded when production style ownership
-    /// moved out of the dev catalog.
-    #[test]
-    fn agent_chat_runtime_override_cannot_change_checked_in_export() {
-        use crate::dev_style_tool::catalog::StyleValue;
-        use crate::dev_style_tool::runtime_overrides::{
-            reset_agent_chat_value, set_agent_chat_value,
-        };
-        use crate::dev_style_tool::AGENT_CHAT_TRANSCRIPT_ROW_PADDING_X;
-
-        let baseline = checked_in_design_bundle().expect("baseline bundle builds");
-
-        set_agent_chat_value(
-            AGENT_CHAT_TRANSCRIPT_ROW_PADDING_X,
-            StyleValue::Number(99.0),
-        )
-        .expect("override applies to the live dev-style channel");
-        let overridden = checked_in_design_bundle().expect("bundle builds under override");
-        // Always clean up the process-global override before asserting.
-        reset_agent_chat_value(AGENT_CHAT_TRANSCRIPT_ROW_PADDING_X);
-
-        assert_eq!(
-            overridden.bundle_hash, baseline.bundle_hash,
-            "a live runtime override leaked into the checked-in export"
-        );
-        match &overridden
-            .tokens
-            .get("agentChat.transcript.rowPaddingX")
-            .expect("token exists")
-            .value
-        {
-            TokenValue::Length { value } => assert_eq!(*value, 16.0),
-            other => panic!("unexpected value: {other:?}"),
         }
     }
 }

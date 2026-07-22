@@ -238,6 +238,35 @@ pub fn delete_preset(id: &str) -> Result<bool> {
     }
 }
 
+/// A saved AI preset resolved for application to the current Agent Chat surface.
+///
+/// This is the handoff payload `AgentChatView::apply_preset_by_id` consumes:
+/// the preset's system prompt is staged in the composer and the preferred
+/// model is selected through the thread's model-picker mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChatPresetPlan {
+    /// System prompt staged into the Agent Chat composer.
+    pub system_prompt: String,
+    /// Preferred model to select on the current thread, when the preset has one.
+    pub preferred_model: Option<String>,
+}
+
+/// Resolve a saved preset by ID for the current Agent Chat preset handoff.
+///
+/// Returns the preset-specific failure message on load errors or unknown IDs
+/// so the deferred handoff can surface `Failed to apply AI preset: {error}`.
+pub fn resolve_agent_chat_preset(preset_id: &str) -> Result<AgentChatPresetPlan, String> {
+    let presets = load_presets().map_err(|error| format!("Failed to load AI presets: {error}"))?;
+    let preset = presets
+        .into_iter()
+        .find(|preset| preset.id == preset_id)
+        .ok_or_else(|| format!("Unknown AI preset: {preset_id}"))?;
+    Ok(AgentChatPresetPlan {
+        system_prompt: preset.system_prompt,
+        preferred_model: preset.preferred_model,
+    })
+}
+
 /// Generate a kebab-case slug from a preset name.
 fn slug_from_name(name: &str) -> String {
     name.to_lowercase()

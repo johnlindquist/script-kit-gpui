@@ -413,10 +413,10 @@ impl ScriptListApp {
     fn select_ai_preset(&mut self, preset_id: &str, _window: &mut Window, cx: &mut Context<Self>) {
         tracing::info!(preset_id = %preset_id, action = "select_ai_preset", "User selected AI preset from search");
         let trace_id = uuid::Uuid::new_v4().to_string();
-        self.open_ai_window_after_main_hide(
+        self.open_agent_chat_after_main_hide(
             "select_ai_preset",
             &trace_id,
-            DeferredAiWindowAction::ApplyPreset {
+            DeferredAgentChatAction::ApplyPreset {
                 preset_id: preset_id.to_string(),
             },
             cx,
@@ -455,7 +455,6 @@ impl ScriptListApp {
                             Some(HUD_SHORT_MS),
                             cx,
                         );
-                        ai::reload_ai_presets(cx);
                         self.go_back_or_close(window, cx);
                     }
                     Err(e) => {

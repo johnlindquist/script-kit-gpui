@@ -18,7 +18,6 @@ mod builders;
 mod command_bar;
 pub(crate) mod constants;
 mod dialog;
-pub(crate) mod kitchen_sink_fixture;
 mod types;
 mod window;
 
@@ -41,10 +40,14 @@ pub(crate) use builders::{
     AGENT_CHAT_RECEIPT_HISTORY_COPY_ACTION_PREFIX, AGENT_CHAT_RECEIPT_HISTORY_ROUTE_ID,
     AGENT_CHAT_SHOW_RECEIPT_HISTORY_ACTION_ID,
 };
+#[allow(unused_imports)]
+// Used by actions builder tests; the legacy AI window consumer is gone.
 pub use builders::{
     get_ai_command_bar_actions, get_day_note_switcher_actions, get_new_chat_actions,
     get_note_switcher_actions, get_notes_command_bar_actions,
 };
+#[allow(unused_imports)]
+// Used by actions builder tests; the legacy AI window consumer is gone.
 pub use builders::{
     to_deeplink_name, ChatModelInfo, ChatPromptInfo, ClipboardEntryInfo, FileSearchDirectoryInfo,
     FileSearchSortMode, NewChatModelInfo, NewChatPresetInfo, NoteSwitcherNoteInfo, NotesInfo,
@@ -66,12 +69,6 @@ pub(crate) use dialog::{
 pub(crate) use dialog::{is_destructive_action, matching_action_id_for_keystroke};
 pub use dialog::{
     ActionsDialog, ActionsDialogActivation, ActionsDialogEscapeOutcome, ActionsDialogRoute,
-};
-#[allow(unused_imports)]
-pub(crate) use kitchen_sink_fixture::{
-    actions_popup_kitchen_sink_actions, actions_popup_kitchen_sink_config,
-    actions_popup_kitchen_sink_feature_manifest, ActionsPopupKitchenSinkMode,
-    ACTIONS_POPUP_KITCHEN_SINK_FIXTURE_ID, ACTIONS_POPUP_KITCHEN_SINK_NO_MATCH_QUERY,
 };
 pub use types::{
     Action, ActionCategory, ActionsDialogConfig, AnchorPosition, ScriptInfo, SearchPosition,

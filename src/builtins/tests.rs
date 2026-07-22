@@ -256,7 +256,6 @@ fn test_builtin_feature_equality() {
         BuiltInFeature::WindowSwitcher,
         BuiltInFeature::WindowSwitcher
     );
-    assert_eq!(BuiltInFeature::DesignGallery, BuiltInFeature::DesignGallery);
     assert_eq!(BuiltInFeature::AiChat, BuiltInFeature::AiChat);
     assert_eq!(BuiltInFeature::Favorites, BuiltInFeature::Favorites);
     assert_eq!(BuiltInFeature::EmojiPicker, BuiltInFeature::EmojiPicker);
@@ -274,15 +273,10 @@ fn test_builtin_feature_equality() {
     );
     assert_ne!(BuiltInFeature::AppLauncher, BuiltInFeature::WindowSwitcher);
     assert_ne!(
-        BuiltInFeature::DesignGallery,
-        BuiltInFeature::ClipboardHistory
-    );
-    assert_ne!(
         BuiltInFeature::PasteSequentially,
         BuiltInFeature::ClipboardHistory
     );
     assert_ne!(BuiltInFeature::AiChat, BuiltInFeature::ClipboardHistory);
-    assert_ne!(BuiltInFeature::AiChat, BuiltInFeature::DesignGallery);
     assert_ne!(BuiltInFeature::Favorites, BuiltInFeature::ClipboardHistory);
     assert_ne!(
         BuiltInFeature::EmojiPicker,

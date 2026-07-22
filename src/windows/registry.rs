@@ -262,7 +262,6 @@ mod tests {
     fn test_window_role_name() {
         assert_eq!(WindowRole::Main.name(), "Main");
         assert_eq!(WindowRole::Notes.name(), "Notes");
-        assert_eq!(WindowRole::Ai.name(), "AI");
     }
 
     #[test]
@@ -286,9 +285,6 @@ mod tests {
 
         let notes = WindowRole::Notes;
         assert!(matches!(notes, crate::window_state::WindowRole::Notes));
-
-        let ai = WindowRole::Ai;
-        assert!(matches!(ai, crate::window_state::WindowRole::Ai));
     }
 
     #[test]

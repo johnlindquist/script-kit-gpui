@@ -140,16 +140,6 @@
                                 // Pass #19 automation re-key fix without rendering a
                                 // visible ScriptList frame while AppKit is still
                                 // closing the panel.
-                                // Sibling teardown for the embedded AI (`kind: Ai`,
-                                // `id: "ai"`) registry entry. See the matching
-                                // `ensure_embedded_ai_window(false)` in
-                                // `src/app_impl/agent_handoff/mod.rs::close_agent_chat_to_script_list`
-                                // and the three-site lock-step across the Hide dispatchers
-                                // (this file, runtime_stdin.rs, app_run_setup.rs,
-                                // + window_visibility.rs::hide_main_window_helper).
-                                // Idempotent no-op when the entry isn't present. Closes
-                                // Run 9 Pass #20 `attacker-hide-path-embedded-ai-registry-stale`.
-                                crate::windows::ensure_embedded_ai_window(false);
                                 // Full teardown for actions-dialog
                                 // (`id: "actions-dialog"`). Pass #29 fix
                                 // (`cmd-k-on-unfocused-clipboard-pops-overlay-not-actions`):
@@ -171,9 +161,8 @@
                                 // Pure registry op; idempotent.
                                 crate::windows::remove_automation_window("confirm-popup");
 
-                                // Check if Notes or AI windows are open for logging only.
+                                // Check if Notes is open for logging only.
                                 let notes_open = notes::is_notes_window_open();
-                                let ai_open = ai::is_ai_window_open();
 
                                 // CRITICAL: Always hide only the main panel. `ctx.hide()`
                                 // app-hides all windows, so a stale/false-negative Notes
@@ -182,7 +171,7 @@
                                     "STDIN",
                                     &format!(
                                         "Using defer_hide_main_window() - main-only hide, secondary_windows_open={}",
-                                        notes_open || ai_open
+                                        notes_open
                                     ),
                                 );
                                 platform::defer_hide_main_window(ctx);

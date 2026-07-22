@@ -753,6 +753,32 @@ impl ScriptListApp {
         );
     }
 
+    /// Dictation delivery: stage `seed_text` in the Agent Chat composer WITHOUT
+    /// submitting it, suppressing any implicit launcher-row context.
+    ///
+    /// Replaces the legacy "set AI window input" dictation delivery now that
+    /// the legacy AI window is gone.
+    pub(crate) fn open_agent_chat_with_composer_seed(
+        &mut self,
+        seed_text: String,
+        ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_agent_chat_from_entry_request(
+            agent_chat_entry::AgentChatEntryRequest {
+                origin: agent_chat_entry::AgentChatEntryOrigin::Dictation,
+                target: agent_chat_entry::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
+                seed_text: Some(seed_text),
+                ui_variant,
+                seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
+                suppress_focused_part: true,
+                context_staging: agent_chat_entry::AgentChatContextStaging::SuppressFocused,
+                return_origin: None,
+            },
+            cx,
+        );
+    }
+
     /// Binary-side body for the detached chat window's "reattach into main
     /// panel" action. Registered with
     /// `chat_window::register_reattach_into_main_hook` at startup because the
@@ -2020,8 +2046,6 @@ impl ScriptListApp {
                 | AppView::ClipboardHistoryView { .. }
                 | AppView::AppLauncherView { .. }
                 | AppView::WindowSwitcherView { .. }
-                | AppView::DesignGalleryView { .. }
-                | AppView::FooterGalleryView { .. }
                 | AppView::ThemeChooserView { .. }
                 | AppView::EmojiPickerView { .. }
                 | AppView::BrowseKitsView { .. }
@@ -3708,11 +3732,6 @@ impl ScriptListApp {
         // which calls the same helper after `reset_to_script_list`.
         crate::windows::update_automation_semantic_surface("main", Some("scriptList".to_string()));
 
-        // Pair with the entry upsert in `enter_embedded_agent_chat_surface`:
-        // tear the AI entry back out of the automation registry so
-        // `listAutomationWindows` stops reporting a kind=ai window once the
-        // user is back on ScriptList.
-        crate::windows::ensure_embedded_ai_window(false);
         self.transition_agent_chat_surface(
             crate::ai::agent_chat::ui::surface_state::AgentChatSurfaceEvent::EmbeddedClosed,
         );
@@ -3908,8 +3927,6 @@ impl ScriptListApp {
             | AppView::DictationHistoryView { .. }
             | AppView::NotesBrowseView { .. }
             | AppView::CurrentAppCommandsView { .. }
-            | AppView::DesignGalleryView { .. }
-            | AppView::FooterGalleryView { .. }
             | AppView::CreationFeedback { .. }
             | AppView::ScriptIssuesView { .. }
             | AppView::SdkReferenceView { .. }
@@ -3949,11 +3966,7 @@ impl ScriptListApp {
             AppView::NamingPrompt { .. } => FocusTarget::NamingPrompt,
 
             AppView::ConfirmPrompt { .. } => FocusTarget::AppRoot,
-            AppView::NonListStatesView { .. } => FocusTarget::AppRoot,
             AppView::PermissionsWizardView { .. } => FocusTarget::AppRoot,
-
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => FocusTarget::AppRoot,
         }
     }
 
@@ -5240,11 +5253,6 @@ impl ScriptListApp {
             AppView::FlowSessionView { .. } => "FlowSessionView".to_string(),
             AppView::NamingPrompt { .. } => "NamingPrompt".to_string(),
             AppView::CreationFeedback { .. } => "CreationFeedback".to_string(),
-            AppView::DesignGalleryView { .. } => "DesignGallery".to_string(),
-            AppView::FooterGalleryView { .. } => "FooterGallery".to_string(),
-            AppView::NonListStatesView { .. } => "NonListStates".to_string(),
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => "DesignExplorer".to_string(),
             AppView::ActionsDialog => "ActionsDialog".to_string(),
             AppView::BrowseKitsView { .. } => "BrowseKits".to_string(),
             AppView::MigrateV1View { .. } => "MigrateV1".to_string(),
@@ -5304,8 +5312,6 @@ impl ScriptListApp {
             | AppView::SearchAiPresetsView { filter, .. }
             | AppView::FavoritesBrowseView { filter, .. }
             | AppView::CurrentAppCommandsView { filter, .. }
-            | AppView::DesignGalleryView { filter, .. }
-            | AppView::FooterGalleryView { filter, .. }
             | AppView::AgentChatHistoryView { filter, .. }
             | AppView::BrowserHistoryView { filter, .. }
             | AppView::DictationHistoryView { filter, .. }
@@ -5402,12 +5408,8 @@ impl ScriptListApp {
             | AppView::ScriptIssuesView { .. }
             | AppView::ActionsDialog
             | AppView::InstalledKitsView { .. }
-            | AppView::NonListStatesView { .. }
             | AppView::PermissionsWizardView { .. }
             | AppView::ConfirmPrompt { .. } => None,
-
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => None,
         }
     }
 

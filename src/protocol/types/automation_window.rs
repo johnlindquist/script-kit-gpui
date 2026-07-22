@@ -32,17 +32,12 @@ pub enum AutomationWindowTarget {
 pub enum AutomationWindowKind {
     Main,
     Notes,
-    Ai,
-    MiniAi,
     AgentChatDetached,
     Dictation,
-    DevStyleTool,
     ActionsDialog,
     PromptPopup,
     /// Transient HUD notification pill (floating, focusless, auto-dismissing).
     Hud,
-    /// Detached Flow Manager window (flow run supervision).
-    FlowManager,
 }
 
 impl AutomationWindowKind {
@@ -54,15 +49,11 @@ impl AutomationWindowKind {
         match self {
             AutomationWindowKind::Main => "main",
             AutomationWindowKind::Notes => "notes",
-            AutomationWindowKind::Ai => "ai",
-            AutomationWindowKind::MiniAi => "miniAi",
             AutomationWindowKind::AgentChatDetached => "agentChatDetached",
             AutomationWindowKind::Dictation => "dictation",
-            AutomationWindowKind::DevStyleTool => "devStyleTool",
             AutomationWindowKind::ActionsDialog => "actionsDialog",
             AutomationWindowKind::PromptPopup => "promptPopup",
             AutomationWindowKind::Hud => "hud",
-            AutomationWindowKind::FlowManager => "flowManager",
         }
     }
 }

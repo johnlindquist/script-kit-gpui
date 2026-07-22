@@ -244,7 +244,6 @@ impl ScriptListApp {
         crate::hotkeys::reset_main_gesture_classifier();
         self.was_window_focused = false;
         crate::windows::set_automation_visibility("main", false);
-        crate::windows::ensure_embedded_ai_window(false);
         crate::footer_popup::close_main_footer_popup(&mut *cx);
         logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
 
@@ -259,15 +258,14 @@ impl ScriptListApp {
             self.cancel_script_execution_without_view_reset();
         }
 
-        // Check if Notes or AI windows are open BEFORE hiding
+        // Check if Notes or Agent Chat windows are open BEFORE hiding
         let notes_open = notes::is_notes_window_open();
-        let ai_open = ai::is_ai_window_open();
         let agent_chat_open = ai::agent_chat::ui::chat_window::is_chat_window_open();
         logging::log(
             "VISIBILITY",
             &format!(
-                "Secondary windows: notes_open={}, ai_open={}, agent_chat_open={}",
-                notes_open, ai_open, agent_chat_open
+                "Secondary windows: notes_open={}, agent_chat_open={}",
+                notes_open, agent_chat_open
             ),
         );
 
@@ -276,7 +274,7 @@ impl ScriptListApp {
         // check can hide Notes together with main.
         // Must be deferred: orderOut: triggers window_did_change_key_status
         // synchronously, which re-enters GPUI's App RefCell and panics.
-        let secondary_windows_open = notes_open || ai_open || agent_chat_open;
+        let secondary_windows_open = notes_open || agent_chat_open;
         logging::log(
             "VISIBILITY",
             &format!(
@@ -308,7 +306,7 @@ impl ScriptListApp {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(135))
                     .await;
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     if script_kit_gpui::is_main_window_visible() {
                         logging::log(
                             "VISIBILITY",
@@ -362,7 +360,7 @@ impl ScriptListApp {
                         reset_mini_bounds_after_hidden_reset: false,
                     };
                     if let Some(app_entity) = app_entity.upgrade() {
-                        let _ = app_entity.update(cx, |app, cx| {
+                        app_entity.update(cx, |app, cx| {
                             app.complete_hidden_main_window_reset(request, cx);
                         });
                     }
@@ -440,7 +438,7 @@ impl ScriptListApp {
     ) {
         let scheduled_generation = script_kit_gpui::main_window_visibility_generation();
         cx.spawn(async move |this, cx| {
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if script_kit_gpui::is_main_window_visible()
                     || script_kit_gpui::main_window_visibility_generation()
                         != scheduled_generation
@@ -525,17 +523,16 @@ impl ScriptListApp {
         mark_main_state_restore_after_focus_loss();
 
         let notes_open = notes::is_notes_window_open();
-        let ai_open = ai::is_ai_window_open();
         let agent_chat_open = ai::agent_chat::ui::chat_window::is_chat_window_open();
         logging::log(
             "VISIBILITY",
             &format!(
-                "Secondary windows: notes_open={}, ai_open={}, agent_chat_open={}",
-                notes_open, ai_open, agent_chat_open
+                "Secondary windows: notes_open={}, agent_chat_open={}",
+                notes_open, agent_chat_open
             ),
         );
 
-        let secondary_windows_open = notes_open || ai_open || agent_chat_open;
+        let secondary_windows_open = notes_open || agent_chat_open;
         logging::log(
             "VISIBILITY",
             &format!(
@@ -599,12 +596,6 @@ impl ScriptListApp {
             }
             AppView::NotesBrowseView { filter, .. } if !filter.is_empty() => {
                 Some("NotesBrowse filter")
-            }
-            AppView::DesignGalleryView { filter, .. } if !filter.is_empty() => {
-                Some("DesignGallery filter")
-            }
-            AppView::FooterGalleryView { filter, .. } if !filter.is_empty() => {
-                Some("FooterGallery filter")
             }
             AppView::ThemeChooserView { filter, .. } if !filter.is_empty() => {
                 Some("ThemeChooser filter")
@@ -747,22 +738,6 @@ impl ScriptListApp {
                 Self::clear_builtin_query_state(filter, selected_index);
                 self.notes_browse_scroll_handle.scroll_to_top_of_item(0);
             }
-            AppView::DesignGalleryView {
-                filter,
-                selected_index,
-            } => {
-                Self::clear_builtin_query_state(filter, selected_index);
-                self.design_gallery_scroll_handle
-                    .scroll_to_item(0, ScrollStrategy::Top);
-            }
-            AppView::FooterGalleryView {
-                filter,
-                selected_index,
-            } => {
-                Self::clear_builtin_query_state(filter, selected_index);
-                self.footer_gallery_scroll_handle
-                    .scroll_to_item(0, ScrollStrategy::Top);
-            }
             AppView::ThemeChooserView {
                 filter,
                 selected_index,
@@ -871,11 +846,7 @@ impl ScriptListApp {
             self.gpui_input_state.update(cx, |state, cx| {
                 state.set_value("", window, cx);
                 state.set_selection(0, 0, window, cx);
-                state.set_placeholder(
-                    crate::dev_style_tool::runtime_overrides::effective_main_input_placeholder(),
-                    window,
-                    cx,
-                );
+                state.set_placeholder(crate::ROOT_LAUNCHER_PLACEHOLDER, window, cx);
             });
 
             // Clear actions popup state (prevents stale overlay on return to menu)

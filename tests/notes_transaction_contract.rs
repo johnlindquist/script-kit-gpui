@@ -336,14 +336,6 @@ fn notes_embedded_agent_chat_switch_emits_structured_logs() {
         !panels.contains("request_explicit_agent_chat_handoff_from_secondary_window"),
         "Notes must not use the detached secondary-window Agent Chat handoff path"
     );
-    assert!(
-        !panels.contains("crate::ai::open_ai_window(cx)"),
-        "Notes must not open the deprecated AI window"
-    );
-    assert!(
-        !panels.contains("crate::ai::set_ai_input(cx, &content, false)"),
-        "Notes must not target the deprecated AI window input API"
-    );
 
     // Detached Agent Chat and shared helpers must still exist for non-Notes paths.
     let agent_chat_mod = include_str!("../src/ai/agent_chat/ui/mod.rs");

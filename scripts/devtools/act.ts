@@ -7,10 +7,7 @@ type ActionKind =
   | "select"
   | "key"
   | "open-actions"
-  | "set-theme-control"
-  | "undo-style-change"
-  | "redo-style-change"
-  | "reset-style-controls";
+  | "set-theme-control";
 
 type Args = {
   actionKind: ActionKind;
@@ -100,9 +97,6 @@ function usage() {
     "  bun scripts/devtools/act.ts key --key Enter --modifiers cmd --allow-submit --submit-intent agent-chat-route --allow-submit-reason <why> [target args]",
     "  bun scripts/devtools/act.ts open-actions [target args]",
     "  bun scripts/devtools/act.ts set-theme-control --control <id> --value <value> --surface ThemeChooser [target args]",
-    "  bun scripts/devtools/act.ts undo-style-change --target-id dev-style-tool [target args]",
-    "  bun scripts/devtools/act.ts redo-style-change --target-id dev-style-tool [target args]",
-    "  bun scripts/devtools/act.ts reset-style-controls --target-id dev-style-tool [target args]",
     "",
     "Target args match scripts/devtools/targets.ts inspect, e.g. --session <name> --main --strict --surface ScriptList.",
   ].join("\n");
@@ -123,9 +117,6 @@ function parseArgs(argv: string[]): Args {
       "key",
       "open-actions",
       "set-theme-control",
-      "undo-style-change",
-      "redo-style-change",
-      "reset-style-controls",
     ].includes(command)
   ) {
     console.error(usage());
@@ -376,36 +367,6 @@ function actionPayload(args: Args, selector: JsonObject) {
       trace: "on",
     };
   }
-  if (args.actionKind === "undo-style-change") {
-    return {
-      type: "batch",
-      requestId: requestId("undo-style-change"),
-      target: selector,
-      commands: [{ type: "undoStyleChange" }],
-      options: { stopOnError: true, rollbackOnError: false, timeout: args.timeoutMs },
-      trace: "on",
-    };
-  }
-  if (args.actionKind === "redo-style-change") {
-    return {
-      type: "batch",
-      requestId: requestId("redo-style-change"),
-      target: selector,
-      commands: [{ type: "redoStyleChange" }],
-      options: { stopOnError: true, rollbackOnError: false, timeout: args.timeoutMs },
-      trace: "on",
-    };
-  }
-  if (args.actionKind === "reset-style-controls") {
-    return {
-      type: "batch",
-      requestId: requestId("reset-style-controls"),
-      target: selector,
-      commands: [{ type: "resetStyleControls" }],
-      options: { stopOnError: true, rollbackOnError: false, timeout: args.timeoutMs },
-      trace: "on",
-    };
-  }
   return {
     type: "simulateKey",
     requestId: requestId("key"),
@@ -554,15 +515,6 @@ const nonDestructiveLauncherSubmitIds = new Set([
   "search-files",
 ]);
 
-const devStyleKitchenSinkSubmitIds = new Set([
-  "button:dev-style-tool-open-main-window-kitchen-sink",
-  "button:dev-style-tool-open-main-window-no-match-kitchen-sink",
-  "button:dev-style-tool-open-actions-popup-kitchen-sink",
-  "button:dev-style-tool-open-actions-popup-no-match-kitchen-sink",
-  "button:dev-style-tool-open-agent-chat-kitchen-sink",
-  "button:dev-style-tool-open-confirm-modal-kitchen-sink",
-]);
-
 const nonDestructiveActionsDialogSubmitPairs = [
   { parentText: "Launchpad", actionId: "copy_deeplink" },
   { parentText: "Emoji Picker", actionId: "copy_deeplink" },
@@ -662,15 +614,6 @@ function isScriptListTargetReceipt(receipt: JsonObject) {
     || resolved?.appViewVariant === "ScriptList";
 }
 
-function isDevStyleToolTargetReceipt(receipt: JsonObject) {
-  const resolved = targetInfo(receipt);
-  return resolved?.automationId === "dev-style-tool"
-    && (
-      resolved?.targetKind === "DevStyleTool"
-      || resolved?.semanticSurface === "devStyleTool"
-    );
-}
-
 function isProfileSearchTargetReceipt(receipt: JsonObject) {
   const resolved = targetInfo(receipt);
   return resolved?.automationId === "main"
@@ -696,20 +639,6 @@ function isPromptPopupTargetReceipt(receipt: JsonObject) {
 
 function isNonDestructiveLauncherSubmit(actionId: string | null) {
   return actionId !== null && nonDestructiveLauncherSubmitIds.has(actionId);
-}
-
-function isNonDestructiveDevStyleKitchenSinkSubmit(
-  args: Args,
-  targetReceipt: JsonObject,
-  selectedSemanticId: string | null,
-) {
-  return args.actionKind === "select"
-    && args.allowSubmit
-    && args.submitIntent === "style-fixture"
-    && args.allowSubmitReason.trim().length > 0
-    && isDevStyleToolTargetReceipt(targetReceipt)
-    && selectedSemanticId !== null
-    && devStyleKitchenSinkSubmitIds.has(selectedSemanticId);
 }
 
 function isNonDestructiveProfileSwitchSubmit(args: Args, before: JsonObject) {
@@ -1036,14 +965,6 @@ async function submitPreflight(args: Args, targetReceipt: JsonObject, before: Js
     };
   }
   if (!isActionsDialogTargetReceipt(targetReceipt)) {
-    if (isNonDestructiveDevStyleKitchenSinkSubmit(args, targetReceipt, selectedSemanticId)) {
-      return {
-        state: "dispatched",
-        actionId: selectedSemanticId,
-        allowedBy: "submitIntent:style-fixture",
-        proofIntent: args.submitIntent,
-      };
-    }
     if (
       isPromptPopupTargetReceipt(targetReceipt)
       && isNonDestructivePromptPopupProfileActivation(selectedSemanticId)

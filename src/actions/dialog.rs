@@ -4974,14 +4974,6 @@ mod tests {
     use crate::actions::types::{Action, ActionCategory, ScriptInfo, SectionStyle};
     use crate::menu_syntax::{MenuSyntaxAction, MenuSyntaxActionKind};
     use crate::menu_syntax_actions::{PowerSyntaxActionSection, SectionMode};
-    use std::sync::{Mutex, OnceLock};
-
-    fn runtime_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("actions dialog runtime test mutex should not be poisoned")
-    }
 
     #[test]
     fn selectable_index_helpers_skip_section_headers_directionally() {
@@ -5224,38 +5216,6 @@ mod tests {
         // POPUP_MAX_HEIGHT (400) - search (40) - context header (26) - footer (32)
         // - list padding (top 0 + bottom 6)
         assert_eq!(viewport_height, 296.0);
-    }
-
-    #[test]
-    fn test_scrollbar_viewport_uses_live_shell_height_and_list_padding_overrides() {
-        let _guard = runtime_test_guard();
-        crate::dev_style_tool::runtime_overrides::reset_all();
-        crate::dev_style_tool::runtime_overrides::set_actions_number_from_devtools(
-            "actions.shell.maxHeight",
-            "260px",
-        )
-        .expect("actions shell max height should be settable");
-        crate::dev_style_tool::runtime_overrides::set_actions_number_from_devtools(
-            "actions.list.paddingTop",
-            "11px",
-        )
-        .expect("actions list top padding should be settable");
-        crate::dev_style_tool::runtime_overrides::set_actions_number_from_devtools(
-            "actions.list.paddingBottom",
-            "13px",
-        )
-        .expect("actions list bottom padding should be settable");
-
-        let viewport_height = actions_dialog_scrollbar_viewport_height(
-            500.0,
-            true,
-            true,
-            true,
-            crate::actions::constants::POPUP_MAX_HEIGHT,
-        );
-
-        assert_eq!(viewport_height, 138.0);
-        crate::dev_style_tool::runtime_overrides::reset_all();
     }
 
     #[test]

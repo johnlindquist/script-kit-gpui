@@ -142,16 +142,8 @@ fn builtin_main_input_surfaces_use_shared_input_chrome() {
             )),
         ),
         (
-            "design_gallery",
-            production_source(include_str!("../src/render_builtins/design_gallery.rs")),
-        ),
-        (
             "emoji_picker",
             production_source(include_str!("../src/render_builtins/emoji_picker.rs")),
-        ),
-        (
-            "footer_gallery",
-            production_source(include_str!("../src/render_builtins/footer_gallery.rs")),
         ),
         (
             "kit_store",
@@ -1135,134 +1127,6 @@ fn kit_store_footer_uses_single_native_slot_owner() {
         "stdin-driven view transitions should immediately refresh the native footer before notifying"
     );
     eprintln!("{{\"audit\":\"minimal_chrome\",\"surface\":\"kit_store\",\"single_footer_owner\":true,\"status\":\"pass\"}}");
-}
-
-#[test]
-fn design_gallery_footer_uses_single_native_slot_owner() {
-    let source = include_str!("../src/render_builtins/design_gallery.rs");
-    let ui_window = include_str!("../src/app_impl/ui_window.rs");
-    let app_view_state = include_str!("../src/main_sections/app_view_state.rs");
-
-    assert!(
-        !source.contains("PromptFooter::new("),
-        "Design Gallery should not render an in-content PromptFooter that can stack with the native footer"
-    );
-    assert!(
-        source.contains("main_window_footer_slot(")
-            && source.contains("render_simple_hint_strip(")
-            && source.contains("\"↵ Select\""),
-        "Design Gallery should route its fallback Select hint through the native footer slot"
-    );
-    assert!(
-        !source.contains("active_main_window_footer_surface()"),
-        "Design Gallery renderer should delegate native-footer policy to main_window_footer_slot"
-    );
-    assert!(
-        app_view_state.contains("AppView::DesignGalleryView { .. } => Some(\"design_gallery\")"),
-        "Design Gallery should register a native footer surface"
-    );
-    assert!(
-        ui_window.contains("FooterButtonConfig::new(FooterAction::Run, \"↵\", \"Select\")"),
-        "Design Gallery native footer should preserve the visible Select shortcut"
-    );
-    eprintln!("{{\"audit\":\"minimal_chrome\",\"surface\":\"design_gallery\",\"single_footer_owner\":true,\"status\":\"pass\"}}");
-}
-
-#[test]
-fn design_gallery_footer_run_does_not_execute_launcher_selection() {
-    let ui_window = include_str!("../src/app_impl/ui_window.rs");
-    let run_start = ui_window
-        .find("FooterAction::Run =>")
-        .expect("footer Run branch exists");
-    let run_branch = &ui_window[run_start..run_start + 2600];
-    assert!(
-        run_branch.contains("dispatch_design_gallery_select_footer_action(cx)")
-            && run_branch.contains("execute_selected(cx)")
-            && run_branch.find("dispatch_design_gallery_select_footer_action(cx)")
-                < run_branch.find("execute_selected(cx)"),
-        "Design Gallery native footer Select must be handled before launcher execute_selected fallback"
-    );
-}
-
-#[test]
-fn design_gallery_native_footer_is_select_only() {
-    let ui_window = include_str!("../src/app_impl/ui_window.rs");
-    let branch_end = ui_window
-        .find("Resolved Design Gallery footer buttons")
-        .expect("Design Gallery footer branch exists");
-    let branch = &ui_window[branch_end.saturating_sub(700)..branch_end];
-    assert!(
-        branch.contains("FooterButtonConfig::new(FooterAction::Run, \"↵\", \"Select\")"),
-        "Design Gallery footer should advertise Select"
-    );
-    assert!(
-        !branch.contains("FooterAction::Ai")
-            && !branch.contains("FooterAction::Actions")
-            && !branch.contains("\"Run\""),
-        "Design Gallery footer should not inherit launcher Run/AI/Actions chrome"
-    );
-}
-
-#[test]
-fn design_gallery_sizing_uses_render_projection() {
-    let ui_window = include_str!("../src/app_impl/ui_window.rs");
-    let sizing_start = ui_window
-        .find("pub(crate) fn calculate_window_size_params")
-        .expect("calculate_window_size_params exists");
-    let sizing = &ui_window[sizing_start..];
-    assert!(
-        sizing.contains("AppView::DesignGalleryView { filter, .. }")
-            && sizing.contains("design_gallery_filtered_len(filter)"),
-        "Design Gallery sizing should use the same filtered row projection as render"
-    );
-    assert!(
-        !sizing.contains("separator_variations::SeparatorStyle::count()"),
-        "Design Gallery sizing should not use stale separator/icon-only counts"
-    );
-}
-
-#[test]
-fn footer_gallery_footer_uses_single_native_slot_owner_while_preserving_previews() {
-    let source = include_str!("../src/render_builtins/footer_gallery.rs");
-    let ui_window = include_str!("../src/app_impl/ui_window.rs");
-    let app_view_state = include_str!("../src/main_sections/app_view_state.rs");
-
-    let footer_hints_start = source
-        .find("let footer_hints")
-        .expect("Footer Gallery fallback footer hints should exist");
-    let preview_section = &source[..footer_hints_start];
-    let footer_section = &source[footer_hints_start..];
-
-    assert!(
-        preview_section.contains("PromptFooter::new(config, footer_colors)")
-            && preview_section.contains(".h(px(80.0))"),
-        "Footer Gallery must preserve its live 80px PromptFooter preview rows"
-    );
-    assert!(
-        !footer_section.contains("PromptFooter::new("),
-        "Footer Gallery should not render a second in-content PromptFooter after footer hints"
-    );
-    assert!(
-        footer_section.contains("main_window_footer_slot(")
-            && footer_section.contains("render_simple_hint_strip("),
-        "Footer Gallery should route fallback hints through the native footer slot"
-    );
-    assert!(
-        !source.contains("active_main_window_footer_surface()"),
-        "Footer Gallery renderer should delegate native-footer policy to main_window_footer_slot"
-    );
-    assert!(
-        app_view_state.contains("AppView::FooterGalleryView { .. } => Some(\"footer_gallery\")"),
-        "Footer Gallery should register a native footer surface"
-    );
-    assert!(
-        ui_window.contains("dispatch_footer_gallery_select_footer_action(cx)")
-            && ui_window.contains(
-                "Footer Gallery native footer Select preserves current no-op selection behavior"
-            ),
-        "Footer Gallery native footer Select should preserve current no-op selection behavior"
-    );
-    eprintln!("{{\"audit\":\"minimal_chrome\",\"surface\":\"footer_gallery\",\"single_footer_owner\":true,\"preview_rows_preserved\":true,\"status\":\"pass\"}}");
 }
 
 #[test]

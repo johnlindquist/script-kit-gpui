@@ -23,7 +23,6 @@ fn builtin_list_views_are_filtered_out_of_live_actions_host() {
         "AppView::ProcessManagerView",
         "AppView::SettingsView",
         "AppView::FavoritesBrowseView",
-        "AppView::DesignGalleryView",
         "AppView::BrowseKitsView",
         "AppView::InstalledKitsView",
     ] {

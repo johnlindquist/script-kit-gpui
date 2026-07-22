@@ -337,9 +337,9 @@ fn clipboard_attach_to_ai_handler_uses_named_action_state() {
         "clipboard attach-to-AI handler should derive guard and deferred handoff behavior from the named action"
     );
     assert!(
-        content.contains("DeferredAiWindowAction::SetInput")
-            && content.contains("DeferredAiWindowAction::AddAttachment")
-            && content.contains("DeferredAiWindowAction::SetInputWithImage")
+        content.contains("DeferredAgentChatAction::SetInput")
+            && content.contains("DeferredAgentChatAction::AddAttachment")
+            && content.contains("DeferredAgentChatAction::SetInputWithImage")
             && content.contains("Clipboard file path is empty")
             && content.contains("Failed to decode clipboard image")
             && content.contains("submit: false"),
@@ -1823,34 +1823,6 @@ fn ai_unavailable_builtin_uses_named_action_states() {
 }
 
 #[test]
-fn ai_legacy_harness_builtin_uses_named_action_states() {
-    let content = fs::read_to_string("src/app_execute/builtin_execution.rs")
-        .expect("Failed to read builtin execution handler");
-
-    assert!(
-        content.contains("enum AiLegacyHarnessBuiltinAction")
-            && content.contains("OpenAi")
-            && content.contains("MiniAi")
-            && content.contains("NewConversation")
-            && content.contains("ClearConversation"),
-        "Legacy AI aliases should be routed through named action states"
-    );
-    assert!(
-        content.contains("AiLegacyHarnessBuiltinAction::from_command(command)")
-            && content.contains("fn execute_ai_legacy_harness_builtin(")
-            && !content.contains("if !command.is_legacy_harness_alias()")
-            && content.contains("action.success_detail()"),
-        "Legacy AI aliases should keep centralized table classification and named success details"
-    );
-    assert!(
-        content.contains("open_tab_ai_agent_chat_with_entry_intent(None, cx)")
-            && content.contains("ai_OpenAi_routed_to_harness")
-            && content.contains("ai_ClearConversation_routed_to_harness"),
-        "Legacy AI aliases should keep routing through the Agent Chat harness compatibility path"
-    );
-}
-
-#[test]
 fn permission_command_builtin_uses_named_action_states() {
     let content = fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("Failed to read builtin execution handler");
@@ -2131,7 +2103,6 @@ fn surface_open_builtins_use_named_action_states() {
         content.contains("SurfaceOpenBuiltinAction::ClipboardHistory")
             && content.contains("SurfaceOpenBuiltinAction::Favorites")
             && content.contains("SurfaceOpenBuiltinAction::AppLauncher")
-            && content.contains("SurfaceOpenBuiltinAction::DesignGallery")
             && content.contains("SurfaceOpenBuiltinAction::AiChat")
             && content.contains("SurfaceOpenBuiltinAction::EmojiPicker")
             && content.contains("SurfaceOpenBuiltinAction::Webcam")
@@ -2148,7 +2119,6 @@ fn surface_open_builtins_use_named_action_states() {
         content.contains("clipboard_history::get_cached_entries(100)")
             && content.contains("AppView::FavoritesBrowseView")
             && content.contains("app_launcher::scan_applications()")
-            && content.contains("AppView::DesignGalleryView")
             && content.contains("open_tab_ai_agent_chat_with_entry_intent(None, cx)")
             && content.contains("crate::emoji_usage::load_frequent_snapshot")
             && content.contains("self.open_webcam(cx)")
@@ -2548,32 +2518,6 @@ fn window_switcher_focus_feedback_uses_named_action_state() {
 }
 
 #[test]
-fn design_explorer_builtin_uses_named_action_states() {
-    let content = fs::read_to_string("src/app_execute/builtin_execution.rs")
-        .expect("Failed to read builtin execution handler");
-
-    assert!(
-        content.contains("enum DesignExplorerBuiltinAction")
-            && content.contains("DesignExplorerBuiltinAction::from_feature(&entry.feature)")
-            && content.contains("fn execute_design_explorer_builtin("),
-        "Design Explorer should route through a named action state"
-    );
-    assert!(
-        content.contains("script_kit_gpui::storybook::StoryBrowser::new(cx)")
-            && content.contains("browser.configure_for_design_explorer")
-            && content.contains("script_kit_gpui::storybook::StorySurface::MainMenu")
-            && content.contains("browser.open_compare_mode()")
-            && content.contains("browser.select_variant_id(\"current-main-menu\")")
-            && content.contains("AppView::DesignExplorerView"),
-        "Design Explorer should preserve storybook browser setup, compare mode, variant selection, and view opening"
-    );
-    assert!(
-        content.contains("action.success_detail()") && content.contains("open_design_explorer"),
-        "Design Explorer success detail should come from the named state"
-    );
-}
-
-#[test]
 fn ai_command_window_policy_uses_named_plan_states() {
     let content = fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("Failed to read builtin execution handler");
@@ -2609,8 +2553,7 @@ fn ai_command_dispatch_uses_named_wrapper_state() {
         content.contains("enum AiCommandBuiltinAction")
             && content.contains("Generate(AiGenerateBuiltinAction)")
             && content.contains("Capture(AiCaptureBuiltinAction)")
-            && content.contains("Unavailable(AiUnavailableBuiltinAction)")
-            && content.contains("LegacyHarness(AiLegacyHarnessBuiltinAction)"),
+            && content.contains("Unavailable(AiUnavailableBuiltinAction)"),
         "AI command dispatch should use a named wrapper state over the existing leaf actions"
     );
     assert!(
@@ -2618,8 +2561,7 @@ fn ai_command_dispatch_uses_named_wrapper_state() {
             && content.contains("fn execute_ai_command_builtin(")
             && content.contains("self.execute_ai_generate_builtin(generate_action")
             && content.contains("self.execute_ai_capture_builtin(capture_action")
-            && content.contains("self.execute_ai_unavailable_builtin(unavailable_action")
-            && content.contains("self.execute_ai_legacy_harness_builtin(legacy_action"),
+            && content.contains("self.execute_ai_unavailable_builtin(unavailable_action"),
         "AI command wrapper state should route to each existing leaf executor"
     );
 }
@@ -2768,26 +2710,34 @@ fn agent_chat_last_response_handlers_use_named_action_states() {
 }
 
 #[test]
-fn deferred_ai_handoff_uses_named_failure_states() {
+fn deferred_agent_chat_handoff_uses_named_failure_states() {
     let content = fs::read_to_string("src/app_actions/handle_action/mod.rs")
         .expect("Failed to read action handler");
 
     assert!(
-        content.contains("enum DeferredAiWindowAction")
-            && content.contains("enum DeferredAiWindowActionKind")
+        content.contains("enum DeferredAgentChatAction")
+            && content.contains("enum DeferredAgentChatActionKind")
             && content.contains("fn name(self) -> &'static str")
             && content.contains("fn failure_message(self, error: impl std::fmt::Display)")
             && content.contains("let deferred_action_kind = deferred_action.kind();")
             && content.contains("deferred_action_kind.failure_message(&error)"),
-        "deferred AI handoff failure feedback should derive from the named deferred action state"
+        "deferred Agent Chat handoff failure feedback should derive from the named deferred action state"
     );
     assert!(
         content.contains("Failed to open Agent Chat: {error}")
             && content.contains("Failed to send to Agent Chat: {error}")
             && content.contains("Failed to attach file to Agent Chat: {error}")
             && content.contains("Failed to apply AI preset: {error}"),
-        "deferred AI handoff state should preserve action-specific failure copy"
+        "deferred Agent Chat handoff state should preserve action-specific failure copy"
     );
+    // The legacy AI window module is deleted, so any reference to its entry
+    // points now fails compilation — the compiler enforces the absence.
+    for legacy_symbol in ["requires_legacy_ai_window", "ai::apply_ai_preset"] {
+        assert!(
+            !content.contains(legacy_symbol),
+            "deferred Agent Chat handoff must not route through the legacy AI window: {legacy_symbol}"
+        );
+    }
 }
 
 #[test]

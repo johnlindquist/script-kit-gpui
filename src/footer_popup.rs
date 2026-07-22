@@ -442,7 +442,6 @@ static MAIN_WINDOW_FOOTER_HOST_STATE: std::sync::Mutex<MainWindowFooterHostSnaps
 struct MainWindowFooterRefreshSignature {
     config: MainWindowFooterConfig,
     content_width_bits: u64,
-    runtime_style_generation: u64,
     dark: bool,
     material: crate::theme::VibrancyMaterial,
     divider_rgba: u32,
@@ -993,14 +992,6 @@ fn set_main_window_footer_last_config(config: Option<&MainWindowFooterConfig>) {
     *MAIN_WINDOW_FOOTER_LAST_CONFIG
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = config.cloned();
-}
-
-pub(crate) fn refresh_main_footer_popup_for_runtime_style(window: &mut Window, cx: &mut App) {
-    let config = MAIN_WINDOW_FOOTER_LAST_CONFIG
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    notify_main_footer_popup(window, config.as_ref(), cx);
 }
 
 fn close_gpui_footer_overlay(cx: &mut App) {
@@ -2651,7 +2642,6 @@ unsafe fn refresh_footer_host_impl(
     let signature = MainWindowFooterRefreshSignature {
         config: config.clone(),
         content_width_bits: content_bounds.size.width.to_bits(),
-        runtime_style_generation: crate::dev_style_tool::runtime_overrides::generation(),
         dark: is_dark,
         material: theme.get_vibrancy().material,
         divider_rgba: chrome.divider_rgba,
@@ -2678,16 +2668,9 @@ unsafe fn refresh_footer_host_impl(
             update_main_window_footer_host_state(Some(config.surface), Some(config.surface), true);
             return true;
         }
-        let runtime_styles_changed = guard
-            .as_ref()
-            .map(|previous| previous.runtime_style_generation != signature.runtime_style_generation)
-            .unwrap_or(true);
         let footer_geometry_changed = guard
             .as_ref()
-            .map(|previous| {
-                previous.content_width_bits != signature.content_width_bits
-                    || runtime_styles_changed
-            })
+            .map(|previous| previous.content_width_bits != signature.content_width_bits)
             .unwrap_or(true);
         let footer_content_changed = guard
             .as_ref()
@@ -2701,7 +2684,6 @@ unsafe fn refresh_footer_host_impl(
                     // lighter visuals-only recolor path doesn't reach every
                     // AppKit subview reliably).
                     || previous.main_menu_theme != signature.main_menu_theme
-                    || runtime_styles_changed
             })
             .unwrap_or(true);
         let footer_visuals_changed = guard
@@ -2715,7 +2697,6 @@ unsafe fn refresh_footer_host_impl(
                     || previous.hover_rgba != signature.hover_rgba
                     || previous.left_dot_hex != signature.left_dot_hex
                     || previous.main_menu_theme != signature.main_menu_theme
-                    || runtime_styles_changed
             })
             .unwrap_or(true);
         let effect_theme_changed = guard

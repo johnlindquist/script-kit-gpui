@@ -174,7 +174,7 @@
 
         let gpui_input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder(crate::dev_style_tool::runtime_overrides::effective_main_input_placeholder())
+                .placeholder(crate::ROOT_LAUNCHER_PLACEHOLDER)
                 .inline_completion_visible_without_focus(true)
         });
         let gpui_input_subscription = cx.subscribe_in(&gpui_input_state, window, {

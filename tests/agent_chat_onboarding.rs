@@ -9,8 +9,6 @@ const AGENT_CHAT_LAUNCH_SOURCE: &str =
 const AGENT_CHAT_VIEW_SOURCE: &str = include_str!("../src/ai/agent_chat/ui/view.rs");
 const AGENT_CHAT_SETUP_CARD_SOURCE: &str =
     include_str!("../src/ai/agent_chat/ui/components/setup_card.rs");
-const SETUP_RENDER_SOURCE: &str = include_str!("../src/ai/window/render_setup.rs");
-const SETUP_SOURCE: &str = include_str!("../src/ai/window/setup.rs");
 const AGENT_CHAT_CONFIG_SOURCE: &str = include_str!("../src/ai/agent_chat/ui/config.rs");
 const CONFIG_TYPES_SOURCE: &str = include_str!("../src/config/types.rs");
 const SETUP_MOD_SOURCE: &str = include_str!("../src/setup/mod.rs");
@@ -68,50 +66,6 @@ fn agent_chat_setup_mode_blocks_script_list_picker_handoff_before_live_thread() 
     assert!(
         AGENT_CHAT_VIEW_SOURCE.contains("event = \"agent_chat_escape_cancel_ignored_setup_mode\""),
         "host-level Escape cancellation must not read live_thread in setup mode"
-    );
-}
-
-// ── Setup surface uses generic Agent Chat copy ────────────────────────────────
-
-#[test]
-fn ai_setup_surface_no_longer_mentions_claude_only_copy() {
-    assert!(
-        SETUP_RENDER_SOURCE.contains("Agent Required"),
-        "setup card title must say Agent Required"
-    );
-    assert!(
-        SETUP_RENDER_SOURCE.contains("Open Agent Catalog"),
-        "setup card must offer Open Agent Catalog"
-    );
-    assert!(
-        !SETUP_RENDER_SOURCE.contains("Connect to Claude Code"),
-        "setup card must NOT mention Claude Code specifically"
-    );
-}
-
-#[test]
-fn setup_button_id_is_generic_not_claude_specific() {
-    assert!(
-        SETUP_RENDER_SOURCE.contains("open-agent-catalog-btn"),
-        "catalog button ID must be generic"
-    );
-    assert!(
-        !SETUP_RENDER_SOURCE.contains("connect-claude-code-btn"),
-        "catalog button must NOT use Claude-specific ID"
-    );
-}
-
-// ── Setup.rs has catalog opener ────────────────────────────────────────
-
-#[test]
-fn setup_has_open_agent_chat_agents_catalog() {
-    assert!(
-        SETUP_SOURCE.contains("fn open_agent_chat_agents_catalog"),
-        "setup.rs must have open_agent_chat_agents_catalog method"
-    );
-    assert!(
-        SETUP_SOURCE.contains("open_agent_chat_agents_catalog_in_editor"),
-        "open_agent_chat_agents_catalog must route through the catalog editor helper"
     );
 }
 

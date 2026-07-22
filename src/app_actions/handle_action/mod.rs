@@ -438,7 +438,7 @@ fn extract_last_code_block_with_lang(text: &str) -> Option<CodeBlock> {
 /// Maximum number of clipboard entries to cache for the clipboard history view.
 const CLIPBOARD_CACHE_SIZE: usize = 100;
 
-enum DeferredAiWindowAction {
+enum DeferredAgentChatAction {
     OpenOnly,
     SetInput {
         text: String,
@@ -458,7 +458,7 @@ enum DeferredAiWindowAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeferredAiWindowActionKind {
+enum DeferredAgentChatActionKind {
     OpenOnly,
     SetInput,
     SetInputSubmit,
@@ -468,7 +468,7 @@ enum DeferredAiWindowActionKind {
     ApplyPreset,
 }
 
-impl DeferredAiWindowActionKind {
+impl DeferredAgentChatActionKind {
     fn name(self) -> &'static str {
         match self {
             Self::OpenOnly => "open_only",
@@ -509,50 +509,20 @@ impl DeferredAiImageAttachmentStage {
     }
 }
 
-impl DeferredAiWindowAction {
-    fn kind(&self) -> DeferredAiWindowActionKind {
+impl DeferredAgentChatAction {
+    fn kind(&self) -> DeferredAgentChatActionKind {
         match self {
-            Self::OpenOnly => DeferredAiWindowActionKind::OpenOnly,
-            Self::SetInput { submit: true, .. } => DeferredAiWindowActionKind::SetInputSubmit,
-            Self::SetInput { submit: false, .. } => DeferredAiWindowActionKind::SetInput,
+            Self::OpenOnly => DeferredAgentChatActionKind::OpenOnly,
+            Self::SetInput { submit: true, .. } => DeferredAgentChatActionKind::SetInputSubmit,
+            Self::SetInput { submit: false, .. } => DeferredAgentChatActionKind::SetInput,
             Self::SetInputWithImage { submit: true, .. } => {
-                DeferredAiWindowActionKind::SetInputWithImageSubmit
+                DeferredAgentChatActionKind::SetInputWithImageSubmit
             }
             Self::SetInputWithImage { submit: false, .. } => {
-                DeferredAiWindowActionKind::SetInputWithImage
+                DeferredAgentChatActionKind::SetInputWithImage
             }
-            Self::AddAttachment { .. } => DeferredAiWindowActionKind::AddAttachment,
-            Self::ApplyPreset { .. } => DeferredAiWindowActionKind::ApplyPreset,
-        }
-    }
-
-    fn requires_legacy_ai_window(&self) -> bool {
-        matches!(self, Self::ApplyPreset { .. })
-    }
-
-    fn apply(self, cx: &mut App) -> Result<&'static str, String> {
-        match self {
-            Self::OpenOnly => Ok("open_only"),
-            Self::SetInput { text, submit } => {
-                ai::set_ai_input(cx, &text, submit)?;
-                Ok("set_input")
-            }
-            Self::SetInputWithImage {
-                text,
-                image_base64,
-                submit,
-            } => {
-                ai::set_ai_input_with_image(cx, &text, &image_base64, submit)?;
-                Ok("set_input_with_image")
-            }
-            Self::AddAttachment { path } => {
-                ai::add_ai_attachment(cx, &path)?;
-                Ok("add_attachment")
-            }
-            Self::ApplyPreset { preset_id } => {
-                ai::apply_ai_preset(cx, &preset_id);
-                Ok("apply_preset")
-            }
+            Self::AddAttachment { .. } => DeferredAgentChatActionKind::AddAttachment,
+            Self::ApplyPreset { .. } => DeferredAgentChatActionKind::ApplyPreset,
         }
     }
 
@@ -640,7 +610,7 @@ impl DeferredAiWindowAction {
                 Ok("add_attachment")
             }
             Self::ApplyPreset { preset_id } => {
-                ai::apply_ai_preset(cx, &preset_id);
+                chat.apply_preset_by_id(&preset_id, cx)?;
                 Ok("apply_preset")
             }
         })
@@ -756,29 +726,28 @@ impl ScriptListApp {
         platform::defer_hide_main_window(cx);
     }
 
-    fn open_ai_window_after_main_hide(
+    fn open_agent_chat_after_main_hide(
         &mut self,
         source_action: &str,
         trace_id: &str,
-        deferred_action: DeferredAiWindowAction,
+        deferred_action: DeferredAgentChatAction,
         cx: &mut Context<Self>,
     ) {
         self.hide_main_and_reset(cx);
-        self.open_ai_window_after_already_hidden(source_action, trace_id, deferred_action, cx);
+        self.open_agent_chat_after_already_hidden(source_action, trace_id, deferred_action, cx);
     }
 
-    fn open_ai_window_after_already_hidden(
+    fn open_agent_chat_after_already_hidden(
         &mut self,
         source_action: &str,
         trace_id: &str,
-        deferred_action: DeferredAiWindowAction,
+        deferred_action: DeferredAgentChatAction,
         cx: &mut Context<Self>,
     ) {
         let source_action = source_action.to_string();
         let trace_id = trace_id.to_string();
         let deferred_action_kind = deferred_action.kind();
         let deferred_action_name = deferred_action_kind.name();
-        let requires_legacy_ai_window = deferred_action.requires_legacy_ai_window();
 
         tracing::info!(
             category = "AI",
@@ -786,7 +755,6 @@ impl ScriptListApp {
             source_action = %source_action,
             trace_id = %trace_id,
             deferred_action = deferred_action_name,
-            requires_legacy_ai_window,
             "Opening deferred chat handoff after main window already hidden"
         );
 
@@ -797,28 +765,18 @@ impl ScriptListApp {
 
             let started_at = std::time::Instant::now();
 
-            let open_result = if requires_legacy_ai_window {
-                cx.update(|cx| {
-                    ai::open_ai_window(cx).map_err(|error| error.to_string())?;
-                    Ok::<(), String>(())
-                })
-            } else {
-                match this.update(cx, |this, cx| {
-                    this.open_tab_ai_agent_chat_with_entry_intent(None, cx);
-                    Ok::<(), String>(())
-                }) {
-                    Ok(result) => result,
-                    Err(error) => Err(error.to_string()),
-                }
+            let open_result = match this.update(cx, |this, cx| {
+                this.open_tab_ai_agent_chat_with_entry_intent(None, cx);
+                Ok::<(), String>(())
+            }) {
+                Ok(result) => result,
+                Err(error) => Err(error.to_string()),
             };
 
             if open_result.is_ok() {
-                let ready_now = if requires_legacy_ai_window {
-                    cx.update(ai::is_ai_window_ready)
-                } else {
-                    this.update(cx, |this, _cx| this.active_agent_chat_entity().is_some())
-                        .unwrap_or(false)
-                };
+                let ready_now = this
+                    .update(cx, |this, _cx| this.active_agent_chat_entity().is_some())
+                    .unwrap_or(false);
                 if !ready_now {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(16))
@@ -826,26 +784,15 @@ impl ScriptListApp {
                 }
             }
 
-            let handoff_result = if requires_legacy_ai_window {
-                open_result.and_then(|()| {
-                    cx.update(|cx| {
-                        if !ai::is_ai_window_ready(cx) {
-                            return Err("AI window not ready after open".to_string());
-                        }
-                        deferred_action.apply(cx)
-                    })
+            let handoff_result = open_result.and_then(|()| {
+                this.update(cx, |this, cx| {
+                    let Some(entity) = this.active_agent_chat_entity() else {
+                        return Err("Agent Chat not ready after open".to_string());
+                    };
+                    deferred_action.apply_to_agent_chat(entity, cx)
                 })
-            } else {
-                open_result.and_then(|()| {
-                    this.update(cx, |this, cx| {
-                        let Some(entity) = this.active_agent_chat_entity() else {
-                            return Err("Agent Chat not ready after open".to_string());
-                        };
-                        deferred_action.apply_to_agent_chat(entity, cx)
-                    })
-                    .map_err(|error| error.to_string())?
-                })
-            };
+                .map_err(|error| error.to_string())?
+            });
 
             match handoff_result {
                 Ok(apply_stage) => {
@@ -857,7 +804,6 @@ impl ScriptListApp {
                             trace_id = %trace_id,
                             deferred_action = deferred_action_name,
                             apply_stage,
-                            requires_legacy_ai_window,
                             duration_ms = started_at.elapsed().as_millis() as u64,
                             "AI handoff completed"
                         );
@@ -873,7 +819,6 @@ impl ScriptListApp {
                             trace_id = %trace_id,
                             deferred_action = deferred_action_name,
                             error = %error,
-                            requires_legacy_ai_window,
                             duration_ms = started_at.elapsed().as_millis() as u64,
                             "Failed to complete deferred chat handoff after hiding main window"
                         );
@@ -1482,7 +1427,7 @@ impl ScriptListApp {
             let Some((current_selected_model_id, model_display_name)) = ({
                 let view = entity.read(cx);
                 view.thread()
-                    .map(|thread| {
+                    .and_then(|thread| {
                         let thread = thread.read(cx);
                         let current_selected_model_id =
                             thread.selected_model_id().map(str::to_string);
@@ -1498,7 +1443,6 @@ impl ScriptListApp {
                             })?;
                         Some((current_selected_model_id, model_display_name))
                     })
-                    .flatten()
             }) else {
                 return DispatchOutcome::error(
                     crate::action_helpers::ERROR_ACTION_FAILED,
@@ -2119,7 +2063,7 @@ impl ScriptListApp {
                                     .unwrap_or_default(),
                             };
 
-                            let _ = cx.update(|cx| {
+                            cx.update(|cx| {
                                 thread_for_result.update(cx, |t, cx| {
                                     t.push_system_message(message, cx);
                                 });
@@ -2151,7 +2095,7 @@ impl ScriptListApp {
                 let markdown = {
                     let view = entity.read(cx);
                     view.thread().and_then(|thread| {
-                        build_agent_chat_conversation_markdown_from_thread(&thread.read(cx))
+                        build_agent_chat_conversation_markdown_from_thread(thread.read(cx))
                     })
                 };
                 let message_count = {
@@ -2207,7 +2151,7 @@ impl ScriptListApp {
                 let markdown = {
                     let view = entity.read(cx);
                     view.thread().and_then(|thread| {
-                        build_agent_chat_conversation_markdown_from_thread(&thread.read(cx))
+                        build_agent_chat_conversation_markdown_from_thread(thread.read(cx))
                     })
                 };
                 let message_count = {

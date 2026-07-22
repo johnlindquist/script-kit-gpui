@@ -217,11 +217,6 @@ impl ScriptListApp {
             AppView::AppLauncherView { .. } => "AppLauncherView",
             AppView::WindowSwitcherView { .. } => "WindowSwitcherView",
             AppView::BrowserTabsView { .. } => "BrowserTabsView",
-            AppView::DesignGalleryView { .. } => "DesignGalleryView",
-            AppView::FooterGalleryView { .. } => "FooterGalleryView",
-            AppView::NonListStatesView { .. } => "NonListStatesView",
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { .. } => "DesignExplorerView",
             AppView::ScratchPadView { .. } => "ScratchPadView",
             AppView::QuickTerminalView { .. } => "QuickTerminalView",
             AppView::FlowSessionView { .. } => "FlowSessionView",
@@ -352,7 +347,6 @@ impl ScriptListApp {
                 "main",
                 Some("scriptList".to_string()),
             );
-            crate::windows::ensure_embedded_ai_window(false);
             self.transition_agent_chat_surface(
                 crate::ai::agent_chat::ui::surface_state::AgentChatSurfaceEvent::EmbeddedClosed,
             );
@@ -364,8 +358,7 @@ impl ScriptListApp {
         self.gpui_input_focused = false;
         self.request_script_list_main_filter_focus(cx);
         // Reset placeholder back to the root launcher discovery copy.
-        self.pending_placeholder =
-            Some(crate::dev_style_tool::runtime_overrides::effective_main_input_placeholder());
+        self.pending_placeholder = Some(crate::ROOT_LAUNCHER_PLACEHOLDER.to_string());
         logging::log(
             "FOCUS",
             "Reset focused_input to MainFilter for cursor display",

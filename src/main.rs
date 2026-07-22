@@ -58,35 +58,6 @@ mod context_snapshot;
 mod designs;
 mod dev_marker;
 mod flows;
-mod dev_style_tool {
-    pub mod actions_popup_catalog;
-    pub mod agent_chat_catalog;
-    pub mod catalog;
-    pub mod confirm_modal_catalog;
-    pub mod copy_catalog;
-    pub(crate) mod export;
-    pub mod kitchen_sink_targets;
-    pub(crate) mod render;
-    pub mod runtime_overrides;
-    pub(crate) mod stories;
-    pub mod theme_catalog;
-    pub mod window;
-
-    #[allow(unused_imports)]
-    pub use actions_popup_catalog::*;
-    #[allow(unused_imports)]
-    pub use agent_chat_catalog::*;
-    #[allow(unused_imports)]
-    pub use catalog::*;
-    #[allow(unused_imports)]
-    pub use confirm_modal_catalog::*;
-    #[allow(unused_imports)]
-    pub use copy_catalog::*;
-    #[allow(unused_imports)]
-    pub(crate) use kitchen_sink_targets::*;
-    #[allow(unused_imports)]
-    pub use theme_catalog::*;
-}
 mod dictation;
 mod editor;
 mod effects;
@@ -370,7 +341,6 @@ include!("main_sections/day_page_actions.rs");
 include!("main_sections/day_page_context_round_trip.rs");
 include!("main_sections/gesture_routing.rs");
 include!("main_sections/release_hints.rs");
-include!("main_sections/kitchen_sink_fixture.rs");
 // Core ScriptListApp implementation extracted to app_impl/mod.rs
 include!("app_impl/mod.rs");
 

@@ -88,16 +88,6 @@ fn canonical_input_renderers() -> &'static [(&'static str, &'static str, &'stati
             "render_builtin_main_input_header(",
         ),
         (
-            "DesignGalleryView",
-            "src/render_builtins/design_gallery.rs",
-            "render_builtin_main_input_header(",
-        ),
-        (
-            "FooterGalleryView",
-            "src/render_builtins/footer_gallery.rs",
-            "render_builtin_main_input_header(",
-        ),
-        (
             "FileSearchView",
             "src/render_builtins/file_search.rs",
             "render_main_view_input_shell(",

@@ -6877,6 +6877,30 @@ impl AgentChatView {
         self.set_input(value, cx);
     }
 
+    /// Apply a saved AI preset (from the Search AI Presets built-in) to this
+    /// Agent Chat conversation.
+    ///
+    /// Resolves the preset through `crate::ai::presets`, selects the preset's
+    /// preferred model through the same `AgentChatThread::select_model`
+    /// mutation the model picker uses, and stages the preset's system prompt
+    /// in the composer so the user can review and submit it.
+    pub(crate) fn apply_preset_by_id(
+        &mut self,
+        preset_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.is_setup_mode() {
+            return Err("Agent Chat is in setup mode".to_string());
+        }
+        let plan = crate::ai::presets::resolve_agent_chat_preset(preset_id)?;
+        if let Some(model_id) = plan.preferred_model.as_deref() {
+            self.live_thread()
+                .update(cx, |thread, cx| thread.select_model(model_id, cx));
+        }
+        self.set_input(plan.system_prompt, cx);
+        Ok(())
+    }
+
     pub(crate) fn apply_test_fixture(
         &mut self,
         phase: &str,

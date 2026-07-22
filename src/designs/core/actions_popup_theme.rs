@@ -134,9 +134,7 @@ pub fn base_actions_popup_theme() -> ActionsPopupThemeDef {
 }
 
 pub fn current_actions_popup_theme() -> ActionsPopupThemeDef {
-    let mut def = crate::dev_style_tool::runtime_overrides::apply_to_actions_popup_def(
-        base_actions_popup_theme(),
-    );
+    let mut def = base_actions_popup_theme();
     def.search.cursor_height = def.search.font_size;
     def
 }

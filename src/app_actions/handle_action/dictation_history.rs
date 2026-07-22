@@ -121,10 +121,10 @@ impl ScriptListApp {
                     return DispatchOutcome::success();
                 };
 
-                self.open_ai_window_after_main_hide(
+                self.open_agent_chat_after_main_hide(
                     action_id,
                     &dctx.trace_id,
-                    DeferredAiWindowAction::SetInput {
+                    DeferredAgentChatAction::SetInput {
                         text: entry.transcript,
                         submit: false,
                     },
@@ -145,7 +145,7 @@ impl ScriptListApp {
                     return DispatchOutcome::success();
                 };
 
-                match crate::notes::save_note_with_content(&mut **cx, entry.transcript) {
+                match crate::notes::save_note_with_content(cx, entry.transcript) {
                     Ok(()) => {
                         if let Some(message) = history_action.success_hud() {
                             self.show_hud(message.to_string(), Some(HUD_MEDIUM_MS), cx);

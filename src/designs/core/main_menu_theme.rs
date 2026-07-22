@@ -505,7 +505,7 @@ impl MainMenuThemeVariant {
     }
 
     pub fn def(self) -> MainMenuThemeDef {
-        crate::dev_style_tool::runtime_overrides::apply_to_main_menu_def(self.base_def())
+        self.base_def()
     }
 
     pub fn header_info_bar(self) -> HeaderInfoBarTokens {

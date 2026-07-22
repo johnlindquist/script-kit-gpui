@@ -12,7 +12,7 @@
   "entries": [
     {
       "file": "src/app_actions/handle_action/mod.rs",
-      "line": 1159,
+      "line": 1104,
       "owner": "transition_to_script_list_after_action",
       "receiver": "self",
       "operation": "assign",
@@ -22,7 +22,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3330,
+      "line": 3363,
       "owner": "open_builtin_filterable_view",
       "receiver": "self",
       "operation": "assign",
@@ -32,7 +32,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3383,
+      "line": 3422,
       "owner": "open_main_window",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -56,7 +56,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3422,
+      "line": 3461,
       "owner": "open_ai_vault_source_filter",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -80,7 +80,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3467,
+      "line": 3506,
       "owner": "open_builtin_filterable_view_with_filter",
       "receiver": "self",
       "operation": "assign",
@@ -90,27 +90,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 4152,
-      "owner": "execute_surface_open_builtin",
-      "receiver": "self",
-      "operation": "assign",
-      "expression": "AppView::NonListStatesView { selected_index: 0 }",
-      "inferredTarget": "AppView::NonListStatesView",
-      "requiresManualReview": false
-    },
-    {
-      "file": "src/app_execute/builtin_execution.rs",
-      "line": 4559,
-      "owner": "execute_design_explorer_builtin",
-      "receiver": "self",
-      "operation": "assign",
-      "expression": "AppView::DesignExplorerView { entity: explorer }",
-      "inferredTarget": "AppView::DesignExplorerView",
-      "requiresManualReview": false
-    },
-    {
-      "file": "src/app_execute/builtin_execution.rs",
-      "line": 4895,
+      "line": 4932,
       "owner": "execute_configure_snap_mode_prompt",
       "receiver": "self",
       "operation": "assign",
@@ -120,7 +100,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 4986,
+      "line": 5023,
       "owner": "execute_select_microphone_builtin",
       "receiver": "self",
       "operation": "assign",
@@ -130,7 +110,7 @@
     },
     {
       "file": "src/app_execute/execution_helpers.rs",
-      "line": 243,
+      "line": 242,
       "owner": "show_api_key_prompt",
       "receiver": "self",
       "operation": "assign",
@@ -140,7 +120,7 @@
     },
     {
       "file": "src/app_execute/execution_helpers.rs",
-      "line": 541,
+      "line": 540,
       "owner": "open_scratch_pad",
       "receiver": "self",
       "operation": "assign",
@@ -150,7 +130,7 @@
     },
     {
       "file": "src/app_execute/utility_views.rs",
-      "line": 303,
+      "line": 309,
       "owner": "open_terminal_with_command",
       "receiver": "self",
       "operation": "assign",
@@ -160,7 +140,7 @@
     },
     {
       "file": "src/app_execute/utility_views.rs",
-      "line": 798,
+      "line": 804,
       "owner": "open_quick_terminal_with_startup_input",
       "receiver": "self",
       "operation": "assign",
@@ -170,7 +150,7 @@
     },
     {
       "file": "src/app_execute/utility_views.rs",
-      "line": 880,
+      "line": 886,
       "owner": "open_webcam",
       "receiver": "self",
       "operation": "assign",
@@ -180,7 +160,7 @@
     },
     {
       "file": "src/app_execute/utility_views.rs",
-      "line": 936,
+      "line": 942,
       "owner": "open_webcam",
       "receiver": "self",
       "operation": "assign",
@@ -190,7 +170,7 @@
     },
     {
       "file": "src/app_execute/utility_views.rs",
-      "line": 967,
+      "line": 973,
       "owner": "open_webcam",
       "receiver": "self",
       "operation": "assign",
@@ -292,7 +272,7 @@
     },
     {
       "file": "src/app_impl/agent_chat_surface_transitions.rs",
-      "line": 46,
+      "line": 48,
       "owner": "enter_embedded_agent_chat_surface",
       "receiver": "self",
       "operation": "assign",
@@ -302,7 +282,7 @@
     },
     {
       "file": "src/app_impl/agent_chat_surface_transitions.rs",
-      "line": 83,
+      "line": 84,
       "owner": "exit_embedded_agent_chat_surface",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -326,7 +306,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/agent_chat_launch.rs",
-      "line": 82,
+      "line": 157,
       "owner": "open_standard_agent_chat_mock_fixture",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -355,11 +335,11 @@
     },
     {
       "file": "src/app_impl/agent_handoff/agent_chat_launch.rs",
-      "line": 131,
-      "owner": "open_agent_chat_kitchen_sink_fixture",
+      "line": 604,
+      "owner": "open_tab_ai_codex_exec_view_from_launch",
       "receiver": "self",
       "operation": "transitionHelper",
-      "expression": "view_entity, cx",
+      "expression": "view_entity.clone(), cx",
       "inferredTarget": "AppView::AgentChatView",
       "requiresManualReview": false,
       "helper": "enter_embedded_agent_chat_surface",
@@ -384,7 +364,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/agent_chat_launch.rs",
-      "line": 411,
+      "line": 815,
       "owner": "open_tab_ai_pi_view_from_launch",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -413,7 +393,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/agent_chat_setup.rs",
-      "line": 17,
+      "line": 27,
       "owner": "show_embedded_agent_chat_setup_view",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -442,7 +422,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/focused_text_entry.rs",
-      "line": 262,
+      "line": 270,
       "owner": "open_focused_text_agent_chat_mock_fixture_from_snapshot",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -471,7 +451,36 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 1262,
+      "line": 829,
+      "owner": "reattach_embedded_agent_chat_from_detached",
+      "receiver": "self",
+      "operation": "transitionHelper",
+      "expression": "view_entity, cx",
+      "inferredTarget": "AppView::AgentChatView",
+      "requiresManualReview": false,
+      "helper": "enter_embedded_agent_chat_surface",
+      "rekeysMainAutomationSurface": true,
+      "focusTarget": "AgentChat",
+      "embeddedAiWindowUpsert": true,
+      "clearsActionsPopupState": true,
+      "transitionContract": {
+        "oldView": "runtimeCurrentView",
+        "newView": "AppView::AgentChatView",
+        "surfaceKind": "AgentChat",
+        "embeddedAiWindowUpsert": true,
+        "mainAutomationRekey": true,
+        "agent_chatSurfaceEvent": "EmbeddedOpened",
+        "actionsCleanup": "clearActionsPopupState",
+        "focusTarget": "AgentChat",
+        "focusCoordinatorRequest": "FocusRequest::agent_chat",
+        "focusedInput": "None",
+        "resize": "callerOwned",
+        "stateSnapshot": "getState.surfaceContract"
+      }
+    },
+    {
+      "file": "src/app_impl/agent_handoff/mod.rs",
+      "line": 1600,
       "owner": "try_reuse_embedded_agent_chat_view",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -500,7 +509,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 2551,
+      "line": 2901,
       "owner": "open_tab_ai_harness_terminal_from_request",
       "receiver": "self",
       "operation": "assign",
@@ -510,7 +519,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 3247,
+      "line": 3640,
       "owner": "close_tab_ai_harness_terminal_impl",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -534,7 +543,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 3284,
+      "line": 3685,
       "owner": "close_tab_ai_harness_terminal",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -558,7 +567,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 3351,
+      "line": 3777,
       "owner": "close_agent_chat_to_script_list",
       "receiver": "self",
       "operation": "assign",
@@ -684,7 +693,7 @@
     },
     {
       "file": "src/app_impl/filter_input_change.rs",
-      "line": 589,
+      "line": 619,
       "owner": "handle_filter_input_change",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -708,7 +717,7 @@
     },
     {
       "file": "src/app_impl/filter_input_core.rs",
-      "line": 325,
+      "line": 416,
       "owner": "open_file_search_view_with_result_transition",
       "receiver": "self",
       "operation": "assign",
@@ -738,7 +747,7 @@
     },
     {
       "file": "src/app_impl/prompt_ai.rs",
-      "line": 493,
+      "line": 494,
       "owner": "show_inline_ai_chat",
       "receiver": "self",
       "operation": "assign",
@@ -748,7 +757,7 @@
     },
     {
       "file": "src/app_impl/prompt_ai.rs",
-      "line": 573,
+      "line": 574,
       "owner": "show_inline_ai_chat",
       "receiver": "self",
       "operation": "assign",
@@ -758,8 +767,8 @@
     },
     {
       "file": "src/app_impl/registries_state.rs",
-      "line": 242,
-      "owner": "reset_to_script_list",
+      "line": 312,
+      "owner": "reset_to_script_list_impl",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::ScriptList",
@@ -768,7 +777,17 @@
     },
     {
       "file": "src/app_impl/selection_fallback.rs",
-      "line": 1250,
+      "line": 804,
+      "owner": "open_brain_memory_preview",
+      "receiver": "self",
+      "operation": "assign",
+      "expression": "AppView::DivPrompt { id, entity }",
+      "inferredTarget": "AppView::DivPrompt",
+      "requiresManualReview": false
+    },
+    {
+      "file": "src/app_impl/selection_fallback.rs",
+      "line": 1549,
       "owner": "open_script_issues_view",
       "receiver": "self",
       "operation": "assign",
@@ -778,7 +797,7 @@
     },
     {
       "file": "src/app_impl/trigger_builtin_dispatch.rs",
-      "line": 435,
+      "line": 461,
       "owner": "apply_filterable_route_plan",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -802,7 +821,7 @@
     },
     {
       "file": "src/app_impl/trigger_builtin_dispatch.rs",
-      "line": 437,
+      "line": 463,
       "owner": "apply_filterable_route_plan",
       "receiver": "self",
       "operation": "assign",
@@ -812,7 +831,7 @@
     },
     {
       "file": "src/app_impl/ui_window.rs",
-      "line": 403,
+      "line": 812,
       "owner": "dispatch_main_window_footer_action",
       "receiver": "self",
       "operation": "assign",
@@ -822,7 +841,7 @@
     },
     {
       "file": "src/app_impl/ui_window.rs",
-      "line": 444,
+      "line": 870,
       "owner": "dispatch_main_window_footer_action",
       "receiver": "self",
       "operation": "assign",
@@ -832,7 +851,7 @@
     },
     {
       "file": "src/app_impl/ui_window.rs",
-      "line": 1751,
+      "line": 2679,
       "owner": "resolve_confirm_prompt",
       "receiver": "self",
       "operation": "assign",
@@ -841,29 +860,29 @@
       "requiresManualReview": true
     },
     {
-      "file": "src/main_sections/kitchen_sink_fixture.rs",
-      "line": 257,
-      "owner": "install_main_window_kitchen_sink_fixture",
+      "file": "src/main_sections/day_page_context_round_trip.rs",
+      "line": 359,
+      "owner": "restore_day_page_view_after_round_trip",
       "receiver": "self",
       "operation": "assign",
-      "expression": "AppView::ScriptList",
-      "inferredTarget": "AppView::ScriptList",
+      "expression": "AppView::DayPage { entity: entity.clone(), }",
+      "inferredTarget": "AppView::DayPage",
       "requiresManualReview": false
     },
     {
-      "file": "src/main_sections/kitchen_sink_fixture.rs",
-      "line": 370,
-      "owner": "install_actions_popup_kitchen_sink_fixture",
+      "file": "src/main_sections/day_page_view.rs",
+      "line": 1983,
+      "owner": "show_day_page_view_with_substrate",
       "receiver": "self",
       "operation": "assign",
-      "expression": "AppView::ScriptList",
-      "inferredTarget": "AppView::ScriptList",
+      "expression": "AppView::DayPage { entity }",
+      "inferredTarget": "AppView::DayPage",
       "requiresManualReview": false
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2535,
-      "owner": "handle_prompt_message",
+      "line": 1860,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::ArgPrompt { id, placeholder, choices, actions, }",
@@ -872,8 +891,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2572,
-      "owner": "handle_prompt_message",
+      "line": 1897,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::MiniPrompt { id, placeholder, choices, }",
@@ -882,8 +901,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2610,
-      "owner": "handle_prompt_message",
+      "line": 1935,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::MicroPrompt { id, placeholder, choices, }",
@@ -892,8 +911,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2675,
-      "owner": "handle_prompt_message",
+      "line": 2000,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::DivPrompt { id, entity }",
@@ -902,8 +921,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2697,
-      "owner": "handle_prompt_message",
+      "line": 2022,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::FormPrompt { id, entity }",
@@ -912,8 +931,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2732,
-      "owner": "handle_prompt_message",
+      "line": 2057,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::FormPrompt { id, entity }",
@@ -922,8 +941,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2780,
-      "owner": "handle_prompt_message",
+      "line": 2105,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::TermPrompt { id, entity }",
@@ -932,8 +951,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2898,
-      "owner": "handle_prompt_message",
+      "line": 2225,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::EditorPrompt { id, entity, focus_handle: editor_focus_handle, }",
@@ -942,8 +961,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 8564,
-      "owner": "handle_prompt_message",
+      "line": 7660,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::PathPrompt { id, entity, focus_handle, }",
@@ -952,8 +971,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 8656,
-      "owner": "handle_prompt_message",
+      "line": 7752,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::EnvPrompt { id, entity }",
@@ -962,8 +981,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 8693,
-      "owner": "handle_prompt_message",
+      "line": 7789,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::DropPrompt { id, entity }",
@@ -972,8 +991,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 8724,
-      "owner": "handle_prompt_message",
+      "line": 7820,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::TemplatePrompt { id, entity }",
@@ -982,8 +1001,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 8769,
-      "owner": "handle_prompt_message",
+      "line": 7865,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::SelectPrompt { id, entity }",
@@ -992,8 +1011,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 9058,
-      "owner": "handle_prompt_message",
+      "line": 8157,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::ChatPrompt { id, entity }",
@@ -1002,8 +1021,8 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 9285,
-      "owner": "handle_prompt_message",
+      "line": 8385,
+      "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
       "expression": "AppView::HotkeyPrompt { id, entity }",

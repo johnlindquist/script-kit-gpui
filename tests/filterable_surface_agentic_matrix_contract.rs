@@ -139,14 +139,6 @@ fn matrix_declares_stable_sibling_filterable_surface_cases() {
             "__aurp16_no_browser_tab_match__",
         ),
         (
-            "design-gallery-visible-rows",
-            "designGallery",
-            "DesignGallery",
-            "list:design-gallery",
-            "design-gallery",
-            "icon",
-        ),
-        (
             "process-manager-visible-rows",
             "processManager",
             "ProcessManager",
@@ -294,7 +286,6 @@ fn matrix_entries_declare_image_library_metadata() {
         ("app-launcher", "app-launcher.png"),
         ("window-switcher", "window-switcher.png"),
         ("browser-tabs", "browser-tabs.png"),
-        ("design-gallery", "design-gallery.png"),
         ("process-manager", "process-manager.png"),
     ] {
         assert!(

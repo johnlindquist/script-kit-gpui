@@ -91,16 +91,11 @@ impl Render for ScriptListApp {
         while let Ok(request) = self.flow_chat_receiver.try_recv() {
             match request {
                 crate::flows::session::FlowChatRequest::Submit { session_id, text } => {
-                    self.submit_flow_chat_message(session_id, text, cx);
-                }
-                crate::flows::session::FlowChatRequest::Background { session_id } => {
-                    let in_session = matches!(
-                        self.current_view,
-                        AppView::FlowSessionView { session_id: current } if current == session_id
-                    );
-                    if in_session {
-                        self.background_flow_session(window, cx);
-                    }
+                    // The composer text already left the input when ChatPrompt
+                    // posted this request, so an unconsumed submit (busy /
+                    // missing session) must re-stage it as the draft.
+                    let result = self.submit_flow_chat_message(session_id, text.clone(), cx);
+                    self.stage_unconsumed_flow_message(text, result, cx);
                 }
                 crate::flows::session::FlowChatRequest::ShowActions { session_id } => {
                     let in_session = matches!(
@@ -254,7 +249,6 @@ impl Render for ScriptListApp {
                 && !self.is_pinned
                 && !actions_popup_active_or_closing
                 && !confirm::is_confirm_window_open()
-                && !crate::dev_style_tool::window::is_dev_style_tool_open()
                 && !ai::agent_chat::ui::chat_window::is_chat_window_open()
                 && !crate::dictation::is_dictation_overlay_open()
                 && !crate::dictation::is_dictation_recording()
@@ -294,11 +288,6 @@ impl Render for ScriptListApp {
                     "FOCUS",
                     "Main window lost focus but confirm popup is open - staying open",
                 );
-            } else if crate::dev_style_tool::window::is_dev_style_tool_open() {
-                logging::log(
-                    "FOCUS",
-                    "Main window lost focus but dev style tool is open - staying open",
-                );
             } else if self.is_pinned {
                 logging::log(
                     "FOCUS",
@@ -324,8 +313,6 @@ impl Render for ScriptListApp {
                 | AppView::AppLauncherView { .. }
                 | AppView::WindowSwitcherView { .. }
                 | AppView::BrowserTabsView { .. }
-                | AppView::DesignGalleryView { .. }
-                | AppView::FooterGalleryView { .. }
                 | AppView::FileSearchView { .. }
                 | AppView::ProfileSearchView { .. }
                 | AppView::ThemeChooserView { .. }
@@ -580,23 +567,6 @@ impl Render for ScriptListApp {
             } => self
                 .render_browser_tabs(filter, selected_index, cx)
                 .into_any_element(),
-            AppView::DesignGalleryView {
-                filter,
-                selected_index,
-            } => self
-                .render_design_gallery(filter, selected_index, cx)
-                .into_any_element(),
-            AppView::FooterGalleryView {
-                filter,
-                selected_index,
-            } => self
-                .render_footer_gallery(filter, selected_index, cx)
-                .into_any_element(),
-            AppView::NonListStatesView { .. } => self.render_non_list_states_showcase(cx),
-            #[cfg(feature = "storybook")]
-            AppView::DesignExplorerView { entity } => {
-                gpui::div().size_full().child(entity).into_any_element()
-            }
             AppView::WebcamView { entity } => {
                 self.render_webcam_prompt(entity, cx).into_any_element()
             }
