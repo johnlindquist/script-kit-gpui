@@ -1963,6 +1963,52 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
 #[cfg(target_os = "macos")]
 const FLOAT_FOOTER_LAYER_ID: &str = "script-kit-float-footer-layer";
 
+/// Default capsule tint alpha (theme background hue) when the theme sets no
+/// explicit `glass_tint_opacity`. Restores the darker, theme-matched capsule
+/// body from the in-window era, where the glass refracted the app's dark
+/// content instead of the bare desktop.
+#[cfg(target_os = "macos")]
+const FLOAT_CAPSULE_DEFAULT_TINT_ALPHA: f64 = 0.45;
+
+/// Shared styling for every floating footer capsule: the window glass-tint
+/// contract when the theme sets one, otherwise a default theme-background
+/// tint, plus the same 25%-alpha `ui.border` hairline the main container
+/// draws (`render_impl`'s `border_color`), so container and capsules speak
+/// one border language.
+#[cfg(target_os = "macos")]
+unsafe fn style_float_footer_capsule(capsule: id, theme: &crate::theme::Theme) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if !crate::platform::apply_theme_glass_tint(capsule) {
+        let responds: bool = msg_send![capsule, respondsToSelector: sel!(setTintColor:)];
+        if responds {
+            let tint = ns_color_from_hex_with_alpha(
+                theme.colors.background.main,
+                FLOAT_CAPSULE_DEFAULT_TINT_ALPHA,
+            );
+            if tint != nil {
+                let _: () = msg_send![capsule, setTintColor: tint];
+            }
+        }
+    }
+
+    let _: () = msg_send![capsule, setWantsLayer: YES];
+    let layer: id = msg_send![capsule, layer];
+    if layer != nil {
+        let border = ns_color_from_hex_with_alpha(theme.colors.ui.border, 0x40 as f64 / 255.0);
+        if border != nil {
+            let cg_border: *const std::ffi::c_void = msg_send![border, CGColor];
+            let _: () = msg_send![layer, setBorderColor: cg_border];
+            let _: () = msg_send![layer, setBorderWidth: 1.0f64];
+            let _: () = msg_send![
+                layer,
+                setCornerRadius:
+                    crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
+            ];
+        }
+    }
+}
+
 /// Registry of the floating-footer window per parent (`(parent_ptr, footer_ptr)`).
 ///
 /// The footer window is deliberately NOT attached via `addChildWindow:` —
@@ -3191,8 +3237,7 @@ unsafe fn ensure_footer_left_info_capsule(left_info_view: id, content_width: f64
             setCornerRadius:
                 crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
         ];
-        // Same theme glass contract as the main window's backdrop.
-        let _ = crate::platform::apply_theme_glass_tint(capsule);
+        style_float_footer_capsule(capsule, &crate::theme::get_cached_theme());
         let _: () = msg_send![
             left_info_view,
             addSubview: capsule
@@ -4235,8 +4280,7 @@ unsafe fn make_footer_hint_item(
                     setCornerRadius:
                         crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
                 ];
-                // Same theme glass contract as the main window's backdrop.
-                let _ = crate::platform::apply_theme_glass_tint(capsule);
+                style_float_footer_capsule(capsule, theme);
                 let _: () = msg_send![
                     container,
                     addSubview: capsule
