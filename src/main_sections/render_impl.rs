@@ -924,15 +924,14 @@ impl Render for ScriptListApp {
                 .into_any_element()
         };
 
-        // Floating footer chrome: the glass container ends above a fully
-        // transparent strip where the footer capsules hover over the desktop.
-        let float_footer_strip = crate::footer_popup::main_window_float_footer_strip_height();
-
+        // Floating footer chrome: the footer strip lives OUTSIDE the window
+        // frame (window_resize::physical_main_window_height shortens the
+        // NSWindow; the capsules ride the footer child window below it), so
+        // the container simply fills the window.
         div()
             .id("main-window-root")
             .size_full()
             .relative()
-            .when(float_footer_strip > 0.0, |d| d.pb(px(float_footer_strip)))
             // Route keys to confirm popup when it's open (Escape/Enter/Tab).
             // This must be at the outermost level to intercept before any
             // view-specific handlers.

@@ -736,8 +736,16 @@ pub fn initial_window_height() -> Pixels {
 /// Initial main-window size for app startup: the shared main-window width
 /// plus the layout-config-driven initial height. Single source of truth so
 /// entry points never hardcode the 750px width.
+///
+/// This is the PHYSICAL frame size (used for window creation and bounds
+/// math): in floating-footer glass mode the footer strip lives outside the
+/// frame, so the height is shorter than the logical
+/// [`initial_window_height`] by the strip.
 pub fn initial_window_size() -> gpui::Size<Pixels> {
-    gpui::size(gpui::px(MAIN_WINDOW_WIDTH), initial_window_height())
+    gpui::size(
+        gpui::px(MAIN_WINDOW_WIDTH),
+        initial_window_height() - px(crate::footer_popup::main_window_float_footer_strip_height()),
+    )
 }
 /// Defer a window resize to the end of the current effect cycle.
 ///
@@ -821,8 +829,20 @@ pub fn reset_resize_debounce() {
 /// # Platform
 /// This function only works on macOS. On other platforms, it's a no-op.
 #[cfg(target_os = "macos")]
+/// Physical NSWindow height for a logical main-window height.
+///
+/// In floating-footer glass mode the footer strip lives OUTSIDE the window
+/// (in the footer child window below the frame), so the NSWindow frame is
+/// shorter than the logical height by the strip. All height math elsewhere
+/// stays logical; this boundary (and its inverse in
+/// [`get_first_window_height`]) is the only conversion point.
+#[cfg(target_os = "macos")]
+fn physical_main_window_height(logical: f64) -> f64 {
+    (logical - f64::from(crate::footer_popup::main_window_float_footer_strip_height())).max(120.0)
+}
+
 pub fn resize_first_window_to_height(target_height: Pixels) {
-    let height_f64: f64 = f32::from(target_height) as f64;
+    let height_f64: f64 = physical_main_window_height(f32::from(target_height) as f64);
 
     // Get the main window from WindowManager
     let window = match window_manager::get_main_window() {
@@ -899,7 +919,11 @@ pub fn get_first_window_height() -> Option<Pixels> {
 
     unsafe {
         let frame: NSRect = msg_send![window, frame];
-        Some(px(frame.size.height as f32))
+        // Inverse of `physical_main_window_height`: report the LOGICAL height
+        // so callers can compare against `height_for_view` outputs.
+        Some(px(frame.size.height as f32
+            + crate::footer_popup::main_window_float_footer_strip_height(
+            )))
     }
 }
 /// Non-macOS stub for resize function
@@ -927,7 +951,7 @@ pub fn resize_first_window_to_size_with_animation(
     target_width: Option<f32>,
     animate: bool,
 ) {
-    let height_f64: f64 = f32::from(target_height) as f64;
+    let height_f64: f64 = physical_main_window_height(f32::from(target_height) as f64);
     let width_f64: Option<f64> = target_width.map(|w| w as f64);
 
     let window = match window_manager::get_main_window() {

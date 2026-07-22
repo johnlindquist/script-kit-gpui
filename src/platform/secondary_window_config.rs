@@ -1575,6 +1575,49 @@ unsafe fn animate_tahoe_glass_disappearance(
     true
 }
 
+/// Apply the theme's glass tint (theme background hue at the
+/// `glass_tint_opacity` slider alpha; 0.0/None = untinted demo-parity glass)
+/// to any `NSGlassEffectView`. Shared by the window backdrop and the floating
+/// footer capsules so every glass surface reads from one theme contract.
+///
+/// # Safety
+/// `glass_view` must be a valid NSGlassEffectView (or nil-checked upstream)
+/// on the main thread.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn apply_theme_glass_tint(glass_view: id) -> bool {
+    let tint_theme = crate::theme::get_cached_theme();
+    let tint_alpha = f64::from(
+        tint_theme
+            .get_opacity()
+            .glass_tint_opacity
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0),
+    );
+    let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
+    if !responds {
+        return false;
+    }
+    if tint_alpha > 0.004 {
+        let hex = tint_theme.colors.background.main;
+        let red = f64::from((hex >> 16) & 0xff) / 255.0;
+        let green = f64::from((hex >> 8) & 0xff) / 255.0;
+        let blue = f64::from(hex & 0xff) / 255.0;
+        let color: id = msg_send![
+            class!(NSColor),
+            colorWithCalibratedRed: red
+            green: green
+            blue: blue
+            alpha: tint_alpha
+        ];
+        let _: () = msg_send![glass_view, setTintColor: color];
+        true
+    } else {
+        let nil_color: id = nil;
+        let _: () = msg_send![glass_view, setTintColor: nil_color];
+        false
+    }
+}
+
 /// Install (or reuse) a native macOS 26 Tahoe `NSGlassEffectView` as the
 /// backmost backdrop of the window's content view.
 ///
@@ -1640,24 +1683,10 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     }
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
-    // Floating footer chrome: the main window's glass container ends above a
-    // transparent bottom strip so the footer capsules float over the desktop.
-    // The GPUI root subtracts the same strip via bottom padding.
-    let bottom_strip = if window_name == "Main window" {
-        f64::from(crate::footer_popup::main_window_float_footer_strip_height())
-    } else {
-        0.0
-    };
-    let backdrop_frame = NSRect::new(
-        cocoa::foundation::NSPoint::new(
-            content_bounds.origin.x,
-            content_bounds.origin.y + bottom_strip,
-        ),
-        cocoa::foundation::NSSize::new(
-            content_bounds.size.width,
-            (content_bounds.size.height - bottom_strip).max(0.0),
-        ),
-    );
+    // Floating footer chrome: the footer strip lives OUTSIDE the window frame
+    // (window_resize shortens the NSWindow), so the backdrop is full-bleed
+    // like every other glass window.
+    let backdrop_frame = content_bounds;
     let vev_count_before =
         tahoe_count_views_kind_of_excluding(content_view, class!(NSVisualEffectView), nil);
 
@@ -1720,49 +1749,15 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
-    // Glass tint follows the theme's glass_tint_opacity slider (theme
-    // background hue at that alpha). 0.0/None = untinted demo-parity glass.
-    let tint_theme = crate::theme::get_cached_theme();
-    let tint_alpha = f64::from(
-        tint_theme
-            .get_opacity()
-            .glass_tint_opacity
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0),
-    );
-    let tint_applied = {
-        let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
-        if responds {
-            if tint_alpha > 0.004 {
-                let hex = tint_theme.colors.background.main;
-                let red = f64::from((hex >> 16) & 0xff) / 255.0;
-                let green = f64::from((hex >> 8) & 0xff) / 255.0;
-                let blue = f64::from(hex & 0xff) / 255.0;
-                let color: id = msg_send![
-                    class!(NSColor),
-                    colorWithCalibratedRed: red
-                    green: green
-                    blue: blue
-                    alpha: tint_alpha
-                ];
-                let _: () = msg_send![glass_view, setTintColor: color];
-                true
-            } else {
-                let nil_color: id = nil;
-                let _: () = msg_send![glass_view, setTintColor: nil_color];
-                false
-            }
-        } else {
-            false
-        }
-    };
+    let tint_applied = apply_theme_glass_tint(glass_view);
 
     let corner_radius = {
         let radius = tahoe_content_corner_radius(content_view);
-        // Floating footer chrome: the backdrop's bottom edge is now a visible
-        // container edge (mid-window, not masked by the window shape), so it
-        // must round itself to match the GPUI root container's `rounded(12.)`.
-        if bottom_strip > 0.0 && radius <= 0.0 {
+        // Main window in glass mode: the backdrop's corners are visible
+        // container corners (the contentView layer reports no radius of its
+        // own), so round them to match the GPUI root container's
+        // `rounded(12.)`.
+        if window_name == "Main window" && radius <= 0.0 {
             12.0
         } else {
             radius

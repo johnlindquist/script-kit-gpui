@@ -2014,7 +2014,10 @@ unsafe fn ensure_float_footer_child_window(ns_window: id) -> id {
 
     let frame: NSRect = msg_send![ns_window, frame];
     let child_frame = NSRect::new(
-        NSPoint::new(frame.origin.x, frame.origin.y),
+        NSPoint::new(
+            frame.origin.x,
+            frame.origin.y - f64::from(main_window_float_footer_strip_height()),
+        ),
         NSSize::new(frame.size.width, footer_height()),
     );
     let child: id = msg_send![class!(NSPanel), alloc];
@@ -2098,9 +2101,12 @@ pub(crate) fn hide_float_footer_for_window(ns_window: id) {
     }
 }
 
-/// Keep the floating-footer window glued to the bottom band of the main
-/// window's frame (congruent coordinates: host-view rects are 1:1) and
-/// mirror the parent's on-screen state (unattached window: manual ordering).
+/// Keep the floating-footer window glued to the strip BELOW the main
+/// window's frame (the frame ends at the container; the strip is outside it —
+/// see `window_resize::physical_main_window_height`) and mirror the parent's
+/// on-screen state (unattached window: manual ordering) and appearance (the
+/// capsule glass must adapt to the same light/dark appearance as the main
+/// window's backdrop, not the child's own resolved appearance).
 #[cfg(target_os = "macos")]
 unsafe fn sync_float_footer_child_frame(ns_window: id) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
@@ -2111,11 +2117,17 @@ unsafe fn sync_float_footer_child_frame(ns_window: id) {
         return;
     }
     let main_frame: NSRect = msg_send![ns_window, frame];
+    let strip = f64::from(main_window_float_footer_strip_height());
     let child_frame = NSRect::new(
-        NSPoint::new(main_frame.origin.x, main_frame.origin.y),
+        NSPoint::new(main_frame.origin.x, main_frame.origin.y - strip),
         NSSize::new(main_frame.size.width, footer_height()),
     );
     let _: () = msg_send![child, setFrame: child_frame display: YES];
+
+    let parent_appearance: id = msg_send![ns_window, effectiveAppearance];
+    if parent_appearance != nil {
+        let _: () = msg_send![child, setAppearance: parent_appearance];
+    }
 
     // Re-assert shadowlessness every pass: the capsule shapes otherwise get a
     // window-server shadow whose row spans bridge the gaps between capsules
@@ -3179,6 +3191,8 @@ unsafe fn ensure_footer_left_info_capsule(left_info_view: id, content_width: f64
             setCornerRadius:
                 crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
         ];
+        // Same theme glass contract as the main window's backdrop.
+        let _ = crate::platform::apply_theme_glass_tint(capsule);
         let _: () = msg_send![
             left_info_view,
             addSubview: capsule
@@ -4221,6 +4235,8 @@ unsafe fn make_footer_hint_item(
                     setCornerRadius:
                         crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
                 ];
+                // Same theme glass contract as the main window's backdrop.
+                let _ = crate::platform::apply_theme_glass_tint(capsule);
                 let _: () = msg_send![
                     container,
                     addSubview: capsule
