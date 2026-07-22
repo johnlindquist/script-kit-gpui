@@ -388,8 +388,8 @@ impl ScriptListApp {
 
                     match key {
                         _ if is_key_up(key) => {
-                            if current_selected > 0 {
-                                let new_selected = current_selected - 1;
+                            if filtered_len > 0 {
+                                let new_selected = current_selected.saturating_sub(1);
                                 if let AppView::ClipboardHistoryView { selected_index, .. } =
                                     &mut this.current_view
                                 {
@@ -405,8 +405,9 @@ impl ScriptListApp {
                             }
                         }
                         _ if is_key_down(key) => {
-                            if current_selected < filtered_len.saturating_sub(1) {
-                                let new_selected = current_selected + 1;
+                            if filtered_len > 0 {
+                                let new_selected = (current_selected + 1)
+                                    .min(filtered_len.saturating_sub(1));
                                 if let AppView::ClipboardHistoryView { selected_index, .. } =
                                     &mut this.current_view
                                 {
@@ -430,7 +431,6 @@ impl ScriptListApp {
                                     cx,
                                 );
                             }
-                            return;
                         }
                         _ if is_key_enter(key) => {
                             // Portal mode: attach the selected entry's content to Agent Chat chat.
@@ -585,7 +585,9 @@ impl ScriptListApp {
                                             }
                                             this.focused_clipboard_entry_id =
                                                 Some(entry_id.clone());
-                                            cx.notify();
+                                            this.clipboard_list_scroll_handle
+                                                .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                            this.note_list_pointer_click(ix, cx);
 
                                             // Double-click: copy and paste
                                             if let gpui::ClickEvent::Mouse(mouse_event) = event {
@@ -620,25 +622,28 @@ impl ScriptListApp {
 
                                 // Hover handler for mouse tracking
                                 let hover_entity = hover_entity_handle.clone();
+                                let move_entity = hover_entity_handle.clone();
+                                let move_handler = move |_event: &gpui::MouseMoveEvent,
+                                                         _window: &mut Window,
+                                                         cx: &mut gpui::App| {
+                                    if let Some(app) = move_entity.upgrade() {
+                                        app.update(cx, |this, cx| {
+                                            this.note_list_pointer_move(ix, cx);
+                                        });
+                                    }
+                                };
                                 let hover_handler = move |is_hovered: &bool, _window: &mut Window, cx: &mut gpui::App| {
                                     if let Some(app) = hover_entity.upgrade() {
                                         app.update(cx, |this, cx| {
-                                            if *is_hovered {
-                                                this.input_mode = InputMode::Mouse;
-                                                if this.hovered_index != Some(ix) {
-                                                    this.hovered_index = Some(ix);
-                                                    cx.notify();
-                                                }
-                                            } else if this.hovered_index == Some(ix) {
-                                                this.hovered_index = None;
-                                                cx.notify();
+                                            if !*is_hovered {
+                                                this.note_list_pointer_leave(ix, cx);
                                             }
                                         });
                                     }
                                 };
 
                                 div()
-                                    .id(ix)
+                                    .id(format!("clipboard-history-row:{}", entry.id))
                                     .cursor_pointer()
                                     .when(
                                         crate::list_item::LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED,
@@ -657,8 +662,12 @@ impl ScriptListApp {
                                         },
                                     )
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
-                                    .child(item)
+                                    .child(item.semantic_id(format!(
+                                        "clipboard-history:{}",
+                                        entry.id
+                                    )))
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))
                             }
@@ -697,59 +706,7 @@ impl ScriptListApp {
             .py(px(design_spacing.padding_xs))
             .on_scroll_wheel(cx.listener(
                 move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                    let view_state = if let AppView::ClipboardHistoryView {
-                        filter,
-                        selected_index,
-                    } = &this.current_view
-                    {
-                        Some((filter.clone(), *selected_index))
-                    } else {
-                        None
-                    };
-
-                    let Some((current_filter, current_selected)) = view_state else {
-                        return;
-                    };
-
-                    let filtered_entries = this.clipboard_history_visible_rows(&current_filter);
-                    let filtered_len = filtered_entries.len();
-
-                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                        event,
-                        current_selected,
-                        filtered_len,
-                    ) else {
-                        if filtered_len > 0 {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    };
-
-                    if let AppView::ClipboardHistoryView { selected_index, .. } =
-                        &mut this.current_view
-                    {
-                        *selected_index = new_selected;
-                    }
-
-                    this.clipboard_list_scroll_handle
-                        .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                    this.note_builtin_selection_owned_wheel_scroll(new_selected);
-                    this.focused_clipboard_entry_id = this
-                        .clipboard_history_visible_rows(&current_filter)
-                        .get(new_selected)
-                        .map(|(_, entry)| entry.id.clone());
-                    Self::log_builtin_scroll_event(
-                        "clipboard_history",
-                        "scroll_to_item",
-                        "wheel",
-                        filtered_len,
-                        Some(new_selected),
-                        Some(new_selected),
-                        Some(&current_filter),
-                        "mouse",
-                    );
-                    cx.notify();
-                    cx.stop_propagation();
+                    this.observe_builtin_native_list_scroll(event, cx);
                 },
             ))
             .flex()
@@ -934,11 +891,11 @@ mod clipboard_chrome_audit {
         );
         assert!(
             source.contains(".on_scroll_wheel(cx.listener("),
-            "clipboard should intercept wheel events on the list pane"
+            "clipboard should observe wheel events on the list pane"
         );
         assert!(
-            source.contains("builtin_scroll_target_from_wheel"),
-            "clipboard wheel scrolling should use the shared builtin helper"
+            source.contains("observe_builtin_native_list_scroll(event, cx)"),
+            "clipboard wheel scrolling should leave viewport movement to the native list"
         );
     }
 }

@@ -611,21 +611,26 @@ impl ScriptListApp {
     /// Returns `false` for `ScriptList`, `FileSearchView` (dedicated routing
     /// via `restart_file_search_stream_for_query`), and non-filter views.
     pub(crate) fn write_filter_to_current_subview(&mut self, text: &str) -> bool {
-        enum StableUniformReset {
+        enum UniformReset {
+            ClipboardHistory,
             AppLauncher,
             WindowSwitcher,
             BrowserTabs,
+            ProcessManager,
             CurrentAppCommands,
             Tips,
+            InstalledKits,
         }
 
-        let mut stable_uniform_reset = None;
+        let mut uniform_reset = None;
         let handled = match &mut self.current_view {
             AppView::ClipboardHistoryView {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    uniform_reset = Some(UniformReset::ClipboardHistory);
+                }
                 true
             }
             AppView::AppLauncherView {
@@ -633,7 +638,7 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 if Self::sync_builtin_query_state(filter, selected_index, text) {
-                    stable_uniform_reset = Some(StableUniformReset::AppLauncher);
+                    uniform_reset = Some(UniformReset::AppLauncher);
                 }
                 true
             }
@@ -642,7 +647,7 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 if Self::sync_builtin_query_state(filter, selected_index, text) {
-                    stable_uniform_reset = Some(StableUniformReset::WindowSwitcher);
+                    uniform_reset = Some(UniformReset::WindowSwitcher);
                 }
                 true
             }
@@ -651,7 +656,7 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 if Self::sync_builtin_query_state(filter, selected_index, text) {
-                    stable_uniform_reset = Some(StableUniformReset::BrowserTabs);
+                    uniform_reset = Some(UniformReset::BrowserTabs);
                 }
                 true
             }
@@ -659,7 +664,9 @@ impl ScriptListApp {
                 filter,
                 selected_index,
             } => {
-                Self::sync_builtin_query_state(filter, selected_index, text);
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    uniform_reset = Some(UniformReset::ProcessManager);
+                }
                 true
             }
             AppView::FooterGalleryView {
@@ -730,7 +737,7 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 if Self::sync_builtin_query_state(filter, selected_index, text) {
-                    stable_uniform_reset = Some(StableUniformReset::CurrentAppCommands);
+                    uniform_reset = Some(UniformReset::CurrentAppCommands);
                 }
                 true
             }
@@ -761,7 +768,17 @@ impl ScriptListApp {
                 ..
             } => {
                 if Self::sync_builtin_query_state(filter, selected_index, text) {
-                    stable_uniform_reset = Some(StableUniformReset::Tips);
+                    uniform_reset = Some(UniformReset::Tips);
+                }
+                true
+            }
+            AppView::InstalledKitsView {
+                filter,
+                selected_index,
+                ..
+            } => {
+                if Self::sync_builtin_query_state(filter, selected_index, text) {
+                    uniform_reset = Some(UniformReset::InstalledKits);
                 }
                 true
             }
@@ -794,22 +811,38 @@ impl ScriptListApp {
             _ => false,
         };
 
-        if let Some(reset) = stable_uniform_reset {
+        if let Some(reset) = uniform_reset {
             match reset {
-                StableUniformReset::AppLauncher => self
+                UniformReset::ClipboardHistory => {
+                    self.clipboard_list_scroll_handle
+                        .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                    if let AppView::ClipboardHistoryView { filter, .. } = &self.current_view {
+                        self.focused_clipboard_entry_id = self
+                            .clipboard_history_visible_rows(filter)
+                            .first()
+                            .map(|(_, entry)| entry.id.clone());
+                    }
+                }
+                UniformReset::AppLauncher => self
                     .list_scroll_handle
                     .scroll_to_item(0, gpui::ScrollStrategy::Top),
-                StableUniformReset::WindowSwitcher => self
+                UniformReset::WindowSwitcher => self
                     .window_list_scroll_handle
                     .scroll_to_item(0, gpui::ScrollStrategy::Top),
-                StableUniformReset::BrowserTabs => self
+                UniformReset::BrowserTabs => self
                     .browser_tabs_scroll_handle
                     .scroll_to_item(0, gpui::ScrollStrategy::Top),
-                StableUniformReset::CurrentAppCommands => self
+                UniformReset::ProcessManager => self
+                    .process_list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top),
+                UniformReset::CurrentAppCommands => self
                     .current_app_commands_scroll_handle
                     .scroll_to_item(0, gpui::ScrollStrategy::Top),
-                StableUniformReset::Tips => self
+                UniformReset::Tips => self
                     .tips_list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top),
+                UniformReset::InstalledKits => self
+                    .list_scroll_handle
                     .scroll_to_item(0, gpui::ScrollStrategy::Top),
             }
             self.hovered_index = None;

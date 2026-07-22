@@ -2,12 +2,24 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 const KIT_STORE_GITHUB_API_BASE: &str = "https://api.github.com";
 const KIT_STORE_GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const KIT_STORE_GITHUB_VERSION: &str = "2022-11-28";
 const KIT_STORE_GITHUB_USER_AGENT: &str = "script-kit-gpui-kit-store-view";
 const KIT_STORE_GITHUB_TOPICS: [&str; 2] = ["scriptkit-kit", "script-kit"];
+static KIT_STORE_BROWSE_QUERY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn next_kit_store_browse_query_generation() -> u64 {
+    KIT_STORE_BROWSE_QUERY_GENERATION
+        .fetch_add(1, AtomicOrdering::AcqRel)
+        .wrapping_add(1)
+}
+
+fn kit_store_browse_query_generation_is_current(generation: u64) -> bool {
+    KIT_STORE_BROWSE_QUERY_GENERATION.load(AtomicOrdering::Acquire) == generation
+}
 
 /// A kit repository discovered from GitHub search results.
 #[derive(Debug, Clone, Default)]
@@ -417,28 +429,63 @@ impl ScriptListApp {
         self.refresh_scripts(cx);
     }
 
-    fn kit_store_refresh_installed_view(&mut self, _cx: &mut Context<Self>) {
+    fn kit_store_refresh_installed_view(
+        &mut self,
+        removed_kit: Option<&str>,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some((filter, selected_index, old_keys)) = (match &self.current_view {
+            AppView::InstalledKitsView {
+                filter,
+                selected_index,
+                kits,
+            } => Some((
+                filter.clone(),
+                *selected_index,
+                Self::kit_store_installed_visible_rows(kits, filter)
+                    .into_iter()
+                    .map(|(_, kit)| kit.name.clone())
+                    .collect::<Vec<_>>(),
+            )),
+            _ => None,
+        }) else {
+            return;
+        };
+        let snapshot = capture_dynamic_uniform_list_snapshot(
+            &old_keys,
+            selected_index,
+            &self.list_scroll_handle,
+        );
+        let refreshed = Self::kit_store_list_installed();
+        let new_keys: Vec<String> =
+            Self::kit_store_installed_visible_rows(&refreshed, &filter)
+                .into_iter()
+                .map(|(_, kit)| kit.name.clone())
+                .collect();
+        let restore = reconcile_dynamic_uniform_list_snapshot(&snapshot, &new_keys);
         if let AppView::InstalledKitsView {
-            filter,
             selected_index,
             kits,
+            ..
         } = &mut self.current_view
         {
-            *kits = Self::kit_store_list_installed();
-            let visible_len = Self::kit_store_installed_visible_rows(kits, filter).len();
-            if visible_len == 0 {
-                *selected_index = 0;
-            } else {
-                *selected_index = (*selected_index).min(visible_len.saturating_sub(1));
-                self.list_scroll_handle
-                    .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-            }
+            *kits = refreshed;
+            *selected_index = restore.selected_index;
+        }
+        restore_dynamic_uniform_list_viewport(&self.list_scroll_handle, &snapshot, restore);
+
+        let removed_selected = removed_kit.is_some_and(|removed| {
+            snapshot.selection.key.as_deref() == Some(removed)
+        });
+        if removed_selected && !restore.selected_key_survived && !new_keys.is_empty() {
+            self.list_scroll_handle
+                .scroll_to_item(restore.selected_index, ScrollStrategy::Nearest);
         }
     }
 
-    fn kit_store_browse_visible_rows<'a>(
-        results: &'a [KitStoreSearchResult],
-    ) -> Vec<(usize, &'a KitStoreSearchResult)> {
+    fn kit_store_browse_visible_rows(
+        results: &[KitStoreSearchResult],
+    ) -> Vec<(usize, &KitStoreSearchResult)> {
         results.iter().enumerate().collect()
     }
 
@@ -529,8 +576,8 @@ impl ScriptListApp {
         Some(format!("{} · ★ {}", result.full_name, result.stars))
     }
 
-    fn kit_store_browse_row_semantic_id(ix: usize, result: &KitStoreSearchResult) -> String {
-        format!("kit-store-browse-row:{ix}:{}", result.full_name)
+    fn kit_store_browse_row_semantic_id(result: &KitStoreSearchResult) -> String {
+        format!("kit-store-browse-row:{}", result.full_name)
     }
 
     fn kit_store_browse_count_label(total_results: usize) -> String {
@@ -561,10 +608,9 @@ impl ScriptListApp {
     }
 
     fn kit_store_installed_row_semantic_id(
-        ix: usize,
         kit: &script_kit_gpui::kit_store::InstalledKit,
     ) -> String {
-        format!("kit-store-installed-row:{ix}:{}", kit.name)
+        format!("kit-store-installed-row:{}", kit.name)
     }
 
     fn kit_store_installed_empty_state_from_filter(filter: &str) -> KitStoreInstalledEmptyState {
@@ -608,7 +654,7 @@ impl ScriptListApp {
                         install_path = %installed.path.display(),
                         "plugin_store_installed"
                     );
-                    this.kit_store_refresh_installed_view(cx);
+                    this.kit_store_refresh_installed_view(None, cx);
                     this.request_plugin_runtime_refresh(
                         KitStorePluginMutation::Install,
                         &installed.name,
@@ -667,7 +713,7 @@ impl ScriptListApp {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
                     tracing::info!(plugin_id = %kit_name, "plugin_store_updated");
-                    this.kit_store_refresh_installed_view(cx);
+                    this.kit_store_refresh_installed_view(None, cx);
                     this.request_plugin_runtime_refresh(KitStorePluginMutation::Update, &kit_name, cx);
                     this.toast_manager.push(
                         components::toast::Toast::success(
@@ -720,7 +766,7 @@ impl ScriptListApp {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
                     tracing::info!(plugin_id = %kit_name, "plugin_store_removed");
-                    this.kit_store_refresh_installed_view(cx);
+                    this.kit_store_refresh_installed_view(Some(&kit_name), cx);
                     this.request_plugin_runtime_refresh(KitStorePluginMutation::Remove, &kit_name, cx);
                     this.toast_manager.push(
                         components::toast::Toast::success(
@@ -867,16 +913,22 @@ impl ScriptListApp {
         next_query: String,
         cx: &mut Context<Self>,
     ) {
+        let generation = next_kit_store_browse_query_generation();
         if let AppView::BrowseKitsView {
             query,
             selected_index,
-            ..
+            results,
         } = &mut self.current_view
         {
             *query = next_query.clone();
             *selected_index = 0;
+            results.clear();
             self.list_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Nearest);
+                .scroll_to_item(0, ScrollStrategy::Top);
+            self.begin_list_viewport_scroll(
+                crate::scrolling::list_interaction::ListViewportInputSource::Filter,
+                cx,
+            );
             cx.notify();
         }
 
@@ -888,17 +940,17 @@ impl ScriptListApp {
                 .spawn(async move { Self::kit_store_search_results(&query_for_fetch) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                if !kit_store_browse_query_generation_is_current(generation) {
+                    return;
+                }
                 if let AppView::BrowseKitsView {
                     query,
-                    selected_index,
                     results: view_results,
+                    ..
                 } = &mut this.current_view
                 {
                     if *query == query_for_guard {
                         *view_results = results;
-                        *selected_index = 0;
-                        this.list_scroll_handle
-                            .scroll_to_item(0, ScrollStrategy::Nearest);
                         cx.notify();
                     }
                 }
@@ -964,16 +1016,17 @@ impl ScriptListApp {
                             }
                         }
                         _ if is_key_up(key) => {
-                            if *selected_index > 0 {
-                                *selected_index -= 1;
+                            if !results.is_empty() {
+                                *selected_index = selected_index.saturating_sub(1);
                                 this.list_scroll_handle
                                     .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
                                 cx.notify();
                             }
                         }
                         _ if is_key_down(key) => {
-                            if *selected_index < results.len().saturating_sub(1) {
-                                *selected_index += 1;
+                            if !results.is_empty() {
+                                *selected_index = (*selected_index + 1)
+                                    .min(results.len().saturating_sub(1));
                                 this.list_scroll_handle
                                     .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
                                 cx.notify();
@@ -1070,42 +1123,49 @@ impl ScriptListApp {
                                                 } else {
                                                     false
                                                 };
+                                                this.list_scroll_handle
+                                                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                                this.note_list_pointer_click(ix, cx);
                                                 if should_submit {
                                                     this.kit_store_install_selected_result(
                                                         &selected_result,
                                                         cx,
                                                     );
                                                 }
-                                                cx.notify();
                                             });
                                         }
                                         cx.stop_propagation();
                                     };
 
+                                let move_entity = hover_entity.clone();
+                                let move_handler =
+                                    move |_event: &gpui::MouseMoveEvent,
+                                          _window: &mut Window,
+                                          cx: &mut gpui::App| {
+                                        if let Some(entity) = move_entity.upgrade() {
+                                            entity.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(ix, cx);
+                                            });
+                                        }
+                                    };
                                 let hover_handler =
                                     move |is_hovered: &bool,
                                           _window: &mut Window,
                                           cx: &mut gpui::App| {
                                         if let Some(entity) = hover_entity.upgrade() {
                                             entity.update(cx, |this, cx| {
-                                                if *is_hovered {
-                                                    this.input_mode = InputMode::Mouse;
-                                                    if this.hovered_index != Some(ix) {
-                                                        this.hovered_index = Some(ix);
-                                                        cx.notify();
-                                                    }
-                                                } else if this.hovered_index == Some(ix) {
-                                                    this.hovered_index = None;
-                                                    cx.notify();
+                                                if !*is_hovered {
+                                                    this.note_list_pointer_leave(ix, cx);
                                                 }
                                             });
                                         }
                                     };
 
                                 div()
-                                    .id(ix)
+                                    .id(Self::kit_store_browse_row_semantic_id(result))
                                     .cursor_pointer()
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
                                     .child(
                                         ListItem::new(
@@ -1121,9 +1181,7 @@ impl ScriptListApp {
                                         .selected(is_selected)
                                         .hovered(is_hovered)
                                         .main_menu_theme(main_menu_theme)
-                                        .semantic_id(Self::kit_store_browse_row_semantic_id(
-                                            ix, result,
-                                        )),
+                                        .semantic_id(Self::kit_store_browse_row_semantic_id(result)),
                                     )
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))
@@ -1171,39 +1229,7 @@ impl ScriptListApp {
                     .h_full()
                     .on_scroll_wheel(cx.listener(
                         move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                                    let view_state = if let AppView::BrowseKitsView {
-                                        selected_index,
-                                        results,
-                                        ..
-                                    } = &this.current_view
-                                    {
-                                        Some((*selected_index, results.len()))
-                                    } else {
-                                        None
-                                    };
-                                    let Some((current_selected, total_results)) = view_state else {
-                                        return;
-                                    };
-                                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                                        event,
-                                        current_selected,
-                                        total_results,
-                                    ) else {
-                                        if total_results > 0 {
-                                            cx.stop_propagation();
-                                        }
-                                        return;
-                                    };
-                                    if let AppView::BrowseKitsView { selected_index, .. } =
-                                        &mut this.current_view
-                                    {
-                                        *selected_index = new_selected;
-                                    }
-                                    this.list_scroll_handle
-                                        .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                                    this.note_builtin_selection_owned_wheel_scroll(new_selected);
-                                    cx.notify();
-                                    cx.stop_propagation();
+                            this.observe_builtin_native_list_scroll(event, cx);
                         },
                     ))
                     .child(list)
@@ -1295,16 +1321,17 @@ impl ScriptListApp {
                     let mut handled = true;
                     match key {
                         _ if is_key_up(key) => {
-                            if *selected_index > 0 {
-                                *selected_index -= 1;
+                            if visible_len > 0 {
+                                *selected_index = selected_index.saturating_sub(1);
                                 this.list_scroll_handle
                                     .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
                                 cx.notify();
                             }
                         }
                         _ if is_key_down(key) => {
-                            if *selected_index < visible_len.saturating_sub(1) {
-                                *selected_index += 1;
+                            if visible_len > 0 {
+                                *selected_index = (*selected_index + 1)
+                                    .min(visible_len.saturating_sub(1));
                                 this.list_scroll_handle
                                     .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
                                 cx.notify();
@@ -1409,45 +1436,52 @@ impl ScriptListApp {
                                                             was_selected,
                                                             event.click_count(),
                                                         )
-                                                    } else {
-                                                        false
-                                                    };
+                                                } else {
+                                                    false
+                                                };
+                                                this.list_scroll_handle
+                                                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                                this.note_list_pointer_click(ix, cx);
                                                 if should_submit {
                                                     this.kit_store_update_selected_kit(
                                                         &selected_kit,
                                                         cx,
                                                     );
                                                 }
-                                                cx.notify();
                                             });
                                         }
                                         cx.stop_propagation();
                                     };
 
+                                let move_entity = hover_entity.clone();
+                                let move_handler =
+                                    move |_event: &gpui::MouseMoveEvent,
+                                          _window: &mut Window,
+                                          cx: &mut gpui::App| {
+                                        if let Some(entity) = move_entity.upgrade() {
+                                            entity.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(ix, cx);
+                                            });
+                                        }
+                                    };
                                 let hover_handler =
                                     move |is_hovered: &bool,
                                           _window: &mut Window,
                                           cx: &mut gpui::App| {
                                         if let Some(entity) = hover_entity.upgrade() {
                                             entity.update(cx, |this, cx| {
-                                                if *is_hovered {
-                                                    this.input_mode = InputMode::Mouse;
-                                                    if this.hovered_index != Some(ix) {
-                                                        this.hovered_index = Some(ix);
-                                                        cx.notify();
-                                                    }
-                                                } else if this.hovered_index == Some(ix) {
-                                                    this.hovered_index = None;
-                                                    cx.notify();
+                                                if !*is_hovered {
+                                                    this.note_list_pointer_leave(ix, cx);
                                                 }
                                             });
                                         }
                                     };
 
                                 div()
-                                    .id(ix)
+                                    .id(Self::kit_store_installed_row_semantic_id(kit))
                                     .cursor_pointer()
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
                                     .child(
                                         ListItem::new(
@@ -1463,9 +1497,7 @@ impl ScriptListApp {
                                         .selected(is_selected)
                                         .hovered(is_hovered)
                                         .main_menu_theme(main_menu_theme)
-                                        .semantic_id(Self::kit_store_installed_row_semantic_id(
-                                            ix, kit,
-                                        )),
+                                        .semantic_id(Self::kit_store_installed_row_semantic_id(kit)),
                                     )
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))
@@ -1514,43 +1546,7 @@ impl ScriptListApp {
                     .h_full()
                     .on_scroll_wheel(cx.listener(
                         move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                                    let view_state = if let AppView::InstalledKitsView {
-                                        filter,
-                                        selected_index,
-                                        kits,
-                                    } = &this.current_view
-                                    {
-                                        Some((
-                                            *selected_index,
-                                            Self::kit_store_installed_visible_rows(kits, filter)
-                                                .len(),
-                                        ))
-                                    } else {
-                                        None
-                                    };
-                                    let Some((current_selected, total_kits)) = view_state else {
-                                        return;
-                                    };
-                                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                                        event,
-                                        current_selected,
-                                        total_kits,
-                                    ) else {
-                                        if total_kits > 0 {
-                                            cx.stop_propagation();
-                                        }
-                                        return;
-                                    };
-                                    if let AppView::InstalledKitsView { selected_index, .. } =
-                                        &mut this.current_view
-                                    {
-                                        *selected_index = new_selected;
-                                    }
-                                    this.list_scroll_handle
-                                        .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                                    this.note_builtin_selection_owned_wheel_scroll(new_selected);
-                                    cx.notify();
-                                    cx.stop_propagation();
+                            this.observe_builtin_native_list_scroll(event, cx);
                         },
                     ))
                     .child(list)
@@ -1585,5 +1581,30 @@ impl ScriptListApp {
                 overlays: Vec::new(),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod kit_store_dynamic_list_tests {
+    use super::*;
+
+    #[test]
+    fn kit_store_browse_async_generation_fails_closed() {
+        let stale = next_kit_store_browse_query_generation();
+        let current = next_kit_store_browse_query_generation();
+        assert!(!kit_store_browse_query_generation_is_current(stale));
+        assert!(kit_store_browse_query_generation_is_current(current));
+    }
+
+    #[test]
+    fn kit_store_semantic_ids_do_not_include_row_ordinals() {
+        let result = KitStoreSearchResult {
+            full_name: "owner/repository".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            ScriptListApp::kit_store_browse_row_semantic_id(&result),
+            "kit-store-browse-row:owner/repository"
+        );
     }
 }

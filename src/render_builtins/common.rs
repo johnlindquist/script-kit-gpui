@@ -1,5 +1,177 @@
 use crate::ui_foundation::{is_key_down, is_key_enter, is_key_escape, is_key_space, is_key_up};
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DynamicUniformListSelectionSnapshot<K> {
+    pub(crate) key: Option<K>,
+    pub(crate) fallback_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DynamicUniformListViewportSnapshot<K> {
+    /// The current anchor followed by later rows in their old order. If the
+    /// anchor disappears, the first surviving successor is deterministic.
+    pub(crate) anchor_candidates: Vec<K>,
+    pub(crate) fallback_index: usize,
+    pub(crate) fractional_offset: f32,
+    pub(crate) pending_reveal: Option<(K, gpui::ScrollStrategy)>,
+    pub(crate) previous_item_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DynamicUniformListSnapshot<K> {
+    pub(crate) selection: DynamicUniformListSelectionSnapshot<K>,
+    pub(crate) viewport: DynamicUniformListViewportSnapshot<K>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DynamicUniformListRestore {
+    pub(crate) selected_index: usize,
+    pub(crate) selected_key_survived: bool,
+    pub(crate) viewport_index: usize,
+    pub(crate) viewport_key_survived: bool,
+    pub(crate) fractional_offset: f32,
+    pub(crate) pending_reveal: Option<(usize, gpui::ScrollStrategy)>,
+}
+
+fn dynamic_uniform_list_snapshot_from_viewport<K: Clone>(
+    keys: &[K],
+    selected_index: usize,
+    viewport_index: usize,
+    fractional_offset: f32,
+    pending_reveal: Option<(usize, gpui::ScrollStrategy)>,
+) -> DynamicUniformListSnapshot<K> {
+    DynamicUniformListSnapshot {
+        selection: DynamicUniformListSelectionSnapshot {
+            key: keys.get(selected_index).cloned(),
+            fallback_index: selected_index,
+        },
+        viewport: DynamicUniformListViewportSnapshot {
+            anchor_candidates: keys.iter().skip(viewport_index).cloned().collect(),
+            fallback_index: viewport_index,
+            fractional_offset: fractional_offset.clamp(0.0, 0.999_999),
+            pending_reveal: pending_reveal.and_then(|(index, strategy)| {
+                keys.get(index).cloned().map(|key| (key, strategy))
+            }),
+            previous_item_count: keys.len(),
+        },
+    }
+}
+
+pub(crate) fn capture_dynamic_uniform_list_snapshot<K: Clone>(
+    keys: &[K],
+    selected_index: usize,
+    handle: &gpui::UniformListScrollHandle,
+) -> DynamicUniformListSnapshot<K> {
+    let state = handle.0.borrow();
+    let (viewport_index, offset_in_item) = state.base_handle.logical_scroll_top();
+    let row_height = state
+        .last_item_size
+        .filter(|_| !keys.is_empty())
+        .map(|size| size.contents.height.as_f32() / keys.len() as f32)
+        .filter(|height| *height > 0.0)
+        .unwrap_or(crate::list_item::LIST_ITEM_HEIGHT);
+    let fractional_offset = (-offset_in_item.as_f32() / row_height).clamp(0.0, 0.999_999);
+    let pending_reveal = state
+        .deferred_scroll_to_item
+        .map(|pending| (pending.item_index, pending.strategy));
+    drop(state);
+
+    dynamic_uniform_list_snapshot_from_viewport(
+        keys,
+        selected_index,
+        viewport_index,
+        fractional_offset,
+        pending_reveal,
+    )
+}
+
+pub(crate) fn reconcile_dynamic_uniform_list_snapshot<K: PartialEq>(
+    snapshot: &DynamicUniformListSnapshot<K>,
+    new_keys: &[K],
+) -> DynamicUniformListRestore {
+    if new_keys.is_empty() {
+        return DynamicUniformListRestore {
+            selected_index: 0,
+            selected_key_survived: false,
+            viewport_index: 0,
+            viewport_key_survived: false,
+            fractional_offset: 0.0,
+            pending_reveal: None,
+        };
+    }
+
+    let surviving_selection = snapshot
+        .selection
+        .key
+        .as_ref()
+        .and_then(|key| new_keys.iter().position(|candidate| candidate == key));
+    let selected_index = surviving_selection.unwrap_or_else(|| {
+        snapshot
+            .selection
+            .fallback_index
+            .min(new_keys.len().saturating_sub(1))
+    });
+
+    let surviving_viewport = snapshot
+        .viewport
+        .anchor_candidates
+        .iter()
+        .find_map(|key| new_keys.iter().position(|candidate| candidate == key));
+    let viewport_index = surviving_viewport.unwrap_or_else(|| {
+        snapshot
+            .viewport
+            .fallback_index
+            .min(new_keys.len().saturating_sub(1))
+    });
+    let pending_reveal = snapshot.viewport.pending_reveal.as_ref().and_then(|(key, strategy)| {
+        new_keys
+            .iter()
+            .position(|candidate| candidate == key)
+            .map(|index| (index, *strategy))
+    });
+
+    DynamicUniformListRestore {
+        selected_index,
+        selected_key_survived: surviving_selection.is_some(),
+        viewport_index,
+        viewport_key_survived: surviving_viewport.is_some(),
+        fractional_offset: snapshot.viewport.fractional_offset,
+        pending_reveal,
+    }
+}
+
+pub(crate) fn restore_dynamic_uniform_list_viewport(
+    handle: &gpui::UniformListScrollHandle,
+    snapshot: &DynamicUniformListSnapshot<impl PartialEq>,
+    restore: DynamicUniformListRestore,
+) {
+    let mut state = handle.0.borrow_mut();
+    if let Some((item_index, strategy)) = restore.pending_reveal {
+        state.deferred_scroll_to_item = Some(gpui::DeferredScrollToItem {
+            item_index,
+            strategy,
+            offset: 0,
+            scroll_strict: false,
+        });
+        return;
+    }
+
+    state.deferred_scroll_to_item = None;
+    let row_height = state
+        .last_item_size
+        .filter(|_| snapshot.viewport.previous_item_count > 0)
+        .map(|size| {
+            size.contents.height.as_f32() / snapshot.viewport.previous_item_count as f32
+        })
+        .filter(|height| *height > 0.0)
+        .unwrap_or(crate::list_item::LIST_ITEM_HEIGHT);
+    let absolute_offset =
+        (restore.viewport_index as f32 + restore.fractional_offset) * row_height;
+    state
+        .base_handle
+        .set_offset(gpui::point(gpui::px(0.0), gpui::px(-absolute_offset)));
+}
+
 pub(crate) fn render_builtin_split_main_content_layout(
     list_pane: gpui::AnyElement,
     preview_pane: gpui::AnyElement,
@@ -28,6 +200,198 @@ pub(crate) fn render_builtin_split_main_content_layout(
                 .child(preview_pane),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod dynamic_uniform_list_policy_tests {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum ViewportTransport {
+        PixelWheel,
+        LineWheel,
+        Momentum,
+        Scrollbar,
+    }
+
+    #[derive(Debug)]
+    struct Case {
+        name: &'static str,
+        old_keys: Vec<u32>,
+        new_keys: Vec<u32>,
+        selected: usize,
+        viewport: usize,
+        fraction: f32,
+        expected_selected: usize,
+        expected_viewport: usize,
+        selection_survives: bool,
+        viewport_survives: bool,
+    }
+
+    #[test]
+    fn clipboard_process_manager_kit_store_refresh_reorder_delete_filter_matrix() {
+        let long_old: Vec<u32> = (0..64).collect();
+        let mut long_new = vec![1000, 1001];
+        long_new.extend(0..64);
+        let cases = vec![
+            Case {
+                name: "refresh-reorder-offscreen-selection",
+                old_keys: vec![10, 11, 12, 13, 14, 15],
+                new_keys: vec![99, 13, 14, 10, 11, 12, 15],
+                selected: 1,
+                viewport: 3,
+                fraction: 0.375,
+                expected_selected: 4,
+                expected_viewport: 1,
+                selection_survives: true,
+                viewport_survives: true,
+            },
+            Case {
+                name: "deleted-anchor-falls-forward",
+                old_keys: vec![10, 11, 12, 13, 14],
+                new_keys: vec![10, 11, 13, 14],
+                selected: 0,
+                viewport: 2,
+                fraction: 0.5,
+                expected_selected: 0,
+                expected_viewport: 2,
+                selection_survives: true,
+                viewport_survives: true,
+            },
+            Case {
+                name: "filter-removes-selection-but-keeps-anchor",
+                old_keys: vec![10, 11, 12, 13, 14],
+                new_keys: vec![13, 14],
+                selected: 2,
+                viewport: 3,
+                fraction: 0.25,
+                expected_selected: 1,
+                expected_viewport: 0,
+                selection_survives: false,
+                viewport_survives: true,
+            },
+            Case {
+                name: "short-dataset-endpoint",
+                old_keys: vec![7],
+                new_keys: vec![7],
+                selected: 0,
+                viewport: 0,
+                fraction: 0.0,
+                expected_selected: 0,
+                expected_viewport: 0,
+                selection_survives: true,
+                viewport_survives: true,
+            },
+            Case {
+                name: "long-dataset-insertion-after-scroll",
+                old_keys: long_old,
+                new_keys: long_new,
+                selected: 2,
+                viewport: 40,
+                fraction: 0.875,
+                expected_selected: 4,
+                expected_viewport: 42,
+                selection_survives: true,
+                viewport_survives: true,
+            },
+            Case {
+                name: "deleted-tail-anchor-clamps-old-ordinal",
+                old_keys: vec![1, 2, 3, 4],
+                new_keys: vec![1, 2],
+                selected: 3,
+                viewport: 3,
+                fraction: 0.75,
+                expected_selected: 1,
+                expected_viewport: 1,
+                selection_survives: false,
+                viewport_survives: false,
+            },
+        ];
+
+        for transport in [
+            ViewportTransport::PixelWheel,
+            ViewportTransport::LineWheel,
+            ViewportTransport::Momentum,
+            ViewportTransport::Scrollbar,
+        ] {
+            for case in &cases {
+                let snapshot = dynamic_uniform_list_snapshot_from_viewport(
+                    &case.old_keys,
+                    case.selected,
+                    case.viewport,
+                    case.fraction,
+                    None,
+                );
+                let restored =
+                    reconcile_dynamic_uniform_list_snapshot(&snapshot, &case.new_keys);
+                assert_eq!(
+                    restored.selected_index, case.expected_selected,
+                    "{} via {transport:?}: viewport transport must not reinterpret selection",
+                    case.name
+                );
+                assert_eq!(
+                    restored.viewport_index, case.expected_viewport,
+                    "{} via {transport:?}",
+                    case.name
+                );
+                assert_eq!(
+                    restored.selected_key_survived, case.selection_survives,
+                    "{} via {transport:?}",
+                    case.name
+                );
+                assert_eq!(
+                    restored.viewport_key_survived, case.viewport_survives,
+                    "{} via {transport:?}",
+                    case.name
+                );
+                assert_eq!(restored.fractional_offset, case.fraction);
+            }
+        }
+    }
+
+    #[test]
+    fn pending_keyboard_reveal_is_remapped_by_identity_not_old_ordinal() {
+        let snapshot = dynamic_uniform_list_snapshot_from_viewport(
+            &[10, 11, 12, 13],
+            1,
+            3,
+            0.4,
+            Some((1, gpui::ScrollStrategy::Nearest)),
+        );
+        let restored =
+            reconcile_dynamic_uniform_list_snapshot(&snapshot, &[99, 13, 12, 11, 10]);
+        assert_eq!(restored.selected_index, 3);
+        assert_eq!(restored.viewport_index, 1);
+        assert_eq!(
+            restored.pending_reveal,
+            Some((3, gpui::ScrollStrategy::Nearest))
+        );
+    }
+
+    #[test]
+    fn empty_refresh_is_safe_and_stationary_pointer_stays_suppressed() {
+        let snapshot = dynamic_uniform_list_snapshot_from_viewport(
+            &[1, 2, 3],
+            2,
+            2,
+            0.9,
+            None,
+        );
+        let restored = reconcile_dynamic_uniform_list_snapshot(&snapshot, &[]);
+        assert_eq!(restored.selected_index, 0);
+        assert_eq!(restored.viewport_index, 0);
+        assert_eq!(restored.fractional_offset, 0.0);
+
+        let mut pointer = crate::scrolling::list_interaction::ListPointerPolicy {
+            hovered_index: Some(2),
+            suppress_hover_until_pointer_move: false,
+        };
+        pointer.begin_viewport_scroll();
+        pointer.note_hover_change(1, true);
+        assert_eq!(pointer.hovered_index, None);
+        pointer.note_pointer_move(1);
+        assert_eq!(pointer.hovered_index, Some(1));
+    }
 }
 
 impl ScriptListApp {
@@ -668,17 +1032,14 @@ mod builtin_browser_consistency_audit {
             "current_app_commands.rs",
             include_str!("current_app_commands.rs"),
         ),
-        ("design_gallery.rs", include_str!("design_gallery.rs")),
         ("design_picker.rs", include_str!("design_picker.rs")),
         ("dictation_history.rs", include_str!("dictation_history.rs")),
         ("emoji_picker.rs", include_str!("emoji_picker.rs")),
         ("favorites.rs", include_str!("favorites.rs")),
         ("file_search.rs", include_str!("file_search.rs")),
         ("flow_ux.rs", include_str!("flow_ux.rs")),
-        ("footer_gallery.rs", include_str!("footer_gallery.rs")),
         ("kit_store.rs", include_str!("kit_store.rs")),
         ("migrate_v1.rs", include_str!("migrate_v1.rs")),
-        ("non_list_states.rs", include_str!("non_list_states.rs")),
         ("notes_browse.rs", include_str!("notes_browse.rs")),
         (
             "permissions_wizard.rs",
@@ -759,17 +1120,14 @@ mod builtin_browser_consistency_audit {
                      GPUI fallback — never render standalone footer chrome."
                 );
             }
-            // The gallery browser legitimately renders PromptFooter previews
-            // as CONTENT; every other browser must not instantiate footer
-            // chrome directly.
-            if *name != "footer_gallery.rs" {
-                assert!(
-                    !source.contains("PromptFooter::new(") && !source.contains("HintStrip::new("),
-                    "{name} builds footer chrome directly. Route through \
-                     main_window_footer_slot(render_simple_hint_strip(...)) so the \
-                     surface inherits the shared footer components and native footer."
-                );
-            }
+            // No builtin browser may instantiate footer chrome directly;
+            // footer chrome belongs to the persistent main-window footer.
+            assert!(
+                !source.contains("PromptFooter::new(") && !source.contains("HintStrip::new("),
+                "{name} builds footer chrome directly. Route through \
+                 main_window_footer_slot(render_simple_hint_strip(...)) so the \
+                 surface inherits the shared footer components and native footer."
+            );
         }
     }
 }

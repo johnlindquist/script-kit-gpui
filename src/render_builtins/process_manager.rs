@@ -146,6 +146,54 @@ impl ScriptListApp {
         format!("{} process{}", total_count, suffix)
     }
 
+    fn replace_process_manager_rows(
+        &mut self,
+        new_processes: Vec<crate::process_manager::ProcessInfo>,
+        reveal_repaired_selection: bool,
+    ) {
+        let Some((filter, selected_index)) = (match &self.current_view {
+            AppView::ProcessManagerView {
+                filter,
+                selected_index,
+            } => Some((filter.clone(), *selected_index)),
+            _ => None,
+        }) else {
+            self.cached_processes = new_processes;
+            return;
+        };
+
+        let old_keys: Vec<u32> =
+            Self::process_manager_filtered_entries(&self.cached_processes, &filter)
+                .into_iter()
+                .map(|(_, process)| process.pid)
+                .collect();
+        let snapshot = capture_dynamic_uniform_list_snapshot(
+            &old_keys,
+            selected_index,
+            &self.process_list_scroll_handle,
+        );
+
+        self.cached_processes = new_processes;
+        let new_keys: Vec<u32> =
+            Self::process_manager_filtered_entries(&self.cached_processes, &filter)
+                .into_iter()
+                .map(|(_, process)| process.pid)
+                .collect();
+        let restore = reconcile_dynamic_uniform_list_snapshot(&snapshot, &new_keys);
+        if let AppView::ProcessManagerView { selected_index, .. } = &mut self.current_view {
+            *selected_index = restore.selected_index;
+        }
+        restore_dynamic_uniform_list_viewport(
+            &self.process_list_scroll_handle,
+            &snapshot,
+            restore,
+        );
+        if reveal_repaired_selection && !restore.selected_key_survived && !new_keys.is_empty() {
+            self.process_list_scroll_handle
+                .scroll_to_item(restore.selected_index, ScrollStrategy::Nearest);
+        }
+    }
+
     /// Start the periodic refresh task for the ProcessManagerView.
     ///
     /// Spawns a background timer that polls the process manager every 2 seconds
@@ -188,27 +236,7 @@ impl ScriptListApp {
                                     "process_manager.refresh.list_changed"
                                 );
 
-                                app.cached_processes = new_processes;
-
-                                // Clamp selection index against the visible filtered rows.
-                                if let AppView::ProcessManagerView {
-                                    filter,
-                                    selected_index,
-                                } = &mut app.current_view
-                                {
-                                    let visible_len = Self::process_manager_filtered_entries(
-                                        &app.cached_processes,
-                                        filter,
-                                    )
-                                    .len();
-                                    if visible_len == 0 {
-                                        *selected_index = 0;
-                                    } else if *selected_index >= visible_len {
-                                        *selected_index = visible_len - 1;
-                                    }
-                                    app.process_list_scroll_handle
-                                        .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                                }
+                                app.replace_process_manager_rows(new_processes, false);
 
                                 cx.notify();
                             }
@@ -334,11 +362,12 @@ impl ScriptListApp {
                 let current_filtered_len = filtered.len();
 
                 if is_key_up(key) {
-                    if current_selected > 0 {
+                    if current_filtered_len > 0 {
+                        let next = current_selected.saturating_sub(1);
                         if let AppView::ProcessManagerView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected - 1;
+                            *selected_index = next;
                             this.process_list_scroll_handle
                                 .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
                         }
@@ -346,11 +375,13 @@ impl ScriptListApp {
                     }
                     cx.stop_propagation();
                 } else if is_key_down(key) {
-                    if current_selected < current_filtered_len.saturating_sub(1) {
+                    if current_filtered_len > 0 {
+                        let next = (current_selected + 1)
+                            .min(current_filtered_len.saturating_sub(1));
                         if let AppView::ProcessManagerView { selected_index, .. } =
                             &mut this.current_view
                         {
-                            *selected_index = current_selected + 1;
+                            *selected_index = next;
                             this.process_list_scroll_handle
                                 .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
                         }
@@ -373,9 +404,14 @@ impl ScriptListApp {
 
                         match crate::process_manager::PROCESS_MANAGER.terminate_process(pid) {
                             Ok(()) => {
-                                // Refresh the cached processes
-                                this.cached_processes = crate::process_manager::PROCESS_MANAGER
-                                    .get_active_processes_sorted();
+                                // This destructive refresh repairs a missing selection and
+                                // reveals the repaired row. The viewport is otherwise restored
+                                // independently by stable PID.
+                                this.replace_process_manager_rows(
+                                    crate::process_manager::PROCESS_MANAGER
+                                        .get_active_processes_sorted(),
+                                    true,
+                                );
 
                                 let script_name = std::path::Path::new(&script_path)
                                     .file_stem()
@@ -388,28 +424,7 @@ impl ScriptListApp {
                                     cx,
                                 );
 
-                                // Clamp selection if the visible filtered list got shorter.
                                 let new_len = this.cached_processes.len();
-                                if let AppView::ProcessManagerView { selected_index, .. } =
-                                    &mut this.current_view
-                                {
-                                    if *selected_index >= new_len && new_len > 0 {
-                                        *selected_index = new_len - 1;
-                                    }
-                                    let visible_len = Self::process_manager_filtered_entries(
-                                        &this.cached_processes,
-                                        &current_filter,
-                                    )
-                                    .len();
-                                    if visible_len == 0 {
-                                        *selected_index = 0;
-                                    } else if *selected_index >= visible_len {
-                                        *selected_index = visible_len - 1;
-                                    }
-                                    this.process_list_scroll_handle
-                                        .scroll_to_item(*selected_index, ScrollStrategy::Nearest);
-                                }
-
                                 if new_len == 0 {
                                     this.go_back_or_close(window, cx);
                                     return;
@@ -493,37 +508,43 @@ impl ScriptListApp {
                                                     selected_index,
                                                     ..
                                                 } = &mut this.current_view
-                                                {
-                                                    *selected_index = ix;
-                                                }
-                                                cx.notify();
+                                            {
+                                                *selected_index = ix;
+                                            }
+                                                this.process_list_scroll_handle
+                                                    .scroll_to_item(ix, ScrollStrategy::Nearest);
+                                                this.note_list_pointer_click(ix, cx);
                                             });
                                         }
                                     };
 
                                 let hover_entity = hover_entity_handle.clone();
+                                let move_entity = hover_entity_handle.clone();
+                                let move_handler =
+                                    move |_event: &gpui::MouseMoveEvent,
+                                          _window: &mut Window,
+                                          cx: &mut gpui::App| {
+                                        if let Some(app) = move_entity.upgrade() {
+                                            app.update(cx, |this, cx| {
+                                                this.note_list_pointer_move(ix, cx);
+                                            });
+                                        }
+                                    };
                                 let hover_handler =
                                     move |is_hovered: &bool,
                                           _window: &mut Window,
                                           cx: &mut gpui::App| {
                                         if let Some(app) = hover_entity.upgrade() {
                                             app.update(cx, |this, cx| {
-                                                if *is_hovered {
-                                                    this.input_mode = InputMode::Mouse;
-                                                    if this.hovered_index != Some(ix) {
-                                                        this.hovered_index = Some(ix);
-                                                        cx.notify();
-                                                    }
-                                                } else if this.hovered_index == Some(ix) {
-                                                    this.hovered_index = None;
-                                                    cx.notify();
+                                                if !*is_hovered {
+                                                    this.note_list_pointer_leave(ix, cx);
                                                 }
                                             });
                                         }
                                     };
 
                                 div()
-                                    .id(ix)
+                                    .id(("process-manager-row", process_info.pid as usize))
                                     .cursor_pointer()
                                     .when(
                                         crate::list_item::LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED,
@@ -542,12 +563,17 @@ impl ScriptListApp {
                                         },
                                     )
                                     .on_click(click_handler)
+                                    .on_mouse_move(move_handler)
                                     .on_hover(hover_handler)
                                     .child(
                                         ListItem::new(name, list_colors)
                                             .description_opt(Some(description))
                                             .selected(is_selected)
-                                            .hovered(is_hovered),
+                                            .hovered(is_hovered)
+                                            .semantic_id(format!(
+                                                "process-manager:{}",
+                                                process_info.pid
+                                            )),
                                     )
                             } else {
                                 div().id(ix).h(px(LIST_ITEM_HEIGHT))
@@ -600,44 +626,7 @@ impl ScriptListApp {
                     .min_h(px(0.))
                     .on_scroll_wheel(cx.listener(
                         move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                                    let view_state = if let AppView::ProcessManagerView {
-                                        filter,
-                                        selected_index,
-                                    } = &this.current_view
-                                    {
-                                        Some((filter.clone(), *selected_index))
-                                    } else {
-                                        None
-                                    };
-                                    let Some((current_filter, current_selected)) = view_state
-                                    else {
-                                        return;
-                                    };
-                                    let filtered_len = Self::process_manager_filtered_entries(
-                                        &this.cached_processes,
-                                        &current_filter,
-                                    )
-                                    .len();
-                                    let Some(new_selected) = this.builtin_scroll_target_from_wheel(
-                                        event,
-                                        current_selected,
-                                        filtered_len,
-                                    ) else {
-                                        if filtered_len > 0 {
-                                            cx.stop_propagation();
-                                        }
-                                        return;
-                                    };
-                                    if let AppView::ProcessManagerView { selected_index, .. } =
-                                        &mut this.current_view
-                                    {
-                                        *selected_index = new_selected;
-                                    }
-                                    this.process_list_scroll_handle
-                                        .scroll_to_item(new_selected, ScrollStrategy::Nearest);
-                                    this.note_builtin_selection_owned_wheel_scroll(new_selected);
-                                    cx.notify();
-                                    cx.stop_propagation();
+                            this.observe_builtin_native_list_scroll(event, cx);
                         },
                     ))
                     .child(list_element)

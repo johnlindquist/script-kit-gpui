@@ -421,6 +421,32 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> FilterableRouteState {
+        let resets_uniform_list = match &plan.next_view {
+            AppView::ClipboardHistoryView { .. } => {
+                self.clipboard_list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                true
+            }
+            AppView::ProcessManagerView { .. } => {
+                self.process_list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                true
+            }
+            AppView::AppLauncherView { .. }
+            | AppView::BrowseKitsView { .. }
+            | AppView::InstalledKitsView { .. } => {
+                self.list_scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                true
+            }
+            _ => false,
+        };
+        if resets_uniform_list {
+            self.hovered_index = None;
+            self.list_suppress_hover_until_pointer_move = true;
+            self.last_list_interaction_source =
+                crate::scrolling::list_interaction::ListViewportInputSource::Filter;
+        }
         if plan.reset_shared_filter {
             self.filter_text = String::new();
             self.pending_filter_sync = true;
