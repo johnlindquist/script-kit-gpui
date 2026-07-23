@@ -666,6 +666,8 @@ export function analyzeStationaryFidelity(
     ?? byId.get("script-kit-footer-cwd-chip-keycap");
   const leftKeycapGlyph = byId.get("script-kit-footer-left-info-keycap-glyph")
     ?? byId.get("script-kit-footer-cwd-chip-keycap-glyph");
+  const leftIcon = byId.get("script-kit-footer-left-profile-icon")
+    ?? byId.get("script-kit-footer-cwd-chip-icon");
   if (!leftCapsule) errors.push("left footer capsule is missing");
   if (!leftHitTarget) errors.push("left footer hit target is missing");
   if (!leftKeycap) {
@@ -678,6 +680,13 @@ export function analyzeStationaryFidelity(
   }
   if (!leftKeycapGlyph?.text?.value?.trim()) {
     errors.push("left footer shortcut glyph is missing");
+  }
+  if (
+    !leftIcon
+    || Number(leftIcon.image?.width ?? 0) <= 0
+    || Number(leftIcon.image?.height ?? 0) <= 0
+  ) {
+    errors.push("left footer icon has no rendered image");
   }
 
   const visualNodes = nodes.filter((node) =>
@@ -797,6 +806,41 @@ async function captureNativeWindow(pid: number, outDir: string, name: string) {
     "info:",
   ]);
   const edgeEnergy = Number(edge.stdout.trim());
+  const contentLuminanceResult = await run([
+    "magick",
+    path,
+    "-gravity",
+    "north",
+    "-crop",
+    "x880+0+0",
+    "+repage",
+    "-alpha",
+    "off",
+    "-colorspace",
+    "Gray",
+    "-format",
+    "%[fx:mean]",
+    "info:",
+  ]);
+  const contentMeanLuminance = Number(contentLuminanceResult.stdout.trim());
+  const contentDetailEdgeResult = await run([
+    "magick",
+    path,
+    "-crop",
+    "1500x700+0+180",
+    "+repage",
+    "-alpha",
+    "off",
+    "-colorspace",
+    "Gray",
+    "-morphology",
+    "Edge",
+    "Diamond",
+    "-format",
+    "%[fx:mean]",
+    "info:",
+  ]);
+  const contentDetailEdgeEnergy = Number(contentDetailEdgeResult.stdout.trim());
   return {
     name,
     nativeWindow,
@@ -805,6 +849,12 @@ async function captureNativeWindow(pid: number, outDir: string, name: string) {
     footerCropPath,
     footerCropSha256: sha256(footerCropPath),
     edgeEnergy: Number.isFinite(edgeEnergy) ? round(edgeEnergy, 6) : null,
+    contentMeanLuminance: Number.isFinite(contentMeanLuminance)
+      ? round(contentMeanLuminance, 6)
+      : null,
+    contentDetailEdgeEnergy: Number.isFinite(contentDetailEdgeEnergy)
+      ? round(contentDetailEdgeEnergy, 6)
+      : null,
   };
 }
 
@@ -890,7 +940,8 @@ function parseCLI() {
     .split(",")
     .filter(Boolean);
   const expectFallback = args.includes("--expect-fallback");
-  const stationaryOnly = args.includes("--stationary-only");
+  const visualMatrix = args.includes("--visual-matrix");
+  const stationaryOnly = args.includes("--stationary-only") || visualMatrix;
   const baseline = value("--baseline");
   return {
     binary,
@@ -898,12 +949,21 @@ function parseCLI() {
     trials: stationaryOnly ? [] : trials,
     expectFallback,
     stationaryOnly,
+    visualMatrix,
     baseline,
   };
 }
 
 async function cli() {
-  const { binary, outDir, trials, expectFallback, stationaryOnly, baseline } = parseCLI();
+  const {
+    binary,
+    outDir,
+    trials,
+    expectFallback,
+    stationaryOnly,
+    visualMatrix,
+    baseline,
+  } = parseCLI();
   if (!binary || !existsSync(binary)) throw new Error(`binary missing: ${binary ?? "<unset>"}`);
   mkdirSync(outDir, { recursive: true });
   const helper = join(outDir, "macos-native-drag-sampler");
@@ -1182,6 +1242,7 @@ async function cli() {
         || node.id === "script-kit-footer-cwd-chip-hit"
       );
       const leftFrame = leftButton?.screenshotFrame;
+      const matrixStates: Array<Record<string, any>> = [];
       if (leftFrame && finalMain?.bounds) {
         for (let attempt = 0; attempt < 4; attempt += 1) {
           const openWindows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
@@ -1247,6 +1308,297 @@ async function cli() {
       } else {
         structural.errors.push("left footer hit target frame missing from AppKit fidelity snapshot");
       }
+      if (visualMatrix) {
+        const captureMatrixState = async (
+          name: string,
+          expectedMode: "mini" | "full",
+          expectedAppearance: "system" | "light" | "dark",
+        ) => {
+          await driver.waitForSettle({ timeoutMs: 10_000 });
+          const [state, layout] = await Promise.all([
+            driver.getState({ timeoutMs: 15_000 }),
+            driver.getLayoutInfo(
+              { target: { type: "id", id: "main" } },
+              { timeoutMs: 15_000 },
+            ),
+          ]);
+          const capture: any = await captureNativeWindow(Number(main.pid), outDir, name);
+          capture.gutterTransparency = await analyzeNativeWindowGutterAlpha(
+            capture.path,
+            (layout as any)?.fidelity?.appKit,
+          );
+          captures.push(capture);
+          const actualMode = (state as any)?.miniAi?.mainWindowMode ?? null;
+          const contentMeanLuminance = Number(capture.contentMeanLuminance);
+          const contentDetailEdgeEnergy = Number(capture.contentDetailEdgeEnergy);
+          const appearanceCheck = expectedAppearance === "system"
+            ? {
+              pass: true,
+              rule: "system appearance is not luminance-constrained",
+              contentMeanLuminance,
+              contentDetailEdgeEnergy,
+            }
+            : expectedAppearance === "light"
+            ? {
+              pass: contentMeanLuminance >= 0.45 && contentDetailEdgeEnergy >= 0.012,
+              rule:
+                "light fixture luminance must be >= 0.45 and content-detail edge energy >= 0.012",
+              contentMeanLuminance,
+              contentDetailEdgeEnergy,
+            }
+            : {
+              pass: contentMeanLuminance <= 0.35 && contentDetailEdgeEnergy >= 0.012,
+              rule:
+                "dark fixture luminance must be <= 0.35 and content-detail edge energy >= 0.012",
+              contentMeanLuminance,
+              contentDetailEdgeEnergy,
+            };
+          const entry = {
+            name,
+            expectedMode,
+            actualMode,
+            expectedAppearance,
+            promptType: (state as any)?.promptType ?? null,
+            activeFooter: (state as any)?.activeFooter ?? null,
+            mainStage: (layout as any)?.components?.find(
+              (component: any) => component.name === "main-content-stage",
+            ) ?? null,
+            dialogBoundary: (layout as any)?.components?.find(
+              (component: any) => component.name === "main-window-dialog-layer-boundary",
+            ) ?? null,
+            capture,
+            appearanceCheck,
+            pass: actualMode === expectedMode
+              && capture.gutterTransparency.pass
+              && appearanceCheck.pass,
+          };
+          matrixStates.push(entry);
+          return entry;
+        };
+
+        await announceTestStatus(
+          "Visual matrix · Full",
+          "Capturing the expanded theme surface and detached footer",
+        );
+        driver.send({
+          type: "triggerBuiltin",
+          builtinId: "builtin/choose-theme",
+          requestId: "mwnd-matrix-full",
+        });
+        await captureMatrixState("matrix-full-expanded-2x", "full", "system");
+
+        await announceTestStatus(
+          "Visual matrix · Disabled",
+          "Opening a safe confirmation so every footer action is visibly disabled",
+        );
+        driver.send({
+          type: "triggerBuiltin",
+          builtinId: "builtin/main-window",
+          requestId: "mwnd-matrix-disabled-main",
+        });
+        await driver.setFilterAndWait("Clear Suggested", { timeoutMs: 15_000 });
+        await driver.simulateGpuiKeyDown("enter", {
+          target: { type: "id", id: "main" },
+          timeoutMs: 15_000,
+        });
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const popupWindows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
+          if (((popupWindows as any)?.windows ?? []).some(
+            (candidate: any) => candidate.id === "confirm-popup",
+          )) {
+            break;
+          }
+          await Bun.sleep(50);
+        }
+        const disabledState = await captureMatrixState(
+          "matrix-disabled-confirm-2x",
+          "mini",
+          "system",
+        );
+        const disabledButtons = disabledState.activeFooter?.buttons ?? [];
+        disabledState.disabledButtonCount = disabledButtons.filter(
+          (button: any) => button.enabled === false,
+        ).length;
+        disabledState.pass = disabledState.pass
+          && disabledButtons.length > 0
+          && disabledState.disabledButtonCount === disabledButtons.length;
+        if (!disabledState.pass) {
+          structural.errors.push("disabled footer matrix state did not disable every action");
+        }
+        await driver.simulateGpuiKeyDown("escape", {
+          target: { type: "id", id: "confirm-popup" },
+          timeoutMs: 15_000,
+        }).catch(() => null);
+        await Bun.sleep(250);
+
+        const themePath = join(driver.sessionDir, "home", ".scriptkit", "theme.json");
+        const applyThemeFixture = async (
+          label: string,
+          expectedAppearance: "Light" | "Dark",
+          theme: Record<string, unknown>,
+        ) => {
+          await announceTestStatus(
+            `Visual matrix · ${label}`,
+            "Applying a sandbox-only theme and waiting for native glass refresh",
+          );
+          const logOffset = Bun.file(driver.logPath).size;
+          writeFileSync(themePath, `${JSON.stringify(theme, null, 2)}\n`);
+          const loadMarker = `Theme load completed source=theme_json appearance=${expectedAppearance}`;
+          let loadObserved = false;
+          for (let attempt = 0; attempt < 150; attempt += 1) {
+            const appendedLog = await Bun.file(driver.logPath).slice(logOffset).text();
+            if (appendedLog.includes(loadMarker)) {
+              loadObserved = true;
+              break;
+            }
+            await Bun.sleep(100);
+          }
+          if (!loadObserved) {
+            throw new Error(`theme reload marker not observed: ${loadMarker}`);
+          }
+          // The watcher log proves the cache changed. Give AppKit's native
+          // glass tint and GPUI's theme projection one morph interval to
+          // finish before measuring pixels.
+          await Bun.sleep(1_200);
+          await driver.waitForSettle({ timeoutMs: 10_000 });
+        };
+        driver.send({
+          type: "triggerBuiltin",
+          builtinId: "builtin/main-window",
+          requestId: "mwnd-matrix-bright-main",
+        });
+        await driver.setFilterAndWait("Clear Suggested", { timeoutMs: 15_000 });
+        await applyThemeFixture("Bright / light", "Light", {
+          appearance: "light",
+          colors: {
+            background: {
+              main: "#FFF7FF",
+              title_bar: "#FFE5FF",
+              search_box: "#FFFFFF",
+              log_panel: "#F3E8FF",
+            },
+            text: {
+              primary: "#111118",
+              secondary: "#252536",
+              tertiary: "#41415A",
+              muted: "#5A5A72",
+              dimmed: "#77778A",
+              on_accent: "#FFFFFF",
+            },
+            accent: { selected: "#C026D3", selected_subtle: "#F0ABFC" },
+            ui: {
+              border: "#7E22CE",
+              success: "#15803D",
+              error: "#B91C1C",
+              warning: "#B45309",
+              info: "#1D4ED8",
+            },
+          },
+          background_gradient: {
+            enabled: true,
+            from: "#FF00CC",
+            to: "#00D4FF",
+            angle: 130,
+            opacity: 0.82,
+            layers: [{
+              enabled: true,
+              from: "#FFD600",
+              to: "#7C3AED",
+              angle: 35,
+              opacity: 0.55,
+            }],
+          },
+          vibrancy: { enabled: true, material: "menu", backdrop_saturation: 2.6 },
+          opacity: {
+            main: 1.0,
+            title_bar: 1.0,
+            search_box: 1.0,
+            log_panel: 1.0,
+            vibrancy_background: 1.0,
+            glass_veil_opacity: 0.9,
+            glass_tint_opacity: 0.75,
+          },
+        });
+        await captureMatrixState("matrix-bright-light-2x", "mini", "light");
+
+        await driver.setFilterAndWait("Turn Off Background Effect", { timeoutMs: 15_000 });
+        await driver.simulateGpuiKeyDown("enter", {
+          target: { type: "id", id: "main" },
+          timeoutMs: 15_000,
+        });
+        await ensureMainWindowVisible("mwnd-matrix-dark-main-show");
+        driver.send({
+          type: "triggerBuiltin",
+          builtinId: "builtin/main-window",
+          requestId: "mwnd-matrix-dark-main",
+        });
+        await driver.setFilterAndWait("Clear Suggested", { timeoutMs: 15_000 });
+        await applyThemeFixture("Dark / plain", "Dark", {
+          appearance: "dark",
+          colors: {
+            background: {
+              main: "#0A0A0D",
+              title_bar: "#111116",
+              search_box: "#181820",
+              log_panel: "#060608",
+            },
+            text: {
+              primary: "#FFFFFF",
+              secondary: "#E4E4E7",
+              tertiary: "#A1A1AA",
+              muted: "#71717A",
+              dimmed: "#52525B",
+              on_accent: "#0A0A0D",
+            },
+            accent: { selected: "#FBBF24", selected_subtle: "#3F3F46" },
+            ui: {
+              border: "#3F3F46",
+              success: "#22C55E",
+              error: "#EF4444",
+              warning: "#F59E0B",
+              info: "#3B82F6",
+            },
+          },
+          background_gradient: null,
+          vibrancy: { enabled: true, material: "menu", backdrop_saturation: 2.6 },
+          opacity: {
+            main: 1.0,
+            title_bar: 1.0,
+            search_box: 1.0,
+            log_panel: 1.0,
+            vibrancy_background: 1.0,
+            glass_veil_opacity: 0.9,
+            glass_tint_opacity: 0.75,
+          },
+        });
+        await captureMatrixState("matrix-dark-plain-2x", "mini", "dark");
+
+        const matrixHashes = new Set(
+          matrixStates.map((state) => state.capture?.footerCropSha256).filter(Boolean),
+        );
+        const requiredNames = new Set([
+          "matrix-full-expanded-2x",
+          "matrix-disabled-confirm-2x",
+          "matrix-bright-light-2x",
+          "matrix-dark-plain-2x",
+        ]);
+        const requiredStatesPresent = [...requiredNames].every((name) =>
+          matrixStates.some((state) => state.name === name)
+        );
+        receipt.visualMatrix = {
+          pass: requiredStatesPresent
+            && matrixStates.every((state) => state.pass)
+            && matrixHashes.size === matrixStates.length,
+          requiredNames: [...requiredNames],
+          requiredStatesPresent,
+          distinctFooterHashCount: matrixHashes.size,
+          states: matrixStates,
+          sandboxThemePath: themePath,
+        };
+        if (!(receipt.visualMatrix as any).pass) {
+          structural.errors.push("stationary appearance/state/background matrix failed");
+        }
+      }
       for (const capture of captures as any[]) {
         capture.gutterTransparency ??= await analyzeNativeWindowGutterAlpha(
           capture.path,
@@ -1287,10 +1639,17 @@ async function cli() {
         reviewRequired: true,
       };
     } else {
+      const capture: any = await captureNativeWindow(
+        Number(main.pid),
+        outDir,
+        "fallback-main-window-2x",
+      );
       receipt.stationary = {
-        pass: true,
+        pass: capture.nativeWindow?.onscreen === true
+          && Number(capture.nativeWindow?.alpha ?? 0) >= 0.99
+          && Number(capture.edgeEnergy ?? 0) > 0,
         structural: "fallback intentionally has no native glass capsule hierarchy",
-        captures: [],
+        captures: [capture],
         priorFallbackReceipt: ".artifacts/main-window-native-drag/fallback/receipt.json",
       };
     }
@@ -1331,6 +1690,7 @@ async function cli() {
     );
     receipt.pass = lifecyclePass
       && (receipt.stationary as any)?.pass === true
+      && (!visualMatrix || (receipt.visualMatrix as any)?.pass === true)
       && (receipt.crashScan as any)?.pass === true
       && results.every((result: any) => result.analysis.overallPass && result.filmstrip?.pass === true);
   } finally {

@@ -317,6 +317,12 @@ function stationaryFixture(hostHeight = 480) {
     text: { value: "Space", color: { alpha: 0.8 } },
     layer: { contentsScale: 2 },
   });
+  nodes.push({
+    id: "script-kit-footer-left-profile-icon",
+    parentId: "script-kit-footer-left-info-capsule-content",
+    image: { width: 13, height: 13 },
+    layer: { contentsScale: 2 },
+  });
   return {
     layout: {
       components: [
@@ -417,6 +423,19 @@ describe("stationary native footer analyzer", () => {
     expect(result.pass).toBe(false);
     expect(result.errors.some((error) => error.includes("left footer shortcut keycap is missing"))).toBe(true);
     expect(result.errors.some((error) => error.includes("left footer shortcut glyph is missing"))).toBe(true);
+  });
+
+  test("fails when the left capsule icon view has no rendered image", () => {
+    const fixture = stationaryFixture();
+    const icon = fixture.layout.fidelity.appKit.nodes.find(
+      (node: any) => node.id === "script-kit-footer-left-profile-icon",
+    );
+    icon.image = { width: 0, height: 0 };
+    const result = analyzeStationaryFidelity(fixture.layout, fixture.automationWindow);
+    expect(result.pass).toBe(false);
+    expect(
+      result.errors.some((error) => error.includes("left footer icon has no rendered image")),
+    ).toBe(true);
   });
 });
 

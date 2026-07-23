@@ -965,6 +965,8 @@ pub(crate) struct ScriptListApp {
     quick_terminal_warm_created_at: Option<std::time::Instant>,
     /// Theme wrapped in Arc for cheap cloning when passing to prompts/dialogs
     theme: std::sync::Arc<theme::Theme>,
+    /// Last global theme-service revision projected into `self.theme`.
+    theme_revision_seen: u64,
     #[allow(dead_code)]
     config: config::Config,
     // Scroll activity tracking for scrollbar fade

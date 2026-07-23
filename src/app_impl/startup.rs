@@ -178,6 +178,7 @@ impl ScriptListApp {
         // or re-run system appearance detection.
         let theme_load_started = std::time::Instant::now();
         let theme = std::sync::Arc::new(theme::get_cached_theme());
+        let theme_revision_seen = crate::theme::service::theme_revision();
         logging::log(
             "PERF",
             &format!(
@@ -765,6 +766,7 @@ impl ScriptListApp {
             quick_terminal_warm_inflight: false,
             quick_terminal_warm_created_at: None,
             theme,
+            theme_revision_seen,
             config,
             // Scroll activity tracking: start with scrollbar hidden
             scrollbar_visibility: crate::transitions::Opacity::INVISIBLE,

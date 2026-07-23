@@ -55,6 +55,15 @@ pub fn embedded_asset_exists(path: &str) -> bool {
     matches!(gpui::AssetSource::load(&AppAssets, path), Ok(Some(_)))
 }
 
+/// Load an embedded application asset as owned bytes for native AppKit
+/// bridges that cannot consume GPUI's `AssetSource` directly.
+pub fn embedded_asset_bytes(path: &str) -> Option<Vec<u8>> {
+    gpui::AssetSource::load(&AppAssets, path)
+        .ok()
+        .flatten()
+        .map(|bytes| bytes.into_owned())
+}
+
 /// Attach an icon source to an `svg()` builder, picking the right loader:
 /// relative paths ("icons/foo.svg", "logo.svg") load from the embedded
 /// [`AppAssets`] source, absolute paths from disk (script-provided icons).
@@ -82,6 +91,7 @@ mod asset_source_tests {
             "icons/monitor.svg",         // Lucide (builtin "Show Desktop")
             "icons/sun-moon.svg",        // Lucide (builtin "Toggle Dark Mode")
             "icons/square-terminal.svg", // Lucide
+            "icons/lightbulb.svg",       // Native floating-footer tip glyph
         ] {
             let loaded = AppAssets.load(path).expect("asset load must not error");
             assert!(

@@ -18,7 +18,7 @@
                 let view = cx.new(|cx| ScriptListApp::new(config_for_app, bun_available, window, cx));
                 // Store the entity for external access
                 *app_entity_for_closure.lock().unwrap_or_else(|e| e.into_inner()) = Some(view.clone());
-                cx.new(|cx| Root::new(view, window, cx))
+                cx.new(|cx| Root::new_transparent(view, window, cx))
             },
         ) {
             Ok(window) => {

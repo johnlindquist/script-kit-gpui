@@ -33,6 +33,7 @@ pub struct Root {
     pub notification: Entity<NotificationList>,
     sheet_size: Option<DefiniteLength>,
     view: AnyView,
+    paint_background: bool,
 }
 
 #[derive(Clone)]
@@ -76,7 +77,22 @@ impl Root {
             notification: cx.new(|cx| NotificationList::new(window, cx)),
             sheet_size: None,
             view: view.into(),
+            paint_background: true,
         }
+    }
+
+    /// Create a Root whose window-sized wrapper stays transparent.
+    ///
+    /// Use this when the hosted view owns a smaller, explicitly bounded
+    /// background stage inside a larger transparent native window.
+    pub fn new_transparent(
+        view: impl Into<AnyView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut root = Self::new(view, window, cx);
+        root.paint_background = false;
+        root
     }
 
     pub fn update<F, R>(window: &mut Window, cx: &mut App, f: F) -> R
@@ -356,7 +372,7 @@ impl Render for Root {
                 .relative()
                 .size_full()
                 .font_family(cx.theme().font_family.clone())
-                .bg(cx.theme().background)
+                .when(self.paint_background, |this| this.bg(cx.theme().background))
                 .text_color(cx.theme().foreground)
                 .child(self.view.clone()),
         )

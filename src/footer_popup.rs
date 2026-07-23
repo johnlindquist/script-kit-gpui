@@ -476,6 +476,7 @@ struct MainWindowFooterRefreshSignature {
     divider_rgba: u32,
     text_primary_hex: u32,
     background_hex: u32,
+    glass_tint_opacity_bits: u32,
     accent_hex: u32,
     selection_rgba: u32,
     hover_rgba: u32,
@@ -2182,7 +2183,19 @@ const FLOAT_CAPSULE_DEFAULT_TINT_ALPHA: f64 = 0.45;
 /// one border language.
 #[cfg(target_os = "macos")]
 unsafe fn style_float_footer_capsule(capsule: id, theme: &crate::theme::Theme) {
-    use objc::{msg_send, sel, sel_impl};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let appearance_name = if theme.should_use_dark_vibrancy() {
+        ns_string("NSAppearanceNameVibrantDark")
+    } else {
+        ns_string("NSAppearanceNameVibrantLight")
+    };
+    if appearance_name != nil {
+        let appearance: id = msg_send![class!(NSAppearance), appearanceNamed: appearance_name];
+        if appearance != nil {
+            let _: () = msg_send![capsule, setAppearance: appearance];
+        }
+    }
 
     if !crate::platform::apply_theme_glass_tint(capsule) {
         let responds: bool = msg_send![capsule, respondsToSelector: sel!(setTintColor:)];
@@ -3074,6 +3087,11 @@ unsafe fn refresh_footer_host_impl(
         divider_rgba: chrome.divider_rgba,
         text_primary_hex: theme.colors.text.primary,
         background_hex: theme.colors.background.main,
+        glass_tint_opacity_bits: theme
+            .get_opacity()
+            .glass_tint_opacity
+            .unwrap_or(0.0)
+            .to_bits(),
         accent_hex: chrome.accent_hex,
         selection_rgba: chrome.selection_rgba,
         hover_rgba: chrome.hover_rgba,
@@ -3119,6 +3137,7 @@ unsafe fn refresh_footer_host_impl(
                 previous.divider_rgba != signature.divider_rgba
                     || previous.text_primary_hex != signature.text_primary_hex
                     || previous.background_hex != signature.background_hex
+                    || previous.glass_tint_opacity_bits != signature.glass_tint_opacity_bits
                     || previous.accent_hex != signature.accent_hex
                     || previous.selection_rgba != signature.selection_rgba
                     || previous.hover_rgba != signature.hover_rgba
@@ -3253,6 +3272,9 @@ unsafe fn refresh_footer_host_impl(
         } else if footer_visuals_changed {
             recolor_footer_hint_subviews(hints_view, &theme);
         }
+        if footer_content_changed || footer_visuals_changed || effect_theme_changed {
+            restyle_footer_glass_capsules(hints_view, &theme);
+        }
     }
 
     // Left info (streaming dot + model name)
@@ -3270,6 +3292,9 @@ unsafe fn refresh_footer_host_impl(
             } else {
                 layout_footer_left_info(left_info_view, config.left_info.as_ref(), text_color);
             }
+        }
+        if footer_content_changed || footer_visuals_changed || effect_theme_changed {
+            restyle_footer_glass_capsules(left_info_view, &theme);
         }
     }
     // Content nodes can be created by the layout paths above. Apply the
@@ -4374,6 +4399,31 @@ unsafe fn recolor_footer_hint_subviews(view: id, theme: &crate::theme::Theme) {
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn restyle_footer_glass_capsules(view: id, theme: &crate::theme::Theme) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if view == nil {
+        return;
+    }
+    if let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") {
+        let is_glass: cocoa::base::BOOL = msg_send![view, isKindOfClass: glass_class];
+        if is_glass == YES {
+            style_float_footer_capsule(view, theme);
+        }
+    }
+
+    let subviews: id = msg_send![view, subviews];
+    if subviews == nil {
+        return;
+    }
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let child: id = msg_send![subviews, objectAtIndex: index];
+        restyle_footer_glass_capsules(child, theme);
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn recolor_footer_hint_subviews_with_colors(view: id, text_color: id, border_color: id) {
     use objc::{class, msg_send, sel, sel_impl};
 
@@ -4840,7 +4890,11 @@ fn footer_icon_png_bytes(token: &str) -> Option<Vec<u8>> {
     }
     let path = crate::components::footer_chrome::footer_icon_path(token)
         .unwrap_or_else(|| crate::components::footer_chrome::FOOTER_PROFILE_ICON_PATH.to_string());
-    let svg = std::fs::read_to_string(path).ok()?;
+    let svg = if std::path::Path::new(&path).is_absolute() {
+        std::fs::read_to_string(path).ok()?
+    } else {
+        String::from_utf8(crate::utils::assets::embedded_asset_bytes(&path)?).ok()?
+    };
     footer_icon_png_from_svg(&svg)
 }
 

@@ -6,6 +6,12 @@ impl Focusable for ScriptListApp {
 
 impl Render for ScriptListApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let global_theme_revision = crate::theme::service::theme_revision();
+        if self.theme_revision_seen != global_theme_revision {
+            self.theme_revision_seen = global_theme_revision;
+            self.update_theme(cx);
+        }
+
         // Track render timing for filter perf analysis
         let render_start = std::time::Instant::now();
         let filter_snapshot = self.filter_text.clone();
@@ -821,8 +827,6 @@ impl Render for ScriptListApp {
             self.main_menu_render_diagnostics.filter_perf_start = None;
         }
 
-        // Get vibrancy background - None when vibrancy enabled (let Root handle blur)
-        let vibrancy_bg = crate::ui_foundation::get_vibrancy_background(&self.theme);
         let theme_background_gradients =
             crate::ui_foundation::theme_background_gradient_layers("bg-layer", &self.theme);
 
@@ -1104,6 +1108,12 @@ impl Render for ScriptListApp {
                     .relative()
                     .flex()
                     .flex_col()
+                    // The main window's gpui-component Root is intentionally
+                    // transparent because the native footer lives below this
+                    // stage. Paint the same theme veil here so every opacity
+                    // setting stops at the content boundary and the detached
+                    // gutter remains physically empty.
+                    .bg(cx.theme().background)
                     // Hide mouse cursor while typing
                     .when(mouse_cursor_hidden, |d| d.cursor(CursorStyle::None))
                     // Hide cursor and clear hover on any keyboard interaction
@@ -1128,8 +1138,6 @@ impl Render for ScriptListApp {
                             }
                         }
                     }))
-                    // Apply background only when vibrancy is disabled
-                    .when_some(vibrancy_bg, |d, bg| d.bg(bg))
                     // A user-authored gradient is explicit theme content, so it
                     // renders even when vibrancy is enabled.
                     .children(theme_background_gradients)
