@@ -795,11 +795,6 @@ app.run(move |cx: &mut App| {
                         // Update the app entity theme
                         view.update_theme(ctx);
                         view.sync_main_footer_popup(win, ctx);
-                        let mut footer_config = view.main_window_footer_config_with_cx(Some(ctx));
-                        if let Some(ref mut cfg) = footer_config {
-                            view.enrich_footer_config_with_agent_chat_info(cfg);
-                        }
-                        crate::footer_popup::notify_main_footer_popup(win, footer_config.as_ref(), ctx);
 
                         // Notify all registered windows to re-render with new colors
                         windows::notify_all_windows(ctx);

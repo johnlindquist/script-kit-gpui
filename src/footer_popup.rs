@@ -975,6 +975,14 @@ fn gpui_footer_overlay_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn should_use_gpui_footer_overlay(glass_mode: bool, overlay_enabled: bool) -> bool {
+    !glass_mode && overlay_enabled
+}
+
+fn main_footer_gpui_overlay_active() -> bool {
+    should_use_gpui_footer_overlay(glass_scroll_bands_active(), gpui_footer_overlay_enabled())
+}
+
 fn gpui_footer_overlay_bounds(parent_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     let footer_height = crate::components::footer_chrome::current_main_menu_footer_height();
     Bounds {
@@ -1078,7 +1086,11 @@ fn sync_gpui_footer_overlay(
     display_id: Option<DisplayId>,
     config: MainWindowFooterConfig,
 ) {
-    if !gpui_footer_overlay_enabled() {
+    // Re-check ownership at execution time. Appearance/vibrancy changes can
+    // land between the caller scheduling this work and GPUI running it; a
+    // stale fallback request must never recreate a second footer window after
+    // native one-window glass mode became active.
+    if !main_footer_gpui_overlay_active() {
         close_gpui_footer_overlay(cx);
         return;
     }
@@ -1230,8 +1242,6 @@ pub(crate) fn sync_main_footer_popup(
     // The in-window AppKit host rides the main NSWindow's frame morph. The
     // separate GPUI overlay NSWindow does not, so glass mode keeps only the
     // native host active and always closes the overlay.
-    let overlay_config = (!glass_scroll_bands_active()).then_some(config).flatten();
-
     set_main_window_footer_last_config(config);
     let requested_surface = config.map(|cfg| cfg.surface);
     update_main_window_footer_host_state(requested_surface, None, false);
@@ -1276,13 +1286,7 @@ pub(crate) fn sync_main_footer_popup(
         }
     }
 
-    defer_gpui_footer_overlay_sync(
-        cx,
-        parent_window_handle,
-        parent_bounds,
-        display_id,
-        overlay_config,
-    );
+    defer_gpui_footer_overlay_sync(cx, parent_window_handle, parent_bounds, display_id, config);
 
     #[cfg(not(target_os = "macos"))]
     let _ = (window, config);
@@ -1290,7 +1294,7 @@ pub(crate) fn sync_main_footer_popup(
 
 /// Sync the GPUI footer overlay child window OUTSIDE the caller's draw.
 ///
-/// `sync_main_footer_popup`/`notify_main_footer_popup` are called from the main
+/// `sync_main_footer_popup` is called from the main
 /// window's `render()`. Opening or drawing another window mid-draw allocates
 /// into — and `open_window` then clears — the shared per-App element arena,
 /// dangling every element of the in-progress draw (real SIGSEGV: dangling
@@ -1306,7 +1310,9 @@ fn defer_gpui_footer_overlay_sync(
 ) {
     let config = config.cloned();
     cx.defer(move |cx| {
-        if let Some(config) = config {
+        if !main_footer_gpui_overlay_active() {
+            close_gpui_footer_overlay(cx);
+        } else if let Some(config) = config {
             sync_gpui_footer_overlay(cx, parent_window_handle, parent_bounds, display_id, config);
         } else {
             close_gpui_footer_overlay(cx);
@@ -1369,48 +1375,6 @@ pub(crate) fn clear_window_footer_popup(window: &mut Window) {
 
     #[cfg(not(target_os = "macos"))]
     let _ = window;
-}
-
-pub(crate) fn notify_main_footer_popup(
-    window: &mut Window,
-    config: Option<&MainWindowFooterConfig>,
-    cx: &mut App,
-) {
-    set_main_window_footer_last_config(config);
-    let requested_surface = config.map(|cfg| cfg.surface);
-    update_main_window_footer_host_state(requested_surface, None, false);
-    let parent_window_handle = window.window_handle();
-    let parent_bounds = window.bounds();
-    let display_id = window.display(cx).as_ref().map(|display| display.id());
-
-    #[cfg(target_os = "macos")]
-    {
-        let Some((_, ns_window)) = window_gpui_view_and_ns_window(window) else {
-            return;
-        };
-
-        // SAFETY: `ns_window` comes from the live GPUI main window currently
-        // being rendered/observed on the AppKit thread.
-        unsafe {
-            if let Some(config) = config {
-                let installed = refresh_main_footer_host(ns_window, config);
-                update_main_window_footer_host_state(
-                    requested_surface,
-                    installed.then_some(config.surface),
-                    installed,
-                );
-            } else {
-                clear_main_window_footer_refresh_signature();
-                remove_main_window_footer_host(ns_window);
-                update_main_window_footer_host_state(None, None, false);
-            }
-        }
-    }
-
-    defer_gpui_footer_overlay_sync(cx, parent_window_handle, parent_bounds, display_id, config);
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = (window, config);
 }
 
 pub(crate) fn close_main_footer_popup(cx: &mut App) {
@@ -5305,8 +5269,8 @@ mod footer_layout_tests {
         footer_hint_content_layout_for_button, footer_hint_item_gap, footer_hint_label_widths,
         footer_hint_legacy_extra_padding, footer_hint_max_item_width, footer_hint_slot_width,
         footer_selected_background_rgba, main_window_detached_footer_regions_appkit,
-        main_window_detached_footer_regions_gpui, FooterAction, FooterButtonConfig,
-        FooterDotStatus, FOOTER_HINT_KEY_LABEL_GAP, FOOTER_HINT_PADDING_X,
+        main_window_detached_footer_regions_gpui, should_use_gpui_footer_overlay, FooterAction,
+        FooterButtonConfig, FooterDotStatus, FOOTER_HINT_KEY_LABEL_GAP, FOOTER_HINT_PADDING_X,
         FOOTER_RUN_HINT_PADDING_X,
     };
 
@@ -5323,6 +5287,14 @@ mod footer_layout_tests {
     fn native_glass_capsules_use_the_shared_open_gap() {
         assert_eq!(footer_hint_item_gap(true, 2.0), 6.0);
         assert_eq!(footer_hint_item_gap(false, 2.0), 2.0);
+    }
+
+    #[test]
+    fn native_glass_mode_always_owns_the_main_footer_without_an_overlay() {
+        assert!(!should_use_gpui_footer_overlay(true, true));
+        assert!(!should_use_gpui_footer_overlay(true, false));
+        assert!(should_use_gpui_footer_overlay(false, true));
+        assert!(!should_use_gpui_footer_overlay(false, false));
     }
 
     #[test]
