@@ -1777,6 +1777,45 @@ fn pending_dictation_model_action() -> &'static parking_lot::Mutex<Option<Dictat
     PENDING_DICTATION_MODEL_ACTION.get_or_init(|| parking_lot::Mutex::new(None))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingDictationRestart {
+    action: DictationBuiltinAction,
+    target: crate::dictation::DictationTarget,
+}
+
+static PENDING_DICTATION_RESTART: std::sync::OnceLock<
+    parking_lot::Mutex<Option<PendingDictationRestart>>,
+> = std::sync::OnceLock::new();
+
+fn pending_dictation_restart(
+) -> &'static parking_lot::Mutex<Option<PendingDictationRestart>> {
+    PENDING_DICTATION_RESTART.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// A toggle received while capture teardown is in flight flips the desired
+/// post-stop state. Odd extra presses queue a restart; even extra presses
+/// cancel it. This preserves toggle parity instead of dropping keystrokes.
+fn next_pending_dictation_restart(
+    pending: Option<PendingDictationRestart>,
+    requested: PendingDictationRestart,
+) -> Option<PendingDictationRestart> {
+    if crate::dictation::toggled_post_stop_restart(pending.is_some()) {
+        Some(requested)
+    } else {
+        None
+    }
+}
+
+fn toggle_pending_dictation_restart(requested: PendingDictationRestart) -> bool {
+    let mut pending = pending_dictation_restart().lock();
+    *pending = next_pending_dictation_restart(*pending, requested);
+    pending.is_some()
+}
+
+fn take_pending_dictation_restart() -> Option<PendingDictationRestart> {
+    pending_dictation_restart().lock().take()
+}
+
 #[cfg(test)]
 fn ai_open_failure_message(error: impl std::fmt::Display) -> String {
     format!("Failed to open AI: {error}")
@@ -5845,6 +5884,24 @@ impl ScriptListApp {
             "{}", action.opening_message()
         );
 
+        if crate::dictation::is_dictation_stopping() {
+            let target = crate::dictation::dictation_stop_target()
+                .unwrap_or_else(|| action.stop_fallback_target());
+            let restart_queued = toggle_pending_dictation_restart(PendingDictationRestart {
+                action,
+                target,
+            });
+            tracing::info!(
+                category = "DICTATION",
+                action = ?action,
+                ?target,
+                restart_queued,
+                trace_id = %dctx.trace_id,
+                "Applied rapid dictation toggle to pending post-stop state"
+            );
+            return Self::builtin_success(dctx, action.success_detail());
+        }
+
         let is_start_edge = !crate::dictation::is_dictation_busy();
         tracing::info!(
             category = "DICTATION",
@@ -5854,7 +5911,7 @@ impl ScriptListApp {
             "Dictation builtin shortcut flow reached toggle boundary"
         );
         if is_start_edge {
-            let preflight = self.prepare_dictation_builtin_start(action, cx);
+            let preflight = self.prepare_dictation_builtin_start(action, None, cx);
             tracing::info!(
                 category = "DICTATION",
                 action = ?action,
@@ -5892,21 +5949,36 @@ impl ScriptListApp {
             return Self::builtin_success(dctx, action.success_detail());
         }
 
+        self.start_ready_dictation_builtin_action(
+            action,
+            dictation_target,
+            Some(&dctx.trace_id),
+            cx,
+        );
+
+        Self::builtin_success(dctx, action.success_detail())
+    }
+
+    fn start_ready_dictation_builtin_action(
+        &mut self,
+        action: DictationBuiltinAction,
+        dictation_target: crate::dictation::DictationTarget,
+        trace_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         match crate::dictation::toggle_dictation(dictation_target) {
             Ok(crate::dictation::DictationToggleOutcome::Started) => {
                 tracing::info!(
                     category = "DICTATION",
                     action = ?action,
-                    trace_id = %dctx.trace_id,
+                    trace_id = trace_id.unwrap_or("queued-restart"),
                     ?dictation_target,
                     "Dictation toggle returned Started"
                 );
-                if is_start_edge
-                    && matches!(
-                        dictation_target,
-                        crate::dictation::DictationTarget::ExternalApp
-                    )
-                {
+                if matches!(
+                    dictation_target,
+                    crate::dictation::DictationTarget::ExternalApp
+                ) {
                     self.close_and_reset_window(cx);
                 }
                 self.handle_dictation_started(action, dictation_target, cx);
@@ -5933,13 +6005,12 @@ impl ScriptListApp {
                 );
             }
         }
-
-        Self::builtin_success(dctx, action.success_detail())
     }
 
     fn prepare_dictation_builtin_start(
         &mut self,
         action: DictationBuiltinAction,
+        target_override: Option<crate::dictation::DictationTarget>,
         cx: &mut Context<Self>,
     ) -> DictationStartPreflight {
         let prefs = crate::config::load_user_preferences();
@@ -5967,7 +6038,12 @@ impl ScriptListApp {
             return DictationStartPreflight::OpenedSetup;
         }
 
-        if let Err(error) = self.ensure_dictation_builtin_target_available(action) {
+        let target_available = if let Some(target) = target_override {
+            self.ensure_dictation_delivery_target_available_for(target)
+        } else {
+            self.ensure_dictation_builtin_target_available(action)
+        };
+        if let Err(error) = target_available {
             let error_text = error.to_string();
             tracing::error!(
                 category = "DICTATION",
@@ -6139,6 +6215,10 @@ impl ScriptListApp {
                 target,
                 job,
             }) => {
+                // This stop request is the new parity baseline. Shortcut
+                // presses that arrive after it will toggle the queued restart
+                // state rather than being silently ignored.
+                *pending_dictation_restart().lock() = None;
                 if transcribe {
                     let _ = crate::dictation::begin_overlay_session();
                     let _ = crate::dictation::open_dictation_overlay(cx);
@@ -6166,6 +6246,37 @@ impl ScriptListApp {
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         if !crate::dictation::finish_stop_capture(request_id, &stop_result) {
+                            return;
+                        }
+                        if let Some(restart) = take_pending_dictation_restart() {
+                            let (chunk_count, audio_duration_ms) = match &stop_result {
+                                Ok(Some(capture)) => (
+                                    capture.chunks.len(),
+                                    capture.audio_duration.as_millis() as u64,
+                                ),
+                                _ => (0, 0),
+                            };
+                            tracing::info!(
+                                category = "DICTATION",
+                                action = ?restart.action,
+                                target = ?restart.target,
+                                chunk_count,
+                                audio_duration_ms,
+                                "Starting queued dictation restart; abandoning the superseded capture"
+                            );
+                            let preflight = this.prepare_dictation_builtin_start(
+                                restart.action,
+                                Some(restart.target),
+                                cx,
+                            );
+                            if preflight == DictationStartPreflight::Ready {
+                                this.start_ready_dictation_builtin_action(
+                                    restart.action,
+                                    restart.target,
+                                    None,
+                                    cx,
+                                );
+                            }
                             return;
                         }
                         match stop_result {

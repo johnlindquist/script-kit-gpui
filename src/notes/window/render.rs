@@ -81,35 +81,23 @@ impl NotesApp {
                     }),
             );
 
-        let (agent_chat_body, agent_chat_footer) =
-            if let Some(ref agent_chat_entity) = self.embedded_agent_chat {
-                let agent_chat_footer = {
-                    let view = agent_chat_entity.read(cx);
-                    view.build_external_host_footer(agent_chat_entity.downgrade(), cx)
-                };
-
-                (
-                    div()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .child(agent_chat_entity.clone())
-                        .into_any_element(),
-                    agent_chat_footer,
-                )
-            } else {
-                (
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(muted_color.opacity(OPACITY_MUTED))
-                        .child("Agent Chat is loading...")
-                        .into_any_element(),
-                    None,
-                )
-            };
+        let agent_chat_body = if let Some(ref agent_chat_entity) = self.embedded_agent_chat {
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .child(agent_chat_entity.clone())
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(muted_color.opacity(OPACITY_MUTED))
+                .child("Agent Chat is loading...")
+                .into_any_element()
+        };
 
         div()
             .flex_1()
@@ -118,8 +106,13 @@ impl NotesApp {
             .h_full()
             .child(titlebar)
             .child(agent_chat_body)
-            .when_some(agent_chat_footer, |d, footer| d.child(footer))
             .into_any_element()
+    }
+
+    fn render_agent_chat_window_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let agent_chat_entity = self.embedded_agent_chat.as_ref()?;
+        let view = agent_chat_entity.read(cx);
+        view.build_external_host_footer(agent_chat_entity.downgrade(), cx)
     }
 
     fn process_render_side_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -168,6 +161,72 @@ impl Render for NotesApp {
             crate::ui_foundation::theme_background_gradient_layers("notes-bg-layer", &theme);
 
         let in_agent_chat_mode = self.surface_mode == NotesSurfaceMode::AgentChat;
+        let detached_footer = crate::footer_popup::glass_scroll_bands_active();
+        let window_size = window.bounds().size;
+        let regions = crate::footer_popup::main_window_detached_footer_regions_gpui(
+            f32::from(window_size.width),
+            f32::from(window_size.height),
+            if detached_footer {
+                crate::components::footer_chrome::current_main_menu_footer_height()
+            } else {
+                0.0
+            },
+            if detached_footer {
+                crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+            } else {
+                0.0
+            },
+            window.scale_factor(),
+        );
+
+        let footer = if in_agent_chat_mode {
+            self.render_agent_chat_window_footer(cx)
+        } else if self.selected_note_id.is_some() {
+            Some(self.render_editor_footer(
+                self.preview_enabled,
+                self.focus_mode,
+                self.window_hovered || self.force_hovered,
+                self.get_character_count(cx),
+                cx,
+            ))
+        } else {
+            None
+        };
+
+        let content = if in_agent_chat_mode {
+            self.render_agent_chat_surface(cx)
+        } else {
+            self.render_editor(cx).into_any_element()
+        };
+
+        let stage = if detached_footer {
+            div()
+                .id("notes-window-content-stage")
+                .w_full()
+                .h(px(regions.main_content.height))
+                .min_h(px(regions.main_content.height))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .rounded(px(crate::ui::chrome::LIQUID_GLASS_WINDOW_RADIUS_PX))
+                .when_some(vibrancy_bg, |d, bg| d.bg(bg))
+                .children(theme_background_gradients)
+                .child(content)
+                .into_any_element()
+        } else {
+            div()
+                .id("notes-window-content-stage")
+                .w_full()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .when_some(vibrancy_bg, |d, bg| d.bg(bg))
+                .children(theme_background_gradients)
+                .child(content)
+                .into_any_element()
+        };
 
         div()
             .id("notes-window-root")
@@ -175,8 +234,6 @@ impl Render for NotesApp {
             .flex_col()
             .size_full()
             .relative()
-            .when_some(vibrancy_bg, |d, bg| d.bg(bg))
-            .children(theme_background_gradients)
             .text_color(cx.theme().foreground)
             .track_focus(&self.focus_handle)
             .when(mouse_cursor_hidden, |d| d.cursor(CursorStyle::None))
@@ -205,11 +262,16 @@ impl Render for NotesApp {
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.handle_key_down(event, window, cx);
             }))
-            // Surface dispatch: Notes editor or embedded Agent Chat chat.
-            .when(!in_agent_chat_mode, |d| d.child(self.render_editor(cx)))
-            .when(in_agent_chat_mode, |d| {
-                d.child(self.render_agent_chat_surface(cx))
+            .child(stage)
+            .when(detached_footer, |d| {
+                d.child(
+                    div()
+                        .w_full()
+                        .h(px(regions.transparent_gap.height))
+                        .flex_none(),
+                )
             })
+            .when_some(footer, |d, footer| d.child(footer))
             .children(gpui_component::Root::render_dialog_layer(window, cx))
             .children(gpui_component::Root::render_notification_layer(window, cx))
     }

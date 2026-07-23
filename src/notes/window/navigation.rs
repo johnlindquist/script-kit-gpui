@@ -668,28 +668,90 @@ impl NotesApp {
             .unwrap_or((728.0, self.last_window_height.max(self.initial_height)));
         let metrics = style::adopted_metrics();
         let titlebar_height = metrics.titlebar_height;
-        let footer_height = metrics.footer_height;
+        let detached_footer = crate::footer_popup::glass_scroll_bands_active();
+        let footer_height = if detached_footer {
+            crate::components::footer_chrome::current_main_menu_footer_height()
+        } else {
+            metrics.footer_height
+        };
+        let footer_gap = if detached_footer {
+            crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+        } else {
+            0.0
+        };
+        let regions = crate::footer_popup::main_window_detached_footer_regions_gpui(
+            window_width,
+            window_height,
+            footer_height,
+            footer_gap,
+            1.0,
+        );
+        let stage_height = regions.main_content.height;
+        let content_parent = if detached_footer {
+            "NotesContentStage"
+        } else {
+            "NotesWindow"
+        };
         let search_height = if self.show_search { 40.0 } else { 0.0 };
         let toolbar_height = if self.show_format_toolbar { 36.0 } else { 0.0 };
         let content_top = titlebar_height + search_height + toolbar_height;
-        let editor_height = (window_height - content_top - footer_height).max(0.0);
+        let editor_height = (stage_height - content_top).max(0.0);
         let mut components = Vec::new();
 
         components.push(
             LayoutComponentInfo::new("NotesWindow", LayoutComponentType::Container)
                 .with_bounds(0.0, 0.0, window_width, window_height)
                 .with_visual_style(
-                    chrome_tokens::CHROME_LAYER_FLOATING,
-                    chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
-                    Some(chrome_tokens::LIQUID_GLASS_WINDOW_RADIUS_PX),
+                    if detached_footer {
+                        chrome_tokens::CHROME_LAYER_WINDOW_BACKDROP
+                    } else {
+                        chrome_tokens::CHROME_LAYER_FLOATING
+                    },
+                    if detached_footer {
+                        chrome_tokens::MATERIAL_NATIVE_WINDOW_BACKDROP
+                    } else {
+                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT
+                    },
+                    if detached_footer {
+                        None
+                    } else {
+                        Some(chrome_tokens::LIQUID_GLASS_WINDOW_RADIUS_PX)
+                    },
                 )
                 .with_visual_token("chrome.notesWindow")
                 .with_flex_column()
                 .with_depth(0)
                 .with_explanation(
-                    "Floating Notes window root measured from the resolved target bounds.",
+                    if detached_footer {
+                        "Single transparent Notes composition host containing a bounded glass stage, an exact desktop gutter, and floating glass footer capsules."
+                    } else {
+                        "Floating Notes window root measured from the resolved target bounds."
+                    },
                 ),
         );
+        if detached_footer {
+            components.push(
+                LayoutComponentInfo::new("NotesContentStage", LayoutComponentType::Container)
+                    .with_bounds(
+                        regions.main_content.x,
+                        regions.main_content.y,
+                        regions.main_content.width,
+                        regions.main_content.height,
+                    )
+                    .with_visual_style(
+                        chrome_tokens::CHROME_LAYER_FLOATING,
+                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
+                        Some(chrome_tokens::LIQUID_GLASS_WINDOW_RADIUS_PX),
+                    )
+                    .with_visual_token("chrome.notesContentStage")
+                    .with_flex_column()
+                    .with_depth(1)
+                    .with_parent("NotesWindow")
+                    .with_explanation(
+                        "Bounded Notes glass stage; its bottom edge stops before the desktop gutter.",
+                    ),
+            );
+        }
         components.push(
             LayoutComponentInfo::new("NotesTitlebar", LayoutComponentType::Header)
                 .with_bounds(0.0, 0.0, window_width, titlebar_height)
@@ -699,8 +761,8 @@ impl NotesApp {
                     Some(chrome_tokens::LIQUID_GLASS_PANEL_RADIUS_PX),
                 )
                 .with_visual_token("chrome.notesTitlebar")
-                .with_depth(1)
-                .with_parent("NotesWindow")
+                .with_depth(if detached_footer { 2 } else { 1 })
+                .with_parent(content_parent)
                 .with_explanation(
                     "Titlebar area that hosts note title and hover-revealed controls.",
                 ),
@@ -716,8 +778,8 @@ impl NotesApp {
                         Some(chrome_tokens::LIQUID_GLASS_CONTROL_RADIUS_PX),
                     )
                     .with_visual_token("chrome.notesSearch")
-                    .with_depth(1)
-                    .with_parent("NotesWindow")
+                    .with_depth(if detached_footer { 2 } else { 1 })
+                    .with_parent(content_parent)
                     .with_explanation("Editor find/search row shown by Cmd+F."),
             );
         }
@@ -737,8 +799,8 @@ impl NotesApp {
                         Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
                     )
                     .with_visual_token("chrome.notesFormatToolbar")
-                    .with_depth(1)
-                    .with_parent("NotesWindow")
+                    .with_depth(if detached_footer { 2 } else { 1 })
+                    .with_parent(content_parent)
                     .with_explanation(
                         "Formatting toolbar shown for rich-text and markdown actions.",
                     ),
@@ -763,30 +825,58 @@ impl NotesApp {
                 .with_visual_token("content.notesEditor")
                 .with_flex_column()
                 .with_flex_grow(1.0)
-                .with_depth(1)
-                .with_parent("NotesWindow")
+                .with_depth(if detached_footer { 2 } else { 1 })
+                .with_parent(content_parent)
                 .with_explanation(
                     "Primary Notes content region after titlebar/search/toolbar reservations.",
                 ),
         );
 
+        if detached_footer {
+            components.push(
+                LayoutComponentInfo::new("NotesFooterDesktopGutter", LayoutComponentType::Other)
+                    .with_bounds(
+                        regions.transparent_gap.x,
+                        regions.transparent_gap.y,
+                        regions.transparent_gap.width,
+                        regions.transparent_gap.height,
+                    )
+                    .with_depth(1)
+                    .with_parent("NotesWindow")
+                    .with_explanation(
+                        "Fully transparent 8-point desktop gutter separating the Notes stage from its floating controls.",
+                    ),
+            );
+        }
         components.push(
             LayoutComponentInfo::new("NotesFooter", LayoutComponentType::Panel)
                 .with_bounds(
-                    0.0,
-                    (window_height - footer_height).max(0.0),
-                    window_width,
-                    footer_height,
+                    regions.footer.x,
+                    regions.footer.y,
+                    regions.footer.width,
+                    regions.footer.height,
                 )
                 .with_visual_style(
-                    chrome_tokens::CHROME_LAYER_FUNCTIONAL,
-                    chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
+                    if detached_footer {
+                        chrome_tokens::CHROME_LAYER_FLOATING
+                    } else {
+                        chrome_tokens::CHROME_LAYER_FUNCTIONAL
+                    },
+                    if detached_footer {
+                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT
+                    } else {
+                        chrome_tokens::MATERIAL_SOLID_THEME_TOKEN
+                    },
                     Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
                 )
                 .with_visual_token("chrome.notesFooter")
                 .with_depth(1)
                 .with_parent("NotesWindow")
-                .with_explanation("Status/footer strip with save state, counts, and mode hints."),
+                .with_explanation(if detached_footer {
+                    "Transparent positioning rail containing discrete native glass capsules; it has no full-width footer surface."
+                } else {
+                    "Status/footer strip with save state, counts, and mode hints."
+                }),
         );
 
         if self.command_bar.is_open() {

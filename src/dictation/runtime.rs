@@ -199,6 +199,22 @@ pub fn is_dictation_stopping() -> bool {
     STOP_IN_FLIGHT.lock().is_some()
 }
 
+/// Delivery target owned by the stop coordinator while the live session has
+/// already been moved out of [`SESSION`]. Rapid toggle handling uses this to
+/// restart against the same surface instead of re-resolving against a window
+/// topology that may be temporarily concealed during the stop transition.
+pub fn dictation_stop_target() -> Option<DictationTarget> {
+    STOP_IN_FLIGHT.lock().as_ref().map(|state| state.target)
+}
+
+/// Toggle parity for shortcut requests received while capture teardown owns
+/// the session. `false -> true` queues a restart after stop; the next request
+/// flips it back to `false`. Keeping this pure makes the last-intent rule
+/// independently testable without a microphone.
+pub(crate) fn toggled_post_stop_restart(pending: bool) -> bool {
+    !pending
+}
+
 pub fn is_dictation_busy() -> bool {
     is_dictation_recording() || is_dictation_stopping()
 }

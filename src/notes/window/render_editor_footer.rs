@@ -103,17 +103,24 @@ impl NotesApp {
             Some(leading),
             buttons,
         );
+        let glass_buttons_enabled = crate::components::footer_chrome::glass_capsules_enabled();
 
         div()
             .child(hint_strip)
             .when(in_focus_mode && !window_hovered, |d| d.opacity(0.))
-            .when(in_focus_mode && window_hovered, |d| {
-                d.opacity(OPACITY_DISABLED)
-            })
-            .when(!in_focus_mode && !window_hovered, |d| {
-                d.opacity(OPACITY_SUBTLE)
-            })
-            .when(!in_focus_mode && window_hovered, |d| d.opacity(1.0))
+            .when(
+                !glass_buttons_enabled && in_focus_mode && window_hovered,
+                |d| d.opacity(OPACITY_DISABLED),
+            )
+            .when(
+                !glass_buttons_enabled && !in_focus_mode && !window_hovered,
+                |d| d.opacity(OPACITY_SUBTLE),
+            )
+            .when(
+                (glass_buttons_enabled && (!in_focus_mode || window_hovered))
+                    || (!glass_buttons_enabled && !in_focus_mode && window_hovered),
+                |d| d.opacity(1.0),
+            )
             .into_any_element()
     }
 }

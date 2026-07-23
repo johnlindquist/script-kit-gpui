@@ -2000,7 +2000,7 @@ impl Render for DictationOverlay {
             native_footer_spacer().into_any_element()
         };
 
-        let inner = if matches!(phase, DictationSessionPhase::Idle) {
+        let main_inner = if matches!(phase, DictationSessionPhase::Idle) {
             div()
         } else {
             div()
@@ -2025,11 +2025,26 @@ impl Render for DictationOverlay {
                         .justify_center()
                         .child(render_glass_signal_band(center)),
                 )
-                .child(footer_rail)
         };
 
         // Same capsule radius for all phases; confirming swaps content inline.
         let radius = OVERLAY_RADIUS_PX;
+        let window_size = window.bounds().size;
+        let detached_regions = crate::footer_popup::main_window_detached_footer_regions_gpui(
+            f32::from(window_size.width),
+            f32::from(window_size.height),
+            if glass_in_window_footer {
+                crate::components::footer_chrome::current_main_menu_footer_height()
+            } else {
+                0.0
+            },
+            if glass_in_window_footer {
+                crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+            } else {
+                0.0
+            },
+            window.scale_factor(),
+        );
 
         // Capsule chrome only; the signal band uses the main-menu selected-row fill
         // and the action rail carries the launcher window surface underneath.
@@ -2039,18 +2054,45 @@ impl Render for DictationOverlay {
             .items_center()
             .justify_center()
             .w_full()
-            .h_full()
+            .when(glass_in_window_footer, |d| {
+                d.h(px(detached_regions.main_content.height))
+                    .min_h(px(detached_regions.main_content.height))
+            })
+            .when(!glass_in_window_footer, |d| d.h_full())
             .relative()
             .overflow_hidden()
             .rounded(px(radius))
             .bg(window_background)
             .children(theme_background_gradients)
             .border_1()
-            .border_color(border_color)
-            .child(inner);
+            .border_color(border_color);
 
-        // Outer root claims the full popup content bounds so no GPUI inset
-        // gap remains between the pill and the native window frame.
+        let composition = if glass_in_window_footer {
+            div()
+                .w_full()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(surface.child(main_inner))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(detached_regions.transparent_gap.height))
+                        .flex_none(),
+                )
+                .child(footer_rail)
+                .into_any_element()
+        } else {
+            surface
+                .child(main_inner)
+                .child(footer_rail)
+                .into_any_element()
+        };
+
+        // The physical window is one atomic composition host. In glass mode
+        // its bounded content capsule ends above an 8pt transparent desktop
+        // gutter; the shared per-button glass footer remains in the same
+        // NSWindow below it, so no follower window can lag during a drag.
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_key_down))
@@ -2063,7 +2105,7 @@ impl Render for DictationOverlay {
             .w_full()
             .h_full()
             .overflow_hidden()
-            .child(surface)
+            .child(composition)
     }
 }
 
@@ -2823,11 +2865,21 @@ fn configure_overlay_window_surface(window: &mut Window) {
                     );
                     return;
                 }
-                let () = msg_send![layer, setCornerRadius: OVERLAY_RADIUS_PX as f64];
-                let () = msg_send![layer, setMasksToBounds: YES];
+                if glass_mode {
+                    // The physical NSWindow is only a transparent composition
+                    // host now. Clipping its full bounds would reconnect the
+                    // bounded content capsule to the floating footer strip.
+                    // The GPUI stage and native backdrop own their own radius.
+                    let () = msg_send![layer, setCornerRadius: 0.0f64];
+                    let () = msg_send![layer, setMasksToBounds: NO];
+                } else {
+                    let () = msg_send![layer, setCornerRadius: OVERLAY_RADIUS_PX as f64];
+                    let () = msg_send![layer, setMasksToBounds: YES];
+                }
                 tracing::info!(
                     category = "DICTATION",
                     radius = OVERLAY_RADIUS_PX,
+                    detached_footer = glass_mode,
                     "Configured dictation overlay native surface"
                 );
             }
@@ -3266,23 +3318,82 @@ pub fn automation_layout_info(
         });
     let width = bounds.width as f32;
     let height = bounds.height as f32;
-    let footer_height =
-        crate::components::footer_chrome::footer_rail_chrome(&get_cached_theme()).height_px;
+    let theme = get_cached_theme();
+    let detached_footer =
+        crate::platform::tahoe_liquid_glass_available() && theme.is_vibrancy_enabled();
+    let footer_height = crate::components::footer_chrome::footer_rail_chrome(&theme).height_px;
+    let footer_gap = if detached_footer {
+        crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+    } else {
+        0.0
+    };
+    let regions = crate::footer_popup::main_window_detached_footer_regions_gpui(
+        width,
+        height,
+        footer_height,
+        footer_gap,
+        1.0,
+    );
+    let stage_height = regions.main_content.height;
+    let content_parent = if detached_footer {
+        "DictationContentStage"
+    } else {
+        "DictationOverlayWindow"
+    };
     let header_top = 5.0;
     let header_height = OVERLAY_HEADER_ROW_HEIGHT_PX;
     let caption_top = header_top + header_height;
-    let caption_height = (height - footer_height - caption_top).max(0.0);
+    let caption_height = (stage_height - caption_top).max(0.0);
 
-    let components = vec![
-        LayoutComponentInfo::new("DictationOverlayWindow", LayoutComponentType::Container)
-            .with_bounds(0.0, 0.0, width, height)
-            .with_visual_style(
-                chrome_tokens::CHROME_LAYER_FLOATING,
-                chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
-                Some(OVERLAY_RADIUS_PX),
-            )
-            .with_hit_bounds(0.0, 0.0, width, height)
-            .with_padding(0.0, 0.0, 0.0, 0.0),
+    let mut components =
+        vec![
+            LayoutComponentInfo::new("DictationOverlayWindow", LayoutComponentType::Container)
+                .with_bounds(0.0, 0.0, width, height)
+                .with_visual_style(
+                    if detached_footer {
+                        chrome_tokens::CHROME_LAYER_WINDOW_BACKDROP
+                    } else {
+                        chrome_tokens::CHROME_LAYER_FLOATING
+                    },
+                    if detached_footer {
+                        chrome_tokens::MATERIAL_NATIVE_WINDOW_BACKDROP
+                    } else {
+                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT
+                    },
+                    if detached_footer {
+                        None
+                    } else {
+                        Some(OVERLAY_RADIUS_PX)
+                    },
+                )
+                .with_hit_bounds(0.0, 0.0, width, height)
+                .with_padding(0.0, 0.0, 0.0, 0.0),
+        ];
+    if detached_footer {
+        components.push(
+            LayoutComponentInfo::new("DictationContentStage", LayoutComponentType::Container)
+                .with_bounds(
+                    regions.main_content.x,
+                    regions.main_content.y,
+                    regions.main_content.width,
+                    regions.main_content.height,
+                )
+                .with_visual_style(
+                    chrome_tokens::CHROME_LAYER_FLOATING,
+                    chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
+                    Some(OVERLAY_RADIUS_PX),
+                )
+                .with_hit_bounds(
+                    regions.main_content.x,
+                    regions.main_content.y,
+                    regions.main_content.width,
+                    regions.main_content.height,
+                )
+                .with_depth(1)
+                .with_parent("DictationOverlayWindow"),
+        );
+    }
+    components.extend([
         LayoutComponentInfo::new("DictationHeaderRow", LayoutComponentType::Container)
             .with_bounds(0.0, header_top, width, header_height)
             .with_visual_style(
@@ -3296,7 +3407,9 @@ pub fn automation_layout_info(
                 OVERLAY_HORIZONTAL_PADDING_PX,
                 0.0,
                 OVERLAY_HORIZONTAL_PADDING_PX,
-            ),
+            )
+            .with_depth(if detached_footer { 2 } else { 1 })
+            .with_parent(content_parent),
         LayoutComponentInfo::new("DictationTimerSlot", LayoutComponentType::Other)
             .with_bounds(
                 OVERLAY_HORIZONTAL_PADDING_PX,
@@ -3309,7 +3422,9 @@ pub fn automation_layout_info(
                 chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
                 None,
             )
-            .with_padding(0.0, 0.0, 0.0, 0.0),
+            .with_padding(0.0, 0.0, 0.0, 0.0)
+            .with_depth(if detached_footer { 2 } else { 1 })
+            .with_parent(content_parent),
         LayoutComponentInfo::new("DictationDestinationChips", LayoutComponentType::Button)
             .with_bounds(
                 TARGET_BADGE_SLOT_WIDTH_PX + OVERLAY_HORIZONTAL_PADDING_PX,
@@ -3330,7 +3445,9 @@ pub fn automation_layout_info(
                     .max(0.0),
                 header_height,
             )
-            .with_gap(6.0),
+            .with_gap(6.0)
+            .with_depth(if detached_footer { 2 } else { 1 })
+            .with_parent(content_parent),
         LayoutComponentInfo::new("DictationTargetBadge", LayoutComponentType::Button)
             .with_bounds(
                 width - TARGET_BADGE_SLOT_WIDTH_PX - OVERLAY_HORIZONTAL_PADDING_PX,
@@ -3349,7 +3466,9 @@ pub fn automation_layout_info(
                 TARGET_BADGE_SLOT_WIDTH_PX,
                 header_height,
             )
-            .with_padding(2.0, 8.0, 2.0, 8.0),
+            .with_padding(2.0, 8.0, 2.0, 8.0)
+            .with_depth(if detached_footer { 2 } else { 1 })
+            .with_parent(content_parent),
         LayoutComponentInfo::new("DictationSignalBand", LayoutComponentType::Container)
             .with_bounds(0.0, caption_top, width, caption_height)
             .with_visual_style(
@@ -3363,7 +3482,9 @@ pub fn automation_layout_info(
                 OVERLAY_HORIZONTAL_PADDING_PX,
                 6.0,
                 OVERLAY_HORIZONTAL_PADDING_PX,
-            ),
+            )
+            .with_depth(if detached_footer { 2 } else { 1 })
+            .with_parent(content_parent),
         LayoutComponentInfo::new("DictationWaveform", LayoutComponentType::Container)
             .with_bounds(
                 (width - 48.0) / 2.0,
@@ -3376,17 +3497,65 @@ pub fn automation_layout_info(
                 chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
                 Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
             )
-            .with_gap(WAVEFORM_BAR_GAP_PX),
+            .with_gap(WAVEFORM_BAR_GAP_PX)
+            .with_depth(if detached_footer { 2 } else { 1 })
+            .with_parent(content_parent),
+    ]);
+    if detached_footer {
+        components.push(
+            LayoutComponentInfo::new(
+                "DictationFooterDesktopGutter",
+                LayoutComponentType::Other,
+            )
+            .with_bounds(
+                regions.transparent_gap.x,
+                regions.transparent_gap.y,
+                regions.transparent_gap.width,
+                regions.transparent_gap.height,
+            )
+            .with_depth(1)
+            .with_parent("DictationOverlayWindow")
+            .with_explanation(
+                "Fully transparent 8-point desktop gutter separating the dictation capsule from its floating controls.",
+            ),
+        );
+    }
+    components.push(
         LayoutComponentInfo::new("DictationFooterRail", LayoutComponentType::Panel)
-            .with_bounds(0.0, height - footer_height, width, footer_height)
+            .with_bounds(
+                regions.footer.x,
+                regions.footer.y,
+                regions.footer.width,
+                regions.footer.height,
+            )
             .with_visual_style(
-                chrome_tokens::CHROME_LAYER_FUNCTIONAL,
-                chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
+                if detached_footer {
+                    chrome_tokens::CHROME_LAYER_FLOATING
+                } else {
+                    chrome_tokens::CHROME_LAYER_FUNCTIONAL
+                },
+                if detached_footer {
+                    chrome_tokens::MATERIAL_NS_VISUAL_EFFECT
+                } else {
+                    chrome_tokens::MATERIAL_SOLID_THEME_TOKEN
+                },
                 Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
             )
-            .with_hit_bounds(0.0, height - footer_height, width, footer_height)
-            .with_padding(0.0, 0.0, 0.0, 0.0),
-    ];
+            .with_hit_bounds(
+                regions.footer.x,
+                regions.footer.y,
+                regions.footer.width,
+                regions.footer.height,
+            )
+            .with_padding(0.0, 0.0, 0.0, 0.0)
+            .with_depth(1)
+            .with_parent("DictationOverlayWindow")
+            .with_explanation(if detached_footer {
+                "Transparent positioning rail containing discrete native glass capsules; it has no full-width footer surface."
+            } else {
+                "In-window dictation action rail."
+            }),
+    );
 
     LayoutInfo {
         window_width: width,

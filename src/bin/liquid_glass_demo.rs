@@ -1,292 +1,183 @@
-//! Liquid glass proof of concept: recreates the macOS 26 Tahoe Spotlight
-//! glass morph (category circles gooey-splitting out of the search bar,
-//! getting absorbed back in while typing, results panel flowing out below).
-//!
-//! GPUI owns its own Metal pixels, so the real SwiftUI `glassEffect`
-//! refraction is not available. Instead:
-//! - `WindowBackgroundAppearance::Blurred` gives a real frosted backdrop
-//!   that follows the alpha of what we draw (desktop blurs only behind
-//!   the shapes).
-//! - The gooey merge is genuine: all glass shapes live in one signed
-//!   distance field combined with a polynomial smooth-min, and the merged
-//!   contour is extracted with marching squares each frame and painted as
-//!   a single liquid path.
-//! - Springs (underdamped) drive the choreography for the bouncy feel.
-//!
-//! Run with: cargo run --bin liquid-glass-demo
+#![allow(unexpected_cfgs)] // objc 0.2 macros still probe the retired `cargo-clippy` cfg.
 
-use std::collections::{HashMap, HashSet};
+//! Pixel-matched macOS 26 Spotlight detached-glass prototype.
+//!
+//! GPUI owns one 776 x 88 pt transparent window and the animation clock. Rust
+//! hosts real `NSGlassEffectView`s in one `NSGlassEffectContainerView` beneath
+//! GPUI's transparent Metal surface. The five visible pieces are therefore
+//! sibling views in one native window, so AppKit drags them atomically.
+//!
+//! Run with:
+//! `./scripts/agentic/agent-cargo.sh run --bin liquid-glass-demo`
+
 use std::time::Instant;
 
 use gpui::{
-    canvas, div, hsla, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
-    AnimationExt, Bounds, Context, FocusHandle, KeyDownEvent, PathBuilder, Render, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+    div, prelude::*, px, size, AnimationExt, Bounds, Context, FocusHandle, KeyDownEvent, Render,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
 };
 use gpui_platform::application;
-use script_kit_gpui::effects::BackgroundEffect;
 
-// ---------------------------------------------------------------------------
-// Layout constants (window coordinates)
-// ---------------------------------------------------------------------------
+// Measured from the 1552 x 176 Retina Spotlight reference (points below).
+const WINDOW_W: f32 = 776.0;
+const WINDOW_H: f32 = 88.0;
+const BAR_X: f32 = 41.0;
+const BAR_Y: f32 = 20.0;
+const ELEMENT_H: f32 = 56.0;
+const EXPANDED_BAR_W: f32 = 640.0;
+const DETACHED_BAR_W: f32 = 384.0;
+const CIRCLE_DIAMETER: f32 = 56.0;
+const CIRCLE_R: f32 = CIRCLE_DIAMETER / 2.0;
+const ITEM_GAP: f32 = 8.0;
+const CIRCLE_PITCH: f32 = CIRCLE_DIAMETER + ITEM_GAP;
 
-const BAR_X: f32 = 40.0;
-const BAR_Y: f32 = 50.0;
-const BAR_H: f32 = 58.0;
-const BAR_W_IDLE: f32 = 500.0;
-const BAR_W_OPEN: f32 = 796.0;
-const CIRCLE_R: f32 = 29.0;
-const CIRCLE_PITCH: f32 = 74.0; // diameter 58 + gap 16
-const PANEL_TOP: f32 = BAR_Y + BAR_H - 10.0; // overlaps the bar so the field merges them
-const ROW_H: f32 = 44.0;
-const MAX_ROWS: usize = 5;
-const WINDOW_W: f32 = 880.0;
-const WINDOW_H: f32 = 460.0;
+const AUTO_SPLIT_DELAY_SECS: f32 = 0.303;
+// Start the spring before the first visible lobe: its first ~40 ms remain
+// sub-pixel, yielding the measured five-frame visual hold after contraction.
+const CIRCLE_LAUNCH_DELAY_SECS: f32 = 0.040;
+const BRIDGE_HOLD_SECS: f32 = 0.150;
+const BRIDGE_RETRACT_SECS: f32 = 0.290;
+const BRIDGE_SPACING: f32 = 18.0;
+const SETTLED_SPACING: f32 = 4.0;
 
-const CATEGORY_ICONS: [&str; 4] = ["🏬", "📁", "🗂", "📄"];
+const CATEGORY_SYMBOLS: [&str; 4] = ["appstore", "folder", "square.3.layers.3d", "doc.on.doc"];
 
-const APPS: [(&str, &str); 12] = [
-    ("Safari", "🧭"),
-    ("Terminal", "🖥"),
-    ("Notes", "📝"),
-    ("Music", "🎵"),
-    ("Mail", "✉️"),
-    ("Messages", "💬"),
-    ("Maps", "🗺"),
-    ("Calendar", "📅"),
-    ("Photos", "🌄"),
-    ("Finder", "😀"),
-    ("Settings", "⚙️"),
-    ("Calculator", "🧮"),
-];
-
-fn circle_slot_x(i: usize) -> f32 {
-    BAR_X + BAR_W_IDLE + 16.0 + CIRCLE_R + i as f32 * CIRCLE_PITCH
+fn circle_target_x(index: usize) -> f32 {
+    BAR_X + DETACHED_BAR_W + ITEM_GAP + CIRCLE_R + index as f32 * CIRCLE_PITCH
 }
 
-/// Where circles hide when absorbed: tucked inside the bar's right end.
-const CIRCLE_HIDDEN_X: f32 = BAR_X + BAR_W_IDLE - 30.0;
-
-// ---------------------------------------------------------------------------
-// Springs
-// ---------------------------------------------------------------------------
-
+#[derive(Clone, Copy)]
 struct Spring {
-    pos: f32,
-    vel: f32,
+    position: f32,
+    velocity: f32,
     target: f32,
     stiffness: f32,
     damping: f32,
 }
 
 impl Spring {
-    fn new(pos: f32, stiffness: f32, damping: f32) -> Self {
+    fn new(position: f32, stiffness: f32, damping: f32) -> Self {
         Self {
-            pos,
-            vel: 0.0,
-            target: pos,
+            position,
+            velocity: 0.0,
+            target: position,
             stiffness,
             damping,
         }
     }
 
     fn step(&mut self, dt: f32) {
-        let n = ((dt / 0.004).ceil() as usize).clamp(1, 32);
-        let h = dt / n as f32;
-        for _ in 0..n {
-            let accel = self.stiffness * (self.target - self.pos) - self.damping * self.vel;
-            self.vel += accel * h;
-            self.pos += self.vel * h;
+        // Fixed-size substeps keep the spring stable through an occasional long
+        // render interval without changing the intended 120 Hz choreography.
+        let steps = ((dt / (1.0 / 240.0)).ceil() as usize).clamp(1, 32);
+        let h = dt / steps as f32;
+        for _ in 0..steps {
+            let acceleration =
+                self.stiffness * (self.target - self.position) - self.damping * self.velocity;
+            self.velocity += acceleration * h;
+            self.position += self.velocity * h;
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Signed distance field for the merged glass
-// ---------------------------------------------------------------------------
-
-struct GlassField {
-    bar: (f32, f32, f32, f32),     // center x, center y, half w, half h
-    circles: Vec<(f32, f32, f32)>, // center x, center y, radius
-    panel: Option<(f32, f32, f32, f32, f32)>, // cx, cy, half w, half h, corner radius
-    blend: f32,
+fn smoothstep(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
 }
 
-fn sd_round_rect(x: f32, y: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
-    let qx = (x - cx).abs() - (hw - r);
-    let qy = (y - cy).abs() - (hh - r);
-    let ax = qx.max(0.0);
-    let ay = qy.max(0.0);
-    (ax * ax + ay * ay).sqrt() + qx.max(qy).min(0.0) - r
-}
-
-fn smin(a: f32, b: f32, k: f32) -> f32 {
-    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
-    b * (1.0 - h) + a * h - k * h * (1.0 - h)
-}
-
-impl GlassField {
-    fn eval(&self, x: f32, y: f32) -> f32 {
-        let (bx, by, bhw, bhh) = self.bar;
-        let mut d = sd_round_rect(x, y, bx, by, bhw, bhh, bhh); // capsule
-        for &(cx, cy, r) in &self.circles {
-            let dc = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() - r;
-            d = smin(d, dc, self.blend);
-        }
-        if let Some((pcx, pcy, phw, phh, pr)) = self.panel {
-            let dp = sd_round_rect(x, y, pcx, pcy, phw, phh, pr);
-            d = smin(d, dp, self.blend);
-        }
-        d
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Marching squares: extract iso-contour loops of the field
-// ---------------------------------------------------------------------------
-
-type EdgeKey = (usize, usize, u8); // (i, j, 0 = horizontal edge, 1 = vertical edge)
-
-fn contour_loops(field: &GlassField, w: f32, h: f32, cell: f32) -> Vec<Vec<(f32, f32)>> {
-    let nx = (w / cell).ceil() as usize + 1;
-    let ny = (h / cell).ceil() as usize + 1;
-    let mut grid = vec![0.0f32; nx * ny];
-    for j in 0..ny {
-        for i in 0..nx {
-            grid[j * nx + i] = field.eval(i as f32 * cell, j as f32 * cell);
-        }
-    }
-
-    let mut pts: HashMap<EdgeKey, (f32, f32)> = HashMap::new();
-    let mut adj: HashMap<EdgeKey, Vec<EdgeKey>> = HashMap::new();
-    let interp = |a: f32, b: f32| (a / (a - b)).clamp(0.0, 1.0);
-
-    for j in 0..ny - 1 {
-        for i in 0..nx - 1 {
-            let v00 = grid[j * nx + i];
-            let v10 = grid[j * nx + i + 1];
-            let v01 = grid[(j + 1) * nx + i];
-            let v11 = grid[(j + 1) * nx + i + 1];
-            let mut case = 0u8;
-            if v00 < 0.0 {
-                case |= 1
-            }
-            if v10 < 0.0 {
-                case |= 2
-            }
-            if v11 < 0.0 {
-                case |= 4
-            }
-            if v01 < 0.0 {
-                case |= 8
-            }
-            if case == 0 || case == 15 {
-                continue;
-            }
-            let x0 = i as f32 * cell;
-            let y0 = j as f32 * cell;
-            let top = ((i, j, 0u8), (x0 + interp(v00, v10) * cell, y0));
-            let bottom = ((i, j + 1, 0u8), (x0 + interp(v01, v11) * cell, y0 + cell));
-            let left = ((i, j, 1u8), (x0, y0 + interp(v00, v01) * cell));
-            let right = ((i + 1, j, 1u8), (x0 + cell, y0 + interp(v10, v11) * cell));
-
-            let mut link = |a: (EdgeKey, (f32, f32)), b: (EdgeKey, (f32, f32))| {
-                pts.insert(a.0, a.1);
-                pts.insert(b.0, b.1);
-                adj.entry(a.0).or_default().push(b.0);
-                adj.entry(b.0).or_default().push(a.0);
-            };
-
-            match case {
-                1 | 14 => link(left, top),
-                2 | 13 => link(top, right),
-                3 | 12 => link(left, right),
-                4 | 11 => link(right, bottom),
-                6 | 9 => link(top, bottom),
-                7 | 8 => link(left, bottom),
-                5 => {
-                    link(left, top);
-                    link(right, bottom);
-                }
-                10 => {
-                    link(top, right);
-                    link(left, bottom);
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    let ordered = |a: EdgeKey, b: EdgeKey| if a <= b { (a, b) } else { (b, a) };
-    let mut used: HashSet<(EdgeKey, EdgeKey)> = HashSet::new();
-    let mut loops = Vec::new();
-    let keys: Vec<EdgeKey> = adj.keys().copied().collect();
-    for start in keys {
-        let neighbors = adj[&start].clone();
-        for first in neighbors {
-            if used.contains(&ordered(start, first)) {
-                continue;
-            }
-            used.insert(ordered(start, first));
-            let mut chain = vec![start, first];
-            let (mut prev, mut cur) = (start, first);
-            loop {
-                let next = adj[&cur]
-                    .iter()
-                    .copied()
-                    .find(|&n| n != prev && !used.contains(&ordered(cur, n)));
-                match next {
-                    Some(n) => {
-                        used.insert(ordered(cur, n));
-                        prev = cur;
-                        cur = n;
-                        if n == start {
-                            break;
-                        }
-                        chain.push(n);
-                    }
-                    None => break,
-                }
-            }
-            if chain.len() >= 4 {
-                loops.push(chain.iter().map(|k| pts[k]).collect::<Vec<_>>());
-            }
-        }
-    }
-    loops
-}
-
-/// One round of Chaikin corner cutting (closed polygon) to soften grid stairs.
-fn chaikin(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
-    let n = points.len();
-    let mut out = Vec::with_capacity(n * 2);
-    for i in 0..n {
-        let a = points[i];
-        let b = points[(i + 1) % n];
-        out.push((0.75 * a.0 + 0.25 * b.0, 0.75 * a.1 + 0.25 * b.1));
-        out.push((0.25 * a.0 + 0.75 * b.0, 0.25 * a.1 + 0.75 * b.1));
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// The demo view
-// ---------------------------------------------------------------------------
-
-struct LiquidGlassDemo {
-    query: String,
-    selection: usize,
+struct SpotlightGlassDemo {
     focus_handle: FocusHandle,
     started: Instant,
     last_frame: Instant,
-    bar_w: Spring,
-    circles: Vec<Spring>, // progress 0..1 per category circle
-    panel_h: Spring,
+    transition_started: Option<Instant>,
+    detached: bool,
+    auto_split_started: bool,
+    bar_width: Spring,
+    circle_progress: Spring,
     shadow_disabled: bool,
-    effect: BackgroundEffect,
-    last_key: Instant,
     #[cfg(target_os = "macos")]
     native: Option<native_glass::NativeGlass>,
+}
+
+impl SpotlightGlassDemo {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            started: Instant::now(),
+            last_frame: Instant::now(),
+            transition_started: None,
+            detached: false,
+            auto_split_started: false,
+            // Tuned to the source: fast front-loaded contraction, a restrained
+            // 5-7% overshoot, then target lock inside roughly 500 ms.
+            bar_width: Spring::new(EXPANDED_BAR_W, 320.0, 24.0),
+            // The material train develops for roughly 300 ms after launch;
+            // using the bar's faster spring makes the circles separate three
+            // source frames too early and reveals their symbols prematurely.
+            circle_progress: Spring::new(0.0, 130.0, 16.5),
+            shadow_disabled: false,
+            #[cfg(target_os = "macos")]
+            native: None,
+        }
+    }
+
+    fn set_detached(&mut self, detached: bool) {
+        self.detached = detached;
+        self.transition_started = Some(Instant::now());
+        self.bar_width.target = if detached {
+            DETACHED_BAR_W
+        } else {
+            EXPANDED_BAR_W
+        };
+        // The source contracts the capsule for five frames before the first
+        // material lobe appears. `tick` launches the circles after that hold.
+        self.circle_progress.target = 0.0;
+    }
+
+    fn tick(&mut self) {
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().clamp(0.0, 0.05);
+        self.last_frame = now;
+
+        if !self.auto_split_started && self.started.elapsed().as_secs_f32() >= AUTO_SPLIT_DELAY_SECS
+        {
+            self.auto_split_started = true;
+            self.set_detached(true);
+        }
+
+        if self.detached
+            && self
+                .transition_started
+                .is_some_and(|started| started.elapsed().as_secs_f32() >= CIRCLE_LAUNCH_DELAY_SECS)
+        {
+            self.circle_progress.target = 1.0;
+        }
+
+        self.bar_width.step(dt);
+        self.circle_progress.step(dt);
+    }
+
+    fn container_spacing(&self) -> f32 {
+        if !self.detached {
+            return BRIDGE_SPACING;
+        }
+        let elapsed = self
+            .transition_started
+            .map(|started| started.elapsed().as_secs_f32())
+            .unwrap_or_default();
+        let retract =
+            smoothstep((elapsed - BRIDGE_HOLD_SECS) / BRIDGE_RETRACT_SECS.max(f32::EPSILON));
+        BRIDGE_SPACING + (SETTLED_SPACING - BRIDGE_SPACING) * retract
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "enter" | "space" => self.set_detached(!self.detached),
+            "escape" => cx.quit(),
+            _ => return,
+        }
+        cx.notify();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -298,55 +189,48 @@ fn ns_view_of(window: &Window) -> Option<cocoa::base::id> {
     Some(appkit.ns_view.as_ptr() as cocoa::base::id)
 }
 
-/// The window is almost entirely transparent; macOS would draw a full-rect
-/// drop shadow behind it (the fork keeps a 0.0001-alpha background to
-/// preserve shadows), which reads as a dark veil. Kill the shadow entirely.
 #[cfg(target_os = "macos")]
-fn try_disable_window_shadow(window: &Window) -> bool {
+fn disable_outer_window_shadow(window: &Window) -> bool {
     use cocoa::base::{id, NO};
     use objc::{msg_send, sel, sel_impl};
+
     let Some(ns_view) = ns_view_of(window) else {
         return false;
     };
-    // SAFETY: ns_view belongs to the live GPUI window on the AppKit main
-    // thread; `-[NSView window]` and `-[NSWindow setHasShadow:]` are standard.
+    // SAFETY: GPUI renders and invokes this on the live AppKit main thread.
     unsafe {
         let ns_window: id = msg_send![ns_view, window];
         if ns_window.is_null() {
             return false;
         }
         let _: () = msg_send![ns_window, setHasShadow: NO];
+        let _: () = msg_send![ns_window, setOpaque: NO];
         true
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn try_disable_window_shadow(_window: &Window) -> bool {
+fn disable_outer_window_shadow(_window: &Window) -> bool {
     true
 }
 
-/// Hand the in-flight mouse-down to AppKit as a native window drag so the
-/// borderless window can be moved from anywhere.
 #[cfg(target_os = "macos")]
 fn start_native_window_drag(window: &Window) {
     use cocoa::base::{id, nil};
     use objc::{msg_send, sel, sel_impl};
+
     let Some(ns_view) = ns_view_of(window) else {
         return;
     };
-    // SAFETY: main thread; `-[NSWindow performWindowDragWithEvent:]` with the
-    // application's current event is the standard borderless-drag pattern.
+    // SAFETY: standard borderless-window drag handoff on the AppKit main thread.
     unsafe {
         let ns_window: id = msg_send![ns_view, window];
-        if ns_window.is_null() {
-            return;
-        }
         let app: id = cocoa::appkit::NSApp();
-        if app == nil {
+        if ns_window == nil || app == nil {
             return;
         }
         let event: id = msg_send![app, currentEvent];
-        if !event.is_null() {
+        if event != nil {
             let _: () = msg_send![ns_window, performWindowDragWithEvent: event];
         }
     }
@@ -355,363 +239,432 @@ fn start_native_window_drag(window: &Window) {
 #[cfg(not(target_os = "macos"))]
 fn start_native_window_drag(_window: &Window) {}
 
-/// Real liquid glass on macOS 26: AppKit `NSGlassEffectView`s (genuine
-/// refraction of whatever is behind the window) hosted in an
-/// `NSGlassEffectContainerView` (native gooey shape merging), inserted
-/// *below* GPUI's Metal view — the same slot the fork uses for its blur
-/// view — so GPUI text/icons composite on top, unrefracted. Classes are
-/// resolved at runtime; on older macOS we return None and the demo keeps
-/// its CPU-side SDF glass.
 #[cfg(target_os = "macos")]
 mod native_glass {
-    use cocoa::base::{id, NO, YES};
-    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use cocoa::base::{id, nil, NO, YES};
+    use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
     use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    use super::{BAR_X, BAR_Y, CATEGORY_SYMBOLS, CIRCLE_R, ELEMENT_H};
 
     pub struct NativeGlass {
         content_view: id,
-        pub bar: id,
-        pub circles: Vec<id>,
-        pub panel: id,
+        container: id,
+        bar: id,
+        circles: Vec<id>,
+        search_icon: id,
+        search_label: id,
+        caret: id,
+        category_icons: Vec<id>,
     }
 
-    pub fn setup(gpui_view: id) -> Option<NativeGlass> {
-        let glass_cls = Class::get("NSGlassEffectView")?;
-        let container_cls = Class::get("NSGlassEffectContainerView")?;
-        let nsview_cls = Class::get("NSView")?;
-        // SAFETY: main thread; standard AppKit alloc/init and view hierarchy
-        // calls; `gpui_view` is the live GPUI Metal view inside contentView.
-        unsafe {
-            let ns_window: id = msg_send![gpui_view, window];
-            if ns_window.is_null() {
-                return None;
-            }
-            let content_view: id = msg_send![ns_window, contentView];
-            let bounds: NSRect = msg_send![content_view, bounds];
-            let resize_mask: u64 = (1 << 1) | (1 << 4); // width + height sizable
+    fn ns_string(value: &str) -> id {
+        unsafe { NSString::alloc(nil).init_str(value) }
+    }
 
-            let container: id = msg_send![container_cls, alloc];
-            let container: id = msg_send![container, initWithFrame: bounds];
-            let _: () = msg_send![container, setAutoresizingMask: resize_mask];
-            let _: () = msg_send![container, setSpacing: 24.0f64];
-
-            let inner: id = msg_send![nsview_cls, alloc];
-            let inner: id = msg_send![inner, initWithFrame: bounds];
-            let _: () = msg_send![inner, setAutoresizingMask: resize_mask];
-            let _: () = msg_send![container, setContentView: inner];
-
-            let make_glass = || -> id {
-                let v: id = msg_send![glass_cls, alloc];
-                let v: id = msg_send![
-                    v,
-                    initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0))
-                ];
-                let _: () = msg_send![v, setHidden: YES];
-                let _: () = msg_send![inner, addSubview: v];
-                v
-            };
-            let bar = make_glass();
-            let circles = (0..4).map(|_| make_glass()).collect();
-            let panel = make_glass();
-
-            let below: i64 = -1; // NSWindowBelow
-            let _: () = msg_send![content_view, addSubview: container positioned: below relativeTo: gpui_view];
-
-            Some(NativeGlass {
-                content_view,
-                bar,
-                circles,
-                panel,
-            })
+    unsafe fn dynamic_secondary_label_color(alpha: f64) -> id {
+        let color: id = msg_send![class!(NSColor), secondaryLabelColor];
+        if color == nil {
+            return nil;
         }
+        msg_send![color, colorWithAlphaComponent: alpha]
+    }
+
+    unsafe fn make_symbol_view(symbol: &str, point_size: f64, weight: f64) -> id {
+        let name = ns_string(symbol);
+        let image: id = msg_send![
+            class!(NSImage),
+            imageWithSystemSymbolName: name
+            accessibilityDescription: nil
+        ];
+        if image == nil {
+            return nil;
+        }
+        let configuration: id = msg_send![
+            class!(NSImageSymbolConfiguration),
+            configurationWithPointSize: point_size
+            weight: weight
+        ];
+        let configured: id = if configuration == nil {
+            image
+        } else {
+            msg_send![image, imageWithSymbolConfiguration: configuration]
+        };
+        let view: id = msg_send![class!(NSImageView), alloc];
+        let view: id = msg_send![view, initWithFrame: NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(point_size + 4.0, point_size + 4.0),
+        )];
+        if view != nil {
+            let _: () = msg_send![view, setImage: configured];
+            let _: () = msg_send![view, setImageScaling: 0usize];
+            let color = dynamic_secondary_label_color(0.86);
+            if color != nil {
+                let _: () = msg_send![view, setContentTintColor: color];
+            }
+        }
+        view
+    }
+
+    unsafe fn make_app_store_view() -> id {
+        // `appstore` is not an exported SF Symbol on macOS. Spotlight uses the
+        // familiar three-tool mark, so keep a tiny template vector beside the
+        // other native symbols instead of substituting a storefront glyph.
+        const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+<g fill="none" stroke="#000" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M10 37 L25 10"/><path d="M20 10 L38 37"/><path d="M8 30 L40 30"/>
+</g></svg>"##;
+        let data: id = msg_send![
+            class!(NSData),
+            dataWithBytes: SVG.as_ptr() as *const std::ffi::c_void
+            length: SVG.len()
+        ];
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithData: data];
+        if image == nil {
+            return nil;
+        }
+        let _: () = msg_send![image, setTemplate: YES];
+        let view: id = msg_send![class!(NSImageView), alloc];
+        let view: id = msg_send![view, initWithFrame: NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(26.0, 26.0),
+        )];
+        if view != nil {
+            let _: () = msg_send![view, setImage: image];
+            let _: () = msg_send![view, setImageScaling: 0usize];
+            let color = dynamic_secondary_label_color(0.86);
+            if color != nil {
+                let _: () = msg_send![view, setContentTintColor: color];
+            }
+        }
+        view
+    }
+
+    unsafe fn make_label() -> id {
+        let field: id = msg_send![class!(NSTextField), alloc];
+        let field: id = msg_send![field, init];
+        if field == nil {
+            return nil;
+        }
+        let value = ns_string("Spotlight Search");
+        let font: id = msg_send![class!(NSFont), systemFontOfSize: 24.0f64 weight: -0.4f64];
+        let color = dynamic_secondary_label_color(0.78);
+        let _: () = msg_send![field, setStringValue: value];
+        let _: () = msg_send![field, setBezeled: NO];
+        let _: () = msg_send![field, setBordered: NO];
+        let _: () = msg_send![field, setDrawsBackground: NO];
+        let _: () = msg_send![field, setEditable: NO];
+        let _: () = msg_send![field, setSelectable: NO];
+        let _: () = msg_send![field, setUsesSingleLineMode: YES];
+        let _: () = msg_send![field, setFont: font];
+        if color != nil {
+            let _: () = msg_send![field, setTextColor: color];
+        }
+        let _: () = msg_send![field, sizeToFit];
+        field
+    }
+
+    unsafe fn make_caret() -> id {
+        let view: id = msg_send![class!(NSView), alloc];
+        let view: id = msg_send![view, initWithFrame: NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(2.0, 30.0),
+        )];
+        if view == nil {
+            return nil;
+        }
+        let _: () = msg_send![view, setWantsLayer: YES];
+        let layer: id = msg_send![view, layer];
+        let color = dynamic_secondary_label_color(0.86);
+        if layer != nil && color != nil {
+            let cg_color: id = msg_send![color, CGColor];
+            let _: () = msg_send![layer, setBackgroundColor: cg_color];
+            let _: () = msg_send![layer, setCornerRadius: 1.0f64];
+        }
+        view
+    }
+
+    unsafe fn make_glass(glass_class: &Class, view_class: &Class, parent: id) -> (id, id) {
+        let glass: id = msg_send![glass_class, alloc];
+        let glass: id = msg_send![glass, initWithFrame: NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(10.0, 10.0),
+        )];
+        if glass == nil {
+            return (nil, nil);
+        }
+
+        // AppKit only guarantees foreground placement for a glass effect's
+        // `contentView`. Arbitrary siblings may be sampled as background and
+        // refracted, which turns text and symbols into unreadable smears.
+        let chrome: id = msg_send![view_class, alloc];
+        let chrome: id = msg_send![chrome, initWithFrame: NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(10.0, 10.0),
+        )];
+        let resize_mask: u64 = (1 << 1) | (1 << 4);
+        let _: () = msg_send![chrome, setAutoresizingMask: resize_mask];
+        let _: () = msg_send![glass, setContentView: chrome];
+        let _: () = msg_send![glass, setHidden: YES];
+        let _: () = msg_send![parent, addSubview: glass];
+        (glass, chrome)
     }
 
     impl NativeGlass {
-        pub fn content_height(&self) -> f64 {
-            // SAFETY: main thread, standard accessor.
+        pub fn setup(gpui_view: id) -> Option<Self> {
+            let glass_class = Class::get("NSGlassEffectView")?;
+            let container_class = Class::get("NSGlassEffectContainerView")?;
+            let view_class = Class::get("NSView")?;
+
+            // SAFETY: all objects are created and installed on AppKit's main thread.
+            unsafe {
+                let ns_window: id = msg_send![gpui_view, window];
+                if ns_window == nil {
+                    return None;
+                }
+                let content_view: id = msg_send![ns_window, contentView];
+                let bounds: NSRect = msg_send![content_view, bounds];
+                let resize_mask: u64 = (1 << 1) | (1 << 4);
+
+                let container: id = msg_send![container_class, alloc];
+                let container: id = msg_send![container, initWithFrame: bounds];
+                let _: () = msg_send![container, setAutoresizingMask: resize_mask];
+                let _: () = msg_send![container, setSpacing: 18.0f64];
+
+                let inner: id = msg_send![view_class, alloc];
+                let inner: id = msg_send![inner, initWithFrame: bounds];
+                let _: () = msg_send![inner, setAutoresizingMask: resize_mask];
+                let _: () = msg_send![container, setContentView: inner];
+
+                let (bar, bar_content) = make_glass(glass_class, view_class, inner);
+                let circle_pairs = (0..4)
+                    .map(|_| make_glass(glass_class, view_class, inner))
+                    .collect::<Vec<_>>();
+                let circles = circle_pairs
+                    .iter()
+                    .map(|(glass, _)| *glass)
+                    .collect::<Vec<_>>();
+                let circle_contents = circle_pairs
+                    .iter()
+                    .map(|(_, content)| *content)
+                    .collect::<Vec<_>>();
+
+                // Every chrome view belongs to its owning glass `contentView`.
+                // This is the supported foreground hierarchy in macOS 26.
+                let search_icon = make_symbol_view("magnifyingglass", 22.0, 0.23);
+                let search_label = make_label();
+                let caret = make_caret();
+                for view in [search_icon, search_label, caret] {
+                    if view != nil {
+                        let _: () = msg_send![bar_content, addSubview: view];
+                    }
+                }
+                let category_icons = CATEGORY_SYMBOLS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, symbol)| {
+                        let view = if index == 0 {
+                            make_app_store_view()
+                        } else {
+                            make_symbol_view(symbol, 22.0, 0.23)
+                        };
+                        if view != nil {
+                            let _: () = msg_send![circle_contents[index], addSubview: view];
+                        }
+                        view
+                    })
+                    .collect();
+
+                let _: () = msg_send![
+                    content_view,
+                    addSubview: container
+                    positioned: -1i64
+                    relativeTo: gpui_view
+                ];
+
+                Some(Self {
+                    content_view,
+                    container,
+                    bar,
+                    circles,
+                    search_icon,
+                    search_label,
+                    caret,
+                    category_icons,
+                })
+            }
+        }
+
+        fn content_height(&self) -> f64 {
             unsafe {
                 let bounds: NSRect = msg_send![self.content_view, bounds];
                 bounds.size.height
             }
         }
 
-        /// x/y are top-left in GPUI (y-down) coordinates; AppKit is y-up.
-        pub fn place(
+        unsafe fn place_view(
             view: id,
-            content_h: f64,
+            content_height: f64,
             x: f64,
             y: f64,
-            w: f64,
-            h: f64,
+            width: f64,
+            height: f64,
+            visible: bool,
+        ) {
+            if view == nil {
+                return;
+            }
+            let _: () = msg_send![view, setHidden: if visible { NO } else { YES }];
+            if visible {
+                let frame = NSRect::new(
+                    NSPoint::new(x, content_height - y - height),
+                    NSSize::new(width.max(1.0), height.max(1.0)),
+                );
+                let _: () = msg_send![view, setFrame: frame];
+            }
+        }
+
+        unsafe fn place_glass(
+            view: id,
+            content_height: f64,
+            x: f64,
+            y: f64,
+            width: f64,
+            height: f64,
             radius: f64,
             visible: bool,
         ) {
-            // SAFETY: main thread, standard NSView setters plus
-            // NSGlassEffectView's cornerRadius property.
-            unsafe {
-                let _: () = msg_send![view, setHidden: if visible { NO } else { YES }];
-                if !visible {
-                    return;
-                }
-                let frame = NSRect::new(
-                    NSPoint::new(x, content_h - y - h),
-                    NSSize::new(w.max(1.0), h.max(1.0)),
-                );
-                let _: () = msg_send![view, setFrame: frame];
+            Self::place_view(view, content_height, x, y, width, height, visible);
+            if view != nil && visible {
                 let _: () = msg_send![view, setCornerRadius: radius];
             }
         }
-    }
-}
 
-impl LiquidGlassDemo {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self {
-            query: String::new(),
-            selection: 0,
-            focus_handle: cx.focus_handle(),
-            started: Instant::now(),
-            last_frame: Instant::now(),
-            bar_w: Spring::new(BAR_W_IDLE, 320.0, 24.0),
-            circles: (0..4)
-                .map(|i| Spring::new(0.0, 260.0 + i as f32 * 15.0, 16.5))
-                .collect(),
-            panel_h: Spring::new(0.0, 340.0, 26.0),
-            shadow_disabled: false,
-            effect: BackgroundEffect::Aurora,
-            last_key: Instant::now(),
-            #[cfg(target_os = "macos")]
-            native: None,
-        }
-    }
+        pub fn sync(
+            &self,
+            bar_width: f32,
+            circle_progress: f32,
+            spacing: f32,
+            caret_visible: bool,
+        ) {
+            let content_height = self.content_height();
+            let progress = circle_progress.clamp(0.0, 1.08);
+            let radius = CIRCLE_R * progress;
+            let icon_alpha = super::smoothstep((progress - 0.86) / 0.14) as f64;
 
-    fn results(&self) -> Vec<(&'static str, &'static str)> {
-        if self.query.is_empty() {
-            return Vec::new();
-        }
-        let q = self.query.to_lowercase();
-        APPS.iter()
-            .filter(|(name, _)| name.to_lowercase().contains(&q))
-            .copied()
-            .take(MAX_ROWS)
-            .collect()
-    }
+            unsafe {
+                let _: () = msg_send![self.container, setSpacing: spacing as f64];
+                Self::place_glass(
+                    self.bar,
+                    content_height,
+                    BAR_X as f64,
+                    BAR_Y as f64,
+                    bar_width.max(ELEMENT_H) as f64,
+                    ELEMENT_H as f64,
+                    (ELEMENT_H / 2.0) as f64,
+                    true,
+                );
 
-    fn tick(&mut self) {
-        let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().clamp(0.0, 0.05);
-        self.last_frame = now;
+                // Material is emitted by the capsule's live trailing cap. This
+                // is what keeps frames 24-29 connected while the bar is still
+                // contracting; anchoring at the old expanded edge creates a
+                // visibly incorrect transient gap.
+                let material_origin_x = BAR_X + bar_width - CIRCLE_R;
+                for index in 0..4 {
+                    let center_x = material_origin_x
+                        + (super::circle_target_x(index) - material_origin_x) * progress;
+                    Self::place_glass(
+                        self.circles[index],
+                        content_height,
+                        (center_x - radius) as f64,
+                        (BAR_Y + CIRCLE_R - radius) as f64,
+                        (radius * 2.0) as f64,
+                        (radius * 2.0) as f64,
+                        radius as f64,
+                        radius > 1.0,
+                    );
 
-        let t = self.started.elapsed().as_secs_f32();
-        let searching = !self.query.is_empty();
-        let rows = self.results().len();
-
-        for (i, spring) in self.circles.iter_mut().enumerate() {
-            spring.target = if searching {
-                0.0
-            } else if t > 0.35 + i as f32 * 0.09 {
-                1.0
-            } else {
-                0.0
-            };
-            spring.step(dt);
-        }
-        self.bar_w.target = if searching { BAR_W_OPEN } else { BAR_W_IDLE };
-        self.bar_w.step(dt);
-        self.panel_h.target = if rows > 0 {
-            rows as f32 * ROW_H + 34.0
-        } else {
-            0.0
-        };
-        self.panel_h.step(dt);
-    }
-
-    fn glass_field(&self) -> GlassField {
-        let bar_w = self.bar_w.pos.max(BAR_H);
-        let bar = (
-            BAR_X + bar_w / 2.0,
-            BAR_Y + BAR_H / 2.0,
-            bar_w / 2.0,
-            BAR_H / 2.0,
-        );
-        let circles = self
-            .circles
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let p = s.pos;
-                let r = CIRCLE_R * p.clamp(0.0, 1.08);
-                if r < 1.5 {
-                    return None;
-                }
-                let x = CIRCLE_HIDDEN_X + (circle_slot_x(i) - CIRCLE_HIDDEN_X) * p;
-                Some((x, BAR_Y + BAR_H / 2.0, r))
-            })
-            .collect();
-        let panel = {
-            let h = self.panel_h.pos;
-            if h > 3.0 {
-                let hw = self.bar_w.pos.max(BAR_H) / 2.0;
-                Some((
-                    BAR_X + self.bar_w.pos.max(BAR_H) / 2.0,
-                    PANEL_TOP + h / 2.0,
-                    hw,
-                    h / 2.0,
-                    26.0f32.min(h / 2.0),
-                ))
-            } else {
-                None
-            }
-        };
-        GlassField {
-            bar,
-            circles,
-            panel,
-            blend: 16.0,
-        }
-    }
-
-    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        self.last_key = Instant::now();
-        let key = event.keystroke.key.as_str();
-        match key {
-            "tab" => {
-                self.effect = if event.keystroke.modifiers.shift {
-                    self.effect.prev()
-                } else {
-                    self.effect.next()
-                };
-            }
-            "escape" => {
-                if self.query.is_empty() {
-                    cx.quit();
-                } else {
-                    self.query.clear();
-                    self.selection = 0;
-                }
-            }
-            "backspace" => {
-                self.query.pop();
-                self.selection = 0;
-            }
-            "enter" => {
-                self.query.clear();
-                self.selection = 0;
-            }
-            "up" => self.selection = self.selection.saturating_sub(1),
-            "down" => {
-                let rows = self.results().len();
-                if rows > 0 {
-                    self.selection = (self.selection + 1).min(rows - 1);
-                }
-            }
-            "space" => self.query.push(' '),
-            _ => {
-                if let Some(ch) = &event.keystroke.key_char {
-                    if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                        self.query.push_str(ch);
-                        self.selection = 0;
+                    let icon_size = 26.0f32;
+                    let circle_size = radius * 2.0;
+                    Self::place_view(
+                        self.category_icons[index],
+                        circle_size as f64,
+                        ((circle_size - icon_size) / 2.0) as f64,
+                        ((circle_size - icon_size) / 2.0) as f64,
+                        icon_size as f64,
+                        icon_size as f64,
+                        radius > 10.0,
+                    );
+                    if self.category_icons[index] != nil {
+                        let _: () = msg_send![
+                            self.category_icons[index],
+                            setAlphaValue: icon_alpha
+                        ];
                     }
-                } else if key.chars().count() == 1 {
-                    self.query.push_str(key);
-                    self.selection = 0;
                 }
+
+                Self::place_view(
+                    self.search_icon,
+                    ELEMENT_H as f64,
+                    18.0,
+                    15.0,
+                    26.0,
+                    26.0,
+                    true,
+                );
+                Self::place_view(self.caret, ELEMENT_H as f64, 59.0, 13.0, 2.0, 30.0, true);
+                let _: () = msg_send![
+                    self.caret,
+                    setAlphaValue: if caret_visible { 0.90f64 } else { 0.0f64 }
+                ];
+
+                let label_size: NSSize = msg_send![self.search_label, fittingSize];
+                Self::place_view(
+                    self.search_label,
+                    ELEMENT_H as f64,
+                    59.0,
+                    ((ELEMENT_H - label_size.height as f32) / 2.0) as f64,
+                    label_size.width,
+                    label_size.height,
+                    true,
+                );
             }
         }
-        cx.notify();
     }
 }
 
-impl Render for LiquidGlassDemo {
+impl Render for SpotlightGlassDemo {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.tick();
 
-        let field = self.glass_field();
-        let results = self.results();
-        let searching = !self.query.is_empty();
-        let bar_w = self.bar_w.pos;
-        let panel_alpha = (self.panel_h.pos / 90.0).clamp(0.0, 1.0);
-        let t = self.started.elapsed().as_secs_f32();
-        let caret_on = (t * 2.0).fract() < 0.65;
-
-        let circle_overlays: Vec<_> = self
-            .circles
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let p = s.pos;
-                let x = CIRCLE_HIDDEN_X + (circle_slot_x(i) - CIRCLE_HIDDEN_X) * p;
-                (x, p.clamp(0.0, 1.0))
-            })
-            .collect();
-
         if !self.shadow_disabled {
-            self.shadow_disabled = try_disable_window_shadow(window);
+            self.shadow_disabled = disable_outer_window_shadow(window);
         }
 
-        // Native AppKit liquid glass (real refraction) when available: sync
-        // the glass view frames to the springs every frame. The container
-        // handles the gooey merging natively.
         #[cfg(target_os = "macos")]
-        let native_active = {
+        {
             if self.native.is_none() {
                 if let Some(ns_view) = ns_view_of(window) {
-                    self.native = native_glass::setup(ns_view);
+                    self.native = native_glass::NativeGlass::setup(ns_view);
                 }
             }
-            if let Some(glass) = &self.native {
-                use native_glass::NativeGlass;
-                let ch = glass.content_height();
-                NativeGlass::place(
-                    glass.bar,
-                    ch,
-                    BAR_X as f64,
-                    BAR_Y as f64,
-                    self.bar_w.pos as f64,
-                    BAR_H as f64,
-                    (BAR_H / 2.0) as f64,
-                    true,
+            if let Some(native) = &self.native {
+                let caret_visible = (self.started.elapsed().as_secs_f32() * 2.0).fract() < 0.65;
+                native.sync(
+                    self.bar_width.position,
+                    self.circle_progress.position,
+                    self.container_spacing(),
+                    caret_visible,
                 );
-                for (i, spring) in self.circles.iter().enumerate() {
-                    let p = spring.pos;
-                    let r = CIRCLE_R * p.clamp(0.0, 1.08);
-                    let x = CIRCLE_HIDDEN_X + (circle_slot_x(i) - CIRCLE_HIDDEN_X) * p;
-                    let cy = BAR_Y + BAR_H / 2.0;
-                    NativeGlass::place(
-                        glass.circles[i],
-                        ch,
-                        (x - r) as f64,
-                        (cy - r) as f64,
-                        (r * 2.0) as f64,
-                        (r * 2.0) as f64,
-                        r as f64,
-                        r > 1.5,
-                    );
-                }
-                let ph = self.panel_h.pos;
-                NativeGlass::place(
-                    glass.panel,
-                    ch,
-                    BAR_X as f64,
-                    PANEL_TOP as f64,
-                    self.bar_w.pos as f64,
-                    ph as f64,
-                    26.0f64.min((ph / 2.0) as f64),
-                    ph > 3.0,
-                );
-                true
-            } else {
-                false
             }
-        };
-        #[cfg(not(target_os = "macos"))]
-        let native_active = false;
+        }
 
         window.focus(&self.focus_handle, cx);
 
         div()
-            .id("liquid-glass-root")
+            .id("spotlight-detached-glass-root")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(
@@ -721,228 +674,10 @@ impl Render for LiquidGlassDemo {
                 }),
             )
             .size_full()
-            .relative()
-            .font_family(".SystemUIFont")
-            // Liquid glass slab: SDF -> marching squares -> one merged path.
-            .child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds: Bounds<gpui::Pixels>, _, window, _| {
-                        // Real AppKit glass draws below GPUI; skip the CPU glass.
-                        if native_active {
-                            return;
-                        }
-                        let ox = f32::from(bounds.origin.x);
-                        let oy = f32::from(bounds.origin.y);
-                        let loops = contour_loops(&field, WINDOW_W, WINDOW_H, 4.0);
-                        for lp in &loops {
-                            let smooth = chaikin(&chaikin(lp));
-                            if smooth.len() < 3 {
-                                continue;
-                            }
-                            let build = |style: PathBuilder| {
-                                let mut b = style;
-                                b.move_to(point(px(smooth[0].0 + ox), px(smooth[0].1 + oy)));
-                                for p in &smooth[1..] {
-                                    b.line_to(point(px(p.0 + ox), px(p.1 + oy)));
-                                }
-                                b.close();
-                                b.build()
-                            };
-                            // Frosted base tint.
-                            if let Ok(path) = build(PathBuilder::fill()) {
-                                window.paint_path(path, rgba(0x1c1e2ac9));
-                            }
-                            // Vertical sheen, brighter at the top like lit glass.
-                            if let Ok(path) = build(PathBuilder::fill()) {
-                                window.paint_path(
-                                    path,
-                                    linear_gradient(
-                                        180.0,
-                                        linear_color_stop(rgba(0xffffff2e), 0.0),
-                                        linear_color_stop(rgba(0xffffff07), 1.0),
-                                    ),
-                                );
-                            }
-                            // Specular rim.
-                            if let Ok(path) = build(PathBuilder::stroke(px(1.0))) {
-                                window.paint_path(path, rgba(0xffffff6b));
-                            }
-                        }
-                    },
-                )
-                .absolute()
-                .size_full(),
-            )
-            // Script Kit's procedural shader effects, playing inside each
-            // glass shape (uv is per-quad, so every shape is its own little
-            // scene). Tab / Shift-Tab cycles the roster.
-            .children({
-                // Faster clock + bright saturated palette so the effect reads
-                // as a luminous scene inside the glass, not a faint tint.
-                let shader_bg = |intensity: f32| {
-                    gpui::shader_effect(
-                        self.effect.shader_id(),
-                        t * 1.4,
-                        [
-                            ((62.0 + self.query.len() as f32 * 13.0) / bar_w).clamp(0.05, 0.95),
-                            0.5,
-                        ],
-                        (0.35 + 0.65 * (-(self.last_key.elapsed().as_secs_f32()) * 2.0).exp())
-                            .clamp(0.0, 1.0),
-                        hsla(0.55, 0.95, 0.72, intensity),
-                        hsla(0.80, 0.90, 0.70, intensity),
-                    )
-                };
-                let fx_quad = |x: f32, y: f32, w: f32, h: f32, r: f32, intensity: f32| {
-                    div()
-                        .absolute()
-                        .left(px(x + 1.0))
-                        .top(px(y + 1.0))
-                        .w(px((w - 2.0).max(0.0)))
-                        .h(px((h - 2.0).max(0.0)))
-                        .rounded(px((r - 1.0).max(0.0)))
-                        .bg(shader_bg(intensity))
-                };
-                let mut quads = vec![fx_quad(BAR_X, BAR_Y, bar_w, BAR_H, BAR_H / 2.0, 0.62)];
-                for (i, spring) in self.circles.iter().enumerate() {
-                    let p = spring.pos;
-                    let r = CIRCLE_R * p.clamp(0.0, 1.08);
-                    if r > 1.5 {
-                        let x = CIRCLE_HIDDEN_X + (circle_slot_x(i) - CIRCLE_HIDDEN_X) * p;
-                        let cy = BAR_Y + BAR_H / 2.0;
-                        quads.push(fx_quad(x - r, cy - r, r * 2.0, r * 2.0, r, 0.5));
-                    }
-                }
-                let ph = self.panel_h.pos;
-                if ph > 3.0 {
-                    quads.push(fx_quad(
-                        BAR_X,
-                        PANEL_TOP,
-                        bar_w,
-                        ph,
-                        26.0f32.min(ph / 2.0),
-                        0.62,
-                    ));
-                }
-                quads
-            })
-            // Effect name hint above the bar.
-            .child(
-                div()
-                    .absolute()
-                    .left(px(BAR_X + 4.0))
-                    .top(px(BAR_Y - 26.0))
-                    .text_size(px(11.0))
-                    .text_color(rgba(0xffffff66))
-                    .child(format!("{} · ⇥ cycle effect", self.effect.name())),
-            )
-            // Search bar content (flex row so the caret rides the text).
-            .child(
-                div()
-                    .absolute()
-                    .left(px(BAR_X))
-                    .top(px(BAR_Y))
-                    .w(px(bar_w))
-                    .h(px(BAR_H))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .px(px(22.0))
-                    .child(div().text_size(px(19.0)).child("🔍"))
-                    .child(
-                        div()
-                            .text_size(px(22.0))
-                            .text_color(if searching {
-                                rgba(0xffffffee)
-                            } else {
-                                rgba(0xffffff73)
-                            })
-                            .child(if searching {
-                                self.query.clone()
-                            } else {
-                                "Spotlight Search".to_string()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .w(px(2.0))
-                            .h(px(26.0))
-                            .rounded(px(1.0))
-                            .bg(rgba(0xffffffcc))
-                            .opacity(if caret_on { 1.0 } else { 0.0 }),
-                    ),
-            )
-            // Category circle icons riding their springs.
-            .children(circle_overlays.into_iter().enumerate().map(|(i, (x, p))| {
-                div()
-                    .absolute()
-                    .left(px(x - CIRCLE_R))
-                    .top(px(BAR_Y))
-                    .w(px(CIRCLE_R * 2.0))
-                    .h(px(BAR_H))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(20.0))
-                    .opacity(p * p)
-                    .child(CATEGORY_ICONS[i])
-            }))
-            // Results rows.
-            .child(
-                div()
-                    .absolute()
-                    .left(px(BAR_X + 12.0))
-                    .top(px(BAR_Y + BAR_H + 6.0))
-                    .w(px(bar_w - 24.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .opacity(panel_alpha)
-                    .children(results.iter().enumerate().map(|(i, (name, icon))| {
-                        let selected = i == self.selection;
-                        div()
-                            .h(px(ROW_H))
-                            .flex()
-                            .items_center()
-                            .gap(px(12.0))
-                            .px(px(12.0))
-                            .rounded(px(12.0))
-                            .when(selected, |d| d.bg(rgba(0xffffff1f)))
-                            .child(div().text_size(px(20.0)).child(*icon))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .text_size(px(15.0))
-                                            .text_color(rgba(0xfffffff2))
-                                            .child(*name),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(rgba(0xffffff8c))
-                                            .child("Application"),
-                                    ),
-                            )
-                            .child(div().flex_grow())
-                            .when(selected, |d| {
-                                d.child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(rgba(0xffffff73))
-                                        .child("↩"),
-                                )
-                            })
-                    })),
-            )
-            // Invisible repeating animation keeps frames flowing for the springs.
             .child(div().size_0().with_animation(
-                "liquid-glass-tick",
+                "spotlight-detached-glass-tick",
                 gpui::Animation::new(std::time::Duration::from_secs(1)).repeat(),
-                |el, _| el,
+                |element, _| element,
             ))
     }
 }
@@ -962,13 +697,10 @@ fn main() {
                 window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
             },
-            |_, cx| cx.new(LiquidGlassDemo::new),
+            |_, cx| cx.new(SpotlightGlassDemo::new),
         )
-        .unwrap();
-        cx.on_window_closed(|cx, _| {
-            cx.quit();
-        })
-        .detach();
+        .expect("open the Spotlight detached-glass prototype");
+        cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);
     });
 }

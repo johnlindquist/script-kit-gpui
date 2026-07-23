@@ -32,7 +32,6 @@ impl NotesApp {
         let has_selection = self.selected_note_id.is_some();
         let show_toolbar = self.show_format_toolbar;
         let is_preview = self.preview_enabled;
-        let char_count = self.get_character_count(cx);
         let is_pinned = self.is_current_note_pinned();
         let in_focus_mode = self.focus_mode;
         let window_hovered = self.window_hovered || self.force_hovered;
@@ -47,9 +46,6 @@ impl NotesApp {
             in_focus_mode,
             cx,
         );
-
-        let footer =
-            self.render_editor_footer(is_preview, in_focus_mode, window_hovered, char_count, cx);
 
         let editor_body = self.render_editor_body(is_trash, has_selection, is_preview, cx);
 
@@ -67,6 +63,5 @@ impl NotesApp {
                 |d| d.child(self.render_toolbar(cx)),
             )
             .child(div().flex_1().min_h(px(0.)).h_full().child(editor_body))
-            .when(has_selection, |d| d.child(footer))
     }
 }

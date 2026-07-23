@@ -2554,7 +2554,7 @@ fn dictation_start_preflights_delivery_target_before_toggle() {
         &src[dictation_start..dictation_start + 4000.min(src.len() - dictation_start)];
 
     let preflight_pos = dictation_src
-        .find("let preflight = self.prepare_dictation_builtin_start(action, cx);")
+        .find("let preflight = self.prepare_dictation_builtin_start(action, None, cx);")
         .expect("dictation start must prepare preflight");
     let toggle_pos = dictation_src
         .find("crate::dictation::toggle_dictation(dictation_target)")
@@ -2873,7 +2873,7 @@ fn dictation_start_preflight_runs_before_toggle() {
         .find("let is_start_edge = !crate::dictation::is_dictation_busy();")
         .expect("dictation start path must gate preflight on recording state");
     let preflight_pos = dictation_src
-        .find("let preflight = self.prepare_dictation_builtin_start(action, cx);")
+        .find("let preflight = self.prepare_dictation_builtin_start(action, None, cx);")
         .expect("dictation start path must prepare preflight");
     let toggle_pos = dictation_src
         .find("crate::dictation::toggle_dictation(dictation_target)")
@@ -2882,6 +2882,19 @@ fn dictation_start_preflight_runs_before_toggle() {
     assert!(
         recording_guard_pos < preflight_pos && preflight_pos < toggle_pos,
         "start-edge preflight must run before toggle_dictation"
+    );
+}
+
+#[test]
+fn rapid_dictation_toggle_parity_is_last_intent_wins_during_stop() {
+    let restart_after_first_extra_toggle = crate::dictation::toggled_post_stop_restart(false);
+    assert!(
+        restart_after_first_extra_toggle,
+        "first toggle during stop must queue a restart"
+    );
+    assert!(
+        !crate::dictation::toggled_post_stop_restart(restart_after_first_extra_toggle),
+        "second toggle during stop must cancel the queued restart"
     );
 }
 
@@ -4115,14 +4128,14 @@ fn overlay_render_uses_outer_wrapper_for_full_bounds() {
     let window_source = std::fs::read_to_string("src/dictation/window.rs").expect("read window.rs");
 
     // The render must have a dedicated outer root div that claims full bounds
-    // with overflow hidden and the pill surface as a child.
+    // with overflow hidden and the one-window composition as a child.
     let compact: String = window_source
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
     assert!(
-        compact.contains(".w_full().h_full().overflow_hidden().child(surface)"),
-        "overlay render must use an outer wrapper div with w_full().h_full().overflow_hidden().child(surface)"
+        compact.contains(".w_full().h_full().overflow_hidden().child(composition)"),
+        "overlay render must use an outer wrapper div with w_full().h_full().overflow_hidden().child(composition)"
     );
 }
 
@@ -4263,7 +4276,9 @@ fn dictation_overlay_claims_full_popup_bounds_contract() {
         "pub(crate) fn finished_label",
     ));
 
-    // Inner pill surface must claim full popup content bounds with overflow hidden
+    // The bounded pill surface owns the full width and clips its content. In
+    // glass mode its height is the main-content region; the footer and exact
+    // 8pt gutter live below it in the same physical window.
     assert!(
         body.contains(&compact_delta_contract(
             "let surface = div()\
@@ -4272,11 +4287,15 @@ fn dictation_overlay_claims_full_popup_bounds_contract() {
             .items_center()\
             .justify_center()\
             .w_full()\
-            .h_full()\
+            .when(glass_in_window_footer, |d| {\
+                d.h(px(detached_regions.main_content.height))\
+                    .min_h(px(detached_regions.main_content.height))\
+            })\
+            .when(!glass_in_window_footer, |d| d.h_full())\
             .relative()\
             .overflow_hidden()"
         )),
-        "inner dictation pill must fill the popup content bounds with overflow_hidden"
+        "dictation pill must fill the bounded content stage and preserve the non-glass full-window fallback"
     );
 
     // Root overlay node must fill the popup window edge-to-edge with overflow hidden
@@ -4288,7 +4307,7 @@ fn dictation_overlay_claims_full_popup_bounds_contract() {
     );
     assert!(
         body.contains(&compact_delta_contract(
-            ".w_full().h_full().overflow_hidden().child(surface)"
+            ".w_full().h_full().overflow_hidden().child(composition)"
         )),
         "root overlay node must fill the popup window edge-to-edge with overflow_hidden"
     );

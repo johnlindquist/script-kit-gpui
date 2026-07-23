@@ -420,14 +420,14 @@ pub(crate) const TAHOE_GLASS_BACKDROP_IDENTIFIER: &str = "script-kit-tahoe-glass
 #[cfg(target_os = "macos")]
 const NS_WINDOW_BELOW: isize = -1;
 
-/// Native backdrop partition. Secondary windows remain full-bleed; the main
-/// launcher leaves its detached footer and the desktop gutter outside the
-/// material frame while retaining one physical NSWindow.
+/// Native backdrop partition. Windows with floating footers leave the footer
+/// and desktop gutter outside the material frame while retaining one physical
+/// NSWindow, so their controls translate atomically with the content.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TahoeBackdropLayout {
     FullWindow,
-    MainContentAboveDetachedFooter { bottom_inset: f64 },
+    ContentAboveDetachedFooter { bottom_inset: f64 },
 }
 
 #[cfg(target_os = "macos")]
@@ -437,7 +437,7 @@ impl TahoeBackdropLayout {
 
         match self {
             Self::FullWindow => bounds,
-            Self::MainContentAboveDetachedFooter { bottom_inset } => {
+            Self::ContentAboveDetachedFooter { bottom_inset } => {
                 let bottom_inset = bottom_inset.clamp(0.0, bounds.size.height.max(0.0));
                 NSRect::new(
                     NSPoint::new(bounds.origin.x, bounds.origin.y + bottom_inset),
@@ -450,20 +450,25 @@ impl TahoeBackdropLayout {
     fn bottom_inset(self) -> f64 {
         match self {
             Self::FullWindow => 0.0,
-            Self::MainContentAboveDetachedFooter { bottom_inset } => bottom_inset.max(0.0),
+            Self::ContentAboveDetachedFooter { bottom_inset } => bottom_inset.max(0.0),
         }
     }
 
-    fn is_detached_main(self) -> bool {
-        matches!(self, Self::MainContentAboveDetachedFooter { .. })
+    fn is_detached_footer(self) -> bool {
+        matches!(self, Self::ContentAboveDetachedFooter { .. })
     }
+}
+
+#[cfg(target_os = "macos")]
+fn window_name_owns_detached_footer(window_name: &str) -> bool {
+    matches!(window_name, "Main window" | "Notes" | "Dictation overlay")
 }
 
 #[cfg(target_os = "macos")]
 fn tahoe_backdrop_layout(window_name: &str) -> TahoeBackdropLayout {
     let bottom_inset = f64::from(crate::footer_popup::main_window_float_footer_strip_height());
-    if window_name == "Main window" && bottom_inset > 0.0 {
-        TahoeBackdropLayout::MainContentAboveDetachedFooter { bottom_inset }
+    if window_name_owns_detached_footer(window_name) && bottom_inset > 0.0 {
+        TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset }
     } else {
         TahoeBackdropLayout::FullWindow
     }
@@ -497,7 +502,7 @@ extern "C" fn tahoe_glass_backdrop_repin(this: &objc::runtime::Object, _: objc::
         }
         let bounds: cocoa::foundation::NSRect = msg_send![superview, bounds];
         let bottom_inset = *this.get_ivar::<f64>("_scriptKitBottomInset");
-        let frame = TahoeBackdropLayout::MainContentAboveDetachedFooter { bottom_inset }
+        let frame = TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset }
             .frame(bounds);
         let _: () = msg_send![this_id, setFrame: frame];
     }
@@ -652,7 +657,7 @@ unsafe fn update_tahoe_backdrop_geometry_and_shadow(
     let _: () = msg_send![glass_view, setFrame: backdrop_frame];
 
     let content_layer: id = msg_send![content_view, layer];
-    if backdrop_layout.is_detached_main() {
+    if backdrop_layout.is_detached_footer() {
         let _: () = msg_send![window, setHasShadow: false];
         if content_layer != nil {
             let _: () = msg_send![content_layer, setCornerRadius: 0.0f64];
@@ -1951,12 +1956,17 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
 
     let corner_radius = {
         let radius = tahoe_content_corner_radius(content_view);
-        // Main window in glass mode: the backdrop's corners are visible
-        // container corners (the contentView layer reports no radius of its
-        // own), so round them to match the GPUI root container's
-        // `rounded(12.)`.
-        if window_name == "Main window" && radius <= 0.0 {
-            f64::from(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX)
+        // Detached-footer windows expose the backdrop's corners mid-window,
+        // where the ordinary NSWindow mask cannot round them. Match the GPUI
+        // content-stage radius for each owning surface.
+        if backdrop_layout.is_detached_footer() && radius <= 0.0 {
+            if window_name == "Notes" {
+                f64::from(crate::ui::chrome::LIQUID_GLASS_WINDOW_RADIUS_PX)
+            } else if window_name == "Dictation overlay" {
+                f64::from(crate::ui::chrome::LIQUID_GLASS_PANEL_RADIUS_PX)
+            } else {
+                f64::from(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX)
+            }
         } else {
             radius
         }
@@ -2461,7 +2471,7 @@ mod secondary_window_config_tests {
         use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(750.0, 501.0));
-        let layout = super::TahoeBackdropLayout::MainContentAboveDetachedFooter {
+        let layout = super::TahoeBackdropLayout::ContentAboveDetachedFooter {
             bottom_inset: 40.0,
         };
         let frame = layout.frame(bounds);
@@ -2474,6 +2484,18 @@ mod secondary_window_config_tests {
         let footer_top = 32.0;
         assert_eq!(frame.origin.y - footer_top, 8.0);
         assert!(footer_top <= frame.origin.y);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn main_notes_and_dictation_share_the_detached_footer_backdrop_partition() {
+        for window_name in ["Main window", "Notes", "Dictation overlay"] {
+            assert!(
+                super::window_name_owns_detached_footer(window_name),
+                "{window_name} must own the shared floating footer partition"
+            );
+        }
+        assert!(!super::window_name_owns_detached_footer("Actions popup"));
     }
 
     #[cfg(target_os = "macos")]

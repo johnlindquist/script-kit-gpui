@@ -1023,8 +1023,9 @@ fn test_notes_agent_chat_uses_shared_external_footer_renderer() {
     assert!(
         RENDER_SOURCE
             .contains("view.build_external_host_footer(agent_chat_entity.downgrade(), cx)")
-            && RENDER_SOURCE.contains(".when_some(agent_chat_footer, |d, footer| d.child(footer))"),
-        "Notes Agent Chat surface should render the shared Agent Chat footer below the embedded chat view"
+            && RENDER_SOURCE.contains("self.render_agent_chat_window_footer(cx)")
+            && RENDER_SOURCE.contains(".when_some(footer, |d, footer| d.child(footer))"),
+        "Notes Agent Chat surface should resolve the shared external footer and place it in the window footer lane"
     );
     let footer_hints = &AGENT_CHAT_VIEW_SOURCE[AGENT_CHAT_VIEW_SOURCE
         .find("fn footer_hint_label(")
