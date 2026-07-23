@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { Driver } from "./driver.ts";
+import { announceTestStatus } from "./test-status.ts";
 
 export type Rect = { x: number; y: number; width: number; height: number };
 export type ControlFrame = {
@@ -584,6 +585,27 @@ export function analyzeStationaryFidelity(
     }
   }
 
+  const leftCapsule = byId.get("script-kit-footer-left-info-capsule");
+  const leftHitTarget = byId.get("script-kit-footer-left-info-hit-target")
+    ?? byId.get("script-kit-footer-cwd-chip-hit");
+  const leftKeycap = byId.get("script-kit-footer-left-info-keycap")
+    ?? byId.get("script-kit-footer-cwd-chip-keycap");
+  const leftKeycapGlyph = byId.get("script-kit-footer-left-info-keycap-glyph")
+    ?? byId.get("script-kit-footer-cwd-chip-keycap-glyph");
+  if (!leftCapsule) errors.push("left footer capsule is missing");
+  if (!leftHitTarget) errors.push("left footer hit target is missing");
+  if (!leftKeycap) {
+    errors.push("left footer shortcut keycap is missing");
+  } else {
+    if (leftKeycap.frame?.height !== 20) errors.push("left footer shortcut keycap is not 20pt high");
+    if (leftKeycap.layer?.cornerRadius !== 6) errors.push("left footer shortcut keycap radius is not 6pt");
+    if (leftKeycap.layer?.borderWidth !== 1) errors.push("left footer shortcut keycap border is not 1pt");
+    if (leftKeycap.layer?.contentsScale !== 2) errors.push("left footer shortcut keycap is not rendered at 2x");
+  }
+  if (!leftKeycapGlyph?.text?.value?.trim()) {
+    errors.push("left footer shortcut glyph is missing");
+  }
+
   const visualNodes = nodes.filter((node) =>
     node.text != null
     || node.image != null
@@ -775,6 +797,7 @@ async function cli() {
   try {
     driver.send({ type: "show" });
     await driver.waitForState({ windowVisible: true }, { timeoutMs: 15_000 });
+    await driver.setFilterAndWait("", { timeoutMs: 15_000 });
     await driver.waitForSettle({ timeoutMs: 10_000 });
     const windows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
     const main = (windows.windows ?? []).find((window: any) => window.id === "main");
@@ -817,6 +840,9 @@ async function cli() {
     };
 
     const showHideCycles: Array<Record<string, unknown>> = [];
+    if (!stationaryOnly) {
+      await announceTestStatus("Window lifecycle", "10 hide/show cycles · the panel will blink");
+    }
     for (let cycle = 1; cycle <= (stationaryOnly ? 0 : 10); cycle += 1) {
       driver.send({ type: "hide", requestId: `mwnd-hide-${cycle}` });
       await driver.waitForState({ windowVisible: false }, { timeoutMs: 15_000 });
@@ -843,6 +869,9 @@ async function cli() {
     }
 
     const modeTransitions: Array<Record<string, unknown>> = [];
+    if (!stationaryOnly) {
+      await announceTestStatus("Full ↔ compact lifecycle", "20 automated mode transitions");
+    }
     for (let transition = 1; transition <= (stationaryOnly ? 0 : 20); transition += 1) {
       const builtinId = transition % 2 === 1
         ? "builtin/choose-theme"
@@ -863,6 +892,10 @@ async function cli() {
 
     const results: Array<Record<string, unknown>> = [];
     for (const trajectory of trials) {
+      await announceTestStatus(
+        `Native drag · ${trajectory}`,
+        "Script Kit will move while live control geometry is sampled",
+      );
       const attempts: Array<Record<string, unknown>> = [];
       let selected: Record<string, any> | null = null;
       for (let attempt = 1; attempt <= MAX_NATIVE_DRAG_ATTEMPTS; attempt += 1) {
@@ -927,6 +960,10 @@ async function cli() {
       window.id === "main" && window.pid === main.pid
     ) ?? main;
     if (!expectFallback) {
+      await announceTestStatus(
+        "Footer visual states",
+        "Capturing default, Actions hover, and Actions selected",
+      );
       const structural = analyzeStationaryFidelity(
         receipt.layout,
         finalMain,
@@ -938,6 +975,7 @@ async function cli() {
       const appKitNodes = ((receipt.layout as any)?.fidelity?.appKit?.nodes ?? []) as AppKitNode[];
       const actionsButton = appKitNodes.find((node) => node.id === "script-kit-footer-button-actions");
       const actionsFrame = actionsButton?.screenshotFrame;
+      let leftInteraction: Record<string, unknown> | null = null;
       if (actionsFrame && finalMain?.bounds) {
         const footerHeight = Number((receipt.layout as any)?.fidelity?.appKit?.footerContainerFrame?.height ?? 32);
         const hoverX = Math.round(finalMain.bounds.x + actionsFrame.x + actionsFrame.width / 2);
@@ -965,12 +1003,100 @@ async function cli() {
       } else {
         structural.errors.push("Actions hit target frame missing from AppKit fidelity snapshot");
       }
+      const leftButton = appKitNodes.find((node) =>
+        node.id === "script-kit-footer-left-info-hit-target"
+        || node.id === "script-kit-footer-cwd-chip-hit"
+      );
+      const leftFrame = leftButton?.screenshotFrame;
+      if (leftFrame && finalMain?.bounds) {
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          const openWindows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
+          const actionsOpen = ((openWindows as any)?.windows ?? []).some(
+            (candidate: any) => candidate.id === "actions-dialog",
+          );
+          if (!actionsOpen) break;
+          await driver.simulateGpuiKeyDown("escape", {
+            target: { type: "id", id: "actions-dialog" },
+            timeoutMs: 15_000,
+          }).catch(() => null);
+          await Bun.sleep(150);
+        }
+        driver.send({ type: "show" });
+        await driver.waitForState({ windowVisible: true }, { timeoutMs: 15_000 });
+        await driver.waitForSettle({ timeoutMs: 10_000 });
+        const footerHeight = Number((receipt.layout as any)?.fidelity?.appKit?.footerContainerFrame?.height ?? 32);
+        const leftX = Math.round(finalMain.bounds.x + leftFrame.x + leftFrame.width / 2);
+        const leftY = Math.round(
+          finalMain.bounds.y + finalMain.bounds.height - footerHeight
+          + leftFrame.y + leftFrame.height / 2,
+        );
+        await announceTestStatus(
+          "Left capsule visual",
+          "Capturing its hover style, shortcut keycap, and glyph",
+        );
+        const leftHover = await run(["cliclick", `m:${leftX},${leftY}`]);
+        await Bun.sleep(350);
+        if (leftHover.exitCode === 0) {
+          captures.push(await captureNativeWindow(Number(main.pid), outDir, "stationary-hover-left-2x"));
+        } else {
+          structural.errors.push(`left footer hover input failed: ${leftHover.stderr.trim()}`);
+        }
+        const beforeLogs = await driver.getLogs({
+          limit: 500,
+          contains: "Enqueued native footer action",
+        });
+        const beforeCount = Number((beforeLogs as any)?.entries?.length ?? 0);
+        await announceTestStatus(
+          "Left capsule interaction",
+          "One active-window click must dispatch exactly once",
+        );
+        const click = await run(["cliclick", `c:${leftX},${leftY}`]);
+        await Bun.sleep(400);
+        const afterLogs = await driver.getLogs({
+          limit: 500,
+          contains: "Enqueued native footer action",
+        });
+        const afterCount = Number((afterLogs as any)?.entries?.length ?? 0);
+        const dispatchDelta = afterCount - beforeCount;
+        leftInteraction = {
+          targetId: leftButton?.id ?? null,
+          activeWindowClick: true,
+          clickExitCode: click.exitCode,
+          dispatchDelta,
+          pass: click.exitCode === 0 && dispatchDelta === 1,
+        };
+        if (click.exitCode !== 0 || dispatchDelta !== 1) {
+          structural.errors.push(
+            `active left footer click dispatched ${dispatchDelta} actions (click exit ${click.exitCode}), expected exactly one`,
+          );
+        }
+      } else {
+        structural.errors.push("left footer hit target frame missing from AppKit fidelity snapshot");
+      }
+      for (const capture of captures as any[]) {
+        if (capture.nativeWindow?.onscreen !== true || Number(capture.nativeWindow?.alpha ?? 0) < 0.99) {
+          structural.errors.push(`${capture.name} captured a hidden or transparent main window`);
+        }
+        if (Number(capture.edgeEnergy ?? 0) <= 0) {
+          structural.errors.push(`${capture.name} contains no visible native-window edges`);
+        }
+      }
+      const defaultFooterHash = (captures.find((capture: any) =>
+        capture.name === "stationary-default-2x"
+      ) as any)?.footerCropSha256;
+      const leftHoverFooterHash = (captures.find((capture: any) =>
+        capture.name === "stationary-hover-left-2x"
+      ) as any)?.footerCropSha256;
+      if (!leftHoverFooterHash || leftHoverFooterHash === defaultFooterHash) {
+        structural.errors.push("left footer hover did not produce a distinct visual state");
+      }
       structural.pass = structural.errors.length === 0;
       const distinctFooterStates = new Set(captures.map((capture: any) => capture.footerCropSha256));
       receipt.stationary = {
         pass: structural.pass && captures.length >= 3 && distinctFooterStates.size >= 2,
         structural,
         captures,
+        leftInteraction,
         distinctFooterStateCount: distinctFooterStates.size,
         captureMethod: "Quartz CGWindowID resolved by exact launched PID; screencapture -l",
         reviewRequired: true,

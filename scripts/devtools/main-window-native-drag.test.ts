@@ -300,6 +300,22 @@ function stationaryFixture(hostHeight = 501) {
     text: { value: "Actions", color: { alpha: 1 } },
     layer: { contentsScale: 2 },
   });
+  nodes.push({
+    id: "script-kit-footer-left-info-hit-target",
+    parentId: "script-kit-footer-left-info-capsule-content",
+  });
+  nodes.push({
+    id: "script-kit-footer-left-info-keycap",
+    parentId: "script-kit-footer-left-info-capsule-content",
+    frame: { x: 8, y: 4, width: 41, height: 20 },
+    layer: { contentsScale: 2, cornerRadius: 6, borderWidth: 1 },
+  });
+  nodes.push({
+    id: "script-kit-footer-left-info-keycap-glyph",
+    parentId: "script-kit-footer-left-info-keycap",
+    text: { value: "Space", color: { alpha: 0.8 } },
+    layer: { contentsScale: 2 },
+  });
   return {
     layout: {
       fidelity: {
@@ -350,5 +366,16 @@ describe("stationary native footer analyzer", () => {
     const result = analyzeStationaryFidelity(fixture.layout, fixture.automationWindow);
     expect(result.pass).toBe(false);
     expect(result.errors.some((error) => error.includes("not exactly partitioned"))).toBe(true);
+  });
+
+  test("fails when the left capsule loses its shortcut keycap or glyph", () => {
+    const fixture = stationaryFixture();
+    fixture.layout.fidelity.appKit.nodes = fixture.layout.fidelity.appKit.nodes.filter(
+      (node: any) => !node.id.startsWith("script-kit-footer-left-info-keycap"),
+    );
+    const result = analyzeStationaryFidelity(fixture.layout, fixture.automationWindow);
+    expect(result.pass).toBe(false);
+    expect(result.errors.some((error) => error.includes("left footer shortcut keycap is missing"))).toBe(true);
+    expect(result.errors.some((error) => error.includes("left footer shortcut glyph is missing"))).toBe(true);
   });
 });
