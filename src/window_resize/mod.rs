@@ -26,7 +26,7 @@ const RESIZE_MIN_DELTA_PX: f64 = 1.0;
 const WINDOW_RESIZE_ANIMATE: bool = false;
 /// Tahoe's detached footer is hosted inside the physical main NSWindow.
 const MAIN_WINDOW_SINGLE_HOST_FOOTER_ACTIVE: bool = true;
-const MAIN_WINDOW_MIN_HEIGHT: f32 = 480.0;
+pub(crate) const MAIN_WINDOW_MIN_HEIGHT: f32 = 480.0;
 const MAIN_WINDOW_MAX_HEIGHT: f32 = 480.0;
 const MAIN_WINDOW_HEADER_HEIGHT: f32 =
     crate::panel::HEADER_TOTAL_HEIGHT - crate::panel::HEADER_DIVIDER_HEIGHT;
@@ -291,6 +291,9 @@ pub(crate) fn resize_to_file_search_window_sync(result_count: usize) {
 
 /// Width for the main window (standard launcher)
 pub(crate) const MAIN_WINDOW_WIDTH: f32 = 750.0;
+/// Smallest physical main-window width whose GPUI layout and native footer
+/// share the same coordinate space without clipping.
+pub(crate) const MAIN_WINDOW_MIN_WIDTH: f32 = 480.0;
 const FOCUSED_TEXT_MINI_INPUT_ONLY_HEIGHT: f32 = crate::panel::PROMPT_INPUT_FIELD_HEIGHT;
 const FOCUSED_TEXT_MINI_RESULT_HEIGHT: f32 = 150.0;
 /// Window height when the mini shows the three stacked variation cards.

@@ -546,6 +546,10 @@ app.run(move |cx: &mut App| {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: None,
                 is_movable: true,
+                window_min_size: Some(size(
+                    px(crate::window_resize::MAIN_WINDOW_MIN_WIDTH),
+                    px(crate::window_resize::MAIN_WINDOW_MIN_HEIGHT),
+                )),
                 window_background,
                 show: false, // Start hidden - only show on hotkey press
                 focus: false, // Don't focus on creation

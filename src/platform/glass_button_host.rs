@@ -385,6 +385,7 @@ pub(crate) struct GlassButtonHost {
     glass_class: &'static Class,
     views: Vec<id>,
     hovered: Vec<bool>,
+    style_signature: Option<crate::platform::NativeGlassStyleSignature>,
 }
 
 impl GlassButtonHost {
@@ -428,12 +429,19 @@ impl GlassButtonHost {
                 glass_class,
                 views: Vec::new(),
                 hovered: Vec::new(),
+                style_signature: None,
             })
         }
     }
 
     /// Show one pooled glass view per frame and hide every unused view.
     fn sync(&mut self, frames: &[GlassButtonFrame], hovered: &[bool]) {
+        let theme = crate::theme::get_cached_theme();
+        let style = crate::platform::resolve_native_glass_style(
+            &theme,
+            crate::platform::NativeGlassSurfaceRole::FloatingCapsule,
+        );
+        let restyle = self.style_signature != Some(style.signature);
         while self.views.len() < frames.len() {
             // SAFETY: `glass_class` is the runtime-resolved Tahoe class and
             // `inner` remains retained for the lifetime of this host.
@@ -451,6 +459,19 @@ impl GlassButtonHost {
                 }
                 let _: () = msg_send![view, setWantsLayer: YES];
                 let _: () = msg_send![view, setHidden: YES];
+                let content: id = msg_send![objc::class!(NSView), alloc];
+                let content: id = msg_send![
+                    content,
+                    initWithFrame: NSRect::new(
+                        NSPoint::new(0.0, 0.0),
+                        NSSize::new(10.0, 10.0)
+                    )
+                ];
+                if content != nil {
+                    let _: () = msg_send![content, setAutoresizingMask: 18u64];
+                    let _: () = msg_send![view, setContentView: content];
+                }
+                let _ = crate::platform::apply_native_glass_style(view, style);
                 let _: () = msg_send![self.native.inner(), addSubview: view];
                 view
             };
@@ -478,6 +499,9 @@ impl GlassButtonHost {
                     NSPoint::new(x, content_height - y - height),
                     NSSize::new(width.max(1.0), height.max(1.0)),
                 );
+                if restyle {
+                    let _ = crate::platform::apply_native_glass_style(view, style);
+                }
                 let _: () = msg_send![view, setFrame: frame];
                 let _: () = msg_send![view, setCornerRadius: radius];
                 let _: () = msg_send![view, setHidden: NO];
@@ -495,6 +519,7 @@ impl GlassButtonHost {
                     self.hovered[index] = desired_hover;
                 }
             }
+            self.style_signature = Some(style.signature);
         }
 
         tracing::debug!(

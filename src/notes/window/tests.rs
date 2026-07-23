@@ -1061,3 +1061,22 @@ fn test_confirmed_delete_updates_selection_without_early_editor_refocus() {
         "Confirmed delete should update selection first and restore editor focus after dialog dismissal"
     );
 }
+#[test]
+fn notes_entry_reveal_rejects_stale_callbacks_after_cancel_and_restart() {
+    let mut reveal = super::NotesEntryReveal::new(41);
+    let first_generation = reveal.generation;
+    assert!(reveal.advance(
+        first_generation,
+        super::NotesEntryRevealPhase::NativeConfigured
+    ));
+    assert!(!reveal.body_visible);
+
+    reveal.cancel();
+    assert!(!reveal.advance(first_generation, super::NotesEntryRevealPhase::Visible));
+    assert!(!reveal.body_visible);
+
+    let restarted_generation = reveal.restart();
+    assert_ne!(restarted_generation, first_generation);
+    assert!(reveal.advance(restarted_generation, super::NotesEntryRevealPhase::Visible));
+    assert!(reveal.body_visible);
+}

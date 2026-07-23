@@ -152,6 +152,11 @@ impl NotesApp {
 impl Render for NotesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mouse_cursor_hidden = self.mouse_cursor_hidden;
+        let body_opacity = if self.entry_reveal.body_visible {
+            1.0
+        } else {
+            0.0
+        };
 
         self.process_render_side_effects(window, cx);
 
@@ -208,6 +213,7 @@ impl Render for NotesApp {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
+                .opacity(body_opacity)
                 .rounded(px(crate::ui::chrome::LIQUID_GLASS_WINDOW_RADIUS_PX))
                 .when_some(vibrancy_bg, |d, bg| d.bg(bg))
                 .children(theme_background_gradients)
@@ -222,6 +228,7 @@ impl Render for NotesApp {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
+                .opacity(body_opacity)
                 .when_some(vibrancy_bg, |d, bg| d.bg(bg))
                 .children(theme_background_gradients)
                 .child(content)

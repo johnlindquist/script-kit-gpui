@@ -33,6 +33,9 @@ pub(crate) const FOOTER_BUTTON_VERTICAL_INSET_PX: f32 = 2.0;
 pub(crate) const FOOTER_ACTION_ITEM_GAP_PX: f32 = 2.0;
 /// Resting separation between adjacent native Liquid Glass capsules.
 pub(crate) const FOOTER_GLASS_BUTTON_GAP_PX: f32 = 6.0;
+/// Minimum open space between any left-side capsule and the measured start
+/// of the trailing action cluster.
+pub(crate) const FOOTER_LEFT_RIGHT_MIN_GAP_PX: f32 = FOOTER_GLASS_BUTTON_GAP_PX;
 pub(crate) const FOOTER_ACTION_CONTENT_GAP_PX: f32 = 4.0;
 pub(crate) const FOOTER_ACTION_CONTENT_PADDING_X_PX: f32 = 4.0;
 // Extra inner x width (total, split across both sides) that trailing centered

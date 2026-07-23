@@ -91,6 +91,8 @@ const FOOTER_LEFT_INFO_CAPSULE_ID: &str = "script-kit-footer-left-info-capsule";
 #[cfg(target_os = "macos")]
 const FOOTER_LEFT_INFO_CAPSULE_CONTENT_ID: &str = "script-kit-footer-left-info-capsule-content";
 #[cfg(target_os = "macos")]
+const FOOTER_LEFT_INFO_STATE_LAYER_ID: &str = "script-kit-footer-left-info-state-layer";
+#[cfg(target_os = "macos")]
 const FOOTER_LEFT_PROFILE_ICON_SIZE: f64 = 13.0;
 #[cfg(target_os = "macos")]
 const FOOTER_STREAMING_DOT_SIZE: f64 =
@@ -481,6 +483,8 @@ struct MainWindowFooterRefreshSignature {
     selection_rgba: u32,
     hover_rgba: u32,
     left_dot_hex: Option<u32>,
+    #[cfg(target_os = "macos")]
+    native_glass_signature: crate::platform::NativeGlassStyleSignature,
     /// Active main-menu theme discriminant. The native footer reads the *global*
     /// current theme (not threaded through `config`), so the discriminant is
     /// folded into the signature to force a rebuild on cycle.
@@ -2169,62 +2173,16 @@ pub(crate) unsafe fn sync_main_window_glass_scroll_bands(ns_window: id) {
 #[cfg(target_os = "macos")]
 const FLOAT_FOOTER_LAYER_ID: &str = "script-kit-float-footer-layer";
 
-/// Default capsule tint alpha (theme background hue) when the theme sets no
-/// explicit `glass_tint_opacity`. Restores the darker, theme-matched capsule
-/// body from the in-window era, where the glass refracted the app's dark
-/// content instead of the bare desktop.
-#[cfg(target_os = "macos")]
-const FLOAT_CAPSULE_DEFAULT_TINT_ALPHA: f64 = 0.45;
-
-/// Shared styling for every floating footer capsule: the window glass-tint
-/// contract when the theme sets one, otherwise a default theme-background
-/// tint, plus the same 25%-alpha `ui.border` hairline the main container
-/// draws (`render_impl`'s `border_color`), so container and capsules speak
-/// one border language.
+/// Shared styling for every floating footer capsule. The window backdrop and
+/// every capsule resolve through the same appearance/RGB/effective-tint
+/// policy; only the capsule role may add the shared adaptive separation rim.
 #[cfg(target_os = "macos")]
 unsafe fn style_float_footer_capsule(capsule: id, theme: &crate::theme::Theme) {
-    use objc::{class, msg_send, sel, sel_impl};
-
-    let appearance_name = if theme.should_use_dark_vibrancy() {
-        ns_string("NSAppearanceNameVibrantDark")
-    } else {
-        ns_string("NSAppearanceNameVibrantLight")
-    };
-    if appearance_name != nil {
-        let appearance: id = msg_send![class!(NSAppearance), appearanceNamed: appearance_name];
-        if appearance != nil {
-            let _: () = msg_send![capsule, setAppearance: appearance];
-        }
-    }
-
-    if !crate::platform::apply_theme_glass_tint(capsule) {
-        let responds: bool = msg_send![capsule, respondsToSelector: sel!(setTintColor:)];
-        if responds {
-            let tint = ns_color_from_hex_with_alpha(
-                theme.colors.background.main,
-                FLOAT_CAPSULE_DEFAULT_TINT_ALPHA,
-            );
-            if tint != nil {
-                let _: () = msg_send![capsule, setTintColor: tint];
-            }
-        }
-    }
-
-    let _: () = msg_send![capsule, setWantsLayer: YES];
-    let layer: id = msg_send![capsule, layer];
-    if layer != nil {
-        let border = ns_color_from_hex_with_alpha(theme.colors.ui.border, 0x40 as f64 / 255.0);
-        if border != nil {
-            let cg_border: *const std::ffi::c_void = msg_send![border, CGColor];
-            let _: () = msg_send![layer, setBorderColor: cg_border];
-            let _: () = msg_send![layer, setBorderWidth: 1.0f64];
-            let _: () = msg_send![
-                layer,
-                setCornerRadius:
-                    crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
-            ];
-        }
-    }
+    let style = crate::platform::resolve_native_glass_style(
+        theme,
+        crate::platform::NativeGlassSurfaceRole::FloatingCapsule,
+    );
+    let _ = crate::platform::apply_native_glass_style(capsule, style);
 }
 
 #[cfg(target_os = "macos")]
@@ -2751,9 +2709,12 @@ unsafe fn install_footer_host_view(root: id, width: f64, glass_mode: bool) -> bo
         let _: () = msg_send![footer_view, addSubview: hints_view];
     }
 
+    let initial_hints = footer_hints_frame(width);
+    let initial_lanes =
+        resolve_native_footer_lanes(initial_hints.size.width, 0.0, initial_hints.size.width);
     let left_info_view: id = msg_send![footer_passthrough_view_class(), alloc];
     let left_info_view: id =
-        msg_send![left_info_view, initWithFrame: footer_left_info_frame(width)];
+        msg_send![left_info_view, initWithFrame: footer_left_info_frame(initial_lanes)];
     if left_info_view != nil {
         let left_info_id = ns_string(FOOTER_LEFT_INFO_ID);
         if left_info_id != nil {
@@ -3096,6 +3057,12 @@ unsafe fn refresh_footer_host_impl(
         selection_rgba: chrome.selection_rgba,
         hover_rgba: chrome.hover_rgba,
         left_dot_hex,
+        #[cfg(target_os = "macos")]
+        native_glass_signature: crate::platform::resolve_native_glass_style(
+            &theme,
+            crate::platform::NativeGlassSurfaceRole::FloatingCapsule,
+        )
+        .signature,
         main_menu_theme: crate::designs::current_main_menu_theme() as u8,
         gpui_overlay_owns_glyphs,
         button_leading_dot_hexes,
@@ -3142,13 +3109,16 @@ unsafe fn refresh_footer_host_impl(
                     || previous.selection_rgba != signature.selection_rgba
                     || previous.hover_rgba != signature.hover_rgba
                     || previous.left_dot_hex != signature.left_dot_hex
+                    || previous.native_glass_signature != signature.native_glass_signature
                     || previous.main_menu_theme != signature.main_menu_theme
             })
             .unwrap_or(true);
         let effect_theme_changed = guard
             .as_ref()
             .map(|previous| {
-                previous.dark != signature.dark || previous.material != signature.material
+                previous.dark != signature.dark
+                    || previous.material != signature.material
+                    || previous.native_glass_signature != signature.native_glass_signature
             })
             .unwrap_or(true);
         *guard = Some(signature);
@@ -3257,20 +3227,29 @@ unsafe fn refresh_footer_host_impl(
     let text_color = ns_color_from_hex_with_alpha(footer_text_hex(&theme), alpha);
 
     let hints_view = find_subview_by_identifier(footer_view, FOOTER_HINTS_ID);
+    let default_hints_frame = footer_hints_frame(content_bounds.size.width);
+    let mut native_footer_lanes = resolve_native_footer_lanes(
+        default_hints_frame.size.width,
+        0.0,
+        default_hints_frame.size.width,
+    );
     if hints_view != nil {
         if footer_content_changed {
-            let _: () =
-                msg_send![hints_view, setFrame: footer_hints_frame(content_bounds.size.width)];
+            let _: () = msg_send![hints_view, setFrame: default_hints_frame];
             if gpui_overlay_owns_glyphs {
                 // Sandwich layering: AppKit keeps only the material/divider
                 // while GPUI owns the footer glyphs in a child overlay window
                 // above this footer host.
-                layout_footer_hints(hints_view, text_color, &[], &theme);
+                native_footer_lanes = layout_footer_hints(hints_view, text_color, &[], &theme);
             } else {
-                layout_footer_hints(hints_view, text_color, &config.buttons, &theme);
+                native_footer_lanes =
+                    layout_footer_hints(hints_view, text_color, &config.buttons, &theme);
             }
         } else if footer_visuals_changed {
             recolor_footer_hint_subviews(hints_view, &theme);
+            native_footer_lanes = measure_native_footer_lanes(hints_view, &config.buttons);
+        } else {
+            native_footer_lanes = measure_native_footer_lanes(hints_view, &config.buttons);
         }
         if footer_content_changed || footer_visuals_changed || effect_theme_changed {
             restyle_footer_glass_capsules(hints_view, &theme);
@@ -3283,7 +3262,7 @@ unsafe fn refresh_footer_host_impl(
         if footer_content_changed {
             let _: () = msg_send![
                 left_info_view,
-                setFrame: footer_left_info_frame(content_bounds.size.width)
+                setFrame: footer_left_info_frame(native_footer_lanes)
             ];
         }
         if footer_content_changed || (footer_visuals_changed && config.left_info.is_some()) {
@@ -3434,10 +3413,89 @@ fn footer_hints_frame(width: f64) -> cocoa::foundation::NSRect {
 }
 
 #[cfg(target_os = "macos")]
-fn footer_left_info_frame(width: f64) -> cocoa::foundation::NSRect {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NativeFooterLaneLayout {
+    hints_width: f64,
+    left_pinned_end_x: f64,
+    trailing_start_x: f64,
+    left_info_x: f64,
+    left_info_width: f64,
+    trailing_overflow: bool,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FooterLeftInfoDegradation {
+    Full,
+    TruncatedLabels,
+    CwdAffordanceOnly,
+    PrimaryOnly,
+    PrimaryAffordanceOnly,
+    Hidden,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FooterLeftInfoAllocation {
+    degradation: FooterLeftInfoDegradation,
+    available_width: f64,
+}
+
+#[cfg(target_os = "macos")]
+const FOOTER_LEFT_INFO_CAPSULE_PAD_X: f64 = 8.0;
+
+#[cfg(target_os = "macos")]
+fn resolve_native_footer_lanes(
+    hints_width: f64,
+    left_pinned_end_x: f64,
+    trailing_start_x: f64,
+) -> NativeFooterLaneLayout {
+    let gap = f64::from(crate::components::footer_chrome::FOOTER_LEFT_RIGHT_MIN_GAP_PX);
+    let left_pinned_end_x = left_pinned_end_x.clamp(0.0, hints_width.max(0.0));
+    let trailing_start_x = trailing_start_x.clamp(0.0, hints_width.max(0.0));
+    let left_info_x = left_pinned_end_x + gap + FOOTER_LEFT_INFO_CAPSULE_PAD_X;
+    let left_info_end_x = trailing_start_x - gap - FOOTER_LEFT_INFO_CAPSULE_PAD_X;
+    let trailing_overflow = trailing_start_x < left_pinned_end_x + gap;
+    NativeFooterLaneLayout {
+        hints_width,
+        left_pinned_end_x,
+        trailing_start_x,
+        left_info_x,
+        left_info_width: if trailing_overflow {
+            0.0
+        } else {
+            (left_info_end_x - left_info_x).max(0.0)
+        },
+        trailing_overflow,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_footer_left_info_allocation(available_width: f64) -> FooterLeftInfoAllocation {
+    let degradation = if available_width >= 260.0 {
+        FooterLeftInfoDegradation::Full
+    } else if available_width >= 190.0 {
+        FooterLeftInfoDegradation::TruncatedLabels
+    } else if available_width >= 132.0 {
+        FooterLeftInfoDegradation::CwdAffordanceOnly
+    } else if available_width >= 92.0 {
+        FooterLeftInfoDegradation::PrimaryOnly
+    } else if available_width >= 44.0 {
+        FooterLeftInfoDegradation::PrimaryAffordanceOnly
+    } else {
+        FooterLeftInfoDegradation::Hidden
+    };
+    FooterLeftInfoAllocation {
+        degradation,
+        available_width: available_width.max(0.0),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn footer_left_info_frame(layout: NativeFooterLaneLayout) -> cocoa::foundation::NSRect {
     cocoa::foundation::NSRect::new(
-        cocoa::foundation::NSPoint::new(FOOTER_HINT_SIDE_INSET, 0.0),
-        cocoa::foundation::NSSize::new(width / 2.0, footer_height()),
+        cocoa::foundation::NSPoint::new(FOOTER_HINT_SIDE_INSET + layout.left_info_x, 0.0),
+        cocoa::foundation::NSSize::new(layout.left_info_width, footer_height()),
     )
 }
 
@@ -3451,6 +3509,12 @@ unsafe fn layout_footer_left_info(
     use objc::{msg_send, sel, sel_impl};
 
     let bounds: NSRect = msg_send![left_info_view, bounds];
+    let allocation = resolve_footer_left_info_allocation(bounds.size.width);
+    let left_info = if matches!(allocation.degradation, FooterLeftInfoDegradation::Hidden) {
+        None
+    } else {
+        left_info
+    };
     let Some(info) = left_info else {
         remove_identified_subview(left_info_view, FOOTER_STATUS_DOT_ID);
         remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);
@@ -3470,7 +3534,24 @@ unsafe fn layout_footer_left_info(
     let mut x = 0.0_f64;
 
     // ── CWD chip (always on the far left, independent of model marker) ──
-    if let Some(cwd_chip) = info.cwd_chip.as_ref() {
+    let show_cwd = matches!(
+        allocation.degradation,
+        FooterLeftInfoDegradation::Full
+            | FooterLeftInfoDegradation::TruncatedLabels
+            | FooterLeftInfoDegradation::CwdAffordanceOnly
+    );
+    let show_primary = !matches!(
+        allocation.degradation,
+        FooterLeftInfoDegradation::CwdAffordanceOnly
+    );
+    let show_labels = !matches!(
+        allocation.degradation,
+        FooterLeftInfoDegradation::CwdAffordanceOnly
+            | FooterLeftInfoDegradation::PrimaryAffordanceOnly
+    );
+    let max_content_x = (allocation.available_width - FOOTER_LEFT_INFO_CAPSULE_PAD_X).max(0.0);
+
+    if let Some(cwd_chip) = info.cwd_chip.as_ref().filter(|_| show_cwd) {
         let chip_start_x = x;
 
         // Folder icon.
@@ -3496,23 +3577,25 @@ unsafe fn layout_footer_left_info(
             x += FOOTER_LEFT_PROFILE_ICON_SIZE + FOOTER_LEFT_DOT_LABEL_GAP;
         }
 
-        let label = ensure_footer_cwd_chip_label(
-            left_info_view,
-            visual_parent,
-            &cwd_chip.label,
-            text_color,
-        );
-        if label != nil {
+        let label = if show_labels {
+            ensure_footer_cwd_chip_label(left_info_view, visual_parent, &cwd_chip.label, text_color)
+        } else {
+            remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_LABEL_ID);
+            nil
+        };
+        if label != nil && x < max_content_x {
             let label_size: NSSize = msg_send![label, fittingSize];
+            let label_width = label_size.width.min((max_content_x - x).max(0.0));
             let label_y = ((bounds.size.height - label_size.height) / 2.0).round();
+            let _: () = msg_send![label, setLineBreakMode: 4usize];
             let _: () = msg_send![
                 label,
                 setFrame: NSRect::new(
                     NSPoint::new(x + visual_offset_x, label_y + visual_offset_y),
-                    NSSize::new(label_size.width, label_size.height),
+                    NSSize::new(label_width, label_size.height),
                 )
             ];
-            x += label_size.width;
+            x += label_width;
         }
 
         if let Some(key_glyph) = cwd_chip.key.as_deref().filter(|key| !key.trim().is_empty()) {
@@ -3554,7 +3637,9 @@ unsafe fn layout_footer_left_info(
     let hit_start_x = x;
 
     // ── Status dot (legacy left-info path only; Agent Chat profile markers pulse the icon) ──
-    let show_dot = info.icon_token.is_none() && !matches!(info.dot_status, FooterDotStatus::Hidden);
+    let show_dot = show_primary
+        && info.icon_token.is_none()
+        && !matches!(info.dot_status, FooterDotStatus::Hidden);
     if show_dot {
         let dot_y = ((bounds.size.height - FOOTER_STREAMING_DOT_SIZE) / 2.0).round();
         let dot_view = ensure_footer_status_dot_view(left_info_view, visual_parent);
@@ -3577,7 +3662,7 @@ unsafe fn layout_footer_left_info(
     }
 
     // ── Optional merged profile icon ──
-    if let Some(token) = info.icon_token.as_deref() {
+    if let Some(token) = info.icon_token.as_deref().filter(|_| show_primary) {
         let icon_view = ensure_footer_left_profile_icon_view(left_info_view, visual_parent);
         if icon_view != nil {
             let image = footer_icon_image(token);
@@ -3606,7 +3691,11 @@ unsafe fn layout_footer_left_info(
     // Left-aligned markers use the same bordered keycap chrome as trailing
     // footer actions. This was previously rendered only by the GPUI fallback,
     // leaving the native glass owner with a missing shortcut glyph.
-    if let Some(keycap) = info.keycap.as_deref().filter(|key| !key.trim().is_empty()) {
+    if let Some(keycap) = info
+        .keycap
+        .as_deref()
+        .filter(|key| show_primary && !key.trim().is_empty())
+    {
         x += layout_footer_left_keycap(
             left_info_view,
             visual_parent,
@@ -3625,22 +3714,24 @@ unsafe fn layout_footer_left_info(
     }
 
     // ── Model name label ──
-    if info.model_name.is_empty() {
+    if info.model_name.is_empty() || !show_primary || !show_labels {
         remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);
     } else {
         let label =
             ensure_footer_model_label(left_info_view, visual_parent, &info.model_name, text_color);
         if label != nil {
             let label_size: NSSize = msg_send![label, fittingSize];
+            let label_width = label_size.width.min((max_content_x - x).max(0.0));
             let label_y = ((bounds.size.height - label_size.height) / 2.0).round();
+            let _: () = msg_send![label, setLineBreakMode: 4usize];
             let _: () = msg_send![
                 label,
                 setFrame: NSRect::new(
                     NSPoint::new(x + visual_offset_x, label_y + visual_offset_y),
-                    NSSize::new(label_size.width, label_size.height),
+                    NSSize::new(label_width, label_size.height),
                 )
             ];
-            x += label_size.width;
+            x += label_width;
         }
     }
 
@@ -3653,7 +3744,7 @@ unsafe fn layout_footer_left_info(
         ),
     );
 
-    ensure_footer_left_info_capsule(left_info_view, x, bounds.size.height);
+    ensure_footer_left_info_capsule(left_info_view, x.min(max_content_x), bounds.size.height);
 }
 
 /// Return the owning foreground view for left-info visuals. Glass foregrounds
@@ -3673,7 +3764,7 @@ unsafe fn ensure_footer_left_info_visual_parent(left_info_view: id, height: f64)
         return (left_info_view, 0.0, 0.0);
     };
 
-    const PAD_X: f64 = 8.0;
+    const PAD_X: f64 = FOOTER_LEFT_INFO_CAPSULE_PAD_X;
     let item_height =
         crate::components::footer_chrome::footer_button_height(footer_height() as f32) as f64;
     let capsule_y = ((height - item_height) / 2.0).round();
@@ -3742,6 +3833,48 @@ unsafe fn ensure_footer_left_info_visual_parent(left_info_view: id, height: f64)
         ];
         let _: () = msg_send![content_layer, setMasksToBounds: YES];
     }
+    let state_view = find_subview_by_identifier(content, FOOTER_LEFT_INFO_STATE_LAYER_ID);
+    let state_view = if state_view != nil {
+        state_view
+    } else {
+        let state_view: id = msg_send![class!(NSView), alloc];
+        let state_view: id = msg_send![
+            state_view,
+            initWithFrame: NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(PAD_X * 2.0 + 1.0, item_height)
+            )
+        ];
+        if state_view != nil {
+            let identifier = ns_string(FOOTER_LEFT_INFO_STATE_LAYER_ID);
+            if identifier != nil {
+                let _: () = msg_send![state_view, setIdentifier: identifier];
+            }
+            let _: () = msg_send![state_view, setAutoresizingMask: 18u64];
+            let _: () = msg_send![state_view, setWantsLayer: YES];
+            let state_layer: id = msg_send![state_view, layer];
+            if state_layer != nil {
+                let _: () = msg_send![
+                    state_layer,
+                    setCornerRadius:
+                        crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
+                ];
+                let _: () = msg_send![state_layer, setMasksToBounds: YES];
+            }
+            let _: () = msg_send![
+                content,
+                addSubview: state_view
+                positioned: -1isize
+                relativeTo: cocoa::base::nil
+            ];
+        }
+        state_view
+    };
+    if state_view != nil {
+        let content_bounds: NSRect = msg_send![content, bounds];
+        let _: () = msg_send![state_view, setFrame: content_bounds];
+    }
+    style_float_footer_capsule(capsule, &crate::theme::get_cached_theme());
     let _: () = msg_send![capsule, setHidden: NO];
     (content, PAD_X, -capsule_y)
 }
@@ -3801,6 +3934,10 @@ unsafe fn ensure_footer_left_info_capsule(left_info_view: id, content_width: f64
     };
     let _: () = msg_send![capsule, setHidden: NO];
     let _: () = msg_send![capsule, setFrame: frame];
+    // Resizing/attaching an NSGlassEffectView may replace its private
+    // foreground backing. Reapply the shared policy after the final frame so
+    // the left capsule keeps the same veil and rim as trailing capsules.
+    style_float_footer_capsule(capsule, &crate::theme::get_cached_theme());
 }
 
 #[cfg(target_os = "macos")]
@@ -4154,8 +4291,7 @@ unsafe fn layout_footer_cwd_chip_hit_target(
     if let Some(object) = button.as_mut() {
         object.set_ivar::<usize>(
             "_stateView",
-            find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_CAPSULE_CONTENT_ID)
-                as usize,
+            find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_STATE_LAYER_ID) as usize,
         );
     }
     let tooltip = tooltip.map(ns_string).unwrap_or(nil);
@@ -4206,8 +4342,7 @@ unsafe fn layout_footer_left_info_hit_target(
     if let Some(object) = button.as_mut() {
         object.set_ivar::<usize>(
             "_stateView",
-            find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_CAPSULE_CONTENT_ID)
-                as usize,
+            find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_STATE_LAYER_ID) as usize,
         );
     }
 }
@@ -4481,7 +4616,7 @@ unsafe fn layout_footer_hints(
     text_color: id,
     buttons: &[FooterButtonConfig],
     theme: &crate::theme::Theme,
-) {
+) -> NativeFooterLaneLayout {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{msg_send, sel, sel_impl};
 
@@ -4557,14 +4692,15 @@ unsafe fn layout_footer_hints(
         ));
     }
 
-    let left_pinned_width = items
-        .iter()
-        .filter(|(_, _, _, _, left_pinned)| *left_pinned)
-        .map(|(_, target_width, _, _, _)| *target_width + item_gap)
-        .sum::<f64>();
-    let mut trailing_x = (hints_bounds.size.width - trailing_item_width)
-        .max(left_pinned_width)
-        .max(0.0);
+    // Trailing actions own the right edge. Never shift them right to rescue a
+    // left lane; if the two clusters exhaust the strip, the left allocation
+    // degrades or disappears instead.
+    let mut trailing_x = (hints_bounds.size.width - trailing_item_width).max(0.0);
+    let trailing_start_x = if trailing_item_width > 0.0 {
+        trailing_x
+    } else {
+        hints_bounds.size.width
+    };
     // Left-pinned buttons (e.g. Cwd, then Agent·Model) lay out left-to-right
     // from x=0 so multiple left chips sit side by side instead of overlapping.
     let mut left_x = 0.0;
@@ -4597,6 +4733,40 @@ unsafe fn layout_footer_hints(
             trailing_x += target_width + item_gap;
         }
     }
+    let left_pinned_end_x = if left_x > 0.0 {
+        (left_x - item_gap).max(0.0)
+    } else {
+        0.0
+    };
+    resolve_native_footer_lanes(hints_bounds.size.width, left_pinned_end_x, trailing_start_x)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn measure_native_footer_lanes(
+    hints_view: id,
+    buttons: &[FooterButtonConfig],
+) -> NativeFooterLaneLayout {
+    use cocoa::foundation::NSRect;
+    use objc::{msg_send, sel, sel_impl};
+
+    let bounds: NSRect = msg_send![hints_view, bounds];
+    let subviews: id = msg_send![hints_view, subviews];
+    if subviews == nil {
+        return resolve_native_footer_lanes(bounds.size.width, 0.0, bounds.size.width);
+    }
+    let count: usize = msg_send![subviews, count];
+    let mut left_end = 0.0_f64;
+    let mut trailing_start = bounds.size.width;
+    for index in 0..count.min(buttons.len()) {
+        let item: id = msg_send![subviews, objectAtIndex: index];
+        let frame: NSRect = msg_send![item, frame];
+        if is_footer_left_pinned_button(&buttons[index]) {
+            left_end = left_end.max(frame.origin.x + frame.size.width);
+        } else {
+            trailing_start = trailing_start.min(frame.origin.x);
+        }
+    }
+    resolve_native_footer_lanes(bounds.size.width, left_end, trailing_start)
 }
 
 #[cfg(target_os = "macos")]
@@ -5558,6 +5728,65 @@ mod footer_layout_tests {
     fn native_glass_capsules_use_the_shared_open_gap() {
         assert_eq!(footer_hint_item_gap(true, 2.0), 6.0);
         assert_eq!(footer_hint_item_gap(false, 2.0), 2.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_footer_lane_keeps_left_capsule_clear_of_trailing_actions() {
+        let lane = super::resolve_native_footer_lanes(718.0, 120.0, 506.0);
+        let capsule_min_x = lane.left_info_x - super::FOOTER_LEFT_INFO_CAPSULE_PAD_X;
+        let capsule_max_x =
+            lane.left_info_x + lane.left_info_width + super::FOOTER_LEFT_INFO_CAPSULE_PAD_X;
+        let gap = f64::from(crate::components::footer_chrome::FOOTER_LEFT_RIGHT_MIN_GAP_PX);
+
+        assert!(capsule_min_x >= lane.left_pinned_end_x + gap);
+        assert!(capsule_max_x <= lane.trailing_start_x - gap);
+        assert!(!lane.trailing_overflow);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_footer_lane_hides_left_info_when_clusters_exhaust_width() {
+        let lane = super::resolve_native_footer_lanes(250.0, 132.0, 136.0);
+        let allocation = super::resolve_footer_left_info_allocation(lane.left_info_width);
+
+        assert!(lane.trailing_overflow);
+        assert_eq!(lane.left_info_width, 0.0);
+        assert_eq!(
+            allocation.degradation,
+            super::FooterLeftInfoDegradation::Hidden
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn footer_left_info_allocation_degrades_monotonically() {
+        use super::FooterLeftInfoDegradation::*;
+
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(300.0).degradation,
+            Full
+        );
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(220.0).degradation,
+            TruncatedLabels
+        );
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(150.0).degradation,
+            CwdAffordanceOnly
+        );
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(110.0).degradation,
+            PrimaryOnly
+        );
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(60.0).degradation,
+            PrimaryAffordanceOnly
+        );
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(20.0).degradation,
+            Hidden
+        );
     }
 
     #[test]

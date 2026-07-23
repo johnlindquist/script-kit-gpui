@@ -75,6 +75,65 @@ fn hide_main_window_then_activate_notes(cx: &mut App, notes_handle: gpui::Window
     );
 }
 
+fn schedule_notes_entry_reveal(
+    handle: gpui::WindowHandle<Root>,
+    notes_app: Entity<NotesApp>,
+    cx: &mut App,
+) {
+    let generation = notes_app.update(cx, |app, cx| {
+        let generation = app.entry_reveal.generation;
+        app.entry_reveal
+            .advance(generation, NotesEntryRevealPhase::NativeConfigured);
+        cx.notify();
+        generation
+    });
+    let weak = notes_app.downgrade();
+    let _ = update_notes_window_detached(handle, cx, |window, _cx| {
+        window.on_next_frame(move |window, cx| {
+            let should_settle = weak
+                .update(cx, |app, cx| {
+                    let first = app
+                        .entry_reveal
+                        .advance(generation, NotesEntryRevealPhase::FirstFrameComplete);
+                    if first {
+                        app.entry_reveal
+                            .advance(generation, NotesEntryRevealPhase::SettlingMaterial);
+                        cx.notify();
+                    }
+                    first
+                })
+                .unwrap_or(false);
+            if !should_settle {
+                return;
+            }
+            let weak = weak.clone();
+            let any_handle = window.window_handle();
+            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                cx.background_executor()
+                    .timer(crate::platform::glass_entry_settle_delay())
+                    .await;
+                cx.update(|cx| {
+                    let _ = any_handle.update(cx, |_root, window, _cx| {
+                        window.on_next_frame(move |_window, cx| {
+                            let _ = weak.update(cx, |app, cx| {
+                                if app
+                                    .entry_reveal
+                                    .advance(generation, NotesEntryRevealPhase::Visible)
+                                {
+                                    cx.notify();
+                                }
+                            });
+                        });
+                        window.request_animation_frame();
+                    });
+                });
+            })
+            .detach();
+        });
+        window.request_animation_frame();
+    });
+}
+
 /// Default Notes window bounds: top-right corner of the display the mouse
 /// cursor is on (falling back to the primary display). Geometry is owned by
 /// the app-authored contract (`notes::window::contract`), shared by
@@ -662,43 +721,84 @@ fn open_notes_window_with_close_behavior(
 
     // Check if window already exists and is valid
     if let Some(handle) = existing_handle {
-        // Window exists - check if it's valid and close it (toggle OFF)
-        // Lock is released, safe to call handle.update()
-        if handle
-            .update(cx, |root, window, cx| {
-                // Save bounds before closing (fixes bounds persistence on toggle close)
-                let wb = window.window_bounds();
-                crate::window_state::save_window_from_gpui(
-                    crate::window_state::WindowRole::Notes,
-                    wb,
-                );
-                // Avoid re-entrant Root lease: `window.close_all_dialogs(cx)` wraps its body
-                // in `Root::update(self, cx, ...)`, but we already hold the Root lease via
-                // `handle.update`. Calling the inner method on the leased `root` directly
-                // bypasses the second lease and prevents the entity_map.rs:142 double-lease
-                // panic that fires on rapid `openNotes` -> `hide` -> `openNotes` toggles.
-                root.close_all_dialogs(window, cx);
-                // Glass mode: play the Spotlight dematerialize (same as the
-                // main window's exit), then remove after the fade.
-                if crate::platform::begin_gpui_window_exit_dematerialize(window, "PANEL", "Notes") {
-                    let any_handle = window.window_handle();
-                    cx.spawn(async move |_root, cx: &mut gpui::AsyncApp| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(135))
-                            .await;
-                        cx.update(|cx| {
-                            let _ = any_handle.update(cx, |_root, window, _cx| {
-                                window.remove_window();
-                            });
-                        });
-                    })
-                    .detach();
-                } else {
-                    window.remove_window();
-                }
+        let pending_exit = NOTES_EXIT_TICKET
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if pending_exit.is_some() {
+            if update_notes_window_detached(handle, cx, |window, _cx| {
+                crate::platform::cancel_gpui_window_exit_dematerialize(window);
+                configure_notes_as_floating_panel(window);
+                window.activate_window();
             })
             .is_ok()
+            {
+                crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
+                    id: "notes".to_string(),
+                    kind: crate::protocol::AutomationWindowKind::Notes,
+                    title: Some("Notes".to_string()),
+                    focused: true,
+                    visible: true,
+                    semantic_surface: Some("notes".to_string()),
+                    bounds: None,
+                    parent_window_id: None,
+                    parent_kind: None,
+                    pid: Some(std::process::id()),
+                });
+                logging::log(
+                    "PANEL",
+                    "Notes exit superseded - reused the live native window",
+                );
+                if let Some(notes_app) = NOTES_APP_ENTITY
+                    .get_or_init(|| std::sync::Mutex::new(None))
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone())
+                {
+                    notes_app.update(cx, |app, cx| {
+                        app.entry_reveal.restart();
+                        cx.notify();
+                    });
+                    schedule_notes_entry_reveal(handle, notes_app, cx);
+                }
+                return Ok(());
+            }
+        }
+        // Window exists - check if it's valid and close it (toggle OFF)
+        // Lock is released, safe to call handle.update()
+        if let Some(notes_app) = NOTES_APP_ENTITY
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
         {
+            notes_app.update(cx, |app, cx| {
+                app.entry_reveal.cancel();
+                cx.notify();
+            });
+        }
+        let close_result = handle.update(cx, |root, window, cx| {
+            // Save bounds before closing (fixes bounds persistence on toggle close)
+            let wb = window.window_bounds();
+            crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
+            // Avoid re-entrant Root lease: `window.close_all_dialogs(cx)` wraps its body
+            // in `Root::update(self, cx, ...)`, but we already hold the Root lease via
+            // `handle.update`. Calling the inner method on the leased `root` directly
+            // bypasses the second lease and prevents the entity_map.rs:142 double-lease
+            // panic that fires on rapid `openNotes` -> `hide` -> `openNotes` toggles.
+            root.close_all_dialogs(window, cx);
+            // Glass mode: play the Spotlight dematerialize (same as the
+            // main window's exit), then remove after the fade.
+            if let Some(ticket) =
+                crate::platform::begin_gpui_window_exit_with_ticket(window, "PANEL", "Notes")
+            {
+                Some((ticket, window.window_handle()))
+            } else {
+                window.remove_window();
+                None
+            }
+        });
+        if let Ok(exit) = close_result {
             // Close any open CommandBar windows (command_bar and note_switcher)
             // They use a global singleton, so we close it via the actions module
             crate::actions::close_actions_window(cx);
@@ -707,10 +807,46 @@ fn open_notes_window_with_close_behavior(
                 target: "script_kit::keyboard",
                 event = "notes_toggle_off_restore_launcher_requested"
             );
-            retire_notes_window_registrations(notes_window_close_transition(
-                NotesWindowCloseOrigin::CurrentWindow,
-            ));
-            restore_launcher_after_notes_close_if_needed(cx);
+            if let Some((ticket, any_handle)) = exit {
+                *NOTES_EXIT_TICKET
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(ticket);
+                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                    cx.background_executor()
+                        .timer(crate::platform::glass_exit_remove_delay())
+                        .await;
+                    cx.update(|cx| {
+                        let pending_matches = NOTES_EXIT_TICKET
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .as_ref()
+                            .copied()
+                            == Some(ticket);
+                        if !pending_matches
+                            || !crate::platform::glass_exit_ticket_is_current(ticket)
+                        {
+                            return;
+                        }
+                        NOTES_EXIT_TICKET
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .take();
+                        retire_notes_window_registrations(notes_window_close_transition(
+                            NotesWindowCloseOrigin::CurrentWindow,
+                        ));
+                        let _ = any_handle.update(cx, |_root, window, _cx| {
+                            window.remove_window();
+                        });
+                        restore_launcher_after_notes_close_if_needed(cx);
+                    });
+                })
+                .detach();
+            } else {
+                retire_notes_window_registrations(notes_window_close_transition(
+                    NotesWindowCloseOrigin::CurrentWindow,
+                ));
+                restore_launcher_after_notes_close_if_needed(cx);
+            }
             return Ok(());
         }
         // Window handle was invalid, fall through to create new window
@@ -846,6 +982,21 @@ fn open_notes_window_with_close_behavior(
         pid: Some(std::process::id()),
     });
 
+    // Resolve and configure the exact GPUI-owned NSWindow before the body
+    // reveal sequence begins. A title scan can select a stale tail window
+    // during rapid close/reopen and is therefore not an acceptable owner.
+    let native_configured = update_notes_window_detached(handle, cx, |window, _cx| {
+        configure_notes_as_floating_panel(window)
+    })
+    .unwrap_or(false);
+    if !native_configured {
+        tracing::warn!(
+            target: "script_kit::notes",
+            event = "notes_native_entry_configuration_failed",
+            "Notes exact-window native configuration failed; bounded reveal fallback remains active"
+        );
+    }
+
     // Focus the editor input in the Notes window
     // Release lock before calling update
     let notes_app_entity = notes_app_holder.lock().ok().and_then(|mut g| g.take());
@@ -907,10 +1058,8 @@ fn open_notes_window_with_close_behavior(
                 cx.notify();
             });
         });
+        schedule_notes_entry_reveal(handle, notes_app, cx);
     }
-
-    // Configure as floating panel (always on top) after window is created
-    configure_notes_as_floating_panel();
 
     // NOTE: Theme hot-reload is now handled by the centralized ThemeService
     // (crate::theme::service::ensure_theme_service) which is started once at app init.
@@ -1241,53 +1390,75 @@ fn run_current_notes_window_close_sequence(
 /// focus handoff makes GPUI's callback log `window not found`.
 pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
     let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
-    // Glass mode: start the Spotlight dematerialize before the close
-    // sequence (focus handoff proceeds during the fade); removal is then
-    // deferred past the animation instead of running on the next frame.
-    let dematerialize_handle =
-        if crate::platform::begin_gpui_window_exit_dematerialize(window, "PANEL", "Notes") {
-            Some(window.window_handle())
-        } else {
-            None
-        };
-    let instant_remove = dematerialize_handle.is_none();
-    run_current_notes_window_close_sequence(
-        transition,
-        retire_notes_window_registrations,
-        || restore_launcher_after_notes_close_if_needed(cx),
-        || {
-            if instant_remove {
-                window.on_next_frame(|window, _cx| window.remove_window());
-                window.request_animation_frame();
-            }
-        },
-    );
-    if let Some(any_handle) = dematerialize_handle {
+    if let Some(ticket) =
+        crate::platform::begin_gpui_window_exit_with_ticket(window, "PANEL", "Notes")
+    {
+        let any_handle = window.window_handle();
+        *NOTES_EXIT_TICKET
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(ticket);
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(135))
+                .timer(crate::platform::glass_exit_remove_delay())
                 .await;
             cx.update(|cx| {
+                let pending_matches = NOTES_EXIT_TICKET
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .as_ref()
+                    .copied()
+                    == Some(ticket);
+                if !pending_matches || !crate::platform::glass_exit_ticket_is_current(ticket) {
+                    return;
+                }
+                NOTES_EXIT_TICKET
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .take();
+                retire_notes_window_registrations(transition);
                 let _ = any_handle.update(cx, |_root, window, _cx| {
                     window.remove_window();
                 });
+                if transition.restore_launcher_after_removal {
+                    restore_launcher_after_notes_close_if_needed(cx);
+                }
             });
         })
         .detach();
+    } else {
+        run_current_notes_window_close_sequence(
+            transition,
+            retire_notes_window_registrations,
+            || restore_launcher_after_notes_close_if_needed(cx),
+            || {
+                window.on_next_frame(|window, _cx| window.remove_window());
+                window.request_animation_frame();
+            },
+        );
     }
 }
 
 pub fn close_notes_window(cx: &mut App) {
-    // SAFETY: Release lock BEFORE calling handle.update() to prevent deadlock
-    // If handle.update() causes Drop to fire synchronously and tries to acquire
-    // the same lock, we would deadlock. Taking the handle out first avoids this.
+    if let Some(notes_app) = NOTES_APP_ENTITY
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
+        notes_app.update(cx, |app, cx| {
+            app.entry_reveal.cancel();
+            cx.notify();
+        });
+    }
+
+    // Keep the handle and entity registered through the visual tail so a
+    // toggle arriving before removal can supersede this exit and reuse the
+    // same physical Notes window.
     let handle = {
         let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok().and_then(|mut g| g.take())
+        slot.lock().ok().and_then(|g| *g)
     };
-    let transition =
-        notes_window_close_transition(NotesWindowCloseOrigin::StoredHandleAlreadyTaken);
-    retire_notes_window_registrations(transition);
+    let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
 
     if let Some(handle) = handle {
         match update_notes_window_detached(handle, cx, |window, cx| {
@@ -1297,32 +1468,59 @@ pub fn close_notes_window(cx: &mut App) {
             // Safe here: no Root lease is held, so the Root::update inside
             // close_all_dialogs does not double-lease.
             window.close_all_dialogs(cx);
-            // Glass mode: play the Spotlight dematerialize (same as the main
-            // window's exit), then remove after the fade.
-            if crate::platform::begin_gpui_window_exit_dematerialize(window, "PANEL", "Notes") {
-                let any_handle = window.window_handle();
-                cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(135))
-                        .await;
-                    cx.update(|cx| {
-                        let _ = any_handle.update(cx, |_root, window, _cx| {
-                            window.remove_window();
-                        });
-                    });
-                })
-                .detach();
+            if let Some(ticket) =
+                crate::platform::begin_gpui_window_exit_with_ticket(window, "PANEL", "Notes")
+            {
+                Some((ticket, window.window_handle()))
             } else {
                 window.remove_window();
+                None
             }
         }) {
-            Ok(()) => {
+            Ok(exit) => {
                 tracing::info!(
                     target: "script_kit::keyboard",
                     event = "notes_helper_close_restore_launcher_requested"
                 );
-                if transition.restore_launcher_after_removal {
-                    restore_launcher_after_notes_close_if_needed(cx);
+                if let Some((ticket, any_handle)) = exit {
+                    *NOTES_EXIT_TICKET
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) = Some(ticket);
+                    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                        cx.background_executor()
+                            .timer(crate::platform::glass_exit_remove_delay())
+                            .await;
+                        cx.update(|cx| {
+                            let pending_matches = NOTES_EXIT_TICKET
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .as_ref()
+                                .copied()
+                                == Some(ticket);
+                            if !pending_matches
+                                || !crate::platform::glass_exit_ticket_is_current(ticket)
+                            {
+                                return;
+                            }
+                            NOTES_EXIT_TICKET
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .take();
+                            retire_notes_window_registrations(transition);
+                            let _ = any_handle.update(cx, |_root, window, _cx| {
+                                window.remove_window();
+                            });
+                            if transition.restore_launcher_after_removal {
+                                restore_launcher_after_notes_close_if_needed(cx);
+                            }
+                        });
+                    })
+                    .detach();
+                } else {
+                    retire_notes_window_registrations(transition);
+                    if transition.restore_launcher_after_removal {
+                        restore_launcher_after_notes_close_if_needed(cx);
+                    }
                 }
             }
             Err(error) => {
@@ -1425,97 +1623,60 @@ pub fn is_notes_window(window: &gpui::Window) -> bool {
 /// - NSWindowCollectionBehaviorMoveToActiveSpace - moves to current space when shown
 /// - Disabled window restoration - prevents macOS position caching
 #[cfg(target_os = "macos")]
-fn configure_notes_as_floating_panel() {
+fn configure_notes_as_floating_panel(gpui_window: &gpui::Window) -> bool {
     use crate::logging;
-    use std::ffi::CStr;
 
     unsafe {
-        let app: id = NSApp();
-        let windows: id = msg_send![app, windows];
-        let count: usize = msg_send![windows, count];
-
-        for i in 0..count {
-            let window: id = msg_send![windows, objectAtIndex: i];
-            let title: id = msg_send![window, title];
-
-            if title != nil {
-                let title_cstr: *const i8 = msg_send![title, UTF8String];
-                if !title_cstr.is_null() {
-                    let title_str = CStr::from_ptr(title_cstr).to_string_lossy();
-
-                    if title_str == "Notes" {
-                        // Found the Notes window - configure it
-
-                        // Keep Notes visible when the app is hidden by a stray
-                        // app-level hide. Main-window dismissal must not take
-                        // the independent Notes host with it.
-                        let _: () = msg_send![window, setCanHide: false];
-
-                        // Keep the GPUI-assigned PopUp window level (101).
-
-                        // Get current collection behavior to preserve existing flags
-                        let current: u64 = msg_send![window, collectionBehavior];
-
-                        // OR in FullScreenAuxiliary (256) + IgnoresCycle (64)
-                        // IgnoresCycle excludes Notes from Cmd+Tab - it's a utility window
-                        // Strip Space-hopping flags so Notes stays on its opening Space
-                        let desired: u64 = notes_window_collection_behavior(current);
-                        let _: () = msg_send![window, setCollectionBehavior:desired];
-
-                        // Ensure window content is shareable for captureScreenshot()
-                        let sharing_type: i64 = 1; // NSWindowSharingReadOnly
-                        let _: () = msg_send![window, setSharingType:sharing_type];
-
-                        // Disable window restoration
-                        let _: () = msg_send![window, setRestorable:false];
-
-                        // Disable close/hide animation for instant dismiss (NSWindowAnimationBehaviorNone = 2)
-                        let _: () = msg_send![window, setAnimationBehavior: 2i64];
-
-                        // ═══════════════════════════════════════════════════════════════════════════
-                        // VIBRANCY CONFIGURATION - Match main window for consistent blur
-                        // ═══════════════════════════════════════════════════════════════════════════
-                        let theme = get_cached_theme();
-                        let is_dark = theme.should_use_dark_vibrancy();
-                        crate::platform::configure_secondary_window_vibrancy(
-                            window, "Notes", is_dark,
-                        );
-
-                        // Log detailed breakdown of collection behavior bits
-                        let has_can_join =
-                            (desired & NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES) != 0;
-                        let has_ignores =
-                            (desired & NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE) != 0;
-                        let has_move_to_active =
-                            (desired & NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE) != 0;
-
-                        logging::log(
-                            "PANEL",
-                            &format!(
-                                "Notes window: behavior={}->{} [CanJoinAllSpaces={}, IgnoresCycle={}, MoveToActiveSpace={}]",
-                                current, desired, has_can_join, has_ignores, has_move_to_active
-                            ),
-                        );
-                        logging::log(
-                            "PANEL",
-                            "Notes window: Will NOT appear in Cmd+Tab app switcher (floating utility panel)",
-                        );
-                        return;
-                    }
-                }
-            }
+        let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(gpui_window) else {
+            logging::log("PANEL", "Warning: Notes raw window handle unavailable");
+            return false;
+        };
+        let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+            return false;
+        };
+        let ns_view = appkit.ns_view.as_ptr() as id;
+        let window: id = msg_send![ns_view, window];
+        if window == nil {
+            return false;
         }
 
+        let _: () = msg_send![window, setCanHide: false];
+        let current: u64 = msg_send![window, collectionBehavior];
+        let desired: u64 = notes_window_collection_behavior(current);
+        let _: () = msg_send![window, setCollectionBehavior:desired];
+        let sharing_type: i64 = 1;
+        let _: () = msg_send![window, setSharingType:sharing_type];
+        let _: () = msg_send![window, setRestorable:false];
+        let _: () = msg_send![window, setAnimationBehavior: 2i64];
+
+        let theme = get_cached_theme();
+        let is_dark = theme.should_use_dark_vibrancy();
+        crate::platform::configure_secondary_window_vibrancy(window, "Notes", is_dark);
+
+        let window_number: i64 = msg_send![window, windowNumber];
+        let has_can_join = (desired & NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES) != 0;
+        let has_ignores = (desired & NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE) != 0;
+        let has_move_to_active =
+            (desired & NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE) != 0;
         logging::log(
             "PANEL",
-            "Warning: Notes window not found by title for floating panel config",
+            &format!(
+                "event=notes_native_entry_configured window_number={} behavior={}->{} CanJoinAllSpaces={} IgnoresCycle={} MoveToActiveSpace={}",
+                window_number,
+                current,
+                desired,
+                has_can_join,
+                has_ignores,
+                has_move_to_active
+            ),
         );
+        true
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_notes_as_floating_panel() {
-    // No-op on non-macOS platforms
+fn configure_notes_as_floating_panel(_window: &gpui::Window) -> bool {
+    false
 }
 
 /// Return the current editor text from the Notes window, if open.

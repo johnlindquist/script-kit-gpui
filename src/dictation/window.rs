@@ -1111,7 +1111,7 @@ impl DictationOverlay {
     /// back to instant close when glass/morph is unavailable.
     fn dematerialize_then_remove_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.teardown_glass_button_host(window);
-        if crate::platform::begin_gpui_window_exit_dematerialize(
+        if let Some(ticket) = crate::platform::begin_gpui_window_exit_with_ticket(
             window,
             "DICTATION",
             "Dictation overlay",
@@ -1119,9 +1119,12 @@ impl DictationOverlay {
             let any_handle = window.window_handle();
             cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(135))
+                    .timer(crate::platform::glass_exit_remove_delay())
                     .await;
                 cx.update(|cx| {
+                    if !crate::platform::glass_exit_ticket_is_current(ticket) {
+                        return;
+                    }
                     let _ = any_handle.update(cx, |_view, window, _cx| {
                         prepare_overlay_window_for_close(window);
                         window.remove_window();

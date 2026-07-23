@@ -12,6 +12,18 @@ pub const LIQUID_GLASS_MIN_VISUAL_PX: f32 = 20.0;
 pub const LIQUID_GLASS_PREFERRED_HIT_PX: f32 = 44.0;
 pub const LIQUID_GLASS_PREFERRED_CENTER_GAP_PX: f32 = 60.0;
 
+/// Minimum native `NSGlassEffectView.tintColor` alpha used by the shared
+/// window/capsule material policy. This stabilizes the sampled hue while
+/// preserving enough translucency to read as native glass.
+pub const LIQUID_GLASS_STABILITY_TINT_ALPHA_FLOOR: f32 = 0.55;
+/// Small matched-color veil inside each discrete capsule. It damps local
+/// desktop hue sampling without replacing the native material or filling the
+/// transparent gaps between capsules.
+pub const LIQUID_GLASS_CAPSULE_VEIL_ALPHA: f32 = 0.80;
+pub const LIQUID_GLASS_CAPSULE_RIM_WIDTH_PX: f32 = 1.0;
+pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_DARK: f32 = 0.24;
+pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_LIGHT: f32 = 0.18;
+
 pub const LIQUID_GLASS_WINDOW_RADIUS_PX: f32 = 22.0;
 /// Radius of the bounded launcher content capsule when its footer controls
 /// occupy a detached region inside the same transparent native window.

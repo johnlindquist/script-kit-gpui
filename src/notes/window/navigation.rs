@@ -503,6 +503,29 @@ impl NotesApp {
                 "lastWindowHeight": self.last_window_height,
                 "notesAgentChatGeneration": self.notes_agent_chat_generation,
             },
+            "entryReveal": {
+                "schemaVersion": 1,
+                "instanceId": self.entry_reveal.instance_id,
+                "generation": self.entry_reveal.generation,
+                "phase": self.entry_reveal.phase.as_str(),
+                "bodyVisible": self.entry_reveal.body_visible,
+            },
+            "windowLifecycle": {
+                "schemaVersion": 1,
+                "phase": if NOTES_EXIT_TICKET
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .is_some()
+                {
+                    "Exiting"
+                } else {
+                    "Open"
+                },
+                "hasExitTicket": NOTES_EXIT_TICKET
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .is_some(),
+            },
             "autosize": {
                 "schemaVersion": 1,
                 "redacted": true,

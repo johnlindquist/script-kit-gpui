@@ -187,6 +187,7 @@ impl NotesApp {
             pending_day_editor_reconcile: None,
             has_unsaved_changes: false,
             instance_id,
+            entry_reveal: NotesEntryReveal::new(instance_id),
             last_save_time: None,
             last_persisted_bounds: None,
             last_bounds_save: Instant::now(),

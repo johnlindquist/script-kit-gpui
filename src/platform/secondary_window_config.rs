@@ -76,6 +76,157 @@ const GLASS_EXIT_GROW_Y: f64 = 0.012;
 const GLASS_EXIT_BLUR_RADIUS: f64 = 8.0;
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GlassExitMode {
+    DetachedRegionsFadeOnly,
+    PopupTransformAndBlur,
+}
+
+#[cfg(target_os = "macos")]
+fn glass_exit_mode(window_name: &str) -> GlassExitMode {
+    if window_name_owns_detached_footer(window_name) {
+        GlassExitMode::DetachedRegionsFadeOnly
+    } else {
+        GlassExitMode::PopupTransformAndBlur
+    }
+}
+
+pub fn glass_exit_remove_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS)
+}
+
+pub(crate) fn glass_entry_settle_delay() -> std::time::Duration {
+    let duration = crate::theme::get_cached_theme()
+        .get_opacity()
+        .glass_morph_duration
+        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
+        .clamp(0.0, GLASS_MORPH_MAX_DURATION as f32);
+    std::time::Duration::from_secs_f32(duration)
+}
+
+#[cfg(target_os = "macos")]
+static GLASS_EXIT_GENERATIONS: std::sync::Mutex<Vec<(usize, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GlassExitTicket {
+    window_key: usize,
+    generation: u64,
+}
+
+#[cfg(target_os = "macos")]
+fn advance_glass_exit_generation(window_key: usize) -> GlassExitTicket {
+    let mut generations = GLASS_EXIT_GENERATIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let generation = if let Some((_, generation)) = generations
+        .iter_mut()
+        .find(|(key, _)| *key == window_key)
+    {
+        *generation = generation.wrapping_add(1).max(1);
+        *generation
+    } else {
+        generations.push((window_key, 1));
+        1
+    };
+    GlassExitTicket {
+        window_key,
+        generation,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn glass_exit_ticket_is_current(ticket: GlassExitTicket) -> bool {
+    GLASS_EXIT_GENERATIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .iter()
+        .any(|(key, generation)| {
+            *key == ticket.window_key && *generation == ticket.generation
+        })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns_window_from_gpui_window(window: &gpui::Window) -> Option<id> {
+    let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    let ns_view = appkit.ns_view.as_ptr() as id;
+    let ns_window: id = msg_send![ns_view, window];
+    (ns_window != nil).then_some(ns_window)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_gpui_window_exit_dematerialize(window: &gpui::Window) -> bool {
+    if require_main_thread("cancel_gpui_window_exit_dematerialize") {
+        return false;
+    }
+    unsafe {
+        let Some(ns_window) = ns_window_from_gpui_window(window) else {
+            return false;
+        };
+        cancel_ns_window_exit_dematerialize(ns_window)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn cancel_gpui_window_exit_dematerialize(_window: &gpui::Window) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn glass_exit_ticket_is_current(_ticket: GlassExitTicket) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cancel_pending_glass_window_selectors(window: id) {
+    if let Ok(mut targets) = GLASS_MORPH_SETTLE_TARGETS.lock() {
+        targets.remove(&(window as usize));
+    }
+    let content_view: id = msg_send![window, contentView];
+    if content_view == nil {
+        return;
+    }
+    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
+    if glass_view == nil {
+        return;
+    }
+    let _: () = msg_send![
+        class!(NSObject),
+        cancelPreviousPerformRequestsWithTarget: glass_view
+        selector: sel!(settleOwnWindowFrame)
+        object: nil
+    ];
+    let _: () = msg_send![
+        class!(NSObject),
+        cancelPreviousPerformRequestsWithTarget: glass_view
+        selector: sel!(orderOutOwnWindow)
+        object: nil
+    ];
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cancel_ns_window_exit_dematerialize(window: id) -> bool {
+    if window == nil {
+        return false;
+    }
+    advance_glass_exit_generation(window as usize);
+    cancel_pending_glass_window_selectors(window);
+    clear_exit_dematerialize_blur(window);
+    let content_view: id = msg_send![window, contentView];
+    if content_view != nil {
+        let layer: id = msg_send![content_view, layer];
+        if layer != nil {
+            let _: () = msg_send![layer, removeAllAnimations];
+        }
+    }
+    let _: () = msg_send![window, setAlphaValue: 1.0f64];
+    true
+}
+
+#[cfg(target_os = "macos")]
 fn glass_morph_tuning() -> Option<GlassMorphTuning> {
     let opacity = crate::theme::get_cached_theme().get_opacity();
     let duration = f64::from(
@@ -948,24 +1099,33 @@ pub fn begin_gpui_window_exit_dematerialize(
     log_target: &str,
     window_name: &str,
 ) -> bool {
+    begin_gpui_window_exit_with_ticket(window, log_target, window_name).is_some()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn begin_gpui_window_exit_with_ticket(
+    window: &gpui::Window,
+    log_target: &str,
+    window_name: &str,
+) -> Option<GlassExitTicket> {
     if require_main_thread("begin_gpui_window_exit_dematerialize") {
-        return false;
+        return None;
     }
-    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
-        return false;
-    };
-    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-        return false;
-    };
-    let ns_view = appkit.ns_view.as_ptr() as id;
     // SAFETY: ns_view belongs to a live GPUI window on the main thread.
     unsafe {
-        let ns_window: id = msg_send![ns_view, window];
-        if ns_window.is_null() {
-            return false;
-        }
+        let ns_window = ns_window_from_gpui_window(window)?;
         begin_ns_window_exit_dematerialize(ns_window, log_target, window_name)
+            .then(|| advance_glass_exit_generation(ns_window as usize))
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn begin_gpui_window_exit_with_ticket(
+    _window: &gpui::Window,
+    _log_target: &str,
+    _window_name: &str,
+) -> Option<GlassExitTicket> {
+    None
 }
 
 /// Start the shared exit and remove the GPUI window after its short visual
@@ -977,13 +1137,16 @@ pub fn dematerialize_then_remove_gpui_window<V: 'static>(
     log_target: &'static str,
     window_name: &'static str,
 ) {
-    if begin_gpui_window_exit_dematerialize(window, log_target, window_name) {
+    if let Some(ticket) = begin_gpui_window_exit_with_ticket(window, log_target, window_name) {
         let any_handle = window.window_handle();
         cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS))
+                .timer(glass_exit_remove_delay())
                 .await;
             cx.update(|cx| {
+                if !glass_exit_ticket_is_current(ticket) {
+                    return;
+                }
                 let _ = any_handle.update(cx, |_view, window, _cx| {
                     window.remove_window();
                 });
@@ -1002,8 +1165,8 @@ pub fn dematerialize_then_remove_gpui_window_from_app(
     log_target: &'static str,
     window_name: &'static str,
 ) {
-    if begin_gpui_window_exit_dematerialize(window, log_target, window_name) {
-        remove_gpui_window_after_glass_exit_from_app(window, cx);
+    if let Some(ticket) = begin_gpui_window_exit_with_ticket(window, log_target, window_name) {
+        remove_gpui_window_after_glass_exit_from_app_with_ticket(window, cx, ticket);
     } else {
         window.remove_window();
     }
@@ -1013,12 +1176,32 @@ pub fn dematerialize_then_remove_gpui_window_from_app(
 /// exit. This is used by `on_window_should_close` handlers that must return
 /// `false` while the visual tail completes.
 pub fn remove_gpui_window_after_glass_exit_from_app(window: &mut gpui::Window, cx: &mut gpui::App) {
+    let ticket = unsafe {
+        ns_window_from_gpui_window(window)
+            .map(|window| advance_glass_exit_generation(window as usize))
+    };
+    if let Some(ticket) = ticket {
+        remove_gpui_window_after_glass_exit_from_app_with_ticket(window, cx, ticket);
+    } else {
+        window.remove_window();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_gpui_window_after_glass_exit_from_app_with_ticket(
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+    ticket: GlassExitTicket,
+) {
     let any_handle = window.window_handle();
     cx.spawn(async move |cx: &mut gpui::AsyncApp| {
         cx.background_executor()
-            .timer(std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS))
+            .timer(glass_exit_remove_delay())
             .await;
         cx.update(|cx| {
+            if !glass_exit_ticket_is_current(ticket) {
+                return;
+            }
             let _ = any_handle.update(cx, |_view, window, _cx| {
                 window.remove_window();
             });
@@ -1068,8 +1251,43 @@ unsafe fn begin_ns_window_exit_dematerialize(
         if frame.size.width < 40.0 || frame.size.height < 40.0 {
             return false;
         }
+        // An exit requested while the entry rebound is still pending must
+        // freeze the owning window as one partitioned surface. Otherwise the
+        // old settle callback can resize the stage while its capsules fade.
+        cancel_pending_glass_window_selectors(window);
 
-        // Blur ramp: 0 -> 8pt over the fade.
+        if matches!(
+            glass_exit_mode(window_name),
+            GlassExitMode::DetachedRegionsFadeOnly
+        ) {
+            clear_exit_dematerialize_blur(window);
+            let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+            let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+            let _: () = msg_send![ctx, setDuration: GLASS_EXIT_DURATION];
+            let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+            if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+                let name = tahoe_ns_string("easeInEaseOut");
+                if name != nil {
+                    let timing: id = msg_send![timing_class, functionWithName: name];
+                    if timing != nil {
+                        let _: () = msg_send![ctx, setTimingFunction: timing];
+                    }
+                }
+            }
+            let animator: id = msg_send![window, animator];
+            let _: () = msg_send![animator, setAlphaValue: 0.0f64];
+            let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+            logging::log(
+                log_target,
+                &format!(
+                    "event=glass_morph window={} variant=detached_regions_fade_only phase=exit duration={:.2}s direction=fixed_frame",
+                    window_name, GLASS_EXIT_DURATION
+                ),
+            );
+            return true;
+        }
+
+        // Popup-only blur ramp: 0 -> 8pt over the fade.
         let content_view: id = msg_send![window, contentView];
         if content_view != nil {
             let layer: id = msg_send![content_view, layer];
@@ -1500,9 +1718,10 @@ unsafe fn animate_tahoe_glass_appearance_directed(
 ) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
-    // A superseded exit dematerialize may have left a blur on the content
-    // view layer — every show must clear it before drawing.
-    clear_exit_dematerialize_blur(window);
+    // Every show is an exit supersession boundary. Invalidate delayed removal,
+    // cancel old settle/order-out callbacks, and clear common-ancestor effects
+    // before preparing the next entry frame.
+    cancel_ns_window_exit_dematerialize(window);
 
     // The hide path parks the window at alpha 0 so no show path can flash a
     // full-alpha frame. Every early exit below must therefore restore alpha,
@@ -1773,47 +1992,237 @@ unsafe fn animate_tahoe_glass_disappearance(
     true
 }
 
-/// Apply the theme's glass tint (theme background hue at the
-/// `glass_tint_opacity` slider alpha; 0.0/None = untinted demo-parity glass)
-/// to any `NSGlassEffectView`. Shared by the window backdrop and the floating
-/// footer capsules so every glass surface reads from one theme contract.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeGlassSurfaceRole {
+    WindowBackdrop,
+    FloatingCapsule,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeGlassStyleSignature {
+    pub(crate) dark: bool,
+    pub(crate) tint_rgb: u32,
+    pub(crate) requested_tint_alpha_bits: Option<u32>,
+    pub(crate) effective_tint_alpha_bits: u32,
+    pub(crate) veil_alpha_bits: u32,
+    pub(crate) rim_rgba: u32,
+    pub(crate) rim_width_bits: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NativeGlassStyle {
+    pub(crate) role: NativeGlassSurfaceRole,
+    pub(crate) signature: NativeGlassStyleSignature,
+    pub(crate) effective_tint_alpha: f32,
+    pub(crate) veil_alpha: f32,
+    pub(crate) rim_width: f32,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn resolve_native_glass_style(
+    theme: &crate::theme::Theme,
+    role: NativeGlassSurfaceRole,
+) -> NativeGlassStyle {
+    let requested_tint_alpha = theme.get_opacity().glass_tint_opacity;
+    let matched = crate::ui_foundation::main_window_matched_background_rgba(theme);
+    let tint_rgb = (matched >> 8) & 0x00ff_ffff;
+    let tint_floor = crate::ui::chrome::LIQUID_GLASS_STABILITY_TINT_ALPHA_FLOOR;
+    let effective_tint_alpha = requested_tint_alpha
+        .unwrap_or(tint_floor)
+        .max(tint_floor)
+        .clamp(0.0, 1.0);
+    let capsule = matches!(role, NativeGlassSurfaceRole::FloatingCapsule);
+    let veil_alpha = if capsule {
+        crate::ui::chrome::LIQUID_GLASS_CAPSULE_VEIL_ALPHA
+    } else {
+        0.0
+    };
+    let rim_alpha = if capsule {
+        if theme.should_use_dark_vibrancy() {
+            crate::ui::chrome::LIQUID_GLASS_CAPSULE_RIM_ALPHA_DARK
+        } else {
+            crate::ui::chrome::LIQUID_GLASS_CAPSULE_RIM_ALPHA_LIGHT
+        }
+    } else {
+        0.0
+    };
+    let rim_width = if rim_alpha > 0.0 {
+        crate::ui::chrome::LIQUID_GLASS_CAPSULE_RIM_WIDTH_PX
+    } else {
+        0.0
+    };
+    let rim_color = if theme.should_use_dark_vibrancy() {
+        0xff_ff_ff
+    } else {
+        0x00_00_00
+    };
+    let rim_rgba = (rim_color << 8) | (rim_alpha * 255.0).round() as u32;
+    NativeGlassStyle {
+        role,
+        signature: NativeGlassStyleSignature {
+            dark: theme.should_use_dark_vibrancy(),
+            tint_rgb,
+            requested_tint_alpha_bits: requested_tint_alpha.map(f32::to_bits),
+            effective_tint_alpha_bits: effective_tint_alpha.to_bits(),
+            veil_alpha_bits: veil_alpha.to_bits(),
+            rim_rgba,
+            rim_width_bits: rim_width.to_bits(),
+        },
+        effective_tint_alpha,
+        veil_alpha,
+        rim_width,
+    }
+}
+
+/// Apply the complete shared native glass policy. AppKit mutations are made
+/// in one disabled-actions transaction so a theme refresh cannot expose an
+/// intermediate untinted or mismatched frame.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn apply_native_glass_style(
+    glass_view: id,
+    style: NativeGlassStyle,
+) -> bool {
+    if glass_view == nil {
+        return false;
+    }
+    let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
+    if !responds {
+        return false;
+    }
+    let transaction_class = objc::runtime::Class::get("CATransaction");
+    if let Some(transaction_class) = transaction_class {
+        let _: () = msg_send![transaction_class, begin];
+        let _: () = msg_send![transaction_class, setDisableActions: cocoa::base::YES];
+    }
+    let appearance_name = if style.signature.dark {
+        tahoe_ns_string("NSAppearanceNameVibrantDark")
+    } else {
+        tahoe_ns_string("NSAppearanceNameVibrantLight")
+    };
+    if appearance_name != nil {
+        let appearance: id = msg_send![class!(NSAppearance), appearanceNamed: appearance_name];
+        if appearance != nil {
+            let _: () = msg_send![glass_view, setAppearance: appearance];
+        }
+    }
+    let red = f64::from((style.signature.tint_rgb >> 16) & 0xff) / 255.0;
+    let green = f64::from((style.signature.tint_rgb >> 8) & 0xff) / 255.0;
+    let blue = f64::from(style.signature.tint_rgb & 0xff) / 255.0;
+    let tint: id = msg_send![
+        class!(NSColor),
+        colorWithCalibratedRed: red
+        green: green
+        blue: blue
+        alpha: f64::from(style.effective_tint_alpha)
+    ];
+    let _: () = msg_send![glass_view, setTintColor: tint];
+
+    let _: () = msg_send![glass_view, setWantsLayer: cocoa::base::YES];
+    let content_view: id = msg_send![glass_view, contentView];
+    let mut content_layer = nil;
+    if content_view != nil {
+        let _: () = msg_send![content_view, setWantsLayer: cocoa::base::YES];
+        content_layer = msg_send![content_view, layer];
+        if content_layer != nil {
+            let veil: id = msg_send![
+                class!(NSColor),
+                colorWithCalibratedRed: red
+                green: green
+                blue: blue
+                alpha: f64::from(style.veil_alpha)
+            ];
+            let veil_cg: *const std::ffi::c_void = msg_send![veil, CGColor];
+            let _: () = msg_send![content_layer, setBackgroundColor: veil_cg];
+            let _: () = msg_send![content_layer, setMasksToBounds: cocoa::base::YES];
+            if matches!(style.role, NativeGlassSurfaceRole::FloatingCapsule) {
+                let _: () = msg_send![
+                    content_layer,
+                    setCornerRadius:
+                        f64::from(crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX)
+                ];
+            }
+        }
+    }
+    let layer: id = msg_send![glass_view, layer];
+    if layer != nil {
+        if matches!(style.role, NativeGlassSurfaceRole::FloatingCapsule) {
+            let _: () = msg_send![
+                layer,
+                setCornerRadius:
+                    f64::from(crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX)
+            ];
+        }
+        let rim_red = f64::from((style.signature.rim_rgba >> 24) & 0xff) / 255.0;
+        let rim_green = f64::from((style.signature.rim_rgba >> 16) & 0xff) / 255.0;
+        let rim_blue = f64::from((style.signature.rim_rgba >> 8) & 0xff) / 255.0;
+        let rim_alpha = f64::from(style.signature.rim_rgba & 0xff) / 255.0;
+        let rim: id = msg_send![
+            class!(NSColor),
+            colorWithCalibratedRed: rim_red
+            green: rim_green
+            blue: rim_blue
+            alpha: rim_alpha
+        ];
+        let rim_cg: *const std::ffi::c_void = msg_send![rim, CGColor];
+        // The foreground content layer is the final visible capsule surface.
+        // Put the separation rim there rather than behind NSGlassEffectView's
+        // private material hierarchy.
+        if content_layer != nil {
+            let _: () = msg_send![content_layer, setBorderColor: rim_cg];
+            let _: () =
+                msg_send![content_layer, setBorderWidth: f64::from(style.rim_width)];
+        }
+        let _: () = msg_send![layer, setBorderWidth: 0.0f64];
+        // R is the locked production treatment. Clear any stale shadow state
+        // left by a recycled AppKit view so RS cannot leak into production.
+        let _: () = msg_send![layer, setShadowOpacity: 0.0f32];
+        let _: () = msg_send![layer, setShadowRadius: 0.0f64];
+        let shadow_offset = cocoa::foundation::NSSize::new(0.0, 0.0);
+        let _: () = msg_send![layer, setShadowOffset: shadow_offset];
+        let _: () = msg_send![layer, setShadowPath: nil];
+    }
+    if let Some(transaction_class) = transaction_class {
+        let _: () = msg_send![transaction_class, commit];
+    }
+    let window: id = msg_send![glass_view, window];
+    let window_number: i64 = if window != nil {
+        msg_send![window, windowNumber]
+    } else {
+        -1
+    };
+    tracing::info!(
+        target: "script_kit::native_glass",
+        event = "native_glass_style_applied",
+        window_number,
+        role = match style.role {
+            NativeGlassSurfaceRole::WindowBackdrop => "window_backdrop",
+            NativeGlassSurfaceRole::FloatingCapsule => "floating_capsule",
+        },
+        tint_rgb = style.signature.tint_rgb,
+        requested_tint_alpha_bits = ?style.signature.requested_tint_alpha_bits,
+        effective_tint_alpha = style.effective_tint_alpha,
+        veil_alpha = style.veil_alpha,
+        rim_rgba = style.signature.rim_rgba,
+        "native_glass_style_applied"
+    );
+    true
+}
+
+/// Compatibility entry point for callers that do not yet own a role.
 ///
 /// # Safety
 /// `glass_view` must be a valid NSGlassEffectView (or nil-checked upstream)
 /// on the main thread.
 #[cfg(target_os = "macos")]
 pub(crate) unsafe fn apply_theme_glass_tint(glass_view: id) -> bool {
-    let tint_theme = crate::theme::get_cached_theme();
-    let tint_alpha = f64::from(
-        tint_theme
-            .get_opacity()
-            .glass_tint_opacity
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0),
-    );
-    let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
-    if !responds {
-        return false;
-    }
-    if tint_alpha > 0.004 {
-        let hex = tint_theme.colors.background.main;
-        let red = f64::from((hex >> 16) & 0xff) / 255.0;
-        let green = f64::from((hex >> 8) & 0xff) / 255.0;
-        let blue = f64::from(hex & 0xff) / 255.0;
-        let color: id = msg_send![
-            class!(NSColor),
-            colorWithCalibratedRed: red
-            green: green
-            blue: blue
-            alpha: tint_alpha
-        ];
-        let _: () = msg_send![glass_view, setTintColor: color];
-        true
-    } else {
-        let nil_color: id = nil;
-        let _: () = msg_send![glass_view, setTintColor: nil_color];
-        false
-    }
+    let theme = crate::theme::get_cached_theme();
+    apply_native_glass_style(
+        glass_view,
+        resolve_native_glass_style(&theme, NativeGlassSurfaceRole::WindowBackdrop),
+    )
 }
 
 /// Install (or reuse) a native macOS 26 Tahoe `NSGlassEffectView` as the
@@ -1952,7 +2361,13 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
-    let tint_applied = apply_theme_glass_tint(glass_view);
+    let tint_applied = apply_native_glass_style(
+        glass_view,
+        resolve_native_glass_style(
+            &crate::theme::get_cached_theme(),
+            NativeGlassSurfaceRole::WindowBackdrop,
+        ),
+    );
 
     let corner_radius = {
         let radius = tahoe_content_corner_radius(content_view);
@@ -2496,6 +2911,98 @@ mod secondary_window_config_tests {
             );
         }
         assert!(!super::window_name_owns_detached_footer("Actions popup"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detached_footer_owners_use_region_preserving_exit() {
+        for window_name in ["Main window", "Notes", "Dictation overlay"] {
+            assert_eq!(
+                super::glass_exit_mode(window_name),
+                super::GlassExitMode::DetachedRegionsFadeOnly
+            );
+        }
+        for window_name in ["Actions popup", "Confirm popup", "Inline popup"] {
+            assert_eq!(
+                super::glass_exit_mode(window_name),
+                super::GlassExitMode::PopupTransformAndBlur
+            );
+        }
+        assert_eq!(super::glass_exit_remove_delay().as_millis(), 135);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_glass_style_locks_t55_r_and_preserves_requested_tint_semantics() {
+        let mut inherited = crate::theme::Theme::default();
+        inherited.opacity.as_mut().unwrap().glass_tint_opacity = None;
+        let mut explicit_zero = inherited.clone();
+        explicit_zero
+            .opacity
+            .as_mut()
+            .unwrap()
+            .glass_tint_opacity = Some(0.0);
+        let mut below_floor = inherited.clone();
+        below_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.54);
+        let mut at_floor = inherited.clone();
+        at_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.55);
+        let mut above_floor = inherited.clone();
+        above_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.72);
+        let light = crate::theme::Theme::light_default();
+
+        let backdrop = super::resolve_native_glass_style(
+            &inherited,
+            super::NativeGlassSurfaceRole::WindowBackdrop,
+        );
+        let capsule = super::resolve_native_glass_style(
+            &inherited,
+            super::NativeGlassSurfaceRole::FloatingCapsule,
+        );
+        let explicit = super::resolve_native_glass_style(
+            &explicit_zero,
+            super::NativeGlassSurfaceRole::FloatingCapsule,
+        );
+        let below = super::resolve_native_glass_style(
+            &below_floor,
+            super::NativeGlassSurfaceRole::FloatingCapsule,
+        );
+        let at = super::resolve_native_glass_style(
+            &at_floor,
+            super::NativeGlassSurfaceRole::FloatingCapsule,
+        );
+        let above = super::resolve_native_glass_style(
+            &above_floor,
+            super::NativeGlassSurfaceRole::FloatingCapsule,
+        );
+        let light_capsule = super::resolve_native_glass_style(
+            &light,
+            super::NativeGlassSurfaceRole::FloatingCapsule,
+        );
+
+        assert_eq!(backdrop.signature.tint_rgb, capsule.signature.tint_rgb);
+        assert_eq!(
+            backdrop.signature.effective_tint_alpha_bits,
+            capsule.signature.effective_tint_alpha_bits
+        );
+        assert_eq!(backdrop.signature.requested_tint_alpha_bits, None);
+        assert_eq!(
+            explicit.signature.requested_tint_alpha_bits,
+            Some(0.0_f32.to_bits())
+        );
+        for style in [backdrop, capsule, explicit, below, at] {
+            assert_eq!(style.effective_tint_alpha, 0.55);
+        }
+        assert_eq!(above.effective_tint_alpha, 0.72);
+        assert_eq!(backdrop.veil_alpha, 0.0);
+        assert_eq!(backdrop.rim_width, 0.0);
+        assert_eq!(backdrop.signature.rim_rgba, 0xFFFF_FF00);
+        assert_eq!(capsule.veil_alpha, 0.80);
+        assert_eq!(capsule.rim_width, 1.0);
+        assert_eq!(capsule.signature.rim_rgba, 0xFFFF_FF3D);
+        assert_eq!(light_capsule.veil_alpha, 0.80);
+        assert_eq!(light_capsule.rim_width, 1.0);
+        assert_eq!(light_capsule.signature.rim_rgba, 0x0000_002E);
+        assert_ne!(backdrop.signature, explicit.signature);
     }
 
     #[cfg(target_os = "macos")]

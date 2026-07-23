@@ -12,8 +12,6 @@ use gpui::{
 
 use chrono::NaiveDate;
 #[cfg(target_os = "macos")]
-use cocoa::appkit::NSApp;
-#[cfg(target_os = "macos")]
 use cocoa::base::{id, nil};
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -57,6 +55,8 @@ static NOTES_APP_ENTITY: std::sync::OnceLock<std::sync::Mutex<Option<Entity<Note
 /// globals its own instance still owns (see `impl Drop for NotesApp`).
 static NOTES_INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CURRENT_NOTES_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static NOTES_EXIT_TICKET: std::sync::Mutex<Option<crate::platform::GlassExitTicket>> =
+    std::sync::Mutex::new(None);
 
 pub type NotesRunCommandExecutor = fn(command_id: &str, cx: &mut App) -> Result<bool, String>;
 
@@ -204,6 +204,71 @@ pub enum NotesSurfaceMode {
     Notes,
     /// An embedded Agent Chat chat session inside the Notes window.
     AgentChat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotesEntryRevealPhase {
+    Constructed,
+    NativeConfigured,
+    FirstFrameComplete,
+    SettlingMaterial,
+    Visible,
+    Cancelled,
+}
+
+impl NotesEntryRevealPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Constructed => "constructed",
+            Self::NativeConfigured => "nativeConfigured",
+            Self::FirstFrameComplete => "firstFrameComplete",
+            Self::SettlingMaterial => "settlingMaterial",
+            Self::Visible => "visible",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotesEntryReveal {
+    instance_id: u64,
+    generation: u64,
+    phase: NotesEntryRevealPhase,
+    body_visible: bool,
+}
+
+impl NotesEntryReveal {
+    const fn new(instance_id: u64) -> Self {
+        Self {
+            instance_id,
+            generation: 1,
+            phase: NotesEntryRevealPhase::Constructed,
+            body_visible: false,
+        }
+    }
+
+    fn advance(&mut self, generation: u64, phase: NotesEntryRevealPhase) -> bool {
+        if self.generation != generation || self.phase == NotesEntryRevealPhase::Cancelled {
+            return false;
+        }
+        self.phase = phase;
+        self.body_visible = phase == NotesEntryRevealPhase::Visible;
+        true
+    }
+
+    fn cancel(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.phase = NotesEntryRevealPhase::Cancelled;
+        self.body_visible = false;
+        self.generation
+    }
+
+    fn restart(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.phase = NotesEntryRevealPhase::Constructed;
+        self.body_visible = false;
+        self.generation
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +521,9 @@ pub struct NotesApp {
 
     /// Which NotesApp generation this is; guards Drop's global cleanup.
     instance_id: u64,
+    /// Body paint is withheld until native glass configuration and its entry
+    /// morph have both completed. The editor stays mounted and accepts input.
+    entry_reveal: NotesEntryReveal,
 
     /// Debounce: Last time we saved (to avoid too-frequent saves)
     last_save_time: Option<Instant>,
