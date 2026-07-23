@@ -1097,6 +1097,8 @@ impl Render for ScriptListApp {
             }))
             .child(
                 div()
+                    .id("main-content-stage")
+                    .debug_selector(|| "main-content-stage".to_string())
                     .w_full()
                     .h(px(main_content_height))
                     .relative()
@@ -1171,9 +1173,21 @@ impl Render for ScriptListApp {
                             overlay_bounds,
                             &component_bounds,
                         ))
-                    }),
+                    })
+                    // Root dialogs and their modal hit shields belong to the
+                    // same bounded stage as every other GPUI overlay. Keeping
+                    // them below this stage's height + overflow clip prevents
+                    // paint or input from entering the transparent gutter or
+                    // the native footer strip.
+                    .child(
+                        div()
+                            .id("main-window-dialog-layer-boundary")
+                            .debug_selector(|| "main-window-dialog-layer-boundary".to_string())
+                            .absolute()
+                            .inset_0()
+                            .overflow_hidden()
+                            .children(gpui_component::Root::render_dialog_layer(window, cx)),
+                    ),
             )
-            // Dialog layer rendered outside overflow_hidden so it isn't clipped
-            .children(gpui_component::Root::render_dialog_layer(window, cx))
     }
 }

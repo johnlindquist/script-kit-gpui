@@ -518,6 +518,7 @@ export function analyzeStationaryFidelity(
 ) {
   const appKit = layout?.fidelity?.appKit ?? null;
   const nodes = (appKit?.nodes ?? []) as AppKitNode[];
+  const components = (layout?.components ?? []) as Array<Record<string, any>>;
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const errors: string[] = [];
   const ancestorIds = (node: AppKitNode) => {
@@ -563,6 +564,60 @@ export function analyzeStationaryFidelity(
   if (appKit?.transparentGapPoints !== 8) errors.push("main/footer gutter is not 8pt");
   if (appKit?.backdropFooterIntersectionArea !== 0) errors.push("main/footer materials overlap");
   if (appKit?.outerWindowHasShadow !== false) errors.push("outer window shadow must stay disabled");
+  const mainStage = components.find((component) => component.name === "main-content-stage");
+  const dialogBoundary = components.find((component) =>
+    component.name === "main-window-dialog-layer-boundary"
+  );
+  const expectedMainStage = {
+    x: 0,
+    y: 0,
+    width: Number(hostBounds?.width ?? 0),
+    height: Number(mainBackdropFrame?.height ?? 0),
+  };
+  const isContainedByMainStage = (measured: any) =>
+    measured != null
+    && measured.x >= expectedMainStage.x
+    && measured.y >= expectedMainStage.y
+    && measured.x + measured.width <= expectedMainStage.x + expectedMainStage.width
+    && measured.y + measured.height <= expectedMainStage.y + expectedMainStage.height;
+  for (const [name, component, requiredFields] of [
+    ["main-content-stage", mainStage, ["bounds", "visibleBounds"]],
+    [
+      "main-window-dialog-layer-boundary",
+      dialogBoundary,
+      ["bounds", "visibleBounds", "clipBounds"],
+    ],
+  ] as const) {
+    if (!component) {
+      errors.push(`${name} paint-time bounds are missing`);
+      continue;
+    }
+    for (const field of requiredFields) {
+      const measured = component[field];
+      if (!isContainedByMainStage(measured)) {
+        errors.push(
+          `${name} ${field} is not bounded to the main-content stage: ${JSON.stringify(measured)}`,
+        );
+      }
+    }
+    if (
+      name === "main-content-stage"
+      && (
+        component.bounds?.x !== expectedMainStage.x
+        || component.bounds?.y !== expectedMainStage.y
+        || component.bounds?.width !== expectedMainStage.width
+        || component.bounds?.height !== expectedMainStage.height
+      )
+    ) {
+      errors.push(`${name} does not fill the bounded main-content stage`);
+    }
+    if (
+      component.measurementProvenance !== "paint-time"
+      || component.coordinateSpace !== "window"
+    ) {
+      errors.push(`${name} lacks paint-time window-coordinate provenance`);
+    }
+  }
   const backdropLayer = appKit?.mainBackdropLayer ?? null;
   if (!backdropLayer) {
     errors.push("main backdrop layer telemetry is missing");
@@ -676,6 +731,8 @@ export function analyzeStationaryFidelity(
     expectedHostSize: expectedHostSize ?? null,
     mainBackdropFrame,
     footerContainerFrame,
+    mainStage: mainStage ?? null,
+    dialogBoundary: dialogBoundary ?? null,
     transparentGapPoints: appKit?.transparentGapPoints ?? null,
   };
 }
@@ -1191,6 +1248,17 @@ async function cli() {
         structural.errors.push("left footer hit target frame missing from AppKit fidelity snapshot");
       }
       for (const capture of captures as any[]) {
+        capture.gutterTransparency ??= await analyzeNativeWindowGutterAlpha(
+          capture.path,
+          (receipt.layout as any)?.fidelity?.appKit,
+        );
+        if (!capture.gutterTransparency.pass) {
+          structural.errors.push(
+            ...((capture.gutterTransparency.errors as string[]).map(
+              (error) => `${capture.name} transparent gutter: ${error}`,
+            )),
+          );
+        }
         if (capture.nativeWindow?.onscreen !== true || Number(capture.nativeWindow?.alpha ?? 0) < 0.99) {
           structural.errors.push(`${capture.name} captured a hidden or transparent main window`);
         }

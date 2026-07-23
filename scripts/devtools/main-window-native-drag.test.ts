@@ -319,6 +319,24 @@ function stationaryFixture(hostHeight = 480) {
   });
   return {
     layout: {
+      components: [
+        {
+          name: "main-content-stage",
+          bounds: { x: 0, y: 0, width: 750, height: hostHeight - 40 },
+          visibleBounds: { x: 0, y: 0, width: 750, height: hostHeight - 40 },
+          clipBounds: { x: 0, y: 0, width: 750, height: hostHeight - 40 },
+          measurementProvenance: "paint-time",
+          coordinateSpace: "window",
+        },
+        {
+          name: "main-window-dialog-layer-boundary",
+          bounds: { x: 1, y: 1, width: 748, height: hostHeight - 42 },
+          visibleBounds: { x: 1, y: 1, width: 748, height: hostHeight - 42 },
+          clipBounds: { x: 1, y: 1, width: 748, height: hostHeight - 42 },
+          measurementProvenance: "paint-time",
+          coordinateSpace: "window",
+        },
+      ],
       fidelity: {
         appKit: {
           nodes,
@@ -374,6 +392,20 @@ describe("stationary native footer analyzer", () => {
     const result = analyzeStationaryFidelity(fixture.layout, fixture.automationWindow);
     expect(result.pass).toBe(false);
     expect(result.errors.some((error) => error.includes("not exactly partitioned"))).toBe(true);
+  });
+
+  test("fails when a GPUI dialog boundary reaches into the detached gutter", () => {
+    const fixture = stationaryFixture();
+    fixture.layout.components[1].bounds.height = 480;
+    fixture.layout.components[1].visibleBounds.height = 480;
+    fixture.layout.components[1].clipBounds.height = 480;
+    const result = analyzeStationaryFidelity(fixture.layout, fixture.automationWindow);
+    expect(result.pass).toBe(false);
+    expect(
+      result.errors.some((error) =>
+        error.includes("main-window-dialog-layer-boundary bounds is not bounded")
+      ),
+    ).toBe(true);
   });
 
   test("fails when the left capsule loses its shortcut keycap or glyph", () => {
