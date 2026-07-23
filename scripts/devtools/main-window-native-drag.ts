@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { Driver } from "./driver.ts";
+import {
+  identityFromEnvironment,
+  newRunId,
+} from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 
 export type Rect = { x: number; y: number; width: number; height: number };
@@ -1511,10 +1515,18 @@ async function cli() {
     throw new Error(`Swift resize helper compile failed: ${resizeCompile.stderr}`);
   }
 
+  const gitCommit = (await run(["git", "rev-parse", "HEAD"])).stdout.trim();
+  const evidenceIdentity = identityFromEnvironment({
+    runId: newRunId(),
+    gitCommit,
+    binary: resolve(binary),
+    binarySha256: sha256(binary),
+  });
   const receipt: Record<string, unknown> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    ...evidenceIdentity,
+    scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "main-window",
     startedAt: new Date().toISOString(),
-    gitCommit: (await run(["git", "rev-parse", "HEAD"])).stdout.trim(),
     baselineCommit: baseline
       ? (await run(["git", "rev-parse", baseline])).stdout.trim()
       : null,
@@ -2375,6 +2387,11 @@ async function cli() {
     receipt.driverStats = driver.stats;
     receipt.cleanedUp = cleanupPass;
     receipt.finishedAt = new Date().toISOString();
+    receipt.disposition = receipt.valid !== true
+      ? "INVALID_OBSERVER"
+      : receipt.pass === true
+      ? "EVALUABLE_PASS"
+      : "EVALUABLE_FAIL";
   }
   const receiptPath = join(outDir, "receipt.json");
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);

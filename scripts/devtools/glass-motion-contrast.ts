@@ -3,6 +3,15 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import {
+  aggregateDisposition,
+  assertFreshOutputDirectory,
+  newRunId,
+  sha256File,
+  validateChildReceipt,
+  validateUniqueScenarioSet,
+  type EvidenceIdentity,
+} from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 
 type Disposition =
@@ -62,6 +71,7 @@ async function runLockedTreatmentCell(options: {
   helper: string;
   outputDirectory: string;
   fixture: string;
+  identity: EvidenceIdentity;
 }) {
   const slug = `${options.fixture}-locked-T55-R`;
   const cellDirectory = join(options.outputDirectory, slug);
@@ -102,6 +112,11 @@ async function runLockedTreatmentCell(options: {
     ];
     mainResult = await run(mainCommand, {
       SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
+      SCRIPT_KIT_GLASS_RUN_ID: options.identity.runId,
+      SCRIPT_KIT_GLASS_GIT_COMMIT: options.identity.gitCommit,
+      SCRIPT_KIT_GLASS_BINARY: options.identity.binary,
+      SCRIPT_KIT_GLASS_BINARY_SHA256: options.identity.binarySha256,
+      SCRIPT_KIT_GLASS_SCENARIO: `locked:${options.fixture}`,
     });
     const mainReceiptPath = join(mainDirectory, "receipt.json");
     const metricsPath = join(cellDirectory, "metrics.json");
@@ -137,6 +152,12 @@ async function runLockedTreatmentCell(options: {
     const motionMetrics = existsSync(motionMetricsPath)
       ? JSON.parse(readFileSync(motionMetricsPath, "utf8"))
       : null;
+    const childValidationErrors = validateChildReceipt(
+      mainReceipt,
+      options.identity,
+      `locked:${options.fixture}`,
+      mainResult.exitCode,
+    );
     const structuralPass = mainReceipt?.pass === true;
     const materialRelationPass = metrics != null
       && metrics.summary?.maximumStageDeltaE00
@@ -173,7 +194,9 @@ async function runLockedTreatmentCell(options: {
       materialRelationPass,
       boundaryPass,
       motionColorPass,
-      pass: structuralPass
+      childValidationErrors,
+      pass: childValidationErrors.length === 0
+        && structuralPass
         && materialRelationPass
         && boundaryPass
         && motionColorPass,
@@ -218,8 +241,22 @@ async function main() {
   if (!existsSync(binary)) {
     throw new Error(`binary missing: ${binary}`);
   }
+  assertFreshOutputDirectory(outputDirectory);
   mkdirSync(outputDirectory, { recursive: true });
   const startedAt = new Date().toISOString();
+  const gitCommit = (await run(["git", "rev-parse", "HEAD"])).stdout.trim();
+  const identity: EvidenceIdentity = {
+    runId: newRunId(),
+    gitCommit,
+    binary,
+    binarySha256: sha256File(binary),
+  };
+  const childEnvironment = {
+    SCRIPT_KIT_GLASS_RUN_ID: identity.runId,
+    SCRIPT_KIT_GLASS_GIT_COMMIT: identity.gitCommit,
+    SCRIPT_KIT_GLASS_BINARY: identity.binary,
+    SCRIPT_KIT_GLASS_BINARY_SHA256: identity.binarySha256,
+  };
   await announceTestStatus(
     `Glass motion ${mode}`,
     "Exact-window material, gutter, lane, and lifecycle proof",
@@ -236,11 +273,19 @@ async function main() {
     "--visual-matrix",
   ], {
     SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
+    ...childEnvironment,
+    SCRIPT_KIT_GLASS_SCENARIO: "main-window",
   });
   const mainReceiptPath = join(mainOutput, "receipt.json");
   const mainReceipt = existsSync(mainReceiptPath)
     ? JSON.parse(readFileSync(mainReceiptPath, "utf8"))
     : null;
+  const setupErrors = validateChildReceipt(
+    mainReceipt,
+    identity,
+    "main-window",
+    mainResult.exitCode,
+  );
   const disposition = classify(mainResult, mainReceipt);
   let lockedTreatment: any = null;
   if (mode === "all" || mode === "locked") {
@@ -270,6 +315,7 @@ async function main() {
         helper,
         outputDirectory: lockedDirectory,
         fixture,
+        identity,
       }));
     }
     const stability = cells.find((cell) => cell.fixture === "saturated-stripes");
@@ -320,6 +366,8 @@ async function main() {
       rapidPath,
     ], {
       SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
+      ...childEnvironment,
+      SCRIPT_KIT_GLASS_SCENARIO: "rapid-toggle",
     });
     rapidToggle = {
       exitCode: rapidResult.exitCode,
@@ -339,6 +387,8 @@ async function main() {
       lifecycleDirectory,
     ], {
       SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
+      ...childEnvironment,
+      SCRIPT_KIT_GLASS_SCENARIO: "lifecycle",
     });
     const lifecycleReceiptPath = join(lifecycleDirectory, "receipt.json");
     lifecycleFilmstrip = {
@@ -368,14 +418,64 @@ async function main() {
           (cell: any) => cell.fixture === "saturated-stripes",
         )?.motionMetrics?.frames?.length === 18
     : true;
+  if (rapidToggle != null) {
+    setupErrors.push(...validateChildReceipt(
+      rapidToggle.receipt,
+      identity,
+      "rapid-toggle",
+      rapidToggle.exitCode,
+    ));
+  }
+  if (lifecycleFilmstrip != null) {
+    setupErrors.push(...validateChildReceipt(
+      lifecycleFilmstrip.receipt,
+      identity,
+      "lifecycle",
+      lifecycleFilmstrip.exitCode,
+    ));
+  }
+  const requiredChildScenarios = [
+    "main-window",
+    ...(lockedTreatment?.cells ?? []).map((cell: any) => `locked:${cell.fixture}`),
+    ...(rapidToggle == null ? [] : ["rapid-toggle"]),
+    ...(lifecycleFilmstrip == null ? [] : ["lifecycle"]),
+  ];
+  const observedChildScenarios = [
+    mainReceipt?.scenario,
+    ...(lockedTreatment?.cells ?? []).map((cell: any) =>
+      JSON.parse(readFileSync(cell.mainReceiptPath, "utf8"))?.scenario
+    ),
+    ...(rapidToggle == null ? [] : [rapidToggle.receipt?.scenario]),
+    ...(lifecycleFilmstrip == null ? [] : [lifecycleFilmstrip.receipt?.scenario]),
+  ].filter((item): item is string => typeof item === "string");
+  setupErrors.push(...validateUniqueScenarioSet(
+    observedChildScenarios,
+    requiredChildScenarios,
+  ));
+  const children = [
+    mainReceipt,
+    ...(lockedTreatment?.cells ?? []).map((cell: any) =>
+      existsSync(cell.mainReceiptPath)
+        ? JSON.parse(readFileSync(cell.mainReceiptPath, "utf8"))
+        : null
+    ),
+    rapidToggle?.receipt,
+    lifecycleFilmstrip?.receipt,
+  ].filter(Boolean);
+  const finalBinarySha256 = sha256File(binary);
+  if (finalBinarySha256 !== identity.binarySha256) {
+    setupErrors.push("binary changed during evidence run");
+  }
+  const finalDisposition = aggregateDisposition(children, setupErrors);
   const receipt = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    ...identity,
+    scenario: "whole-premise",
     startedAt,
     finishedAt: new Date().toISOString(),
     mode,
-    gitCommit: (await run(["git", "rev-parse", "HEAD"])).stdout.trim(),
-    binary,
-    binarySha256: sha256(binary),
+    finalBinarySha256,
+    setupErrors,
     mainWindow: {
       command: [
         "bun",
@@ -418,18 +518,22 @@ async function main() {
     rapidToggle,
     lifecycleFilmstrip,
     evidenceComplete,
-    pass: disposition === "EVALUABLE_PASS"
+    pass: finalDisposition === "EVALUABLE_PASS"
       && evidenceComplete
       && (lockedTreatment == null || lockedTreatment.pass === true)
       && (rapidToggle == null || rapidToggle.receipt?.pass === true)
       && (lifecycleFilmstrip == null
         || lifecycleFilmstrip.receipt?.pass === true),
-    disposition,
+    disposition: finalDisposition,
   };
   const receiptPath = explicitReceiptPath ?? join(outputDirectory, "receipt.json");
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   console.log(JSON.stringify(receipt, null, 2));
-  process.exitCode = receipt.pass ? 0 : disposition.startsWith("INVALID_") ? 2 : 1;
+  process.exitCode = receipt.pass
+    ? 0
+    : finalDisposition.startsWith("INVALID_")
+    ? 2
+    : 1;
 }
 
 await main();

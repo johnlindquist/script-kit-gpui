@@ -10,6 +10,10 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "./driver.ts";
+import {
+  identityFromEnvironment,
+  newRunId,
+} from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 
 function arg(name: string, fallback?: string) {
@@ -142,10 +146,15 @@ if (compile.exitCode !== 0) {
 }
 
 const receipt: Json = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   startedAt: new Date().toISOString(),
-  binary,
-  binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+  ...identityFromEnvironment({
+    runId: newRunId(),
+    gitCommit: (await run(["git", "rev-parse", "HEAD"])).stdout.trim(),
+    binary,
+    binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+  }),
+  scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "lifecycle",
   helperSha256: createHash("sha256").update(readFileSync(helper)).digest("hex"),
   scenarios: [],
   pass: false,
@@ -427,6 +436,11 @@ try {
   receipt.cleanedUp = !driver.alive;
   receipt.finishedAt = new Date().toISOString();
   receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
+  receipt.disposition = receipt.pass === true
+    ? "EVALUABLE_PASS"
+    : receipt.error
+    ? "INVALID_OBSERVER"
+    : "EVALUABLE_FAIL";
   const receiptPath = join(outDir, "receipt.json");
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   console.log(JSON.stringify({ receiptPath, pass: receipt.pass }, null, 2));

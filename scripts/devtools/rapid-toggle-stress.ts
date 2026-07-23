@@ -11,6 +11,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Driver, type Json } from "./driver.ts";
+import {
+  identityFromEnvironment,
+  newRunId,
+} from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 
 type WindowSnapshot = {
@@ -157,10 +161,15 @@ if (!binary || !existsSync(binary)) {
 mkdirSync(dirname(outPath), { recursive: true });
 
 const receipt: Json = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   startedAt: new Date().toISOString(),
-  binary,
-  binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+  ...identityFromEnvironment({
+    runId: newRunId(),
+    gitCommit: Bun.spawnSync(["git", "rev-parse", "HEAD"]).stdout.toString().trim(),
+    binary,
+    binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+  }),
+  scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "rapid-toggle",
   phases: {},
   pass: false,
 };
@@ -655,6 +664,11 @@ try {
   receipt.cleanedUp = !driver.alive;
   receipt.finishedAt = new Date().toISOString();
   receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
+  receipt.disposition = receipt.pass === true
+    ? "EVALUABLE_PASS"
+    : receipt.error
+    ? "INVALID_OBSERVER"
+    : "EVALUABLE_FAIL";
   writeFileSync(outPath, `${JSON.stringify(receipt, null, 2)}\n`);
   console.log(JSON.stringify({ receiptPath: outPath, pass: receipt.pass }, null, 2));
 }
