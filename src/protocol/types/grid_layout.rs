@@ -599,6 +599,16 @@ pub struct AppKitFidelityNode {
     pub action_selector: Option<String>,
 }
 
+/// Runtime allocation selected for the constrained leading footer lane.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppKitFooterLeftAllocation {
+    pub degradation: String,
+    pub available_width: f64,
+    pub cwd_label_width: f64,
+    pub primary_label_width: f64,
+}
+
 /// Main-window AppKit footer-host evidence. This never includes the separate
 /// GPUI footer overlay child window.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -620,6 +630,8 @@ pub struct AppKitFidelitySnapshot {
     pub outer_window_has_shadow: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_backdrop_layer: Option<AppKitFidelityLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer_left_allocation: Option<AppKitFooterLeftAllocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub material_bearing_view_ids: Vec<String>,
     pub nodes: Vec<AppKitFidelityNode>,
@@ -1051,6 +1063,7 @@ mod tests {
                 window_bounds: bounds.clone(),
                 main_backdrop_frame: None,
                 main_backdrop_layer: None,
+                footer_left_allocation: None,
                 footer_container_frame: None,
                 transparent_gap_points: None,
                 backdrop_footer_intersection_area: None,

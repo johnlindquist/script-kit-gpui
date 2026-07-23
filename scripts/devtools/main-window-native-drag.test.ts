@@ -249,21 +249,24 @@ function withFilmstrip(fixture: NativeTrace, staleActualTime = false) {
   const dragged = fixture.samples.filter(
     (sample) => sample.phase === "dragged",
   );
-  const paths = [
-    import.meta.path,
-    new URL("./main-window-native-drag.ts", import.meta.url).pathname,
-    new URL("../agentic/macos-native-drag-sampler.swift", import.meta.url)
-      .pathname,
-  ];
-  fixture.filmstripFrames = [0.25, 0.5, 0.75].map((fraction, index) => {
+  const paths = Array.from(
+    new Bun.Glob("scripts/**/*.{ts,swift,py}").scanSync({
+      cwd: new URL("../..", import.meta.url).pathname,
+      absolute: true,
+    }),
+  ).slice(0, 18);
+  const motion = Array.from({ length: 15 }, (_, index) => {
+    const fraction = (index + 1) / 16;
     const sample = dragged[Math.floor((dragged.length - 1) * fraction)]!;
     return {
+      sequence: index + 1,
+      phase: "motion",
       fraction,
       tNs: sample.tNs,
       actualFrameNs: staleActualTime
         ? fixture.mouseDownEventNs! - 1
         : sample.controls[0].frameRead!.midpointNs,
-      markerEventNs: sample.controls[0].frameRead!.midpointNs,
+      markerEventNs: null,
       encodingCompletedNs: sample.tNs + 50_000_000,
       mainFramePt: { x: 100 + index * 120, y: 100, width: 750, height: 501 },
       path: paths[index],
@@ -271,6 +274,27 @@ function withFilmstrip(fixture: NativeTrace, staleActualTime = false) {
       error: null,
     };
   });
+  const settled = Array.from({ length: 3 }, (_, index) => ({
+    sequence: 16 + index,
+    phase: "settled",
+    fraction: 1.1 + index / 10,
+    tNs: fixture.mouseUpEventNs! + (index + 1) * 20_000_000,
+    actualFrameNs: fixture.mouseUpEventNs! + (index + 1) * 20_000_000,
+    markerEventNs: null,
+    encodingCompletedNs: fixture.mouseUpEventNs! + (index + 1) * 30_000_000,
+    mainFramePt: { x: 460, y: 100, width: 750, height: 501 },
+    path: paths[15 + index],
+    captureSucceeded: true,
+    error: null,
+  }));
+  fixture.filmstripFrames = [...motion, ...settled];
+  fixture.screenCaptureHealth = {
+    receivedFrameCount: 18,
+    completeFrameCount: 18,
+    encodedCompleteFrameCount: 18,
+    incompleteFrameCount: 0,
+    droppedCompleteFrameCount: 0,
+  };
   return fixture;
 }
 
@@ -525,6 +549,12 @@ function stationaryFixture(hostHeight = 480) {
             shadowOffsetX: 0,
             shadowOffsetY: 0,
             hasShadowPath: false,
+          },
+          footerLeftAllocation: {
+            degradation: "full",
+            availableWidth: 116,
+            cwdLabelWidth: 20,
+            primaryLabelWidth: 40,
           },
         },
       },

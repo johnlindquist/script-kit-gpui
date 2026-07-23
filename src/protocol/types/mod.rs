@@ -68,10 +68,11 @@ pub use elements_actions_scriptlets::{
 };
 pub use grid_layout::{
     AppKitFidelityColor, AppKitFidelityImage, AppKitFidelityLayer, AppKitFidelityNode,
-    AppKitFidelitySnapshot, AppKitFidelityText, BoxModelSides, ComputedBoxModel, ComputedFlexStyle,
-    FidelityCaptureStatus, FidelityLayoutNode, FidelityLayoutSnapshot, FidelityPaintTargetSnapshot,
-    FidelityUnscopedPaintSummary, GridColorScheme, GridDepthOption, GridOptions, LayoutBounds,
-    LayoutComponentInfo, LayoutComponentType, LayoutInfo, ScriptErrorData,
+    AppKitFidelitySnapshot, AppKitFidelityText, AppKitFooterLeftAllocation, BoxModelSides,
+    ComputedBoxModel, ComputedFlexStyle, FidelityCaptureStatus, FidelityLayoutNode,
+    FidelityLayoutSnapshot, FidelityPaintTargetSnapshot, FidelityUnscopedPaintSummary,
+    GridColorScheme, GridDepthOption, GridOptions, LayoutBounds, LayoutComponentInfo,
+    LayoutComponentType, LayoutInfo, ScriptErrorData,
 };
 pub use input::{ExecOptions, MouseData};
 pub use menu_bar::MenuBarItemData;

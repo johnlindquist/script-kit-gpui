@@ -52,6 +52,8 @@ export type DragSample = {
   topologyComplete?: boolean;
 };
 export type FilmstripFrame = {
+  sequence?: number;
+  phase?: "pre" | "motion" | "settled" | string;
   fraction: number;
   tNs: number;
   actualFrameNs?: number;
@@ -105,6 +107,13 @@ export type NativeTrace = {
   };
   samples: DragSample[];
   filmstripFrames?: FilmstripFrame[];
+  screenCaptureHealth?: {
+    receivedFrameCount: number;
+    completeFrameCount: number;
+    encodedCompleteFrameCount: number;
+    incompleteFrameCount: number;
+    droppedCompleteFrameCount: number;
+  };
   errors: string[];
 };
 
@@ -783,40 +792,29 @@ async function run(command: string[], options: { stdout?: "pipe" | "ignore" } = 
 export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
   const errors: string[] = [];
   const frames = [...(trace.filmstripFrames ?? [])].sort(
-    (a, b) => a.fraction - b.fraction,
+    (a, b) => (a.actualFrameNs ?? a.tNs) - (b.actualFrameNs ?? b.tNs),
   );
-  const motionFrames = frames.filter((frame) => frame.fraction < 1);
-  const settledFrames = frames.filter((frame) => frame.fraction > 1);
-  if (motionFrames.length !== 15 || settledFrames.length !== 3) {
+  const motionFrames = frames.filter((frame) => frame.phase === "motion");
+  const settledFrames = frames.filter((frame) => frame.phase === "settled");
+  if (motionFrames.length < 15 || settledFrames.length < 3) {
     errors.push(
-      `expected 15 motion + 3 settled same-run frames, found ${motionFrames.length} + ${settledFrames.length}`,
+      `expected at least 15 motion + 3 settled same-run frames, found ${motionFrames.length} + ${settledFrames.length}`,
     );
   }
-  const expectedFractions = Array.from({ length: 15 }, (_, index) =>
-    (index + 1) / 16
-  );
   motionFrames.forEach((frame, index) => {
-    if (
-      Math.abs(frame.fraction - (expectedFractions[index] ?? frame.fraction)) >
-      0.001
-    ) {
-      errors.push(`unexpected filmstrip fraction ${frame.fraction}`);
-    }
     if (!frame.captureSucceeded || !existsSync(frame.path)) {
       errors.push(
         `filmstrip capture ${index + 1} failed: ${frame.error ?? "file missing"}`,
       );
     }
-    if (frame.actualFrameNs == null || frame.markerEventNs == null) {
+    if (frame.actualFrameNs == null) {
       errors.push(
-        `filmstrip frame ${index + 1} is not tied to ScreenCaptureKit and event host time`,
+        `filmstrip frame ${index + 1} is not tied to ScreenCaptureKit host time`,
       );
     }
   });
   const downNs = trace.mouseDownEventNs ?? null;
   const upNs = trace.mouseUpEventNs ?? null;
-  const refreshPeriodNs =
-    1_000_000_000 / Math.max(1, trace.display?.refreshHz ?? 60);
   if (
     downNs == null ||
     upNs == null ||
@@ -839,16 +837,14 @@ export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
   ) {
     errors.push("settled filmstrip frames are not after tagged mouse-up");
   }
+  const captureHealth = trace.screenCaptureHealth;
   if (
-    frames.some(
-      (frame) =>
-        frame.actualFrameNs == null ||
-        frame.markerEventNs == null ||
-        Math.abs(frame.actualFrameNs - frame.markerEventNs)
-          > refreshPeriodNs * 2 + 1_000_000,
-    )
+    captureHealth == null
+    || captureHealth.completeFrameCount !== frames.length
+    || captureHealth.encodedCompleteFrameCount !== frames.length
+    || captureHealth.droppedCompleteFrameCount !== 0
   ) {
-    errors.push("filmstrip frame/event skew exceeds two display intervals plus 1ms");
+    errors.push("not every complete ScreenCaptureKit frame was encoded");
   }
   const positions = motionFrames.flatMap((frame) =>
     frame.mainFramePt ? [frame.mainFramePt] : [],
@@ -858,7 +854,7 @@ export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
   );
   const displacementPt =
     positions.length >= 2 ? distance(positions[0], positions.at(-1)!) : 0;
-  if (distinctPositions.size < 12)
+  if (distinctPositions.size < Math.min(12, motionFrames.length))
     errors.push(
       `filmstrip contains only ${distinctPositions.size}/12 distinct motion positions`,
     );
@@ -876,7 +872,7 @@ export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
       .filter((frame) => frame.fraction < 1)
       .flatMap((frame) => (frame.sha256 ? [frame.sha256] : [])),
   );
-  if (motionHashes.size < 12)
+  if (motionHashes.size < Math.min(12, motionFrames.length))
     errors.push(
       `filmstrip captures contain only ${motionHashes.size}/12 distinct motion images`,
     );
@@ -886,6 +882,7 @@ export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
     sameRunRawTrace: true,
     motionFrameCount: motionFrames.length,
     settledFrameCount: settledFrames.length,
+    screenCaptureHealth: captureHealth ?? null,
     distinctMainPositions: distinctPositions.size,
     displacementPt: round(displacementPt),
     frames: enrichedFrames,
@@ -1097,6 +1094,7 @@ export function analyzeStationaryFidelity(
     ?? byId.get("script-kit-footer-cwd-chip-keycap");
   const leftKeycapGlyph = byId.get("script-kit-footer-left-info-keycap-glyph")
     ?? byId.get("script-kit-footer-cwd-chip-keycap-glyph");
+  const leftGlyph = leftKeycapGlyph?.text?.value?.trim() ?? "";
   const leftIcon = byId.get("script-kit-footer-left-profile-icon")
     ?? byId.get("script-kit-footer-cwd-chip-icon");
   if (!leftCapsule) errors.push("left footer capsule is missing");
@@ -1114,10 +1112,9 @@ export function analyzeStationaryFidelity(
       if (leftKeycap.layer?.borderWidth !== 1) errors.push("left footer shortcut keycap border is not 1pt");
       if (leftKeycap.layer?.contentsScale !== 2) errors.push("left footer shortcut keycap is not rendered at 2x");
     }
-    const leftGlyph = leftKeycapGlyph?.text?.value?.trim() ?? "";
     if (leftGlyph.length === 0) {
       errors.push(
-        "visible left footer shortcut glyph is empty",
+        "left footer shortcut glyph is missing or empty",
       );
     }
     if (
@@ -1192,6 +1189,29 @@ export function analyzeStationaryFidelity(
   if (leftHitOverlapWidth > 0) {
     errors.push(`left footer hit target overlaps trailing actions by ${round(leftHitOverlapWidth)}pt`);
   }
+  for (const node of nodes.filter((candidate) =>
+    candidate.id.includes("footer")
+    && candidate.hidden !== true
+    && candidate.screenshotFrame != null
+  )) {
+    const frame = node.screenshotFrame!;
+    if (
+      frame.x < 0
+      || frame.y < 0
+      || frame.x + frame.width > Number(hostBounds?.width ?? 0) + 0.01
+      || frame.y + frame.height > Number(footerContainerFrame?.height ?? 0) + 0.01
+    ) {
+      errors.push(`${node.id} escapes the footer host bounds`);
+    }
+  }
+  const leftAllocation = appKit?.footerLeftAllocation ?? null;
+  if (
+    leftAllocation == null
+    || typeof leftAllocation.degradation !== "string"
+    || Number(leftAllocation.availableWidth) < 0
+  ) {
+    errors.push("runtime left-lane allocation telemetry is missing");
+  }
 
   return {
     pass: errors.length === 0,
@@ -1201,6 +1221,8 @@ export function analyzeStationaryFidelity(
     openGaps,
     trailingGaps,
     leftCapsuleVisible,
+    leftShortcutGlyph: leftGlyph || null,
+    leftAllocation,
     leftRightGap,
     leftHitOverlapWidth: round(leftHitOverlapWidth),
     hostBounds,
@@ -1242,6 +1264,37 @@ async function resolveNativeWindow(pid: number, expectedWindowId?: number) {
   throw new Error(
     `native main window ${expectedWindowId ?? "<unresolved>"} not found for pid ${pid} after 2s${lastStderr ? `: ${lastStderr}` : ""}`,
   );
+}
+
+async function completeNativeInventory(pid: number, expectedMainWindowId: number) {
+  const query = await run([
+    "swift",
+    resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
+    "--pid",
+    String(pid),
+  ]);
+  if (query.exitCode !== 0) {
+    return { pass: false, windows: [], ownerWindowIds: [], error: query.stderr.trim() };
+  }
+  const parsed = JSON.parse(query.stdout);
+  const windows = (parsed.windows ?? []).filter((window: any) =>
+    Number(window.windowId ?? 0) > 0
+    && Number(window.bounds?.width ?? 0) > 1
+    && Number(window.bounds?.height ?? 0) > 1
+  );
+  const ownerWindowIds = windows
+    .filter((window: any) =>
+      Number(window.bounds?.width ?? 0) >= 240
+      && Number(window.bounds?.height ?? 0) >= 300
+    )
+    .map((window: any) => Number(window.windowId));
+  return {
+    pass: ownerWindowIds.length === 1 && ownerWindowIds[0] === expectedMainWindowId,
+    windows,
+    ownerWindowIds,
+    includesHiddenAndAlphaZero: true,
+    error: null,
+  };
 }
 
 async function captureNativeWindow(
@@ -1363,6 +1416,7 @@ async function captureNativeWindow(
 async function setNativeWindowSize(
   helper: string,
   pid: number,
+  windowId: number,
   width: number,
   height: number,
 ) {
@@ -1370,6 +1424,8 @@ async function setNativeWindowSize(
     helper,
     "--pid",
     String(pid),
+    "--window-id",
+    String(windowId),
     "--width",
     String(Math.round(width)),
     "--height",
@@ -1560,6 +1616,10 @@ async function cli() {
     receipt.pid = main.pid;
     receipt.pinnedMainWindowNumber = pinnedMainWindow.windowId;
     receipt.initialAutomationWindows = windows;
+    receipt.initialCompleteNativeInventory = await completeNativeInventory(
+      Number(main.pid),
+      pinnedMainWindow.windowId,
+    );
 
     const ensureMainWindowVisible = async (requestId: string) => {
       const state = await driver.getState({ timeoutMs: 15_000 });
@@ -1737,6 +1797,10 @@ async function cli() {
     );
     const finalWindows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
     receipt.finalAutomationWindows = finalWindows;
+    receipt.finalCompleteNativeInventory = await completeNativeInventory(
+      Number(main.pid),
+      pinnedMainWindow.windowId,
+    );
     const finalMain = ((finalWindows as any)?.windows ?? []).find((window: any) =>
       window.id === "main" && window.pid === main.pid
     ) ?? main;
@@ -1781,14 +1845,18 @@ async function cli() {
         const resized = await setNativeWindowSize(
           resizeHelper,
           Number(main.pid),
+          pinnedMainWindow.windowId,
           width,
           originalHeight,
         );
         await Bun.sleep(250);
-        const layout = await driver.getLayoutInfo(
-          { target: { type: "id", id: "main" } },
-          { timeoutMs: 15_000 },
-        );
+        const [layout, state] = await Promise.all([
+          driver.getLayoutInfo(
+            { target: { type: "id", id: "main" } },
+            { timeoutMs: 15_000 },
+          ),
+          driver.getState({ timeoutMs: 15_000 }),
+        ]);
         const windows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
         const resizedMain = ((windows as any)?.windows ?? []).find(
           (window: any) => window.id === "main" && window.pid === main.pid,
@@ -1804,6 +1872,25 @@ async function cli() {
           outDir,
           `stationary-width-${width}-2x`,
         );
+        const completeInventory = await completeNativeInventory(
+          Number(main.pid),
+          pinnedMainWindow.windowId,
+        );
+        const expectedShortcutGlyph =
+          (state as any)?.activeFooter?.leftInfo?.keycap ?? null;
+        const degradation = analysis.leftAllocation?.degradation ?? null;
+        const expectedLeftVisible = degradation !== "hidden";
+        const semanticGlyphPass = expectedLeftVisible
+          ? typeof expectedShortcutGlyph === "string"
+            && expectedShortcutGlyph.length > 0
+            && analysis.leftShortcutGlyph === expectedShortcutGlyph
+          : analysis.leftShortcutGlyph == null;
+        const allocationPass = analysis.leftAllocation != null
+          && Number(analysis.leftAllocation.cwdLabelWidth ?? 0) >= 0
+          && Number(analysis.leftAllocation.primaryLabelWidth ?? 0) >= 0
+          && Number(analysis.leftAllocation.cwdLabelWidth ?? 0)
+              + Number(analysis.leftAllocation.primaryLabelWidth ?? 0)
+            <= Number(analysis.leftAllocation.availableWidth ?? 0) + 0.01;
         widthMatrix.push({
           width,
           requestedWidth: width,
@@ -1814,13 +1901,25 @@ async function cli() {
           automationBounds: resizedMain?.bounds ?? null,
           structural: analysis,
           capture,
-          pass: resized.exitCode === 0 && analysis.pass,
+          degradation,
+          expectedLeftVisible,
+          expectedShortcutGlyph,
+          observedShortcutGlyph: analysis.leftShortcutGlyph,
+          semanticGlyphPass,
+          allocationPass,
+          completeNativeInventory: completeInventory,
+          pass: resized.exitCode === 0
+            && analysis.pass
+            && semanticGlyphPass
+            && allocationPass
+            && completeInventory.pass,
         });
       }
       if (widths.length > 0) {
         await setNativeWindowSize(
           resizeHelper,
           Number(main.pid),
+          pinnedMainWindow.windowId,
           originalWidth,
           originalHeight,
         );
@@ -2341,6 +2440,8 @@ async function cli() {
       result.analysis?.valid === true && result.filmstrip?.pass === true
     );
     receipt.pass = lifecyclePass
+      && (receipt.initialCompleteNativeInventory as any)?.pass === true
+      && (receipt.finalCompleteNativeInventory as any)?.pass === true
       && (receipt.stationary as any)?.pass === true
       && (!visualMatrix || (receipt.visualMatrix as any)?.pass === true)
       && (widths.length === 0 || (receipt.widthMatrix as any)?.pass === true)

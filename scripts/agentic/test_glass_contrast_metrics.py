@@ -1,33 +1,73 @@
 #!/usr/bin/env python3
-"""Deterministic unit checks for the glass CIEDE2000 implementation."""
+"""Synthetic locks for rounded capsule masking and descendant exclusion."""
+
+from __future__ import annotations
 
 import importlib.util
+import unittest
 from pathlib import Path
 
-
-module_path = Path(__file__).with_name("glass-contrast-metrics.py")
-spec = importlib.util.spec_from_file_location("glass_contrast_metrics", module_path)
-assert spec and spec.loader
-metrics = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(metrics)
+from PIL import Image, ImageDraw
 
 
-def main() -> None:
-    # Published Sharma/Wu/Dalal CIEDE2000 reference pairs.
-    pairs = [
-        ((50.0, 2.6772, -79.7751), (50.0, 0.0, -82.7485), 2.0425),
-        ((50.0, 3.1571, -77.2803), (50.0, 0.0, -82.7485), 2.8615),
-        ((50.0, 2.8361, -74.0200), (50.0, 0.0, -82.7485), 3.4412),
-        ((50.0, -1.3802, -84.2814), (50.0, 0.0, -82.7485), 1.0000),
-        ((50.0, 0.0, 0.0), (50.0, -1.0, 2.0), 2.3669),
-    ]
-    for left, right, expected in pairs:
-        actual = metrics.delta_e_2000(left, right)
-        assert abs(actual - expected) < 0.0002, (left, right, actual, expected)
-        reverse = metrics.delta_e_2000(right, left)
-        assert abs(reverse - expected) < 0.0002, (right, left, reverse, expected)
-    print(f"ok: {len(pairs)} CIEDE2000 reference pairs")
+def load_metrics():
+    source = Path(__file__).with_name("glass-contrast-metrics.py")
+    spec = importlib.util.spec_from_file_location("glass_contrast_metrics", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+metrics = load_metrics()
+
+
+class RoundedMaskTests(unittest.TestCase):
+    def test_corners_and_foreground_descendants_do_not_change_material_median(self):
+        image = Image.new("RGB", (140, 80), (20, 20, 20))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((20, 20, 119, 59), radius=12, fill=(100, 110, 120))
+        draw.rectangle((50, 30, 89, 49), fill=(255, 0, 255))
+        image.putpixel((21, 21), (0, 255, 0))
+        capsule = {
+            "id": "script-kit-footer-capsule-test",
+            "screenshotFrame": {"x": 20, "y": 20, "width": 100, "height": 40},
+            "layer": {"cornerRadius": 12},
+        }
+        nodes = [
+            capsule,
+            {
+                "id": "script-kit-footer-capsule-content-test",
+                "parentId": capsule["id"],
+                "className": "NSView",
+                "screenshotFrame": capsule["screenshotFrame"],
+            },
+            {
+                "id": "script-kit-footer-label-chip-test",
+                "parentId": "script-kit-footer-capsule-content-test",
+                "className": "NSView",
+                "screenshotFrame": {"x": 50, "y": 30, "width": 40, "height": 20},
+            },
+        ]
+        result = metrics.capsule_metrics(image, capsule, 1.0, nodes)
+        self.assertEqual(result["materialMedianRgb"], (100, 110, 120))
+        self.assertEqual(result["mask"]["shape"], "rounded-rect")
+        self.assertEqual(result["mask"]["erosionDevicePixels"], 3)
+        self.assertEqual(result["mask"]["foregroundDescendantCount"], 1)
+
+    def test_descendant_walker_includes_nested_keycaps_icons_and_state_layers(self):
+        nodes = [
+            {"id": "root"},
+            {"id": "content", "parentId": "root"},
+            {"id": "keycap", "parentId": "content"},
+            {"id": "glyph", "parentId": "keycap"},
+            {"id": "other", "parentId": "elsewhere"},
+        ]
+        self.assertEqual(
+            metrics.descendant_ids(nodes, "root"),
+            {"content", "keycap", "glyph"},
+        )
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

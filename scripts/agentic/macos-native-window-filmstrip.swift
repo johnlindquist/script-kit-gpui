@@ -4,6 +4,7 @@ import CoreVideo
 import Foundation
 import ImageIO
 import ScreenCaptureKit
+import AppKit
 
 private struct Arguments {
     var windowID: CGWindowID?
@@ -67,8 +68,43 @@ private func parseArguments() -> Arguments {
 private struct FrameReceipt: Codable {
     let sequence: Int
     let displayTime: UInt64
+    let displayTimeNs: UInt64
+    let windowBounds: CGRect?
+    let windowAlpha: Double?
+    let windowOnscreen: Bool?
     let path: String
     let sha256: String
+}
+
+private let machTimebase: mach_timebase_info_data_t = {
+    var value = mach_timebase_info_data_t()
+    mach_timebase_info(&value)
+    return value
+}()
+
+private func hostTicksToNs(_ ticks: UInt64) -> UInt64 {
+    let quotient = ticks / UInt64(machTimebase.denom)
+    let remainder = ticks % UInt64(machTimebase.denom)
+    return quotient * UInt64(machTimebase.numer)
+        + remainder * UInt64(machTimebase.numer) / UInt64(machTimebase.denom)
+}
+
+private func windowState(_ windowID: CGWindowID) -> (
+    bounds: CGRect?,
+    alpha: Double?,
+    onscreen: Bool?
+) {
+    guard let info = CGWindowListCopyWindowInfo(
+        [.optionIncludingWindow, .excludeDesktopElements],
+        windowID
+    ) as? [[String: Any]], let row = info.first else {
+        return (nil, nil, nil)
+    }
+    let bounds = (row[kCGWindowBounds as String] as? NSDictionary)
+        .flatMap { CGRect(dictionaryRepresentation: $0) }
+    let alpha = (row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue
+    let onscreen = (row[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue
+    return (bounds, alpha, onscreen)
 }
 
 private struct Receipt: Codable {
@@ -98,12 +134,14 @@ private func sha256(_ path: String) -> String {
 private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
     private let lock = NSLock()
     private let outputDirectory: URL
+    private let windowID: CGWindowID
     private var receipts: [FrameReceipt] = []
     private var errors: [String] = []
     private let context = CIContext(options: [.cacheIntermediates: false])
 
-    init(outputDirectory: URL) {
+    init(outputDirectory: URL, windowID: CGWindowID) {
         self.outputDirectory = outputDirectory
+        self.windowID = windowID
     }
 
     func stream(
@@ -120,6 +158,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         guard let status = attachments?.first?[.status] as? NSNumber,
               status.intValue == SCFrameStatus.complete.rawValue else { return }
         let displayTime = (attachments?.first?[.displayTime] as? NSNumber)?.uint64Value ?? 0
+        let state = windowState(windowID)
         lock.lock()
         let sequence = receipts.count
         lock.unlock()
@@ -147,6 +186,10 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         let receipt = FrameReceipt(
             sequence: sequence,
             displayTime: displayTime,
+            displayTimeNs: hostTicksToNs(displayTime),
+            windowBounds: state.bounds,
+            windowAlpha: state.alpha,
+            windowOnscreen: state.onscreen,
             path: path,
             sha256: sha256(path)
         )
@@ -219,7 +262,7 @@ private enum Main {
         do {
             let window = try await resolveWindow(arguments)
             resolvedWindowID = window.windowID
-            let receiver = Capture(outputDirectory: directory)
+            let receiver = Capture(outputDirectory: directory, windowID: window.windowID)
             let configuration = SCStreamConfiguration()
             configuration.width = max(1, Int(window.frame.width * 2))
             configuration.height = max(1, Int(window.frame.height * 2))

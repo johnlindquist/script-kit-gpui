@@ -153,6 +153,8 @@ private struct Sample: Codable {
 }
 
 private struct FilmstripFrame: Codable {
+    let sequence: Int
+    let phase: String
     let fraction: Double
     let tNs: UInt64
     let actualFrameNs: UInt64?
@@ -164,6 +166,8 @@ private struct FilmstripFrame: Codable {
     let error: String?
 
     init(
+        sequence: Int = 0,
+        phase: String = "unknown",
         fraction: Double,
         tNs: UInt64,
         actualFrameNs: UInt64? = nil,
@@ -174,6 +178,8 @@ private struct FilmstripFrame: Codable {
         captureSucceeded: Bool,
         error: String?
     ) {
+        self.sequence = sequence
+        self.phase = phase
         self.fraction = fraction
         self.tNs = tNs
         self.actualFrameNs = actualFrameNs
@@ -184,6 +190,14 @@ private struct FilmstripFrame: Codable {
         self.captureSucceeded = captureSucceeded
         self.error = error
     }
+}
+
+private struct ScreenCaptureHealth: Codable {
+    let receivedFrameCount: Int
+    let completeFrameCount: Int
+    let encodedCompleteFrameCount: Int
+    let incompleteFrameCount: Int
+    let droppedCompleteFrameCount: Int
 }
 
 private struct EventRecord: Codable {
@@ -243,6 +257,7 @@ private struct Output: Codable {
     let events: [EventRecord]
     let interference: Interference
     let observerHealth: ObserverHealth
+    let screenCaptureHealth: ScreenCaptureHealth
     let samples: [Sample]
     let filmstripFrames: [FilmstripFrame]
     let errors: [String]
@@ -282,6 +297,13 @@ private struct Output: Codable {
             ownerAXCallMs: [],
             cgInventoryCallMs: []
         ),
+        screenCaptureHealth: ScreenCaptureHealth = ScreenCaptureHealth(
+            receivedFrameCount: 0,
+            completeFrameCount: 0,
+            encodedCompleteFrameCount: 0,
+            incompleteFrameCount: 0,
+            droppedCompleteFrameCount: 0
+        ),
         samples: [Sample],
         filmstripFrames: [FilmstripFrame],
         errors: [String]
@@ -302,6 +324,7 @@ private struct Output: Codable {
         self.events = events
         self.interference = interference
         self.observerHealth = observerHealth
+        self.screenCaptureHealth = screenCaptureHealth
         self.samples = samples
         self.filmstripFrames = filmstripFrames
         self.errors = errors
@@ -968,16 +991,16 @@ private final class FilmstripStore: @unchecked Sendable {
     }
 }
 
-private func resolveShareableDisplay(_ displayID: UInt32) -> (display: SCDisplay?, error: String?) {
+private func resolveShareableWindow(_ windowID: Int) -> (window: SCWindow?, error: String?) {
     let semaphore = DispatchSemaphore(value: 0)
     let resultLock = NSLock()
     var resultError: String?
-    var resultDisplay: SCDisplay?
+    var resultWindow: SCWindow?
     SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
         resultLock.lock()
         if let content {
-            resultDisplay = content.displays.first { $0.displayID == displayID }
-            if resultDisplay == nil { resultError = "ScreenCaptureKit display \(displayID) unavailable" }
+            resultWindow = content.windows.first { Int($0.windowID) == windowID }
+            if resultWindow == nil { resultError = "ScreenCaptureKit window \(windowID) unavailable" }
         } else {
             resultError = "ScreenCaptureKit content unavailable: \(error?.localizedDescription ?? "unknown error")"
         }
@@ -985,7 +1008,7 @@ private func resolveShareableDisplay(_ displayID: UInt32) -> (display: SCDisplay
     }
     if semaphore.wait(timeout: .now() + 5) == .timedOut { return (nil, "ScreenCaptureKit content lookup timed out") }
     resultLock.lock(); defer { resultLock.unlock() }
-    return (resultDisplay, resultError)
+    return (resultWindow, resultError)
 }
 
 private struct CapturedBuffer {
@@ -996,15 +1019,39 @@ private struct CapturedBuffer {
 private final class WindowStreamCapture: NSObject, SCStreamOutput, @unchecked Sendable {
     private let lock = NSLock()
     private var latest: CapturedBuffer?
+    private var recording = false
+    private var recorded: [CapturedBuffer] = []
+    private var receivedFrameCount = 0
+    private var completeFrameCount = 0
+    private var incompleteFrameCount = 0
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else { return }
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
             as? [[SCStreamFrameInfo: Any]]
+        let status = (attachments?.first?[.status] as? NSNumber)?.intValue
+        lock.lock()
+        receivedFrameCount += 1
+        lock.unlock()
+        guard status == SCFrameStatus.complete.rawValue else {
+            lock.lock()
+            incompleteFrameCount += 1
+            lock.unlock()
+            return
+        }
         let displayTicks = (attachments?.first?[.displayTime] as? NSNumber)?.uint64Value
             ?? HostClock.ticks()
+        let source = CapturedBuffer(
+            pixelBuffer: pixelBuffer,
+            actualFrameNs: HostClock.ns(displayTicks)
+        )
+        let copied = copyBuffer(source)
         lock.lock()
-        latest = CapturedBuffer(pixelBuffer: pixelBuffer, actualFrameNs: HostClock.ns(displayTicks))
+        completeFrameCount += 1
+        latest = copied ?? source
+        if recording, let copied {
+            recorded.append(copied)
+        }
         lock.unlock()
     }
 
@@ -1016,13 +1063,14 @@ private final class WindowStreamCapture: NSObject, SCStreamOutput, @unchecked Se
             lock.unlock()
             return nil
         }
+        lock.unlock()
+        return copyBuffer(source)
+    }
+
+    private func copyBuffer(_ source: CapturedBuffer) -> CapturedBuffer? {
         let pixelBuffer = source.pixelBuffer
-        let actualFrameNs = source.actualFrameNs
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer {
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
-            lock.unlock()
-        }
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
         var copiedBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault,
@@ -1049,7 +1097,38 @@ private final class WindowStreamCapture: NSObject, SCStreamOutput, @unchecked Se
                 bytesPerRow
             )
         }
-        return CapturedBuffer(pixelBuffer: copiedBuffer, actualFrameNs: actualFrameNs)
+        return CapturedBuffer(
+            pixelBuffer: copiedBuffer,
+            actualFrameNs: source.actualFrameNs
+        )
+    }
+
+    func beginRecording() {
+        lock.lock()
+        recorded.removeAll(keepingCapacity: true)
+        receivedFrameCount = 0
+        completeFrameCount = 0
+        incompleteFrameCount = 0
+        recording = true
+        lock.unlock()
+    }
+
+    func endRecording() -> (
+        frames: [CapturedBuffer],
+        received: Int,
+        complete: Int,
+        incomplete: Int
+    ) {
+        lock.lock()
+        recording = false
+        let result = (
+            frames: recorded,
+            received: receivedFrameCount,
+            complete: completeFrameCount,
+            incomplete: incompleteFrameCount
+        )
+        lock.unlock()
+        return result
     }
 
     func write(
@@ -1060,15 +1139,19 @@ private final class WindowStreamCapture: NSObject, SCStreamOutput, @unchecked Se
     ) -> String? {
         let context = CIContext(options: [.cacheIntermediates: false])
         let image = CIImage(cvPixelBuffer: captured.pixelBuffer)
-        guard let cropFramePt else { return "exact pinned-window crop geometry unavailable" }
-        let scale = image.extent.width / display.boundsPt.width
-        let crop = CGRect(
-            x: (cropFramePt.x - display.boundsPt.x) * scale,
-            y: image.extent.height
-                - (cropFramePt.y - display.boundsPt.y + cropFramePt.height) * scale,
-            width: cropFramePt.width * scale,
-            height: cropFramePt.height * scale
-        ).intersection(image.extent)
+        let crop: CGRect
+        if let cropFramePt {
+            let scale = image.extent.width / display.boundsPt.width
+            crop = CGRect(
+                x: (cropFramePt.x - display.boundsPt.x) * scale,
+                y: image.extent.height
+                    - (cropFramePt.y - display.boundsPt.y + cropFramePt.height) * scale,
+                width: cropFramePt.width * scale,
+                height: cropFramePt.height * scale
+            ).intersection(image.extent)
+        } else {
+            crop = image.extent
+        }
         guard !crop.isNull, crop.width > 1, crop.height > 1 else {
             return "exact pinned-window crop is outside the display frame"
         }
@@ -1087,17 +1170,17 @@ private final class WindowStreamCapture: NSObject, SCStreamOutput, @unchecked Se
     }
 }
 
-private func startDisplayStream(
-    _ shareableDisplay: SCDisplay?,
+private func startWindowStream(
+    _ shareableWindow: SCWindow?,
     display: DisplayInfo
 ) -> (stream: SCStream?, capture: WindowStreamCapture?, error: String?) {
-    guard let shareableDisplay else { return (nil, nil, "ScreenCaptureKit display unavailable") }
+    guard let shareableWindow else { return (nil, nil, "ScreenCaptureKit window unavailable") }
     let capture = WindowStreamCapture()
     let configuration = SCStreamConfiguration()
     // A one-point-per-pixel observer stream is enough for color metrics and
     // avoids starving the 120 Hz geometry sampler with full-Retina frames.
-    configuration.width = Int(display.boundsPt.width)
-    configuration.height = Int(display.boundsPt.height)
+    configuration.width = max(1, Int(shareableWindow.frame.width.rounded()))
+    configuration.height = max(1, Int(shareableWindow.frame.height.rounded()))
     configuration.showsCursor = false
     configuration.minimumFrameInterval = CMTime(
         value: 1,
@@ -1105,7 +1188,7 @@ private func startDisplayStream(
     )
     configuration.queueDepth = 8
     let stream = SCStream(
-        filter: SCContentFilter(display: shareableDisplay, excludingWindows: []),
+        filter: SCContentFilter(desktopIndependentWindow: shareableWindow),
         configuration: configuration,
         delegate: nil
     )
@@ -1256,7 +1339,6 @@ private func main() throws {
         : hypot(delta.x, delta.y) / max(0.001, duration)
     let evidence = EvidenceStore()
     let timeline = DisplayTimeline(evidence: evidence)
-    let markerStore = CaptureMarkerStore()
     let filmstripStore = FilmstripStore()
     let initialFrontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
@@ -1309,13 +1391,14 @@ private func main() throws {
         )
     }
     let shareable = arguments.filmstripDir == nil
-        ? (display: Optional<SCDisplay>.none, error: Optional<String>.none)
-        : resolveShareableDisplay(display.displayID)
+        ? (window: Optional<SCWindow>.none, error: Optional<String>.none)
+        : resolveShareableWindow(mainNumber)
     if let error = shareable.error { errors.append(error) }
     let streamCapture = arguments.filmstripDir == nil
         ? (stream: Optional<SCStream>.none, capture: Optional<WindowStreamCapture>.none, error: Optional<String>.none)
-        : startDisplayStream(shareable.display, display: display)
+        : startWindowStream(shareable.window, display: display)
     if let error = streamCapture.error { errors.append(error) }
+    streamCapture.capture?.beginRecording()
 
     let initialTopology = timedTopology(pid: pid)
     evidence.recordTopologyDuration(
@@ -1461,10 +1544,6 @@ private func main() throws {
         // captures two observations per display interval; posting at that
         // doubled rate only starves WindowServer and does not add motion.
         let steps = max(36, Int(ceil(duration * display.refreshHz)))
-        // A real frame-by-frame material trace: fifteen in-motion captures
-        // across the drag plus three settled captures after mouse-up.
-        let captureFractions = (1...15).map { Double($0) / 16.0 }
-        var nextCapture = 0
         for step in 1...steps {
             let progress = Double(step) / Double(steps)
             let intendedOffsetNs = UInt64((duration * progress * 1_000_000_000).rounded())
@@ -1477,19 +1556,6 @@ private func main() throws {
                 intendedNs: HostClock.ns(intendedTicks), sequence: step + 1,
                 kind: "mouseDragged"
             ) { evidence.record(event) }
-            if nextCapture < captureFractions.count,
-               progress >= captureFractions[nextCapture],
-               let directory = arguments.filmstripDir {
-                let fraction = captureFractions[nextCapture]
-                let prefix = arguments.filmstripPrefix ?? arguments.trajectory
-                let path = URL(fileURLWithPath: directory)
-                    .appendingPathComponent("\(prefix)-filmstrip-\(nextCapture + 1).png").path
-                markerStore.append(CaptureMarker(
-                    fraction: fraction, markerEventNs: monotonicNs(), path: path,
-                    captured: streamCapture.capture?.snapshotCopy()
-                ))
-                nextCapture += 1
-            }
         }
         let upTicks = epochTicks + HostClock.ticks(forNanoseconds: UInt64((duration * 1_000_000_000).rounded()))
         HostClock.wait(until: upTicks)
@@ -1502,17 +1568,7 @@ private func main() throws {
         for (index, settledDelay) in [0.08, 0.16, 0.26].enumerated() {
             Thread.sleep(forTimeInterval: settledDelay - previousSettledDelay)
             previousSettledDelay = settledDelay
-            if let directory = arguments.filmstripDir {
-                let prefix = arguments.filmstripPrefix ?? arguments.trajectory
-                let path = URL(fileURLWithPath: directory)
-                    .appendingPathComponent("\(prefix)-settled-\(index + 1).png").path
-                markerStore.append(CaptureMarker(
-                    fraction: 1.0 + Double(index + 1) / 10.0,
-                    markerEventNs: monotonicNs(),
-                    path: path,
-                    captured: streamCapture.capture?.snapshotCopy()
-                ))
-            }
+            _ = index
         }
         Thread.sleep(forTimeInterval: 0.04)
         driverDone.signal()
@@ -1527,12 +1583,69 @@ private func main() throws {
     _ = geometryDone.wait(timeout: .now() + 2)
     _ = topologyDone.wait(timeout: .now() + 2)
 
+    let capturedRun = streamCapture.capture?.endRecording()
     if let stream = streamCapture.stream {
         let stop = DispatchSemaphore(value: 0)
         stream.stopCapture { _ in stop.signal() }
         _ = stop.wait(timeout: .now() + 2)
     }
     let samples = evidence.values()
+    let downTimestamp = evidence.mouseDownTimestamp()
+    let upTimestamp = evidence.mouseUpTimestamp()
+    var encodedCompleteFrameCount = 0
+    for (index, captured) in (capturedRun?.frames ?? []).enumerated() {
+        let nearestMain = samples.min { lhs, rhs in
+            let lhsDistance = lhs.tNs > captured.actualFrameNs ? lhs.tNs - captured.actualFrameNs : captured.actualFrameNs - lhs.tNs
+            let rhsDistance = rhs.tNs > captured.actualFrameNs ? rhs.tNs - captured.actualFrameNs : captured.actualFrameNs - rhs.tNs
+            return lhsDistance < rhsDistance
+        }?.mainFramePt
+        let phase: String
+        let fraction: Double
+        if let downTimestamp, captured.actualFrameNs < downTimestamp {
+            phase = "pre"
+            fraction = -0.1
+        } else if let downTimestamp, let upTimestamp, captured.actualFrameNs <= upTimestamp {
+            phase = "motion"
+            fraction = Double(captured.actualFrameNs - downTimestamp)
+                / Double(max(1, upTimestamp - downTimestamp))
+        } else {
+            phase = "settled"
+            fraction = 1.0 + Double(index + 1) / 10_000.0
+        }
+        let prefix = arguments.filmstripPrefix ?? arguments.trajectory
+        let path = URL(fileURLWithPath: arguments.filmstripDir ?? ".")
+            .appendingPathComponent(
+                String(format: "%@-complete-%04d.png", prefix, index + 1)
+            ).path
+        let captureError: String?
+        if let capture = streamCapture.capture {
+            captureError = capture.write(
+                captured,
+                to: path,
+                cropFramePt: nil,
+                display: display
+            )
+        } else {
+            captureError = "ScreenCaptureKit writer unavailable"
+        }
+        if captureError == nil {
+            encodedCompleteFrameCount += 1
+        }
+        filmstripStore.append(FilmstripFrame(
+            sequence: index + 1,
+            phase: phase,
+            fraction: fraction,
+            tNs: captured.actualFrameNs,
+            actualFrameNs: captured.actualFrameNs,
+            markerEventNs: nil,
+            encodingCompletedNs: monotonicNs(),
+            mainFramePt: nearestMain,
+            path: path,
+            captureSucceeded: captureError == nil,
+            error: captureError
+        ))
+    }
+    /*
     for marker in markerStore.values() {
         let nearestMain = marker.captured.flatMap { captured in
             samples.min { lhs, rhs in
@@ -1561,6 +1674,29 @@ private func main() throws {
             path: marker.path, captureSucceeded: captureError == nil, error: captureError
         ))
     }
+    */
+    let captureHealth = ScreenCaptureHealth(
+        receivedFrameCount: capturedRun?.received ?? 0,
+        completeFrameCount: capturedRun?.complete ?? 0,
+        encodedCompleteFrameCount: encodedCompleteFrameCount,
+        incompleteFrameCount: capturedRun?.incomplete ?? 0,
+        droppedCompleteFrameCount: max(
+            0,
+            (capturedRun?.complete ?? 0) - encodedCompleteFrameCount
+        )
+    )
+    if arguments.filmstripDir != nil
+        && (
+            captureHealth.completeFrameCount == 0
+                || captureHealth.droppedCompleteFrameCount != 0
+        )
+    {
+        errors.append(
+            "ScreenCaptureKit complete-frame contract failed: "
+                + "\(captureHealth.completeFrameCount) complete, "
+                + "\(captureHealth.encodedCompleteFrameCount) encoded"
+        )
+    }
 
     if let eventTapSource { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), eventTapSource, .commonModes) }
     if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
@@ -1582,6 +1718,7 @@ private func main() throws {
         events: evidence.eventValues(),
         interference: evidence.interference(frontmostChanged: frontmostChanged),
         observerHealth: evidence.observerHealth(),
+        screenCaptureHealth: captureHealth,
         samples: samples, filmstripFrames: filmstripStore.values(), errors: errors
     )
     try write(output, to: arguments.output)

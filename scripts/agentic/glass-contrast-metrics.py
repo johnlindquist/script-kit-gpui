@@ -133,6 +133,81 @@ def frame_pixels(frame: dict, scale: float, image_height: int) -> tuple[int, int
     return x, y, width, height
 
 
+def rounded_rect_contains(
+    px: float,
+    py: float,
+    rect: tuple[int, int, int, int],
+    radius: float,
+) -> bool:
+    x, y, width, height = rect
+    if width <= 0 or height <= 0:
+        return False
+    radius = max(0.0, min(radius, width / 2.0, height / 2.0))
+    if x + radius <= px <= x + width - radius or y + radius <= py <= y + height - radius:
+        return x <= px < x + width and y <= py < y + height
+    cx = x + radius if px < x + width / 2.0 else x + width - radius
+    cy = y + radius if py < y + height / 2.0 else y + height - radius
+    return (px - cx) ** 2 + (py - cy) ** 2 <= radius**2
+
+
+def descendant_ids(nodes: list[dict], root_id: str) -> set[str]:
+    children: dict[str, list[str]] = {}
+    for node in nodes:
+        parent = node.get("parentId")
+        node_id = node.get("id")
+        if parent and node_id:
+            children.setdefault(str(parent), []).append(str(node_id))
+    result: set[str] = set()
+    pending = list(children.get(root_id, []))
+    while pending:
+        node_id = pending.pop()
+        if node_id in result:
+            continue
+        result.add(node_id)
+        pending.extend(children.get(node_id, []))
+    return result
+
+
+def foreground_exclusion_rects(
+    node: dict,
+    nodes: list[dict],
+    scale: float,
+    image_height: int,
+) -> tuple[list[tuple[int, int, int, int]], bool]:
+    descendants = descendant_ids(nodes, str(node.get("id", "")))
+    excluded: list[tuple[int, int, int, int]] = []
+    active_full_state_overlay = False
+    for foreground in nodes:
+        foreground_id = str(foreground.get("id", ""))
+        if (
+            foreground_id not in descendants
+            or foreground.get("hidden", False)
+            or float(foreground.get("alpha", 1)) <= 0
+        ):
+            continue
+        foreground_class = str(foreground.get("className", ""))
+        layer = foreground.get("layer", {})
+        background_alpha = float(layer.get("backgroundColor", {}).get("alpha", 0))
+        is_state_overlay = "state-layer" in foreground_id and background_alpha > 0
+        is_foreground = (
+            foreground_class in {"NSTextField", "NSImageView"}
+            or "label-chip" in foreground_id
+            or "keycap" in foreground_id
+            or foreground_id.endswith("-icon")
+            or foreground_id.endswith("-dot")
+        )
+        if not is_foreground and not is_state_overlay:
+            continue
+        frame = foreground.get("screenshotFrame")
+        if not frame:
+            continue
+        fx, fy, fw, fh = frame_pixels(frame, scale, image_height)
+        if is_state_overlay:
+            active_full_state_overlay = True
+        excluded.append((fx - 1, fy - 1, fw + 2, fh + 2))
+    return excluded, active_full_state_overlay
+
+
 def capsule_metrics(
     image: Image.Image, node: dict, scale: float, foreground_nodes: list[dict]
 ) -> dict:
@@ -159,32 +234,42 @@ def capsule_metrics(
     for py in range(y + radius, y + height - radius):
         add_pair((x + inset, py), (x - outside, py))
         add_pair((x + width - 1 - inset, py), (x + width - 1 + outside, py))
+    corner_centers = [
+        (x + radius, y + radius, math.pi, math.pi * 1.5),
+        (x + width - radius, y + radius, math.pi * 1.5, math.pi * 2),
+        (x + width - radius, y + height - radius, 0.0, math.pi * 0.5),
+        (x + radius, y + height - radius, math.pi * 0.5, math.pi),
+    ]
+    for cx, cy, start, end in corner_centers:
+        steps = max(8, round(radius * (end - start)))
+        for step in range(steps + 1):
+            angle = start + (end - start) * step / steps
+            add_pair(
+                (
+                    round(cx + (radius - inset) * math.cos(angle)),
+                    round(cy + (radius - inset) * math.sin(angle)),
+                ),
+                (
+                    round(cx + (radius + outside) * math.cos(angle)),
+                    round(cy + (radius + outside) * math.sin(angle)),
+                ),
+            )
 
     # The material contract is measured on the capsule body, not its text or
     # state chrome. Erode by three device-independent pixels and subtract every
-    # AppKit foreground node whose screenshot frame intersects this capsule.
-    erode = max(3, round(3 * scale))
-    excluded: list[tuple[int, int, int, int]] = []
-    for foreground in foreground_nodes:
-        frame = foreground.get("screenshotFrame")
-        if not frame or foreground.get("id") == node.get("id"):
-            continue
-        foreground_id = str(foreground.get("id", ""))
-        foreground_class = str(foreground.get("className", ""))
-        is_leaf_foreground = (
-            foreground_class in {"NSTextField", "NSImageView"}
-            or "label-chip" in foreground_id
-            or "keycap" in foreground_id
-            or foreground_id.endswith("-icon")
-        )
-        if not is_leaf_foreground:
-            continue
-        fx, fy, fw, fh = frame_pixels(frame, scale, image.height)
-        if fx < x + width and fx + fw > x and fy < y + height and fy + fh > y:
-            excluded.append((fx - 1, fy - 1, fw + 2, fh + 2))
+    # Erode by exactly three device pixels. The rounded interior mask excludes
+    # corner pixels as well as every rendered foreground descendant.
+    erode = 3
+    excluded, active_state_overlay = foreground_exclusion_rects(
+        node, foreground_nodes, scale, image.height
+    )
+    inner_rect = (x + erode, y + erode, width - erode * 2, height - erode * 2)
+    inner_radius = max(0, radius - erode)
     material_pixels: list[tuple[int, ...]] = []
-    for py in range(y + erode, y + height - erode):
-        for px in range(x + erode, x + width - erode):
+    for py in range(y, y + height):
+        for px in range(x, x + width):
+            if not rounded_rect_contains(px + 0.5, py + 0.5, inner_rect, inner_radius):
+                continue
             if any(ex <= px < ex + ew and ey <= py < ey + eh for ex, ey, ew, eh in excluded):
                 continue
             material_pixels.append(image.getpixel((px, py)))
@@ -195,6 +280,13 @@ def capsule_metrics(
         "id": node["id"],
         "framePixels": {"x": x, "y": y, "width": width, "height": height},
         "sampleCount": len(differences),
+        "mask": {
+            "shape": "rounded-rect",
+            "cornerRadiusDevicePixels": radius,
+            "erosionDevicePixels": erode,
+            "foregroundDescendantCount": len(excluded),
+            "activeStateOverlay": active_state_overlay,
+        },
         "medianBoundaryLuminanceDifference": statistics.median(differences),
         "p10BoundaryLuminanceDifference": percentile(differences, 0.10),
         "fractionAtLeast015": sum(value >= 0.015 for value in differences) / len(differences),

@@ -1863,6 +1863,7 @@ pub(crate) fn collect_main_footer_appkit_fidelity_snapshot(
                 backdrop_footer_intersection_area,
                 outer_window_has_shadow: Some(has_shadow == YES),
                 main_backdrop_layer,
+                footer_left_allocation: footer_left_allocation_snapshot(),
                 material_bearing_view_ids,
                 nodes,
             })
@@ -3435,12 +3436,56 @@ enum FooterLeftInfoDegradation {
 }
 
 #[cfg(target_os = "macos")]
+impl FooterLeftInfoDegradation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::TruncatedLabels => "truncatedLabels",
+            Self::CwdAffordanceOnly => "cwdAffordanceOnly",
+            Self::PrimaryOnly => "primaryOnly",
+            Self::PrimaryAffordanceOnly => "primaryAffordanceOnly",
+            Self::Hidden => "hidden",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct FooterLeftInfoAllocation {
     degradation: FooterLeftInfoDegradation,
     available_width: f64,
     cwd_label_width: f64,
     primary_label_width: f64,
+}
+
+#[cfg(target_os = "macos")]
+static LAST_FOOTER_LEFT_ALLOCATION: OnceLock<
+    Mutex<Option<crate::protocol::AppKitFooterLeftAllocation>>,
+> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn record_footer_left_allocation(allocation: FooterLeftInfoAllocation) {
+    let snapshot = crate::protocol::AppKitFooterLeftAllocation {
+        degradation: allocation.degradation.as_str().to_string(),
+        available_width: allocation.available_width,
+        cwd_label_width: allocation.cwd_label_width,
+        primary_label_width: allocation.primary_label_width,
+    };
+    if let Ok(mut slot) = LAST_FOOTER_LEFT_ALLOCATION
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *slot = Some(snapshot);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn footer_left_allocation_snapshot() -> Option<crate::protocol::AppKitFooterLeftAllocation> {
+    LAST_FOOTER_LEFT_ALLOCATION
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
 }
 
 #[cfg(target_os = "macos")]
@@ -3694,6 +3739,7 @@ unsafe fn layout_footer_left_info(
         primary_visible_without_label: primary_marker_width + primary_keycap_width > 0.0,
     };
     let allocation = resolve_footer_left_info_allocation(bounds.size.width, measured);
+    record_footer_left_allocation(allocation);
     if matches!(allocation.degradation, FooterLeftInfoDegradation::Hidden) {
         remove_identified_subview(left_info_view, FOOTER_STATUS_DOT_ID);
         remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);

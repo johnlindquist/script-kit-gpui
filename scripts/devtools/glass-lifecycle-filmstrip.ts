@@ -70,13 +70,25 @@ async function nativeWindowIds(pid: number, title?: string) {
     String(pid),
   ]);
   if (query.exitCode !== 0) {
-    return { ids: [] as number[], error: query.stderr.trim() };
+    return {
+      ids: [] as number[],
+      windows: [] as Json[],
+      completeWindows: [] as Json[],
+      completeWindowIds: [] as number[],
+      includesHiddenAndAlphaZero: true,
+      error: query.stderr.trim(),
+    };
   }
   const parsed = JSON.parse(query.stdout);
-  const matching = (parsed.windows ?? [])
+  const allWindows = (parsed.windows ?? [])
+    .filter((window: Json) =>
+      Number(window?.windowId ?? 0) > 0
+      && Number(window?.bounds?.width ?? 0) > 1
+      && Number(window?.bounds?.height ?? 0) > 1
+    );
+  const matching = allWindows
       .filter((window: Json) =>
-        Number(window?.windowId ?? 0) > 0
-        && window?.onscreen === true
+        window?.onscreen === true
         && Number(window?.alpha ?? 0) > 0
         && (title == null || window?.title === title)
       )
@@ -87,6 +99,9 @@ async function nativeWindowIds(pid: number, title?: string) {
   return {
     ids: matching.map((window: Json) => Number(window.windowId)),
     windows: matching,
+    completeWindows: allWindows,
+    completeWindowIds: allWindows.map((window: Json) => Number(window.windowId)),
+    includesHiddenAndAlphaZero: true,
     error: null,
   };
 }
@@ -195,7 +210,14 @@ function startFilmstrip(
     "120",
   ];
   const process = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
-  return { directory, readyPath, process, command };
+  return {
+    name,
+    directory,
+    readyPath,
+    process,
+    command,
+    processStartedAt: new Date().toISOString(),
+  };
 }
 
 async function finishFilmstrip(
@@ -207,12 +229,32 @@ async function finishFilmstrip(
     new Response(started.process.stderr).text(),
     started.process.exited,
   ]);
+  const metricsPath = join(started.directory, "metrics.json");
+  const metricsResult = await run([
+    "python3",
+    resolve(import.meta.dir, "../agentic/glass-lifecycle-metrics.py"),
+    "--receipt",
+    join(started.directory, "receipt.json"),
+    "--scenario",
+    started.name,
+    "--out",
+    metricsPath,
+  ]);
+  const metrics = existsSync(metricsPath)
+    ? JSON.parse(readFileSync(metricsPath, "utf8"))
+    : null;
   return {
     command: started.command,
     exitCode,
     stderr: stderr.trim().slice(-1_000),
     stdout: stdout.trim().slice(-1_000),
+    metricsPath,
+    metricsExitCode: metricsResult.exitCode,
+    metrics,
     ...analyzeFilmstrip(started.directory, expectedWindowID),
+    pass: analyzeFilmstrip(started.directory, expectedWindowID).pass
+      && metricsResult.exitCode === 0
+      && metrics?.pass === true,
   };
 }
 
@@ -238,6 +280,7 @@ try {
   const mainNative = await nativeWindowIds(pid);
   const mainWindowID = mainNative.ids[0];
   if (!mainWindowID) throw new Error(`main native window missing: ${mainNative.error}`);
+  receipt.initialCompleteNativeInventory = mainNative;
 
   await announceTestStatus(
     "Lifecycle filmstrip · Main exit",
@@ -255,8 +298,25 @@ try {
     filmstrip: mainExitFilmstrip,
     pass: mainExitFilmstrip.pass,
   });
+  await announceTestStatus(
+    "Lifecycle filmstrip · Main entry",
+    "Observer starts while hidden; the same CGWindowID and detached gutter emerge together",
+  );
+  const mainEntry = startFilmstrip("main-entry", { windowID: mainWindowID }, 700);
+  const showRequestedAt = new Date().toISOString();
   driver.send({ type: "show", requestId: "glass-life-main-show" });
+  const mainEntryReady = await waitForFile(mainEntry.readyPath);
   await driver.waitForState({ windowVisible: true }, { timeoutMs: 3_000 });
+  const mainEntryFilmstrip = await finishFilmstrip(mainEntry, mainWindowID);
+  (receipt.scenarios as Json[]).push({
+    name: "main-entry",
+    exactWindowID: mainWindowID,
+    observerStartedAt: mainEntry.processStartedAt,
+    showRequestedAt,
+    streamReady: mainEntryReady,
+    filmstrip: mainEntryFilmstrip,
+    pass: mainEntryFilmstrip.pass,
+  });
 
   await announceTestStatus(
     "Lifecycle filmstrip · Notes entry",
@@ -285,17 +345,38 @@ try {
       && sample?.state?.entryReveal?.bodyVisible === false,
   );
   const visibleAfterSettle = entryStates.at(-1)?.state?.entryReveal?.bodyVisible === true;
+  const finalReveal = entryStates.at(-1)?.state?.entryReveal;
+  const framesBeforeVisible = (
+    notesEntryFilmstrip.receipt?.frames ?? []
+  ).filter((frame: Json) =>
+    typeof frame?.displayTimeNs === "number"
+    && typeof finalReveal?.visibleAtMonotonicNs === "number"
+    && frame.displayTimeNs <= finalReveal.visibleAtMonotonicNs
+  ).length;
   const notesEntryPass = notesEntryFilmstrip.pass
     && configuredState?.nativeWindowNumber === notesEntryID
-    && typeof configuredState?.nativeConfiguredAtUnixMs === "number"
+    && configuredState?.backdropFoundOrCreated === true
+    && configuredState?.nativeSelectorsSupported === true
+    && configuredState?.styleApplied === true
+    && configuredState?.fallbackUsed === false
+    && typeof configuredState?.configuredAtMonotonicNs === "number"
     && typeof configuredState?.settleDurationMs === "number"
     && hiddenBeforeVisible
-    && visibleAfterSettle;
+    && visibleAfterSettle
+    && Number(finalReveal?.completedFrameCount ?? 0) >= 2
+    && framesBeforeVisible >= 2
+    && notesEntryFilmstrip.metrics?.bodyPixelTransition === true;
   (receipt.scenarios as Json[]).push({
     name: "notes-entry",
     exactWindowID: notesEntryID,
     states: entryStates,
-    bodyOnlyReveal: { hiddenBeforeVisible, visibleAfterSettle },
+    bodyOnlyReveal: {
+      hiddenBeforeVisible,
+      visibleAfterSettle,
+      framesBeforeVisible,
+      completedFrameCount: finalReveal?.completedFrameCount ?? null,
+      bodyPixelTransition: notesEntryFilmstrip.metrics?.bodyPixelTransition ?? false,
+    },
     nativeConfiguration: configuredState ?? null,
     filmstrip: notesEntryFilmstrip,
     pass: notesEntryPass,
@@ -324,6 +405,7 @@ try {
   await Bun.sleep(360);
   const afterReopen = await notesState();
   const notesAfterNative = await nativeWindowIds(pid, "Notes");
+  const notesCompleteAfter = await nativeWindowIds(pid);
   const notesReopenFilmstrip = await finishFilmstrip(notesReopen, notesReopenID);
   const notesReopenPass = notesReopenFilmstrip.pass
     && duringExit?.windowLifecycle?.phase === "Exiting"
@@ -333,7 +415,9 @@ try {
     && afterReopen?.windowLifecycle?.hasExitTicket === false
     && afterReopen?.entryReveal?.bodyVisible === true
     && notesAfterNative.ids.length === 1
-    && notesAfterNative.ids[0] === notesReopenID;
+    && notesAfterNative.ids[0] === notesReopenID
+    && notesCompleteAfter.completeWindowIds.includes(mainWindowID)
+    && notesCompleteAfter.completeWindowIds.includes(notesReopenID);
   (receipt.scenarios as Json[]).push({
     name: "notes-close-before-settle-reopen",
     exactWindowID: notesReopenID,
@@ -341,6 +425,7 @@ try {
     duringExit,
     afterReopen,
     nativeWindowIdsAfterReopen: notesAfterNative.ids,
+    completeNativeInventoryAfterReopen: notesCompleteAfter,
     filmstrip: notesReopenFilmstrip,
     pass: notesReopenPass,
   });
@@ -382,6 +467,7 @@ try {
   await Bun.sleep(300);
   const dictationAfter = (await driver.getState({ timeoutMs: 5_000 }))?.dictation;
   const dictationNativeAfter = await nativeWindowIds(pid, "Script Kit Dictation");
+  const dictationCompleteAfter = await nativeWindowIds(pid);
   const dictationFilmstrip = await finishFilmstrip(dictation, dictationID);
   const dictationPass = dictationFilmstrip.pass
     && dictationDuringExit?.windowLifecycle?.phase === "Exiting"
@@ -391,7 +477,9 @@ try {
     && dictationAfter?.windowLifecycle?.phase === "Open"
     && dictationAfter?.windowLifecycle?.hasExitTicket === false
     && dictationNativeAfter.ids.length === 1
-    && dictationNativeAfter.ids[0] === dictationID;
+    && dictationNativeAfter.ids[0] === dictationID
+    && dictationCompleteAfter.completeWindowIds.includes(mainWindowID)
+    && dictationCompleteAfter.completeWindowIds.includes(dictationID);
   (receipt.scenarios as Json[]).push({
     name: "dictation-exit-reopen",
     exactWindowID: dictationID,
@@ -401,6 +489,7 @@ try {
     duringExit: dictationDuringExit,
     afterReopen: dictationAfter,
     nativeWindowIdsAfterReopen: dictationNativeAfter.ids,
+    completeNativeInventoryAfterReopen: dictationCompleteAfter,
     noMicrophoneCapture: true,
     filmstrip: dictationFilmstrip,
     pass: dictationPass,
@@ -418,12 +507,13 @@ try {
 
   receipt.requiredScenarioNames = [
     "main-exit",
+    "main-entry",
     "notes-entry",
     "notes-close-before-settle-reopen",
     "dictation-exit-reopen",
   ];
   const scenarios = receipt.scenarios as Json[];
-  receipt.pass = scenarios.length === 4
+  receipt.pass = scenarios.length === 5
     && receipt.requiredScenarioNames.every((name: string) =>
       scenarios.some((scenario) => scenario?.name === name)
     )

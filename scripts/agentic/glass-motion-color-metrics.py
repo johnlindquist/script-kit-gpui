@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import math
+import statistics
 from pathlib import Path
 
 from PIL import Image
@@ -46,11 +47,11 @@ def main() -> int:
         frames = []
     else:
         frames = trial.get("filmstrip", {}).get("frames", [])
-    motion_frames = [frame for frame in frames if float(frame.get("fraction", 0)) < 1]
-    settled_frames = [frame for frame in frames if float(frame.get("fraction", 0)) > 1]
-    if len(motion_frames) != 15 or len(settled_frames) != 3:
+    motion_frames = [frame for frame in frames if frame.get("phase") == "motion" or float(frame.get("fraction", 0)) < 1]
+    settled_frames = [frame for frame in frames if frame.get("phase") == "settled" or float(frame.get("fraction", 0)) > 1]
+    if len(motion_frames) < 15 or len(settled_frames) < 3:
         errors.append(
-            f"expected 15 motion + 3 settled frames, found "
+            f"expected at least 15 motion + 3 settled frames, found "
             f"{len(motion_frames)} + {len(settled_frames)}"
         )
 
@@ -123,25 +124,83 @@ def main() -> int:
                     ),
                     default=math.inf,
                 ),
+                "minimumMedianBoundaryLuminanceDifference": min(
+                    (capsule["medianBoundaryLuminanceDifference"] for capsule in capsules),
+                    default=0,
+                ),
+                "minimumP10BoundaryLuminanceDifference": min(
+                    (capsule["p10BoundaryLuminanceDifference"] for capsule in capsules),
+                    default=0,
+                ),
+                "minimumFractionAtLeast015": min(
+                    (capsule["fractionAtLeast015"] for capsule in capsules),
+                    default=0,
+                ),
             }
         )
 
-    maximum_delta = max(
-        (row["maximumStageDeltaE00"] for row in frame_rows), default=math.inf
-    )
-    maximum_lstar = max(
-        (row["maximumStageAbsoluteLStarDifference"] for row in frame_rows),
-        default=math.inf,
-    )
-    motion_relations = [
-        row["maximumStageDeltaE00"]
-        for row in frame_rows
-        if row["phase"] == "motion"
+    capsule_ids = [str(node.get("id")) for node in capsule_nodes]
+    adaptive: dict[str, dict] = {}
+    for capsule_id in capsule_ids:
+        settled_rows = [
+            next((capsule for capsule in row["capsules"] if capsule["id"] == capsule_id), None)
+            for row in frame_rows
+            if row["phase"] == "settled"
+        ]
+        settled_rows = [row for row in settled_rows if row is not None][-3:]
+        if len(settled_rows) != 3:
+            errors.append(f"{capsule_id}: expected three settled relation samples")
+            continue
+        offsets = [
+            tuple(
+                material - stage
+                for material, stage in zip(
+                    metrics.rgb_to_lab(tuple(row["materialMedianRgb"])),
+                    metrics.rgb_to_lab(tuple(row["stageMedianRgb"])),
+                )
+            )
+            for row in settled_rows
+        ]
+        offset = tuple(statistics.median(item[index] for item in offsets) for index in range(3))
+        residuals = []
+        for row in frame_rows:
+            capsule = next(
+                (item for item in row["capsules"] if item["id"] == capsule_id), None
+            )
+            if capsule is None:
+                continue
+            stage_lab = metrics.rgb_to_lab(tuple(capsule["stageMedianRgb"]))
+            expected_lab = tuple(stage_lab[index] + offset[index] for index in range(3))
+            actual_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
+            residual = metrics.delta_e_2000(actual_lab, expected_lab)
+            capsule["adaptiveExpectedLab"] = expected_lab
+            capsule["adaptiveResidualDeltaE00"] = residual
+            residuals.append(residual)
+        adaptive[capsule_id] = {
+            "settledOffsetLab": offset,
+            "residualP95DeltaE00": metrics.percentile(residuals, 0.95),
+            "residualMaximumDeltaE00": max(residuals, default=math.inf),
+            "pass": (
+                metrics.percentile(residuals, 0.95) <= 5.0
+                and max(residuals, default=math.inf) <= 8.0
+            ),
+        }
+    settled_offsets = [tuple(row["settledOffsetLab"]) for row in adaptive.values()]
+    neighboring_relation_differences = [
+        metrics.delta_e_2000(
+            (50 + left[0], left[1], left[2]),
+            (50 + right[0], right[1], right[2]),
+        )
+        for left, right in zip(settled_offsets, settled_offsets[1:])
     ]
-    motion_relation_range = (
-        max(motion_relations) - min(motion_relations)
-        if motion_relations
-        else math.inf
+    maximum_neighbor_relation_difference = max(
+        neighboring_relation_differences, default=0
+    )
+    boundary_pass = all(
+        row["minimumMedianBoundaryLuminanceDifference"] >= 0.040
+        and row["minimumP10BoundaryLuminanceDifference"] >= 0.015
+        and row["minimumFractionAtLeast015"] >= 0.80
+        for row in frame_rows
     )
     result = {
         "schemaVersion": 1,
@@ -152,21 +211,20 @@ def main() -> int:
         "settledFrameCount": sum(row["phase"] == "settled" for row in frame_rows),
         "frames": frame_rows,
         "summary": {
-            "maximumStageDeltaE00": maximum_delta,
-            "maximumStageAbsoluteLStarDifference": maximum_lstar,
-            # AppKit intentionally gives compact glass a fixed adaptive
-            # separation from a window-sized backdrop. Motion stability is
-            # therefore the bounded change in that relationship, not a false
-            # demand that two different glass geometries render identical.
-            "motionRelationRangeDeltaE00": motion_relation_range,
+            "adaptiveCapsules": adaptive,
+            "maximumNeighboringSettledRelationDeltaE00":
+                maximum_neighbor_relation_difference,
+            "boundaryPassEveryFrame": boundary_pass,
         },
         "errors": errors,
         "pass": (
             not errors
-            and len(frame_rows) == 18
-            and maximum_delta <= 25.0
-            and maximum_lstar <= 18.0
-            and motion_relation_range <= 10.0
+            and len(motion_frames) >= 15
+            and len(settled_frames) >= 3
+            and len(adaptive) == len(capsule_ids)
+            and all(row["pass"] for row in adaptive.values())
+            and maximum_neighbor_relation_difference <= 6.0
+            and boundary_pass
         ),
     }
     serialized = json.dumps(result, indent=2) + "\n"

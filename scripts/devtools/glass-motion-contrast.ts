@@ -152,6 +152,34 @@ async function runLockedTreatmentCell(options: {
     const motionMetrics = existsSync(motionMetricsPath)
       ? JSON.parse(readFileSync(motionMetricsPath, "utf8"))
       : null;
+    let saturatedLifecycle: any = null;
+    if (motionRequired) {
+      const lifecycleDirectory = join(cellDirectory, "saturated-lifecycle");
+      const lifecycleResult = await run([
+        "bun",
+        resolve(import.meta.dir, "glass-lifecycle-filmstrip.ts"),
+        "--binary",
+        options.binary,
+        "--out",
+        lifecycleDirectory,
+      ], {
+        SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
+        SCRIPT_KIT_GLASS_RUN_ID: options.identity.runId,
+        SCRIPT_KIT_GLASS_GIT_COMMIT: options.identity.gitCommit,
+        SCRIPT_KIT_GLASS_BINARY: options.identity.binary,
+        SCRIPT_KIT_GLASS_BINARY_SHA256: options.identity.binarySha256,
+        SCRIPT_KIT_GLASS_SCENARIO: "lifecycle-saturated",
+      });
+      const lifecycleReceiptPath = join(lifecycleDirectory, "receipt.json");
+      saturatedLifecycle = {
+        exitCode: lifecycleResult.exitCode,
+        receiptPath: lifecycleReceiptPath,
+        receipt: existsSync(lifecycleReceiptPath)
+          ? JSON.parse(readFileSync(lifecycleReceiptPath, "utf8"))
+          : null,
+        stderr: lifecycleResult.stderr.slice(-4_000),
+      };
+    }
     const childValidationErrors = validateChildReceipt(
       mainReceipt,
       options.identity,
@@ -169,11 +197,13 @@ async function runLockedTreatmentCell(options: {
       && metrics.summary?.minimumFractionAtLeast015 >= 0.80;
     const motionColorPass = !motionRequired
       || (motionMetricsResult.exitCode === 0
-        && motionMetrics?.motionFrameCount === 15
-        && motionMetrics?.settledFrameCount === 3
-        && motionMetrics?.summary?.maximumStageDeltaE00 <= 25
-        && motionMetrics?.summary?.maximumStageAbsoluteLStarDifference <= 18
-        && motionMetrics?.summary?.motionRelationRangeDeltaE00 <= 10);
+        && motionMetrics?.motionFrameCount >= 15
+        && motionMetrics?.settledFrameCount >= 3
+        && motionMetrics?.summary?.boundaryPassEveryFrame === true
+        && motionMetrics?.summary?.maximumNeighboringSettledRelationDeltaE00 <= 6
+        && Object.values(
+          motionMetrics?.summary?.adaptiveCapsules ?? {},
+        ).every((capsule: any) => capsule?.pass === true));
     return {
       slug,
       fixture: options.fixture,
@@ -190,6 +220,7 @@ async function runLockedTreatmentCell(options: {
       motionMetricsExitCode: motionMetricsResult.exitCode,
       metrics,
       motionMetrics,
+      saturatedLifecycle,
       structuralPass,
       materialRelationPass,
       boundaryPass,
@@ -322,11 +353,13 @@ async function main() {
     const neutral = cells.filter((cell) => cell.fixture !== "saturated-stripes");
     const stabilityPass = stability?.structuralPass === true
       && stability?.motionColorPass === true
-      && stability?.motionMetrics?.motionFrameCount === 15
-      && stability?.motionMetrics?.settledFrameCount === 3
-      && stability?.motionMetrics?.summary?.maximumStageDeltaE00 <= 25
-      && stability?.motionMetrics?.summary?.maximumStageAbsoluteLStarDifference <= 18
-      && stability?.motionMetrics?.summary?.motionRelationRangeDeltaE00 <= 10;
+      && stability?.motionMetrics?.motionFrameCount >= 15
+      && stability?.motionMetrics?.settledFrameCount >= 3
+      && stability?.motionMetrics?.summary?.boundaryPassEveryFrame === true
+      && stability?.motionMetrics?.summary?.maximumNeighboringSettledRelationDeltaE00 <= 6
+      && Object.values(
+        stability?.motionMetrics?.summary?.adaptiveCapsules ?? {},
+      ).every((capsule: any) => capsule?.pass === true);
     const neutralPass = neutral.length === 3 && neutral.every((cell) => cell.pass);
     lockedTreatment = {
       helper,
@@ -354,7 +387,12 @@ async function main() {
   }
 
   let rapidToggle: any = null;
-  let lifecycleFilmstrip: any = null;
+  let lifecycleFilmstrip: any = mode === "locked"
+    ? lockedTreatment?.cells?.find(
+      (cell: any) => cell.fixture === "saturated-stripes",
+    )?.saturatedLifecycle ?? null
+    : null;
+  let notesFallback: any = null;
   if (mode === "all" || mode === "green") {
     const rapidPath = join(outputDirectory, "rapid-toggle.json");
     const rapidResult = await run([
@@ -377,28 +415,56 @@ async function main() {
         : null,
       stderr: rapidResult.stderr.slice(-4_000),
     };
-    const lifecycleDirectory = join(outputDirectory, "lifecycle-filmstrips");
-    const lifecycleResult = await run([
+    const notesFallbackPath = join(outputDirectory, "notes-fallback.json");
+    const notesFallbackResult = await run([
       "bun",
-      resolve(import.meta.dir, "glass-lifecycle-filmstrip.ts"),
+      resolve(import.meta.dir, "notes-glass-entry-fallback.ts"),
       "--binary",
       binary,
       "--out",
-      lifecycleDirectory,
+      notesFallbackPath,
     ], {
       SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
       ...childEnvironment,
-      SCRIPT_KIT_GLASS_SCENARIO: "lifecycle",
+      SCRIPT_KIT_GLASS_SCENARIO: "notes-fallback",
     });
-    const lifecycleReceiptPath = join(lifecycleDirectory, "receipt.json");
-    lifecycleFilmstrip = {
-      exitCode: lifecycleResult.exitCode,
-      receiptPath: lifecycleReceiptPath,
-      receipt: existsSync(lifecycleReceiptPath)
-        ? JSON.parse(readFileSync(lifecycleReceiptPath, "utf8"))
+    notesFallback = {
+      exitCode: notesFallbackResult.exitCode,
+      receiptPath: notesFallbackPath,
+      receipt: existsSync(notesFallbackPath)
+        ? JSON.parse(readFileSync(notesFallbackPath, "utf8"))
         : null,
-      stderr: lifecycleResult.stderr.slice(-4_000),
+      stderr: notesFallbackResult.stderr.slice(-4_000),
     };
+    lifecycleFilmstrip = mode === "all"
+      ? lockedTreatment?.cells?.find(
+        (cell: any) => cell.fixture === "saturated-stripes",
+      )?.saturatedLifecycle ?? null
+      : null;
+    if (lifecycleFilmstrip == null) {
+      const lifecycleDirectory = join(outputDirectory, "lifecycle-filmstrips");
+      const lifecycleResult = await run([
+        "bun",
+        resolve(import.meta.dir, "glass-lifecycle-filmstrip.ts"),
+        "--binary",
+        binary,
+        "--out",
+        lifecycleDirectory,
+      ], {
+        SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
+        ...childEnvironment,
+        SCRIPT_KIT_GLASS_SCENARIO: "lifecycle",
+      });
+      const lifecycleReceiptPath = join(lifecycleDirectory, "receipt.json");
+      lifecycleFilmstrip = {
+        exitCode: lifecycleResult.exitCode,
+        receiptPath: lifecycleReceiptPath,
+        receipt: existsSync(lifecycleReceiptPath)
+          ? JSON.parse(readFileSync(lifecycleReceiptPath, "utf8"))
+          : null,
+        stderr: lifecycleResult.stderr.slice(-4_000),
+      };
+    }
   }
   const evidenceComplete = mode === "all"
     ? mainReceipt?.visualMatrix?.states?.length === 4
@@ -406,17 +472,18 @@ async function main() {
       && lockedTreatment?.cells?.length === 4
       && lockedTreatment?.cells?.find(
           (cell: any) => cell.fixture === "saturated-stripes",
-        )?.motionMetrics?.frames?.length === 18
-      && lifecycleFilmstrip?.receipt?.scenarios?.length === 4
+        )?.motionMetrics?.frames?.length >= 18
+      && lifecycleFilmstrip?.receipt?.scenarios?.length === 5
       && Object.keys(rapidToggle?.receipt?.phases ?? {}).length === 3
     : mode === "green"
-    ? lifecycleFilmstrip?.receipt?.scenarios?.length === 4
+    ? lifecycleFilmstrip?.receipt?.scenarios?.length === 5
       && Object.keys(rapidToggle?.receipt?.phases ?? {}).length === 3
     : mode === "locked"
     ? lockedTreatment?.cells?.length === 4
       && lockedTreatment?.cells?.find(
           (cell: any) => cell.fixture === "saturated-stripes",
-        )?.motionMetrics?.frames?.length === 18
+        )?.motionMetrics?.frames?.length >= 18
+      && lifecycleFilmstrip?.receipt?.scenarios?.length === 5
     : true;
   if (rapidToggle != null) {
     setupErrors.push(...validateChildReceipt(
@@ -430,15 +497,30 @@ async function main() {
     setupErrors.push(...validateChildReceipt(
       lifecycleFilmstrip.receipt,
       identity,
-      "lifecycle",
+      mode === "all" || mode === "locked" ? "lifecycle-saturated" : "lifecycle",
       lifecycleFilmstrip.exitCode,
+    ));
+  }
+  if (notesFallback != null) {
+    setupErrors.push(...validateChildReceipt(
+      notesFallback.receipt,
+      identity,
+      "notes-fallback",
+      notesFallback.exitCode,
     ));
   }
   const requiredChildScenarios = [
     "main-window",
     ...(lockedTreatment?.cells ?? []).map((cell: any) => `locked:${cell.fixture}`),
     ...(rapidToggle == null ? [] : ["rapid-toggle"]),
-    ...(lifecycleFilmstrip == null ? [] : ["lifecycle"]),
+    ...(notesFallback == null ? [] : ["notes-fallback"]),
+    ...(lifecycleFilmstrip == null
+      ? []
+      : [
+        mode === "all" || mode === "locked"
+          ? "lifecycle-saturated"
+          : "lifecycle",
+      ]),
   ];
   const observedChildScenarios = [
     mainReceipt?.scenario,
@@ -446,6 +528,7 @@ async function main() {
       JSON.parse(readFileSync(cell.mainReceiptPath, "utf8"))?.scenario
     ),
     ...(rapidToggle == null ? [] : [rapidToggle.receipt?.scenario]),
+    ...(notesFallback == null ? [] : [notesFallback.receipt?.scenario]),
     ...(lifecycleFilmstrip == null ? [] : [lifecycleFilmstrip.receipt?.scenario]),
   ].filter((item): item is string => typeof item === "string");
   setupErrors.push(...validateUniqueScenarioSet(
@@ -460,6 +543,7 @@ async function main() {
         : null
     ),
     rapidToggle?.receipt,
+    notesFallback?.receipt,
     lifecycleFilmstrip?.receipt,
   ].filter(Boolean);
   const finalBinarySha256 = sha256File(binary);
@@ -502,7 +586,13 @@ async function main() {
       stationaryBackgrounds: ["dark-terminal", "light-document", "material-matched"],
       motionBackground: "saturated-stripes",
       widthsPt: [750, 560, 480, 400, 320, 280],
-      lifecycle: ["main-exit", "notes-entry", "notes-close-before-settle-reopen"],
+      lifecycle: [
+        "main-exit",
+        "main-entry",
+        "notes-entry",
+        "notes-close-before-settle-reopen",
+        "dictation-exit-reopen",
+      ],
     },
     executedScenarios: {
       mainVisualMatrixRows: mainReceipt?.visualMatrix?.states ?? [],
@@ -516,12 +606,14 @@ async function main() {
     },
     lockedTreatment,
     rapidToggle,
+    notesFallback,
     lifecycleFilmstrip,
     evidenceComplete,
     pass: finalDisposition === "EVALUABLE_PASS"
       && evidenceComplete
       && (lockedTreatment == null || lockedTreatment.pass === true)
       && (rapidToggle == null || rapidToggle.receipt?.pass === true)
+      && (notesFallback == null || notesFallback.receipt?.pass === true)
       && (lifecycleFilmstrip == null
         || lifecycleFilmstrip.receipt?.pass === true),
     disposition: finalDisposition,
