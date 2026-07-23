@@ -44,6 +44,24 @@ const FOOTER_HINT_TEXT_ALIGN_LEFT: usize = 0;
 const FOOTER_HINT_TEXT_ALIGN_RIGHT: usize = 2;
 #[cfg(target_os = "macos")]
 const FOOTER_HINT_BUTTON_ID_PREFIX: &str = "script-kit-footer-button-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_ITEM_ID_PREFIX: &str = "script-kit-footer-item-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_CAPSULE_ID_PREFIX: &str = "script-kit-footer-capsule-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_CAPSULE_CONTENT_ID_PREFIX: &str = "script-kit-footer-capsule-content-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_STATE_LAYER_ID_PREFIX: &str = "script-kit-footer-state-layer-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_LABEL_CHIP_ID_PREFIX: &str = "script-kit-footer-label-chip-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_LABEL_ID_PREFIX: &str = "script-kit-footer-label-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_KEYS_ID_PREFIX: &str = "script-kit-footer-keys-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_KEYCAP_ID_PREFIX: &str = "script-kit-footer-keycap-";
+#[cfg(target_os = "macos")]
+const FOOTER_HINT_KEYCAP_GLYPH_ID_PREFIX: &str = "script-kit-footer-keycap-glyph-";
 /// Identifier prefix for the per-button leading status dot view, so DevTools /
 /// layout proofs can find e.g. `script-kit-footer-leading-dot-agentModel`.
 #[cfg(target_os = "macos")]
@@ -62,6 +80,10 @@ const FOOTER_MODEL_LABEL_ID: &str = "script-kit-footer-model-label";
 const FOOTER_LEFT_PROFILE_ICON_ID: &str = "script-kit-footer-left-profile-icon";
 #[cfg(target_os = "macos")]
 const FOOTER_LEFT_INFO_HIT_TARGET_ID: &str = "script-kit-footer-left-info-hit-target";
+#[cfg(target_os = "macos")]
+const FOOTER_LEFT_INFO_CAPSULE_ID: &str = "script-kit-footer-left-info-capsule";
+#[cfg(target_os = "macos")]
+const FOOTER_LEFT_INFO_CAPSULE_CONTENT_ID: &str = "script-kit-footer-left-info-capsule-content";
 #[cfg(target_os = "macos")]
 const FOOTER_LEFT_PROFILE_ICON_SIZE: f64 = 13.0;
 #[cfg(target_os = "macos")]
@@ -3255,6 +3277,11 @@ unsafe fn refresh_footer_host_impl(
             }
         }
     }
+    // Content nodes can be created by the layout paths above. Apply the
+    // current Retina scale after construction as well as before refresh so
+    // newly allocated keycap, border, icon, and status-dot layers are sharp on
+    // their first frame.
+    sync_native_view_tree_contents_scale(footer_view, backing_scale);
     invalidate_footer_effect_view_theme(
         footer_view,
         effect_theme_changed
@@ -3395,6 +3422,7 @@ unsafe fn layout_footer_left_info(
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{msg_send, sel, sel_impl};
 
+    let bounds: NSRect = msg_send![left_info_view, bounds];
     let Some(info) = left_info else {
         remove_identified_subview(left_info_view, FOOTER_STATUS_DOT_ID);
         remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);
@@ -3403,10 +3431,12 @@ unsafe fn layout_footer_left_info(
         remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_ICON_ID);
         remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_LABEL_ID);
         remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_HIT_TARGET_ID);
+        ensure_footer_left_info_capsule(left_info_view, 0.0, bounds.size.height);
         return;
     };
 
-    let bounds: NSRect = msg_send![left_info_view, bounds];
+    let (visual_parent, visual_offset_x, visual_offset_y) =
+        ensure_footer_left_info_visual_parent(left_info_view, bounds.size.height);
     let mut x = 0.0_f64;
 
     // ── CWD chip (always on the far left, independent of model marker) ──
@@ -3414,7 +3444,7 @@ unsafe fn layout_footer_left_info(
         let chip_start_x = x;
 
         // Folder icon.
-        let icon_view = ensure_footer_cwd_chip_icon_view(left_info_view);
+        let icon_view = ensure_footer_cwd_chip_icon_view(left_info_view, visual_parent);
         if icon_view != nil {
             let image = footer_icon_image(&cwd_chip.icon_token);
             if image != nil {
@@ -3424,7 +3454,7 @@ unsafe fn layout_footer_left_info(
             let _: () = msg_send![
                 icon_view,
                 setFrame: NSRect::new(
-                    NSPoint::new(x, icon_y),
+                    NSPoint::new(x + visual_offset_x, icon_y + visual_offset_y),
                     NSSize::new(FOOTER_LEFT_PROFILE_ICON_SIZE, FOOTER_LEFT_PROFILE_ICON_SIZE),
                 )
             ];
@@ -3446,14 +3476,15 @@ unsafe fn layout_footer_left_info(
         } else {
             cwd_chip.label.clone()
         };
-        let label = ensure_footer_cwd_chip_label(left_info_view, &label_text, text_color);
+        let label =
+            ensure_footer_cwd_chip_label(left_info_view, visual_parent, &label_text, text_color);
         if label != nil {
             let label_size: NSSize = msg_send![label, fittingSize];
             let label_y = ((bounds.size.height - label_size.height) / 2.0).round();
             let _: () = msg_send![
                 label,
                 setFrame: NSRect::new(
-                    NSPoint::new(x, label_y),
+                    NSPoint::new(x + visual_offset_x, label_y + visual_offset_y),
                     NSSize::new(label_size.width, label_size.height),
                 )
             ];
@@ -3483,12 +3514,12 @@ unsafe fn layout_footer_left_info(
     let show_dot = info.icon_token.is_none() && !matches!(info.dot_status, FooterDotStatus::Hidden);
     if show_dot {
         let dot_y = ((bounds.size.height - FOOTER_STREAMING_DOT_SIZE) / 2.0).round();
-        let dot_view = ensure_footer_status_dot_view(left_info_view);
+        let dot_view = ensure_footer_status_dot_view(left_info_view, visual_parent);
         if dot_view != nil {
             let _: () = msg_send![
                 dot_view,
                 setFrame: NSRect::new(
-                    NSPoint::new(x, dot_y),
+                    NSPoint::new(x + visual_offset_x, dot_y + visual_offset_y),
                     NSSize::new(FOOTER_STREAMING_DOT_SIZE, FOOTER_STREAMING_DOT_SIZE),
                 )
             ];
@@ -3504,7 +3535,7 @@ unsafe fn layout_footer_left_info(
 
     // ── Optional merged profile icon ──
     if let Some(token) = info.icon_token.as_deref() {
-        let icon_view = ensure_footer_left_profile_icon_view(left_info_view);
+        let icon_view = ensure_footer_left_profile_icon_view(left_info_view, visual_parent);
         if icon_view != nil {
             let image = footer_icon_image(token);
             if image != nil {
@@ -3514,7 +3545,7 @@ unsafe fn layout_footer_left_info(
             let _: () = msg_send![
                 icon_view,
                 setFrame: NSRect::new(
-                    NSPoint::new(x, icon_y),
+                    NSPoint::new(x + visual_offset_x, icon_y + visual_offset_y),
                     NSSize::new(FOOTER_LEFT_PROFILE_ICON_SIZE, FOOTER_LEFT_PROFILE_ICON_SIZE),
                 )
             ];
@@ -3533,14 +3564,15 @@ unsafe fn layout_footer_left_info(
     if info.model_name.is_empty() {
         remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);
     } else {
-        let label = ensure_footer_model_label(left_info_view, &info.model_name, text_color);
+        let label =
+            ensure_footer_model_label(left_info_view, visual_parent, &info.model_name, text_color);
         if label != nil {
             let label_size: NSSize = msg_send![label, fittingSize];
             let label_y = ((bounds.size.height - label_size.height) / 2.0).round();
             let _: () = msg_send![
                 label,
                 setFrame: NSRect::new(
-                    NSPoint::new(x, label_y),
+                    NSPoint::new(x + visual_offset_x, label_y + visual_offset_y),
                     NSSize::new(label_size.width, label_size.height),
                 )
             ];
@@ -3560,20 +3592,97 @@ unsafe fn layout_footer_left_info(
     ensure_footer_left_info_capsule(left_info_view, x, bounds.size.height);
 }
 
-/// Floating-chrome mode: back the left-info content (tips/status) with its
-/// own glass capsule sized to the laid-out content width. Hidden when there
-/// is no content or float mode is off.
+/// Return the owning foreground view for left-info visuals. Glass foregrounds
+/// must be mounted through `NSGlassEffectView.contentView`; siblings are
+/// treated as refracted background and become washed out. The returned
+/// offsets preserve the left-info coordinate system while the capsule extends
+/// beyond it by its shared horizontal padding.
+#[cfg(target_os = "macos")]
+unsafe fn ensure_footer_left_info_visual_parent(left_info_view: id, height: f64) -> (id, f64, f64) {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    if !glass_scroll_bands_active() {
+        return (left_info_view, 0.0, 0.0);
+    }
+    let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") else {
+        return (left_info_view, 0.0, 0.0);
+    };
+
+    const PAD_X: f64 = 8.0;
+    let item_height =
+        crate::components::footer_chrome::footer_button_height(footer_height() as f32) as f64;
+    let capsule_y = ((height - item_height) / 2.0).round();
+    let provisional_frame = NSRect::new(
+        NSPoint::new(-PAD_X, capsule_y),
+        NSSize::new(PAD_X * 2.0 + 1.0, item_height),
+    );
+    let existing = find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_CAPSULE_ID);
+    let capsule = if existing != nil {
+        existing
+    } else {
+        let capsule: id = msg_send![glass_class, alloc];
+        let capsule: id = msg_send![capsule, initWithFrame: provisional_frame];
+        if capsule == nil {
+            return (left_info_view, 0.0, 0.0);
+        }
+        let identifier = ns_string(FOOTER_LEFT_INFO_CAPSULE_ID);
+        if identifier != nil {
+            let _: () = msg_send![capsule, setIdentifier: identifier];
+        }
+        let _: () = msg_send![
+            capsule,
+            setCornerRadius:
+                crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
+        ];
+        style_float_footer_capsule(capsule, &crate::theme::get_cached_theme());
+        let _: () = msg_send![
+            left_info_view,
+            addSubview: capsule
+            positioned: -1isize
+            relativeTo: cocoa::base::nil
+        ];
+        capsule
+    };
+
+    let existing_content = find_subview_by_identifier(capsule, FOOTER_LEFT_INFO_CAPSULE_CONTENT_ID);
+    let content = if existing_content != nil {
+        existing_content
+    } else {
+        let content: id = msg_send![class!(NSView), alloc];
+        let content: id = msg_send![
+            content,
+            initWithFrame: NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(PAD_X * 2.0 + 1.0, item_height)
+            )
+        ];
+        if content == nil {
+            return (left_info_view, 0.0, 0.0);
+        }
+        let identifier = ns_string(FOOTER_LEFT_INFO_CAPSULE_CONTENT_ID);
+        if identifier != nil {
+            let _: () = msg_send![content, setIdentifier: identifier];
+        }
+        let _: () = msg_send![content, setAutoresizingMask: 18u64];
+        let _: () = msg_send![capsule, setContentView: content];
+        content
+    };
+    let _: () = msg_send![capsule, setHidden: NO];
+    (content, PAD_X, -capsule_y)
+}
+
+/// Floating-chrome mode: size the left-info capsule to its laid-out content.
+/// Hidden when there is no content or float mode is off.
 #[cfg(target_os = "macos")]
 unsafe fn ensure_footer_left_info_capsule(left_info_view: id, content_width: f64, height: f64) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{msg_send, sel, sel_impl};
 
-    // Safe in-window: the whole footer host (including this view) lives in
-    // the floating-footer child window, so this glass cannot merge with the
-    // main window's Tahoe backdrop.
-    const CAPSULE_ID: &str = "script-kit-footer-left-info-capsule";
+    // Safe in-window: the footer container is bounded to the 32pt footer band
+    // and separated from the main backdrop by the transparent gutter.
     const PAD_X: f64 = 8.0;
-    let existing = find_subview_by_identifier(left_info_view, CAPSULE_ID);
+    let existing = find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_CAPSULE_ID);
     let active = glass_scroll_bands_active() && content_width > 1.0;
     if !active {
         if existing != nil {
@@ -3598,7 +3707,7 @@ unsafe fn ensure_footer_left_info_capsule(left_info_view: id, content_width: f64
         if capsule == nil {
             return;
         }
-        let identifier = ns_string(CAPSULE_ID);
+        let identifier = ns_string(FOOTER_LEFT_INFO_CAPSULE_ID);
         if identifier != nil {
             let _: () = msg_send![capsule, setIdentifier: identifier];
         }
@@ -3636,7 +3745,7 @@ unsafe fn remove_identified_subview(parent: id, identifier: &str) {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ensure_footer_status_dot_view(left_info_view: id) -> id {
+unsafe fn ensure_footer_status_dot_view(left_info_view: id, visual_parent: id) -> id {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{class, msg_send, sel, sel_impl};
 
@@ -3669,12 +3778,17 @@ unsafe fn ensure_footer_status_dot_view(left_info_view: id) -> id {
         let _: () = msg_send![dot_view, setLayer: layer];
     }
     let _: () = msg_send![dot_view, setWantsLayer: YES];
-    let _: () = msg_send![left_info_view, addSubview: dot_view];
+    let _: () = msg_send![visual_parent, addSubview: dot_view];
     dot_view
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ensure_footer_model_label(left_info_view: id, text: &str, text_color: id) -> id {
+unsafe fn ensure_footer_model_label(
+    left_info_view: id,
+    visual_parent: id,
+    text: &str,
+    text_color: id,
+) -> id {
     use objc::{class, msg_send, sel, sel_impl};
 
     let font: id = msg_send![
@@ -3705,13 +3819,13 @@ unsafe fn ensure_footer_model_label(left_info_view: id, text: &str, text_color: 
         if identifier != nil {
             let _: () = msg_send![label, setIdentifier: identifier];
         }
-        let _: () = msg_send![left_info_view, addSubview: label];
+        let _: () = msg_send![visual_parent, addSubview: label];
     }
     label
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ensure_footer_left_profile_icon_view(left_info_view: id) -> id {
+unsafe fn ensure_footer_left_profile_icon_view(left_info_view: id, visual_parent: id) -> id {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{class, msg_send, sel, sel_impl};
 
@@ -3736,12 +3850,12 @@ unsafe fn ensure_footer_left_profile_icon_view(left_info_view: id) -> id {
         let _: () = msg_send![image_view, setIdentifier: identifier];
     }
     let _: () = msg_send![image_view, setWantsLayer: YES];
-    let _: () = msg_send![left_info_view, addSubview: image_view];
+    let _: () = msg_send![visual_parent, addSubview: image_view];
     image_view
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ensure_footer_cwd_chip_icon_view(left_info_view: id) -> id {
+unsafe fn ensure_footer_cwd_chip_icon_view(left_info_view: id, visual_parent: id) -> id {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
     use objc::{class, msg_send, sel, sel_impl};
 
@@ -3766,12 +3880,17 @@ unsafe fn ensure_footer_cwd_chip_icon_view(left_info_view: id) -> id {
         let _: () = msg_send![image_view, setIdentifier: identifier];
     }
     let _: () = msg_send![image_view, setWantsLayer: YES];
-    let _: () = msg_send![left_info_view, addSubview: image_view];
+    let _: () = msg_send![visual_parent, addSubview: image_view];
     image_view
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ensure_footer_cwd_chip_label(left_info_view: id, text: &str, text_color: id) -> id {
+unsafe fn ensure_footer_cwd_chip_label(
+    left_info_view: id,
+    visual_parent: id,
+    text: &str,
+    text_color: id,
+) -> id {
     use objc::{class, msg_send, sel, sel_impl};
 
     let font: id = msg_send![
@@ -3802,7 +3921,7 @@ unsafe fn ensure_footer_cwd_chip_label(left_info_view: id, text: &str, text_colo
         if identifier != nil {
             let _: () = msg_send![label, setIdentifier: identifier];
         }
-        let _: () = msg_send![left_info_view, addSubview: label];
+        let _: () = msg_send![visual_parent, addSubview: label];
     }
     label
 }
@@ -4115,6 +4234,15 @@ unsafe fn recolor_footer_hint_subviews_with_colors(view: id, text_color: id, bor
 }
 
 #[cfg(target_os = "macos")]
+fn footer_hint_item_gap(glass_active: bool, ordinary_gap: f64) -> f64 {
+    if glass_active {
+        crate::components::footer_chrome::FOOTER_GLASS_BUTTON_GAP_PX as f64
+    } else {
+        ordinary_gap
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn layout_footer_hints(
     hints_view: id,
     text_color: id,
@@ -4168,7 +4296,7 @@ unsafe fn layout_footer_hints(
     ];
 
     let metrics = crate::components::footer_chrome::current_main_menu_footer_metrics();
-    let item_gap = metrics.item_gap_px as f64;
+    let item_gap = footer_hint_item_gap(glass_scroll_bands_active(), metrics.item_gap_px as f64);
     let mut items = Vec::new();
     let mut trailing_item_width = 0.0_f64;
     for button_cfg in buttons {
@@ -4628,11 +4756,23 @@ unsafe fn make_footer_hint_item(
     if container == nil {
         return nil;
     }
+    let action_key = footer_action_key(button_cfg.action);
+    let item_identifier = ns_string(&format!("{FOOTER_HINT_ITEM_ID_PREFIX}{action_key}"));
+    if item_identifier != nil {
+        let _: () = msg_send![container, setIdentifier: item_identifier];
+    }
+
+    // AppKit only guarantees correct glass compositing for content mounted
+    // through NSGlassEffectView.contentView. Keep the transparent NSButton in
+    // the outer wrapper for hit testing, but put every visual child inside the
+    // capsule's foreground content hierarchy.
+    let mut visual_content_parent = container;
+    let mut state_background_view = container;
 
     // Floating-chrome mode: each button rides its own glass capsule. The
-    // whole host lives in the floating-footer CHILD window, so this glass
-    // cannot merge with the main window's Tahoe backdrop (same-window glass
-    // bridges the 8px container gap into a full-width meniscus shelf).
+    // bounded footer glass container is isolated from the bounded main
+    // backdrop by the transparent 8pt gutter, so neighbouring capsules remain
+    // independent instead of becoming a full-width meniscus shelf.
     if glass_scroll_bands_active() {
         if let Some(glass_class) = objc::runtime::Class::get("NSGlassEffectView") {
             let capsule: id = msg_send![glass_class, alloc];
@@ -4644,7 +4784,61 @@ unsafe fn make_footer_hint_item(
                 )
             ];
             if capsule != nil {
+                let capsule_identifier =
+                    ns_string(&format!("{FOOTER_HINT_CAPSULE_ID_PREFIX}{action_key}"));
+                if capsule_identifier != nil {
+                    let _: () = msg_send![capsule, setIdentifier: capsule_identifier];
+                }
                 let _: () = msg_send![capsule, setAutoresizingMask: 18u64];
+
+                let capsule_content: id = msg_send![class!(NSView), alloc];
+                let capsule_content: id = msg_send![
+                    capsule_content,
+                    initWithFrame: NSRect::new(
+                        NSPoint::new(0.0, 0.0),
+                        NSSize::new(0.0, item_height)
+                    )
+                ];
+                if capsule_content != nil {
+                    let content_identifier = ns_string(&format!(
+                        "{FOOTER_HINT_CAPSULE_CONTENT_ID_PREFIX}{action_key}"
+                    ));
+                    if content_identifier != nil {
+                        let _: () = msg_send![capsule_content, setIdentifier: content_identifier];
+                    }
+                    let _: () = msg_send![capsule_content, setAutoresizingMask: 18u64];
+                    let _: () = msg_send![capsule, setContentView: capsule_content];
+                    visual_content_parent = capsule_content;
+
+                    let state_view: id = msg_send![class!(NSView), alloc];
+                    let state_view: id = msg_send![
+                        state_view,
+                        initWithFrame: NSRect::new(
+                            NSPoint::new(0.0, 0.0),
+                            NSSize::new(0.0, item_height)
+                        )
+                    ];
+                    if state_view != nil {
+                        let state_identifier =
+                            ns_string(&format!("{FOOTER_HINT_STATE_LAYER_ID_PREFIX}{action_key}"));
+                        if state_identifier != nil {
+                            let _: () = msg_send![state_view, setIdentifier: state_identifier];
+                        }
+                        let _: () = msg_send![state_view, setAutoresizingMask: 18u64];
+                        let _: () = msg_send![state_view, setWantsLayer: YES];
+                        let state_layer: id = msg_send![state_view, layer];
+                        if state_layer != nil {
+                            let _: () = msg_send![
+                                state_layer,
+                                setCornerRadius:
+                                    crate::components::footer_chrome::FOOTER_ACTION_BUTTON_RADIUS_PX as f64
+                            ];
+                        }
+                        let _: () = msg_send![capsule_content, addSubview: state_view];
+                        state_background_view = state_view;
+                    }
+                }
+
                 let _: () = msg_send![
                     capsule,
                     setCornerRadius:
@@ -4674,6 +4868,12 @@ unsafe fn make_footer_hint_item(
     };
     if has_label && label_field == nil {
         return nil;
+    }
+    if label_field != nil {
+        let label_identifier = ns_string(&format!("{FOOTER_HINT_LABEL_ID_PREFIX}{action_key}"));
+        if label_identifier != nil {
+            let _: () = msg_send![label_field, setIdentifier: label_identifier];
+        }
     }
 
     let edge_padding_x = if matches!(
@@ -4705,6 +4905,10 @@ unsafe fn make_footer_hint_item(
     if keys_view == nil {
         return nil;
     }
+    let keys_identifier = ns_string(&format!("{FOOTER_HINT_KEYS_ID_PREFIX}{action_key}"));
+    if keys_identifier != nil {
+        let _: () = msg_send![keys_view, setIdentifier: keys_identifier];
+    }
     let _: () = msg_send![keys_view, setWantsLayer: YES];
 
     let mut keys_view_width = 0.0_f64;
@@ -4721,6 +4925,11 @@ unsafe fn make_footer_hint_item(
         ];
         if chip_view == nil {
             continue;
+        }
+        let keycap_identifier =
+            ns_string(&format!("{FOOTER_HINT_KEYCAP_ID_PREFIX}{action_key}-{i}"));
+        if keycap_identifier != nil {
+            let _: () = msg_send![chip_view, setIdentifier: keycap_identifier];
         }
 
         let _: () = msg_send![chip_view, setWantsLayer: YES];
@@ -4783,6 +4992,12 @@ unsafe fn make_footer_hint_item(
             let glyph_size: NSSize = msg_send![glyph_field, fittingSize];
             (glyph_field, glyph_size)
         };
+        let glyph_identifier = ns_string(&format!(
+            "{FOOTER_HINT_KEYCAP_GLYPH_ID_PREFIX}{action_key}-{i}"
+        ));
+        if glyph_identifier != nil {
+            let _: () = msg_send![glyph_view, setIdentifier: glyph_identifier];
+        }
         let chip_width = (glyph_size.width + chip_padding_x * 2.0).max(chip_height);
 
         let glyph_x = ((chip_width - glyph_size.width) / 2.0).round();
@@ -4864,6 +5079,11 @@ unsafe fn make_footer_hint_item(
         if label_view == nil {
             return nil;
         }
+        let label_chip_identifier =
+            ns_string(&format!("{FOOTER_HINT_LABEL_CHIP_ID_PREFIX}{action_key}"));
+        if label_chip_identifier != nil {
+            let _: () = msg_send![label_view, setIdentifier: label_chip_identifier];
+        }
         let _: () = msg_send![label_view, setWantsLayer: YES];
         let label_layer: id = msg_send![label_view, layer];
         if label_layer != nil {
@@ -4935,7 +5155,7 @@ unsafe fn make_footer_hint_item(
                     NSSize::new(FOOTER_STREAMING_DOT_SIZE, FOOTER_STREAMING_DOT_SIZE)
                 )
             ];
-            let _: () = msg_send![container, addSubview: dot_view];
+            let _: () = msg_send![visual_content_parent, addSubview: dot_view];
         }
     }
 
@@ -4956,9 +5176,9 @@ unsafe fn make_footer_hint_item(
         )
     ];
     let _: () = msg_send![container, setWantsLayer: YES];
-    let container_layer: id = msg_send![container, layer];
-    if container_layer != nil {
-        let _: () = msg_send![container_layer, setCornerRadius: FOOTER_HINT_RADIUS];
+    let background_layer: id = msg_send![state_background_view, layer];
+    if background_layer != nil {
+        let _: () = msg_send![background_layer, setCornerRadius: FOOTER_HINT_RADIUS];
         // Resolve the resting background: selected buttons use the active fill,
         // otherwise accent-fill variations paint a subtle resting tint and all
         // other variations stay transparent. Every action routes through the
@@ -4973,7 +5193,7 @@ unsafe fn make_footer_hint_item(
             if rest_ns != nil {
                 let cg: id = msg_send![rest_ns, CGColor];
                 if cg != nil {
-                    let _: () = msg_send![container_layer, setBackgroundColor: cg];
+                    let _: () = msg_send![background_layer, setBackgroundColor: cg];
                 }
             }
         }
@@ -5020,13 +5240,14 @@ unsafe fn make_footer_hint_item(
                 "_enabled",
                 if button_cfg.enabled { YES } else { NO },
             );
+            obj.set_ivar::<usize>("_stateView", state_background_view as usize);
         }
     }
 
     if has_label && label_view != nil {
-        let _: () = msg_send![container, addSubview: label_view];
+        let _: () = msg_send![visual_content_parent, addSubview: label_view];
     }
-    let _: () = msg_send![container, addSubview: keys_view];
+    let _: () = msg_send![visual_content_parent, addSubview: keys_view];
     if button != nil {
         let _: () = msg_send![container, addSubview: button];
     }
@@ -5081,7 +5302,7 @@ unsafe fn make_footer_hint_text_field(
 mod footer_layout_tests {
     use super::{
         footer_active_dot_hex, footer_dot_hex, footer_hint_content_layout,
-        footer_hint_content_layout_for_button, footer_hint_label_widths,
+        footer_hint_content_layout_for_button, footer_hint_item_gap, footer_hint_label_widths,
         footer_hint_legacy_extra_padding, footer_hint_max_item_width, footer_hint_slot_width,
         footer_selected_background_rgba, main_window_detached_footer_regions_appkit,
         main_window_detached_footer_regions_gpui, FooterAction, FooterButtonConfig,
@@ -5096,6 +5317,12 @@ mod footer_layout_tests {
         assert!(regions.main_content.height >= 0.0);
         assert!(regions.transparent_gap.height >= 0.0);
         assert!(regions.footer.height >= 0.0);
+    }
+
+    #[test]
+    fn native_glass_capsules_use_the_shared_open_gap() {
+        assert_eq!(footer_hint_item_gap(true, 2.0), 6.0);
+        assert_eq!(footer_hint_item_gap(false, 2.0), 2.0);
     }
 
     #[test]
@@ -5802,6 +6029,7 @@ fn footer_button_class() -> *const objc::runtime::Class {
             decl.add_ivar::<cocoa::base::BOOL>("_isActionsButton");
             decl.add_ivar::<cocoa::base::BOOL>("_selected");
             decl.add_ivar::<cocoa::base::BOOL>("_enabled");
+            decl.add_ivar::<usize>("_stateView");
             decl.add_method(
                 sel!(acceptsFirstMouse:),
                 footer_button_accepts_first_mouse
@@ -6004,12 +6232,20 @@ unsafe fn apply_footer_button_background(button: id, rgba_value: Option<u32>) {
         return;
     }
 
-    let superview: id = msg_send![button, superview];
-    if superview == nil {
+    let state_view = button
+        .as_ref()
+        .map(|object| *object.get_ivar::<usize>("_stateView") as id)
+        .unwrap_or(nil);
+    let target_view: id = if state_view != nil {
+        state_view
+    } else {
+        msg_send![button, superview]
+    };
+    if target_view == nil {
         return;
     }
 
-    let layer: id = msg_send![superview, layer];
+    let layer: id = msg_send![target_view, layer];
     if layer == nil {
         return;
     }

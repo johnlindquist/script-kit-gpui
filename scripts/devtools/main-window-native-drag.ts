@@ -373,6 +373,203 @@ function sha256(path: string) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+type AppKitNode = {
+  id: string;
+  parentId?: string;
+  className?: string;
+  hidden?: boolean;
+  alpha?: number;
+  frame?: Rect;
+  windowFrame?: Rect;
+  screenshotFrame?: Rect;
+  layer?: { contentsScale?: number; borderWidth?: number; cornerRadius?: number };
+  text?: { value?: string; color?: { alpha?: number } };
+  image?: unknown;
+};
+
+export function analyzeStationaryFidelity(layout: any, automationWindow: any) {
+  const appKit = layout?.fidelity?.appKit ?? null;
+  const nodes = (appKit?.nodes ?? []) as AppKitNode[];
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const errors: string[] = [];
+  const ancestorIds = (node: AppKitNode) => {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    let parentId = node.parentId;
+    while (parentId && !seen.has(parentId)) {
+      ids.push(parentId);
+      seen.add(parentId);
+      parentId = byId.get(parentId)?.parentId;
+    }
+    return ids;
+  };
+
+  if (!appKit) errors.push("AppKit fidelity snapshot missing");
+  if (automationWindow?.bounds?.width !== 750 || automationWindow?.bounds?.height !== 501) {
+    errors.push(
+      `native host is ${automationWindow?.bounds?.width ?? "?"}x${automationWindow?.bounds?.height ?? "?"}, expected 750x501`,
+    );
+  }
+  if (appKit?.footerContainerFrame?.height !== 32) errors.push("footer container is not 32pt high");
+  if (appKit?.transparentGapPoints !== 8) errors.push("main/footer gutter is not 8pt");
+  if (appKit?.backdropFooterIntersectionArea !== 0) errors.push("main/footer materials overlap");
+  if (appKit?.outerWindowHasShadow !== false) errors.push("outer window shadow must stay disabled");
+
+  const capsules = nodes.filter((node) =>
+    node.className === "NSGlassEffectView"
+    && (node.id.startsWith("script-kit-footer-capsule-")
+      || node.id === "script-kit-footer-left-info-capsule")
+  );
+  if (capsules.length < 2) errors.push(`only ${capsules.length} independent footer capsules found`);
+  for (const capsule of capsules) {
+    if (capsule.frame?.height !== 28) errors.push(`${capsule.id} is not 28pt high`);
+    if (capsule.layer?.cornerRadius !== 6) errors.push(`${capsule.id} radius is not 6pt`);
+    if (capsule.layer?.contentsScale !== 2) errors.push(`${capsule.id} is not rendered at 2x`);
+    if ((capsule.frame?.width ?? 750) >= (appKit?.footerContainerFrame?.width ?? 750)) {
+      errors.push(`${capsule.id} incorrectly spans the footer`);
+    }
+    const expectedContentId = capsule.id === "script-kit-footer-left-info-capsule"
+      ? "script-kit-footer-left-info-capsule-content"
+      : capsule.id.replace("script-kit-footer-capsule-", "script-kit-footer-capsule-content-");
+    if (byId.get(expectedContentId)?.parentId !== capsule.id) {
+      errors.push(`${capsule.id} has no identified contentView child`);
+    }
+    if (capsule.id.startsWith("script-kit-footer-capsule-")) {
+      const stateLayerId = capsule.id.replace(
+        "script-kit-footer-capsule-",
+        "script-kit-footer-state-layer-",
+      );
+      if (byId.get(stateLayerId)?.parentId !== expectedContentId) {
+        errors.push(`${capsule.id} has no foreground interaction-state layer`);
+      }
+    }
+  }
+
+  const visualNodes = nodes.filter((node) =>
+    node.text != null
+    || node.image != null
+    || node.id.includes("status-dot")
+    || node.id.includes("leading-dot")
+    || node.id.includes("keycap-")
+  );
+  for (const node of visualNodes) {
+    const owners = ancestorIds(node).filter((id) => id.includes("capsule-content"));
+    if (owners.length !== 1) errors.push(`${node.id} is not owned by exactly one capsule contentView`);
+    if (node.layer && node.layer.contentsScale !== 2) errors.push(`${node.id} layer is not rendered at 2x`);
+    if (node.text && (node.text.color?.alpha ?? 0) < 0.6) {
+      errors.push(`${node.id} text alpha is below the readable footer token floor`);
+    }
+  }
+
+  const sortedCapsules = capsules
+    .filter((node) => !node.hidden)
+    .sort((a, b) => (a.windowFrame?.x ?? 0) - (b.windowFrame?.x ?? 0));
+  const openGaps = sortedCapsules.slice(1).map((capsule, index) =>
+    round(
+      (capsule.windowFrame?.x ?? 0)
+      - ((sortedCapsules[index].windowFrame?.x ?? 0) + (sortedCapsules[index].windowFrame?.width ?? 0)),
+    )
+  );
+  if (openGaps.some((gap) => gap <= 0)) errors.push(`capsule gaps are not visibly open: ${openGaps.join(",")}`);
+  const trailingCapsules = sortedCapsules.filter((node) =>
+    node.id.startsWith("script-kit-footer-capsule-")
+  );
+  const trailingGaps = trailingCapsules.slice(1).map((capsule, index) =>
+    round(
+      (capsule.windowFrame?.x ?? 0)
+      - ((trailingCapsules[index].windowFrame?.x ?? 0)
+        + (trailingCapsules[index].windowFrame?.width ?? 0)),
+    )
+  );
+  if (trailingGaps.some((gap) => gap !== 6)) {
+    errors.push(`trailing glass capsule gaps are ${trailingGaps.join(",")}, expected shared 6pt token`);
+  }
+
+  return {
+    pass: errors.length === 0,
+    errors,
+    capsuleIds: capsules.map((node) => node.id),
+    visualNodeIds: visualNodes.map((node) => node.id),
+    openGaps,
+    trailingGaps,
+    hostBounds: automationWindow?.bounds ?? null,
+    mainBackdropFrame: appKit?.mainBackdropFrame ?? null,
+    footerContainerFrame: appKit?.footerContainerFrame ?? null,
+    transparentGapPoints: appKit?.transparentGapPoints ?? null,
+  };
+}
+
+async function resolveNativeWindow(pid: number) {
+  const query = await run([
+    "swift",
+    resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
+    "--pid",
+    String(pid),
+  ]);
+  if (query.exitCode !== 0) throw new Error(`native window query failed: ${query.stderr}`);
+  const parsed = JSON.parse(query.stdout);
+  const candidates = (parsed.windows ?? []).filter((window: any) =>
+    window.windowId > 0 && window.bounds?.width >= 700 && window.bounds?.height >= 400
+  );
+  const selected = candidates.sort((a: any, b: any) =>
+    Number(b.onscreen) - Number(a.onscreen)
+    || b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height
+  )[0];
+  if (!selected) throw new Error(`no native main window found for pid ${pid}`);
+  return selected;
+}
+
+async function captureNativeWindow(pid: number, outDir: string, name: string) {
+  const nativeWindow = await resolveNativeWindow(pid);
+  const path = join(outDir, `${name}.png`);
+  const capture = await run([
+    "screencapture",
+    `-l${nativeWindow.windowId}`,
+    "-o",
+    "-x",
+    path,
+  ]);
+  if (capture.exitCode !== 0 || !existsSync(path)) {
+    throw new Error(`native window capture ${name} failed: ${capture.stderr}`);
+  }
+  const footerCropPath = join(outDir, `${name}-footer-2x.png`);
+  const crop = await run([
+    "magick",
+    path,
+    "-gravity",
+    "south",
+    "-crop",
+    "x80+0+0",
+    "+repage",
+    footerCropPath,
+  ]);
+  if (crop.exitCode !== 0 || !existsSync(footerCropPath)) {
+    throw new Error(`footer crop ${name} failed: ${crop.stderr}`);
+  }
+  const edge = await run([
+    "magick",
+    footerCropPath,
+    "-colorspace",
+    "Gray",
+    "-morphology",
+    "Edge",
+    "Diamond",
+    "-format",
+    "%[fx:mean]",
+    "info:",
+  ]);
+  const edgeEnergy = Number(edge.stdout.trim());
+  return {
+    name,
+    nativeWindow,
+    path,
+    sha256: sha256(path),
+    footerCropPath,
+    footerCropSha256: sha256(footerCropPath),
+    edgeEnergy: Number.isFinite(edgeEnergy) ? round(edgeEnergy, 6) : null,
+  };
+}
+
 function parseCLI() {
   const args = process.argv.slice(2);
   const value = (name: string, fallback?: string) => {
@@ -385,11 +582,12 @@ function parseCLI() {
     .split(",")
     .filter(Boolean);
   const expectFallback = args.includes("--expect-fallback");
-  return { binary, outDir, trials, expectFallback };
+  const stationaryOnly = args.includes("--stationary-only");
+  return { binary, outDir, trials: stationaryOnly ? [] : trials, expectFallback, stationaryOnly };
 }
 
 async function cli() {
-  const { binary, outDir, trials, expectFallback } = parseCLI();
+  const { binary, outDir, trials, expectFallback, stationaryOnly } = parseCLI();
   if (!binary || !existsSync(binary)) throw new Error(`binary missing: ${binary ?? "<unset>"}`);
   mkdirSync(outDir, { recursive: true });
   const helper = join(outDir, "macos-native-drag-sampler");
@@ -459,7 +657,7 @@ async function cli() {
     };
 
     const showHideCycles: Array<Record<string, unknown>> = [];
-    for (let cycle = 1; cycle <= 10; cycle += 1) {
+    for (let cycle = 1; cycle <= (stationaryOnly ? 0 : 10); cycle += 1) {
       driver.send({ type: "hide", requestId: `mwnd-hide-${cycle}` });
       await driver.waitForState({ windowVisible: false }, { timeoutMs: 15_000 });
       const hidden = await driver.getState({ timeoutMs: 15_000 });
@@ -485,7 +683,7 @@ async function cli() {
     }
 
     const modeTransitions: Array<Record<string, unknown>> = [];
-    for (let transition = 1; transition <= 20; transition += 1) {
+    for (let transition = 1; transition <= (stationaryOnly ? 0 : 20); transition += 1) {
       const builtinId = transition % 2 === 1
         ? "builtin/choose-theme"
         : "builtin/main-window";
@@ -554,6 +752,63 @@ async function cli() {
       { target: { type: "id", id: "main" } },
       { timeoutMs: 15_000 },
     );
+    const finalWindows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
+    const finalMain = ((finalWindows as any)?.windows ?? []).find((window: any) =>
+      window.id === "main" && window.pid === main.pid
+    ) ?? main;
+    if (!expectFallback) {
+      const structural = analyzeStationaryFidelity(receipt.layout, finalMain);
+      const captures: Array<Record<string, unknown>> = [];
+      captures.push(await captureNativeWindow(Number(main.pid), outDir, "stationary-default-2x"));
+
+      const appKitNodes = ((receipt.layout as any)?.fidelity?.appKit?.nodes ?? []) as AppKitNode[];
+      const actionsButton = appKitNodes.find((node) => node.id === "script-kit-footer-button-actions");
+      const actionsFrame = actionsButton?.screenshotFrame;
+      if (actionsFrame && finalMain?.bounds) {
+        const footerHeight = Number((receipt.layout as any)?.fidelity?.appKit?.footerContainerFrame?.height ?? 32);
+        const hoverX = Math.round(finalMain.bounds.x + actionsFrame.x + actionsFrame.width / 2);
+        const hoverY = Math.round(
+          finalMain.bounds.y + finalMain.bounds.height - footerHeight
+          + actionsFrame.y + actionsFrame.height / 2,
+        );
+        const hover = await run(["cliclick", `m:${hoverX},${hoverY}`]);
+        await Bun.sleep(350);
+        if (hover.exitCode === 0) {
+          captures.push(await captureNativeWindow(Number(main.pid), outDir, "stationary-hover-actions-2x"));
+        } else {
+          structural.errors.push(`hover input failed: ${hover.stderr.trim()}`);
+        }
+
+        const select = await run(["cliclick", `c:${hoverX},${hoverY}`]);
+        await Bun.sleep(500);
+        if (select.exitCode === 0) {
+          captures.push(await captureNativeWindow(Number(main.pid), outDir, "stationary-actions-selected-2x"));
+          await run(["cliclick", "kp:esc"]);
+          await Bun.sleep(200);
+        } else {
+          structural.errors.push(`Actions selection input failed: ${select.stderr.trim()}`);
+        }
+      } else {
+        structural.errors.push("Actions hit target frame missing from AppKit fidelity snapshot");
+      }
+      structural.pass = structural.errors.length === 0;
+      const distinctFooterStates = new Set(captures.map((capture: any) => capture.footerCropSha256));
+      receipt.stationary = {
+        pass: structural.pass && captures.length >= 3 && distinctFooterStates.size >= 2,
+        structural,
+        captures,
+        distinctFooterStateCount: distinctFooterStates.size,
+        captureMethod: "Quartz CGWindowID resolved by exact launched PID; screencapture -l",
+        reviewRequired: true,
+      };
+    } else {
+      receipt.stationary = {
+        pass: true,
+        structural: "fallback intentionally has no native glass capsule hierarchy",
+        captures: [],
+        priorFallbackReceipt: ".artifacts/main-window-native-drag/fallback/receipt.json",
+      };
+    }
     receipt.logs = await driver.getLogs({ limit: 500 });
     const compositionIsValid = (snapshot: any) => {
       if (expectFallback) {
@@ -581,6 +836,7 @@ async function cli() {
     receipt.expectFallback = expectFallback;
     receipt.valid = results.every((result: any) => result.analysis.valid);
     receipt.pass = lifecyclePass
+      && (receipt.stationary as any)?.pass === true
       && results.every((result: any) => result.analysis.overallPass);
   } finally {
     try {
