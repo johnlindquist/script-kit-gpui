@@ -247,6 +247,15 @@ export function analyzeTrace(trace: NativeTrace): DragAnalysis {
     if (entries.length !== inMotion.length) {
       errors.push(`control ${id} resolved in ${entries.length}/${inMotion.length} in-motion samples`);
     }
+    const distinctAbsolutePositions = new Set(entries.flatMap((entry) => {
+      const frame = entry.control.framePt;
+      return frame ? [`${round(frame.x, 2)},${round(frame.y, 2)}`] : [];
+    })).size;
+    if (distinctMainPositions >= 30 && distinctAbsolutePositions < 5) {
+      errors.push(
+        `control ${id} AX positions are stale (${distinctAbsolutePositions} distinct positions for ${distinctMainPositions} main positions)`,
+      );
+    }
     const values = entries.map((entry) => entry.driftPx);
     let consecutiveOverHalfPixel = 0;
     for (let index = 1; index < values.length; index += 1) {
@@ -373,6 +382,28 @@ function sha256(path: string) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+function summarizeNativeWindowInventory(trace: NativeTrace) {
+  const phases = [...new Set(trace.samples.map((sample) => sample.phase))];
+  return Object.fromEntries(phases.map((phase) => {
+    const samples = trace.samples.filter((sample) => sample.phase === phase);
+    return [phase, {
+      sampleCount: samples.length,
+      relevantWindowCounts: [...new Set(samples.map((sample) => sample.relevantWindowCount))],
+      mainWindowNumbers: [...new Set(samples.flatMap((sample) =>
+        sample.mainWindowNumber == null ? [] : [sample.mainWindowNumber]
+      ))],
+      footerWindowNumbers: [...new Set(samples.flatMap((sample) =>
+        sample.footerWindowNumber == null ? [] : [sample.footerWindowNumber]
+      ))],
+      controlWindowNumbers: [...new Set(samples.flatMap((sample) =>
+        sample.controls.flatMap((control) =>
+          control.axWindowNumber == null ? [] : [control.axWindowNumber]
+        )
+      ))],
+    }];
+  }));
+}
+
 type AppKitNode = {
   id: string;
   parentId?: string;
@@ -387,7 +418,11 @@ type AppKitNode = {
   image?: unknown;
 };
 
-export function analyzeStationaryFidelity(layout: any, automationWindow: any) {
+export function analyzeStationaryFidelity(
+  layout: any,
+  automationWindow: any,
+  options: { expectedHostSize?: { width: number; height: number } } = {},
+) {
   const appKit = layout?.fidelity?.appKit ?? null;
   const nodes = (appKit?.nodes ?? []) as AppKitNode[];
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -405,10 +440,31 @@ export function analyzeStationaryFidelity(layout: any, automationWindow: any) {
   };
 
   if (!appKit) errors.push("AppKit fidelity snapshot missing");
-  if (automationWindow?.bounds?.width !== 750 || automationWindow?.bounds?.height !== 501) {
+  const hostBounds = automationWindow?.bounds ?? null;
+  const mainBackdropFrame = appKit?.mainBackdropFrame ?? null;
+  const footerContainerFrame = appKit?.footerContainerFrame ?? null;
+  const expectedHostSize = options.expectedHostSize;
+  if (
+    expectedHostSize
+    && (hostBounds?.width !== expectedHostSize.width || hostBounds?.height !== expectedHostSize.height)
+  ) {
     errors.push(
-      `native host is ${automationWindow?.bounds?.width ?? "?"}x${automationWindow?.bounds?.height ?? "?"}, expected 750x501`,
+      `native host is ${hostBounds?.width ?? "?"}x${hostBounds?.height ?? "?"}, expected ${expectedHostSize.width}x${expectedHostSize.height}`,
     );
+  }
+  if (
+    !hostBounds
+    || !mainBackdropFrame
+    || !footerContainerFrame
+    || hostBounds.width !== mainBackdropFrame.width
+    || hostBounds.width !== footerContainerFrame.width
+    || mainBackdropFrame.x !== 0
+    || footerContainerFrame.x !== 0
+    || footerContainerFrame.y !== 0
+    || mainBackdropFrame.y !== footerContainerFrame.height + 8
+    || mainBackdropFrame.y + mainBackdropFrame.height !== hostBounds.height
+  ) {
+    errors.push("native host is not exactly partitioned into footer, 8pt gutter, and bounded main backdrop");
   }
   if (appKit?.footerContainerFrame?.height !== 32) errors.push("footer container is not 32pt high");
   if (appKit?.transparentGapPoints !== 8) errors.push("main/footer gutter is not 8pt");
@@ -492,9 +548,10 @@ export function analyzeStationaryFidelity(layout: any, automationWindow: any) {
     visualNodeIds: visualNodes.map((node) => node.id),
     openGaps,
     trailingGaps,
-    hostBounds: automationWindow?.bounds ?? null,
-    mainBackdropFrame: appKit?.mainBackdropFrame ?? null,
-    footerContainerFrame: appKit?.footerContainerFrame ?? null,
+    hostBounds,
+    expectedHostSize: expectedHostSize ?? null,
+    mainBackdropFrame,
+    footerContainerFrame,
     transparentGapPoints: appKit?.transparentGapPoints ?? null,
   };
 }
@@ -583,11 +640,19 @@ function parseCLI() {
     .filter(Boolean);
   const expectFallback = args.includes("--expect-fallback");
   const stationaryOnly = args.includes("--stationary-only");
-  return { binary, outDir, trials: stationaryOnly ? [] : trials, expectFallback, stationaryOnly };
+  const baseline = value("--baseline");
+  return {
+    binary,
+    outDir,
+    trials: stationaryOnly ? [] : trials,
+    expectFallback,
+    stationaryOnly,
+    baseline,
+  };
 }
 
 async function cli() {
-  const { binary, outDir, trials, expectFallback, stationaryOnly } = parseCLI();
+  const { binary, outDir, trials, expectFallback, stationaryOnly, baseline } = parseCLI();
   if (!binary || !existsSync(binary)) throw new Error(`binary missing: ${binary ?? "<unset>"}`);
   mkdirSync(outDir, { recursive: true });
   const helper = join(outDir, "macos-native-drag-sampler");
@@ -603,6 +668,9 @@ async function cli() {
     schemaVersion: 1,
     startedAt: new Date().toISOString(),
     gitCommit: (await run(["git", "rev-parse", "HEAD"])).stdout.trim(),
+    baselineCommit: baseline
+      ? (await run(["git", "rev-parse", baseline])).stdout.trim()
+      : null,
     binary: resolve(binary),
     binarySha256: sha256(binary),
     helperSha256: sha256(helper),
@@ -725,6 +793,7 @@ async function cli() {
           rawSha256: sha256(rawPath),
           helperExitCode: helperRun.exitCode,
           helperStderr: helperRun.stderr,
+          nativeWindowInventory: summarizeNativeWindowInventory(trace),
           analysis,
         };
         attempts.push(entry);
@@ -743,6 +812,7 @@ async function cli() {
         rawSha256: selected?.rawSha256 ?? null,
         helperExitCode: selected?.helperExitCode ?? null,
         helperStderr: selected?.helperStderr ?? null,
+        nativeWindowInventory: selected?.nativeWindowInventory ?? null,
         analysis: selected?.analysis ?? null,
       });
     }
@@ -753,11 +823,16 @@ async function cli() {
       { timeoutMs: 15_000 },
     );
     const finalWindows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
+    receipt.finalAutomationWindows = finalWindows;
     const finalMain = ((finalWindows as any)?.windows ?? []).find((window: any) =>
       window.id === "main" && window.pid === main.pid
     ) ?? main;
     if (!expectFallback) {
-      const structural = analyzeStationaryFidelity(receipt.layout, finalMain);
+      const structural = analyzeStationaryFidelity(
+        receipt.layout,
+        finalMain,
+        stationaryOnly ? { expectedHostSize: { width: 750, height: 501 } } : {},
+      );
       const captures: Array<Record<string, unknown>> = [];
       captures.push(await captureNativeWindow(Number(main.pid), outDir, "stationary-default-2x"));
 
@@ -810,6 +885,13 @@ async function cli() {
       };
     }
     receipt.logs = await driver.getLogs({ limit: 500 });
+    const logText = JSON.stringify(receipt.logs);
+    const crashMarkers = logText.match(/panic|fatal error|segmentation fault|crash(?:ed)?/gi) ?? [];
+    receipt.crashScan = {
+      pass: crashMarkers.length === 0,
+      markerCount: crashMarkers.length,
+      markers: [...new Set(crashMarkers.map((marker) => marker.toLowerCase()))],
+    };
     const compositionIsValid = (snapshot: any) => {
       if (expectFallback) {
         return snapshot?.windowVisible === true
@@ -837,6 +919,7 @@ async function cli() {
     receipt.valid = results.every((result: any) => result.analysis.valid);
     receipt.pass = lifecyclePass
       && (receipt.stationary as any)?.pass === true
+      && (receipt.crashScan as any)?.pass === true
       && results.every((result: any) => result.analysis.overallPass);
   } finally {
     try {
@@ -844,8 +927,38 @@ async function cli() {
       await driver.waitForState({ windowVisible: false }, { timeoutMs: 5_000 });
     } catch {}
     await driver.close();
+    await Bun.sleep(250);
+    const launchedPid = Number(receipt.pid ?? 0);
+    const processProbe = launchedPid > 0
+      ? await run(["kill", "-0", String(launchedPid)])
+      : { exitCode: 1, stdout: "", stderr: "PID unavailable" };
+    const nativeWindowProbe = launchedPid > 0
+      ? await run([
+        "swift",
+        resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
+        "--pid",
+        String(launchedPid),
+      ])
+      : { exitCode: 1, stdout: "", stderr: "PID unavailable" };
+    let survivingNativeWindows: unknown[] = [];
+    try {
+      survivingNativeWindows = JSON.parse(nativeWindowProbe.stdout).windows ?? [];
+    } catch {}
+    const cleanupPass = launchedPid > 0
+      && processProbe.exitCode !== 0
+      && nativeWindowProbe.exitCode === 0
+      && survivingNativeWindows.length === 0;
+    receipt.cleanup = {
+      pass: cleanupPass,
+      launchedPid,
+      processAlive: processProbe.exitCode === 0,
+      nativeWindowQueryExitCode: nativeWindowProbe.exitCode,
+      survivingNativeWindows,
+      nativeWindowQueryStderr: nativeWindowProbe.stderr.trim(),
+    };
+    receipt.pass = receipt.pass === true && cleanupPass;
     receipt.driverStats = driver.stats;
-    receipt.cleanedUp = true;
+    receipt.cleanedUp = cleanupPass;
     receipt.finishedAt = new Date().toISOString();
   }
   const receiptPath = join(outDir, "receipt.json");

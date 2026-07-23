@@ -7,8 +7,7 @@ const UI_WINDOW_SOURCE: &str = include_str!("../src/app_impl/ui_window.rs");
 const RENDER_PROMPTS_OTHER_SOURCE: &str = include_str!("../src/render_prompts/other.rs");
 const STARTUP_SOURCE: &str = include_str!("../src/app_impl/startup.rs");
 const VIBRANCY_CONFIG_SOURCE: &str = include_str!("../src/platform/vibrancy_config.rs");
-const RUNTIME_STDIN_MATCH_SIMULATE_KEY_SOURCE: &str =
-    include_str!("../src/main_entry/runtime_stdin_match_simulate_key.rs");
+const SIMULATE_KEY_DISPATCH_SOURCE: &str = include_str!("../src/app_impl/simulate_key_dispatch.rs");
 
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let start = source
@@ -246,10 +245,10 @@ fn script_issues_enter_routes_to_agent_chat_prompt_submission() {
     );
 
     assert!(
-        RUNTIME_STDIN_MATCH_SIMULATE_KEY_SOURCE.contains("AppView::ScriptIssuesView { report }")
-            && RUNTIME_STDIN_MATCH_SIMULATE_KEY_SOURCE
+        SIMULATE_KEY_DISPATCH_SOURCE.contains("AppView::ScriptIssuesView { report }")
+            && SIMULATE_KEY_DISPATCH_SOURCE
                 .contains("SimulateKey: Enter - fix script issues in Agent Chat")
-            && RUNTIME_STDIN_MATCH_SIMULATE_KEY_SOURCE
+            && SIMULATE_KEY_DISPATCH_SOURCE
                 .contains("view.fix_script_issues_in_agent(&report, ctx);"),
         "simulateKey Enter must keep parity with physical Enter for ScriptIssuesView"
     );
@@ -312,7 +311,10 @@ fn native_vibrancy_config_skips_redundant_same_window_reapply() {
 
     assert!(
         VIBRANCY_CONFIG_SOURCE.contains("static LAST_MAIN_WINDOW_VIBRANCY_SIGNATURE")
-            && body.contains("let signature = (window as usize, is_dark, material);")
+            && body.contains("let signature = (")
+            && body.contains("window as usize,")
+            && body.contains("background_tint,")
+            && body.contains("glass_bits,")
             && body.contains("guard.as_ref() == Some(&signature)")
             && body.contains("return;")
             && body.find("guard.as_ref() == Some(&signature)")
@@ -489,7 +491,9 @@ fn gpui_footer_overlay_is_default_and_keeps_native_material_as_background_only()
     );
     assert!(
         function_body(FOOTER_POPUP_SOURCE, "unsafe fn refresh_window_footer_host")
-            .contains("refresh_footer_host_impl(ns_window, config, false)"),
+            .contains("reusable_window_footer_search_root(ns_window)")
+            && function_body(FOOTER_POPUP_SOURCE, "unsafe fn refresh_window_footer_host")
+                .contains("config,\n        false,"),
         "refresh_window_footer_host must never blank AppKit glyphs"
     );
     // Flexbox sizing contract: buttons take intrinsic (text-measured) width

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  analyzeStationaryFidelity,
   analyzeTrace,
   type DragSample,
   type NativeTrace,
@@ -12,6 +13,8 @@ function trace(options: {
   displacementStep?: number;
   missingRightAt?: number;
   settlingDrift?: number;
+  settlingDriftAt?: (index: number) => number;
+  staleControls?: boolean;
 } = {}): NativeTrace {
   const {
     driftAt = () => 0,
@@ -20,6 +23,8 @@ function trace(options: {
     displacementStep = 5,
     missingRightAt = -1,
     settlingDrift = 0,
+    settlingDriftAt = () => settlingDrift,
+    staleControls = false,
   } = options;
   const mainWindowNumber = 100;
   const footerWindowNumber = twoWindows ? 101 : null;
@@ -29,15 +34,16 @@ function trace(options: {
 
   const push = (phase: string, index: number, mainX: number, driftPx: number) => {
     const driftPt = driftPx / scale;
+    const controlMainX = staleControls ? 100 : mainX;
     const controls = [
       {
         id: "script-kit-footer-left-info-hit-target",
-        framePt: { x: mainX + 12 + driftPt, y: 510, width: 100, height: 28 },
+        framePt: { x: controlMainX + 12 + driftPt, y: 510, width: 100, height: 28 },
         axWindowNumber: twoWindows ? 101 : mainWindowNumber,
       },
       ...(index === missingRightAt ? [] : [{
         id: "script-kit-footer-button-ai",
-        framePt: { x: mainX + 630 + driftPt, y: 510, width: 108, height: 28 },
+        framePt: { x: controlMainX + 630 + driftPt, y: 510, width: 108, height: 28 },
         axWindowNumber: twoWindows ? 101 : mainWindowNumber,
       }]),
     ];
@@ -61,9 +67,19 @@ function trace(options: {
   for (let index = 0; index < inMotionCount; index += 1) {
     push("dragged", index, 100 + index * displacementStep, driftAt(index));
   }
-  push("mouseUp", 0, 100 + Math.max(0, inMotionCount - 1) * displacementStep, settlingDrift);
+  push(
+    "mouseUp",
+    0,
+    100 + Math.max(0, inMotionCount - 1) * displacementStep,
+    settlingDriftAt(0),
+  );
   for (let index = 0; index < 18; index += 1) {
-    push("settling", index, 100 + Math.max(0, inMotionCount - 1) * displacementStep, settlingDrift);
+    push(
+      "settling",
+      index,
+      100 + Math.max(0, inMotionCount - 1) * displacementStep,
+      settlingDriftAt(index),
+    );
   }
 
   return {
@@ -135,10 +151,111 @@ describe("native main-window drag analyzer", () => {
     expect(result.overallPass).toBe(false);
   });
 
+  test("invalidates stale Accessibility control coordinates", () => {
+    const result = analyzeTrace(trace({ staleControls: true }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("AX positions are stale"))).toBe(true);
+  });
+
   test("fails when settling remains late", () => {
     const result = analyzeTrace(trace({ settlingDrift: 0.6 }));
     expect(result.valid).toBe(true);
     expect(result.motionThresholdsPass).toBe(false);
     expect(result.controls[0].stableAfterSettling).toBe(false);
+  });
+
+  test("fails when settling takes longer than two display refresh periods", () => {
+    const result = analyzeTrace(trace({
+      settlingDriftAt: (index) => index < 4 ? 0.6 : 0,
+    }));
+    expect(result.valid).toBe(true);
+    expect(result.controls[0].settlingMs).toBe(40);
+    expect(result.controls[0].thresholdsPass).toBe(false);
+  });
+});
+
+function stationaryFixture(hostHeight = 501) {
+  const capsules = [
+    { suffix: "left-info", id: "script-kit-footer-left-info-capsule", x: 12, width: 116 },
+    { suffix: "run", id: "script-kit-footer-capsule-run", x: 500, width: 100 },
+    { suffix: "actions", id: "script-kit-footer-capsule-actions", x: 606, width: 80 },
+    { suffix: "ai", id: "script-kit-footer-capsule-ai", x: 692, width: 46 },
+  ];
+  const nodes: any[] = [];
+  for (const capsule of capsules) {
+    const contentId = capsule.suffix === "left-info"
+      ? "script-kit-footer-left-info-capsule-content"
+      : `script-kit-footer-capsule-content-${capsule.suffix}`;
+    nodes.push({
+      id: capsule.id,
+      className: "NSGlassEffectView",
+      frame: { x: capsule.x, y: 2, width: capsule.width, height: 28 },
+      windowFrame: { x: capsule.x, y: 2, width: capsule.width, height: 28 },
+      layer: { contentsScale: 2, cornerRadius: 6 },
+    });
+    nodes.push({ id: contentId, parentId: capsule.id });
+    if (capsule.suffix !== "left-info") {
+      nodes.push({
+        id: `script-kit-footer-state-layer-${capsule.suffix}`,
+        parentId: contentId,
+      });
+    }
+  }
+  nodes.push({
+    id: "script-kit-footer-label-actions",
+    parentId: "script-kit-footer-capsule-content-actions",
+    text: { value: "Actions", color: { alpha: 1 } },
+    layer: { contentsScale: 2 },
+  });
+  return {
+    layout: {
+      fidelity: {
+        appKit: {
+          nodes,
+          mainBackdropFrame: { x: 0, y: 40, width: 750, height: hostHeight - 40 },
+          footerContainerFrame: { x: 0, y: 0, width: 750, height: 32 },
+          transparentGapPoints: 8,
+          backdropFooterIntersectionArea: 0,
+          outerWindowHasShadow: false,
+        },
+      },
+    },
+    automationWindow: { bounds: { x: 381, y: 166, width: 750, height: hostHeight } },
+  };
+}
+
+describe("stationary native footer analyzer", () => {
+  test("accepts the exact fresh-launch fixture", () => {
+    const fixture = stationaryFixture();
+    const result = analyzeStationaryFidelity(
+      fixture.layout,
+      fixture.automationWindow,
+      { expectedHostSize: { width: 750, height: 501 } },
+    );
+    expect(result.pass).toBe(true);
+  });
+
+  test("accepts lifecycle-settled height when the material partition remains exact", () => {
+    const fixture = stationaryFixture(480);
+    expect(analyzeStationaryFidelity(fixture.layout, fixture.automationWindow).pass).toBe(true);
+  });
+
+  test("fails a default-fixture size mismatch", () => {
+    const fixture = stationaryFixture(480);
+    const result = analyzeStationaryFidelity(
+      fixture.layout,
+      fixture.automationWindow,
+      { expectedHostSize: { width: 750, height: 501 } },
+    );
+    expect(result.pass).toBe(false);
+    expect(result.errors.some((error) => error.includes("expected 750x501"))).toBe(true);
+  });
+
+  test("fails a material partition that bridges the detached gutter", () => {
+    const fixture = stationaryFixture();
+    fixture.layout.fidelity.appKit.mainBackdropFrame.y = 39;
+    const result = analyzeStationaryFidelity(fixture.layout, fixture.automationWindow);
+    expect(result.pass).toBe(false);
+    expect(result.errors.some((error) => error.includes("not exactly partitioned"))).toBe(true);
   });
 });

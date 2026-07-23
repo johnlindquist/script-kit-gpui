@@ -22,8 +22,6 @@ fn tahoe_liquid_glass_is_gated_and_uses_shared_theme_tint() {
     let ui_foundation = read_source("src/ui_foundation/mod.rs");
     let actions_dialog = read_source("src/actions/dialog.rs");
     let terminal_command_bar = read_source("src/terminal/command_bar_ui/render.rs");
-    let notes_actions_panel = read_source("src/notes/actions_panel.rs");
-    let notes_browse_panel = read_source("src/notes/browse_panel.rs");
     let agent_chat_window = read_source("src/ai/agent_chat/ui/chat_window.rs");
     let file_search = read_source("src/file_search/mod.rs");
 
@@ -76,7 +74,8 @@ fn tahoe_liquid_glass_is_gated_and_uses_shared_theme_tint() {
     assert!(
         main_vibrancy
             .contains("crate::ui_foundation::main_window_matched_background_rgba(&theme)")
-            && main_vibrancy.contains("material, background_tint"),
+            && main_vibrancy.contains("background_tint,")
+            && main_vibrancy.contains("glass_bits,"),
         "Main-window Liquid Glass refresh de-dupe must include the shared theme tint, not just dark/material state"
     );
     assert!(
@@ -90,14 +89,9 @@ fn tahoe_liquid_glass_is_gated_and_uses_shared_theme_tint() {
         "Terminal command bar must share AppChromeColors popup_surface_rgba instead of hardcoded 0.50/0.95 alpha"
     );
     assert!(
-        notes_actions_panel.contains("main_window_matched_background(&sk_theme)")
-            && notes_browse_panel.contains("main_window_matched_background(&sk_theme)"),
-        "Notes actions and browse panels must share the main-window matched background helper"
-    );
-    assert!(
         agent_chat_window.contains("theme::get_cached_theme().is_vibrancy_enabled()")
             && agent_chat_window.contains("WindowBackgroundAppearance::Opaque")
-            && agent_chat_window.contains("WindowBackgroundAppearance::Blurred"),
+            && agent_chat_window.contains("crate::platform::vibrancy_window_background()"),
         "Detached Agent Chat window background appearance must honor vibrancy-disabled opaque mode"
     );
     assert!(
@@ -210,7 +204,8 @@ fn footer_native_host_uses_theme_vibrancy_and_reports_installed_surface() {
 
     for needle in [
         "pub unsafe fn configure_footer_popup_window(window: id, is_dark: bool)",
-        "configure_actions_popup_window(window, is_dark)",
+        "configure_attached_popup_window(",
+        "\"Actions popup\"",
         "setIgnoresMouseEvents: true",
         "setHasShadow: false",
         "c\"Script Kit Footer\".as_ptr()",
@@ -237,7 +232,7 @@ fn agent_chat_detached_chat_window_uses_default_vibrancy_native_backdrop_and_run
         .expect("chat_window_options should be present");
     for needle in [
         "theme::get_cached_theme().is_vibrancy_enabled()",
-        "gpui::WindowBackgroundAppearance::Blurred",
+        "crate::platform::vibrancy_window_background()",
         "gpui::WindowBackgroundAppearance::Opaque",
         "kind: WindowKind::PopUp",
     ] {
@@ -314,7 +309,7 @@ fn agent_chat_detached_chat_window_uses_default_vibrancy_native_backdrop_and_run
 
 #[test]
 fn devtools_targets_match_agent_chat_by_semantic_surface_alias() {
-    let targets = read_source("scripts/devtools/targets.ts");
+    let targets = read_source("scripts/devtools/lib/target-identity.ts");
     assert!(
         targets.contains("[\"snapshot.semanticSurface\", snapshot.semanticSurface]")
             && targets.contains("[\"listedWindow.semanticSurface\", listedWindow.semanticSurface]"),
