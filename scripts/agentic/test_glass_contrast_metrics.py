@@ -27,7 +27,16 @@ class RoundedMaskTests(unittest.TestCase):
         image = Image.new("RGB", (140, 80), (20, 20, 20))
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle((20, 20, 119, 59), radius=12, fill=(100, 110, 120))
-        draw.rectangle((50, 30, 89, 49), fill=(255, 0, 255))
+        foreground_frames = [
+            (32, 30, 41, 39),
+            (45, 30, 54, 39),
+            (58, 30, 67, 39),
+            (71, 30, 80, 39),
+            (84, 30, 93, 39),
+            (97, 30, 106, 39),
+        ]
+        for frame in foreground_frames:
+            draw.rectangle(frame, fill=(255, 0, 255))
         image.putpixel((21, 21), (0, 255, 0))
         capsule = {
             "id": "script-kit-footer-capsule-test",
@@ -43,17 +52,49 @@ class RoundedMaskTests(unittest.TestCase):
                 "screenshotFrame": capsule["screenshotFrame"],
             },
             {
-                "id": "script-kit-footer-label-chip-test",
+                "id": "script-kit-footer-label-test",
+                "parentId": "script-kit-footer-capsule-content-test",
+                "className": "NSTextField",
+                "screenshotFrame": {"x": 32, "y": 40, "width": 10, "height": 10},
+            },
+            {
+                "id": "script-kit-footer-test-icon",
+                "parentId": "script-kit-footer-capsule-content-test",
+                "className": "NSImageView",
+                "screenshotFrame": {"x": 45, "y": 40, "width": 10, "height": 10},
+            },
+            {
+                "id": "script-kit-footer-keycap-test",
                 "parentId": "script-kit-footer-capsule-content-test",
                 "className": "NSView",
-                "screenshotFrame": {"x": 50, "y": 30, "width": 40, "height": 20},
+                "screenshotFrame": {"x": 58, "y": 40, "width": 10, "height": 10},
+            },
+            {
+                "id": "script-kit-footer-shortcut-glyph-test",
+                "parentId": "script-kit-footer-keycap-test",
+                "className": "NSTextField",
+                "screenshotFrame": {"x": 71, "y": 40, "width": 10, "height": 10},
+            },
+            {
+                "id": "script-kit-footer-status-dot",
+                "parentId": "script-kit-footer-capsule-content-test",
+                "className": "NSView",
+                "screenshotFrame": {"x": 84, "y": 40, "width": 10, "height": 10},
+            },
+            {
+                "id": "script-kit-footer-state-layer-test",
+                "parentId": "script-kit-footer-capsule-content-test",
+                "className": "NSView",
+                "layer": {"backgroundColor": {"alpha": 1}},
+                "screenshotFrame": {"x": 97, "y": 40, "width": 10, "height": 10},
             },
         ]
         result = metrics.capsule_metrics(image, capsule, 1.0, nodes)
         self.assertEqual(result["materialMedianRgb"], (100, 110, 120))
         self.assertEqual(result["mask"]["shape"], "rounded-rect")
         self.assertEqual(result["mask"]["erosionDevicePixels"], 3)
-        self.assertEqual(result["mask"]["foregroundDescendantCount"], 1)
+        self.assertEqual(result["mask"]["foregroundDescendantCount"], 6)
+        self.assertTrue(result["mask"]["activeStateOverlay"])
 
     def test_descendant_walker_includes_nested_keycaps_icons_and_state_layers(self):
         nodes = [
