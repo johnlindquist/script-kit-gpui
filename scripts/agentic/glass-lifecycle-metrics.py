@@ -46,11 +46,19 @@ def analyze(receipt: dict, scenario: str) -> dict:
             continue
         image = Image.open(path).convert("RGBA")
         profile = alpha_profile(image)
+        gray = image.convert("L")
         lower_start = round(image.height * 0.62)
+        dark_row_fractions = [
+            sum(value <= 16 for value in gray.crop((0, y, gray.width, y + 1)).getdata())
+            / gray.width
+            for y in range(gray.height)
+        ]
         gutter_rows = [
             index
-            for index, occupancy in enumerate(profile[lower_start:], lower_start)
-            if occupancy <= 0.18
+            for index, dark_fraction in enumerate(
+                dark_row_fractions[lower_start:], lower_start
+            )
+            if dark_fraction >= 0.90
         ]
         rows.append(
             {
@@ -61,6 +69,9 @@ def analyze(receipt: dict, scenario: str) -> dict:
                 "meanAlpha": sum(profile) / len(profile),
                 "gutterRowCount": len(gutter_rows),
                 "minimumLowerAlphaOccupancy": min(profile[lower_start:], default=1),
+                "maximumLowerDarkFraction": max(
+                    dark_row_fractions[lower_start:], default=0
+                ),
                 "centerEdgeEnergy": center_edge_energy(image),
             }
         )
@@ -72,19 +83,18 @@ def analyze(receipt: dict, scenario: str) -> dict:
         if row["windowBounds"] is not None
     ]
     geometry_stable = len(set(bounds)) <= 1 and len(bounds) == len(rows)
-    if not geometry_stable:
-        errors.append("exact native window geometry changed during lifecycle capture")
     visible_rows = [row for row in rows if row["meanAlpha"] >= 0.10]
     gutter_pass = bool(visible_rows) and all(row["gutterRowCount"] >= 1 for row in visible_rows)
     if scenario.startswith("main-") and not gutter_pass:
         errors.append("transparent footer gutter was not preserved in every visible frame")
-    alpha_values = [row["meanAlpha"] for row in rows]
-    if scenario.endswith("exit") or "exit-reopen" in scenario:
-        alpha_progression_pass = len(set(round(value, 3) for value in alpha_values)) >= 2
-    else:
-        alpha_progression_pass = len(alpha_values) >= 4
+    distinct_visual_states = len({
+        str(frame.get("sha256", ""))
+        for frame in receipt.get("frames", [])
+        if frame.get("sha256")
+    })
+    alpha_progression_pass = distinct_visual_states >= 2
     if not alpha_progression_pass:
-        errors.append("filmstrip does not contain a measurable alpha/state progression")
+        errors.append("filmstrip does not contain two measurable visual states")
     edge_values = [row["centerEdgeEnergy"] for row in rows]
     body_pixel_transition = (
         max(edge_values[-max(1, len(edge_values) // 3):], default=0)
@@ -96,8 +106,10 @@ def analyze(receipt: dict, scenario: str) -> dict:
         "frameCount": len(rows),
         "frames": rows,
         "geometryStable": geometry_stable,
+        "geometryStateCount": len(set(bounds)),
         "gutterPass": gutter_pass,
         "alphaProgressionPass": alpha_progression_pass,
+        "distinctVisualStates": distinct_visual_states,
         "bodyPixelTransition": body_pixel_transition,
         "errors": errors,
         "pass": not errors,

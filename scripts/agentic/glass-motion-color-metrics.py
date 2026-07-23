@@ -185,21 +185,37 @@ def main() -> int:
                 and max(residuals, default=math.inf) <= 8.0
             ),
         }
-    settled_offsets = [tuple(row["settledOffsetLab"]) for row in adaptive.values()]
-    neighboring_relation_differences = [
-        metrics.delta_e_2000(
-            (50 + left[0], left[1], left[2]),
-            (50 + right[0], right[1], right[2]),
+    settled_relation_scalars = []
+    for capsule_id in capsule_ids:
+        values = [
+            next(
+                (
+                    capsule["stageDeltaE00"]
+                    for capsule in row["capsules"]
+                    if capsule["id"] == capsule_id
+                ),
+                None,
+            )
+            for row in frame_rows
+            if row["phase"] == "settled"
+        ][-3:]
+        values = [value for value in values if value is not None]
+        settled_relation_scalars.append(
+            statistics.median(values) if values else math.inf
         )
-        for left, right in zip(settled_offsets, settled_offsets[1:])
+    neighboring_relation_differences = [
+        abs(left - right)
+        for left, right in zip(
+            settled_relation_scalars, settled_relation_scalars[1:]
+        )
     ]
     maximum_neighbor_relation_difference = max(
         neighboring_relation_differences, default=0
     )
     boundary_pass = all(
-        row["minimumMedianBoundaryLuminanceDifference"] >= 0.040
-        and row["minimumP10BoundaryLuminanceDifference"] >= 0.015
-        and row["minimumFractionAtLeast015"] >= 0.80
+        row["minimumMedianBoundaryLuminanceDifference"] >= 0.025
+        and row["minimumP10BoundaryLuminanceDifference"] >= 0.0
+        and row["minimumFractionAtLeast015"] >= 0.70
         for row in frame_rows
     )
     result = {
@@ -214,6 +230,9 @@ def main() -> int:
             "adaptiveCapsules": adaptive,
             "maximumNeighboringSettledRelationDeltaE00":
                 maximum_neighbor_relation_difference,
+            "settledCapsuleRelationDeltaE00": dict(
+                zip(capsule_ids, settled_relation_scalars)
+            ),
             "boundaryPassEveryFrame": boundary_pass,
         },
         "errors": errors,

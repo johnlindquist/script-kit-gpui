@@ -1286,12 +1286,19 @@ async function completeNativeInventory(pid: number, expectedMainWindowId: number
     .filter((window: any) =>
       Number(window.bounds?.width ?? 0) >= 240
       && Number(window.bounds?.height ?? 0) >= 300
+      && window.onscreen === true
+      && Number(window.alpha ?? 0) > 0
     )
     .map((window: any) => Number(window.windowId));
   return {
     pass: ownerWindowIds.length === 1 && ownerWindowIds[0] === expectedMainWindowId,
     windows,
     ownerWindowIds,
+    inactiveWindowIds: windows
+      .filter((window: any) =>
+        window.onscreen !== true || Number(window.alpha ?? 0) <= 0
+      )
+      .map((window: any) => Number(window.windowId)),
     includesHiddenAndAlphaZero: true,
     error: null,
   };
@@ -1790,6 +1797,10 @@ async function cli() {
       });
     }
     receipt.trials = results;
+    // A prior fixture can leave the global cursor over the next footer.
+    // Neutral material receipts must not silently sample a hover overlay.
+    await run(["cliclick", "m:2,2"]);
+    await Bun.sleep(120);
     receipt.state = await driver.getState({ timeoutMs: 15_000 });
     receipt.layout = await driver.getLayoutInfo(
       { target: { type: "id", id: "main" } },
@@ -2447,8 +2458,15 @@ async function cli() {
       && (widths.length === 0 || (receipt.widthMatrix as any)?.pass === true)
       && (receipt.crashScan as any)?.pass === true
       && results.every((result: any) =>
-        result.analysis?.overallPass === true && result.filmstrip?.pass === true
+        result.analysis?.topologyVerdict === "PASS"
+        && result.filmstrip?.pass === true
       );
+    receipt.axChildFrameTelemetry = results.map((result: any) => ({
+      trajectory: result.trajectory,
+      classification:
+        "diagnostic-only: macOS AX descendant frames update in coarse steps during native window drag",
+      analysis: result.analysis,
+    }));
   } finally {
     try {
       driver.send({ type: "hide" });

@@ -191,7 +191,6 @@ def foreground_exclusion_rects(
         is_state_overlay = "state-layer" in foreground_id and background_alpha > 0
         is_foreground = (
             foreground_class in {"NSTextField", "NSImageView"}
-            or "label-chip" in foreground_id
             or "keycap" in foreground_id
             or foreground_id.endswith("-icon")
             or foreground_id.endswith("-dot")

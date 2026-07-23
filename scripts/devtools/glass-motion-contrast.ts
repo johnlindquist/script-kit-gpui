@@ -243,6 +243,7 @@ async function runLockedTreatmentCell(options: {
 }
 
 const classify = (result: CommandResult, receipt: any): Disposition => {
+  if (receipt?.disposition) return receipt.disposition as Disposition;
   const serialized = JSON.stringify(receipt ?? {});
   if (/untaggedInputCount[^0-9]*[1-9]|USER_OR_ENVIRONMENT/.test(serialized)) {
     return "INVALID_INTERFERENCE";

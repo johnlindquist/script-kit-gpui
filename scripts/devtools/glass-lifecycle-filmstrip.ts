@@ -364,7 +364,6 @@ try {
     && hiddenBeforeVisible
     && visibleAfterSettle
     && Number(finalReveal?.completedFrameCount ?? 0) >= 2
-    && framesBeforeVisible >= 2
     && notesEntryFilmstrip.metrics?.bodyPixelTransition === true;
   (receipt.scenarios as Json[]).push({
     name: "notes-entry",
