@@ -93,6 +93,57 @@ async function activatePid(pid: number) {
   return { exitCode, stderr: stderr.trim().slice(0, 400) };
 }
 
+async function nativeWindowIds(pid: number, title: string) {
+  const child = Bun.spawn([
+    "swift",
+    resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
+    "--pid",
+    String(pid),
+  ], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) {
+    return { ids: [], error: stderr.trim().slice(0, 400) };
+  }
+  const parsed = JSON.parse(stdout);
+  return {
+    ids: (parsed.windows ?? [])
+      .filter((window: Json) =>
+        window?.title === title
+        && Number(window?.windowId ?? 0) > 0
+        && window?.onscreen === true
+        && Number(window?.alpha ?? 0) > 0
+      )
+      .map((window: Json) => Number(window.windowId)),
+    error: null,
+  };
+}
+
+async function notesLifecycleState(driver: Driver) {
+  try {
+    const state = await driver.getTargetState(
+      { type: "id", id: "notes" },
+      { timeoutMs: 5_000 },
+    );
+    const notes = state?.notes ?? state ?? null;
+    return notes
+      ? {
+        entryReveal: notes.entryReveal ?? null,
+        windowLifecycle: notes.windowLifecycle ?? null,
+        editor: notes.editor ?? null,
+      }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 const binary = resolve(arg("--binary", process.env.SCRIPT_KIT_GPUI_BINARY ?? "")!);
 const outPath = resolve(
   arg(
@@ -241,7 +292,18 @@ try {
     const windows = await driver.listAutomationWindows({ timeoutMs: 5_000 });
     const count = countKind(windows, "notes");
     maxNotesWindows = Math.max(maxNotesWindows, count);
-    notesSamples.push({ index, count });
+    const native = driver.pid
+      ? await nativeWindowIds(driver.pid, "Notes")
+      : { ids: [], error: "driver PID unavailable" };
+    const notesState = count > 0 ? await notesLifecycleState(driver) : null;
+    notesSamples.push({
+      index,
+      automationWindowCount: count,
+      nativeWindowIds: native.ids,
+      nativeWindowCount: native.ids.length,
+      nativeWindowError: native.error,
+      notesState,
+    });
   }
   await Bun.sleep(350);
   const notesAfterBurst = await driver.listAutomationWindows({ timeoutMs: 5_000 });
@@ -253,6 +315,43 @@ try {
   driver.send({ type: "openNotes", requestId: "mwnd15-notes-recovery-open" });
   const notesOpen = await waitForKindCount(driver, "notes", 1, 2_000);
   const notesOpenMs = performance.now() - notesOpenStarted;
+  const hiddenInputBefore = await notesLifecycleState(driver);
+  const hiddenInputText = "mwnd15 hidden editor input";
+  const hiddenInputReceipt = await driver.request({
+    type: "batch",
+    target: { type: "kind", kind: "notes", index: 0 },
+    commands: [{ type: "setInput", text: hiddenInputText }],
+    options: { stopOnError: true, rollbackOnError: false, timeout: 5_000 },
+    trace: "on",
+  }, { expect: "batchResult", timeoutMs: 6_000 });
+  const hiddenInputAfter = await notesLifecycleState(driver);
+  const hiddenInputAccepted = hiddenInputBefore?.entryReveal?.bodyVisible === false
+    && hiddenInputReceipt?.success !== false
+    && hiddenInputBefore?.editor?.textFingerprint
+      !== hiddenInputAfter?.editor?.textFingerprint
+    && Number(hiddenInputAfter?.editor?.textLength ?? 0) === hiddenInputText.length;
+  const beforeTail = driver.pid
+    ? await nativeWindowIds(driver.pid, "Notes")
+    : { ids: [], error: "driver PID unavailable" };
+  driver.send({ type: "openNotes", requestId: "mwnd15-notes-close-before-tail" });
+  await Bun.sleep(40);
+  driver.send({ type: "openNotes", requestId: "mwnd15-notes-reopen-before-tail" });
+  const notesReopened = await waitForKindCount(driver, "notes", 1, 2_000);
+  const afterTail = driver.pid
+    ? await nativeWindowIds(driver.pid, "Notes")
+    : { ids: [], error: "driver PID unavailable" };
+  const reusedNativeWindow = beforeTail.ids.length === 1
+    && afterTail.ids.length === 1
+    && beforeTail.ids[0] === afterTail.ids[0];
+  let revealAfterReopen = await notesLifecycleState(driver);
+  const revealDeadline = performance.now() + 2_000;
+  while (
+    revealAfterReopen?.entryReveal?.bodyVisible !== true
+    && performance.now() < revealDeadline
+  ) {
+    await Bun.sleep(20);
+    revealAfterReopen = await notesLifecycleState(driver);
+  }
   const notesCloseStarted = performance.now();
   driver.send({ type: "openNotes", requestId: "mwnd15-notes-recovery-close" });
   const notesClose = await waitForKindCount(driver, "notes", 0, 2_000);
@@ -262,7 +361,12 @@ try {
     notesErrorBaseline,
   );
   const notesPass = maxNotesWindows <= 1
+    && notesSamples.every((sample) => Number(sample?.nativeWindowCount ?? 0) <= 1)
     && notesOpen.pass
+    && hiddenInputAccepted
+    && notesReopened.pass
+    && reusedNativeWindow
+    && revealAfterReopen?.entryReveal?.bodyVisible === true
     && notesClose.pass
     && notesOpenMs <= 750
     && notesCloseMs <= 750
@@ -274,6 +378,22 @@ try {
     maxNotesWindows,
     notesOpenMs: Number(notesOpenMs.toFixed(2)),
     notesCloseMs: Number(notesCloseMs.toFixed(2)),
+    hiddenInput: {
+      accepted: hiddenInputAccepted,
+      bodyVisibleBefore: hiddenInputBefore?.entryReveal?.bodyVisible ?? null,
+      bodyVisibleAfter: hiddenInputAfter?.entryReveal?.bodyVisible ?? null,
+      beforeFingerprint: hiddenInputBefore?.editor?.textFingerprint ?? null,
+      afterFingerprint: hiddenInputAfter?.editor?.textFingerprint ?? null,
+      textLength: hiddenInputAfter?.editor?.textLength ?? null,
+      receiptSuccess: hiddenInputReceipt?.success ?? null,
+    },
+    closeBeforeTailReopen: {
+      beforeNativeWindowIds: beforeTail.ids,
+      afterNativeWindowIds: afterTail.ids,
+      reusedNativeWindow,
+      reopened: notesReopened,
+      entryReveal: revealAfterReopen,
+    },
     errors: notesErrors,
   };
 
@@ -295,6 +415,7 @@ try {
     level: "error",
   }))?.entries ?? []).length;
   let maxDictationWindows = 0;
+  let maxNativeDictationWindows = 0;
   const dictationSamples: Json[] = [];
   for (let index = 0; index < 12; index += 1) {
     driver.send({
@@ -306,11 +427,18 @@ try {
     const windows = await driver.listAutomationWindows({ timeoutMs: 5_000 });
     const count = countKind(windows, "dictation");
     maxDictationWindows = Math.max(maxDictationWindows, count);
+    const native = driver.pid
+      ? await nativeWindowIds(driver.pid, "Script Kit Dictation")
+      : { ids: [], error: "driver PID unavailable" };
+    maxNativeDictationWindows = Math.max(maxNativeDictationWindows, native.ids.length);
     const state = await driver.getState({ timeoutMs: 5_000 });
     const dictation = state?.dictation ?? state?.dictationState ?? state?.dictation_state ?? null;
     dictationSamples.push({
       index,
       count,
+      nativeWindowIds: native.ids,
+      nativeWindowCount: native.ids.length,
+      nativeWindowError: native.error,
       generation: dictation?.generation ?? null,
       recordingStateGeneration: dictation?.recordingStateGeneration ?? null,
       isRecording: dictation?.isRecording ?? null,
@@ -355,6 +483,7 @@ try {
     || Number(sample.recordingStateGeneration ?? 0) > baselineRecordingStateGeneration
   );
   const dictationPass = maxDictationWindows <= 1
+    && maxNativeDictationWindows <= 1
     && exercisedRealToggle
     && dictationCleanup.isRecording === false
     && dictationCleanup.captureActive === false
@@ -371,6 +500,7 @@ try {
     baselineRecordingStateGeneration,
     exercisedRealToggle,
     maxDictationWindows,
+    maxNativeDictationWindows,
     finalWindowCount: dictationClosed.count,
     settleMs: Number(dictationSettleMs.toFixed(2)),
     closeMs: Number(dictationCloseMs.toFixed(2)),

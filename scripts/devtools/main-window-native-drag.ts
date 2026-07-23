@@ -1067,24 +1067,29 @@ export function analyzeStationaryFidelity(
   const leftIcon = byId.get("script-kit-footer-left-profile-icon")
     ?? byId.get("script-kit-footer-cwd-chip-icon");
   if (!leftCapsule) errors.push("left footer capsule is missing");
-  if (!leftHitTarget) errors.push("left footer hit target is missing");
-  if (!leftKeycap) {
-    errors.push("left footer shortcut keycap is missing");
-  } else {
-    if (leftKeycap.frame?.height !== 20) errors.push("left footer shortcut keycap is not 20pt high");
-    if (leftKeycap.layer?.cornerRadius !== 6) errors.push("left footer shortcut keycap radius is not 6pt");
-    if (leftKeycap.layer?.borderWidth !== 1) errors.push("left footer shortcut keycap border is not 1pt");
-    if (leftKeycap.layer?.contentsScale !== 2) errors.push("left footer shortcut keycap is not rendered at 2x");
-  }
-  if (!leftKeycapGlyph?.text?.value?.trim()) {
-    errors.push("left footer shortcut glyph is missing");
-  }
-  if (
-    !leftIcon
-    || Number(leftIcon.image?.width ?? 0) <= 0
-    || Number(leftIcon.image?.height ?? 0) <= 0
-  ) {
-    errors.push("left footer icon has no rendered image");
+  const leftCapsuleVisible = leftCapsule != null && leftCapsule.hidden !== true;
+  if (leftCapsuleVisible) {
+    if (!leftHitTarget) errors.push("visible left footer hit target is missing");
+    if (!leftKeycap) {
+      errors.push("visible left footer shortcut keycap is missing");
+    } else {
+      if (leftKeycap.frame?.height !== 20) errors.push("left footer shortcut keycap is not 20pt high");
+      if (leftKeycap.layer?.cornerRadius !== 6) errors.push("left footer shortcut keycap radius is not 6pt");
+      if (leftKeycap.layer?.borderWidth !== 1) errors.push("left footer shortcut keycap border is not 1pt");
+      if (leftKeycap.layer?.contentsScale !== 2) errors.push("left footer shortcut keycap is not rendered at 2x");
+    }
+    if (!leftKeycapGlyph?.text?.value?.trim()) {
+      errors.push("visible left footer shortcut glyph is missing");
+    }
+    if (
+      !leftIcon
+      || Number(leftIcon.image?.width ?? 0) <= 0
+      || Number(leftIcon.image?.height ?? 0) <= 0
+    ) {
+      errors.push("visible left footer icon has no rendered image");
+    }
+  } else if (leftHitTarget) {
+    errors.push("hidden left footer capsule retained an active hit target");
   }
 
   const visualNodes = nodes.filter((node) =>
@@ -1126,6 +1131,28 @@ export function analyzeStationaryFidelity(
   if (trailingGaps.some((gap) => gap !== 6)) {
     errors.push(`trailing glass capsule gaps are ${trailingGaps.join(",")}, expected shared 6pt token`);
   }
+  const firstTrailing = trailingCapsules[0];
+  const leftRightGap = leftCapsuleVisible && leftCapsule?.windowFrame && firstTrailing?.windowFrame
+    ? round(
+      firstTrailing.windowFrame.x
+      - (leftCapsule.windowFrame.x + leftCapsule.windowFrame.width),
+    )
+    : null;
+  if (leftRightGap != null && leftRightGap < 6) {
+    errors.push(`left capsule is only ${leftRightGap}pt from trailing actions, expected at least 6pt`);
+  }
+  const leftHitFrame = leftHitTarget?.windowFrame;
+  const trailingFrame = firstTrailing?.windowFrame;
+  const leftHitOverlapWidth = leftHitFrame && trailingFrame
+    ? Math.max(
+      0,
+      Math.min(leftHitFrame.x + leftHitFrame.width, trailingFrame.x + trailingFrame.width)
+        - Math.max(leftHitFrame.x, trailingFrame.x),
+    )
+    : 0;
+  if (leftHitOverlapWidth > 0) {
+    errors.push(`left footer hit target overlaps trailing actions by ${round(leftHitOverlapWidth)}pt`);
+  }
 
   return {
     pass: errors.length === 0,
@@ -1134,6 +1161,9 @@ export function analyzeStationaryFidelity(
     visualNodeIds: visualNodes.map((node) => node.id),
     openGaps,
     trailingGaps,
+    leftCapsuleVisible,
+    leftRightGap,
+    leftHitOverlapWidth: round(leftHitOverlapWidth),
     hostBounds,
     expectedHostSize: expectedHostSize ?? null,
     mainBackdropFrame,
@@ -1145,23 +1175,31 @@ export function analyzeStationaryFidelity(
 }
 
 async function resolveNativeWindow(pid: number) {
-  const query = await run([
-    "swift",
-    resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
-    "--pid",
-    String(pid),
-  ]);
-  if (query.exitCode !== 0) throw new Error(`native window query failed: ${query.stderr}`);
-  const parsed = JSON.parse(query.stdout);
-  const candidates = (parsed.windows ?? []).filter((window: any) =>
-    window.windowId > 0 && window.bounds?.width >= 700 && window.bounds?.height >= 400
+  let lastStderr = "";
+  for (let attempt = 1; attempt <= 40; attempt += 1) {
+    const query = await run([
+      "swift",
+      resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
+      "--pid",
+      String(pid),
+    ]);
+    lastStderr = query.stderr;
+    if (query.exitCode === 0) {
+      const parsed = JSON.parse(query.stdout);
+      const candidates = (parsed.windows ?? []).filter((window: any) =>
+        window.windowId > 0 && window.bounds?.width >= 240 && window.bounds?.height >= 300
+      );
+      const selected = candidates.sort((a: any, b: any) =>
+        Number(b.onscreen) - Number(a.onscreen)
+        || b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height
+      )[0];
+      if (selected) return selected;
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error(
+    `no native main window found for pid ${pid} after 2s${lastStderr ? `: ${lastStderr}` : ""}`,
   );
-  const selected = candidates.sort((a: any, b: any) =>
-    Number(b.onscreen) - Number(a.onscreen)
-    || b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height
-  )[0];
-  if (!selected) throw new Error(`no native main window found for pid ${pid}`);
-  return selected;
 }
 
 async function captureNativeWindow(pid: number, outDir: string, name: string) {
@@ -1176,6 +1214,18 @@ async function captureNativeWindow(pid: number, outDir: string, name: string) {
   ]);
   if (capture.exitCode !== 0 || !existsSync(path)) {
     throw new Error(`native window capture ${name} failed: ${capture.stderr}`);
+  }
+  const compositedPath = join(outDir, `${name}-composited-2x.png`);
+  const bounds = nativeWindow.bounds;
+  const compositedCapture = await run([
+    "screencapture",
+    "-o",
+    "-x",
+    `-R${Math.round(bounds.x)},${Math.round(bounds.y)},${Math.round(bounds.width)},${Math.round(bounds.height)}`,
+    compositedPath,
+  ]);
+  if (compositedCapture.exitCode !== 0 || !existsSync(compositedPath)) {
+    throw new Error(`composited window-bounds capture ${name} failed: ${compositedCapture.stderr}`);
   }
   const footerCropPath = join(outDir, `${name}-footer-2x.png`);
   const crop = await run([
@@ -1244,6 +1294,8 @@ async function captureNativeWindow(pid: number, outDir: string, name: string) {
     nativeWindow,
     path,
     sha256: sha256(path),
+    compositedPath,
+    compositedSha256: sha256(compositedPath),
     footerCropPath,
     footerCropSha256: sha256(footerCropPath),
     edgeEnergy: Number.isFinite(edgeEnergy) ? round(edgeEnergy, 6) : null,
@@ -1254,6 +1306,23 @@ async function captureNativeWindow(pid: number, outDir: string, name: string) {
       ? round(contentDetailEdgeEnergy, 6)
       : null,
   };
+}
+
+async function setNativeWindowSize(
+  helper: string,
+  pid: number,
+  width: number,
+  height: number,
+) {
+  return run([
+    helper,
+    "--pid",
+    String(pid),
+    "--width",
+    String(Math.round(width)),
+    "--height",
+    String(Math.round(height)),
+  ]);
 }
 
 export type GutterAlphaMetrics = {
@@ -1341,6 +1410,10 @@ function parseCLI() {
   const visualMatrix = args.includes("--visual-matrix");
   const stationaryOnly = args.includes("--stationary-only") || visualMatrix;
   const baseline = value("--baseline");
+  const widths = value("--widths", visualMatrix ? "750,560,480,400,320,280" : "")!
+    .split(",")
+    .map(Number)
+    .filter((width) => Number.isFinite(width) && width >= 200);
   return {
     binary,
     outDir,
@@ -1349,6 +1422,7 @@ function parseCLI() {
     stationaryOnly,
     visualMatrix,
     baseline,
+    widths,
   };
 }
 
@@ -1361,6 +1435,7 @@ async function cli() {
     stationaryOnly,
     visualMatrix,
     baseline,
+    widths,
   } = parseCLI();
   if (!binary || !existsSync(binary)) throw new Error(`binary missing: ${binary ?? "<unset>"}`);
   mkdirSync(outDir, { recursive: true });
@@ -1375,6 +1450,18 @@ async function cli() {
     helper,
   ]);
   if (compile.exitCode !== 0) throw new Error(`Swift helper compile failed: ${compile.stderr}`);
+  const resizeHelper = join(outDir, "macos-window-resize");
+  const resizeCompile = await run([
+    "xcrun",
+    "swiftc",
+    "-O",
+    resolve(import.meta.dir, "../agentic/macos-window-resize.swift"),
+    "-o",
+    resizeHelper,
+  ]);
+  if (resizeCompile.exitCode !== 0) {
+    throw new Error(`Swift resize helper compile failed: ${resizeCompile.stderr}`);
+  }
 
   const receipt: Record<string, unknown> = {
     schemaVersion: 1,
@@ -1617,6 +1704,71 @@ async function cli() {
         );
       }
       captures.push(defaultCapture);
+
+      const widthMatrix: Array<Record<string, unknown>> = [];
+      const originalWidth = Number(finalMain?.bounds?.width ?? 750);
+      const originalHeight = Number(finalMain?.bounds?.height ?? 480);
+      for (const width of widths) {
+        await announceTestStatus(
+          `Footer lane · ${width} pt`,
+          "Checking left capsule, shortcut glyphs, and trailing-action clearance",
+        );
+        const resized = await setNativeWindowSize(
+          resizeHelper,
+          Number(main.pid),
+          width,
+          originalHeight,
+        );
+        await Bun.sleep(250);
+        const layout = await driver.getLayoutInfo(
+          { target: { type: "id", id: "main" } },
+          { timeoutMs: 15_000 },
+        );
+        const windows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
+        const resizedMain = ((windows as any)?.windows ?? []).find(
+          (window: any) => window.id === "main" && window.pid === main.pid,
+        );
+        const actualWidth = Number(resizedMain?.bounds?.width ?? width);
+        const actualHeight = Number(resizedMain?.bounds?.height ?? originalHeight);
+        const analysis = analyzeStationaryFidelity(layout, resizedMain, {
+          expectedHostSize: { width: actualWidth, height: actualHeight },
+        });
+        const capture = await captureNativeWindow(
+          Number(main.pid),
+          outDir,
+          `stationary-width-${width}-2x`,
+        );
+        widthMatrix.push({
+          width,
+          requestedWidth: width,
+          actualWidth,
+          clampedByWindowMinimum: actualWidth > width,
+          resizeExitCode: resized.exitCode,
+          resizeStderr: resized.stderr,
+          automationBounds: resizedMain?.bounds ?? null,
+          structural: analysis,
+          capture,
+          pass: resized.exitCode === 0 && analysis.pass,
+        });
+      }
+      if (widths.length > 0) {
+        await setNativeWindowSize(
+          resizeHelper,
+          Number(main.pid),
+          originalWidth,
+          originalHeight,
+        );
+        await Bun.sleep(250);
+        receipt.layout = await driver.getLayoutInfo(
+          { target: { type: "id", id: "main" } },
+          { timeoutMs: 15_000 },
+        );
+      }
+      receipt.widthMatrix = {
+        widths,
+        rows: widthMatrix,
+        pass: widthMatrix.every((row: any) => row.pass === true),
+      };
 
       const appKitNodes = ((receipt.layout as any)?.fidelity?.appKit?.nodes ?? []) as AppKitNode[];
       const actionsButton = appKitNodes.find((node) => node.id === "script-kit-footer-button-actions");
@@ -2103,6 +2255,7 @@ async function cli() {
     receipt.pass = lifecyclePass
       && (receipt.stationary as any)?.pass === true
       && (!visualMatrix || (receipt.visualMatrix as any)?.pass === true)
+      && (widths.length === 0 || (receipt.widthMatrix as any)?.pass === true)
       && (receipt.crashScan as any)?.pass === true
       && results.every((result: any) =>
         result.analysis?.overallPass === true && result.filmstrip?.pass === true

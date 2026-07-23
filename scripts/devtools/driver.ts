@@ -379,6 +379,16 @@ export abstract class ProtocolCore {
     );
   }
 
+  getTargetState(
+    target: Json,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<Json> {
+    return this.request(
+      { type: "getState", target },
+      { expect: "stateResult", ...opts },
+    );
+  }
+
   async getActiveListScroll(opts: { timeoutMs?: number } = {}): Promise<ActiveListScrollReceipt> {
     const state = await this.getState(opts);
     const receipt = state.activeListScroll ?? state.mainListScroll;
