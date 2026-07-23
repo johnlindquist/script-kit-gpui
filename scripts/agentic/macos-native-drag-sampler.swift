@@ -161,6 +161,12 @@ private struct FilmstripFrame: Codable {
     let markerEventNs: UInt64?
     let encodingCompletedNs: UInt64?
     let mainFramePt: Rect?
+    let expectedWindowNumber: Int?
+    let actualWindowNumber: Int?
+    let displayID: UInt32?
+    let refreshHz: Double?
+    let captureScale: Double?
+    let pixelFormat: String?
     let path: String
     let captureSucceeded: Bool
     let error: String?
@@ -174,6 +180,12 @@ private struct FilmstripFrame: Codable {
         markerEventNs: UInt64? = nil,
         encodingCompletedNs: UInt64? = nil,
         mainFramePt: Rect?,
+        expectedWindowNumber: Int? = nil,
+        actualWindowNumber: Int? = nil,
+        displayID: UInt32? = nil,
+        refreshHz: Double? = nil,
+        captureScale: Double? = nil,
+        pixelFormat: String? = nil,
         path: String,
         captureSucceeded: Bool,
         error: String?
@@ -186,6 +198,12 @@ private struct FilmstripFrame: Codable {
         self.markerEventNs = markerEventNs
         self.encodingCompletedNs = encodingCompletedNs
         self.mainFramePt = mainFramePt
+        self.expectedWindowNumber = expectedWindowNumber
+        self.actualWindowNumber = actualWindowNumber
+        self.displayID = displayID
+        self.refreshHz = refreshHz
+        self.captureScale = captureScale
+        self.pixelFormat = pixelFormat
         self.path = path
         self.captureSucceeded = captureSucceeded
         self.error = error
@@ -1182,6 +1200,11 @@ private func startWindowStream(
     configuration.width = max(1, Int(shareableWindow.frame.width.rounded()))
     configuration.height = max(1, Int(shareableWindow.frame.height.rounded()))
     configuration.showsCursor = false
+    // ScreenCaptureKit may otherwise negotiate a bi-planar YUV buffer on
+    // current macOS releases. `copyBuffer` preserves packed rows so pin the
+    // observer stream to BGRA rather than silently encoding corrupted green
+    // frames from only the first plane.
+    configuration.pixelFormat = kCVPixelFormatType_32BGRA
     configuration.minimumFrameInterval = CMTime(
         value: 1,
         timescale: CMTimeScale(max(60, display.refreshHz.rounded()))
@@ -1640,6 +1663,12 @@ private func main() throws {
             markerEventNs: nil,
             encodingCompletedNs: monotonicNs(),
             mainFramePt: nearestMain,
+            expectedWindowNumber: mainNumber,
+            actualWindowNumber: shareable.window.map { Int($0.windowID) },
+            displayID: display.displayID,
+            refreshHz: display.refreshHz,
+            captureScale: 1.0,
+            pixelFormat: "BGRA",
             path: path,
             captureSucceeded: captureError == nil,
             error: captureError

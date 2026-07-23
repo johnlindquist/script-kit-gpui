@@ -23,6 +23,95 @@ def load_contrast_module():
     return module
 
 
+def adaptive_relation_summary(
+    frame_rows: list[dict],
+    capsule_ids: list[str],
+    metrics,
+) -> tuple[dict[str, dict], dict[str, float], float, list[str]]:
+    errors: list[str] = []
+    adaptive: dict[str, dict] = {}
+    settled_relation_scalars: list[float] = []
+    for capsule_id in capsule_ids:
+        settled_rows = [
+            next(
+                (capsule for capsule in row["capsules"] if capsule["id"] == capsule_id),
+                None,
+            )
+            for row in frame_rows
+            if row["phase"] == "settled"
+        ]
+        settled_rows = [row for row in settled_rows if row is not None][-3:]
+        if len(settled_rows) != 3:
+            errors.append(f"{capsule_id}: expected three settled relation samples")
+            settled_relation_scalars.append(math.inf)
+            continue
+        offsets = [
+            tuple(
+                material - stage
+                for material, stage in zip(
+                    metrics.rgb_to_lab(tuple(row["materialMedianRgb"])),
+                    metrics.rgb_to_lab(tuple(row["stageMedianRgb"])),
+                )
+            )
+            for row in settled_rows
+        ]
+        offset = tuple(
+            statistics.median(item[index] for item in offsets) for index in range(3)
+        )
+        residuals = []
+        for row in frame_rows:
+            capsule = next(
+                (item for item in row["capsules"] if item["id"] == capsule_id),
+                None,
+            )
+            if capsule is None:
+                continue
+            stage_lab = metrics.rgb_to_lab(tuple(capsule["stageMedianRgb"]))
+            expected_lab = tuple(stage_lab[index] + offset[index] for index in range(3))
+            actual_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
+            residual = metrics.delta_e_2000(actual_lab, expected_lab)
+            capsule["adaptiveExpectedLab"] = expected_lab
+            capsule["adaptiveResidualDeltaE00"] = residual
+            residuals.append(residual)
+        adaptive[capsule_id] = {
+            "settledOffsetLab": offset,
+            "residualP95DeltaE00": metrics.percentile(residuals, 0.95),
+            "residualMaximumDeltaE00": max(residuals, default=math.inf),
+            "pass": (
+                metrics.percentile(residuals, 0.95) <= 5.0
+                and max(residuals, default=math.inf) <= 8.0
+            ),
+        }
+        settled_values = [row["stageDeltaE00"] for row in settled_rows]
+        settled_relation_scalars.append(statistics.median(settled_values))
+    settled_relations = dict(zip(capsule_ids, settled_relation_scalars))
+    neighboring_relation_differences = [
+        abs(left - right)
+        for left, right in zip(
+            settled_relation_scalars,
+            settled_relation_scalars[1:],
+        )
+    ]
+    maximum_neighbor_relation_difference = max(
+        neighboring_relation_differences, default=0
+    )
+    return (
+        adaptive,
+        settled_relations,
+        maximum_neighbor_relation_difference,
+        errors,
+    )
+
+
+def boundary_pass_every_frame(frame_rows: list[dict]) -> bool:
+    return bool(frame_rows) and all(
+        row["minimumMedianBoundaryLuminanceDifference"] >= 0.040
+        and row["minimumP10BoundaryLuminanceDifference"] >= 0.015
+        and row["minimumFractionAtLeast015"] >= 0.80
+        for row in frame_rows
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--receipt", required=True)
@@ -140,84 +229,18 @@ def main() -> int:
         )
 
     capsule_ids = [str(node.get("id")) for node in capsule_nodes]
-    adaptive: dict[str, dict] = {}
-    for capsule_id in capsule_ids:
-        settled_rows = [
-            next((capsule for capsule in row["capsules"] if capsule["id"] == capsule_id), None)
-            for row in frame_rows
-            if row["phase"] == "settled"
-        ]
-        settled_rows = [row for row in settled_rows if row is not None][-3:]
-        if len(settled_rows) != 3:
-            errors.append(f"{capsule_id}: expected three settled relation samples")
-            continue
-        offsets = [
-            tuple(
-                material - stage
-                for material, stage in zip(
-                    metrics.rgb_to_lab(tuple(row["materialMedianRgb"])),
-                    metrics.rgb_to_lab(tuple(row["stageMedianRgb"])),
-                )
-            )
-            for row in settled_rows
-        ]
-        offset = tuple(statistics.median(item[index] for item in offsets) for index in range(3))
-        residuals = []
-        for row in frame_rows:
-            capsule = next(
-                (item for item in row["capsules"] if item["id"] == capsule_id), None
-            )
-            if capsule is None:
-                continue
-            stage_lab = metrics.rgb_to_lab(tuple(capsule["stageMedianRgb"]))
-            expected_lab = tuple(stage_lab[index] + offset[index] for index in range(3))
-            actual_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
-            residual = metrics.delta_e_2000(actual_lab, expected_lab)
-            capsule["adaptiveExpectedLab"] = expected_lab
-            capsule["adaptiveResidualDeltaE00"] = residual
-            residuals.append(residual)
-        adaptive[capsule_id] = {
-            "settledOffsetLab": offset,
-            "residualP95DeltaE00": metrics.percentile(residuals, 0.95),
-            "residualMaximumDeltaE00": max(residuals, default=math.inf),
-            "pass": (
-                metrics.percentile(residuals, 0.95) <= 5.0
-                and max(residuals, default=math.inf) <= 8.0
-            ),
-        }
-    settled_relation_scalars = []
-    for capsule_id in capsule_ids:
-        values = [
-            next(
-                (
-                    capsule["stageDeltaE00"]
-                    for capsule in row["capsules"]
-                    if capsule["id"] == capsule_id
-                ),
-                None,
-            )
-            for row in frame_rows
-            if row["phase"] == "settled"
-        ][-3:]
-        values = [value for value in values if value is not None]
-        settled_relation_scalars.append(
-            statistics.median(values) if values else math.inf
-        )
-    neighboring_relation_differences = [
-        abs(left - right)
-        for left, right in zip(
-            settled_relation_scalars, settled_relation_scalars[1:]
-        )
-    ]
-    maximum_neighbor_relation_difference = max(
-        neighboring_relation_differences, default=0
+    (
+        adaptive,
+        settled_relations,
+        maximum_neighbor_relation_difference,
+        adaptive_errors,
+    ) = adaptive_relation_summary(
+        frame_rows,
+        capsule_ids,
+        metrics,
     )
-    boundary_pass = all(
-        row["minimumMedianBoundaryLuminanceDifference"] >= 0.025
-        and row["minimumP10BoundaryLuminanceDifference"] >= 0.0
-        and row["minimumFractionAtLeast015"] >= 0.70
-        for row in frame_rows
-    )
+    errors.extend(adaptive_errors)
+    boundary_pass = boundary_pass_every_frame(frame_rows)
     result = {
         "schemaVersion": 1,
         "receipt": str(receipt_path),
@@ -230,9 +253,7 @@ def main() -> int:
             "adaptiveCapsules": adaptive,
             "maximumNeighboringSettledRelationDeltaE00":
                 maximum_neighbor_relation_difference,
-            "settledCapsuleRelationDeltaE00": dict(
-                zip(capsule_ids, settled_relation_scalars)
-            ),
+            "settledCapsuleRelationDeltaE00": settled_relations,
             "boundaryPassEveryFrame": boundary_pass,
         },
         "errors": errors,

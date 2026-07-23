@@ -60,6 +60,12 @@ export type FilmstripFrame = {
   markerEventNs?: number;
   encodingCompletedNs?: number;
   mainFramePt: Rect | null;
+  expectedWindowNumber?: number | null;
+  actualWindowNumber?: number | null;
+  displayID?: number | null;
+  refreshHz?: number | null;
+  captureScale?: number | null;
+  pixelFormat?: string | null;
   path: string;
   captureSucceeded: boolean;
   error?: string | null;
@@ -789,7 +795,18 @@ async function run(command: string[], options: { stdout?: "pipe" | "ignore" } = 
   return { stdout, stderr, exitCode };
 }
 
-export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
+type FilmstripIdentity = {
+  runId: string;
+  gitCommit: string;
+  binarySha256: string;
+  pid: number;
+  expectedWindowNumber: number;
+};
+
+export function analyzeIntegratedFilmstrip(
+  trace: NativeTrace,
+  identity?: FilmstripIdentity,
+) {
   const errors: string[] = [];
   const frames = [...(trace.filmstripFrames ?? [])].sort(
     (a, b) => (a.actualFrameNs ?? a.tNs) - (b.actualFrameNs ?? b.tNs),
@@ -846,6 +863,28 @@ export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
   ) {
     errors.push("not every complete ScreenCaptureKit frame was encoded");
   }
+  if (identity) {
+    frames.forEach((frame, index) => {
+      if (
+        frame.expectedWindowNumber !== identity.expectedWindowNumber
+        || frame.actualWindowNumber !== identity.expectedWindowNumber
+      ) {
+        errors.push(
+          `filmstrip frame ${index + 1} changed capture owner: expected ${identity.expectedWindowNumber}, `
+            + `recorded ${frame.expectedWindowNumber ?? "<missing>"}/${frame.actualWindowNumber ?? "<missing>"}`,
+        );
+      }
+      if (
+        trace.display == null
+        || frame.displayID !== trace.display.displayID
+        || frame.refreshHz !== trace.display.refreshHz
+        || frame.captureScale !== 1
+        || frame.pixelFormat !== "BGRA"
+      ) {
+        errors.push(`filmstrip frame ${index + 1} is missing pinned display/BGRA stream identity`);
+      }
+    });
+  }
   const positions = motionFrames.flatMap((frame) =>
     frame.mainFramePt ? [frame.mainFramePt] : [],
   );
@@ -864,6 +903,14 @@ export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
     );
   const enrichedFrames = frames.map((frame) => ({
     ...frame,
+    ...(identity
+      ? {
+        runId: identity.runId,
+        gitCommit: identity.gitCommit,
+        binarySha256: identity.binarySha256,
+        pid: identity.pid,
+      }
+      : {}),
     exists: existsSync(frame.path),
     sha256: existsSync(frame.path) ? sha256(frame.path) : null,
   }));
@@ -1762,7 +1809,13 @@ async function cli() {
         ], { stdout: "ignore" });
         const trace = JSON.parse(readFileSync(rawPath, "utf8")) as NativeTrace;
         const analysis = analyzeTrace(trace);
-        const filmstrip = analyzeIntegratedFilmstrip(trace);
+        const filmstrip = analyzeIntegratedFilmstrip(trace, {
+          runId: evidenceIdentity.runId,
+          gitCommit: evidenceIdentity.gitCommit,
+          binarySha256: evidenceIdentity.binarySha256,
+          pid: Number(main.pid),
+          expectedWindowNumber: pinnedMainWindow.windowId,
+        });
         const entry = {
           attempt,
           rawPath,
