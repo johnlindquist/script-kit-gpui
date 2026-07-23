@@ -208,10 +208,10 @@ pub enum NotesSurfaceMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotesEntryRevealPhase {
-    Constructed,
-    NativeConfigured,
-    FirstFrameComplete,
-    SettlingMaterial,
+    Hidden,
+    AwaitingPostConfigFrame,
+    Settling,
+    AwaitingRevealFrame,
     Visible,
     Cancelled,
 }
@@ -219,10 +219,10 @@ enum NotesEntryRevealPhase {
 impl NotesEntryRevealPhase {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Constructed => "constructed",
-            Self::NativeConfigured => "nativeConfigured",
-            Self::FirstFrameComplete => "firstFrameComplete",
-            Self::SettlingMaterial => "settlingMaterial",
+            Self::Hidden => "hidden",
+            Self::AwaitingPostConfigFrame => "awaitingPostConfigFrame",
+            Self::Settling => "settling",
+            Self::AwaitingRevealFrame => "awaitingRevealFrame",
             Self::Visible => "visible",
             Self::Cancelled => "cancelled",
         }
@@ -237,10 +237,20 @@ struct NotesEntryReveal {
     body_visible: bool,
     native_window_number: Option<i64>,
     native_configured: bool,
+    backdrop_found_or_created: bool,
+    native_selectors_supported: bool,
+    style_applied: bool,
+    fallback_used: bool,
     native_style_signature: Option<String>,
+    configured_at_monotonic_ns: Option<u64>,
     native_configured_at_unix_ms: Option<u64>,
     settle_duration_ms: u64,
     morph_started: bool,
+    completed_frame_count: u8,
+    first_frame_at_monotonic_ns: Option<u64>,
+    settle_complete_at_monotonic_ns: Option<u64>,
+    reveal_requested_at_monotonic_ns: Option<u64>,
+    visible_at_monotonic_ns: Option<u64>,
 }
 
 impl NotesEntryReveal {
@@ -248,14 +258,24 @@ impl NotesEntryReveal {
         Self {
             instance_id,
             generation: 1,
-            phase: NotesEntryRevealPhase::Constructed,
+            phase: NotesEntryRevealPhase::Hidden,
             body_visible: false,
             native_window_number: None,
             native_configured: false,
+            backdrop_found_or_created: false,
+            native_selectors_supported: false,
+            style_applied: false,
+            fallback_used: false,
             native_style_signature: None,
+            configured_at_monotonic_ns: None,
             native_configured_at_unix_ms: None,
             settle_duration_ms: 0,
             morph_started: false,
+            completed_frame_count: 0,
+            first_frame_at_monotonic_ns: None,
+            settle_complete_at_monotonic_ns: None,
+            reveal_requested_at_monotonic_ns: None,
+            visible_at_monotonic_ns: None,
         }
     }
 
@@ -266,16 +286,16 @@ impl NotesEntryReveal {
         let ordered = matches!(
             (self.phase, phase),
             (
-                NotesEntryRevealPhase::Constructed,
-                NotesEntryRevealPhase::NativeConfigured
+                NotesEntryRevealPhase::Hidden,
+                NotesEntryRevealPhase::AwaitingPostConfigFrame
             ) | (
-                NotesEntryRevealPhase::NativeConfigured,
-                NotesEntryRevealPhase::FirstFrameComplete
+                NotesEntryRevealPhase::AwaitingPostConfigFrame,
+                NotesEntryRevealPhase::Settling
             ) | (
-                NotesEntryRevealPhase::FirstFrameComplete,
-                NotesEntryRevealPhase::SettlingMaterial
+                NotesEntryRevealPhase::Settling,
+                NotesEntryRevealPhase::AwaitingRevealFrame
             ) | (
-                NotesEntryRevealPhase::SettlingMaterial,
+                NotesEntryRevealPhase::AwaitingRevealFrame,
                 NotesEntryRevealPhase::Visible
             )
         );
@@ -291,14 +311,24 @@ impl NotesEntryReveal {
         &mut self,
         window_number: i64,
         configured: bool,
+        backdrop_found_or_created: bool,
+        native_selectors_supported: bool,
+        style_applied: bool,
+        fallback_used: bool,
         style_signature: String,
+        configured_at_monotonic_ns: u64,
         configured_at_unix_ms: u64,
         settle_duration_ms: u64,
         morph_started: bool,
     ) {
         self.native_window_number = Some(window_number);
         self.native_configured = configured;
+        self.backdrop_found_or_created = backdrop_found_or_created;
+        self.native_selectors_supported = native_selectors_supported;
+        self.style_applied = style_applied;
+        self.fallback_used = fallback_used;
         self.native_style_signature = Some(style_signature);
+        self.configured_at_monotonic_ns = Some(configured_at_monotonic_ns);
         self.native_configured_at_unix_ms = Some(configured_at_unix_ms);
         self.settle_duration_ms = settle_duration_ms;
         self.morph_started = morph_started;
@@ -313,14 +343,24 @@ impl NotesEntryReveal {
 
     fn restart(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1).max(1);
-        self.phase = NotesEntryRevealPhase::Constructed;
+        self.phase = NotesEntryRevealPhase::Hidden;
         self.body_visible = false;
         self.native_window_number = None;
         self.native_configured = false;
+        self.backdrop_found_or_created = false;
+        self.native_selectors_supported = false;
+        self.style_applied = false;
+        self.fallback_used = false;
         self.native_style_signature = None;
+        self.configured_at_monotonic_ns = None;
         self.native_configured_at_unix_ms = None;
         self.settle_duration_ms = 0;
         self.morph_started = false;
+        self.completed_frame_count = 0;
+        self.first_frame_at_monotonic_ns = None;
+        self.settle_complete_at_monotonic_ns = None;
+        self.reveal_requested_at_monotonic_ns = None;
+        self.visible_at_monotonic_ns = None;
         self.generation
     }
 }

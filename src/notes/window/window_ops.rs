@@ -79,10 +79,23 @@ fn hide_main_window_then_activate_notes(cx: &mut App, notes_handle: gpui::Window
 struct NotesNativeEntryConfig {
     window_number: i64,
     configured: bool,
+    backdrop_found_or_created: bool,
+    native_selectors_supported: bool,
+    style_applied: bool,
     style_signature: String,
+    configured_at_monotonic_ns: u64,
     configured_at_unix_ms: u64,
     settle_duration_ms: u64,
     morph_started: bool,
+}
+
+fn notes_entry_monotonic_ns() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn notes_entry_owner_is_current(
@@ -105,29 +118,88 @@ fn notes_entry_owner_is_current(
             .is_some_and(|current| current.entity_id() == notes_app.entity_id())
 }
 
+fn notes_entry_lifecycle_is_open() -> bool {
+    NOTES_EXIT_TICKET
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .is_none()
+}
+
+#[cfg(target_os = "macos")]
+fn notes_native_window_number(window: &gpui::Window) -> Option<i64> {
+    unsafe {
+        let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+        let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+            return None;
+        };
+        let ns_view = appkit.ns_view.as_ptr() as id;
+        let ns_window: id = msg_send![ns_view, window];
+        (ns_window != nil).then(|| msg_send![ns_window, windowNumber])
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn notes_native_window_number(_window: &gpui::Window) -> Option<i64> {
+    None
+}
+
 fn schedule_notes_entry_reveal(
     handle: gpui::WindowHandle<Root>,
     notes_app: Entity<NotesApp>,
-    native: NotesNativeEntryConfig,
+    native: Option<NotesNativeEntryConfig>,
     cx: &mut App,
 ) {
-    if !notes_entry_owner_is_current(handle, &notes_app) {
+    if !notes_entry_owner_is_current(handle, &notes_app) || !notes_entry_lifecycle_is_open() {
         return;
     }
+    let fallback_used = native.as_ref().is_none_or(|config| !config.configured);
+    let expected_window_number = native.as_ref().map(|config| config.window_number);
+    let settle_duration_ms = if fallback_used {
+        250
+    } else {
+        native
+            .as_ref()
+            .map(|config| config.settle_duration_ms)
+            .unwrap_or(0)
+    };
     let generation = notes_app.update(cx, |app, cx| {
         let generation = app.entry_reveal.generation;
-        app.entry_reveal.record_native_configuration(
-            native.window_number,
-            native.configured,
-            native.style_signature.clone(),
-            native.configured_at_unix_ms,
-            native.settle_duration_ms,
-            native.morph_started,
-        );
+        if let Some(native) = native.as_ref() {
+            app.entry_reveal.record_native_configuration(
+                native.window_number,
+                native.configured,
+                native.backdrop_found_or_created,
+                native.native_selectors_supported,
+                native.style_applied,
+                fallback_used,
+                native.style_signature.clone(),
+                native.configured_at_monotonic_ns,
+                native.configured_at_unix_ms,
+                settle_duration_ms,
+                native.morph_started,
+            );
+        } else {
+            app.entry_reveal.record_native_configuration(
+                -1,
+                false,
+                false,
+                false,
+                false,
+                true,
+                "unavailable".to_string(),
+                notes_entry_monotonic_ns(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                settle_duration_ms,
+                false,
+            );
+        }
         let configured = app
             .entry_reveal
-            .advance(generation, NotesEntryRevealPhase::NativeConfigured);
-        debug_assert!(configured, "Notes entry must begin from Constructed");
+            .advance(generation, NotesEntryRevealPhase::AwaitingPostConfigFrame);
+        debug_assert!(configured, "Notes entry must begin hidden");
         cx.notify();
         generation
     });
@@ -135,17 +207,23 @@ fn schedule_notes_entry_reveal(
     let owner = notes_app.clone();
     let _ = update_notes_window_detached(handle, cx, |window, _cx| {
         window.on_next_frame(move |window, cx| {
-            if !notes_entry_owner_is_current(handle, &owner) {
+            if !notes_entry_owner_is_current(handle, &owner)
+                || !notes_entry_lifecycle_is_open()
+                || expected_window_number
+                    .filter(|number| *number > 0)
+                    .is_some_and(|number| notes_native_window_number(window) != Some(number))
+            {
                 return;
             }
             let should_settle = weak
                 .update(cx, |app, cx| {
                     let first = app
                         .entry_reveal
-                        .advance(generation, NotesEntryRevealPhase::FirstFrameComplete);
+                        .advance(generation, NotesEntryRevealPhase::Settling);
                     if first {
-                        app.entry_reveal
-                            .advance(generation, NotesEntryRevealPhase::SettlingMaterial);
+                        app.entry_reveal.completed_frame_count = 1;
+                        app.entry_reveal.first_frame_at_monotonic_ns =
+                            Some(notes_entry_monotonic_ns());
                         cx.notify();
                     }
                     first
@@ -157,16 +235,44 @@ fn schedule_notes_entry_reveal(
             let weak = weak.clone();
             let owner = owner.clone();
             let any_handle = window.window_handle();
-            let settle_delay = std::time::Duration::from_millis(native.settle_duration_ms);
+            let settle_delay = std::time::Duration::from_millis(settle_duration_ms);
             cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                 cx.background_executor().timer(settle_delay).await;
                 cx.update(|cx| {
-                    if !notes_entry_owner_is_current(handle, &owner) {
+                    if !notes_entry_owner_is_current(handle, &owner)
+                        || !notes_entry_lifecycle_is_open()
+                    {
+                        return;
+                    }
+                    let awaiting_reveal = weak
+                        .update(cx, |app, cx| {
+                            if app
+                                .entry_reveal
+                                .advance(generation, NotesEntryRevealPhase::AwaitingRevealFrame)
+                            {
+                                let now = notes_entry_monotonic_ns();
+                                app.entry_reveal.settle_complete_at_monotonic_ns = Some(now);
+                                app.entry_reveal.reveal_requested_at_monotonic_ns = Some(now);
+                                cx.notify();
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if !awaiting_reveal {
                         return;
                     }
                     let _ = any_handle.update(cx, |_root, window, _cx| {
                         window.on_next_frame(move |_window, cx| {
-                            if !notes_entry_owner_is_current(handle, &owner) {
+                            if !notes_entry_owner_is_current(handle, &owner)
+                                || !notes_entry_lifecycle_is_open()
+                                || expected_window_number
+                                    .filter(|number| *number > 0)
+                                    .is_some_and(|number| {
+                                        notes_native_window_number(_window) != Some(number)
+                                    })
+                            {
                                 return;
                             }
                             let _ = weak.update(cx, |app, cx| {
@@ -174,6 +280,9 @@ fn schedule_notes_entry_reveal(
                                     .entry_reveal
                                     .advance(generation, NotesEntryRevealPhase::Visible)
                                 {
+                                    app.entry_reveal.completed_frame_count = 2;
+                                    app.entry_reveal.visible_at_monotonic_ns =
+                                        Some(notes_entry_monotonic_ns());
                                     cx.notify();
                                 }
                             });
@@ -786,7 +895,7 @@ fn open_notes_window_with_close_behavior(
                 window.activate_window();
                 native
             });
-            if let Ok(Some(native)) = reopened {
+            if let Ok(native) = reopened {
                 crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
                     id: "notes".to_string(),
                     kind: crate::protocol::AutomationWindowKind::Notes,
@@ -1113,9 +1222,7 @@ fn open_notes_window_with_close_behavior(
                 cx.notify();
             });
         });
-        if let Some(native) = native_config {
-            schedule_notes_entry_reveal(handle, notes_app, native, cx);
-        }
+        schedule_notes_entry_reveal(handle, notes_app, native_config, cx);
     }
 
     // NOTE: Theme hot-reload is now handled by the centralized ThemeService
@@ -1743,7 +1850,11 @@ fn configure_notes_as_floating_panel(gpui_window: &gpui::Window) -> Option<Notes
         Some(NotesNativeEntryConfig {
             window_number: receipt.window_number,
             configured: receipt.configured,
+            backdrop_found_or_created: receipt.backdrop_found_or_created,
+            native_selectors_supported: receipt.native_selectors_supported,
+            style_applied: receipt.style_applied,
             style_signature: format!("{:?}", receipt.style_signature),
+            configured_at_monotonic_ns: receipt.configured_at_monotonic_ns,
             configured_at_unix_ms: receipt.configured_at_unix_ms,
             settle_duration_ms: receipt.settle_duration_ms,
             morph_started: receipt.morph_started,

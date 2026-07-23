@@ -1067,7 +1067,7 @@ fn notes_entry_reveal_rejects_stale_callbacks_after_cancel_and_restart() {
     let first_generation = reveal.generation;
     assert!(reveal.advance(
         first_generation,
-        super::NotesEntryRevealPhase::NativeConfigured
+        super::NotesEntryRevealPhase::AwaitingPostConfigFrame
     ));
     assert!(!reveal.body_visible);
 
@@ -1080,16 +1080,50 @@ fn notes_entry_reveal_rejects_stale_callbacks_after_cancel_and_restart() {
     assert!(!reveal.advance(restarted_generation, super::NotesEntryRevealPhase::Visible));
     assert!(reveal.advance(
         restarted_generation,
-        super::NotesEntryRevealPhase::NativeConfigured
+        super::NotesEntryRevealPhase::AwaitingPostConfigFrame
     ));
+    assert!(reveal.advance(restarted_generation, super::NotesEntryRevealPhase::Settling));
     assert!(reveal.advance(
         restarted_generation,
-        super::NotesEntryRevealPhase::FirstFrameComplete
-    ));
-    assert!(reveal.advance(
-        restarted_generation,
-        super::NotesEntryRevealPhase::SettlingMaterial
+        super::NotesEntryRevealPhase::AwaitingRevealFrame
     ));
     assert!(reveal.advance(restarted_generation, super::NotesEntryRevealPhase::Visible));
     assert!(reveal.body_visible);
+}
+
+#[test]
+fn notes_entry_reveal_fallback_is_bounded_and_still_requires_two_frames() {
+    let mut reveal = super::NotesEntryReveal::new(42);
+    let generation = reveal.generation;
+    reveal.record_native_configuration(
+        -1,
+        false,
+        false,
+        false,
+        false,
+        true,
+        "unavailable".to_string(),
+        10,
+        20,
+        250,
+        false,
+    );
+    assert!(reveal.fallback_used);
+    assert!(!reveal.native_configured);
+    assert!(reveal.advance(
+        generation,
+        super::NotesEntryRevealPhase::AwaitingPostConfigFrame
+    ));
+    assert!(reveal.advance(generation, super::NotesEntryRevealPhase::Settling));
+    reveal.completed_frame_count = 1;
+    assert!(!reveal.body_visible);
+    assert!(reveal.advance(
+        generation,
+        super::NotesEntryRevealPhase::AwaitingRevealFrame
+    ));
+    assert!(!reveal.body_visible);
+    assert!(reveal.advance(generation, super::NotesEntryRevealPhase::Visible));
+    reveal.completed_frame_count = 2;
+    assert!(reveal.body_visible);
+    assert_eq!(reveal.completed_frame_count, 2);
 }

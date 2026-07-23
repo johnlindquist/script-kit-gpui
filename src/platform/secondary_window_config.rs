@@ -15,10 +15,33 @@ enum GlassMorphVariant {
 pub(crate) struct NativeGlassEntryReceipt {
     pub(crate) window_number: i64,
     pub(crate) configured: bool,
+    pub(crate) backdrop_found_or_created: bool,
+    pub(crate) native_selectors_supported: bool,
+    pub(crate) style_applied: bool,
     pub(crate) style_signature: NativeGlassStyleSignature,
     pub(crate) morph_started: bool,
     pub(crate) settle_duration_ms: u64,
+    pub(crate) configured_at_monotonic_ns: u64,
     pub(crate) configured_at_unix_ms: u64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct TahoeGlassBackdropResult {
+    created: bool,
+    found_or_created: bool,
+    native_selectors_supported: bool,
+    style_applied: bool,
+    style_signature: NativeGlassStyleSignature,
+}
+
+fn glass_monotonic_ns() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(target_os = "macos")]
@@ -292,10 +315,6 @@ unsafe fn configure_window_vibrancy_common(
     is_dark: bool,
     morph_variant: GlassMorphVariant,
 ) -> NativeGlassEntryReceipt {
-    let configured_at_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
     // Clear window appearance so GPUI can detect system appearance changes.
     // Appearance is set on individual NSVisualEffectViews instead.
     let _: () = msg_send![window, setAppearance: nil];
@@ -358,7 +377,8 @@ unsafe fn configure_window_vibrancy_common(
         );
     }
 
-    let glass_created = configure_tahoe_window_backdrop(window, log_target, window_name);
+    let backdrop = configure_tahoe_window_backdrop_with_result(window, log_target, window_name);
+    let glass_created = backdrop.is_some_and(|result| result.created);
     let morph_tuning = glass_morph_tuning();
     // Secondary/overlay windows (notes, dictation, confirm, actions, AI,
     // flow manager, inline popups) are created per appearance, so a freshly
@@ -402,14 +422,35 @@ unsafe fn configure_window_vibrancy_common(
         ),
     );
     let window_number: i64 = msg_send![window, windowNumber];
+    let style_signature = backdrop
+        .map(|result| result.style_signature)
+        .unwrap_or_else(|| {
+            resolve_native_glass_style(
+                &crate::theme::get_cached_theme(),
+                NativeGlassSurfaceRole::WindowBackdrop,
+            )
+            .signature
+        });
+    let configured_at_monotonic_ns = glass_monotonic_ns();
+    let configured_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let backdrop_found_or_created = backdrop.is_some_and(|result| result.found_or_created);
+    let native_selectors_supported =
+        backdrop.is_some_and(|result| result.native_selectors_supported);
+    let style_applied = backdrop.is_some_and(|result| result.style_applied);
     NativeGlassEntryReceipt {
         window_number,
-        configured: content_view != nil,
-        style_signature: resolve_native_glass_style(
-            &crate::theme::get_cached_theme(),
-            NativeGlassSurfaceRole::WindowBackdrop,
-        )
-        .signature,
+        configured: window_number > 0
+            && content_view != nil
+            && backdrop_found_or_created
+            && native_selectors_supported
+            && style_applied,
+        backdrop_found_or_created,
+        native_selectors_supported,
+        style_applied,
+        style_signature,
         morph_started: glass_created && morph_tuning.is_some(),
         settle_duration_ms: if glass_created {
             morph_tuning
@@ -418,6 +459,7 @@ unsafe fn configure_window_vibrancy_common(
         } else {
             0
         },
+        configured_at_monotonic_ns,
         configured_at_unix_ms,
     }
 }
@@ -2284,14 +2326,24 @@ pub(crate) unsafe fn apply_theme_glass_tint(glass_view: id) -> bool {
 /// `window` must be a valid NSWindow on the main thread (checked + null-guarded).
 #[cfg(target_os = "macos")]
 unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_name: &str) -> bool {
+    configure_tahoe_window_backdrop_with_result(window, log_target, window_name)
+        .is_some_and(|result| result.created)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn configure_tahoe_window_backdrop_with_result(
+    window: id,
+    log_target: &str,
+    window_name: &str,
+) -> Option<TahoeGlassBackdropResult> {
     use cocoa::appkit::{NSViewHeightSizable, NSViewWidthSizable};
     use cocoa::foundation::NSRect;
 
     if window.is_null() {
-        return false;
+        return None;
     }
     if require_main_thread("configure_tahoe_window_backdrop") {
-        return false;
+        return None;
     }
 
     // Reconcile capability loss as well as installation. In particular, the
@@ -2308,7 +2360,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                 window_name
             ),
         );
-        return false;
+        return None;
     }
 
     let Some(glass_class) = tahoe_liquid_glass_class() else {
@@ -2319,7 +2371,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                 window_name
             ),
         );
-        return false;
+        return None;
     };
 
     let content_view: id = msg_send![window, contentView];
@@ -2331,7 +2383,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                 window_name
             ),
         );
-        return false;
+        return None;
     }
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
@@ -2355,7 +2407,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                     superview == content_view
                 ),
             );
-            return false;
+            return None;
         }
     } else {
         let Some(backdrop_class) = tahoe_glass_backdrop_view_class(glass_class) else {
@@ -2366,7 +2418,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                     window_name
                 ),
             );
-            return false;
+            return None;
         };
         let allocated: id = msg_send![backdrop_class, alloc];
         glass_view = msg_send![allocated, initWithFrame: backdrop_frame];
@@ -2378,7 +2430,7 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
                     window_name
                 ),
             );
-            return false;
+            return None;
         }
         let identifier = tahoe_ns_string(TAHOE_GLASS_BACKDROP_IDENTIFIER);
         if identifier != nil {
@@ -2402,13 +2454,16 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
     let _: () =
         msg_send![glass_view, setAutoresizingMask: NSViewWidthSizable | NSViewHeightSizable];
 
-    let tint_applied = apply_native_glass_style(
-        glass_view,
-        resolve_native_glass_style(
-            &crate::theme::get_cached_theme(),
-            NativeGlassSurfaceRole::WindowBackdrop,
-        ),
+    let style = resolve_native_glass_style(
+        &crate::theme::get_cached_theme(),
+        NativeGlassSurfaceRole::WindowBackdrop,
     );
+    let tint_selector_supported: bool =
+        msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
+    let corner_selector_supported: bool =
+        msg_send![glass_view, respondsToSelector: sel!(setCornerRadius:)];
+    let native_selectors_supported = tint_selector_supported && corner_selector_supported;
+    let tint_applied = apply_native_glass_style(glass_view, style);
 
     let corner_radius = {
         let radius = tahoe_content_corner_radius(content_view);
@@ -2493,7 +2548,13 @@ unsafe fn configure_tahoe_window_backdrop(window: id, log_target: &str, window_n
         );
     }
 
-    created
+    Some(TahoeGlassBackdropResult {
+        created,
+        found_or_created: glass_count == 1 && backmost,
+        native_selectors_supported,
+        style_applied: tint_applied,
+        style_signature: style.signature,
+    })
 }
 
 /// Build an autoreleased NSString from a Rust `&str` (nil on interior NUL).
