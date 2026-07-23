@@ -229,12 +229,18 @@ impl NotesEntryRevealPhase {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NotesEntryReveal {
     instance_id: u64,
     generation: u64,
     phase: NotesEntryRevealPhase,
     body_visible: bool,
+    native_window_number: Option<i64>,
+    native_configured: bool,
+    native_style_signature: Option<String>,
+    native_configured_at_unix_ms: Option<u64>,
+    settle_duration_ms: u64,
+    morph_started: bool,
 }
 
 impl NotesEntryReveal {
@@ -244,6 +250,12 @@ impl NotesEntryReveal {
             generation: 1,
             phase: NotesEntryRevealPhase::Constructed,
             body_visible: false,
+            native_window_number: None,
+            native_configured: false,
+            native_style_signature: None,
+            native_configured_at_unix_ms: None,
+            settle_duration_ms: 0,
+            morph_started: false,
         }
     }
 
@@ -251,9 +263,45 @@ impl NotesEntryReveal {
         if self.generation != generation || self.phase == NotesEntryRevealPhase::Cancelled {
             return false;
         }
+        let ordered = matches!(
+            (self.phase, phase),
+            (
+                NotesEntryRevealPhase::Constructed,
+                NotesEntryRevealPhase::NativeConfigured
+            ) | (
+                NotesEntryRevealPhase::NativeConfigured,
+                NotesEntryRevealPhase::FirstFrameComplete
+            ) | (
+                NotesEntryRevealPhase::FirstFrameComplete,
+                NotesEntryRevealPhase::SettlingMaterial
+            ) | (
+                NotesEntryRevealPhase::SettlingMaterial,
+                NotesEntryRevealPhase::Visible
+            )
+        );
+        if !ordered {
+            return false;
+        }
         self.phase = phase;
         self.body_visible = phase == NotesEntryRevealPhase::Visible;
         true
+    }
+
+    fn record_native_configuration(
+        &mut self,
+        window_number: i64,
+        configured: bool,
+        style_signature: String,
+        configured_at_unix_ms: u64,
+        settle_duration_ms: u64,
+        morph_started: bool,
+    ) {
+        self.native_window_number = Some(window_number);
+        self.native_configured = configured;
+        self.native_style_signature = Some(style_signature);
+        self.native_configured_at_unix_ms = Some(configured_at_unix_ms);
+        self.settle_duration_ms = settle_duration_ms;
+        self.morph_started = morph_started;
     }
 
     fn cancel(&mut self) -> u64 {
@@ -267,6 +315,12 @@ impl NotesEntryReveal {
         self.generation = self.generation.wrapping_add(1).max(1);
         self.phase = NotesEntryRevealPhase::Constructed;
         self.body_visible = false;
+        self.native_window_number = None;
+        self.native_configured = false;
+        self.native_style_signature = None;
+        self.native_configured_at_unix_ms = None;
+        self.settle_duration_ms = 0;
+        self.morph_started = false;
         self.generation
     }
 }

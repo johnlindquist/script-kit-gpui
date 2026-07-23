@@ -951,6 +951,7 @@ pub fn automation_state() -> serde_json::Value {
             "generation": generation,
             "source": "runtime.dictation.cleanupState",
         },
+        "windowLifecycle": crate::dictation::dictation_window_lifecycle_receipt(),
         "safety": {
             "noMicrophoneCaptureStarted": true,
             "noSystemSettingsOpened": true,

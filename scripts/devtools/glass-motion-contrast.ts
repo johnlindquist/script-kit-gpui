@@ -86,17 +86,21 @@ async function runLockedTreatmentCell(options: {
   try {
     await waitForFile(fixtureReceiptPath);
     const mainDirectory = join(cellDirectory, "main-window");
-    mainResult = await run([
+    const motionRequired = options.fixture === "saturated-stripes";
+    const mainCommand = [
       "bun",
       resolve(import.meta.dir, "main-window-native-drag.ts"),
       "--binary",
       options.binary,
       "--out",
       mainDirectory,
-      "--stationary-only",
+      ...(motionRequired
+        ? ["--trials", "fast-horizontal"]
+        : ["--stationary-only"]),
       "--widths",
       "none",
-    ], {
+    ];
+    mainResult = await run(mainCommand, {
       SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
     });
     const mainReceiptPath = join(mainDirectory, "receipt.json");
@@ -117,14 +121,38 @@ async function runLockedTreatmentCell(options: {
     const metrics = existsSync(metricsPath)
       ? JSON.parse(readFileSync(metricsPath, "utf8"))
       : null;
+    const motionMetricsPath = join(cellDirectory, "motion-metrics.json");
+    const motionMetricsResult = motionRequired && existsSync(mainReceiptPath)
+      ? await run([
+        "python3",
+        resolve(import.meta.dir, "../agentic/glass-motion-color-metrics.py"),
+        "--receipt",
+        mainReceiptPath,
+        "--trajectory",
+        "fast-horizontal",
+        "--out",
+        motionMetricsPath,
+      ])
+      : { exitCode: motionRequired ? 1 : 0, stdout: "", stderr: "" };
+    const motionMetrics = existsSync(motionMetricsPath)
+      ? JSON.parse(readFileSync(motionMetricsPath, "utf8"))
+      : null;
     const structuralPass = mainReceipt?.pass === true;
     const materialRelationPass = metrics != null
-      && metrics.summary?.maximumStageDeltaE76 <= 12
+      && metrics.summary?.maximumStageDeltaE00
+        <= (motionRequired ? 25 : 10)
       && metrics.summary?.maximumStageAbsoluteLStarDifference <= 12;
     const boundaryPass = metrics != null
       && metrics.summary?.minimumMedianBoundaryLuminanceDifference >= 0.040
       && metrics.summary?.minimumP10BoundaryLuminanceDifference >= 0.015
       && metrics.summary?.minimumFractionAtLeast015 >= 0.80;
+    const motionColorPass = !motionRequired
+      || (motionMetricsResult.exitCode === 0
+        && motionMetrics?.motionFrameCount === 15
+        && motionMetrics?.settledFrameCount === 3
+        && motionMetrics?.summary?.maximumStageDeltaE00 <= 25
+        && motionMetrics?.summary?.maximumStageAbsoluteLStarDifference <= 18
+        && motionMetrics?.summary?.motionRelationRangeDeltaE00 <= 10);
     return {
       slug,
       fixture: options.fixture,
@@ -134,14 +162,25 @@ async function runLockedTreatmentCell(options: {
       fixtureReceipt: JSON.parse(readFileSync(fixtureReceiptPath, "utf8")),
       mainReceiptPath,
       metricsPath,
+      motionRequired,
+      motionMetricsPath: motionRequired ? motionMetricsPath : null,
       mainExitCode: mainResult.exitCode,
       metricsExitCode: metricsResult.exitCode,
+      motionMetricsExitCode: motionMetricsResult.exitCode,
       metrics,
+      motionMetrics,
       structuralPass,
       materialRelationPass,
       boundaryPass,
-      pass: structuralPass && materialRelationPass && boundaryPass,
-      stderr: `${mainResult.stderr}\n${metricsResult.stderr}`.trim().slice(-4_000),
+      motionColorPass,
+      pass: structuralPass
+        && materialRelationPass
+        && boundaryPass
+        && motionColorPass,
+      stderr:
+        `${mainResult.stderr}\n${metricsResult.stderr}\n${motionMetricsResult.stderr}`
+          .trim()
+          .slice(-4_000),
     };
   } finally {
     fixture.kill();
@@ -236,7 +275,12 @@ async function main() {
     const stability = cells.find((cell) => cell.fixture === "saturated-stripes");
     const neutral = cells.filter((cell) => cell.fixture !== "saturated-stripes");
     const stabilityPass = stability?.structuralPass === true
-      && stability?.metrics?.summary?.maximumStageAbsoluteLStarDifference <= 12;
+      && stability?.motionColorPass === true
+      && stability?.motionMetrics?.motionFrameCount === 15
+      && stability?.motionMetrics?.settledFrameCount === 3
+      && stability?.motionMetrics?.summary?.maximumStageDeltaE00 <= 25
+      && stability?.motionMetrics?.summary?.maximumStageAbsoluteLStarDifference <= 18
+      && stability?.motionMetrics?.summary?.motionRelationRangeDeltaE00 <= 10;
     const neutralPass = neutral.length === 3 && neutral.every((cell) => cell.pass);
     lockedTreatment = {
       helper,
@@ -264,6 +308,7 @@ async function main() {
   }
 
   let rapidToggle: any = null;
+  let lifecycleFilmstrip: any = null;
   if (mode === "all" || mode === "green") {
     const rapidPath = join(outputDirectory, "rapid-toggle.json");
     const rapidResult = await run([
@@ -284,7 +329,45 @@ async function main() {
         : null,
       stderr: rapidResult.stderr.slice(-4_000),
     };
+    const lifecycleDirectory = join(outputDirectory, "lifecycle-filmstrips");
+    const lifecycleResult = await run([
+      "bun",
+      resolve(import.meta.dir, "glass-lifecycle-filmstrip.ts"),
+      "--binary",
+      binary,
+      "--out",
+      lifecycleDirectory,
+    ], {
+      SCRIPT_KIT_TEST_STATUS: process.env.SCRIPT_KIT_TEST_STATUS ?? "1",
+    });
+    const lifecycleReceiptPath = join(lifecycleDirectory, "receipt.json");
+    lifecycleFilmstrip = {
+      exitCode: lifecycleResult.exitCode,
+      receiptPath: lifecycleReceiptPath,
+      receipt: existsSync(lifecycleReceiptPath)
+        ? JSON.parse(readFileSync(lifecycleReceiptPath, "utf8"))
+        : null,
+      stderr: lifecycleResult.stderr.slice(-4_000),
+    };
   }
+  const evidenceComplete = mode === "all"
+    ? mainReceipt?.visualMatrix?.states?.length === 4
+      && mainReceipt?.widthMatrix?.rows?.length === 6
+      && lockedTreatment?.cells?.length === 4
+      && lockedTreatment?.cells?.find(
+          (cell: any) => cell.fixture === "saturated-stripes",
+        )?.motionMetrics?.frames?.length === 18
+      && lifecycleFilmstrip?.receipt?.scenarios?.length === 4
+      && Object.keys(rapidToggle?.receipt?.phases ?? {}).length === 3
+    : mode === "green"
+    ? lifecycleFilmstrip?.receipt?.scenarios?.length === 4
+      && Object.keys(rapidToggle?.receipt?.phases ?? {}).length === 3
+    : mode === "locked"
+    ? lockedTreatment?.cells?.length === 4
+      && lockedTreatment?.cells?.find(
+          (cell: any) => cell.fixture === "saturated-stripes",
+        )?.motionMetrics?.frames?.length === 18
+    : true;
   const receipt = {
     schemaVersion: 1,
     startedAt,
@@ -315,17 +398,32 @@ async function main() {
       disposition,
       stderr: mainResult.stderr.slice(-4_000),
     },
-    scenarios: {
+    scenarioContract: {
       stationaryBackgrounds: ["dark-terminal", "light-document", "material-matched"],
       motionBackground: "saturated-stripes",
       widthsPt: [750, 560, 480, 400, 320, 280],
       lifecycle: ["main-exit", "notes-entry", "notes-close-before-settle-reopen"],
     },
+    executedScenarios: {
+      mainVisualMatrixRows: mainReceipt?.visualMatrix?.states ?? [],
+      mainWidthRows: mainReceipt?.widthMatrix?.rows ?? [],
+      saturatedMotionFrames:
+        lockedTreatment?.cells?.find(
+          (cell: any) => cell.fixture === "saturated-stripes",
+        )?.motionMetrics?.frames ?? [],
+      lifecycle: lifecycleFilmstrip?.receipt?.scenarios ?? [],
+      rapidTogglePhases: rapidToggle?.receipt?.phases ?? {},
+    },
     lockedTreatment,
     rapidToggle,
+    lifecycleFilmstrip,
+    evidenceComplete,
     pass: disposition === "EVALUABLE_PASS"
+      && evidenceComplete
       && (lockedTreatment == null || lockedTreatment.pass === true)
-      && (rapidToggle == null || rapidToggle.receipt?.pass === true),
+      && (rapidToggle == null || rapidToggle.receipt?.pass === true)
+      && (lifecycleFilmstrip == null
+        || lifecycleFilmstrip.receipt?.pass === true),
     disposition,
   };
   const receiptPath = explicitReceiptPath ?? join(outputDirectory, "receipt.json");

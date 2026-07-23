@@ -7,7 +7,10 @@ import ScreenCaptureKit
 
 private struct Arguments {
     var windowID: CGWindowID?
+    var pid: pid_t?
+    var title: String?
     var outputDirectory: String?
+    var readyPath: String?
     var durationMs = 250
     var frameRate = 120
 }
@@ -23,9 +26,24 @@ private func parseArguments() -> Arguments {
                 result.windowID = CGWindowID(values[index + 1])
                 index += 1
             }
+        case "--pid":
+            if index + 1 < values.count {
+                result.pid = pid_t(values[index + 1])
+                index += 1
+            }
+        case "--title":
+            if index + 1 < values.count {
+                result.title = values[index + 1]
+                index += 1
+            }
         case "--out":
             if index + 1 < values.count {
                 result.outputDirectory = values[index + 1]
+                index += 1
+            }
+        case "--ready":
+            if index + 1 < values.count {
+                result.readyPath = values[index + 1]
                 index += 1
             }
         case "--duration-ms":
@@ -144,19 +162,33 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
     }
 }
 
-private func resolveWindow(_ id: CGWindowID) async throws -> SCWindow {
-    let content = try await SCShareableContent.excludingDesktopWindows(
-        false,
-        onScreenWindowsOnly: true
-    )
-    guard let window = content.windows.first(where: { $0.windowID == id }) else {
-        throw NSError(
-            domain: "macos-native-window-filmstrip",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "ScreenCaptureKit window \(id) unavailable"]
+private func resolveWindow(_ arguments: Arguments) async throws -> SCWindow {
+    for _ in 0..<100 {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
         )
+        if let window = content.windows.first(where: { candidate in
+            if let id = arguments.windowID {
+                return candidate.windowID == id
+            }
+            guard let pid = arguments.pid else { return false }
+            let pidMatches = candidate.owningApplication?.processID == pid
+            let titleMatches = arguments.title == nil || candidate.title == arguments.title
+            return pidMatches && titleMatches
+        }) {
+            return window
+        }
+        try await Task.sleep(for: .milliseconds(20))
     }
-    return window
+    throw NSError(
+        domain: "macos-native-window-filmstrip",
+        code: 1,
+        userInfo: [
+            NSLocalizedDescriptionKey:
+                "ScreenCaptureKit window unavailable for id=\(arguments.windowID.map(String.init) ?? "nil") pid=\(arguments.pid.map(String.init) ?? "nil") title=\(arguments.title ?? "nil")"
+        ]
+    )
 }
 
 private func writeReceipt(_ receipt: Receipt, to path: URL) throws {
@@ -169,9 +201,9 @@ private func writeReceipt(_ receipt: Receipt, to path: URL) throws {
 private enum Main {
     static func main() async {
         let arguments = parseArguments()
-        guard let windowID = arguments.windowID,
+        guard arguments.windowID != nil || arguments.pid != nil,
               let outputDirectory = arguments.outputDirectory else {
-            fputs("usage: macos-native-window-filmstrip --window-id ID --out DIR [--duration-ms N] [--fps N]\n", stderr)
+            fputs("usage: macos-native-window-filmstrip (--window-id ID | --pid PID [--title TITLE]) --out DIR [--ready PATH] [--duration-ms N] [--fps N]\n", stderr)
             exit(64)
         }
         let directory = URL(fileURLWithPath: outputDirectory, isDirectory: true)
@@ -183,8 +215,10 @@ private enum Main {
         var stream: SCStream?
         var capture: Capture?
         var errors: [String] = []
+        var resolvedWindowID = arguments.windowID ?? 0
         do {
-            let window = try await resolveWindow(windowID)
+            let window = try await resolveWindow(arguments)
+            resolvedWindowID = window.windowID
             let receiver = Capture(outputDirectory: directory)
             let configuration = SCStreamConfiguration()
             configuration.width = max(1, Int(window.frame.width * 2))
@@ -211,6 +245,17 @@ private enum Main {
             try await createdStream.startCapture()
             stream = createdStream
             capture = receiver
+            if let readyPath = arguments.readyPath {
+                let ready = [
+                    "windowID": Int(window.windowID),
+                    "startedAt": ISO8601DateFormatter().string(from: Date()),
+                ] as [String: Any]
+                let data = try JSONSerialization.data(
+                    withJSONObject: ready,
+                    options: [.prettyPrinted, .sortedKeys]
+                )
+                try data.write(to: URL(fileURLWithPath: readyPath), options: .atomic)
+            }
             try await Task.sleep(for: .milliseconds(arguments.durationMs))
             try await createdStream.stopCapture()
         } catch {
@@ -227,7 +272,7 @@ private enum Main {
         let receipt = Receipt(
             schemaVersion: 1,
             status: errors.isEmpty ? "ok" : "invalid",
-            windowID: windowID,
+            windowID: resolvedWindowID,
             requestedDurationMs: arguments.durationMs,
             requestedFrameRate: arguments.frameRate,
             startedAt: startedAt,

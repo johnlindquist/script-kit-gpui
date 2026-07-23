@@ -11,6 +11,17 @@ enum GlassMorphVariant {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeGlassEntryReceipt {
+    pub(crate) window_number: i64,
+    pub(crate) configured: bool,
+    pub(crate) style_signature: NativeGlassStyleSignature,
+    pub(crate) morph_started: bool,
+    pub(crate) settle_duration_ms: u64,
+    pub(crate) configured_at_unix_ms: u64,
+}
+
+#[cfg(target_os = "macos")]
 impl GlassMorphVariant {
     fn log_name(self) -> &'static str {
         match self {
@@ -112,6 +123,12 @@ static GLASS_EXIT_GENERATIONS: std::sync::Mutex<Vec<(usize, u64)>> =
 pub(crate) struct GlassExitTicket {
     window_key: usize,
     generation: u64,
+}
+
+impl GlassExitTicket {
+    pub(crate) fn generation(self) -> u64 {
+        self.generation
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -274,7 +291,11 @@ unsafe fn configure_window_vibrancy_common(
     window_name: &str,
     is_dark: bool,
     morph_variant: GlassMorphVariant,
-) {
+) -> NativeGlassEntryReceipt {
+    let configured_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     // Clear window appearance so GPUI can detect system appearance changes.
     // Appearance is set on individual NSVisualEffectViews instead.
     let _: () = msg_send![window, setAppearance: nil];
@@ -338,6 +359,7 @@ unsafe fn configure_window_vibrancy_common(
     }
 
     let glass_created = configure_tahoe_window_backdrop(window, log_target, window_name);
+    let morph_tuning = glass_morph_tuning();
     // Secondary/overlay windows (notes, dictation, confirm, actions, AI,
     // flow manager, inline popups) are created per appearance, so a freshly
     // created backdrop means the window just appeared: morph it in.
@@ -379,6 +401,25 @@ unsafe fn configure_window_vibrancy_common(
             window_name, appearance_name, material_name
         ),
     );
+    let window_number: i64 = msg_send![window, windowNumber];
+    NativeGlassEntryReceipt {
+        window_number,
+        configured: content_view != nil,
+        style_signature: resolve_native_glass_style(
+            &crate::theme::get_cached_theme(),
+            NativeGlassSurfaceRole::WindowBackdrop,
+        )
+        .signature,
+        morph_started: glass_created && morph_tuning.is_some(),
+        settle_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.duration * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        configured_at_unix_ms,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2723,6 +2764,15 @@ pub fn configure_footer_popup_window(_window: *mut std::ffi::c_void, _is_dark: b
 /// - NSAppearance and content view pointers are nil-checked before use.
 #[cfg(target_os = "macos")]
 pub unsafe fn configure_secondary_window_vibrancy(window: id, window_name: &str, is_dark: bool) {
+    let _ = configure_secondary_window_vibrancy_with_receipt(window, window_name, is_dark);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn configure_secondary_window_vibrancy_with_receipt(
+    window: id,
+    window_name: &str,
+    is_dark: bool,
+) -> Option<NativeGlassEntryReceipt> {
     if window.is_null() {
         logging::log(
             "PANEL",
@@ -2731,16 +2781,16 @@ pub unsafe fn configure_secondary_window_vibrancy(window: id, window_name: &str,
                 window_name
             ),
         );
-        return;
+        return None;
     }
 
-    configure_window_vibrancy_common(
+    Some(configure_window_vibrancy_common(
         window,
         "PANEL",
         window_name,
         is_dark,
         GlassMorphVariant::WindowFrame,
-    );
+    ))
 }
 
 /// Configure the live dictation overlay with the shared native material path.

@@ -201,7 +201,7 @@ impl Render for NotesApp {
         let content = if in_agent_chat_mode {
             self.render_agent_chat_surface(cx)
         } else {
-            self.render_editor(cx).into_any_element()
+            self.render_editor(body_opacity, cx).into_any_element()
         };
 
         let stage = if detached_footer {
@@ -213,7 +213,6 @@ impl Render for NotesApp {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .opacity(body_opacity)
                 .rounded(px(crate::ui::chrome::LIQUID_GLASS_WINDOW_RADIUS_PX))
                 .when_some(vibrancy_bg, |d, bg| d.bg(bg))
                 .children(theme_background_gradients)
@@ -228,7 +227,6 @@ impl Render for NotesApp {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .opacity(body_opacity)
                 .when_some(vibrancy_bg, |d, bg| d.bg(bg))
                 .children(theme_background_gradients)
                 .child(content)

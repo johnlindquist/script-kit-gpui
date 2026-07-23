@@ -509,6 +509,12 @@ impl NotesApp {
                 "generation": self.entry_reveal.generation,
                 "phase": self.entry_reveal.phase.as_str(),
                 "bodyVisible": self.entry_reveal.body_visible,
+                "nativeWindowNumber": self.entry_reveal.native_window_number,
+                "nativeConfigured": self.entry_reveal.native_configured,
+                "nativeStyleSignature": self.entry_reveal.native_style_signature,
+                "nativeConfiguredAtUnixMs": self.entry_reveal.native_configured_at_unix_ms,
+                "settleDurationMs": self.entry_reveal.settle_duration_ms,
+                "morphStarted": self.entry_reveal.morph_started,
             },
             "windowLifecycle": {
                 "schemaVersion": 1,
@@ -525,6 +531,12 @@ impl NotesApp {
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
                     .is_some(),
+                "exitGeneration": NOTES_EXIT_TICKET
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .as_ref()
+                    .copied()
+                    .map(crate::platform::GlassExitTicket::generation),
             },
             "autosize": {
                 "schemaVersion": 1,

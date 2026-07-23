@@ -200,6 +200,12 @@ pub(crate) const FOOTER_PROFILE_ICON_TOKEN: &str = "bot";
 pub(crate) const FOOTER_PROFILE_ICON_PATH: &str = "icons/bot.svg";
 pub(crate) const FOOTER_STATUS_DOT_SIZE_PX: f32 = 6.0;
 pub(crate) const FOOTER_LEFT_INFO_GAP_PX: f32 = 6.0;
+/// Smallest useful visible tail for a truncated CWD label after measuring
+/// its real AppKit width.
+pub(crate) const FOOTER_CWD_LABEL_MIN_WIDTH_PX: f32 = 24.0;
+/// Smallest useful visible tail for a truncated primary label after measuring
+/// its real AppKit width.
+pub(crate) const FOOTER_PRIMARY_LABEL_MIN_WIDTH_PX: f32 = 32.0;
 pub(crate) const FOOTER_BRAILLE_SPINNER_FONT_PX: f32 = 15.0;
 pub(crate) const FOOTER_BRAILLE_SPINNER_LANE_PX: f32 = 12.0;
 

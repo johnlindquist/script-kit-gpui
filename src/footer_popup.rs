@@ -3439,6 +3439,19 @@ enum FooterLeftInfoDegradation {
 struct FooterLeftInfoAllocation {
     degradation: FooterLeftInfoDegradation,
     available_width: f64,
+    cwd_label_width: f64,
+    primary_label_width: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FooterLeftInfoMeasurements {
+    cwd_fixed_width: f64,
+    cwd_label_width: f64,
+    primary_fixed_width: f64,
+    primary_label_width: f64,
+    has_cwd: bool,
+    primary_visible_without_label: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -3471,23 +3484,77 @@ fn resolve_native_footer_lanes(
 }
 
 #[cfg(target_os = "macos")]
-fn resolve_footer_left_info_allocation(available_width: f64) -> FooterLeftInfoAllocation {
-    let degradation = if available_width >= 260.0 {
-        FooterLeftInfoDegradation::Full
-    } else if available_width >= 190.0 {
-        FooterLeftInfoDegradation::TruncatedLabels
-    } else if available_width >= 132.0 {
-        FooterLeftInfoDegradation::CwdAffordanceOnly
-    } else if available_width >= 92.0 {
-        FooterLeftInfoDegradation::PrimaryOnly
-    } else if available_width >= 44.0 {
-        FooterLeftInfoDegradation::PrimaryAffordanceOnly
+fn resolve_footer_left_info_allocation(
+    available_width: f64,
+    measured: FooterLeftInfoMeasurements,
+) -> FooterLeftInfoAllocation {
+    let available_width = available_width.max(0.0);
+    let cwd_min = measured.cwd_label_width.min(f64::from(
+        crate::components::footer_chrome::FOOTER_CWD_LABEL_MIN_WIDTH_PX,
+    ));
+    let primary_min = measured.primary_label_width.min(f64::from(
+        crate::components::footer_chrome::FOOTER_PRIMARY_LABEL_MIN_WIDTH_PX,
+    ));
+    let fixed = measured.cwd_fixed_width + measured.primary_fixed_width;
+    let full_required = fixed + measured.cwd_label_width + measured.primary_label_width;
+    let truncated_required = fixed + cwd_min + primary_min;
+    let cwd_affordance_required = fixed + primary_min;
+    let primary_only_required = measured.primary_fixed_width + primary_min;
+
+    let (degradation, cwd_label_width, primary_label_width) = if full_required <= 0.0 {
+        (FooterLeftInfoDegradation::Hidden, 0.0, 0.0)
+    } else if available_width >= full_required {
+        (
+            FooterLeftInfoDegradation::Full,
+            measured.cwd_label_width,
+            measured.primary_label_width,
+        )
+    } else if measured.has_cwd && available_width >= truncated_required {
+        let flexible = (available_width - fixed - cwd_min - primary_min).max(0.0);
+        let cwd_extra = (measured.cwd_label_width - cwd_min).max(0.0);
+        let primary_extra = (measured.primary_label_width - primary_min).max(0.0);
+        let total_extra = cwd_extra + primary_extra;
+        let cwd_share = if total_extra > 0.0 {
+            flexible * cwd_extra / total_extra
+        } else {
+            0.0
+        };
+        let cwd_width = (cwd_min + cwd_share).min(measured.cwd_label_width);
+        (
+            FooterLeftInfoDegradation::TruncatedLabels,
+            cwd_width,
+            (available_width - fixed - cwd_width)
+                .max(primary_min)
+                .min(measured.primary_label_width),
+        )
+    } else if measured.has_cwd && available_width >= cwd_affordance_required {
+        (
+            FooterLeftInfoDegradation::CwdAffordanceOnly,
+            0.0,
+            (available_width - fixed)
+                .max(0.0)
+                .min(measured.primary_label_width),
+        )
+    } else if available_width >= primary_only_required {
+        (
+            FooterLeftInfoDegradation::PrimaryOnly,
+            0.0,
+            (available_width - measured.primary_fixed_width)
+                .max(0.0)
+                .min(measured.primary_label_width),
+        )
+    } else if measured.primary_visible_without_label
+        && available_width >= measured.primary_fixed_width
+    {
+        (FooterLeftInfoDegradation::PrimaryAffordanceOnly, 0.0, 0.0)
     } else {
-        FooterLeftInfoDegradation::Hidden
+        (FooterLeftInfoDegradation::Hidden, 0.0, 0.0)
     };
     FooterLeftInfoAllocation {
         degradation,
-        available_width: available_width.max(0.0),
+        available_width,
+        cwd_label_width,
+        primary_label_width,
     }
 }
 
@@ -3509,12 +3576,6 @@ unsafe fn layout_footer_left_info(
     use objc::{msg_send, sel, sel_impl};
 
     let bounds: NSRect = msg_send![left_info_view, bounds];
-    let allocation = resolve_footer_left_info_allocation(bounds.size.width);
-    let left_info = if matches!(allocation.degradation, FooterLeftInfoDegradation::Hidden) {
-        None
-    } else {
-        left_info
-    };
     let Some(info) = left_info else {
         remove_identified_subview(left_info_view, FOOTER_STATUS_DOT_ID);
         remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);
@@ -3531,6 +3592,121 @@ unsafe fn layout_footer_left_info(
 
     let (visual_parent, visual_offset_x, visual_offset_y) =
         ensure_footer_left_info_visual_parent(left_info_view, bounds.size.height);
+    // Measure the actual AppKit content before choosing a degradation mode.
+    // Fixed icon/keycap widths are reserved first; labels only receive the
+    // remaining explicit budget, so no label can push a keycap or hit target
+    // into the trailing action lane.
+    let cwd_label_width = info
+        .cwd_chip
+        .as_ref()
+        .map(|cwd| {
+            let label =
+                ensure_footer_cwd_chip_label(left_info_view, visual_parent, &cwd.label, text_color);
+            if label == nil {
+                0.0
+            } else {
+                let size: NSSize = msg_send![label, fittingSize];
+                size.width
+            }
+        })
+        .unwrap_or(0.0);
+    let primary_label_width = if info.model_name.is_empty() {
+        0.0
+    } else {
+        let label =
+            ensure_footer_model_label(left_info_view, visual_parent, &info.model_name, text_color);
+        if label == nil {
+            0.0
+        } else {
+            let size: NSSize = msg_send![label, fittingSize];
+            size.width
+        }
+    };
+    let cwd_keycap_width = info
+        .cwd_chip
+        .as_ref()
+        .and_then(|cwd| cwd.key.as_deref())
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| {
+            layout_footer_left_keycap(
+                left_info_view,
+                visual_parent,
+                FOOTER_CWD_CHIP_KEYCAP_ID,
+                FOOTER_CWD_CHIP_KEYCAP_GLYPH_ID,
+                key,
+                0.0,
+                bounds.size.height,
+                visual_offset_x,
+                visual_offset_y,
+                text_color,
+            )
+        })
+        .unwrap_or(0.0);
+    let primary_keycap_width = info
+        .keycap
+        .as_deref()
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| {
+            layout_footer_left_keycap(
+                left_info_view,
+                visual_parent,
+                FOOTER_LEFT_INFO_KEYCAP_ID,
+                FOOTER_LEFT_INFO_KEYCAP_GLYPH_ID,
+                key,
+                0.0,
+                bounds.size.height,
+                visual_offset_x,
+                visual_offset_y,
+                text_color,
+            )
+        })
+        .unwrap_or(0.0);
+    let primary_marker_width = if info.icon_token.is_some() {
+        FOOTER_LEFT_PROFILE_ICON_SIZE + FOOTER_LEFT_DOT_LABEL_GAP
+    } else if !matches!(info.dot_status, FooterDotStatus::Hidden) {
+        FOOTER_STREAMING_DOT_SIZE + FOOTER_LEFT_DOT_LABEL_GAP
+    } else {
+        0.0
+    };
+    let measured = FooterLeftInfoMeasurements {
+        cwd_fixed_width: if info.cwd_chip.is_some() {
+            FOOTER_LEFT_PROFILE_ICON_SIZE
+                + FOOTER_LEFT_DOT_LABEL_GAP
+                + if cwd_keycap_width > 0.0 {
+                    FOOTER_HINT_KEY_LABEL_GAP + cwd_keycap_width
+                } else {
+                    0.0
+                }
+                + FOOTER_CWD_CHIP_TRAILING_GAP_PX
+        } else {
+            0.0
+        },
+        cwd_label_width,
+        primary_fixed_width: primary_marker_width
+            + primary_keycap_width
+            + if primary_keycap_width > 0.0 && primary_label_width > 0.0 {
+                FOOTER_HINT_KEY_LABEL_GAP
+            } else {
+                0.0
+            },
+        primary_label_width,
+        has_cwd: info.cwd_chip.is_some(),
+        primary_visible_without_label: primary_marker_width + primary_keycap_width > 0.0,
+    };
+    let allocation = resolve_footer_left_info_allocation(bounds.size.width, measured);
+    if matches!(allocation.degradation, FooterLeftInfoDegradation::Hidden) {
+        remove_identified_subview(left_info_view, FOOTER_STATUS_DOT_ID);
+        remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);
+        remove_identified_subview(left_info_view, FOOTER_LEFT_PROFILE_ICON_ID);
+        remove_identified_subview(left_info_view, FOOTER_LEFT_INFO_HIT_TARGET_ID);
+        remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_ICON_ID);
+        remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_LABEL_ID);
+        remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_KEYCAP_ID);
+        remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_HIT_TARGET_ID);
+        remove_identified_subview(left_info_view, FOOTER_LEFT_INFO_KEYCAP_ID);
+        ensure_footer_left_info_capsule(left_info_view, 0.0, bounds.size.height);
+        return;
+    }
     let mut x = 0.0_f64;
 
     // ── CWD chip (always on the far left, independent of model marker) ──
@@ -3540,16 +3716,10 @@ unsafe fn layout_footer_left_info(
             | FooterLeftInfoDegradation::TruncatedLabels
             | FooterLeftInfoDegradation::CwdAffordanceOnly
     );
-    let show_primary = !matches!(
-        allocation.degradation,
-        FooterLeftInfoDegradation::CwdAffordanceOnly
-    );
-    let show_labels = !matches!(
-        allocation.degradation,
-        FooterLeftInfoDegradation::CwdAffordanceOnly
-            | FooterLeftInfoDegradation::PrimaryAffordanceOnly
-    );
-    let max_content_x = (allocation.available_width - FOOTER_LEFT_INFO_CAPSULE_PAD_X).max(0.0);
+    let show_primary = !matches!(allocation.degradation, FooterLeftInfoDegradation::Hidden);
+    let show_cwd_label = allocation.cwd_label_width > 0.0;
+    let show_primary_label = allocation.primary_label_width > 0.0;
+    let max_content_x = allocation.available_width;
 
     if let Some(cwd_chip) = info.cwd_chip.as_ref().filter(|_| show_cwd) {
         let chip_start_x = x;
@@ -3577,7 +3747,7 @@ unsafe fn layout_footer_left_info(
             x += FOOTER_LEFT_PROFILE_ICON_SIZE + FOOTER_LEFT_DOT_LABEL_GAP;
         }
 
-        let label = if show_labels {
+        let label = if show_cwd_label {
             ensure_footer_cwd_chip_label(left_info_view, visual_parent, &cwd_chip.label, text_color)
         } else {
             remove_identified_subview(left_info_view, FOOTER_CWD_CHIP_LABEL_ID);
@@ -3585,7 +3755,7 @@ unsafe fn layout_footer_left_info(
         };
         if label != nil && x < max_content_x {
             let label_size: NSSize = msg_send![label, fittingSize];
-            let label_width = label_size.width.min((max_content_x - x).max(0.0));
+            let label_width = label_size.width.min(allocation.cwd_label_width);
             let label_y = ((bounds.size.height - label_size.height) / 2.0).round();
             let _: () = msg_send![label, setLineBreakMode: 4usize];
             let _: () = msg_send![
@@ -3714,14 +3884,14 @@ unsafe fn layout_footer_left_info(
     }
 
     // ── Model name label ──
-    if info.model_name.is_empty() || !show_primary || !show_labels {
+    if info.model_name.is_empty() || !show_primary || !show_primary_label {
         remove_identified_subview(left_info_view, FOOTER_MODEL_LABEL_ID);
     } else {
         let label =
             ensure_footer_model_label(left_info_view, visual_parent, &info.model_name, text_color);
         if label != nil {
             let label_size: NSSize = msg_send![label, fittingSize];
-            let label_width = label_size.width.min((max_content_x - x).max(0.0));
+            let label_width = label_size.width.min(allocation.primary_label_width);
             let label_y = ((bounds.size.height - label_size.height) / 2.0).round();
             let _: () = msg_send![label, setLineBreakMode: 4usize];
             let _: () = msg_send![
@@ -5745,10 +5915,25 @@ mod footer_layout_tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn representative_left_info_measurements() -> super::FooterLeftInfoMeasurements {
+        super::FooterLeftInfoMeasurements {
+            cwd_fixed_width: 40.0,
+            cwd_label_width: 80.0,
+            primary_fixed_width: 30.0,
+            primary_label_width: 100.0,
+            has_cwd: true,
+            primary_visible_without_label: true,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn native_footer_lane_hides_left_info_when_clusters_exhaust_width() {
         let lane = super::resolve_native_footer_lanes(250.0, 132.0, 136.0);
-        let allocation = super::resolve_footer_left_info_allocation(lane.left_info_width);
+        let allocation = super::resolve_footer_left_info_allocation(
+            lane.left_info_width,
+            representative_left_info_measurements(),
+        );
 
         assert!(lane.trailing_overflow);
         assert_eq!(lane.left_info_width, 0.0);
@@ -5762,30 +5947,71 @@ mod footer_layout_tests {
     #[test]
     fn footer_left_info_allocation_degrades_monotonically() {
         use super::FooterLeftInfoDegradation::*;
+        let measured = representative_left_info_measurements();
 
         assert_eq!(
-            super::resolve_footer_left_info_allocation(300.0).degradation,
+            super::resolve_footer_left_info_allocation(300.0, measured).degradation,
             Full
         );
         assert_eq!(
-            super::resolve_footer_left_info_allocation(220.0).degradation,
+            super::resolve_footer_left_info_allocation(200.0, measured).degradation,
             TruncatedLabels
         );
         assert_eq!(
-            super::resolve_footer_left_info_allocation(150.0).degradation,
+            super::resolve_footer_left_info_allocation(110.0, measured).degradation,
             CwdAffordanceOnly
         );
         assert_eq!(
-            super::resolve_footer_left_info_allocation(110.0).degradation,
+            super::resolve_footer_left_info_allocation(80.0, measured).degradation,
             PrimaryOnly
         );
         assert_eq!(
-            super::resolve_footer_left_info_allocation(60.0).degradation,
+            super::resolve_footer_left_info_allocation(40.0, measured).degradation,
             PrimaryAffordanceOnly
         );
         assert_eq!(
-            super::resolve_footer_left_info_allocation(20.0).degradation,
+            super::resolve_footer_left_info_allocation(20.0, measured).degradation,
             Hidden
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn footer_left_info_allocator_handles_no_cwd_and_long_labels() {
+        use super::FooterLeftInfoDegradation::*;
+
+        let no_cwd = super::FooterLeftInfoMeasurements {
+            cwd_fixed_width: 0.0,
+            cwd_label_width: 0.0,
+            primary_fixed_width: 30.0,
+            primary_label_width: 100.0,
+            has_cwd: false,
+            primary_visible_without_label: true,
+        };
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(90.0, no_cwd).degradation,
+            PrimaryOnly
+        );
+        assert_eq!(
+            super::resolve_footer_left_info_allocation(30.0, no_cwd).degradation,
+            PrimaryAffordanceOnly
+        );
+
+        let long = super::FooterLeftInfoMeasurements {
+            cwd_label_width: 480.0,
+            primary_label_width: 640.0,
+            ..representative_left_info_measurements()
+        };
+        let allocation = super::resolve_footer_left_info_allocation(180.0, long);
+        assert_eq!(allocation.degradation, TruncatedLabels);
+        assert!(allocation.cwd_label_width >= 24.0);
+        assert!(allocation.primary_label_width >= 32.0);
+        assert!(
+            long.cwd_fixed_width
+                + long.primary_fixed_width
+                + allocation.cwd_label_width
+                + allocation.primary_label_width
+                <= allocation.available_width + f64::EPSILON
         );
     }
 

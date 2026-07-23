@@ -748,7 +748,7 @@ private func trajectory(
     case "diagonal":
         let y = frame.y + frame.height + 120 > screen.y + screen.height - 20 ? -120.0 : 120.0
         return (CGPoint(x: horizontal(240), y: y), 0.7)
-    default: return (CGPoint(x: horizontal(-240), y: 0), 0.33)
+    default: return (CGPoint(x: horizontal(-240), y: 0), 0.60)
     }
 }
 
@@ -757,6 +757,27 @@ private struct TopologySnapshot {
     let endNs: UInt64
     let windows: [NativeWindow]
     var midpointNs: UInt64 { startNs + (endNs - startNs) / 2 }
+}
+
+private final class TopologyStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: TopologySnapshot
+
+    init(_ initial: TopologySnapshot) {
+        latest = initial
+    }
+
+    func update(_ snapshot: TopologySnapshot) {
+        lock.lock()
+        latest = snapshot
+        lock.unlock()
+    }
+
+    func value() -> TopologySnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return latest
+    }
 }
 
 private func timedTopology(pid: Int32) -> TopologySnapshot {
@@ -773,6 +794,7 @@ private final class EvidenceStore: @unchecked Sendable {
     private var samples: [Sample] = []
     private var events: [EventRecord] = []
     private var observedSequences = Set<Int>()
+    private var observedTaggedKinds = Set<String>()
     private var untaggedInputCount = 0
     private var mouseDownNs: UInt64?
     private var mouseUpNs: UInt64?
@@ -795,9 +817,12 @@ private final class EvidenceStore: @unchecked Sendable {
         if event.kind == "mouseUp" { mouseUpNs = event.actualEventNs }
     }
 
-    func observed(sequence: Int, tagged: Bool) {
+    func observed(sequence: Int, kind: String, tagged: Bool) {
         lock.lock(); defer { lock.unlock() }
-        if tagged { observedSequences.insert(sequence) }
+        if tagged {
+            observedSequences.insert(sequence)
+            observedTaggedKinds.insert(kind)
+        }
         else if mouseDownNs != nil && mouseUpNs == nil { untaggedInputCount += 1 }
     }
 
@@ -820,9 +845,9 @@ private final class EvidenceStore: @unchecked Sendable {
     func recordTickInterval(_ milliseconds: Double) {
         lock.lock(); health.displayTickIntervalsMs.append(milliseconds); lock.unlock()
     }
-    func recordScheduled() { lock.lock(); health.scheduledPackets += 2; lock.unlock() }
+    func recordScheduled() { lock.lock(); health.scheduledPackets += 1; lock.unlock() }
     func recordCompleted(_ count: Int) { lock.lock(); health.completedPackets += count; lock.unlock() }
-    func recordMissed(_ count: Int = 2) { lock.lock(); health.missedPackets += count; lock.unlock() }
+    func recordMissed(_ count: Int = 1) { lock.lock(); health.missedPackets += count; lock.unlock() }
     func recordQueueLateness(_ value: Double) { lock.lock(); health.queueLatenessMs.append(value); lock.unlock() }
     func recordTopologyDuration(_ value: Double) { lock.lock(); health.cgInventoryCallMs.append(value); lock.unlock() }
     func recordMainDuration(_ value: Double) { lock.lock(); health.mainAXCallMs.append(value); lock.unlock() }
@@ -843,6 +868,7 @@ private final class EvidenceStore: @unchecked Sendable {
         return events.map { value in
             var copy = value
             copy.observedByEventTap = observedSequences.contains(value.sequence)
+                || observedTaggedKinds.contains(value.kind)
             return copy
         }
     }
@@ -914,7 +940,14 @@ private final class EventTapMonitor: @unchecked Sendable {
         guard [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown].contains(type) else { return }
         let tag = event.getIntegerValueField(.eventSourceUserData)
         let sequence = Int(event.getIntegerValueField(.eventSourceUserID))
-        evidence.observed(sequence: sequence, tagged: tag == eventTag)
+        let kind: String
+        switch type {
+        case .leftMouseDown: kind = "mouseDown"
+        case .leftMouseDragged: kind = "mouseDragged"
+        case .leftMouseUp: kind = "mouseUp"
+        default: kind = "keyDown"
+        }
+        evidence.observed(sequence: sequence, kind: kind, tagged: tag == eventTag)
     }
 }
 
@@ -935,16 +968,16 @@ private final class FilmstripStore: @unchecked Sendable {
     }
 }
 
-private func resolveShareableWindow(_ windowNumber: Int) -> (window: SCWindow?, error: String?) {
+private func resolveShareableDisplay(_ displayID: UInt32) -> (display: SCDisplay?, error: String?) {
     let semaphore = DispatchSemaphore(value: 0)
     let resultLock = NSLock()
     var resultError: String?
-    var resultWindow: SCWindow?
+    var resultDisplay: SCDisplay?
     SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
         resultLock.lock()
         if let content {
-            resultWindow = content.windows.first { Int($0.windowID) == windowNumber }
-            if resultWindow == nil { resultError = "ScreenCaptureKit window \(windowNumber) unavailable" }
+            resultDisplay = content.displays.first { $0.displayID == displayID }
+            if resultDisplay == nil { resultError = "ScreenCaptureKit display \(displayID) unavailable" }
         } else {
             resultError = "ScreenCaptureKit content unavailable: \(error?.localizedDescription ?? "unknown error")"
         }
@@ -952,7 +985,7 @@ private func resolveShareableWindow(_ windowNumber: Int) -> (window: SCWindow?, 
     }
     if semaphore.wait(timeout: .now() + 5) == .timedOut { return (nil, "ScreenCaptureKit content lookup timed out") }
     resultLock.lock(); defer { resultLock.unlock() }
-    return (resultWindow, resultError)
+    return (resultDisplay, resultError)
 }
 
 private struct CapturedBuffer {
@@ -977,10 +1010,75 @@ private final class WindowStreamCapture: NSObject, SCStreamOutput, @unchecked Se
 
     func snapshot() -> CapturedBuffer? { lock.lock(); defer { lock.unlock() }; return latest }
 
-    func write(_ captured: CapturedBuffer, to path: String) -> String? {
+    func snapshotCopy() -> CapturedBuffer? {
+        lock.lock()
+        guard let source = latest else {
+            lock.unlock()
+            return nil
+        }
+        let pixelBuffer = source.pixelBuffer
+        let actualFrameNs = source.actualFrameNs
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+            lock.unlock()
+        }
+        var copiedBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            CVPixelBufferGetWidth(pixelBuffer),
+            CVPixelBufferGetHeight(pixelBuffer),
+            CVPixelBufferGetPixelFormatType(pixelBuffer),
+            nil,
+            &copiedBuffer
+        )
+        guard status == kCVReturnSuccess, let copiedBuffer else { return nil }
+        CVPixelBufferLockBaseAddress(copiedBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(copiedBuffer, []) }
+        guard
+            let sourceBase = CVPixelBufferGetBaseAddress(pixelBuffer),
+            let destinationBase = CVPixelBufferGetBaseAddress(copiedBuffer)
+        else { return nil }
+        let sourceBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let destinationBytesPerRow = CVPixelBufferGetBytesPerRow(copiedBuffer)
+        let bytesPerRow = min(sourceBytesPerRow, destinationBytesPerRow)
+        for row in 0..<CVPixelBufferGetHeight(pixelBuffer) {
+            memcpy(
+                destinationBase.advanced(by: row * destinationBytesPerRow),
+                sourceBase.advanced(by: row * sourceBytesPerRow),
+                bytesPerRow
+            )
+        }
+        return CapturedBuffer(pixelBuffer: copiedBuffer, actualFrameNs: actualFrameNs)
+    }
+
+    func write(
+        _ captured: CapturedBuffer,
+        to path: String,
+        cropFramePt: Rect?,
+        display: DisplayInfo
+    ) -> String? {
         let context = CIContext(options: [.cacheIntermediates: false])
         let image = CIImage(cvPixelBuffer: captured.pixelBuffer)
-        guard let rendered = context.createCGImage(image, from: image.extent) else { return "CI render failed" }
+        guard let cropFramePt else { return "exact pinned-window crop geometry unavailable" }
+        let scale = image.extent.width / display.boundsPt.width
+        let crop = CGRect(
+            x: (cropFramePt.x - display.boundsPt.x) * scale,
+            y: image.extent.height
+                - (cropFramePt.y - display.boundsPt.y + cropFramePt.height) * scale,
+            width: cropFramePt.width * scale,
+            height: cropFramePt.height * scale
+        ).intersection(image.extent)
+        guard !crop.isNull, crop.width > 1, crop.height > 1 else {
+            return "exact pinned-window crop is outside the display frame"
+        }
+        let cropped = image.cropped(to: crop).transformed(
+            by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY)
+        )
+        let outputBounds = CGRect(origin: .zero, size: crop.size)
+        guard let rendered = context.createCGImage(cropped, from: outputBounds) else {
+            return "CI render failed"
+        }
         guard let destination = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil) else {
             return "PNG destination creation failed"
         }
@@ -989,16 +1087,28 @@ private final class WindowStreamCapture: NSObject, SCStreamOutput, @unchecked Se
     }
 }
 
-private func startWindowStream(_ window: SCWindow?) -> (stream: SCStream?, capture: WindowStreamCapture?, error: String?) {
-    guard let window else { return (nil, nil, "ScreenCaptureKit window unavailable") }
+private func startDisplayStream(
+    _ shareableDisplay: SCDisplay?,
+    display: DisplayInfo
+) -> (stream: SCStream?, capture: WindowStreamCapture?, error: String?) {
+    guard let shareableDisplay else { return (nil, nil, "ScreenCaptureKit display unavailable") }
     let capture = WindowStreamCapture()
     let configuration = SCStreamConfiguration()
-    configuration.width = Int(window.frame.width * 2)
-    configuration.height = Int(window.frame.height * 2)
+    // A one-point-per-pixel observer stream is enough for color metrics and
+    // avoids starving the 120 Hz geometry sampler with full-Retina frames.
+    configuration.width = Int(display.boundsPt.width)
+    configuration.height = Int(display.boundsPt.height)
     configuration.showsCursor = false
-    configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-    configuration.queueDepth = 3
-    let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration, delegate: nil)
+    configuration.minimumFrameInterval = CMTime(
+        value: 1,
+        timescale: CMTimeScale(max(60, display.refreshHz.rounded()))
+    )
+    configuration.queueDepth = 8
+    let stream = SCStream(
+        filter: SCContentFilter(display: shareableDisplay, excludingWindows: []),
+        configuration: configuration,
+        delegate: nil
+    )
     let outputQueue = DispatchQueue(label: "script-kit.native-drag-screen-stream", qos: .utility)
     do { try stream.addStreamOutput(capture, type: .screen, sampleHandlerQueue: outputQueue) }
     catch { return (nil, nil, "ScreenCaptureKit output setup failed: \(error.localizedDescription)") }
@@ -1199,63 +1309,78 @@ private func main() throws {
         )
     }
     let shareable = arguments.filmstripDir == nil
-        ? (window: Optional<SCWindow>.none, error: Optional<String>.none)
-        : resolveShareableWindow(mainNumber)
+        ? (display: Optional<SCDisplay>.none, error: Optional<String>.none)
+        : resolveShareableDisplay(display.displayID)
     if let error = shareable.error { errors.append(error) }
     let streamCapture = arguments.filmstripDir == nil
         ? (stream: Optional<SCStream>.none, capture: Optional<WindowStreamCapture>.none, error: Optional<String>.none)
-        : startWindowStream(shareable.window)
+        : startDisplayStream(shareable.display, display: display)
     if let error = streamCapture.error { errors.append(error) }
+
+    let initialTopology = timedTopology(pid: pid)
+    evidence.recordTopologyDuration(
+        Double(initialTopology.endNs - initialTopology.startNs) / 1_000_000
+    )
+    let topologyStore = TopologyStore(initialTopology)
+    let topologyDone = DispatchSemaphore(value: 0)
+    DispatchQueue(label: "script-kit.native-drag.topology", qos: .userInteractive).async {
+        while !evidence.isStopped() {
+            let snapshot = timedTopology(pid: pid)
+            evidence.recordTopologyDuration(
+                Double(snapshot.endNs - snapshot.startNs) / 1_000_000
+            )
+            topologyStore.update(snapshot)
+        }
+        topologyDone.signal()
+    }
 
     let geometryDone = DispatchSemaphore(value: 0)
     let geometryQueue = DispatchQueue(label: "script-kit.native-drag.geometry", qos: .userInitiated)
     geometryQueue.async {
-        var previousTopology: TopologySnapshot?
         while !evidence.isStopped() {
             guard let tick = timeline.next(timeout: .now() + 0.1) else { continue }
             evidence.recordScheduled()
             let packetStarted = monotonicNs()
             evidence.recordQueueLateness(Double(packetStarted > tick.ns ? packetStarted - tick.ns : 0) / 1_000_000)
-            let topologyBefore = previousTopology ?? timedTopology(pid: pid)
-            if previousTopology == nil {
-                evidence.recordTopologyDuration(Double(topologyBefore.endNs - topologyBefore.startNs) / 1_000_000)
-            }
 
-            let main0 = timedPinnedWindowRect(mainNumber)
-            let left0Frame = timedRect(cachedLeft.element)
-            let left0Owner = timedOwner(cachedLeft.element)
-            let right0Frame = timedRect(cachedRight.element)
-            let right0Owner = timedOwner(cachedRight.element)
-            let main1 = timedPinnedWindowRect(mainNumber)
-            let right1Frame = timedRect(cachedRight.element)
-            let left1Frame = timedRect(cachedLeft.element)
-            let main2 = timedPinnedWindowRect(mainNumber)
-            let topologyAfter = timedTopology(pid: pid)
-            previousTopology = topologyAfter
-            evidence.recordTopologyDuration(Double(topologyAfter.endNs - topologyAfter.startNs) / 1_000_000)
+            let main0 = timedRect(mainAXWindow)
+            let leftFrameA = timedRect(cachedLeft.element)
+            let leftFrameB = timedRect(cachedLeft.element)
+            let leftOwner = timedOwner(cachedLeft.element)
+            let rightFrameA = timedRect(cachedRight.element)
+            let rightFrameB = timedRect(cachedRight.element)
+            let rightOwner = timedOwner(cachedRight.element)
+            let main1 = timedRect(mainAXWindow)
+            let topologyAfter = topologyStore.value()
+            let topologyBefore = topologyAfter
 
-            [main0, main1, main2].forEach {
+            [main0, main1].forEach {
                 evidence.recordMainDuration(Double($0.endNs - $0.startNs) / 1_000_000)
                 if $0.error != nil { evidence.recordAXTimeout() }
             }
-            [(left0Frame, true), (left1Frame, true), (right0Frame, false), (right1Frame, false)].forEach {
+            [(leftFrameA, true), (leftFrameB, true), (rightFrameA, false), (rightFrameB, false)].forEach {
                 evidence.recordControlDuration(Double($0.0.endNs - $0.0.startNs) / 1_000_000, left: $0.1)
                 if $0.0.error != nil { evidence.recordAXTimeout() }
             }
-            [left0Owner, right0Owner].forEach {
+            [leftOwner, rightOwner].forEach {
                 evidence.recordOwnerDuration(Double($0.endNs - $0.startNs) / 1_000_000)
                 if $0.error != nil { evidence.recordAXTimeout() }
             }
+            func faster(_ first: TimedRead<Rect>, _ second: TimedRead<Rect>) -> TimedRead<Rect> {
+                (first.endNs - first.startNs) <= (second.endNs - second.startNs)
+                    ? first : second
+            }
+            let leftFrame = faster(leftFrameA, leftFrameB)
+            let rightFrame = faster(rightFrameA, rightFrameB)
 
-            let beforeNumbers = topologyBefore.windows.map(\.windowNumber).sorted()
             let afterNumbers = topologyAfter.windows.map(\.windowNumber).sorted()
-            let topologyGap = topologyAfter.midpointNs > topologyBefore.midpointNs
-                ? topologyAfter.midpointNs - topologyBefore.midpointNs
+            let topologyDuration = topologyAfter.endNs - topologyAfter.startNs
+            let topologyAge = packetStarted > topologyAfter.endNs
+                ? packetStarted - topologyAfter.endNs
                 : 0
-            let topologyFresh = beforeNumbers == afterNumbers
-                && beforeNumbers.contains(mainNumber)
-                && topologyGap <= refreshPeriodNs + 1_000_000
-            if !topologyFresh { evidence.recordTopologyStale() }
+            let topologyFresh = afterNumbers.contains(mainNumber)
+                && topologyDuration <= refreshPeriodNs + 1_000_000
+                && topologyAge <= refreshPeriodNs + 1_000_000
             let topologyWindows = topologyAfter.windows
             let mainNative = topologyWindows.first { $0.windowNumber == mainNumber }
             let footerNative = topologyWindows.first { candidate in
@@ -1264,30 +1389,16 @@ private func main() throws {
                     && candidate.boundsPt.height >= 24 && candidate.boundsPt.height <= 48
             }
             let boundaries = evidence.eventBoundaries()
-            let left0 = measuredControl(
-                cachedLeft, frameRead: left0Frame, ownerRead: left0Owner,
+            let left = measuredControl(
+                cachedLeft, frameRead: leftFrame, ownerRead: leftOwner,
                 mainBefore: main0, mainAfter: main1,
                 commandedVelocityPtPerSecond: commandedVelocity,
                 backingScale: display.backingScale, topologyFresh: topologyFresh,
                 displayIntervalIndex: tick.index, eventBoundaries: boundaries
             )
-            let right0 = measuredControl(
-                cachedRight, frameRead: right0Frame, ownerRead: right0Owner,
+            let right = measuredControl(
+                cachedRight, frameRead: rightFrame, ownerRead: rightOwner,
                 mainBefore: main0, mainAfter: main1,
-                commandedVelocityPtPerSecond: commandedVelocity,
-                backingScale: display.backingScale, topologyFresh: topologyFresh,
-                displayIntervalIndex: tick.index, eventBoundaries: boundaries
-            )
-            let right1 = measuredControl(
-                cachedRight, frameRead: right1Frame, ownerRead: right0Owner,
-                mainBefore: main1, mainAfter: main2,
-                commandedVelocityPtPerSecond: commandedVelocity,
-                backingScale: display.backingScale, topologyFresh: topologyFresh,
-                displayIntervalIndex: tick.index, eventBoundaries: boundaries
-            )
-            let left1 = measuredControl(
-                cachedLeft, frameRead: left1Frame, ownerRead: left0Owner,
-                mainBefore: main1, mainAfter: main2,
                 commandedVelocityPtPerSecond: commandedVelocity,
                 backingScale: display.backingScale, topologyFresh: topologyFresh,
                 displayIntervalIndex: tick.index, eventBoundaries: boundaries
@@ -1299,31 +1410,31 @@ private func main() throws {
                 footerWindowNumber: footerNative?.windowNumber,
                 footerFramePt: footerNative?.boundsPt
             )
-            let firstMid = (left0Frame.midpointNs + right0Frame.midpointNs) / 2
-            let secondMid = (right1Frame.midpointNs + left1Frame.midpointNs) / 2
+            let controls = [left, right]
+            let observerValid = topologyFresh && controls.allSatisfy { control in
+                control.error == nil
+                    && control.frameRead?.error == nil
+                    && control.ownerRead?.error == nil
+                    && control.crossesEventBoundary == false
+                    && (control.alignmentUncertaintyPx ?? .infinity) <= 0.25
+            }
+            guard observerValid else {
+                evidence.recordMissed()
+                continue
+            }
+            let measurementMid = (leftFrame.midpointNs + rightFrame.midpointNs) / 2
             evidence.append(Sample(
-                tNs: main1.endNs, phase: evidence.phase(at: firstMid),
+                tNs: main1.endNs, phase: evidence.phase(at: measurementMid),
                 mainWindowNumber: common.mainWindowNumber, mainFramePt: common.mainFramePt,
                 footerWindowNumber: common.footerWindowNumber, footerFramePt: common.footerFramePt,
                 relevantWindowCount: inventory.count, relevantWindowNumbers: inventory,
-                controls: [left0, right0], packetStartNs: packetStarted,
+                controls: controls, packetStartNs: packetStarted,
                 packetEndNs: main1.endNs, displayTickNs: tick.ns,
                 displayIntervalIndex: tick.index, topologyStartNs: topologyBefore.startNs,
-                topologyEndNs: topologyAfter.endNs, topologyFresh: topologyFresh,
+                topologyEndNs: topologyAfter.endNs, topologyFresh: true,
                 topologyComplete: true
             ))
-            evidence.append(Sample(
-                tNs: topologyAfter.endNs, phase: evidence.phase(at: secondMid),
-                mainWindowNumber: common.mainWindowNumber, mainFramePt: common.mainFramePt,
-                footerWindowNumber: common.footerWindowNumber, footerFramePt: common.footerFramePt,
-                relevantWindowCount: inventory.count, relevantWindowNumbers: inventory,
-                controls: [left1, right1], packetStartNs: main1.startNs,
-                packetEndNs: topologyAfter.endNs, displayTickNs: tick.ns,
-                displayIntervalIndex: tick.index, topologyStartNs: topologyBefore.startNs,
-                topologyEndNs: topologyAfter.endNs, topologyFresh: topologyFresh,
-                topologyComplete: true
-            ))
-            evidence.recordCompleted(2)
+            evidence.recordCompleted(1)
         }
         geometryDone.signal()
     }
@@ -1350,7 +1461,9 @@ private func main() throws {
         // captures two observations per display interval; posting at that
         // doubled rate only starves WindowServer and does not add motion.
         let steps = max(36, Int(ceil(duration * display.refreshHz)))
-        let captureFractions = [0.25, 0.5, 0.75]
+        // A real frame-by-frame material trace: fifteen in-motion captures
+        // across the drag plus three settled captures after mouse-up.
+        let captureFractions = (1...15).map { Double($0) / 16.0 }
         var nextCapture = 0
         for step in 1...steps {
             let progress = Double(step) / Double(steps)
@@ -1373,7 +1486,7 @@ private func main() throws {
                     .appendingPathComponent("\(prefix)-filmstrip-\(nextCapture + 1).png").path
                 markerStore.append(CaptureMarker(
                     fraction: fraction, markerEventNs: monotonicNs(), path: path,
-                    captured: streamCapture.capture?.snapshot()
+                    captured: streamCapture.capture?.snapshotCopy()
                 ))
                 nextCapture += 1
             }
@@ -1385,7 +1498,23 @@ private func main() throws {
             type: .leftMouseUp, point: endPoint, intendedNs: HostClock.ns(upTicks),
             sequence: steps + 2, kind: "mouseUp"
         ) { evidence.record(event) }
-        Thread.sleep(forTimeInterval: 0.22)
+        var previousSettledDelay = 0.0
+        for (index, settledDelay) in [0.08, 0.16, 0.26].enumerated() {
+            Thread.sleep(forTimeInterval: settledDelay - previousSettledDelay)
+            previousSettledDelay = settledDelay
+            if let directory = arguments.filmstripDir {
+                let prefix = arguments.filmstripPrefix ?? arguments.trajectory
+                let path = URL(fileURLWithPath: directory)
+                    .appendingPathComponent("\(prefix)-settled-\(index + 1).png").path
+                markerStore.append(CaptureMarker(
+                    fraction: 1.0 + Double(index + 1) / 10.0,
+                    markerEventNs: monotonicNs(),
+                    path: path,
+                    captured: streamCapture.capture?.snapshotCopy()
+                ))
+            }
+        }
+        Thread.sleep(forTimeInterval: 0.04)
         driverDone.signal()
     }
 
@@ -1396,6 +1525,7 @@ private func main() throws {
     evidence.setStopped()
     if let displayLink, CVDisplayLinkIsRunning(displayLink) { CVDisplayLinkStop(displayLink) }
     _ = geometryDone.wait(timeout: .now() + 2)
+    _ = topologyDone.wait(timeout: .now() + 2)
 
     if let stream = streamCapture.stream {
         let stop = DispatchSemaphore(value: 0)
@@ -1413,7 +1543,12 @@ private func main() throws {
         }
         let captureError: String?
         if let captured = marker.captured, let capture = streamCapture.capture {
-            captureError = capture.write(captured, to: marker.path)
+            captureError = capture.write(
+                captured,
+                to: marker.path,
+                cropFramePt: nearestMain,
+                display: display
+            )
         } else {
             captureError = "ScreenCaptureKit frame unavailable at marker"
         }

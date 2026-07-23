@@ -453,6 +453,9 @@ static OVERLAY_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Global handle so we can reach the overlay from any callsite.
 static DICTATION_OVERLAY_WINDOW: OnceLock<Mutex<Option<gpui::WindowHandle<DictationOverlay>>>> =
     OnceLock::new();
+static DICTATION_OVERLAY_EXIT_TICKET: Mutex<Option<crate::platform::GlassExitTicket>> =
+    Mutex::new(None);
+static DICTATION_OVERLAY_EXIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Callback type for overlay escape actions (abort dictation).
 type OverlayAbortCallback = Box<dyn Fn(&mut App) + Send + Sync + 'static>;
@@ -1085,11 +1088,6 @@ impl DictationOverlay {
         crate::dictation::close_dictation_microphone_popup_window(cx);
         let callback = OVERLAY_ABORT_CALLBACK.lock().take();
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
-        // Pre-clear the global slot so if the callback calls
-        // close_dictation_overlay, the handle is already gone and that
-        // call becomes a harmless no-op.
-        let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
-        slot.lock().take();
         remove_global_escape_monitor();
         self.dematerialize_then_remove_overlay(window, cx);
         if let Some(cb) = callback {
@@ -1110,31 +1108,50 @@ impl DictationOverlay {
     /// then run the native close prep and remove the overlay window. Falls
     /// back to instant close when glass/morph is unavailable.
     fn dematerialize_then_remove_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.teardown_glass_button_host(window);
         if let Some(ticket) = crate::platform::begin_gpui_window_exit_with_ticket(
             window,
             "DICTATION",
             "Dictation overlay",
         ) {
+            *DICTATION_OVERLAY_EXIT_TICKET.lock() = Some(ticket);
+            DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(true, Ordering::SeqCst);
             let any_handle = window.window_handle();
             cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
                 cx.background_executor()
                     .timer(crate::platform::glass_exit_remove_delay())
                     .await;
                 cx.update(|cx| {
-                    if !crate::platform::glass_exit_ticket_is_current(ticket) {
+                    let pending_matches = *DICTATION_OVERLAY_EXIT_TICKET.lock() == Some(ticket);
+                    if !pending_matches || !crate::platform::glass_exit_ticket_is_current(ticket) {
                         return;
                     }
+                    DICTATION_OVERLAY_EXIT_TICKET.lock().take();
                     let _ = any_handle.update(cx, |_view, window, _cx| {
+                        crate::components::footer_chrome::remove_glass_capsule_window(window);
                         prepare_overlay_window_for_close(window);
                         window.remove_window();
                     });
+                    DICTATION_OVERLAY_WINDOW
+                        .get_or_init(|| Mutex::new(None))
+                        .lock()
+                        .take();
+                    crate::windows::remove_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID);
+                    crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+                    DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
                 });
             })
             .detach();
         } else {
+            self.teardown_glass_button_host(window);
             prepare_overlay_window_for_close(window);
             window.remove_window();
+            DICTATION_OVERLAY_WINDOW
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .take();
+            crate::windows::remove_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID);
+            crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+            DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
         }
     }
 
@@ -1144,8 +1161,6 @@ impl DictationOverlay {
         crate::dictation::close_dictation_microphone_popup_window(cx);
         let callback = OVERLAY_SUBMIT_CALLBACK.lock().take();
         *OVERLAY_ABORT_CALLBACK.lock() = None;
-        let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
-        slot.lock().take();
         remove_global_escape_monitor();
         self.dematerialize_then_remove_overlay(window, cx);
 
@@ -1167,8 +1182,6 @@ impl DictationOverlay {
     /// without invoking the abort callback (used for non-recording phases).
     fn close_overlay_from_within(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::dictation::close_dictation_microphone_popup_window(cx);
-        let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
-        slot.lock().take();
         *OVERLAY_ABORT_CALLBACK.lock() = None;
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
         remove_global_escape_monitor();
@@ -2952,7 +2965,19 @@ pub fn open_dictation_overlay(
     let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
     let existing_handle = { *slot.lock() };
     if let Some(handle) = existing_handle {
-        let alive = handle.update(cx, |_view, _window, _cx| {}).is_ok();
+        let alive = handle
+            .update(cx, |_view, window, _cx| {
+                if DICTATION_OVERLAY_EXIT_IN_PROGRESS.swap(false, Ordering::SeqCst) {
+                    crate::platform::cancel_gpui_window_exit_dematerialize(window);
+                    DICTATION_OVERLAY_EXIT_TICKET.lock().take();
+                    tracing::info!(
+                        category = "DICTATION",
+                        event = "dictation_exit_superseded",
+                        "Reused the live Dictation CGWindow and invalidated its exit tail"
+                    );
+                }
+            })
+            .is_ok();
         if alive {
             tracing::info!(
                 category = "DICTATION",
@@ -3265,18 +3290,68 @@ pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
     remove_global_escape_monitor();
 
     let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
-    let handle = {
-        let mut guard = slot.lock();
-        guard.take()
-    };
+    if DICTATION_OVERLAY_EXIT_IN_PROGRESS.load(Ordering::SeqCst) {
+        tracing::debug!(
+            category = "DICTATION",
+            "Dictation overlay exit already in progress"
+        );
+        return Ok(());
+    }
+    let handle = { *slot.lock() };
 
     if let Some(handle) = handle {
-        // Fade to transparent before removing so the backing store clear
-        // doesn't flash white.
-        let result = handle.update(cx, |view, window, _cx| {
-            view.teardown_glass_button_host(window);
-            prepare_overlay_window_for_close(window);
-            window.remove_window();
+        // Keep the native capsule host and owning handle registered throughout
+        // the fade. A rapid reopen cancels this ticket and reuses the CGWindow.
+        let result = handle.update(cx, |_view, window, cx| {
+            if let Some(ticket) = crate::platform::begin_gpui_window_exit_with_ticket(
+                window,
+                "DICTATION",
+                "Dictation overlay",
+            ) {
+                *DICTATION_OVERLAY_EXIT_TICKET.lock() = Some(ticket);
+                DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(true, Ordering::SeqCst);
+                let any_handle = window.window_handle();
+                cx.spawn(async move |_view, cx: &mut gpui::AsyncApp| {
+                    cx.background_executor()
+                        .timer(crate::platform::glass_exit_remove_delay())
+                        .await;
+                    cx.update(|cx| {
+                        let pending_matches = *DICTATION_OVERLAY_EXIT_TICKET.lock() == Some(ticket);
+                        if !pending_matches
+                            || !crate::platform::glass_exit_ticket_is_current(ticket)
+                        {
+                            return;
+                        }
+                        DICTATION_OVERLAY_EXIT_TICKET.lock().take();
+                        let _ = any_handle.update(cx, |_view, window, _cx| {
+                            crate::components::footer_chrome::remove_glass_capsule_window(window);
+                            prepare_overlay_window_for_close(window);
+                            window.remove_window();
+                        });
+                        DICTATION_OVERLAY_WINDOW
+                            .get_or_init(|| Mutex::new(None))
+                            .lock()
+                            .take();
+                        crate::windows::remove_runtime_window_handle(
+                            DICTATION_OVERLAY_AUTOMATION_ID,
+                        );
+                        crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+                        DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
+                    });
+                })
+                .detach();
+            } else {
+                crate::components::footer_chrome::remove_glass_capsule_window(window);
+                prepare_overlay_window_for_close(window);
+                window.remove_window();
+                DICTATION_OVERLAY_WINDOW
+                    .get_or_init(|| Mutex::new(None))
+                    .lock()
+                    .take();
+                crate::windows::remove_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID);
+                crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+                DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
+            }
         });
         if result.is_ok() {
             tracing::info!(category = "DICTATION", "Dictation overlay window closed");
@@ -3287,10 +3362,32 @@ pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
             );
         }
     }
-    crate::windows::remove_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID);
-    crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
-
     Ok(())
+}
+
+pub(crate) fn dictation_window_lifecycle_receipt() -> serde_json::Value {
+    let handle_registered = DICTATION_OVERLAY_WINDOW
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .is_some();
+    let ticket = *DICTATION_OVERLAY_EXIT_TICKET.lock();
+    serde_json::json!({
+        "schemaVersion": 1,
+        "phase": if DICTATION_OVERLAY_EXIT_IN_PROGRESS.load(Ordering::SeqCst) {
+            "Exiting"
+        } else if handle_registered {
+            "Open"
+        } else {
+            "Closed"
+        },
+        "handleRegistered": handle_registered,
+        "exitInProgress": DICTATION_OVERLAY_EXIT_IN_PROGRESS.load(Ordering::SeqCst),
+        "hasExitTicket": ticket.is_some(),
+        "exitGeneration": ticket.map(crate::platform::GlassExitTicket::generation),
+        "automationRegistered": crate::windows::list_automation_windows()
+            .iter()
+            .any(|window| window.id == DICTATION_OVERLAY_AUTOMATION_ID),
+    })
 }
 
 fn dictation_automation_bounds(

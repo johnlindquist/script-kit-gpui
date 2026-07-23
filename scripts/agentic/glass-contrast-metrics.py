@@ -39,6 +39,67 @@ def rgb_to_lab(pixel: tuple[int, int, int]) -> tuple[float, float, float]:
     return 116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)
 
 
+def delta_e_2000(
+    lab1: tuple[float, float, float], lab2: tuple[float, float, float]
+) -> float:
+    """CIEDE2000 color difference (Sharma, Wu, and Dalal 2005)."""
+    l1, a1, b1 = lab1
+    l2, a2, b2 = lab2
+    c1 = math.hypot(a1, b1)
+    c2 = math.hypot(a2, b2)
+    c_bar = (c1 + c2) / 2.0
+    g = 0.5 * (1.0 - math.sqrt(c_bar**7 / (c_bar**7 + 25.0**7)))
+    a1p, a2p = (1.0 + g) * a1, (1.0 + g) * a2
+    c1p, c2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
+
+    def hue(ap: float, b: float) -> float:
+        value = math.degrees(math.atan2(b, ap))
+        return value + 360.0 if value < 0.0 else value
+
+    h1p, h2p = hue(a1p, b1), hue(a2p, b2)
+    delta_lp = l2 - l1
+    delta_cp = c2p - c1p
+    delta_h = h2p - h1p
+    if c1p * c2p == 0.0:
+        delta_hp = 0.0
+    elif abs(delta_h) <= 180.0:
+        delta_hp = delta_h
+    elif delta_h > 180.0:
+        delta_hp = delta_h - 360.0
+    else:
+        delta_hp = delta_h + 360.0
+    delta_big_hp = 2.0 * math.sqrt(c1p * c2p) * math.sin(math.radians(delta_hp / 2.0))
+    l_bar = (l1 + l2) / 2.0
+    c_bar_p = (c1p + c2p) / 2.0
+    if c1p * c2p == 0.0:
+        h_bar = h1p + h2p
+    elif abs(h1p - h2p) <= 180.0:
+        h_bar = (h1p + h2p) / 2.0
+    elif h1p + h2p < 360.0:
+        h_bar = (h1p + h2p + 360.0) / 2.0
+    else:
+        h_bar = (h1p + h2p - 360.0) / 2.0
+    t = (
+        1.0
+        - 0.17 * math.cos(math.radians(h_bar - 30.0))
+        + 0.24 * math.cos(math.radians(2.0 * h_bar))
+        + 0.32 * math.cos(math.radians(3.0 * h_bar + 6.0))
+        - 0.20 * math.cos(math.radians(4.0 * h_bar - 63.0))
+    )
+    delta_theta = 30.0 * math.exp(-(((h_bar - 275.0) / 25.0) ** 2))
+    rc = 2.0 * math.sqrt(c_bar_p**7 / (c_bar_p**7 + 25.0**7))
+    sl = 1.0 + 0.015 * (l_bar - 50.0) ** 2 / math.sqrt(20.0 + (l_bar - 50.0) ** 2)
+    sc = 1.0 + 0.045 * c_bar_p
+    sh = 1.0 + 0.015 * c_bar_p * t
+    rt = -math.sin(math.radians(2.0 * delta_theta)) * rc
+    return math.sqrt(
+        (delta_lp / sl) ** 2
+        + (delta_cp / sc) ** 2
+        + (delta_big_hp / sh) ** 2
+        + rt * (delta_cp / sc) * (delta_big_hp / sh)
+    )
+
+
 def median_rgb(pixels: list[tuple[int, ...]]) -> tuple[int, int, int]:
     return tuple(round(statistics.median(pixel[index] for pixel in pixels)) for index in range(3))
 
@@ -72,7 +133,9 @@ def frame_pixels(frame: dict, scale: float, image_height: int) -> tuple[int, int
     return x, y, width, height
 
 
-def capsule_metrics(image: Image.Image, node: dict, scale: float) -> dict:
+def capsule_metrics(
+    image: Image.Image, node: dict, scale: float, foreground_nodes: list[dict]
+) -> dict:
     x, y, width, height = frame_pixels(node["screenshotFrame"], scale, image.height)
     inset = 1
     outside = 1
@@ -97,14 +160,36 @@ def capsule_metrics(image: Image.Image, node: dict, scale: float) -> dict:
         add_pair((x + inset, py), (x - outside, py))
         add_pair((x + width - 1 - inset, py), (x + width - 1 + outside, py))
 
+    # The material contract is measured on the capsule body, not its text or
+    # state chrome. Erode by three device-independent pixels and subtract every
+    # AppKit foreground node whose screenshot frame intersects this capsule.
+    erode = max(3, round(3 * scale))
+    excluded: list[tuple[int, int, int, int]] = []
+    for foreground in foreground_nodes:
+        frame = foreground.get("screenshotFrame")
+        if not frame or foreground.get("id") == node.get("id"):
+            continue
+        foreground_id = str(foreground.get("id", ""))
+        foreground_class = str(foreground.get("className", ""))
+        is_leaf_foreground = (
+            foreground_class in {"NSTextField", "NSImageView"}
+            or "label-chip" in foreground_id
+            or "keycap" in foreground_id
+            or foreground_id.endswith("-icon")
+        )
+        if not is_leaf_foreground:
+            continue
+        fx, fy, fw, fh = frame_pixels(frame, scale, image.height)
+        if fx < x + width and fx + fw > x and fy < y + height and fy + fh > y:
+            excluded.append((fx - 1, fy - 1, fw + 2, fh + 2))
     material_pixels: list[tuple[int, ...]] = []
-    strip = max(2, round(3 * scale))
-    for py in list(range(y + strip, y + strip * 2)) + list(
-        range(y + height - strip * 2, y + height - strip)
-    ):
-        for px in range(x + radius, x + width - radius):
-            if 0 <= px < image.width and 0 <= py < image.height:
-                material_pixels.append(image.getpixel((px, py)))
+    for py in range(y + erode, y + height - erode):
+        for px in range(x + erode, x + width - erode):
+            if any(ex <= px < ex + ew and ey <= py < ey + eh for ex, ey, ew, eh in excluded):
+                continue
+            material_pixels.append(image.getpixel((px, py)))
+    if not material_pixels:
+        raise ValueError(f"capsule {node.get('id')} has no material pixels after masking")
 
     return {
         "id": node["id"],
@@ -115,6 +200,29 @@ def capsule_metrics(image: Image.Image, node: dict, scale: float) -> dict:
         "fractionAtLeast015": sum(value >= 0.015 for value in differences) / len(differences),
         "materialMedianRgb": median_rgb(material_pixels),
     }
+
+
+def local_stage_rgb(
+    image: Image.Image, capsule: dict, backdrop: dict, scale: float
+) -> tuple[int, int, int]:
+    capsule_frame = capsule["framePixels"]
+    _, stage_y, _, stage_height = frame_pixels(backdrop, scale, image.height)
+    horizontal_inset = max(3, round(3 * scale))
+    left = max(0, capsule_frame["x"] + horizontal_inset)
+    right = min(
+        image.width,
+        capsule_frame["x"] + capsule_frame["width"] - horizontal_inset,
+    )
+    top = stage_y + max(8, stage_height - round(32 * scale))
+    bottom = stage_y + stage_height - max(4, round(4 * scale))
+    pixels = [
+        image.getpixel((x, y))
+        for y in range(top, bottom)
+        for x in range(left, right, max(1, round(2 * scale)))
+    ]
+    if not pixels:
+        raise ValueError(f"capsule {capsule.get('id')} has no local stage reference pixels")
+    return median_rgb(pixels)
 
 
 def main() -> int:
@@ -134,7 +242,13 @@ def main() -> int:
     image = Image.open(image_path).convert("RGB")
     host_width = float(receipt["layout"]["fidelity"]["appKit"]["footerContainerFrame"]["width"])
     scale = image.width / host_width
-    capsules = [capsule_metrics(image, node, scale) for node in node_capsules(receipt)]
+    foreground_nodes = receipt.get("layout", {}).get("fidelity", {}).get("appKit", {}).get(
+        "nodes", []
+    )
+    capsules = [
+        capsule_metrics(image, node, scale, foreground_nodes)
+        for node in node_capsules(receipt)
+    ]
 
     backdrop = receipt["layout"]["fidelity"]["appKit"]["mainBackdropFrame"]
     _, stage_y, _, stage_height = frame_pixels(backdrop, scale, image.height)
@@ -144,12 +258,12 @@ def main() -> int:
         for x in range(round(20 * scale), image.width - round(20 * scale), max(1, round(2 * scale)))
     ]
     stage_rgb = median_rgb(stage_pixels)
-    stage_lab = rgb_to_lab(stage_rgb)
     for capsule in capsules:
+        local_rgb = local_stage_rgb(image, capsule, backdrop, scale)
+        stage_lab = rgb_to_lab(local_rgb)
         material_lab = rgb_to_lab(tuple(capsule["materialMedianRgb"]))
-        capsule["stageDeltaE76"] = math.sqrt(
-            sum((material_lab[index] - stage_lab[index]) ** 2 for index in range(3))
-        )
+        capsule["stageMedianRgb"] = local_rgb
+        capsule["stageDeltaE00"] = delta_e_2000(material_lab, stage_lab)
         capsule["stageAbsoluteLStarDifference"] = abs(material_lab[0] - stage_lab[0])
 
     all_boundary = [capsule["medianBoundaryLuminanceDifference"] for capsule in capsules]
@@ -166,8 +280,8 @@ def main() -> int:
             "minimumMedianBoundaryLuminanceDifference": min(all_boundary, default=0),
             "minimumP10BoundaryLuminanceDifference": min(all_p10, default=0),
             "minimumFractionAtLeast015": min(all_fraction, default=0),
-            "maximumStageDeltaE76": max(
-                (capsule["stageDeltaE76"] for capsule in capsules), default=math.inf
+            "maximumStageDeltaE00": max(
+                (capsule["stageDeltaE00"] for capsule in capsules), default=math.inf
             ),
             "maximumStageAbsoluteLStarDifference": max(
                 (capsule["stageAbsoluteLStarDifference"] for capsule in capsules),
@@ -181,7 +295,7 @@ def main() -> int:
         and summary["minimumMedianBoundaryLuminanceDifference"] >= 0.040
         and summary["minimumP10BoundaryLuminanceDifference"] >= 0.015
         and summary["minimumFractionAtLeast015"] >= 0.80
-        and summary["maximumStageDeltaE76"] <= 12.0
+        and summary["maximumStageDeltaE00"] <= 10.0
         and summary["maximumStageAbsoluteLStarDifference"] <= 12.0
     )
     serialized = json.dumps(result, indent=2) + "\n"

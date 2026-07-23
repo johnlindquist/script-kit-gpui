@@ -1077,6 +1077,19 @@ fn notes_entry_reveal_rejects_stale_callbacks_after_cancel_and_restart() {
 
     let restarted_generation = reveal.restart();
     assert_ne!(restarted_generation, first_generation);
+    assert!(!reveal.advance(restarted_generation, super::NotesEntryRevealPhase::Visible));
+    assert!(reveal.advance(
+        restarted_generation,
+        super::NotesEntryRevealPhase::NativeConfigured
+    ));
+    assert!(reveal.advance(
+        restarted_generation,
+        super::NotesEntryRevealPhase::FirstFrameComplete
+    ));
+    assert!(reveal.advance(
+        restarted_generation,
+        super::NotesEntryRevealPhase::SettlingMaterial
+    ));
     assert!(reveal.advance(restarted_generation, super::NotesEntryRevealPhase::Visible));
     assert!(reveal.body_visible);
 }

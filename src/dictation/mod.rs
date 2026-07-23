@@ -93,6 +93,7 @@ pub use types::{
     DictationToggleOutcome, RawAudioChunk,
 };
 pub use visualizer::{animate_bars, silent_bars};
+pub(crate) use window::dictation_window_lifecycle_receipt;
 pub use window::{
     automation_layout_info, begin_overlay_session, close_dictation_overlay,
     is_dictation_overlay_open, open_dictation_overlay, overlay_generation,
