@@ -1551,6 +1551,10 @@ unsafe fn appkit_layer_fidelity(view: id) -> Option<crate::protocol::AppKitFidel
     let corner_radius: f64 = msg_send![layer, cornerRadius];
     let background_color: id = msg_send![layer, backgroundColor];
     let border_color: id = msg_send![layer, borderColor];
+    let shadow_opacity: f32 = msg_send![layer, shadowOpacity];
+    let shadow_radius: f64 = msg_send![layer, shadowRadius];
+    let shadow_offset: cocoa::foundation::NSSize = msg_send![layer, shadowOffset];
+    let shadow_path: id = msg_send![layer, shadowPath];
     Some(crate::protocol::AppKitFidelityLayer {
         contents_scale,
         masks_to_bounds: masks_to_bounds == YES,
@@ -1558,6 +1562,11 @@ unsafe fn appkit_layer_fidelity(view: id) -> Option<crate::protocol::AppKitFidel
         corner_radius,
         background_color: appkit_color_from_cg_color(background_color),
         border_color: appkit_color_from_cg_color(border_color),
+        shadow_opacity: f64::from(shadow_opacity),
+        shadow_radius,
+        shadow_offset_x: shadow_offset.width,
+        shadow_offset_y: shadow_offset.height,
+        has_shadow_path: shadow_path != nil,
     })
 }
 
@@ -1823,6 +1832,20 @@ pub(crate) fn collect_main_footer_appkit_fidelity_snapshot(
                     _ => (None, None),
                 };
             let has_shadow: cocoa::base::BOOL = msg_send![ns_window, hasShadow];
+            let main_backdrop_layer = (backdrop != nil)
+                .then(|| appkit_layer_fidelity(backdrop))
+                .flatten();
+            let mut material_bearing_view_ids = nodes
+                .iter()
+                .filter(|node| node.class_name == "NSGlassEffectView")
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>();
+            if backdrop != nil {
+                material_bearing_view_ids
+                    .push(crate::platform::TAHOE_GLASS_BACKDROP_IDENTIFIER.to_string());
+            }
+            material_bearing_view_ids.sort();
+            material_bearing_view_ids.dedup();
 
             AppKitFidelityCaptureOutcome::captured(crate::protocol::AppKitFidelitySnapshot {
                 target_id: "main-footer-host".to_string(),
@@ -1834,6 +1857,8 @@ pub(crate) fn collect_main_footer_appkit_fidelity_snapshot(
                 transparent_gap_points,
                 backdrop_footer_intersection_area,
                 outer_window_has_shadow: Some(has_shadow == YES),
+                main_backdrop_layer,
+                material_bearing_view_ids,
                 nodes,
             })
         }

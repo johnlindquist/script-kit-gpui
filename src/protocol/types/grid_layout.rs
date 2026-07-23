@@ -557,6 +557,16 @@ pub struct AppKitFidelityLayer {
     pub background_color: Option<AppKitFidelityColor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub border_color: Option<AppKitFidelityColor>,
+    #[serde(default)]
+    pub shadow_opacity: f64,
+    #[serde(default)]
+    pub shadow_radius: f64,
+    #[serde(default)]
+    pub shadow_offset_x: f64,
+    #[serde(default)]
+    pub shadow_offset_y: f64,
+    #[serde(default)]
+    pub has_shadow_path: bool,
 }
 
 /// One identified AppKit view in the main-window footer host tree.
@@ -608,6 +618,10 @@ pub struct AppKitFidelitySnapshot {
     pub backdrop_footer_intersection_area: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outer_window_has_shadow: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_backdrop_layer: Option<AppKitFidelityLayer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub material_bearing_view_ids: Vec<String>,
     pub nodes: Vec<AppKitFidelityNode>,
 }
 
@@ -1036,10 +1050,12 @@ mod tests {
                 coordinate_space: "appkit-content-bottom-left+screenshot-top-left".to_string(),
                 window_bounds: bounds.clone(),
                 main_backdrop_frame: None,
+                main_backdrop_layer: None,
                 footer_container_frame: None,
                 transparent_gap_points: None,
                 backdrop_footer_intersection_area: None,
                 outer_window_has_shadow: None,
+                material_bearing_view_ids: Vec::new(),
                 nodes: vec![AppKitFidelityNode {
                     id: "script-kit-footer-effect".to_string(),
                     class_name: "NSVisualEffectView".to_string(),

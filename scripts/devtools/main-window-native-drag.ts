@@ -497,7 +497,16 @@ type AppKitNode = {
   frame?: Rect;
   windowFrame?: Rect;
   screenshotFrame?: Rect;
-  layer?: { contentsScale?: number; borderWidth?: number; cornerRadius?: number };
+  layer?: {
+    contentsScale?: number;
+    borderWidth?: number;
+    cornerRadius?: number;
+    shadowOpacity?: number;
+    shadowRadius?: number;
+    shadowOffsetX?: number;
+    shadowOffsetY?: number;
+    hasShadowPath?: boolean;
+  };
   text?: { value?: string; color?: { alpha?: number } };
   image?: unknown;
 };
@@ -554,6 +563,16 @@ export function analyzeStationaryFidelity(
   if (appKit?.transparentGapPoints !== 8) errors.push("main/footer gutter is not 8pt");
   if (appKit?.backdropFooterIntersectionArea !== 0) errors.push("main/footer materials overlap");
   if (appKit?.outerWindowHasShadow !== false) errors.push("outer window shadow must stay disabled");
+  const backdropLayer = appKit?.mainBackdropLayer ?? null;
+  if (!backdropLayer) {
+    errors.push("main backdrop layer telemetry is missing");
+  } else if (
+    Number(backdropLayer.shadowOpacity ?? 1) !== 0
+    || Number(backdropLayer.shadowRadius ?? 1) !== 0
+    || backdropLayer.hasShadowPath === true
+  ) {
+    errors.push("main backdrop still carries a shadow into the detached gutter");
+  }
 
   const capsules = nodes.filter((node) =>
     node.className === "NSGlassEffectView"
@@ -732,6 +751,76 @@ async function captureNativeWindow(pid: number, outDir: string, name: string) {
   };
 }
 
+export type GutterAlphaMetrics = {
+  pixelWidth: number;
+  pixelHeight: number;
+  gapY: number;
+  gapHeight: number;
+  fullAlphaMin: number;
+  fullAlphaMax: number;
+  fullAlphaMean: number;
+  centerAlphaMin: number;
+  centerAlphaMax: number;
+  centerAlphaMean: number;
+};
+
+export function evaluateGutterTransparency(metrics: GutterAlphaMetrics) {
+  const errors: string[] = [];
+  if (metrics.gapHeight < 4) errors.push(`gutter is only ${metrics.gapHeight} physical pixels high`);
+  const alphaTolerance = 1 / 255;
+  if (metrics.fullAlphaMax > alphaTolerance) {
+    errors.push(`full gutter alpha max ${metrics.fullAlphaMax.toFixed(6)} exceeds ${alphaTolerance.toFixed(6)}`);
+  }
+  if (metrics.centerAlphaMax > alphaTolerance) {
+    errors.push(`central gutter alpha max ${metrics.centerAlphaMax.toFixed(6)} exceeds ${alphaTolerance.toFixed(6)}`);
+  }
+  return { pass: errors.length === 0, errors, ...metrics };
+}
+
+async function analyzeNativeWindowGutterAlpha(
+  path: string,
+  appKit: any,
+) {
+  const identify = await run(["magick", path, "-format", "%w,%h", "info:"]);
+  if (identify.exitCode !== 0) throw new Error(`gutter image identify failed: ${identify.stderr}`);
+  const [pixelWidth, pixelHeight] = identify.stdout.trim().split(",").map(Number);
+  const windowBounds = appKit?.windowBounds;
+  const backdrop = appKit?.mainBackdropFrame;
+  const gapPoints = Number(appKit?.transparentGapPoints ?? 0);
+  if (!windowBounds || !backdrop || !pixelWidth || !pixelHeight || gapPoints <= 0) {
+    throw new Error("gutter image analysis is missing window/backdrop geometry");
+  }
+  const scaleY = pixelHeight / Number(windowBounds.height);
+  const gapY = Math.round((Number(windowBounds.height) - Number(backdrop.y)) * scaleY);
+  const gapHeight = Math.round(gapPoints * scaleY);
+  const centerX = Math.round(pixelWidth * 0.25);
+  const centerWidth = Math.max(1, Math.round(pixelWidth * 0.5));
+  const alphaFormat = "%[fx:minima.a],%[fx:maxima.a],%[fx:mean.a]";
+  const measure = async (crop: string) => {
+    const result = await run(["magick", path, "-crop", crop, "+repage", "-format", alphaFormat, "info:"]);
+    if (result.exitCode !== 0) throw new Error(`gutter alpha measurement failed: ${result.stderr}`);
+    return result.stdout.trim().split(",").map(Number);
+  };
+  const [fullAlphaMin, fullAlphaMax, fullAlphaMean] = await measure(
+    `${pixelWidth}x${gapHeight}+0+${gapY}`,
+  );
+  const [centerAlphaMin, centerAlphaMax, centerAlphaMean] = await measure(
+    `${centerWidth}x${gapHeight}+${centerX}+${gapY}`,
+  );
+  return evaluateGutterTransparency({
+    pixelWidth,
+    pixelHeight,
+    gapY,
+    gapHeight,
+    fullAlphaMin,
+    fullAlphaMax,
+    fullAlphaMean,
+    centerAlphaMin,
+    centerAlphaMax,
+    centerAlphaMean,
+  });
+}
+
 function parseCLI() {
   const args = process.argv.slice(2);
   const value = (name: string, fallback?: string) => {
@@ -890,6 +979,22 @@ async function cli() {
     }
     receipt.lifecycle = { showHideCycles, modeTransitions };
 
+    if (stationaryOnly) {
+      await announceTestStatus(
+        "Canonical main launcher",
+        "Resetting persisted surface state before visual measurements",
+      );
+      driver.send({
+        type: "triggerBuiltin",
+        builtinId: "builtin/main-window",
+        requestId: "mwnd-stationary-main-window",
+      });
+      await driver.waitForSettle({ timeoutMs: 10_000 });
+      await ensureMainWindowVisible("mwnd-stationary-main-window-show");
+      await driver.setFilterAndWait("", { timeoutMs: 15_000 });
+      await driver.waitForSettle({ timeoutMs: 10_000 });
+    }
+
     const results: Array<Record<string, unknown>> = [];
     for (const trajectory of trials) {
       await announceTestStatus(
@@ -967,10 +1072,22 @@ async function cli() {
       const structural = analyzeStationaryFidelity(
         receipt.layout,
         finalMain,
-        stationaryOnly ? { expectedHostSize: { width: 750, height: 501 } } : {},
+        stationaryOnly ? { expectedHostSize: { width: 750, height: 480 } } : {},
       );
       const captures: Array<Record<string, unknown>> = [];
-      captures.push(await captureNativeWindow(Number(main.pid), outDir, "stationary-default-2x"));
+      const defaultCapture = await captureNativeWindow(Number(main.pid), outDir, "stationary-default-2x");
+      (defaultCapture as any).gutterTransparency = await analyzeNativeWindowGutterAlpha(
+        (defaultCapture as any).path,
+        (receipt.layout as any)?.fidelity?.appKit,
+      );
+      if (!(defaultCapture as any).gutterTransparency.pass) {
+        structural.errors.push(
+          ...((defaultCapture as any).gutterTransparency.errors as string[]).map(
+            (error) => `transparent gutter: ${error}`,
+          ),
+        );
+      }
+      captures.push(defaultCapture);
 
       const appKitNodes = ((receipt.layout as any)?.fidelity?.appKit?.nodes ?? []) as AppKitNode[];
       const actionsButton = appKitNodes.find((node) => node.id === "script-kit-footer-button-actions");

@@ -3,6 +3,7 @@ import {
   analyzeIntegratedFilmstrip,
   analyzeStationaryFidelity,
   analyzeTrace,
+  evaluateGutterTransparency,
   type DragSample,
   type NativeTrace,
 } from "./main-window-native-drag.ts";
@@ -267,7 +268,7 @@ describe("native main-window drag analyzer", () => {
   });
 });
 
-function stationaryFixture(hostHeight = 501) {
+function stationaryFixture(hostHeight = 480) {
   const capsules = [
     { suffix: "left-info", id: "script-kit-footer-left-info-capsule", x: 12, width: 116 },
     { suffix: "run", id: "script-kit-footer-capsule-run", x: 500, width: 100 },
@@ -326,6 +327,13 @@ function stationaryFixture(hostHeight = 501) {
           transparentGapPoints: 8,
           backdropFooterIntersectionArea: 0,
           outerWindowHasShadow: false,
+          mainBackdropLayer: {
+            shadowOpacity: 0,
+            shadowRadius: 0,
+            shadowOffsetX: 0,
+            shadowOffsetY: 0,
+            hasShadowPath: false,
+          },
         },
       },
     },
@@ -339,25 +347,25 @@ describe("stationary native footer analyzer", () => {
     const result = analyzeStationaryFidelity(
       fixture.layout,
       fixture.automationWindow,
-      { expectedHostSize: { width: 750, height: 501 } },
+      { expectedHostSize: { width: 750, height: 480 } },
     );
     expect(result.pass).toBe(true);
   });
 
-  test("accepts lifecycle-settled height when the material partition remains exact", () => {
-    const fixture = stationaryFixture(480);
+  test("accepts an alternate height when the material partition remains exact", () => {
+    const fixture = stationaryFixture(501);
     expect(analyzeStationaryFidelity(fixture.layout, fixture.automationWindow).pass).toBe(true);
   });
 
   test("fails a default-fixture size mismatch", () => {
-    const fixture = stationaryFixture(480);
+    const fixture = stationaryFixture(501);
     const result = analyzeStationaryFidelity(
       fixture.layout,
       fixture.automationWindow,
-      { expectedHostSize: { width: 750, height: 501 } },
+      { expectedHostSize: { width: 750, height: 480 } },
     );
     expect(result.pass).toBe(false);
-    expect(result.errors.some((error) => error.includes("expected 750x501"))).toBe(true);
+    expect(result.errors.some((error) => error.includes("expected 750x480"))).toBe(true);
   });
 
   test("fails a material partition that bridges the detached gutter", () => {
@@ -377,5 +385,37 @@ describe("stationary native footer analyzer", () => {
     expect(result.pass).toBe(false);
     expect(result.errors.some((error) => error.includes("left footer shortcut keycap is missing"))).toBe(true);
     expect(result.errors.some((error) => error.includes("left footer shortcut glyph is missing"))).toBe(true);
+  });
+});
+
+describe("detached gutter alpha analyzer", () => {
+  const transparent = {
+    pixelWidth: 1500,
+    pixelHeight: 1002,
+    gapY: 922,
+    gapHeight: 16,
+    fullAlphaMin: 0,
+    fullAlphaMax: 0,
+    fullAlphaMean: 0,
+    centerAlphaMin: 0,
+    centerAlphaMax: 0,
+    centerAlphaMean: 0,
+  };
+
+  test("accepts a physically transparent sixteen-pixel gutter", () => {
+    expect(evaluateGutterTransparency(transparent).pass).toBe(true);
+  });
+
+  test("rejects the audited full-width shadow veil", () => {
+    const result = evaluateGutterTransparency({
+      ...transparent,
+      fullAlphaMax: 0.333333,
+      fullAlphaMean: 0.28488,
+      centerAlphaMax: 0.313725,
+      centerAlphaMean: 0.288204,
+    });
+    expect(result.pass).toBe(false);
+    expect(result.errors.some((error) => error.includes("full gutter alpha max"))).toBe(true);
+    expect(result.errors.some((error) => error.includes("central gutter alpha max"))).toBe(true);
   });
 });

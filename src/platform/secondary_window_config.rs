@@ -639,7 +639,7 @@ unsafe fn update_tahoe_backdrop_geometry_and_shadow(
     content_view: id,
     glass_view: id,
     backdrop_layout: TahoeBackdropLayout,
-    corner_radius: f64,
+    _corner_radius: f64,
 ) {
     use cocoa::foundation::NSRect;
 
@@ -661,40 +661,19 @@ unsafe fn update_tahoe_backdrop_geometry_and_shadow(
         let _: () = msg_send![glass_view, setWantsLayer: true];
         let backdrop_layer: id = msg_send![glass_view, layer];
         if backdrop_layer != nil {
-            let shadow = crate::theme::get_cached_theme().get_drop_shadow();
-            let shadow_opacity = if shadow.enabled { shadow.opacity } else { 0.0 };
-            let _: () = msg_send![backdrop_layer, setMasksToBounds: false];
-            let _: () = msg_send![backdrop_layer, setShadowOpacity: shadow_opacity];
-            let _: () = msg_send![backdrop_layer, setShadowRadius: f64::from(shadow.blur_radius) / 2.0];
+            // The backdrop ends immediately above the 8pt desktop gutter.
+            // Any ordinary blurred drop shadow necessarily paints through that
+            // gap and visually reconnects the main material to the footer.
+            // Keep depth in the native glass edge itself; the one-window host
+            // and bounded backdrop must contribute no footer-facing shadow.
+            let _: () = msg_send![backdrop_layer, setMasksToBounds: true];
+            let _: () = msg_send![backdrop_layer, setShadowOpacity: 0.0f32];
+            let _: () = msg_send![backdrop_layer, setShadowRadius: 0.0f64];
             let _: () = msg_send![
                 backdrop_layer,
-                setShadowOffset: cocoa::foundation::NSSize::new(
-                    f64::from(shadow.offset_x),
-                    -f64::from(shadow.offset_y)
-                )
+                setShadowOffset: cocoa::foundation::NSSize::new(0.0, 0.0)
             ];
-            let shadow_color: id = msg_send![
-                class!(NSColor),
-                colorWithSRGBRed: f64::from((shadow.color >> 16) & 0xff) / 255.0
-                green: f64::from((shadow.color >> 8) & 0xff) / 255.0
-                blue: f64::from(shadow.color & 0xff) / 255.0
-                alpha: 1.0f64
-            ];
-            if shadow_color != nil {
-                let cg_color: id = msg_send![shadow_color, CGColor];
-                let _: () = msg_send![backdrop_layer, setShadowColor: cg_color];
-            }
-            let backdrop_bounds: NSRect = msg_send![glass_view, bounds];
-            let path: id = msg_send![
-                class!(NSBezierPath),
-                bezierPathWithRoundedRect: backdrop_bounds
-                xRadius: corner_radius
-                yRadius: corner_radius
-            ];
-            if path != nil {
-                let cg_path: id = msg_send![path, CGPath];
-                let _: () = msg_send![backdrop_layer, setShadowPath: cg_path];
-            }
+            let _: () = msg_send![backdrop_layer, setShadowPath: nil];
         }
     } else {
         let _: () = msg_send![window, setHasShadow: true];
