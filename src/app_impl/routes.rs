@@ -202,6 +202,7 @@ pub const fn plan_trigger_builtin_route(id: TriggerBuiltin) -> AppRoute {
         TriggerBuiltin::ScriptTemplateCatalog => {
             AppRoute::ExecuteBuiltin("builtin/new-script-from-template")
         }
+        TriggerBuiltin::Dictation => AppRoute::ExecuteBuiltin("builtin/dictation"),
         TriggerBuiltin::DictationHistory => AppRoute::ExecuteBuiltin("builtin/dictation-history"),
         TriggerBuiltin::ChooseTheme => AppRoute::ExecuteBuiltin("builtin/choose-theme"),
         TriggerBuiltin::ScriptKitSelfie => AppRoute::ExecuteBuiltin("builtin/script-kit-selfie"),
@@ -271,6 +272,7 @@ mod tests {
             ("OpenTabAi", 1),
             ("OpenCurrentAppCommands", 1),
             ("builtin/choose-theme", 1),
+            ("builtin/dictation", 1),
             ("builtin/main-window", 1),
             ("builtin/dictation-history", 1),
             ("builtin/new-script", 1),

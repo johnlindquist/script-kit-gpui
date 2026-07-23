@@ -1,0 +1,417 @@
+#!/usr/bin/env bun
+/**
+ * Visible, fail-closed stress proof for animation-heavy window toggles.
+ *
+ * The probe exercises the real GPUI dispatch path for Cmd+K, the Notes
+ * toggle command, and the Dictation builtin. Each phase posts input as fast
+ * as the app can acknowledge it, watches for duplicate automation windows,
+ * proves a deliberate recovery action, and rejects fresh ERROR/crash logs.
+ */
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { Driver, type Json } from "./driver.ts";
+import { announceTestStatus } from "./test-status.ts";
+
+type WindowSnapshot = {
+  id?: string;
+  kind?: string;
+  focused?: boolean;
+  visible?: boolean;
+};
+
+function arg(name: string, fallback?: string) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : fallback;
+}
+
+function percentile(values: number[], fraction: number) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return Number(sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)]!.toFixed(2));
+}
+
+function countKind(snapshot: Json, kind: string) {
+  return ((snapshot?.windows ?? []) as WindowSnapshot[]).filter(
+    (window) => window.kind === kind && window.visible !== false,
+  ).length;
+}
+
+async function waitForKindCount(
+  driver: Driver,
+  kind: string,
+  expected: number,
+  timeoutMs = 1_500,
+) {
+  const started = performance.now();
+  let last: Json = null;
+  while (performance.now() - started < timeoutMs) {
+    last = await driver.listAutomationWindows({ timeoutMs: 5_000 });
+    if (countKind(last, kind) === expected) {
+      return {
+        pass: true,
+        elapsedMs: Number((performance.now() - started).toFixed(2)),
+        count: expected,
+        snapshot: last,
+      };
+    }
+    await Bun.sleep(20);
+  }
+  return {
+    pass: false,
+    elapsedMs: Number((performance.now() - started).toFixed(2)),
+    count: countKind(last, kind),
+    snapshot: last,
+  };
+}
+
+function boundedErrors(logs: Json, baselineCount: number) {
+  return ((logs?.entries ?? []) as Json[])
+    .slice(baselineCount)
+    .map((entry) => ({
+      timestamp: entry?.timestamp ?? null,
+      target: entry?.target ?? null,
+      message: String(entry?.message ?? "").slice(0, 240),
+    }));
+}
+
+async function activatePid(pid: number) {
+  const script = [
+    'tell application "System Events"',
+    `set processMatches to application processes whose unix id is ${pid}`,
+    "if (count of processMatches) is 1 then set frontmost of item 1 of processMatches to true",
+    "end tell",
+  ].join("\n");
+  const child = Bun.spawn(["osascript", "-e", script], {
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const [stderr, exitCode] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stderr: stderr.trim().slice(0, 400) };
+}
+
+const binary = resolve(arg("--binary", process.env.SCRIPT_KIT_GPUI_BINARY ?? "")!);
+const outPath = resolve(
+  arg(
+    "--out",
+    ".artifacts/main-window-native-drag/mwnd15-rapid-toggle/receipt.json",
+  )!,
+);
+if (!binary || !existsSync(binary)) {
+  throw new Error(`binary missing: ${binary || "<unset>"}`);
+}
+mkdirSync(dirname(outPath), { recursive: true });
+
+const receipt: Json = {
+  schemaVersion: 1,
+  startedAt: new Date().toISOString(),
+  binary,
+  binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+  phases: {},
+  pass: false,
+};
+
+const driver = await Driver.launch({
+  binary,
+  sandboxHome: true,
+  sessionName: "mwnd15-rapid-toggle",
+  defaultTimeoutMs: 8_000,
+});
+
+try {
+  receipt.pid = driver.pid ?? null;
+  receipt.sessionDir = driver.sessionDir;
+  driver.send({ type: "show" });
+  const mainVisible = await waitForKindCount(driver, "main", 1, 5_000);
+  const activation = driver.pid ? await activatePid(driver.pid) : null;
+  await driver.waitForSettle({ timeoutMs: 5_000 });
+  const errorBaseline = await driver.getLogs({ limit: 500, level: "error" });
+  const baselineErrorCount = ((errorBaseline?.entries ?? []) as Json[]).length;
+
+  await announceTestStatus(
+    "MWND-15A · Cmd+K hammer",
+    "20 real GPUI key dispatches, then launcher input recovery",
+  );
+  const actionLatencies: number[] = [];
+  const actionDispatches: Json[] = [];
+  let maxActionWindows = 0;
+  for (let index = 0; index < 20; index += 1) {
+    const started = performance.now();
+    const dispatch = await driver.simulateGpuiKeyDown("k", {
+      modifiers: ["cmd"],
+      target: { type: "id", id: "main" },
+      timeoutMs: 5_000,
+    });
+    actionLatencies.push(performance.now() - started);
+    actionDispatches.push({
+      index,
+      success: dispatch?.success === true,
+      dispatchPath: dispatch?.dispatchPath ?? null,
+      resolvedWindowId: dispatch?.resolvedWindowId ?? null,
+    });
+    const windows = await driver.listAutomationWindows({ timeoutMs: 5_000 });
+    maxActionWindows = Math.max(maxActionWindows, countKind(windows, "actionsDialog"));
+  }
+  await Bun.sleep(350);
+  await driver.waitForSettle({ timeoutMs: 5_000 });
+
+  const actionStateAfterBurst = await driver.getState({ timeoutMs: 5_000 });
+  const actionsOpenAfterBurst = actionStateAfterBurst?.actionsDialog?.open === true;
+  if (actionsOpenAfterBurst) {
+    await driver.simulateGpuiKeyDown("escape", {
+      target: { type: "id", id: "actions-dialog" },
+      timeoutMs: 5_000,
+    });
+    await waitForKindCount(driver, "actionsDialog", 0);
+  }
+  const inputRecoveryStarted = performance.now();
+  await driver.setFilterAndWait("mwnd15-recovery", { timeoutMs: 5_000 });
+  const inputRecoveryMs = performance.now() - inputRecoveryStarted;
+  await driver.setFilterAndWait("", { timeoutMs: 5_000 });
+
+  await Bun.sleep(350);
+  const deliberateOpenStarted = performance.now();
+  await driver.simulateGpuiKeyDown("k", {
+    modifiers: ["cmd"],
+    target: { type: "id", id: "main" },
+    timeoutMs: 5_000,
+  });
+  const deliberateOpen = await waitForKindCount(driver, "actionsDialog", 1);
+  const deliberateOpenMs = performance.now() - deliberateOpenStarted;
+  const deliberateCloseStarted = performance.now();
+  if (deliberateOpen.pass) {
+    await driver.simulateGpuiKeyDown("escape", {
+      target: { type: "id", id: "actions-dialog" },
+      timeoutMs: 5_000,
+    });
+  }
+  const deliberateClose = await waitForKindCount(driver, "actionsDialog", 0);
+  const deliberateCloseMs = performance.now() - deliberateCloseStarted;
+  const actionsErrors = boundedErrors(
+    await driver.getLogs({ limit: 500, level: "error" }),
+    baselineErrorCount,
+  );
+  const actionsPass = mainVisible.pass
+    && actionDispatches.every((dispatch) => dispatch.success)
+    && maxActionWindows <= 1
+    && inputRecoveryMs <= 300
+    && deliberateOpen.pass
+    && deliberateClose.pass
+    && deliberateOpenMs <= 750
+    && deliberateCloseMs <= 750
+    && actionsErrors.length === 0;
+  receipt.phases.actions = {
+    pass: actionsPass,
+    mainVisible,
+    activation,
+    pulses: actionDispatches.length,
+    dispatches: actionDispatches,
+    latencyMs: {
+      p50: percentile(actionLatencies, 0.5),
+      p95: percentile(actionLatencies, 0.95),
+      max: actionLatencies.length ? Number(Math.max(...actionLatencies).toFixed(2)) : null,
+    },
+    maxActionWindows,
+    actionsOpenAfterBurst,
+    inputRecoveryMs: Number(inputRecoveryMs.toFixed(2)),
+    deliberateOpenMs: Number(deliberateOpenMs.toFixed(2)),
+    deliberateCloseMs: Number(deliberateCloseMs.toFixed(2)),
+    errors: actionsErrors,
+  };
+
+  await announceTestStatus(
+    "MWND-15B · Notes hammer",
+    "16 immediate Notes toggles, duplicate-window watch, then reopen recovery",
+  );
+  const notesErrorBaseline = ((await driver.getLogs({
+    limit: 500,
+    level: "error",
+  }))?.entries ?? []).length;
+  let maxNotesWindows = 0;
+  const notesSamples: Json[] = [];
+  for (let index = 0; index < 16; index += 1) {
+    driver.send({
+      type: "openNotes",
+      requestId: `mwnd15-notes-${index}`,
+    });
+    await Bun.sleep(20);
+    const windows = await driver.listAutomationWindows({ timeoutMs: 5_000 });
+    const count = countKind(windows, "notes");
+    maxNotesWindows = Math.max(maxNotesWindows, count);
+    notesSamples.push({ index, count });
+  }
+  await Bun.sleep(350);
+  const notesAfterBurst = await driver.listAutomationWindows({ timeoutMs: 5_000 });
+  if (countKind(notesAfterBurst, "notes") > 0) {
+    driver.send({ type: "openNotes", requestId: "mwnd15-notes-normalize-close" });
+    await waitForKindCount(driver, "notes", 0, 2_000);
+  }
+  const notesOpenStarted = performance.now();
+  driver.send({ type: "openNotes", requestId: "mwnd15-notes-recovery-open" });
+  const notesOpen = await waitForKindCount(driver, "notes", 1, 2_000);
+  const notesOpenMs = performance.now() - notesOpenStarted;
+  const notesCloseStarted = performance.now();
+  driver.send({ type: "openNotes", requestId: "mwnd15-notes-recovery-close" });
+  const notesClose = await waitForKindCount(driver, "notes", 0, 2_000);
+  const notesCloseMs = performance.now() - notesCloseStarted;
+  const notesErrors = boundedErrors(
+    await driver.getLogs({ limit: 500, level: "error" }),
+    notesErrorBaseline,
+  );
+  const notesPass = maxNotesWindows <= 1
+    && notesOpen.pass
+    && notesClose.pass
+    && notesOpenMs <= 750
+    && notesCloseMs <= 750
+    && notesErrors.length === 0;
+  receipt.phases.notes = {
+    pass: notesPass,
+    pulses: notesSamples.length,
+    samples: notesSamples,
+    maxNotesWindows,
+    notesOpenMs: Number(notesOpenMs.toFixed(2)),
+    notesCloseMs: Number(notesCloseMs.toFixed(2)),
+    errors: notesErrors,
+  };
+
+  await announceTestStatus(
+    "MWND-15C · Dictation hammer",
+    "12 rapid start/stop requests; no transcript text is recorded",
+  );
+  const dictationBefore = await driver.getState({ timeoutMs: 5_000 });
+  const dictationBaseline = dictationBefore?.dictation
+    ?? dictationBefore?.dictationState
+    ?? dictationBefore?.dictation_state
+    ?? null;
+  const baselineGeneration = Number(dictationBaseline?.generation ?? 0);
+  const baselineRecordingStateGeneration = Number(
+    dictationBaseline?.recordingStateGeneration ?? 0,
+  );
+  const dictationErrorBaseline = ((await driver.getLogs({
+    limit: 500,
+    level: "error",
+  }))?.entries ?? []).length;
+  let maxDictationWindows = 0;
+  const dictationSamples: Json[] = [];
+  for (let index = 0; index < 12; index += 1) {
+    driver.send({
+      type: "triggerBuiltin",
+      builtinId: "builtin/dictation",
+      requestId: `mwnd15-dictation-${index}`,
+    });
+    await Bun.sleep(35);
+    const windows = await driver.listAutomationWindows({ timeoutMs: 5_000 });
+    const count = countKind(windows, "dictation");
+    maxDictationWindows = Math.max(maxDictationWindows, count);
+    const state = await driver.getState({ timeoutMs: 5_000 });
+    const dictation = state?.dictation ?? state?.dictationState ?? state?.dictation_state ?? null;
+    dictationSamples.push({
+      index,
+      count,
+      generation: dictation?.generation ?? null,
+      recordingStateGeneration: dictation?.recordingStateGeneration ?? null,
+      isRecording: dictation?.isRecording ?? null,
+      phase: dictation?.phase ?? null,
+      captureActive: dictation?.cleanup?.captureActive ?? null,
+      captureStopInProgress: dictation?.cleanup?.captureStopInProgress ?? null,
+    });
+  }
+
+  let dictationState: Json = null;
+  const dictationSettleStarted = performance.now();
+  while (performance.now() - dictationSettleStarted < 8_000) {
+    const state = await driver.getState({ timeoutMs: 5_000 });
+    dictationState = state?.dictation ?? state?.dictationState ?? state?.dictation_state ?? null;
+    const captureActive = dictationState?.cleanup?.captureActive === true;
+    const stopInProgress = dictationState?.cleanup?.captureStopInProgress === true;
+    if (!captureActive && !stopInProgress && dictationState?.isRecording !== true) break;
+    await Bun.sleep(50);
+  }
+  const dictationSettleMs = performance.now() - dictationSettleStarted;
+  const dictationCloseStarted = performance.now();
+  const dictationClosed = await waitForKindCount(driver, "dictation", 0, 2_000);
+  const dictationCloseMs = performance.now() - dictationCloseStarted;
+  const dictationErrors = boundedErrors(
+    await driver.getLogs({ limit: 500, level: "error" }),
+    dictationErrorBaseline,
+  );
+  const dictationCleanup = {
+    isRecording: dictationState?.isRecording ?? null,
+    phase: dictationState?.phase ?? null,
+    generation: dictationState?.generation ?? null,
+    recordingStateGeneration: dictationState?.recordingStateGeneration ?? null,
+    captureActive: dictationState?.cleanup?.captureActive ?? null,
+    captureStopInProgress: dictationState?.cleanup?.captureStopInProgress ?? null,
+    safety: dictationState?.safety ?? null,
+  };
+  const exercisedRealToggle = dictationSamples.some((sample) =>
+    sample.count > 0
+    || sample.isRecording === true
+    || sample.captureActive === true
+    || Number(sample.generation ?? 0) > baselineGeneration
+    || Number(sample.recordingStateGeneration ?? 0) > baselineRecordingStateGeneration
+  );
+  const dictationPass = maxDictationWindows <= 1
+    && exercisedRealToggle
+    && dictationCleanup.isRecording === false
+    && dictationCleanup.captureActive === false
+    && dictationCleanup.captureStopInProgress === false
+    && dictationSettleMs <= 8_000
+    && dictationClosed.pass
+    && dictationCloseMs <= 2_000
+    && dictationErrors.length === 0;
+  receipt.phases.dictation = {
+    pass: dictationPass,
+    pulses: dictationSamples.length,
+    samples: dictationSamples,
+    baselineGeneration,
+    baselineRecordingStateGeneration,
+    exercisedRealToggle,
+    maxDictationWindows,
+    finalWindowCount: dictationClosed.count,
+    settleMs: Number(dictationSettleMs.toFixed(2)),
+    closeMs: Number(dictationCloseMs.toFixed(2)),
+    cleanup: dictationCleanup,
+    transcriptContentCaptured: false,
+    errors: dictationErrors,
+  };
+
+  const finalInputStarted = performance.now();
+  driver.send({ type: "show" });
+  await waitForKindCount(driver, "main", 1, 2_000);
+  await driver.setFilterAndWait("mwnd15-final", { timeoutMs: 5_000 });
+  const finalInputMs = performance.now() - finalInputStarted;
+  await driver.setFilterAndWait("", { timeoutMs: 5_000 });
+  receipt.finalRecovery = {
+    pass: finalInputMs <= 500,
+    inputEchoMs: Number(finalInputMs.toFixed(2)),
+  };
+
+  const logText = await Bun.file(driver.logPath).text();
+  const crashMarkers = logText
+    .split("\n")
+    .filter((line) => /panicked at|fatal runtime error|abort trap|segmentation fault/i.test(line))
+    .slice(0, 20);
+  receipt.crashScan = { pass: crashMarkers.length === 0, markers: crashMarkers };
+  receipt.driverStats = driver.stats;
+  receipt.pass = actionsPass
+    && notesPass
+    && dictationPass
+    && receipt.finalRecovery.pass
+    && receipt.crashScan.pass;
+} catch (error) {
+  receipt.error = String(error);
+  receipt.pass = false;
+} finally {
+  await driver.close();
+  receipt.cleanedUp = !driver.alive;
+  receipt.finishedAt = new Date().toISOString();
+  receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
+  writeFileSync(outPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  console.log(JSON.stringify({ receiptPath: outPath, pass: receipt.pass }, null, 2));
+}
+
+process.exit(receipt.pass ? 0 : 2);

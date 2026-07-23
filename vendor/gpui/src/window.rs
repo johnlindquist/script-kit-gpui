@@ -1549,9 +1549,17 @@ impl Window {
                     let mut retry_cx = cx.clone();
                     cx.foreground_executor()
                         .spawn(async move {
+                            // Script Kit vendor patch (chaos OF-4/OF-6):
+                            // AppKit frame morphs can deliver one final resize
+                            // after a rapidly toggled window has been removed.
+                            // The immediate update above still schedules this
+                            // required retry for a live borrowed window; if the
+                            // retry also fails, the target is either gone or a
+                            // later native resize callback will carry the live
+                            // geometry. Do not ERROR-log that teardown race.
                             handle
                                 .update(&mut retry_cx, |_, window, cx| window.bounds_changed(cx))
-                                .log_err();
+                                .ok();
                         })
                         .detach();
                 }
@@ -1567,9 +1575,11 @@ impl Window {
                     let mut retry_cx = cx.clone();
                     cx.foreground_executor()
                         .spawn(async move {
+                            // See the resize retry above: a superseded window
+                            // may disappear before this deferred move arrives.
                             handle
                                 .update(&mut retry_cx, |_, window, cx| window.bounds_changed(cx))
-                                .log_err();
+                                .ok();
                         })
                         .detach();
                 }

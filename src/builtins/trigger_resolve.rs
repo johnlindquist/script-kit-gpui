@@ -196,6 +196,7 @@ fn render_variant(id: TriggerBuiltin) -> &'static str {
         TriggerBuiltin::Favorites => "Favorites",
         TriggerBuiltin::SearchAiPresets => "SearchAiPresets",
         TriggerBuiltin::ScriptTemplateCatalog => "ScriptTemplateCatalog",
+        TriggerBuiltin::Dictation => "Dictation",
         TriggerBuiltin::DictationHistory => "DictationHistory",
         TriggerBuiltin::ChooseTheme => "ChooseTheme",
         TriggerBuiltin::ScriptKitSelfie => "ScriptKitSelfie",

@@ -16,6 +16,7 @@
 {"input":"builtin/manage-installed-kits","expected":"ShowFilterableView::KitStoreInstalled"}
 {"input":"builtin/favorites","expected":"ShowFilterableView::Favorites"}
 {"input":"builtin/search-ai-presets","expected":"ShowFilterableView::SearchAiPresets"}
+{"input":"builtin/dictation","expected":"ExecuteBuiltin::builtin/dictation"}
 {"input":"builtin/dictation-history","expected":"ExecuteBuiltin::builtin/dictation-history"}
 {"input":"builtin/choose-theme","expected":"ExecuteBuiltin::builtin/choose-theme"}
 {"input":"builtin/script-kit-selfie","expected":"ExecuteBuiltin::builtin/script-kit-selfie"}
