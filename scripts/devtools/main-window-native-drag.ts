@@ -745,6 +745,7 @@ export function selectTerminalAttempt<
   T extends { analysis: DragAnalysis; filmstrip?: { pass: boolean } },
 >(attempts: T[]): T | null {
   for (const attempt of attempts) {
+    if (attempt.filmstrip?.pass === false) continue;
     if (attempt.analysis.attemptDisposition === "EVALUABLE_FAIL")
       return attempt;
     if (
@@ -1365,7 +1366,10 @@ async function cli() {
   mkdirSync(outDir, { recursive: true });
   const helper = join(outDir, "macos-native-drag-sampler");
   const compile = await run([
+    "xcrun",
     "swiftc",
+    "-O",
+    "-whole-module-optimization",
     resolve(import.meta.dir, "../agentic/macos-native-drag-sampler.swift"),
     "-o",
     helper,
@@ -1405,7 +1409,9 @@ async function cli() {
     const windows = await driver.listAutomationWindows({ timeoutMs: 15_000 });
     const main = (windows.windows ?? []).find((window: any) => window.id === "main");
     if (!main?.pid) throw new Error("main automation window PID missing");
+    const pinnedMainWindow = await resolveNativeWindow(Number(main.pid));
     receipt.pid = main.pid;
+    receipt.pinnedMainWindowNumber = pinnedMainWindow.windowId;
     receipt.initialAutomationWindows = windows;
 
     const ensureMainWindowVisible = async (requestId: string) => {
@@ -1525,6 +1531,12 @@ async function cli() {
           helper,
           "--pid",
           String(main.pid),
+          "--main-window-number",
+          String(pinnedMainWindow.windowId),
+          "--left-control-id",
+          LEFT_CONTROL_ID,
+          "--right-control-id",
+          "script-kit-footer-button-ai",
           "--trajectory",
           trajectory,
           "--output",
@@ -1548,10 +1560,13 @@ async function cli() {
           filmstrip,
         };
         attempts.push(entry);
-        selected ??= entry;
-        if (analysis.valid && filmstrip.pass) {
+        if (filmstrip.pass && analysis.attemptDisposition === "EVALUABLE_FAIL") {
           selected = entry;
-          if (analysis.overallPass) break;
+          break;
+        }
+        if (filmstrip.pass && analysis.attemptDisposition === "EVALUABLE_PASS") {
+          selected = entry;
+          break;
         }
       }
       results.push({
@@ -2083,13 +2098,15 @@ async function cli() {
     receipt.lifecyclePass = lifecyclePass;
     receipt.expectFallback = expectFallback;
     receipt.valid = results.every((result: any) =>
-      result.analysis.valid && result.filmstrip?.pass === true
+      result.analysis?.valid === true && result.filmstrip?.pass === true
     );
     receipt.pass = lifecyclePass
       && (receipt.stationary as any)?.pass === true
       && (!visualMatrix || (receipt.visualMatrix as any)?.pass === true)
       && (receipt.crashScan as any)?.pass === true
-      && results.every((result: any) => result.analysis.overallPass && result.filmstrip?.pass === true);
+      && results.every((result: any) =>
+        result.analysis?.overallPass === true && result.filmstrip?.pass === true
+      );
   } finally {
     try {
       driver.send({ type: "hide" });
@@ -2138,11 +2155,11 @@ async function cli() {
     pass: receipt.pass,
     trials: (receipt.trials as any[]).map((trial) => ({
       trajectory: trial.trajectory,
-      verdict: trial.analysis.verdict,
-      topology: trial.analysis.topology,
-      displacementPt: trial.analysis.displacementPt,
-      maxDriftPx: trial.analysis.controls.map((control: any) => control.maxDriftPx),
-      errors: trial.analysis.errors,
+      verdict: trial.analysis?.verdict ?? "INVALID",
+      topology: trial.analysis?.topology ?? "unknown",
+      displacementPt: trial.analysis?.displacementPt ?? null,
+      maxDriftPx: trial.analysis?.controls?.map((control: any) => control.maxDriftPx) ?? [],
+      errors: trial.analysis?.errors ?? ["no evaluable attempt"],
     })),
   }, null, 2));
   if (receipt.valid !== true) process.exitCode = 2;

@@ -420,6 +420,11 @@ describe("native main-window drag analyzer v2", () => {
   test("a later valid pass replaces earlier invalid attempts", () => {
     const selected = selectTerminalAttempt([
       { analysis: analysis("INVALID_OBSERVER"), id: 1 },
+      {
+        analysis: analysis("EVALUABLE_FAIL"),
+        filmstrip: { pass: false },
+        id: 2,
+      },
       { analysis: analysis("INVALID_INTERFERENCE"), id: 2 },
       {
         analysis: analysis("EVALUABLE_PASS"),
