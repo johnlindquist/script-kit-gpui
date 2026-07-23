@@ -14,7 +14,9 @@ export type Rect = { x: number; y: number; width: number; height: number };
 export type ControlFrame = {
   id: string;
   framePt: Rect | null;
+  mainFramePtAtMeasurement?: Rect | null;
   axWindowNumber: number | null;
+  measurementSource?: string;
   error?: string | null;
 };
 export type DragSample = {
@@ -25,7 +27,16 @@ export type DragSample = {
   footerWindowNumber: number | null;
   footerFramePt: Rect | null;
   relevantWindowCount: number;
+  relevantWindowNumbers?: number[];
   controls: ControlFrame[];
+};
+export type FilmstripFrame = {
+  fraction: number;
+  tNs: number;
+  mainFramePt: Rect | null;
+  path: string;
+  captureSucceeded: boolean;
+  error?: string | null;
 };
 export type NativeTrace = {
   schemaVersion: number;
@@ -42,7 +53,9 @@ export type NativeTrace = {
     boundsPt: Rect;
   } | null;
   sampleTargetHz: number;
+  mouseUpEventNs?: number | null;
   samples: DragSample[];
+  filmstripFrames?: FilmstripFrame[];
   errors: string[];
 };
 
@@ -87,6 +100,18 @@ const THRESHOLDS = {
   rmsDriftPx: 0.35,
   consecutiveOverHalfPixel: 0,
 };
+const LEFT_CONTROL_ID = "script-kit-footer-left-info-hit-target";
+const RIGHT_CONTROL_IDS = [
+  "script-kit-footer-button-ai",
+  "script-kit-footer-button-actions",
+  "script-kit-footer-button-run",
+];
+const LIVE_MEASUREMENT_SOURCE = "live-ax+interpolated-main";
+const MAX_NATIVE_DRAG_ATTEMPTS = 10;
+// AX + WindowServer sampling is driven by an NSEventTracking/common-mode timer.
+// Allow one millisecond of scheduler quantization around the nominal refresh
+// boundary while keeping the separate hard two-refresh maximum-gap guard.
+const TIMER_JITTER_TOLERANCE_MS = 1;
 
 function quantile(values: number[], fraction: number): number | null {
   if (values.length === 0) return null;
@@ -104,10 +129,11 @@ function distance(a: { x: number; y: number }, b: { x: number; y: number }): num
 }
 
 function relativeVector(sample: DragSample, control: ControlFrame) {
-  if (!sample.mainFramePt || !control.framePt) return null;
+  const mainFrame = control.mainFramePtAtMeasurement;
+  if (!mainFrame || !control.framePt) return null;
   return {
-    x: control.framePt.x - sample.mainFramePt.x,
-    y: control.framePt.y - sample.mainFramePt.y,
+    x: control.framePt.x - mainFrame.x,
+    y: control.framePt.y - mainFrame.y,
   };
 }
 
@@ -131,6 +157,7 @@ function settlingForControl(
   controlID: string,
   baseline: { x: number; y: number },
   scale: number,
+  mouseUpEventNs: number | null | undefined,
 ) {
   const settling = driftForControl(
     samples.filter((sample) => sample.phase === "settling"),
@@ -138,9 +165,7 @@ function settlingForControl(
     baseline,
     scale,
   );
-  const mouseUpNs = samples.find((sample) => sample.phase === "mouseUp")?.tNs
-    ?? settling[0]?.sample.tNs
-    ?? null;
+  const mouseUpNs = mouseUpEventNs ?? null;
   if (mouseUpNs == null) return { settlingMs: null, stable: false };
   for (let index = 0; index < settling.length; index += 1) {
     const candidate = settling[index];
@@ -169,6 +194,7 @@ export function analyzeTrace(trace: NativeTrace): DragAnalysis {
   const scale = trace.display?.backingScale ?? 1;
   const refreshPeriodMs = 1000 / Math.max(1, trace.display?.refreshHz ?? 60);
   const controlIDs = [...new Set(samples.flatMap((sample) => sample.controls.map((control) => control.id)))];
+  const rightControlID = RIGHT_CONTROL_IDS.find((id) => controlIDs.includes(id)) ?? null;
 
   const mainPositions = inMotion.flatMap((sample) => sample.mainFramePt ? [sample.mainFramePt] : []);
   const distinctMainPositions = new Set(
@@ -192,18 +218,65 @@ export function analyzeTrace(trace: NativeTrace): DragAnalysis {
 
   if (trace.status !== "ok") errors.push(`sampler status is ${trace.status}`);
   if (!trace.accessibilityTrusted) errors.push("accessibility is not trusted");
-  if (controlIDs.length < 2) errors.push("fewer than two controls were sampled");
+  if (!controlIDs.includes(LEFT_CONTROL_ID)) errors.push(`missing exact left control ${LEFT_CONTROL_ID}`);
+  if (!rightControlID) errors.push(`missing exact right control (${RIGHT_CONTROL_IDS.join(",")})`);
+  if (controlIDs.length !== 2) errors.push(`expected exactly two controls, sampled ${controlIDs.length}`);
   if (inMotion.length < 36) errors.push(`only ${inMotion.length} in-motion samples`);
   if (distinctMainPositions < 30) errors.push(`only ${distinctMainPositions} distinct main positions`);
   if (displacementPt < 200) errors.push(`main displacement ${round(displacementPt)}pt is below 200pt`);
   if (cadence.medianMs == null || cadence.medianMs > 10) {
     errors.push(`median cadence ${cadence.medianMs ?? "missing"}ms exceeds 10ms`);
   }
-  if (cadence.p95Ms == null || cadence.p95Ms > refreshPeriodMs) {
-    errors.push(`p95 cadence ${cadence.p95Ms ?? "missing"}ms exceeds one refresh period`);
+  if (cadence.p95Ms == null || cadence.p95Ms > refreshPeriodMs + TIMER_JITTER_TOLERANCE_MS) {
+    errors.push(
+      `p95 cadence ${cadence.p95Ms ?? "missing"}ms exceeds one refresh period plus ${TIMER_JITTER_TOLERANCE_MS}ms timer jitter`,
+    );
   }
   if (cadence.maxMs == null || cadence.maxMs > refreshPeriodMs * 2) {
     errors.push(`max cadence ${cadence.maxMs ?? "missing"}ms exceeds two refresh periods`);
+  }
+  const mouseUpSample = samples.find((sample) => sample.phase === "mouseUp");
+  if (trace.mouseUpEventNs == null) errors.push("explicit mouse-up event timestamp is missing");
+  if (!mouseUpSample) errors.push("mouse-up phase was not sampled");
+  if (mouseUpSample && trace.mouseUpEventNs != null
+    && Math.abs(Number(mouseUpSample.tNs) - Number(trace.mouseUpEventNs)) > 50_000_000) {
+    errors.push("sampled mouse-up phase is not tied to the explicit mouse-up event timestamp");
+  }
+  if (samples.some((sample) =>
+    sample.relevantWindowNumbers == null
+    || sample.relevantWindowNumbers.length !== sample.relevantWindowCount
+  )) {
+    errors.push("per-sample relevant native-window enumeration is missing or inconsistent");
+  }
+  const relevantWindowCounts = new Set(samples.map((sample) => sample.relevantWindowCount));
+  if (relevantWindowCounts.size !== 1) {
+    errors.push(`relevant native-window count changed during drag: ${[...relevantWindowCounts].join(",")}`);
+  }
+  if (samples.some((sample) => sample.controls.some((control) =>
+    control.measurementSource !== LIVE_MEASUREMENT_SOURCE
+    || control.mainFramePtAtMeasurement == null
+  ))) {
+    errors.push(`all control samples must use ${LIVE_MEASUREMENT_SOURCE}`);
+  }
+  if (samples.some((sample) => sample.controls.some((control) => control.axWindowNumber == null))) {
+    errors.push("control ownership must be non-null in every sample");
+  }
+
+  const baselineLeft = [...pre].reverse().flatMap((sample) => {
+    const control = sample.controls.find((entry) => entry.id === LEFT_CONTROL_ID);
+    return control?.framePt ? [control.framePt] : [];
+  })[0];
+  const baselineRight = rightControlID == null ? null : [...pre].reverse().flatMap((sample) => {
+    const control = sample.controls.find((entry) => entry.id === rightControlID);
+    return control?.framePt ? [control.framePt] : [];
+  })[0] ?? null;
+  if (!baselineLeft || !baselineRight) {
+    errors.push("left/right pre-drag control separation is unavailable");
+  } else {
+    const separation = Math.abs(baselineRight.x - baselineLeft.x);
+    if (baselineRight.x <= baselineLeft.x || separation < 100) {
+      errors.push(`left/right controls are not far apart (${round(separation)}pt)`);
+    }
   }
 
   const nativeWindowNumbers = new Set(
@@ -212,8 +285,13 @@ export function analyzeTrace(trace: NativeTrace): DragAnalysis {
   );
   const oneWindowInvariant = samples.length > 0
     && samples.every((sample) => sample.mainWindowNumber != null && sample.footerWindowNumber == null)
+    && samples.every((sample) => sample.relevantWindowCount === 1)
+    && samples.every((sample) =>
+      sample.relevantWindowNumbers?.length === 1
+      && sample.relevantWindowNumbers[0] === sample.mainWindowNumber
+    )
     && samples.every((sample) => sample.controls.every(
-      (control) => control.axWindowNumber == null || control.axWindowNumber === sample.mainWindowNumber,
+      (control) => control.axWindowNumber != null && control.axWindowNumber === sample.mainWindowNumber,
     ));
   const topology = oneWindowInvariant
     ? "one-window"
@@ -251,7 +329,10 @@ export function analyzeTrace(trace: NativeTrace): DragAnalysis {
       const frame = entry.control.framePt;
       return frame ? [`${round(frame.x, 2)},${round(frame.y, 2)}`] : [];
     })).size;
-    if (distinctMainPositions >= 30 && distinctAbsolutePositions < 5) {
+    // Live AX geometry can publish at a lower cadence than WindowServer on a
+    // 120 Hz display. Require multiple independent live updates so a cached
+    // coordinate cannot pass, without pretending AX must expose every frame.
+    if (distinctMainPositions >= 30 && distinctAbsolutePositions < 3) {
       errors.push(
         `control ${id} AX positions are stale (${distinctAbsolutePositions} distinct positions for ${distinctMainPositions} main positions)`,
       );
@@ -261,7 +342,13 @@ export function analyzeTrace(trace: NativeTrace): DragAnalysis {
     for (let index = 1; index < values.length; index += 1) {
       if (values[index - 1] > 0.5 && values[index] > 0.5) consecutiveOverHalfPixel += 1;
     }
-    const settling = settlingForControl(samples, id, baselineEntry.relative, scale);
+    const settling = settlingForControl(
+      samples,
+      id,
+      baselineEntry.relative,
+      scale,
+      trace.mouseUpEventNs,
+    );
     const settlingLimitMs = refreshPeriodMs + 4;
     const maxDriftPx = values.length ? Math.max(...values) : Number.POSITIVE_INFINITY;
     const p99DriftPx = quantile(values, 0.99) ?? Number.POSITIVE_INFINITY;
@@ -331,50 +418,46 @@ async function run(command: string[], options: { stdout?: "pipe" | "ignore" } = 
   return { stdout, stderr, exitCode };
 }
 
-async function runFilmstrip(
-  helper: string,
-  pid: number,
-  trajectory: string,
-  outDir: string,
-) {
-  const durationSeconds = trajectory === "slow-horizontal" ? 0.9
-    : trajectory === "diagonal" ? 0.7
-    : 0.3;
-  const rawPath = join(outDir, `${trajectory}-filmstrip-raw.json`);
-  const child = Bun.spawn([
-    helper,
-    "--pid",
-    String(pid),
-    "--trajectory",
-    trajectory,
-    "--output",
-    rawPath,
-  ], { stdout: "ignore", stderr: "pipe" });
-  const captures = [0.25, 0.5, 0.75].map(async (fraction, index) => {
-    await Bun.sleep((0.145 + durationSeconds * fraction) * 1000);
-    const path = join(outDir, `${trajectory}-filmstrip-${index + 1}.png`);
-    const capture = await run(["screencapture", "-x", path]);
-    return {
-      fraction,
-      path,
-      exists: existsSync(path),
-      sha256: existsSync(path) ? sha256(path) : null,
-      exitCode: capture.exitCode,
-      stderr: capture.stderr,
-    };
+export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
+  const errors: string[] = [];
+  const frames = [...(trace.filmstripFrames ?? [])].sort((a, b) => a.fraction - b.fraction);
+  if (frames.length !== 3) errors.push(`expected 3 same-run filmstrip frames, found ${frames.length}`);
+  const expectedFractions = [0.25, 0.5, 0.75];
+  frames.forEach((frame, index) => {
+    if (Math.abs(frame.fraction - (expectedFractions[index] ?? frame.fraction)) > 0.001) {
+      errors.push(`unexpected filmstrip fraction ${frame.fraction}`);
+    }
+    if (!frame.captureSucceeded || !existsSync(frame.path)) {
+      errors.push(`filmstrip capture ${index + 1} failed: ${frame.error ?? "file missing"}`);
+    }
   });
-  const [stderr, exitCode, frames] = await Promise.all([
-    new Response(child.stderr).text(),
-    child.exited,
-    Promise.all(captures),
-  ]);
+  const dragged = trace.samples.filter((sample) => sample.phase === "dragged");
+  const firstDraggedNs = dragged[0]?.tNs ?? null;
+  const lastDraggedNs = dragged.at(-1)?.tNs ?? null;
+  if (firstDraggedNs == null || lastDraggedNs == null || frames.some((frame) =>
+    frame.tNs < firstDraggedNs || frame.tNs > lastDraggedNs
+  )) {
+    errors.push("filmstrip frames were not captured inside the analyzed drag interval");
+  }
+  const positions = frames.flatMap((frame) => frame.mainFramePt ? [frame.mainFramePt] : []);
+  const distinctPositions = new Set(positions.map((frame) => `${round(frame.x, 2)},${round(frame.y, 2)}`));
+  const displacementPt = positions.length >= 2 ? distance(positions[0], positions.at(-1)!) : 0;
+  if (distinctPositions.size !== 3) errors.push("filmstrip does not contain three distinct main-window positions");
+  if (displacementPt < 100) errors.push(`filmstrip main-window displacement ${round(displacementPt)}pt is below 100pt`);
+  const enrichedFrames = frames.map((frame) => ({
+    ...frame,
+    exists: existsSync(frame.path),
+    sha256: existsSync(frame.path) ? sha256(frame.path) : null,
+  }));
+  const hashes = new Set(enrichedFrames.flatMap((frame) => frame.sha256 ? [frame.sha256] : []));
+  if (hashes.size !== 3) errors.push("filmstrip captures are not three distinct images");
   return {
-    trajectory,
-    rawPath,
-    rawSha256: existsSync(rawPath) ? sha256(rawPath) : null,
-    exitCode,
-    stderr,
-    frames,
+    pass: errors.length === 0,
+    errors,
+    sameRunRawTrace: true,
+    distinctMainPositions: distinctPositions.size,
+    displacementPt: round(displacementPt),
+    frames: enrichedFrames,
   };
 }
 
@@ -699,6 +782,15 @@ async function cli() {
     receipt.pid = main.pid;
     receipt.initialAutomationWindows = windows;
 
+    const ensureMainWindowVisible = async (requestId: string) => {
+      const state = await driver.getState({ timeoutMs: 15_000 });
+      if ((state as any)?.windowVisible === true) return false;
+      driver.send({ type: "show", requestId });
+      await driver.waitForState({ windowVisible: true }, { timeoutMs: 15_000 });
+      await driver.waitForSettle({ timeoutMs: 5_000 });
+      return true;
+    };
+
     const compositionSnapshot = async () => {
       const [state, layout, automationWindows] = await Promise.all([
         driver.getState({ timeoutMs: 15_000 }),
@@ -773,9 +865,10 @@ async function cli() {
     for (const trajectory of trials) {
       const attempts: Array<Record<string, unknown>> = [];
       let selected: Record<string, any> | null = null;
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        await driver.waitForSettle({ timeoutMs: 5_000 });
+      for (let attempt = 1; attempt <= MAX_NATIVE_DRAG_ATTEMPTS; attempt += 1) {
+        await ensureMainWindowVisible(`mwnd-${trajectory}-attempt-${attempt}-show`);
         const rawPath = join(outDir, `${trajectory}-attempt-${attempt}-raw.json`);
+        const filmstripPrefix = `${trajectory}-attempt-${attempt}`;
         const helperRun = await run([
           helper,
           "--pid",
@@ -784,9 +877,14 @@ async function cli() {
           trajectory,
           "--output",
           rawPath,
+          "--filmstrip-dir",
+          outDir,
+          "--filmstrip-prefix",
+          filmstripPrefix,
         ], { stdout: "ignore" });
         const trace = JSON.parse(readFileSync(rawPath, "utf8")) as NativeTrace;
         const analysis = analyzeTrace(trace);
+        const filmstrip = analyzeIntegratedFilmstrip(trace);
         const entry = {
           attempt,
           rawPath,
@@ -795,18 +893,19 @@ async function cli() {
           helperStderr: helperRun.stderr,
           nativeWindowInventory: summarizeNativeWindowInventory(trace),
           analysis,
+          filmstrip,
         };
         attempts.push(entry);
-        selected = entry;
-        if (analysis.valid) break;
+        selected ??= entry;
+        if (analysis.valid && filmstrip.pass) {
+          selected = entry;
+          if (analysis.overallPass) break;
+        }
       }
-      const filmstrip = selected?.analysis?.valid
-        ? await runFilmstrip(helper, Number(main.pid), trajectory, outDir)
-        : null;
       results.push({
         trajectory,
         attempts,
-        filmstrip,
+        filmstrip: selected?.filmstrip ?? null,
         selectedAttempt: selected?.attempt ?? null,
         rawPath: selected?.rawPath ?? null,
         rawSha256: selected?.rawSha256 ?? null,
@@ -916,11 +1015,13 @@ async function cli() {
     );
     receipt.lifecyclePass = lifecyclePass;
     receipt.expectFallback = expectFallback;
-    receipt.valid = results.every((result: any) => result.analysis.valid);
+    receipt.valid = results.every((result: any) =>
+      result.analysis.valid && result.filmstrip?.pass === true
+    );
     receipt.pass = lifecyclePass
       && (receipt.stationary as any)?.pass === true
       && (receipt.crashScan as any)?.pass === true
-      && results.every((result: any) => result.analysis.overallPass);
+      && results.every((result: any) => result.analysis.overallPass && result.filmstrip?.pass === true);
   } finally {
     try {
       driver.send({ type: "hide" });

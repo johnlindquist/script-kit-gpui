@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  analyzeIntegratedFilmstrip,
   analyzeStationaryFidelity,
   analyzeTrace,
   type DragSample,
@@ -15,6 +16,12 @@ function trace(options: {
   settlingDrift?: number;
   settlingDriftAt?: (index: number) => number;
   staleControls?: boolean;
+  nullOwnership?: boolean;
+  projectedMeasurements?: boolean;
+  windowAppearsAt?: number;
+  missingMouseUp?: boolean;
+  wrongTargetIds?: boolean;
+  closeControls?: boolean;
 } = {}): NativeTrace {
   const {
     driftAt = () => 0,
@@ -25,6 +32,12 @@ function trace(options: {
     settlingDrift = 0,
     settlingDriftAt = () => settlingDrift,
     staleControls = false,
+    nullOwnership = false,
+    projectedMeasurements = false,
+    windowAppearsAt = -1,
+    missingMouseUp = false,
+    wrongTargetIds = false,
+    closeControls = false,
   } = options;
   const mainWindowNumber = 100;
   const footerWindowNumber = twoWindows ? 101 : null;
@@ -35,18 +48,34 @@ function trace(options: {
   const push = (phase: string, index: number, mainX: number, driftPx: number) => {
     const driftPt = driftPx / scale;
     const controlMainX = staleControls ? 100 : mainX;
+    const measurementMainFrame = { x: mainX, y: 100, width: 750, height: 501 };
     const controls = [
       {
-        id: "script-kit-footer-left-info-hit-target",
+        id: wrongTargetIds ? "wrong-left" : "script-kit-footer-left-info-hit-target",
         framePt: { x: controlMainX + 12 + driftPt, y: 510, width: 100, height: 28 },
-        axWindowNumber: twoWindows ? 101 : mainWindowNumber,
+        mainFramePtAtMeasurement: measurementMainFrame,
+        axWindowNumber: nullOwnership ? null : twoWindows ? 101 : mainWindowNumber,
+        measurementSource: projectedMeasurements
+          ? "cached-ax-local+cgwindow"
+          : "live-ax+interpolated-main",
       },
       ...(index === missingRightAt ? [] : [{
-        id: "script-kit-footer-button-ai",
-        framePt: { x: controlMainX + 630 + driftPt, y: 510, width: 108, height: 28 },
-        axWindowNumber: twoWindows ? 101 : mainWindowNumber,
+        id: wrongTargetIds ? "wrong-right" : "script-kit-footer-button-ai",
+        framePt: {
+          x: controlMainX + (closeControls ? 60 : 630) + driftPt,
+          y: 510,
+          width: 108,
+          height: 28,
+        },
+        mainFramePtAtMeasurement: measurementMainFrame,
+        axWindowNumber: nullOwnership ? null : twoWindows ? 101 : mainWindowNumber,
+        measurementSource: projectedMeasurements
+          ? "cached-ax-local+cgwindow"
+          : "live-ax+interpolated-main",
       }]),
     ];
+    const appearingWindow = phase === "dragged" && index >= windowAppearsAt && windowAppearsAt >= 0;
+    const relevantWindowNumbers = twoWindows ? [100, 101] : appearingWindow ? [100, 102] : [100];
     samples.push({
       tNs,
       phase,
@@ -56,7 +85,8 @@ function trace(options: {
       footerFramePt: twoWindows
         ? { x: mainX + driftPt, y: 569, width: 750, height: 32 }
         : null,
-      relevantWindowCount: twoWindows ? 2 : 1,
+      relevantWindowCount: relevantWindowNumbers.length,
+      relevantWindowNumbers,
       controls,
     });
     tNs += 8_000_000;
@@ -67,12 +97,15 @@ function trace(options: {
   for (let index = 0; index < inMotionCount; index += 1) {
     push("dragged", index, 100 + index * displacementStep, driftAt(index));
   }
-  push(
-    "mouseUp",
-    0,
-    100 + Math.max(0, inMotionCount - 1) * displacementStep,
-    settlingDriftAt(0),
-  );
+  const mouseUpEventNs = tNs;
+  if (!missingMouseUp) {
+    push(
+      "mouseUp",
+      0,
+      100 + Math.max(0, inMotionCount - 1) * displacementStep,
+      settlingDriftAt(0),
+    );
+  }
   for (let index = 0; index < 18; index += 1) {
     push(
       "settling",
@@ -97,7 +130,9 @@ function trace(options: {
       boundsPt: { x: 0, y: 0, width: 1512, height: 982 },
     },
     sampleTargetHz: 120,
+    mouseUpEventNs: missingMouseUp ? null : mouseUpEventNs,
     samples,
+    filmstripFrames: [],
     errors: [],
   };
 }
@@ -155,6 +190,64 @@ describe("native main-window drag analyzer", () => {
     const result = analyzeTrace(trace({ staleControls: true }));
     expect(result.valid).toBe(false);
     expect(result.errors.some((error) => error.includes("AX positions are stale"))).toBe(true);
+  });
+
+  test("rejects projected rather than live Accessibility measurements", () => {
+    const result = analyzeTrace(trace({ projectedMeasurements: true }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("live-ax+interpolated-main"))).toBe(true);
+  });
+
+  test("rejects null control ownership", () => {
+    const result = analyzeTrace(trace({ nullOwnership: true }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("non-null"))).toBe(true);
+  });
+
+  test("rejects a native window appearing during the drag", () => {
+    const result = analyzeTrace(trace({ windowAppearsAt: 20 }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("count changed"))).toBe(true);
+  });
+
+  test("rejects a missing explicit mouse-up", () => {
+    const result = analyzeTrace(trace({ missingMouseUp: true }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("mouse-up"))).toBe(true);
+  });
+
+  test("rejects wrong target identifiers", () => {
+    const result = analyzeTrace(trace({ wrongTargetIds: true }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("exact left"))).toBe(true);
+  });
+
+  test("rejects controls that are not far apart", () => {
+    const result = analyzeTrace(trace({ closeControls: true }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.includes("far apart"))).toBe(true);
+  });
+
+  test("rejects missing same-run filmstrip captures", () => {
+    const result = analyzeIntegratedFilmstrip(trace());
+    expect(result.pass).toBe(false);
+    expect(result.errors.some((error) => error.includes("expected 3"))).toBe(true);
+  });
+
+  test("rejects an explicitly failed same-run filmstrip capture", () => {
+    const fixture = trace();
+    const dragged = fixture.samples.filter((sample) => sample.phase === "dragged");
+    fixture.filmstripFrames = [0.25, 0.5, 0.75].map((fraction, index) => ({
+      fraction,
+      tNs: dragged[Math.floor((dragged.length - 1) * fraction)]!.tNs,
+      mainFramePt: { x: 100 + index * 120, y: 100, width: 750, height: 501 },
+      path: import.meta.path,
+      captureSucceeded: index !== 1,
+      error: index === 1 ? "injected capture failure" : null,
+    }));
+    const result = analyzeIntegratedFilmstrip(fixture);
+    expect(result.pass).toBe(false);
+    expect(result.errors.some((error) => error.includes("capture 2 failed"))).toBe(true);
   });
 
   test("fails when settling remains late", () => {
