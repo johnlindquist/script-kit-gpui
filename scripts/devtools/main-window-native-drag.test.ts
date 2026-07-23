@@ -4,11 +4,13 @@ import {
   analyzeStationaryFidelity,
   analyzeTrace,
   evaluateGutterTransparency,
+  selectTerminalAttempt,
+  type DragAnalysis,
   type DragSample,
   type NativeTrace,
 } from "./main-window-native-drag.ts";
 
-function trace(options: {
+type TraceOptions = {
   driftAt?: (index: number) => number;
   twoWindows?: boolean;
   inMotionCount?: number;
@@ -23,7 +25,15 @@ function trace(options: {
   missingMouseUp?: boolean;
   wrongTargetIds?: boolean;
   closeControls?: boolean;
-} = {}): NativeTrace {
+  alignmentUncertaintyPx?: number;
+  packetCompletionStepMs?: number;
+  staleTopology?: boolean;
+  untaggedInput?: boolean;
+  crossesMouseUp?: boolean;
+  sparseSettling?: boolean;
+};
+
+export function trace(options: TraceOptions = {}): NativeTrace {
   const {
     driftAt = () => 0,
     twoWindows = false,
@@ -39,46 +49,90 @@ function trace(options: {
     missingMouseUp = false,
     wrongTargetIds = false,
     closeControls = false,
+    alignmentUncertaintyPx = 0.05,
+    packetCompletionStepMs = 8,
+    staleTopology = false,
+    untaggedInput = false,
+    crossesMouseUp = false,
+    sparseSettling = false,
   } = options;
   const mainWindowNumber = 100;
   const footerWindowNumber = twoWindows ? 101 : null;
   const scale = 2;
   const samples: DragSample[] = [];
-  let tNs = 1_000_000_000;
+  let completionNs = 1_000_000_000;
+  let coordinateNs = 1_000_000_000;
+  let displayIntervalIndex = 0;
 
-  const push = (phase: string, index: number, mainX: number, driftPx: number) => {
+  const push = (
+    phase: string,
+    index: number,
+    mainX: number,
+    driftPx: number,
+  ) => {
+    const midpointNs = coordinateNs;
     const driftPt = driftPx / scale;
     const controlMainX = staleControls ? 100 : mainX;
     const measurementMainFrame = { x: mainX, y: 100, width: 750, height: 501 };
-    const controls = [
-      {
-        id: wrongTargetIds ? "wrong-left" : "script-kit-footer-left-info-hit-target",
-        framePt: { x: controlMainX + 12 + driftPt, y: 510, width: 100, height: 28 },
+    const owner = nullOwnership ? null : twoWindows ? 101 : mainWindowNumber;
+    const makeControl = (id: string, x: number, width: number) => {
+      const frame = { x, y: 510, width, height: 28 };
+      return {
+        id,
+        framePt: frame,
         mainFramePtAtMeasurement: measurementMainFrame,
-        axWindowNumber: nullOwnership ? null : twoWindows ? 101 : mainWindowNumber,
+        axWindowNumber: owner,
         measurementSource: projectedMeasurements
           ? "cached-ax-local+cgwindow"
-          : "live-ax+interpolated-main",
-      },
-      ...(index === missingRightAt ? [] : [{
-        id: wrongTargetIds ? "wrong-right" : "script-kit-footer-button-ai",
-        framePt: {
-          x: controlMainX + (closeControls ? 60 : 630) + driftPt,
-          y: 510,
-          width: 108,
-          height: 28,
+          : "live-ax+bracketed-main-v2",
+        frameRead: {
+          startNs: midpointNs - 100_000,
+          endNs: midpointNs + 100_000,
+          midpointNs,
+          value: frame,
+          error: null,
         },
-        mainFramePtAtMeasurement: measurementMainFrame,
-        axWindowNumber: nullOwnership ? null : twoWindows ? 101 : mainWindowNumber,
-        measurementSource: projectedMeasurements
-          ? "cached-ax-local+cgwindow"
-          : "live-ax+interpolated-main",
-      }]),
+        ownerRead: {
+          startNs: midpointNs + 100_001,
+          endNs: midpointNs + 200_000,
+          midpointNs: midpointNs + 150_000,
+          value: owner,
+          error: null,
+        },
+        alignmentUncertaintyPx,
+        topologyFresh: !staleTopology,
+        displayIntervalIndex,
+        crossesEventBoundary:
+          crossesMouseUp && phase === "settling" && index === 0,
+      };
+    };
+    const controls = [
+      makeControl(
+        wrongTargetIds
+          ? "wrong-left"
+          : "script-kit-footer-left-info-hit-target",
+        controlMainX + 12 + driftPt,
+        100,
+      ),
+      ...(index === missingRightAt
+        ? []
+        : [
+            makeControl(
+              wrongTargetIds ? "wrong-right" : "script-kit-footer-button-ai",
+              controlMainX + (closeControls ? 60 : 630) + driftPt,
+              108,
+            ),
+          ]),
     ];
-    const appearingWindow = phase === "dragged" && index >= windowAppearsAt && windowAppearsAt >= 0;
-    const relevantWindowNumbers = twoWindows ? [100, 101] : appearingWindow ? [100, 102] : [100];
+    const appearingWindow =
+      phase === "dragged" && index >= windowAppearsAt && windowAppearsAt >= 0;
+    const relevantWindowNumbers = twoWindows
+      ? [100, 101]
+      : appearingWindow
+        ? [100, 102]
+        : [100];
     samples.push({
-      tNs,
+      tNs: completionNs,
       phase,
       mainWindowNumber,
       mainFramePt: { x: mainX, y: 100, width: 750, height: 501 },
@@ -89,24 +143,35 @@ function trace(options: {
       relevantWindowCount: relevantWindowNumbers.length,
       relevantWindowNumbers,
       controls,
+      packetStartNs: midpointNs - 500_000,
+      packetEndNs: midpointNs + 500_000,
+      displayTickNs: midpointNs - 4_000_000,
+      displayIntervalIndex,
+      topologyStartNs: midpointNs - 300_000,
+      topologyEndNs: midpointNs + 300_000,
+      topologyFresh: !staleTopology,
+      topologyComplete: true,
     });
-    tNs += 8_000_000;
+    completionNs += packetCompletionStepMs * 1_000_000;
+    coordinateNs +=
+      sparseSettling && phase === "settling" ? 40_000_000 : 8_000_000;
+    displayIntervalIndex += 1;
   };
 
   for (let index = 0; index < 16; index += 1) push("pre", index, 100, 0);
+  const mouseDownEventNs = coordinateNs;
   push("mouseDown", 16, 100, 0);
   for (let index = 0; index < inMotionCount; index += 1) {
     push("dragged", index, 100 + index * displacementStep, driftAt(index));
   }
-  const mouseUpEventNs = tNs;
-  if (!missingMouseUp) {
+  const mouseUpEventNs = coordinateNs;
+  if (!missingMouseUp)
     push(
       "mouseUp",
       0,
       100 + Math.max(0, inMotionCount - 1) * displacementStep,
       settlingDriftAt(0),
     );
-  }
   for (let index = 0; index < 18; index += 1) {
     push(
       "settling",
@@ -117,7 +182,7 @@ function trace(options: {
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "ok",
     pid: 42,
     trajectory: "synthetic",
@@ -131,140 +196,238 @@ function trace(options: {
       boundsPt: { x: 0, y: 0, width: 1512, height: 982 },
     },
     sampleTargetHz: 120,
+    mouseDownEventNs,
     mouseUpEventNs: missingMouseUp ? null : mouseUpEventNs,
+    events: missingMouseUp
+      ? []
+      : [
+          {
+            kind: "mouseDown",
+            sequence: 1,
+            tag: 0x534b,
+            intendedNs: mouseDownEventNs,
+            actualEventNs: mouseDownEventNs,
+            postStartNs: mouseDownEventNs - 10,
+            postEndNs: mouseDownEventNs + 10,
+            observedByEventTap: true,
+          },
+          {
+            kind: "mouseUp",
+            sequence: 2,
+            tag: 0x534b,
+            intendedNs: mouseUpEventNs,
+            actualEventNs: mouseUpEventNs,
+            postStartNs: mouseUpEventNs - 10,
+            postEndNs: mouseUpEventNs + 10,
+            observedByEventTap: true,
+          },
+        ],
+    interference: {
+      untaggedInputCount: untaggedInput ? 1 : 0,
+      frontmostAppChanged: false,
+      pointerDeviationPx: 0,
+      targetMovedExternally: false,
+    },
+    observerHealth: {
+      scheduledPackets: samples.length,
+      completedPackets: samples.length,
+      missedPackets: 0,
+      axTimeoutCount: 0,
+      topologyStaleCount: staleTopology ? 1 : 0,
+      displayTickIntervalsMs: Array.from(
+        { length: samples.length },
+        () => 16.6667,
+      ),
+    },
     samples,
     filmstripFrames: [],
     errors: [],
   };
 }
 
-describe("native main-window drag analyzer", () => {
-  test("accepts a dense one-window zero-drift trace", () => {
+function withFilmstrip(fixture: NativeTrace, staleActualTime = false) {
+  const dragged = fixture.samples.filter(
+    (sample) => sample.phase === "dragged",
+  );
+  const paths = [
+    import.meta.path,
+    new URL("./main-window-native-drag.ts", import.meta.url).pathname,
+    new URL("../agentic/macos-native-drag-sampler.swift", import.meta.url)
+      .pathname,
+  ];
+  fixture.filmstripFrames = [0.25, 0.5, 0.75].map((fraction, index) => {
+    const sample = dragged[Math.floor((dragged.length - 1) * fraction)]!;
+    return {
+      fraction,
+      tNs: sample.tNs,
+      actualFrameNs: staleActualTime
+        ? fixture.mouseDownEventNs! - 1
+        : sample.controls[0].frameRead!.midpointNs,
+      markerEventNs: sample.controls[0].frameRead!.midpointNs,
+      encodingCompletedNs: sample.tNs + 50_000_000,
+      mainFramePt: { x: 100 + index * 120, y: 100, width: 750, height: 501 },
+      path: paths[index],
+      captureSucceeded: true,
+      error: null,
+    };
+  });
+  return fixture;
+}
+
+function analysis(
+  disposition: DragAnalysis["attemptDisposition"],
+): DragAnalysis {
+  return { attemptDisposition: disposition } as DragAnalysis;
+}
+
+describe("native main-window drag analyzer v2", () => {
+  test("accepts a dense one-window zero-drift contemporaneous trace", () => {
     const result = analyzeTrace(trace());
-    expect(result.valid).toBe(true);
-    expect(result.topology).toBe("one-window");
-    expect(result.motionThresholdsPass).toBe(true);
-    expect(result.overallPass).toBe(true);
+    expect(result.attemptDisposition).toBe("EVALUABLE_PASS");
+    expect(result.motionVerdict).toBe("PASS");
+    expect(result.topologyVerdict).toBe("PASS");
   });
 
-  test("fails one frame with two physical pixels of lag", () => {
-    const result = analyzeTrace(trace({ driftAt: (index) => index === 25 ? 2 : 0 }));
-    expect(result.valid).toBe(true);
-    expect(result.motionThresholdsPass).toBe(false);
+  test("slow packet completion with timely coordinate midpoints can pass", () => {
+    const result = analyzeTrace(trace({ packetCompletionStepMs: 40 }));
+    expect(result.cadence.medianMs).toBe(40);
+    expect(result.attemptDisposition).toBe("EVALUABLE_PASS");
+  });
+
+  test("fast completion with excessive alignment uncertainty is invalid", () => {
+    const result = analyzeTrace(trace({ alignmentUncertaintyPx: 20 }));
+    expect(result.attemptDisposition).toBe("INVALID_OBSERVER");
+    expect(result.motionVerdict).toBe("NOT_EVALUATED");
+    expect(result.controls[0].maxDriftPx).toBeNull();
+  });
+
+  test("fails one refresh with two physical pixels of relative lag", () => {
+    const result = analyzeTrace(
+      trace({ driftAt: (index) => (index === 25 ? 2 : 0) }),
+    );
+    expect(result.attemptDisposition).toBe("EVALUABLE_FAIL");
     expect(result.controls[0].maxDriftPx).toBe(2);
   });
 
-  test("fails accumulated subpixel drift through P99 and RMS", () => {
-    const result = analyzeTrace(trace({ driftAt: (index) => index >= 10 ? 0.6 : 0 }));
-    expect(result.valid).toBe(true);
-    expect(result.motionThresholdsPass).toBe(false);
+  test("fails sustained subpixel drift through P99 and RMS", () => {
+    const result = analyzeTrace(
+      trace({ driftAt: (index) => (index >= 10 ? 0.6 : 0) }),
+    );
+    expect(result.attemptDisposition).toBe("EVALUABLE_FAIL");
     expect(result.controls[0].rmsDriftPx).toBeGreaterThan(0.35);
   });
 
-  test("rejects before-and-after-only traces", () => {
-    const result = analyzeTrace(trace({ inMotionCount: 0 }));
-    expect(result.valid).toBe(false);
-    expect(result.verdict).toBe("INVALID");
-  });
-
-  test("rejects traces without meaningful movement", () => {
-    const result = analyzeTrace(trace({ displacementStep: 0 }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("displacement"))).toBe(true);
-  });
-
-  test("rejects a missing far control sample", () => {
-    const result = analyzeTrace(trace({ missingRightAt: 20 }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("resolved in"))).toBe(true);
-  });
-
-  test("fails two-window topology even with zero measured drift", () => {
+  test("trustworthy two-window zero-drift topology is an evaluable product fail", () => {
     const result = analyzeTrace(trace({ twoWindows: true }));
-    expect(result.valid).toBe(true);
-    expect(result.motionThresholdsPass).toBe(true);
-    expect(result.topology).toBe("two-window");
-    expect(result.overallPass).toBe(false);
+    expect(result.evidenceValidity).toBe("VALID");
+    expect(result.topologyVerdict).toBe("FAIL");
+    expect(result.attemptDisposition).toBe("EVALUABLE_FAIL");
   });
 
-  test("invalidates stale Accessibility control coordinates", () => {
-    const result = analyzeTrace(trace({ staleControls: true }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("AX positions are stale"))).toBe(true);
-  });
-
-  test("rejects projected rather than live Accessibility measurements", () => {
-    const result = analyzeTrace(trace({ projectedMeasurements: true }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("live-ax+interpolated-main"))).toBe(true);
-  });
-
-  test("rejects null control ownership", () => {
-    const result = analyzeTrace(trace({ nullOwnership: true }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("non-null"))).toBe(true);
-  });
-
-  test("rejects a native window appearing during the drag", () => {
+  test("trustworthy topology count change is an evaluable product fail", () => {
     const result = analyzeTrace(trace({ windowAppearsAt: 20 }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("count changed"))).toBe(true);
+    expect(result.evidenceValidity).toBe("VALID");
+    expect(result.topologyVerdict).toBe("FAIL");
   });
 
-  test("rejects a missing explicit mouse-up", () => {
-    const result = analyzeTrace(trace({ missingMouseUp: true }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("mouse-up"))).toBe(true);
+  test("missing or stale topology is invalid rather than a product fail", () => {
+    const result = analyzeTrace(trace({ staleTopology: true }));
+    expect(result.attemptDisposition).toBe("INVALID_OBSERVER");
+    expect(result.topologyVerdict).toBe("UNKNOWN");
   });
 
-  test("rejects wrong target identifiers", () => {
-    const result = analyzeTrace(trace({ wrongTargetIds: true }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("exact left"))).toBe(true);
+  test("missing owner is invalid and exposes no drift verdict", () => {
+    const result = analyzeTrace(trace({ nullOwnership: true }));
+    expect(result.attemptDisposition).toBe("INVALID_OBSERVER");
+    expect(
+      result.controls.every((control) => control.maxDriftPx === null),
+    ).toBe(true);
   });
 
-  test("rejects controls that are not far apart", () => {
-    const result = analyzeTrace(trace({ closeControls: true }));
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((error) => error.includes("far apart"))).toBe(true);
+  test("invalid apparent fifty-pixel drift is diagnostic only", () => {
+    const result = analyzeTrace(
+      trace({ alignmentUncertaintyPx: 5, driftAt: () => 50 }),
+    );
+    expect(result.motionVerdict).toBe("NOT_EVALUATED");
+    expect(result.controls[0].maxDriftPx).toBeNull();
+    expect(result.diagnosticOnly.apparentMaxDriftPx).toBe(50);
   });
 
-  test("rejects missing same-run filmstrip captures", () => {
-    const result = analyzeIntegratedFilmstrip(trace());
-    expect(result.pass).toBe(false);
-    expect(result.errors.some((error) => error.includes("expected 3"))).toBe(true);
+  test("packet crossing explicit mouse-up is invalid", () => {
+    const result = analyzeTrace(trace({ crossesMouseUp: true }));
+    expect(result.attemptDisposition).toBe("INVALID_OBSERVER");
   });
 
-  test("rejects an explicitly failed same-run filmstrip capture", () => {
-    const fixture = trace();
-    const dragged = fixture.samples.filter((sample) => sample.phase === "dragged");
-    fixture.filmstripFrames = [0.25, 0.5, 0.75].map((fraction, index) => ({
-      fraction,
-      tNs: dragged[Math.floor((dragged.length - 1) * fraction)]!.tNs,
-      mainFramePt: { x: 100 + index * 120, y: 100, width: 750, height: 501 },
-      path: import.meta.path,
-      captureSucceeded: index !== 1,
-      error: index === 1 ? "injected capture failure" : null,
-    }));
-    const result = analyzeIntegratedFilmstrip(fixture);
-    expect(result.pass).toBe(false);
-    expect(result.errors.some((error) => error.includes("capture 2 failed"))).toBe(true);
-  });
-
-  test("fails when settling remains late", () => {
-    const result = analyzeTrace(trace({ settlingDrift: 0.6 }));
-    expect(result.valid).toBe(true);
-    expect(result.motionThresholdsPass).toBe(false);
+  test("sparse settling without display-interval coverage is an evaluable fail", () => {
+    const result = analyzeTrace(trace({ sparseSettling: true }));
+    expect(result.attemptDisposition).toBe("EVALUABLE_FAIL");
     expect(result.controls[0].stableAfterSettling).toBe(false);
   });
 
-  test("fails when settling takes longer than two display refresh periods", () => {
-    const result = analyzeTrace(trace({
-      settlingDriftAt: (index) => index < 4 ? 0.6 : 0,
-    }));
-    expect(result.valid).toBe(true);
-    expect(result.controls[0].settlingMs).toBe(40);
-    expect(result.controls[0].thresholdsPass).toBe(false);
+  test("untagged input produces INVALID_INTERFERENCE", () => {
+    expect(
+      analyzeTrace(trace({ untaggedInput: true })).attemptDisposition,
+    ).toBe("INVALID_INTERFERENCE");
+  });
+
+  test("rejects projected measurements, missing controls, and missing event tags", () => {
+    expect(
+      analyzeTrace(trace({ projectedMeasurements: true })).attemptDisposition,
+    ).toBe("INVALID_OBSERVER");
+    expect(analyzeTrace(trace({ missingRightAt: 20 })).attemptDisposition).toBe(
+      "INVALID_OBSERVER",
+    );
+    expect(
+      analyzeTrace(trace({ missingMouseUp: true })).attemptDisposition,
+    ).toBe("INVALID_OBSERVER");
+  });
+
+  test("same-drag filmstrip rejects stale actual ScreenCaptureKit frame time", () => {
+    expect(analyzeIntegratedFilmstrip(withFilmstrip(trace())).pass).toBe(true);
+    expect(analyzeIntegratedFilmstrip(withFilmstrip(trace(), true)).pass).toBe(
+      false,
+    );
+  });
+
+  test("first evaluable failure is terminal and all-invalid selects nothing", () => {
+    const firstFail = {
+      analysis: analysis("EVALUABLE_FAIL"),
+      filmstrip: { pass: true },
+      id: 2,
+    };
+    const selected = selectTerminalAttempt([
+      {
+        analysis: analysis("INVALID_OBSERVER"),
+        filmstrip: { pass: false },
+        id: 1,
+      },
+      firstFail,
+      {
+        analysis: analysis("EVALUABLE_PASS"),
+        filmstrip: { pass: true },
+        id: 3,
+      },
+    ]);
+    expect(selected?.id).toBe(2);
+    expect(
+      selectTerminalAttempt([
+        { analysis: analysis("INVALID_OBSERVER"), id: 1 },
+        { analysis: analysis("INVALID_INTERFERENCE"), id: 2 },
+      ]),
+    ).toBeNull();
+  });
+
+  test("a later valid pass replaces earlier invalid attempts", () => {
+    const selected = selectTerminalAttempt([
+      { analysis: analysis("INVALID_OBSERVER"), id: 1 },
+      { analysis: analysis("INVALID_INTERFERENCE"), id: 2 },
+      {
+        analysis: analysis("EVALUABLE_PASS"),
+        filmstrip: { pass: true },
+        id: 3,
+      },
+    ]);
+    expect(selected?.id).toBe(3);
   });
 });
 

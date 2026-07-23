@@ -1,17 +1,19 @@
 #!/usr/bin/env bun
 
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { Driver } from "./driver.ts";
 import { announceTestStatus } from "./test-status.ts";
 
 export type Rect = { x: number; y: number; width: number; height: number };
+export type TimedRead<T> = {
+  startNs: number;
+  endNs: number;
+  midpointNs: number;
+  value: T | null;
+  error: string | null;
+};
 export type ControlFrame = {
   id: string;
   framePt: Rect | null;
@@ -19,6 +21,12 @@ export type ControlFrame = {
   axWindowNumber: number | null;
   measurementSource?: string;
   error?: string | null;
+  frameRead?: TimedRead<Rect>;
+  ownerRead?: TimedRead<number>;
+  alignmentUncertaintyPx?: number;
+  topologyFresh?: boolean;
+  displayIntervalIndex?: number;
+  crossesEventBoundary?: boolean;
 };
 export type DragSample = {
   tNs: number;
@@ -30,10 +38,21 @@ export type DragSample = {
   relevantWindowCount: number;
   relevantWindowNumbers?: number[];
   controls: ControlFrame[];
+  packetStartNs?: number;
+  packetEndNs?: number;
+  displayTickNs?: number;
+  displayIntervalIndex?: number;
+  topologyStartNs?: number;
+  topologyEndNs?: number;
+  topologyFresh?: boolean;
+  topologyComplete?: boolean;
 };
 export type FilmstripFrame = {
   fraction: number;
   tNs: number;
+  actualFrameNs?: number;
+  markerEventNs?: number;
+  encodingCompletedNs?: number;
   mainFramePt: Rect | null;
   path: string;
   captureSucceeded: boolean;
@@ -54,7 +73,32 @@ export type NativeTrace = {
     boundsPt: Rect;
   } | null;
   sampleTargetHz: number;
+  mouseDownEventNs?: number | null;
   mouseUpEventNs?: number | null;
+  events?: Array<{
+    kind: "mouseDown" | "mouseDragged" | "mouseUp" | string;
+    sequence: number;
+    tag: number;
+    intendedNs: number;
+    actualEventNs: number;
+    postStartNs: number;
+    postEndNs: number;
+    observedByEventTap: boolean;
+  }>;
+  interference?: {
+    untaggedInputCount: number;
+    frontmostAppChanged: boolean;
+    pointerDeviationPx: number;
+    targetMovedExternally: boolean;
+  };
+  observerHealth?: {
+    scheduledPackets: number;
+    completedPackets: number;
+    missedPackets: number;
+    axTimeoutCount: number;
+    topologyStaleCount: number;
+    displayTickIntervalsMs: number[];
+  };
   samples: DragSample[];
   filmstripFrames?: FilmstripFrame[];
   errors: string[];
@@ -63,20 +107,36 @@ export type NativeTrace = {
 export type ControlMetrics = {
   id: string;
   sampleCount: number;
-  maxDriftPx: number;
-  p99DriftPx: number;
-  rmsDriftPx: number;
-  consecutiveOverHalfPixel: number;
+  maxDriftPx: number | null;
+  p99DriftPx: number | null;
+  rmsDriftPx: number | null;
+  consecutiveOverHalfPixel: number | null;
   settlingMs: number | null;
   stableAfterSettling: boolean;
   owningWindowNumbers: number[];
   thresholdsPass: boolean;
 };
 
+export type AttemptDisposition =
+  | "EVALUABLE_PASS"
+  | "EVALUABLE_FAIL"
+  | "INVALID_OBSERVER"
+  | "INVALID_INTERFERENCE"
+  | "INVALID_SETUP"
+  | "BLOCKED_ENVIRONMENT";
+export type MotionVerdict = "PASS" | "FAIL" | "NOT_EVALUATED";
+export type TopologyVerdict = "PASS" | "FAIL" | "UNKNOWN";
+
 export type DragAnalysis = {
   trajectory: string;
   valid: boolean;
   verdict: "PASS" | "FAIL" | "INVALID";
+  attemptDisposition: AttemptDisposition;
+  motionVerdict: MotionVerdict;
+  topologyVerdict: TopologyVerdict;
+  evidenceValidity: "VALID" | "INVALID";
+  observerHealth: "PASS" | "FAIL";
+  interferenceClassification: "NONE" | "USER_OR_ENVIRONMENT";
   errors: string[];
   topology: "one-window" | "two-window" | "unknown";
   oneWindowInvariant: boolean;
@@ -93,6 +153,9 @@ export type DragAnalysis = {
   controls: ControlMetrics[];
   motionThresholdsPass: boolean;
   overallPass: boolean;
+  diagnosticOnly: {
+    apparentMaxDriftPx: number | null;
+  };
 };
 
 const THRESHOLDS = {
@@ -107,17 +170,23 @@ const RIGHT_CONTROL_IDS = [
   "script-kit-footer-button-actions",
   "script-kit-footer-button-run",
 ];
-const LIVE_MEASUREMENT_SOURCE = "live-ax+interpolated-main";
+const LIVE_MEASUREMENT_SOURCES = new Set([
+  "live-ax+interpolated-main",
+  "live-ax+bracketed-main-v2",
+]);
 const MAX_NATIVE_DRAG_ATTEMPTS = 10;
 // AX + WindowServer sampling is driven by an NSEventTracking/common-mode timer.
 // Allow one millisecond of scheduler quantization around the nominal refresh
 // boundary while keeping the separate hard two-refresh maximum-gap guard.
-const TIMER_JITTER_TOLERANCE_MS = 1;
+const DISPLAY_GAP_TOLERANCE_MS = 1;
 
 function quantile(values: number[], fraction: number): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1));
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * fraction) - 1),
+  );
   return sorted[index];
 }
 
@@ -125,7 +194,10 @@ function round(value: number, digits = 4): number {
   return Number(value.toFixed(digits));
 }
 
-function distance(a: { x: number; y: number }, b: { x: number; y: number }): number {
+function distance(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
@@ -138,7 +210,21 @@ function relativeVector(sample: DragSample, control: ControlFrame) {
   };
 }
 
-function driftForControl(
+function controlMidpointNs(sample: DragSample, control: ControlFrame): number {
+  return control.frameRead?.midpointNs ?? sample.tNs;
+}
+
+function median(values: number[]): number | null {
+  return quantile(values, 0.5);
+}
+
+function componentMedian(vectors: Array<{ x: number; y: number }>) {
+  const x = median(vectors.map((entry) => entry.x));
+  const y = median(vectors.map((entry) => entry.y));
+  return x == null || y == null ? null : { x, y };
+}
+
+function driftEntries(
   samples: DragSample[],
   controlID: string,
   baseline: { x: number; y: number },
@@ -149,37 +235,95 @@ function driftForControl(
     if (!control) return [];
     const relative = relativeVector(sample, control);
     if (!relative) return [];
-    return [{ sample, control, driftPx: distance(relative, baseline) * scale }];
+    return [
+      {
+        sample,
+        control,
+        midpointNs: controlMidpointNs(sample, control),
+        driftPx: distance(relative, baseline) * scale,
+      },
+    ];
   });
 }
 
-function settlingForControl(
+function stableBaseline(
+  samples: DragSample[],
+  controlID: string,
+  scale: number,
+): { vector: { x: number; y: number } | null; error: string | null } {
+  const entries = samples.flatMap((sample) => {
+    const control = sample.controls.find((entry) => entry.id === controlID);
+    const relative = control ? relativeVector(sample, control) : null;
+    return relative
+      ? [{ relative, tNs: controlMidpointNs(sample, control!) }]
+      : [];
+  });
+  if (entries.length < 12)
+    return {
+      vector: null,
+      error: `control ${controlID} has only ${entries.length}/12 baseline observations`,
+    };
+  const spanNs = entries.at(-1)!.tNs - entries[0].tNs;
+  if (spanNs < 100_000_000)
+    return {
+      vector: null,
+      error: `control ${controlID} baseline spans only ${round(spanNs / 1_000_000)}ms`,
+    };
+  const vector = componentMedian(entries.map((entry) => entry.relative));
+  if (!vector)
+    return {
+      vector: null,
+      error: `control ${controlID} baseline median is unavailable`,
+    };
+  const spreadPx = Math.max(
+    ...entries.map((entry) => distance(entry.relative, vector) * scale),
+  );
+  if (spreadPx > 0.25)
+    return {
+      vector: null,
+      error: `control ${controlID} baseline spread ${round(spreadPx)}px exceeds 0.25px`,
+    };
+  return { vector, error: null };
+}
+
+function settlingForControlV2(
   samples: DragSample[],
   controlID: string,
   baseline: { x: number; y: number },
   scale: number,
-  mouseUpEventNs: number | null | undefined,
+  mouseUpEventNs: number,
+  displayPeriodMs: number,
 ) {
-  const settling = driftForControl(
-    samples.filter((sample) => sample.phase === "settling"),
-    controlID,
-    baseline,
-    scale,
-  );
-  const mouseUpNs = mouseUpEventNs ?? null;
-  if (mouseUpNs == null) return { settlingMs: null, stable: false };
-  for (let index = 0; index < settling.length; index += 1) {
-    const candidate = settling[index];
+  const entries = driftEntries(samples, controlID, baseline, scale)
+    .filter(
+      (entry) =>
+        entry.midpointNs > mouseUpEventNs &&
+        !entry.control.crossesEventBoundary,
+    )
+    .sort((a, b) => a.midpointNs - b.midpointNs);
+  for (let index = 0; index < entries.length; index += 1) {
+    const candidate = entries[index];
     if (candidate.driftPx > 0.5) continue;
-    const stableUntil = candidate.sample.tNs + 100_000_000;
-    const tail = settling.filter(
-      (entry) => entry.sample.tNs >= candidate.sample.tNs && entry.sample.tNs <= stableUntil,
+    const tail = entries.filter(
+      (entry) =>
+        entry.midpointNs >= candidate.midpointNs &&
+        entry.midpointNs <=
+          candidate.midpointNs + 100_000_000 + displayPeriodMs * 1_000_000,
     );
-    const spansWindow = tail.at(-1)?.sample.tNs != null
-      && Number(tail.at(-1)!.sample.tNs) - Number(candidate.sample.tNs) >= 90_000_000;
-    if (spansWindow && tail.every((entry) => entry.driftPx <= 0.5)) {
+    const spans100ms =
+      (tail.at(-1)?.midpointNs ?? 0) - candidate.midpointNs >= 100_000_000;
+    const gaps = tail
+      .slice(1)
+      .map(
+        (entry, tailIndex) =>
+          (entry.midpointNs - tail[tailIndex].midpointNs) / 1_000_000,
+      );
+    const coverage =
+      tail.length >= 7 &&
+      gaps.every((gap) => gap <= displayPeriodMs + DISPLAY_GAP_TOLERANCE_MS);
+    if (spans100ms && coverage && tail.every((entry) => entry.driftPx <= 0.5)) {
       return {
-        settlingMs: (Number(candidate.sample.tNs) - Number(mouseUpNs)) / 1_000_000,
+        settlingMs: (candidate.midpointNs - mouseUpEventNs) / 1_000_000,
         stable: true,
       };
     }
@@ -187,207 +331,393 @@ function settlingForControl(
   return { settlingMs: null, stable: false };
 }
 
+function interferenceDetected(trace: NativeTrace) {
+  const interference = trace.interference;
+  return Boolean(
+    interference &&
+    (interference.untaggedInputCount > 0 ||
+      interference.frontmostAppChanged ||
+      interference.pointerDeviationPx > 1 ||
+      interference.targetMovedExternally),
+  );
+}
+
 export function analyzeTrace(trace: NativeTrace): DragAnalysis {
-  const errors = [...(trace.errors ?? [])];
+  const evidenceErrors = [...(trace.errors ?? [])];
   const samples = trace.samples ?? [];
   const inMotion = samples.filter((sample) => sample.phase === "dragged");
-  const pre = samples.filter((sample) => sample.phase === "pre" || sample.phase === "mouseDown");
+  const pre = samples.filter(
+    (sample) => sample.phase === "pre" || sample.phase === "mouseDown",
+  );
+  const settlingSamples = samples.filter(
+    (sample) => sample.phase === "settling",
+  );
   const scale = trace.display?.backingScale ?? 1;
   const refreshPeriodMs = 1000 / Math.max(1, trace.display?.refreshHz ?? 60);
-  const controlIDs = [...new Set(samples.flatMap((sample) => sample.controls.map((control) => control.id)))];
-  const rightControlID = RIGHT_CONTROL_IDS.find((id) => controlIDs.includes(id)) ?? null;
+  const controlIDs = [
+    ...new Set(
+      samples.flatMap((sample) => sample.controls.map((control) => control.id)),
+    ),
+  ];
+  const rightControlID =
+    RIGHT_CONTROL_IDS.find((id) => controlIDs.includes(id)) ?? null;
+  const requiredIDs = rightControlID
+    ? [LEFT_CONTROL_ID, rightControlID]
+    : [LEFT_CONTROL_ID];
+  const interference = interferenceDetected(trace);
 
-  const mainPositions = inMotion.flatMap((sample) => sample.mainFramePt ? [sample.mainFramePt] : []);
+  const mainPositions = inMotion.flatMap((sample) =>
+    sample.mainFramePt ? [sample.mainFramePt] : [],
+  );
   const distinctMainPositions = new Set(
     mainPositions.map((frame) => `${round(frame.x, 2)},${round(frame.y, 2)}`),
   ).size;
-  const displacementPt = mainPositions.length >= 2
-    ? distance(mainPositions[0], mainPositions.at(-1)!)
-    : 0;
-  // Cadence is a motion-validity constraint. Startup AX resolution and the
-  // post-drag settling tail are retained in the raw trace but must not dilute
-  // or invalidate the sampling frequency achieved while the window moves.
-  const intervalsMs = inMotion.slice(1).map(
-    (sample, index) => (Number(sample.tNs) - Number(inMotion[index].tNs)) / 1_000_000,
-  ).filter((value) => Number.isFinite(value) && value >= 0);
+  const displacementPt =
+    mainPositions.length >= 2
+      ? distance(mainPositions[0], mainPositions.at(-1)!)
+      : 0;
+  const packetIntervalsMs = inMotion
+    .slice(1)
+    .map((sample, index) => (sample.tNs - inMotion[index].tNs) / 1_000_000)
+    .filter((value) => Number.isFinite(value) && value >= 0);
   const cadence = {
-    medianMs: quantile(intervalsMs, 0.5),
-    p95Ms: quantile(intervalsMs, 0.95),
-    maxMs: intervalsMs.length ? Math.max(...intervalsMs) : null,
+    medianMs: quantile(packetIntervalsMs, 0.5),
+    p95Ms: quantile(packetIntervalsMs, 0.95),
+    maxMs: packetIntervalsMs.length ? Math.max(...packetIntervalsMs) : null,
     refreshPeriodMs,
   };
 
-  if (trace.status !== "ok") errors.push(`sampler status is ${trace.status}`);
-  if (!trace.accessibilityTrusted) errors.push("accessibility is not trusted");
-  if (!controlIDs.includes(LEFT_CONTROL_ID)) errors.push(`missing exact left control ${LEFT_CONTROL_ID}`);
-  if (!rightControlID) errors.push(`missing exact right control (${RIGHT_CONTROL_IDS.join(",")})`);
-  if (controlIDs.length !== 2) errors.push(`expected exactly two controls, sampled ${controlIDs.length}`);
-  if (inMotion.length < 36) errors.push(`only ${inMotion.length} in-motion samples`);
-  if (distinctMainPositions < 30) errors.push(`only ${distinctMainPositions} distinct main positions`);
-  if (displacementPt < 200) errors.push(`main displacement ${round(displacementPt)}pt is below 200pt`);
-  if (cadence.medianMs == null || cadence.medianMs > 10) {
-    errors.push(`median cadence ${cadence.medianMs ?? "missing"}ms exceeds 10ms`);
-  }
-  if (cadence.p95Ms == null || cadence.p95Ms > refreshPeriodMs + TIMER_JITTER_TOLERANCE_MS) {
-    errors.push(
-      `p95 cadence ${cadence.p95Ms ?? "missing"}ms exceeds one refresh period plus ${TIMER_JITTER_TOLERANCE_MS}ms timer jitter`,
+  if (trace.schemaVersion < 2)
+    evidenceErrors.push(
+      `schema ${trace.schemaVersion} lacks contemporaneous evidence`,
+    );
+  if (trace.status !== "ok")
+    evidenceErrors.push(`sampler status is ${trace.status}`);
+  if (!trace.accessibilityTrusted)
+    evidenceErrors.push("accessibility is not trusted");
+  if (!trace.display) evidenceErrors.push("display timeline is missing");
+  if (!controlIDs.includes(LEFT_CONTROL_ID))
+    evidenceErrors.push(`missing exact left control ${LEFT_CONTROL_ID}`);
+  if (!rightControlID)
+    evidenceErrors.push(
+      `missing exact right control (${RIGHT_CONTROL_IDS.join(",")})`,
+    );
+  if (controlIDs.length !== 2)
+    evidenceErrors.push(
+      `expected exactly two controls, sampled ${controlIDs.length}`,
+    );
+  if (trace.mouseDownEventNs == null || trace.mouseUpEventNs == null) {
+    evidenceErrors.push(
+      "explicit mouse-down/mouse-up event timestamps are missing",
     );
   }
-  if (cadence.maxMs == null || cadence.maxMs > refreshPeriodMs * 2) {
-    errors.push(`max cadence ${cadence.maxMs ?? "missing"}ms exceeds two refresh periods`);
+  const down = trace.events?.find((event) => event.kind === "mouseDown");
+  const up = trace.events?.find((event) => event.kind === "mouseUp");
+  if (
+    !down?.observedByEventTap ||
+    !up?.observedByEventTap ||
+    down.tag === 0 ||
+    up.tag === 0
+  ) {
+    evidenceErrors.push(
+      "tagged mouse-down/mouse-up were not confirmed by the event tap",
+    );
   }
-  const mouseUpSample = samples.find((sample) => sample.phase === "mouseUp");
-  if (trace.mouseUpEventNs == null) errors.push("explicit mouse-up event timestamp is missing");
-  if (!mouseUpSample) errors.push("mouse-up phase was not sampled");
-  if (mouseUpSample && trace.mouseUpEventNs != null
-    && Math.abs(Number(mouseUpSample.tNs) - Number(trace.mouseUpEventNs)) > 50_000_000) {
-    errors.push("sampled mouse-up phase is not tied to the explicit mouse-up event timestamp");
-  }
-  if (samples.some((sample) =>
-    sample.relevantWindowNumbers == null
-    || sample.relevantWindowNumbers.length !== sample.relevantWindowCount
-  )) {
-    errors.push("per-sample relevant native-window enumeration is missing or inconsistent");
-  }
-  const relevantWindowCounts = new Set(samples.map((sample) => sample.relevantWindowCount));
-  if (relevantWindowCounts.size !== 1) {
-    errors.push(`relevant native-window count changed during drag: ${[...relevantWindowCounts].join(",")}`);
-  }
-  if (samples.some((sample) => sample.controls.some((control) =>
-    control.measurementSource !== LIVE_MEASUREMENT_SOURCE
-    || control.mainFramePtAtMeasurement == null
-  ))) {
-    errors.push(`all control samples must use ${LIVE_MEASUREMENT_SOURCE}`);
-  }
-  if (samples.some((sample) => sample.controls.some((control) => control.axWindowNumber == null))) {
-    errors.push("control ownership must be non-null in every sample");
+  if (inMotion.length < 36)
+    evidenceErrors.push(`only ${inMotion.length} in-motion packets`);
+  if (distinctMainPositions < 30)
+    evidenceErrors.push(
+      `only ${distinctMainPositions} distinct main positions`,
+    );
+  if (displacementPt < 200)
+    evidenceErrors.push(
+      `main displacement ${round(displacementPt)}pt is below 200pt`,
+    );
+
+  const observerHealth = trace.observerHealth;
+  if (!observerHealth)
+    evidenceErrors.push("observer health telemetry is missing");
+  else {
+    if (observerHealth.axTimeoutCount > 0)
+      evidenceErrors.push(
+        `${observerHealth.axTimeoutCount} AX reads timed out`,
+      );
+    if (observerHealth.topologyStaleCount > 0)
+      evidenceErrors.push(
+        `${observerHealth.topologyStaleCount} topology snapshots were stale`,
+      );
+    if (observerHealth.displayTickIntervalsMs.length < 2)
+      evidenceErrors.push("display tick timeline is incomplete");
   }
 
-  const baselineLeft = [...pre].reverse().flatMap((sample) => {
-    const control = sample.controls.find((entry) => entry.id === LEFT_CONTROL_ID);
-    return control?.framePt ? [control.framePt] : [];
-  })[0];
-  const baselineRight = rightControlID == null ? null : [...pre].reverse().flatMap((sample) => {
-    const control = sample.controls.find((entry) => entry.id === rightControlID);
-    return control?.framePt ? [control.framePt] : [];
-  })[0] ?? null;
-  if (!baselineLeft || !baselineRight) {
-    errors.push("left/right pre-drag control separation is unavailable");
-  } else {
-    const separation = Math.abs(baselineRight.x - baselineLeft.x);
-    if (baselineRight.x <= baselineLeft.x || separation < 100) {
-      errors.push(`left/right controls are not far apart (${round(separation)}pt)`);
+  const enumerationMissing = samples.some(
+    (sample) =>
+      sample.relevantWindowNumbers == null ||
+      sample.relevantWindowNumbers.length !== sample.relevantWindowCount ||
+      sample.topologyFresh !== true ||
+      sample.topologyComplete !== true ||
+      sample.topologyStartNs == null ||
+      sample.topologyEndNs == null,
+  );
+  if (enumerationMissing)
+    evidenceErrors.push(
+      "fresh complete per-packet native-window topology is missing",
+    );
+
+  const baselineByID = new Map<string, { x: number; y: number }>();
+  for (const id of requiredIDs) {
+    const baseline = stableBaseline(pre, id, scale);
+    if (baseline.error) evidenceErrors.push(baseline.error);
+    if (baseline.vector) baselineByID.set(id, baseline.vector);
+  }
+  const baselineLeft = baselineByID.get(LEFT_CONTROL_ID);
+  const baselineRight = rightControlID
+    ? baselineByID.get(rightControlID)
+    : null;
+  if (baselineLeft && baselineRight) {
+    const separation = baselineRight.x - baselineLeft.x;
+    if (separation < 100)
+      evidenceErrors.push(
+        `left/right controls are not far apart (${round(separation)}pt)`,
+      );
+  }
+
+  for (const sample of [...pre, ...inMotion, ...settlingSamples]) {
+    for (const id of requiredIDs) {
+      const control = sample.controls.find((entry) => entry.id === id);
+      if (!control) {
+        evidenceErrors.push(
+          `control ${id} is missing from packet ${sample.tNs}`,
+        );
+        continue;
+      }
+      if (!LIVE_MEASUREMENT_SOURCES.has(control.measurementSource ?? "")) {
+        evidenceErrors.push(
+          `control ${id} is not a live bracketed AX measurement`,
+        );
+      }
+      if (!control.frameRead || !control.ownerRead)
+        evidenceErrors.push(`control ${id} read timing is missing`);
+      if (control.frameRead?.error || control.ownerRead?.error || control.error)
+        evidenceErrors.push(`control ${id} AX read failed`);
+      if (control.framePt == null || control.mainFramePtAtMeasurement == null)
+        evidenceErrors.push(`control ${id} geometry is missing`);
+      if (control.axWindowNumber == null || control.ownerRead?.value == null)
+        evidenceErrors.push(`control ${id} ownership is missing`);
+      if (
+        control.alignmentUncertaintyPx == null ||
+        control.alignmentUncertaintyPx > 0.25
+      ) {
+        evidenceErrors.push(
+          `control ${id} alignment uncertainty exceeds 0.25px or is missing`,
+        );
+      }
+      if (control.topologyFresh !== true)
+        evidenceErrors.push(`control ${id} topology is stale`);
+      if (control.crossesEventBoundary)
+        evidenceErrors.push(`control ${id} read crosses an event boundary`);
     }
   }
 
-  const nativeWindowNumbers = new Set(
-    samples.flatMap((sample) => [sample.mainWindowNumber, sample.footerWindowNumber])
+  const motionIntervals = new Set(
+    inMotion
+      .map((sample) => sample.displayIntervalIndex)
       .filter((value): value is number => value != null),
   );
-  const oneWindowInvariant = samples.length > 0
-    && samples.every((sample) => sample.mainWindowNumber != null && sample.footerWindowNumber == null)
-    && samples.every((sample) => sample.relevantWindowCount === 1)
-    && samples.every((sample) =>
-      sample.relevantWindowNumbers?.length === 1
-      && sample.relevantWindowNumbers[0] === sample.mainWindowNumber
-    )
-    && samples.every((sample) => sample.controls.every(
-      (control) => control.axWindowNumber != null && control.axWindowNumber === sample.mainWindowNumber,
-    ));
-  const topology = oneWindowInvariant
-    ? "one-window"
-    : nativeWindowNumbers.size >= 2 || samples.some((sample) => sample.footerWindowNumber != null)
-      ? "two-window"
-      : "unknown";
+  for (const interval of motionIntervals) {
+    const packets = inMotion.filter(
+      (sample) => sample.displayIntervalIndex === interval,
+    );
+    for (const id of requiredIDs) {
+      if (
+        !packets.some((sample) =>
+          sample.controls.some((control) => control.id === id),
+        )
+      ) {
+        evidenceErrors.push(
+          `display interval ${interval} has no ${id} observation`,
+        );
+      }
+    }
+  }
+  for (const id of requiredIDs) {
+    const midpoints = inMotion
+      .flatMap((sample) => {
+        const control = sample.controls.find((entry) => entry.id === id);
+        return control ? [controlMidpointNs(sample, control)] : [];
+      })
+      .sort((a, b) => a - b);
+    if (midpoints.length < 36)
+      evidenceErrors.push(
+        `control ${id} has only ${midpoints.length}/36 valid motion observations`,
+      );
+    const maxGapMs =
+      midpoints.length > 1
+        ? Math.max(
+            ...midpoints
+              .slice(1)
+              .map(
+                (midpoint, index) => (midpoint - midpoints[index]) / 1_000_000,
+              ),
+          )
+        : Number.POSITIVE_INFINITY;
+    if (maxGapMs > refreshPeriodMs + DISPLAY_GAP_TOLERANCE_MS) {
+      evidenceErrors.push(
+        `control ${id} observation gap ${round(maxGapMs)}ms exceeds one display interval plus 1ms`,
+      );
+    }
+  }
 
-  const controls: ControlMetrics[] = controlIDs.map((id) => {
-    const baselineEntry = [...pre].reverse().flatMap((sample) => {
-      const control = sample.controls.find((entry) => entry.id === id);
-      if (!control) return [];
-      const relative = relativeVector(sample, control);
-      return relative ? [{ sample, control, relative }] : [];
-    })[0];
-    if (!baselineEntry) {
-      errors.push(`control ${id} has no pre-drag baseline`);
+  const topologyCounts = new Set(
+    samples.map((sample) => sample.relevantWindowCount),
+  );
+  const topologyNumbers = new Set(
+    samples.flatMap((sample) => sample.relevantWindowNumbers ?? []),
+  );
+  const ownerMismatch = samples.some((sample) =>
+    sample.controls.some(
+      (control) =>
+        control.axWindowNumber != null &&
+        sample.mainWindowNumber != null &&
+        control.axWindowNumber !== sample.mainWindowNumber,
+    ),
+  );
+  const topologyFail =
+    !enumerationMissing &&
+    (topologyCounts.size !== 1 ||
+      [...topologyCounts][0] !== 1 ||
+      topologyNumbers.size !== 1 ||
+      samples.some((sample) => sample.footerWindowNumber != null) ||
+      ownerMismatch);
+  const topologyVerdict: TopologyVerdict = enumerationMissing
+    ? "UNKNOWN"
+    : topologyFail
+      ? "FAIL"
+      : "PASS";
+  const oneWindowInvariant = topologyVerdict === "PASS";
+  const topology =
+    topologyVerdict === "PASS"
+      ? "one-window"
+      : topologyVerdict === "FAIL"
+        ? "two-window"
+        : "unknown";
+
+  const apparentValues: number[] = [];
+  for (const id of requiredIDs) {
+    const baseline = baselineByID.get(id);
+    if (baseline)
+      apparentValues.push(
+        ...driftEntries(inMotion, id, baseline, scale).map(
+          (entry) => entry.driftPx,
+        ),
+      );
+  }
+
+  const uniqueErrors = [...new Set(evidenceErrors)];
+  const evidenceValid = uniqueErrors.length === 0 && !interference;
+  const controls: ControlMetrics[] = requiredIDs.map((id) => {
+    const baseline = baselineByID.get(id);
+    const rawEntries = baseline
+      ? driftEntries(inMotion, id, baseline, scale)
+      : [];
+    const owners = [
+      ...new Set(
+        rawEntries.flatMap((entry) =>
+          entry.control.axWindowNumber == null
+            ? []
+            : [entry.control.axWindowNumber],
+        ),
+      ),
+    ];
+    if (!evidenceValid || !baseline) {
       return {
         id,
-        sampleCount: 0,
-        maxDriftPx: Number.POSITIVE_INFINITY,
-        p99DriftPx: Number.POSITIVE_INFINITY,
-        rmsDriftPx: Number.POSITIVE_INFINITY,
-        consecutiveOverHalfPixel: Number.POSITIVE_INFINITY,
+        sampleCount: rawEntries.length,
+        maxDriftPx: null,
+        p99DriftPx: null,
+        rmsDriftPx: null,
+        consecutiveOverHalfPixel: null,
         settlingMs: null,
         stableAfterSettling: false,
-        owningWindowNumbers: [],
+        owningWindowNumbers: owners,
         thresholdsPass: false,
       };
     }
-    const entries = driftForControl(inMotion, id, baselineEntry.relative, scale);
-    if (entries.length !== inMotion.length) {
-      errors.push(`control ${id} resolved in ${entries.length}/${inMotion.length} in-motion samples`);
-    }
-    const distinctAbsolutePositions = new Set(entries.flatMap((entry) => {
-      const frame = entry.control.framePt;
-      return frame ? [`${round(frame.x, 2)},${round(frame.y, 2)}`] : [];
-    })).size;
-    // Live AX geometry can publish at a lower cadence than WindowServer on a
-    // 120 Hz display. Require multiple independent live updates so a cached
-    // coordinate cannot pass, without pretending AX must expose every frame.
-    if (distinctMainPositions >= 30 && distinctAbsolutePositions < 3) {
-      errors.push(
-        `control ${id} AX positions are stale (${distinctAbsolutePositions} distinct positions for ${distinctMainPositions} main positions)`,
-      );
-    }
-    const values = entries.map((entry) => entry.driftPx);
+    const values = rawEntries.map((entry) => entry.driftPx);
     let consecutiveOverHalfPixel = 0;
     for (let index = 1; index < values.length; index += 1) {
-      if (values[index - 1] > 0.5 && values[index] > 0.5) consecutiveOverHalfPixel += 1;
+      if (values[index - 1] > 0.5 && values[index] > 0.5)
+        consecutiveOverHalfPixel += 1;
     }
-    const settling = settlingForControl(
-      samples,
+    const settling = settlingForControlV2(
+      settlingSamples,
       id,
-      baselineEntry.relative,
+      baseline,
       scale,
-      trace.mouseUpEventNs,
+      trace.mouseUpEventNs!,
+      refreshPeriodMs,
     );
-    const settlingLimitMs = refreshPeriodMs + 4;
-    const maxDriftPx = values.length ? Math.max(...values) : Number.POSITIVE_INFINITY;
-    const p99DriftPx = quantile(values, 0.99) ?? Number.POSITIVE_INFINITY;
-    const rmsDriftPx = values.length
-      ? Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length)
-      : Number.POSITIVE_INFINITY;
-    const owningWindowNumbers = [...new Set(entries.map((entry) => entry.control.axWindowNumber).filter(
-      (value): value is number => value != null,
-    ))];
-    const thresholdsPass = maxDriftPx <= THRESHOLDS.maxDriftPx
-      && p99DriftPx <= THRESHOLDS.p99DriftPx
-      && rmsDriftPx <= THRESHOLDS.rmsDriftPx
-      && consecutiveOverHalfPixel === THRESHOLDS.consecutiveOverHalfPixel
-      && settling.stable
-      && settling.settlingMs != null
-      && settling.settlingMs <= settlingLimitMs;
+    const maxDriftPx = Math.max(...values);
+    const p99DriftPx = quantile(values, 0.99)!;
+    const rmsDriftPx = Math.sqrt(
+      values.reduce((sum, value) => sum + value * value, 0) / values.length,
+    );
+    const thresholdsPass =
+      maxDriftPx <= THRESHOLDS.maxDriftPx &&
+      p99DriftPx <= THRESHOLDS.p99DriftPx &&
+      rmsDriftPx <= THRESHOLDS.rmsDriftPx &&
+      consecutiveOverHalfPixel === 0 &&
+      settling.stable &&
+      settling.settlingMs != null &&
+      settling.settlingMs <= refreshPeriodMs + 4;
     return {
       id,
-      sampleCount: entries.length,
+      sampleCount: values.length,
       maxDriftPx: round(maxDriftPx),
       p99DriftPx: round(p99DriftPx),
       rmsDriftPx: round(rmsDriftPx),
       consecutiveOverHalfPixel,
-      settlingMs: settling.settlingMs == null ? null : round(settling.settlingMs),
+      settlingMs:
+        settling.settlingMs == null ? null : round(settling.settlingMs),
       stableAfterSettling: settling.stable,
-      owningWindowNumbers,
+      owningWindowNumbers: owners,
       thresholdsPass,
     };
   });
 
-  const valid = errors.length === 0;
-  const motionThresholdsPass = controls.length >= 2 && controls.every((control) => control.thresholdsPass);
-  const overallPass = valid && oneWindowInvariant && motionThresholdsPass;
+  const motionThresholdsPass =
+    evidenceValid &&
+    controls.length === 2 &&
+    controls.every((control) => control.thresholdsPass);
+  const productFail =
+    evidenceValid && (topologyVerdict === "FAIL" || !motionThresholdsPass);
+  const motionVerdict: MotionVerdict = !evidenceValid
+    ? "NOT_EVALUATED"
+    : productFail
+      ? "FAIL"
+      : "PASS";
+  const attemptDisposition: AttemptDisposition = interference
+    ? "INVALID_INTERFERENCE"
+    : !evidenceValid
+      ? "INVALID_OBSERVER"
+      : productFail
+        ? "EVALUABLE_FAIL"
+        : "EVALUABLE_PASS";
+  const overallPass =
+    attemptDisposition === "EVALUABLE_PASS" && topologyVerdict === "PASS";
   return {
     trajectory: trace.trajectory,
-    valid,
-    verdict: valid ? overallPass ? "PASS" : "FAIL" : "INVALID",
-    errors,
+    valid: evidenceValid,
+    verdict: !evidenceValid ? "INVALID" : overallPass ? "PASS" : "FAIL",
+    attemptDisposition,
+    motionVerdict,
+    topologyVerdict,
+    evidenceValidity: evidenceValid ? "VALID" : "INVALID",
+    observerHealth: uniqueErrors.length === 0 ? "PASS" : "FAIL",
+    interferenceClassification: interference ? "USER_OR_ENVIRONMENT" : "NONE",
+    errors: interference
+      ? [...uniqueErrors, "positive user/environment interference observed"]
+      : uniqueErrors,
     topology,
     oneWindowInvariant,
     requiredControlCount: controlIDs.length,
@@ -403,7 +733,27 @@ export function analyzeTrace(trace: NativeTrace): DragAnalysis {
     controls,
     motionThresholdsPass,
     overallPass,
+    diagnosticOnly: {
+      apparentMaxDriftPx: apparentValues.length
+        ? round(Math.max(...apparentValues))
+        : null,
+    },
   };
+}
+
+export function selectTerminalAttempt<
+  T extends { analysis: DragAnalysis; filmstrip?: { pass: boolean } },
+>(attempts: T[]): T | null {
+  for (const attempt of attempts) {
+    if (attempt.analysis.attemptDisposition === "EVALUABLE_FAIL")
+      return attempt;
+    if (
+      attempt.analysis.attemptDisposition === "EVALUABLE_PASS" &&
+      attempt.filmstrip?.pass !== false
+    )
+      return attempt;
+  }
+  return null;
 }
 
 async function run(command: string[], options: { stdout?: "pipe" | "ignore" } = {}) {
@@ -421,37 +771,84 @@ async function run(command: string[], options: { stdout?: "pipe" | "ignore" } = 
 
 export function analyzeIntegratedFilmstrip(trace: NativeTrace) {
   const errors: string[] = [];
-  const frames = [...(trace.filmstripFrames ?? [])].sort((a, b) => a.fraction - b.fraction);
-  if (frames.length !== 3) errors.push(`expected 3 same-run filmstrip frames, found ${frames.length}`);
+  const frames = [...(trace.filmstripFrames ?? [])].sort(
+    (a, b) => a.fraction - b.fraction,
+  );
+  if (frames.length !== 3)
+    errors.push(`expected 3 same-run filmstrip frames, found ${frames.length}`);
   const expectedFractions = [0.25, 0.5, 0.75];
   frames.forEach((frame, index) => {
-    if (Math.abs(frame.fraction - (expectedFractions[index] ?? frame.fraction)) > 0.001) {
+    if (
+      Math.abs(frame.fraction - (expectedFractions[index] ?? frame.fraction)) >
+      0.001
+    ) {
       errors.push(`unexpected filmstrip fraction ${frame.fraction}`);
     }
     if (!frame.captureSucceeded || !existsSync(frame.path)) {
-      errors.push(`filmstrip capture ${index + 1} failed: ${frame.error ?? "file missing"}`);
+      errors.push(
+        `filmstrip capture ${index + 1} failed: ${frame.error ?? "file missing"}`,
+      );
+    }
+    if (frame.actualFrameNs == null || frame.markerEventNs == null) {
+      errors.push(
+        `filmstrip frame ${index + 1} is not tied to ScreenCaptureKit and event host time`,
+      );
     }
   });
-  const dragged = trace.samples.filter((sample) => sample.phase === "dragged");
-  const firstDraggedNs = dragged[0]?.tNs ?? null;
-  const lastDraggedNs = dragged.at(-1)?.tNs ?? null;
-  if (firstDraggedNs == null || lastDraggedNs == null || frames.some((frame) =>
-    frame.tNs < firstDraggedNs || frame.tNs > lastDraggedNs
-  )) {
-    errors.push("filmstrip frames were not captured inside the analyzed drag interval");
+  const downNs = trace.mouseDownEventNs ?? null;
+  const upNs = trace.mouseUpEventNs ?? null;
+  const refreshPeriodNs =
+    1_000_000_000 / Math.max(1, trace.display?.refreshHz ?? 60);
+  if (
+    downNs == null ||
+    upNs == null ||
+    frames.some(
+      (frame) =>
+        frame.actualFrameNs == null ||
+        frame.actualFrameNs <= downNs ||
+        frame.actualFrameNs >= upNs,
+    )
+  ) {
+    errors.push(
+      "filmstrip actual frame times are outside the tagged drag interval",
+    );
   }
-  const positions = frames.flatMap((frame) => frame.mainFramePt ? [frame.mainFramePt] : []);
-  const distinctPositions = new Set(positions.map((frame) => `${round(frame.x, 2)},${round(frame.y, 2)}`));
-  const displacementPt = positions.length >= 2 ? distance(positions[0], positions.at(-1)!) : 0;
-  if (distinctPositions.size !== 3) errors.push("filmstrip does not contain three distinct main-window positions");
-  if (displacementPt < 100) errors.push(`filmstrip main-window displacement ${round(displacementPt)}pt is below 100pt`);
+  if (
+    frames.some(
+      (frame) =>
+        frame.actualFrameNs == null ||
+        frame.markerEventNs == null ||
+        Math.abs(frame.actualFrameNs - frame.markerEventNs) > refreshPeriodNs,
+    )
+  ) {
+    errors.push("filmstrip frame/event skew exceeds one display interval");
+  }
+  const positions = frames.flatMap((frame) =>
+    frame.mainFramePt ? [frame.mainFramePt] : [],
+  );
+  const distinctPositions = new Set(
+    positions.map((frame) => `${round(frame.x, 2)},${round(frame.y, 2)}`),
+  );
+  const displacementPt =
+    positions.length >= 2 ? distance(positions[0], positions.at(-1)!) : 0;
+  if (distinctPositions.size !== 3)
+    errors.push(
+      "filmstrip does not contain three distinct main-window positions",
+    );
+  if (displacementPt < 100)
+    errors.push(
+      `filmstrip main-window displacement ${round(displacementPt)}pt is below 100pt`,
+    );
   const enrichedFrames = frames.map((frame) => ({
     ...frame,
     exists: existsSync(frame.path),
     sha256: existsSync(frame.path) ? sha256(frame.path) : null,
   }));
-  const hashes = new Set(enrichedFrames.flatMap((frame) => frame.sha256 ? [frame.sha256] : []));
-  if (hashes.size !== 3) errors.push("filmstrip captures are not three distinct images");
+  const hashes = new Set(
+    enrichedFrames.flatMap((frame) => (frame.sha256 ? [frame.sha256] : [])),
+  );
+  if (hashes.size !== 3)
+    errors.push("filmstrip captures are not three distinct images");
   return {
     pass: errors.length === 0,
     errors,
