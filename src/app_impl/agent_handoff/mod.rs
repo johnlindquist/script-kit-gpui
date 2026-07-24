@@ -131,6 +131,13 @@ impl ScriptListApp {
                     app.select_agent_chat_profile_and_relaunch(profile_id, cx);
                 });
             });
+
+            let escalation_app = app_entity.clone();
+            view.set_on_continue_in_agent_chat(move |seed, cx| {
+                escalation_app.update(cx, |app, cx| {
+                    app.open_agent_chat_from_quick_ai_handoff(seed, cx);
+                });
+            });
         });
 
         // Observe the Agent Chat view for ready-script state and footer-status changes
@@ -726,6 +733,17 @@ impl ScriptListApp {
         );
     }
 
+    pub(crate) fn open_agent_chat_from_quick_ai_handoff(
+        &mut self,
+        seed_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_agent_chat_from_entry_request(
+            agent_chat_entry::AgentChatEntryRequest::quick_ai_handoff(seed_text),
+            cx,
+        );
+    }
+
     /// Quick-question entry: double-tap of the main hotkey. Opens Agent Chat
     /// with an empty composer and no context chips — see
     /// [`agent_chat_entry::AgentChatEntryRequest::quick_question`] for the
@@ -903,6 +921,8 @@ impl ScriptListApp {
         entry_intent: Option<String>,
         context_policy: AgentChatContextPolicy,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+        seed_policy: agent_chat_entry::AgentChatSeedPolicy,
+        force_fresh: bool,
         cx: &mut Context<Self>,
     ) {
         if self.tab_ai_save_offer_state.is_some() {
@@ -922,7 +942,14 @@ impl ScriptListApp {
         let quick_ai =
             ui_variant == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi;
 
-        if !quick_ai && crate::ai::agent_chat::ui::chat_window::is_chat_window_open() {
+        let allow_reuse = !force_fresh
+            && matches!(
+                seed_policy,
+                agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn
+            );
+
+        if !quick_ai && allow_reuse && crate::ai::agent_chat::ui::chat_window::is_chat_window_open()
+        {
             match normalized_entry_intent.as_ref().map(|intent| {
                 crate::ai::agent_chat::ui::chat_window::submit_reused_entry_intent_in_detached_chat(
                     intent.clone(),
@@ -951,6 +978,7 @@ impl ScriptListApp {
             .is_some_and(|entity| entity.read(cx).is_setup_mode());
 
         if !quick_ai
+            && allow_reuse
             && Self::should_reuse_embedded_agent_chat_view_for_open(
                 normalized_entry_intent.as_deref(),
                 has_cached_retry_request,
@@ -968,6 +996,7 @@ impl ScriptListApp {
             crate::ai::TabAiCaptureKind::DefaultContext,
             true,
             ui_variant,
+            seed_policy,
             cx,
         );
     }
@@ -998,8 +1027,9 @@ impl ScriptListApp {
         // Keep the request's context policy truthful (explicit actions target),
         // even though the prebuilt focused part is passed separately through the
         // launch seam below.
-        let context_policy =
-            AgentChatContextPolicy::ActionsPayload { target: target.clone() };
+        let context_policy = AgentChatContextPolicy::ActionsPayload {
+            target: target.clone(),
+        };
         let focused_part =
             Some(crate::ai::message_parts::AiContextPart::FocusedTarget { target, label });
 
@@ -1031,6 +1061,7 @@ impl ScriptListApp {
         let request = TabAiLaunchRequest {
             source_view: self.current_view.clone(),
             entry_intent: None,
+            seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
             context_policy,
             quick_submit_plan: None,
@@ -1078,9 +1109,7 @@ impl ScriptListApp {
                 seed_text: None,
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
                 seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
-                context_policy: AgentChatContextPolicy::ActionsPayload {
-                    target,
-                },
+                context_policy: AgentChatContextPolicy::ActionsPayload { target },
                 return_origin: Some(source_view.clone()),
             },
             cx,
@@ -1125,6 +1154,7 @@ impl ScriptListApp {
         let request = TabAiLaunchRequest {
             source_view: self.current_view.clone(),
             entry_intent: None,
+            seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
             context_policy,
             quick_submit_plan: None,
@@ -1725,6 +1755,7 @@ impl ScriptListApp {
             capture_kind,
             false,
             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
             cx,
         );
     }
@@ -1750,6 +1781,7 @@ impl ScriptListApp {
             capture_kind,
             false,
             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
             cx,
         );
     }
@@ -1859,6 +1891,7 @@ impl ScriptListApp {
                 capture_kind,
                 false,
                 crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+                agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
                 cx,
             );
             return;
@@ -1930,6 +1963,7 @@ impl ScriptListApp {
         let request = TabAiLaunchRequest {
             source_view,
             entry_intent: Some(entry_intent),
+            seed_policy: agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
             context_policy: AgentChatContextPolicy::AmbientOrFocused,
             quick_submit_plan: Some(plan),
@@ -2127,7 +2161,7 @@ impl ScriptListApp {
     /// and triggers a snapshot rebuild. Returns `true` when the chord was
     /// consumed so the legacy Agent Chat route doesn't also fire.
     pub(crate) fn try_route_cmd_enter_to_menu_syntax_ai(&mut self, cx: &mut Context<Self>) -> bool {
-        use crate::menu_syntax::{builtin_schema, MenuSyntaxActionState};
+        use crate::menu_syntax::{MenuSyntaxActionState, builtin_schema};
         let raw = self.filter_text().to_string();
         let mode = &self.menu_syntax_mode;
         let pending = if let Some(invocation) = mode.capture_for(&raw) {
@@ -2237,10 +2271,9 @@ impl ScriptListApp {
     ) -> bool {
         let explicit_spine_prompt_plan =
             self.script_list_cmd_enter_has_explicit_spine_prompt_plan();
-        if explicit_spine_prompt_plan
-            && self.try_submit_spine_prompt_plan_from_enter(cx) {
-                return true;
-            }
+        if explicit_spine_prompt_plan && self.try_submit_spine_prompt_plan_from_enter(cx) {
+            return true;
+        }
         // Run 12 Pass 11 — `cmd-enter-inline-ai-proposal`. When the user is
         // composing power syntax, Cmd+Enter generates an INLINE proposal
         // shown in the hint card (NOT a full Agent Chat chat handoff). Intercept
@@ -2436,6 +2469,7 @@ impl ScriptListApp {
         capture_kind: crate::ai::TabAiCaptureKind,
         force_agent_chat_surface: bool,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+        seed_policy: agent_chat_entry::AgentChatSeedPolicy,
         cx: &mut Context<Self>,
     ) {
         self.begin_tab_ai_harness_entry_from_source_view(
@@ -2446,6 +2480,7 @@ impl ScriptListApp {
             capture_kind,
             force_agent_chat_surface,
             ui_variant,
+            seed_policy,
             cx,
         );
     }
@@ -2465,6 +2500,7 @@ impl ScriptListApp {
         capture_kind: crate::ai::TabAiCaptureKind,
         force_agent_chat_surface: bool,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+        seed_policy: agent_chat_entry::AgentChatSeedPolicy,
         cx: &mut Context<Self>,
     ) {
         let snapshot_started_at = std::time::Instant::now();
@@ -2509,6 +2545,7 @@ impl ScriptListApp {
         let request = TabAiLaunchRequest {
             source_view,
             entry_intent,
+            seed_policy,
             ui_variant,
             context_policy,
             quick_submit_plan,

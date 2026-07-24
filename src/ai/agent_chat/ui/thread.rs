@@ -29,9 +29,9 @@ use sk_protocol::ai_reliability::{
     AiOperationState, AiPhase, AiPhaseTag, AiRecoveryAction, AiSelectionState, AiSurfaceIdentity,
     AiWorkSnapshot, CapabilityDecision, CapabilityFailure, CompletionKind, Fingerprint,
     InvalidTransition, ModelAvailabilityReason, ModelId, PartialOutputState, PreservationReceipt,
-    ProfileId, ProtocolComponent, ProviderId, RecoveryActionKind, RecoveryEffectResult,
-    RetryPolicy, RetrySafety, SelectionChangeReceipt, SelectionOrigin, TurnRef, TurnRequestRef,
-    TurnRisk, WorkKey,
+    ProfileId, ProgressSnapshot, ProtocolComponent, ProviderId, RecoveryActionKind,
+    RecoveryEffectResult, RetryPolicy, RetrySafety, SelectionChangeReceipt, SelectionOrigin,
+    TurnRef, TurnRequestRef, TurnRisk, WorkKey,
 };
 
 use super::capabilities::{
@@ -580,15 +580,28 @@ impl AgentChatThread {
     }
 
     fn reliability_identity(
+        session_policy: AgentChatSessionPolicy,
         profile_id: &str,
         model_id: Option<&str>,
         cwd: &Path,
     ) -> AiSurfaceIdentity {
-        AiSurfaceIdentity::AgentChat {
-            profile_id: ProfileId::from(profile_id),
-            provider_id: Self::provider_id_from_model(model_id),
-            model_id: model_id.map(ModelId::from),
-            cwd_fingerprint: Fingerprint(redacted_fingerprint(&cwd.to_string_lossy())),
+        match session_policy {
+            AgentChatSessionPolicy::QuickAi => AiSurfaceIdentity::QuickAi {
+                profile_id: ProfileId::from(profile_id),
+                provider_id: Self::provider_id_from_model(model_id).unwrap_or_else(|| {
+                    ProviderId::from(crate::ai::agent_chat::profiles::DEFAULT_PI_PROVIDER)
+                }),
+                model_id: ModelId::from(
+                    model_id
+                        .unwrap_or(crate::ai::agent_chat::codex_exec::QUICK_AI_SELECTED_MODEL_ID),
+                ),
+            },
+            AgentChatSessionPolicy::Full => AiSurfaceIdentity::AgentChat {
+                profile_id: ProfileId::from(profile_id),
+                provider_id: Self::provider_id_from_model(model_id),
+                model_id: model_id.map(ModelId::from),
+                cwd_fingerprint: Fingerprint(redacted_fingerprint(&cwd.to_string_lossy())),
+            },
         }
     }
 
@@ -779,6 +792,8 @@ impl AgentChatThread {
             RecoveryActionKind::ConfigureProvider,
             RecoveryActionKind::RepairComponent,
             RecoveryActionKind::TrimContext,
+            RecoveryActionKind::UseCurrentResults,
+            RecoveryActionKind::ContinueInAgentChat,
             RecoveryActionKind::CopyDetails,
         ])
         .layout(crate::ai::reliability::AiRecoveryLayout::ComposerInline);
@@ -1001,6 +1016,7 @@ impl AgentChatThread {
         let _ = self.transition_reliability(
             AiOperationEvent::SessionReplaced {
                 identity: Self::reliability_identity(
+                    self.session_policy,
                     &self.profile_id,
                     self.selected_model_id.as_deref(),
                     &self.cwd,
@@ -1031,6 +1047,7 @@ impl AgentChatThread {
     ) -> Self {
         let reliability_state = AiOperationState::ready(
             Self::reliability_identity(
+                init.session_policy,
                 &init.profile_id,
                 init.selected_model_id.as_deref(),
                 &init.cwd,
@@ -3348,6 +3365,24 @@ impl AgentChatThread {
             }
             AgentChatEvent::TurnFailed { failure } => {
                 let _ = self.flush_streaming_text_buffer();
+                if self.session_policy == AgentChatSessionPolicy::QuickAi
+                    && matches!(self.reliability_state.phase, AiPhase::Running { .. })
+                {
+                    let partial_output_available = self
+                        .latest_message_with_role(AgentChatThreadMessageRole::Assistant)
+                        .is_some_and(|message| !message.body.trim().is_empty());
+                    let _ = self.transition_reliability(
+                        AiOperationEvent::Progressed {
+                            progress: ProgressSnapshot {
+                                partial_output_available,
+                                mutating_effect_started: false,
+                                externally_visible_effect_started: false,
+                            },
+                            work: self.current_work_snapshot(),
+                        },
+                        cx,
+                    );
+                }
                 let safe_message = failure.primary_message().to_string();
                 self.maybe_notify_agent_chat_event(
                     AgentChatNotificationEvent::Failed,
@@ -4372,6 +4407,7 @@ impl AgentChatThread {
         self.queued_submit_while_bootstrapping = false;
         self.reliability_state = AiOperationState::ready(
             Self::reliability_identity(
+                self.session_policy,
                 &self.profile_id,
                 self.selected_model_id.as_deref(),
                 &self.cwd,
@@ -4628,6 +4664,48 @@ impl AgentChatThread {
     /// Tracked tool calls, ordered by creation.
     pub(crate) fn active_tool_calls(&self) -> &[AgentChatToolCallState] {
         &self.active_tool_calls
+    }
+
+    pub(crate) fn quick_ai_handoff_seed(&self) -> Option<String> {
+        if self.session_policy != AgentChatSessionPolicy::QuickAi {
+            return None;
+        }
+        let question = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, AgentChatThreadMessageRole::User))
+            .map(|message| message.body.trim())
+            .filter(|question| !question.is_empty())?;
+        let mut seen = std::collections::HashSet::new();
+        let source_texts = self
+            .active_tool_calls
+            .iter()
+            .filter_map(|tool_call| tool_call.body.as_deref())
+            .chain(
+                self.messages
+                    .iter()
+                    .filter(|message| matches!(message.role, AgentChatThreadMessageRole::Assistant))
+                    .map(|message| message.body.as_str()),
+            );
+        let sources = source_texts
+            .flat_map(str::split_whitespace)
+            .filter_map(crate::ai::agent_chat::codex_exec::canonical_http_url)
+            .filter(|url| seen.insert(url.clone()))
+            .collect::<Vec<_>>();
+
+        let mut seed = format!("Quick AI handoff\n\nOriginal question:\n{question}");
+        if sources.is_empty() {
+            seed.push_str("\n\nSources already found: none.");
+        } else {
+            seed.push_str("\n\nSources already found:");
+            for source in sources {
+                seed.push_str("\n- ");
+                seed.push_str(&source);
+            }
+        }
+        seed.push_str("\n\nContinue with the full Agent Chat tools and context.");
+        Some(seed)
     }
 
     /// Current bootstrap state for deferred context capture.
@@ -4944,6 +5022,7 @@ impl AgentChatThread {
             status: AgentChatThreadStatus::Idle,
             reliability_state: AiOperationState::ready(
                 Self::reliability_identity(
+                    AgentChatSessionPolicy::Full,
                     crate::ai::agent_chat::profiles::BUILTIN_GENERAL_PROFILE_ID,
                     None,
                     Path::new("/tmp/test"),

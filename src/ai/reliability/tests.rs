@@ -57,6 +57,21 @@ fn structured_usage_exhaustion_precedes_http_429_rate_limit() {
 }
 
 #[test]
+fn output_schema_rejection_is_configuration_not_missing_authentication() {
+    let vault = DiagnosticVault::default();
+    let record = classify_provider_failure(
+        &context(Some(400)),
+        "Invalid schema for response_format: output schema uses an unsupported keyword; no API key fallback is available",
+        &vault,
+    );
+    assert_eq!(
+        record.failure.code,
+        AiFailureCode::InvalidConfiguration,
+        "precise schema evidence must win over broad authentication wording"
+    );
+}
+
+#[test]
 fn protocol_evidence_never_degrades_to_provider_failure() {
     let vault = DiagnosticVault::default();
     let record = classify_provider_failure(

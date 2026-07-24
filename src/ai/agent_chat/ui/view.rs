@@ -92,6 +92,7 @@ type ToggleHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'sta
 /// entity, which panics if called from inside its own update.
 type AgentChatFooterActionHandler = std::sync::Arc<dyn Fn(&mut Window, &mut App) + 'static>;
 type AgentChatProfileSelectionHandler = std::sync::Arc<dyn Fn(String, &mut App) + 'static>;
+type AgentChatEscalationHandler = std::sync::Arc<dyn Fn(String, &mut App) + 'static>;
 type AgentChatHostAppHandler = std::sync::Arc<dyn Fn(&mut App) + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -961,6 +962,9 @@ pub(crate) struct AgentChatView {
     on_open_portal: Option<AgentChatPortalHandler>,
     /// Host-owned callback for persisting an Agent Chat profile and relaunching.
     on_profile_selected: Option<AgentChatProfileSelectionHandler>,
+    /// Host-owned callback for promoting a bounded Quick AI result into a
+    /// fresh full Agent Chat turn with an explicit, safe handoff seed.
+    on_continue_in_agent_chat: Option<AgentChatEscalationHandler>,
     /// Transactional session for the currently staged attachment portal open.
     pending_portal_session: Option<AgentChatPendingPortalSession>,
     footer_host: AgentChatFooterHost,
@@ -1435,6 +1439,13 @@ impl AgentChatView {
         callback: impl Fn(String, &mut App) + 'static,
     ) {
         self.on_profile_selected = Some(std::sync::Arc::new(callback));
+    }
+
+    pub(crate) fn set_on_continue_in_agent_chat(
+        &mut self,
+        callback: impl Fn(String, &mut App) + 'static,
+    ) {
+        self.on_continue_in_agent_chat = Some(std::sync::Arc::new(callback));
     }
 
     pub(crate) fn set_profile_display(
@@ -5050,6 +5061,13 @@ impl AgentChatView {
     }
 
     fn trigger_open_history_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.capabilities(cx).history {
+            tracing::info!(
+                target: "script_kit::agent_chat",
+                event = "agent_chat_history_command_denied_by_policy",
+            );
+            return;
+        }
         if let Some(callback) = self.on_open_history_command.clone() {
             Self::spawn_footer_callback(callback, window, cx);
         } else {
@@ -6373,7 +6391,10 @@ impl AgentChatView {
             composer_fingerprint: Some(composer_fingerprint),
             transcript_fingerprint: Some(transcript_fingerprint),
             reliability: Some(crate::ai::reliability::ai_operation_state_snapshot(
-                "agentChat",
+                match &thread.reliability_state().identity {
+                    sk_protocol::ai_reliability::AiSurfaceIdentity::QuickAi { .. } => "quickAi",
+                    _ => "agentChat",
+                },
                 thread.reliability_state(),
                 thread.recovery_card_spec().as_ref(),
             )),
@@ -6883,6 +6904,7 @@ impl AgentChatView {
             on_focused_text_collapse_requested: None,
             on_open_portal: None,
             on_profile_selected: None,
+            on_continue_in_agent_chat: None,
             pending_portal_session: None,
             footer_host: AgentChatFooterHost::Inline,
             ready_script_path: None,
@@ -6993,6 +7015,7 @@ impl AgentChatView {
             on_focused_text_collapse_requested: None,
             on_open_portal: None,
             on_profile_selected: None,
+            on_continue_in_agent_chat: None,
             pending_portal_session: None,
             footer_host: AgentChatFooterHost::Inline,
             ready_script_path: None,
@@ -11510,6 +11533,34 @@ impl AgentChatView {
                 AiCommand::InstallOrRepairComponent(_) => {
                     self.open_profile_trigger_picker(cx);
                 }
+                AiCommand::ContinueInAgentChat(escalation) => {
+                    let seed = self.live_thread().read(cx).quick_ai_handoff_seed();
+                    match (seed, self.on_continue_in_agent_chat.clone()) {
+                        (Some(seed), Some(callback)) => {
+                            self.live_thread().update(cx, |thread, cx| {
+                                thread.complete_recovery_command(
+                                    escalation.command_id,
+                                    RecoveryEffectResult::AgentChatOpened,
+                                    cx,
+                                );
+                            });
+                            cx.defer(move |cx| callback(seed.clone(), cx));
+                        }
+                        _ => {
+                            let failure = crate::ai::reliability::provider_failure(
+                                sk_protocol::ai_reliability::ProtocolComponent::Provider,
+                                "Quick AI handoff could not be prepared",
+                            );
+                            self.live_thread().update(cx, |thread, cx| {
+                                thread.fail_recovery_command(
+                                    escalation.command_id,
+                                    failure.failure,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                }
                 AiCommand::PersistWork(_)
                 | AiCommand::CheckCapabilities(_)
                 | AiCommand::StartTurn(_)
@@ -11519,7 +11570,6 @@ impl AgentChatView {
                 | AiCommand::ReattachSession(_)
                 | AiCommand::RethreadFlow(_)
                 | AiCommand::RestartFlowRun(_)
-                | AiCommand::ContinueInAgentChat(_)
                 | AiCommand::ClearPendingWork(_)
                 | AiCommand::ScheduleRecoveredDismiss => {}
             }

@@ -61,6 +61,9 @@ pub fn primary_message_for_failure(failure: &AiFailure) -> &'static str {
         AiFailureCode::QuickAiSearchBudgetExceeded => {
             "Quick AI reached its search limit. Your question and current results are saved."
         }
+        AiFailureCode::QuickAiDeadlineExceeded => {
+            "Quick AI took too long to finish. Your question and current results are saved."
+        }
         AiFailureCode::AuthenticationMissing | AiFailureCode::AuthenticationExpired => {
             "Sign in to continue with this AI provider."
         }
@@ -186,6 +189,16 @@ pub fn classify_provider_failure(
         ],
     ) {
         AiFailureKind::Authentication(AuthenticationFailure::UsageExhausted)
+    } else if contains_any(
+        &normalized,
+        &[
+            "invalid schema",
+            "output schema",
+            "response_format schema",
+            "schema for response_format",
+        ],
+    ) {
+        AiFailureKind::Configuration(ConfigurationFailure::InvalidConfiguration)
     } else if context.http_status == Some(401)
         || contains_any(
             &normalized,
@@ -301,6 +314,52 @@ pub fn classify_provider_failure(
     record(context, raw, diagnostics, kind)
 }
 
+/// Construct the intentional Quick AI search-limit control outcome without
+/// manufacturing a raw provider diagnostic.
+pub fn quick_ai_search_budget_failure(
+    completed_searches: u8,
+    budget: u8,
+    partial_answer_available: bool,
+    source_count: u16,
+) -> AppFailureRecord {
+    let failure = AiFailure::new(
+        AiFailureKind::Policy(PolicyFailure::QuickAiSearchBudgetExceeded {
+            completed_searches,
+            budget,
+            partial_answer_available,
+            source_count,
+        }),
+        RetrySafety::Never,
+    );
+    AppFailureRecord {
+        presentation: presentation(&FailureContext::default(), &failure),
+        failure,
+    }
+}
+
+/// Construct the intentional Quick AI deadline outcome without manufacturing
+/// a raw provider diagnostic.
+pub fn quick_ai_deadline_failure(
+    deadline_ms: u32,
+    completed_searches: u8,
+    partial_answer_available: bool,
+    source_count: u16,
+) -> AppFailureRecord {
+    let failure = AiFailure::new(
+        AiFailureKind::Policy(PolicyFailure::QuickAiDeadlineExceeded {
+            deadline_ms,
+            completed_searches,
+            partial_answer_available,
+            source_count,
+        }),
+        RetrySafety::Never,
+    );
+    AppFailureRecord {
+        presentation: presentation(&FailureContext::default(), &failure),
+        failure,
+    }
+}
+
 pub fn classify_process_failure(
     context: &FailureContext,
     facts: ProcessFailureFacts,
@@ -397,6 +456,7 @@ fn presentation(context: &FailureContext, failure: &AiFailure) -> FailurePresent
         AiFailureCode::QuickAiSearchBudgetExceeded => {
             ("ai.quick_search_limit", "ai.quick_search_limit.detail")
         }
+        AiFailureCode::QuickAiDeadlineExceeded => ("ai.quick_deadline", "ai.quick_deadline.detail"),
         AiFailureCode::AuthenticationMissing | AiFailureCode::AuthenticationExpired => {
             ("ai.sign_in_required", "ai.sign_in_required.detail")
         }

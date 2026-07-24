@@ -291,6 +291,7 @@ pub enum AiFailureCode {
     NoCompatibleModel,
     ProfileUnavailable,
     QuickAiSearchBudgetExceeded,
+    QuickAiDeadlineExceeded,
     ToolDenied,
     AuthenticationMissing,
     AuthenticationExpired,
@@ -334,6 +335,7 @@ impl AiFailureCode {
                 PolicyFailure::QuickAiSearchBudgetExceeded { .. } => {
                     Self::QuickAiSearchBudgetExceeded
                 }
+                PolicyFailure::QuickAiDeadlineExceeded { .. } => Self::QuickAiDeadlineExceeded,
                 PolicyFailure::ToolDenied { .. } => Self::ToolDenied,
             },
             AiFailureKind::Authentication(failure) => match failure {
@@ -436,6 +438,12 @@ pub enum PolicyFailure {
     QuickAiSearchBudgetExceeded {
         completed_searches: u8,
         budget: u8,
+        partial_answer_available: bool,
+        source_count: u16,
+    },
+    QuickAiDeadlineExceeded {
+        deadline_ms: u32,
+        completed_searches: u8,
         partial_answer_available: bool,
         source_count: u16,
     },
@@ -777,7 +785,10 @@ pub enum AiOperationEvent {
         command_id: CommandId,
         turn: TurnRef,
     },
-    Progressed(ProgressSnapshot),
+    Progressed {
+        progress: ProgressSnapshot,
+        work: AiWorkSnapshot,
+    },
     Completed(CompletionKind),
     Failed(AiFailure),
     CancelRequested,
@@ -836,7 +847,7 @@ impl AiOperationEvent {
             Self::SubmitRequested { .. } => AiEventTag::SubmitRequested,
             Self::CapabilityResolved(_) => AiEventTag::CapabilityResolved,
             Self::RuntimeStarted { .. } => AiEventTag::RuntimeStarted,
-            Self::Progressed(_) => AiEventTag::Progressed,
+            Self::Progressed { .. } => AiEventTag::Progressed,
             Self::Completed(_) => AiEventTag::Completed,
             Self::Failed(_) => AiEventTag::Failed,
             Self::CancelRequested => AiEventTag::CancelRequested,

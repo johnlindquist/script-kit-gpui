@@ -18,7 +18,9 @@ pub fn transition(
         AiOperationEvent::RuntimeStarted { command_id, turn } => {
             runtime_started(state, event_tag, command_id, turn)
         }
-        AiOperationEvent::Progressed(progress) => progressed(state, event_tag, progress),
+        AiOperationEvent::Progressed { progress, work } => {
+            progressed(state, event_tag, progress, work)
+        }
         AiOperationEvent::Completed(completeness) => completed(state, event_tag, completeness),
         AiOperationEvent::Failed(failure) => failed(state, event_tag, failure),
         AiOperationEvent::CancelRequested => cancel_requested(state, event_tag),
@@ -109,21 +111,20 @@ pub fn recovery_plan_for(
                 partial_answer_available,
                 source_count,
                 ..
+            }
+            | PolicyFailure::QuickAiDeadlineExceeded {
+                partial_answer_available,
+                source_count,
+                ..
             } => {
-                let mut policy_options = Vec::new();
+                let mut policy_options = vec![enabled(
+                    RecoveryActionKind::ContinueInAgentChat,
+                    RecoveryRole::Primary,
+                )];
                 if *partial_answer_available || *source_count > 0 {
                     policy_options.push(enabled(
                         RecoveryActionKind::UseCurrentResults,
-                        RecoveryRole::Primary,
-                    ));
-                    policy_options.push(enabled(
-                        RecoveryActionKind::ContinueInAgentChat,
                         RecoveryRole::Secondary,
-                    ));
-                } else {
-                    policy_options.push(enabled(
-                        RecoveryActionKind::ContinueInAgentChat,
-                        RecoveryRole::Primary,
                     ));
                 }
                 policy_options
@@ -461,6 +462,7 @@ fn progressed(
     mut state: AiOperationState,
     event: AiEventTag,
     progress: ProgressSnapshot,
+    work: AiWorkSnapshot,
 ) -> Result<AiTransition, InvalidTransition> {
     let AiPhase::Running { turn, risk, .. } = state.phase.clone() else {
         return invalid(&state, event, InvalidTransitionReason::EventNotAllowed);
@@ -470,6 +472,7 @@ fn progressed(
         risk,
         progress,
     };
+    state.work = work;
     Ok(no_commands(state))
 }
 
@@ -597,6 +600,7 @@ fn backoff_class(failure: &AiFailure) -> BackoffClass {
         | AiFailureCode::NoCompatibleModel
         | AiFailureCode::ProfileUnavailable
         | AiFailureCode::QuickAiSearchBudgetExceeded
+        | AiFailureCode::QuickAiDeadlineExceeded
         | AiFailureCode::ToolDenied
         | AiFailureCode::AuthenticationMissing
         | AiFailureCode::AuthenticationExpired

@@ -177,8 +177,9 @@ export interface DriverOptions {
   /** Directory for driver artifacts (app.log, protocol bus). */
   sessionDir?: string;
   /**
-   * When true, point HOME/SK_PATH at a fresh sandbox under sessionDir so the
-   * driven app never touches real user data and starts from a known state.
+   * When true, point HOME/SK_PATH/CODEX_HOME at a fresh sandbox under
+   * sessionDir so the driven app never touches real user data and starts from
+   * a known state.
    */
   sandboxHome?: boolean;
   /**
@@ -751,6 +752,9 @@ export class Driver extends ProtocolCore {
       mkdirSync(kitDir, { recursive: true });
       env.HOME = home;
       env.SK_PATH = kitDir;
+      // Never inherit an agent runner's CODEX_HOME. The optional auth seeder
+      // owns this sandbox path; without seeding it stays unauthenticated.
+      env.CODEX_HOME = join(home, ".codex");
       if (options.themeFixturePath) {
         const themeFixturePath = resolve(options.themeFixturePath);
         if (!existsSync(themeFixturePath)) {

@@ -104,6 +104,20 @@ impl AgentChatEntryRequest {
     pub(crate) fn quick_question() -> Self {
         Self::clean_main_launcher(None)
     }
+
+    /// Promote a bounded Quick AI result into a fresh full Agent Chat without
+    /// submitting it or inheriting ambient launcher context.
+    pub(crate) fn quick_ai_handoff(seed_text: String) -> Self {
+        Self {
+            origin: AgentChatEntryOrigin::MainLauncher,
+            target: AgentChatThreadTarget::FreshEmbedded,
+            seed_text: Some(seed_text),
+            ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            seed_policy: AgentChatSeedPolicy::ComposerOnly,
+            context_policy: AgentChatContextPolicy::SuppressFocused,
+            return_origin: None,
+        }
+    }
 }
 
 impl ScriptListApp {
@@ -138,12 +152,16 @@ impl ScriptListApp {
             source_view = ?source_view,
         );
 
+        let seed_policy = req.seed_policy.clone();
+        let force_fresh = matches!(req.target, AgentChatThreadTarget::FreshEmbedded);
         match req.context_policy {
             AgentChatContextPolicy::AmbientOrFocused => {
                 self.open_tab_ai_agent_chat_with_options(
                     req.seed_text,
                     AgentChatContextPolicy::AmbientOrFocused,
                     req.ui_variant,
+                    seed_policy,
+                    force_fresh,
                     cx,
                 );
             }
@@ -152,6 +170,8 @@ impl ScriptListApp {
                     req.seed_text,
                     AgentChatContextPolicy::SuppressFocused,
                     req.ui_variant,
+                    seed_policy,
+                    force_fresh,
                     cx,
                 );
             }
@@ -209,6 +229,15 @@ mod quick_question_contract {
         );
     }
 
+    #[test]
+    fn quick_ai_handoff_is_fresh_composer_only_and_context_free() {
+        let req = AgentChatEntryRequest::quick_ai_handoff("bounded result".to_string());
+        assert_eq!(req.target, super::AgentChatThreadTarget::FreshEmbedded,);
+        assert_eq!(req.seed_policy, AgentChatSeedPolicy::ComposerOnly);
+        assert_eq!(req.context_policy, AgentChatContextPolicy::SuppressFocused,);
+        assert_eq!(req.seed_text.as_deref(), Some("bounded result"));
+    }
+
     /// Behavior replacement for the former source-string audit that lived in
     /// `src/ai/agent_chat/ui/tests.rs`: Standard launcher entry may inherit the
     /// selected launcher row, every nonstandard variant must suppress it. Kept
@@ -216,10 +245,8 @@ mod quick_question_contract {
     #[test]
     fn agent_chat_ui_variant_launch_suppresses_selected_launcher_row_context_contract() {
         use crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant;
-        let standard = AgentChatEntryRequest::main_launcher_with_variant(
-            None,
-            AgentChatUiVariant::Standard,
-        );
+        let standard =
+            AgentChatEntryRequest::main_launcher_with_variant(None, AgentChatUiVariant::Standard);
         assert_eq!(
             standard.context_policy,
             AgentChatContextPolicy::AmbientOrFocused,

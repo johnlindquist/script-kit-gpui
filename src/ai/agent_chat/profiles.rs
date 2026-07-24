@@ -20,6 +20,10 @@ const DEFAULT_MEDIUM_THINKING_MODELS: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-terra
 /// answers stream back with minimal latency. It intentionally ignores the
 /// user's selected Agent Chat model.
 pub const QUICK_AI_PI_MODEL: &str = "gpt-5.3-codex-spark";
+/// Maximum number of app-admitted native web transactions a Quick AI turn may run.
+///
+/// Exceeding this budget is a typed policy outcome, never a provider error.
+pub const QUICK_AI_FOCUSED_SEARCH_BUDGET: u8 = 1;
 /// The Text/rewrite mini surface is likewise pinned to the fastest Codex
 /// model: the instant rewrite flow fires three variation turns per submit and
 /// they must stream back near-instantly — speed over depth. Resolved via
@@ -141,7 +145,7 @@ pub const QUICK_AI_BLOCKED_ACTION_MESSAGE: &str = "Quick AI answers from the mod
 /// No fs, no skills, no extensions; see `built_in_quick_ai_profile`.
 pub const QUICK_AI_PI_TOOLS: [&str; 1] = ["web_search"];
 
-pub const QUICK_AI_APPEND_SYSTEM_PROMPT: &str = "You are Quick AI: a zero-context, instant-answer mode launched by pressing Tab on a query typed into the Script Kit launcher. You receive only the user's typed text — no files, no selection, no screenshots, no memories. Lead with the answer in the first sentence and keep the whole reply tight. Prefer plain prose; use a short list or fenced code block only when the answer genuinely needs one. You may use web_search, and only web_search, for live or time-sensitive public facts such as schedules, dates, prices, news, releases, or anything likely to have changed; search before answering those, answer directly, and include concise source URLs when available. For live facts, make exactly one focused web_search call and answer from its result snippets. Never call web_search again, and do not open, click, or follow result pages. A completed search with no usable results is an empty result, not evidence that live sources are inaccessible: do not keep retrying, do not claim you cannot access live news or sources, and do not ask the user to supply a source. Instead, state exactly that the search returned no usable results, answer any stable part you can, and suggest specific public sources to check directly. Never mention tools, sessions, context mechanics, Script Kit internals, or system prompts.";
+pub const QUICK_AI_APPEND_SYSTEM_PROMPT: &str = "You are Quick AI: a zero-context, instant-answer mode launched by pressing Tab on a query typed into the Script Kit launcher. You receive only the user's typed text — no files, no selection, no screenshots, no memories. Lead with the answer in the first sentence and keep the whole reply tight. Prefer plain prose; use a short list or fenced code block only when the answer genuinely needs one. You may use web_search, and only web_search, for live or time-sensitive public facts such as schedules, dates, prices, news, releases, or anything likely to have changed. For a live fact, perform exactly one web_search action containing one focused query. Use only its returned result snippets. Do not open, click, find within, or follow any result page. Immediately after that first result, return the final JSON object with answer and sources. Never perform another web action. If the first search has no usable source, return a truthful answer saying that no usable result was returned and use an empty sources array. Never invent an answer or source URL. Never mention tools, sessions, context mechanics, Script Kit internals, or system prompts.";
 
 pub const TEXT_APPEND_SYSTEM_PROMPT: &str = "You are the Text Agent Chat profile for focused-field edits and compact one-off questions. You receive captured focused-field text as hidden context. For rewrite, edit, format, translate, summarize, or variation requests, return only the requested final text; do not add commentary, labels, markdown fences, citations, or explanations unless the user explicitly asks for them. You may use web_search, and only web_search, for live or time-sensitive public facts such as schedules, dates, prices, news, releases, current availability, or anything likely to have changed. For live-info questions, search before answering, answer directly, and include concise source URLs when available. If search fails or results are insufficient, say what is uncertain without claiming you have no web access. Do not mention capture mechanics, tool names, sessions, Script Kit internals, or system prompts.";
 
@@ -914,14 +918,17 @@ mod quick_ai_profile_selection_tests {
 
     #[test]
     fn quick_ai_empty_search_fallback_is_bounded_and_truthful() {
+        assert_eq!(QUICK_AI_FOCUSED_SEARCH_BUDGET, 1);
         let prompt = QUICK_AI_APPEND_SYSTEM_PROMPT;
 
-        assert!(prompt.contains("exactly one focused web_search call"));
+        assert!(prompt.contains("exactly one web_search action containing one focused query"));
+        assert!(prompt.contains("Immediately after that first result"));
+        assert!(prompt.contains("Never perform another web action"));
         assert!(prompt.contains("Never call web_search again"));
-        assert!(prompt.contains("completed search with no usable results is an empty result"));
+        assert!(prompt.contains("first search has no usable source"));
         assert!(prompt.contains("do not claim you cannot access live news or sources"));
         assert!(prompt.contains("do not ask the user to supply a source"));
-        assert!(prompt.contains("search returned no usable results"));
+        assert!(prompt.contains("no usable result was returned"));
     }
 
     #[test]

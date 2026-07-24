@@ -20,8 +20,18 @@ use crate::ai::agent_chat::runtime::{AgentChatConnection, AgentChatTurnRequest};
 pub(crate) const QUICK_AI_SELECTED_MODEL_ID: &str = "openai-codex/gpt-5.3-codex-spark";
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 const CANCEL_POLL: Duration = Duration::from_millis(20);
-const CANCEL_GRACE: Duration = Duration::from_secs(2);
-const QUICK_AI_OUTPUT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"},"sources":{"type":"array","minItems":1,"items":{"type":"string"}}},"required":["answer","sources"]}"#;
+const QUICK_AI_TOTAL_COMPLETION_BUDGET: Duration = Duration::from_millis(12_000);
+const QUICK_AI_TEARDOWN_RESERVE: Duration = Duration::from_millis(350);
+const QUICK_AI_WORK_DEADLINE: Duration = Duration::from_millis(
+    QUICK_AI_TOTAL_COMPLETION_BUDGET.as_millis() as u64
+        - QUICK_AI_TEARDOWN_RESERVE.as_millis() as u64,
+);
+const QUICK_AI_MAX_ANSWER_CHARS: usize = 1_200;
+const QUICK_AI_MAX_SOURCES: usize = 3;
+// Codex structured output supports this strict subset. Length, count,
+// canonical-URL, and uniqueness constraints are enforced below by the app.
+const QUICK_AI_OUTPUT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"},"sources":{"type":"array","items":{"type":"string"}}},"required":["answer","sources"]}"#;
+const QUICK_AI_WEB_ROW_ID: &str = "quick-ai-web-result";
 
 #[derive(Debug, Clone)]
 pub(crate) struct CodexQuickAiExecSpec {
@@ -31,6 +41,7 @@ pub(crate) struct CodexQuickAiExecSpec {
     pub(crate) developer_instructions: String,
     pub(crate) scratch_root: PathBuf,
     pub(crate) trace_path: Option<PathBuf>,
+    pub(crate) work_deadline: Duration,
 }
 
 impl CodexQuickAiExecSpec {
@@ -43,6 +54,7 @@ impl CodexQuickAiExecSpec {
                 .to_string(),
             scratch_root,
             trace_path: std::env::var_os("SCRIPT_KIT_QUICK_AI_TRACE_PATH").map(PathBuf::from),
+            work_deadline: QUICK_AI_WORK_DEADLINE,
         }
     }
 }
@@ -89,6 +101,7 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
         request: AgentChatTurnRequest,
     ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
         (|| -> Result<AgentChatEventRx> {
+            let turn_started = Instant::now();
             // WP-B2: this cold adapter serves ONLY the web-search-only Quick AI
             // profile. Refuse any turn whose session policy would grant broader
             // tools — the backend allowlist is web-search-only and must never be
@@ -110,12 +123,6 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                 }
             }
 
-            std::fs::create_dir_all(&self.spec.scratch_root).with_context(|| {
-                format!(
-                    "quick_ai_scratch_root_create_failed:{}",
-                    self.spec.scratch_root.display()
-                )
-            })?;
             let run_id = format!(
                 "quick-ai-{}-{generation}-{}",
                 std::process::id(),
@@ -124,12 +131,33 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                     .unwrap_or_default()
                     .as_nanos()
             );
+            let trace = TraceSink::new(
+                self.spec.trace_path.clone(),
+                run_id.clone(),
+                turn_started,
+            );
+            trace.write(
+                "start_turn_entered",
+                json!({
+                    "backend": "codex-direct",
+                    "profileId": "quick-ai",
+                    "modelClass": "spark",
+                }),
+            );
+            std::fs::create_dir_all(&self.spec.scratch_root).with_context(|| {
+                format!(
+                    "quick_ai_scratch_root_create_failed:{}",
+                    self.spec.scratch_root.display()
+                )
+            })?;
             let turn_cwd = self.spec.scratch_root.join(&run_id);
             std::fs::create_dir(&turn_cwd).with_context(|| {
                 format!("quick_ai_turn_cwd_create_failed:{}", turn_cwd.display())
             })?;
+            trace.write("scratch_prepared", json!({}));
 
             let mut command = build_codex_exec_command(&self.spec, &turn_cwd, &query)?;
+            trace.write("spawn_started", json!({}));
             let mut child = command.spawn().with_context(|| {
                 format!("quick_ai_codex_spawn_failed:{}", self.spec.binary.display())
             })?;
@@ -148,7 +176,6 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                 .take()
                 .context("quick_ai_codex_stderr_unavailable")?;
             let cancel_requested = Arc::new(AtomicBool::new(false));
-            let trace = TraceSink::new(self.spec.trace_path.clone(), run_id.clone());
             trace.write(
                 "spawned",
                 json!({
@@ -157,7 +184,7 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                     "model": self.spec.model,
                     "selectedModelId": self.spec.selected_model_id,
                     "promptSha256": sha256_hex(&self.spec.developer_instructions),
-                    "allowedTools": ["web_search"],
+                    "allowedCapabilities": ["public-web-retrieval"],
                     "nativeSearchEnabled": true,
                     "sandbox": "read-only",
                     "ephemeral": true,
@@ -171,6 +198,7 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                     "queryChars": query.chars().count(),
                     "pid": pid,
                     "pgid": pgid,
+                    "startTurnToSpawnMs": turn_started.elapsed().as_millis() as u64,
                 }),
             );
 
@@ -213,97 +241,174 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                         cancel_requested: cancel_requested.clone(),
                     },
                 );
+            let work_deadline = self.spec.work_deadline;
             std::thread::Builder::new()
                 .name(format!("quick-ai-turn-{generation}"))
                 .spawn(move || {
                     let _registration = registration;
                     let mut accumulator = CodexExecTurnAccumulator::new(run_id.clone());
-                    let mut failure: Option<CodexTurnFailure> = None;
-                    let mut cancelled = false;
-                    loop {
+                    let deadline = turn_started + work_deadline;
+                    let mut stop_reason = loop {
                         if cancel_requested.load(Ordering::Acquire) || event_tx.is_closed() {
-                            cancelled = true;
-                            break;
+                            break QuickAiTurnStop::Cancelled;
                         }
-                        match line_rx.recv_timeout(CANCEL_POLL) {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            let failure = crate::ai::reliability::quick_ai_deadline_failure(
+                                work_deadline.as_millis().min(u32::MAX as u128) as u32,
+                                completed_focused_search_count(&accumulator),
+                                partial_answer(&accumulator).is_some(),
+                                all_recovery_source_count(&accumulator),
+                            );
+                            trace.write(
+                                "deadline_expired",
+                                json!({
+                                    "deadlineMs": work_deadline.as_millis() as u64,
+                                    "completedSearches": completed_focused_search_count(&accumulator),
+                                    "partialAnswerAvailable": partial_answer(&accumulator).is_some(),
+                                    "sourceCount": all_recovery_source_count(&accumulator),
+                                }),
+                            );
+                            break QuickAiTurnStop::DeadlineRecovery(failure);
+                        }
+                        let poll = CANCEL_POLL.min(deadline.saturating_duration_since(now));
+                        match line_rx.recv_timeout(poll) {
                             Ok(Ok(line)) => {
                                 if line.trim().is_empty() {
-                                    failure = Some(CodexTurnFailure::protocol(
+                                    break QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
                                         "quick_ai_codex_empty_jsonl_line",
                                     ));
-                                    break;
                                 }
                                 let event = match parse_codex_exec_line(&line) {
                                     Ok(event) => event,
                                     Err(error) => {
-                                        failure =
-                                            Some(CodexTurnFailure::protocol(error.to_string()));
-                                        break;
+                                        break QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
+                                            error.to_string(),
+                                        ));
                                     }
                                 };
                                 trace_event_for_protocol(&trace, &event);
+                                let permit_before = accumulator.web_budget.permit_reserved;
+                                let completed_before = accumulator.web_budget.search_completed;
                                 match apply_codex_exec_event(&mut accumulator, event) {
-                                    Ok(events) => {
+                                    Ok(CodexEventDecision::Continue(events)) => {
+                                        if !permit_before && accumulator.web_budget.permit_reserved {
+                                            trace.write("search_permit_reserved", json!({"permit": 1}));
+                                        }
+                                        if !completed_before && accumulator.web_budget.search_completed {
+                                            trace.write("search_completed", json!({"permit": 1}));
+                                        }
+                                        let mut send_stop = None;
                                         for event in events {
                                             match event_tx.try_send(event) {
                                                 Ok(()) => {}
                                                 Err(async_channel::TrySendError::Closed(_)) => {
-                                                    cancelled = true;
+                                                    send_stop = Some(QuickAiTurnStop::Cancelled);
                                                     break;
                                                 }
                                                 Err(async_channel::TrySendError::Full(_)) => {
-                                                    failure = Some(CodexTurnFailure::protocol(
-                                                        "quick_ai_event_channel_backpressure",
+                                                    send_stop = Some(QuickAiTurnStop::Failed(
+                                                        CodexTurnFailure::protocol(
+                                                            "quick_ai_event_channel_backpressure",
+                                                        ),
                                                     ));
                                                     break;
                                                 }
                                             }
                                         }
+                                        if let Some(stop) = send_stop {
+                                            break stop;
+                                        }
+                                        if accumulator.terminal_seen {
+                                            break QuickAiTurnStop::ProviderTerminal;
+                                        }
                                     }
-                                    Err(error) => {
-                                        failure = Some(error);
-                                        break;
+                                    Ok(CodexEventDecision::CompleteEarly(answer)) => {
+                                        trace.write(
+                                            "answer_candidate",
+                                            json!({
+                                                "answerSha256": sha256_hex(&answer.rendered),
+                                                "answerChars": answer.rendered.chars().count(),
+                                                "sourceCount": answer.source_count,
+                                            }),
+                                        );
+                                        trace.write("early_finalization_selected", json!({}));
+                                        break QuickAiTurnStop::EarlySuccess(answer);
                                     }
-                                }
-                                if cancelled || failure.is_some() {
-                                    break;
+                                    Ok(CodexEventDecision::StopForRecovery(record)) => {
+                                        trace.write(
+                                            "excess_web_action_observed",
+                                            json!({
+                                                "actionOrdinal": accumulator.web_budget.excess_action_count.saturating_add(1),
+                                                "completedSearches": completed_focused_search_count(&accumulator),
+                                            }),
+                                        );
+                                        break QuickAiTurnStop::PolicyRecovery(record);
+                                    }
+                                    Err(error) => break QuickAiTurnStop::Failed(error),
                                 }
                             }
                             Ok(Err(error)) => {
-                                failure = Some(CodexTurnFailure::protocol(format!(
+                                break QuickAiTurnStop::Failed(CodexTurnFailure::protocol(format!(
                                     "quick_ai_codex_stdout_read_failed:{error}"
                                 )));
-                                break;
                             }
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                                 if let Ok(Some(status)) = child.try_wait() {
-                                    if !accumulator.terminal_seen {
-                                        failure = Some(CodexTurnFailure::protocol(format!(
+                                    if accumulator.terminal_seen {
+                                        break QuickAiTurnStop::ProviderTerminal;
+                                    }
+                                    break QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
+                                        format!(
                                             "quick_ai_codex_eof_without_terminal:{}",
                                             status.code().unwrap_or(-1)
-                                        )));
-                                    }
-                                    break;
+                                        ),
+                                    ));
                                 }
                             }
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                if !accumulator.terminal_seen {
-                                    failure = Some(CodexTurnFailure::protocol(
-                                        "quick_ai_codex_eof_without_terminal",
-                                    ));
+                                if accumulator.terminal_seen {
+                                    break QuickAiTurnStop::ProviderTerminal;
                                 }
-                                break;
+                                break QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
+                                    "quick_ai_codex_eof_without_terminal",
+                                ));
                             }
                         }
-                    }
+                    };
 
-                    let teardown = terminate_and_reap_process_group(&mut child, pgid, CANCEL_GRACE)
-                        .unwrap_or_else(|error| ProcessTeardownReport::failed(error.to_string()));
+                    let teardown_policy = match &stop_reason {
+                        QuickAiTurnStop::EarlySuccess(_)
+                        | QuickAiTurnStop::PolicyRecovery(_)
+                        | QuickAiTurnStop::DeadlineRecovery(_) => QUICK_AI_FAST_TEARDOWN,
+                        QuickAiTurnStop::ProviderTerminal
+                        | QuickAiTurnStop::Cancelled
+                        | QuickAiTurnStop::Failed(_) => USER_CANCEL_TEARDOWN,
+                    };
+                    trace.write("teardown_started", json!({}));
+                    let teardown = terminate_and_reap_process_group(
+                        &mut child,
+                        pgid,
+                        teardown_policy,
+                    )
+                    .unwrap_or_else(|error| ProcessTeardownReport::failed(error.to_string()));
                     let stderr_text = stderr_thread.join().unwrap_or_default();
                     trace.write(
                         "teardown",
                         serde_json::to_value(&teardown).unwrap_or(Value::Null),
                     );
+                    if !teardown.child_reaped || teardown.process_group_alive {
+                        stop_reason = QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
+                            "quick_ai_codex_process_teardown_incomplete",
+                        ));
+                    } else if matches!(stop_reason, QuickAiTurnStop::ProviderTerminal)
+                        && (teardown.exit_code != Some(0) || teardown.exit_signal.is_some())
+                    {
+                        stop_reason = QuickAiTurnStop::Failed(CodexTurnFailure::protocol(format!(
+                            "quick_ai_codex_nonzero_exit:code={:?}:signal={:?}",
+                            teardown.exit_code, teardown.exit_signal
+                        )));
+                    }
                     let _ = std::fs::remove_dir_all(&scratch);
                     if let Ok(mut turns) = active_turns.lock() {
                         if turns
@@ -314,109 +419,86 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                         }
                     }
 
-                    if cancelled {
-                        emit_running_search_failures(&event_tx, &accumulator, "Cancelled", false);
-                        trace.write("terminal", json!({"kind": "cancelled"}));
-                        let _ = event_tx.send_blocking(AgentChatEvent::TurnCompleted {
-                            outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
-                                kind: sk_protocol::ai_reliability::CancellationKind::UserCancelled,
-                                partial: sk_protocol::ai_reliability::PartialOutputState::None,
-                            },
-                        });
-                        return;
-                    }
-
-                    if failure.is_none() {
-                        if !teardown.child_reaped || teardown.process_group_alive {
-                            failure = Some(CodexTurnFailure::protocol(
-                                "quick_ai_codex_process_teardown_incomplete",
-                            ));
-                        } else if teardown.exit_code != Some(0) || teardown.exit_signal.is_some() {
-                            failure = Some(CodexTurnFailure::protocol(format!(
-                                "quick_ai_codex_nonzero_exit:code={:?}:signal={:?}",
-                                teardown.exit_code, teardown.exit_signal
-                            )));
-                        } else if !accumulator.turn_completed_seen {
-                            failure = Some(CodexTurnFailure::protocol(
-                                "quick_ai_codex_eof_without_terminal",
-                            ));
-                        }
-                    }
-                    let final_events = failure
-                        .map(Err)
-                        .unwrap_or_else(|| finalize_successful_turn(&accumulator));
-                    match final_events {
-                        Ok(events) => {
-                            if let Some(AgentChatEvent::AgentMessageDelta(answer)) = events.first()
-                            {
-                                trace.write(
-                                "final_answer_selected",
-                                json!({
-                                    "answerSha256": sha256_hex(answer),
-                                    "answerChars": answer.chars().count(),
-                                    "answerUrls": http_urls_in_text(answer),
-                                    "sourceProvenance": if accumulator.structured_urls.is_empty() {
-                                        "answer_url_after_native_search"
-                                    } else {
-                                        "codex_web_search_action"
-                                    },
-                                }),
-                            );
-                            }
-                            trace.write("terminal", json!({"kind": "completed"}));
-                            for event in events {
-                                let _ = event_tx.send_blocking(event);
-                            }
-                        }
-                        Err(error) => {
-                            let mut message = error.message;
-                            if message.is_empty() {
-                                message = "quick_ai_codex_turn_failed".to_string();
-                            }
-                            let raw_failure = if stderr_text.trim().is_empty() {
-                                message
-                            } else {
-                                format!("{message}\n{}", stderr_text.trim())
-                            };
-                            let failure = crate::ai::reliability::provider_failure(
-                                sk_protocol::ai_reliability::ProtocolComponent::Codex,
-                                raw_failure,
-                            );
-                            let fingerprint = failure
-                                .failure
-                                .diagnostic
-                                .as_ref()
-                                .map(|diagnostic| diagnostic.fingerprint.0.as_str())
-                                .unwrap_or("unavailable");
-                            tracing::warn!(
-                                target: "script_kit::quick_ai",
-                                event = "codex_quick_ai_failed",
-                                failure_code = ?failure.failure.code,
-                                diagnostic_fingerprint = fingerprint,
-                            );
-                            trace.write(
-                                "protocol_failure",
-                                json!({
-                                    "failureCode": format!("{:?}", failure.failure.code),
-                                    "diagnosticFingerprint": fingerprint,
-                                }),
-                            );
+                    match stop_reason {
+                        QuickAiTurnStop::Cancelled => {
                             emit_running_search_failures(
                                 &event_tx,
                                 &accumulator,
-                                failure.primary_message(),
-                                true,
+                                "Cancelled",
+                                false,
+                            );
+                            trace.write("terminal", json!({"kind": "cancelled"}));
+                            let _ = event_tx.send_blocking(AgentChatEvent::TurnCompleted {
+                                outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
+                                    kind: sk_protocol::ai_reliability::CancellationKind::UserCancelled,
+                                    partial: sk_protocol::ai_reliability::PartialOutputState::None,
+                                },
+                            });
+                        }
+                        QuickAiTurnStop::PolicyRecovery(recovery)
+                        | QuickAiTurnStop::DeadlineRecovery(recovery) => {
+                            if let Some(answer) = partial_answer(&accumulator) {
+                                let _ = event_tx
+                                    .send_blocking(AgentChatEvent::AgentMessageDelta(answer));
+                            }
+                            emit_running_search_failures(
+                                &event_tx,
+                                &accumulator,
+                                recovery.primary_message(),
+                                false,
+                            );
+                            let failure_code = format!("{:?}", recovery.failure.code);
+                            trace.write(
+                                "policy_recovery",
+                                json!({
+                                    "failureCode": failure_code,
+                                    "completedSearches": completed_focused_search_count(&accumulator),
+                                    "searchBudget": crate::ai::agent_chat::profiles::QUICK_AI_FOCUSED_SEARCH_BUDGET,
+                                    "partialAnswerAvailable": partial_answer(&accumulator).is_some(),
+                                    "sourceCount": all_recovery_source_count(&accumulator),
+                                }),
                             );
                             trace.write(
                                 "terminal",
-                                json!({
-                                    "kind": "failed",
-                                    "failureCode": format!("{:?}", failure.failure.code),
-                                    "diagnosticFingerprint": fingerprint,
-                                }),
+                                json!({"kind": "recovery", "failureCode": failure_code}),
                             );
-                            let _ = event_tx.send_blocking(AgentChatEvent::TurnFailed { failure });
+                            let _ = event_tx
+                                .send_blocking(AgentChatEvent::TurnFailed { failure: recovery });
                         }
+                        QuickAiTurnStop::EarlySuccess(answer) => {
+                            emit_successful_answer(
+                                &event_tx,
+                                &trace,
+                                &accumulator,
+                                answer.rendered,
+                                "early-structured-answer",
+                            );
+                        }
+                        QuickAiTurnStop::ProviderTerminal => {
+                            match finalize_successful_turn(&accumulator) {
+                                Ok(events) => emit_successful_events(
+                                    &event_tx,
+                                    &trace,
+                                    &accumulator,
+                                    events,
+                                    "provider-terminal",
+                                ),
+                                Err(error) => emit_codex_failure(
+                                    &event_tx,
+                                    &trace,
+                                    &accumulator,
+                                    error,
+                                    &stderr_text,
+                                ),
+                            }
+                        }
+                        QuickAiTurnStop::Failed(error) => emit_codex_failure(
+                            &event_tx,
+                            &trace,
+                            &accumulator,
+                            error,
+                            &stderr_text,
+                        ),
                     }
                 })
                 .context("quick_ai_worker_spawn_failed")?;
@@ -500,6 +582,8 @@ pub(crate) fn build_codex_exec_command(
         .arg("--config")
         .arg("model_reasoning_effort=\"low\"")
         .arg("--config")
+        .arg("tools.web_search.context_size=\"low\"")
+        .arg("--config")
         .arg(format!(
             "developer_instructions={}",
             serde_json::to_string(&spec.developer_instructions)?
@@ -573,7 +657,6 @@ struct WebSearchItem {
     id: String,
     query: String,
     action: WebSearchAction,
-    raw_action: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -725,7 +808,6 @@ fn parse_item(item: &Value) -> Result<CodexItem, CodexProtocolError> {
                 id,
                 query,
                 action: parsed,
-                raw_action: action,
             }))
         }
         "error" => Ok(CodexItem::Diagnostic {
@@ -751,23 +833,31 @@ struct CodexExecTurnAccumulator {
     search_order: Vec<String>,
     structured_urls: Vec<String>,
     structured_url_keys: HashSet<String>,
+    recovery_only_urls: Vec<String>,
+    recovery_only_url_keys: HashSet<String>,
     completed_agent_messages: Vec<CompletedAgentMessage>,
     completed_agent_ids: HashSet<String>,
-    focused_search_count: usize,
+    web_budget: QuickAiWebBudgetState,
     non_search_tool_count: usize,
 }
 
 #[derive(Debug, Clone)]
 struct WebSearchState {
-    item_id: String,
-    query: String,
-    action: Value,
     started: bool,
     completed: bool,
     urls: Vec<String>,
     tool_started_emitted: bool,
     tool_completed_emitted: bool,
-    search_counted: bool,
+}
+
+#[derive(Debug, Default)]
+struct QuickAiWebBudgetState {
+    admitted_item_id: Option<String>,
+    admitted_query_key: Option<String>,
+    permit_reserved: bool,
+    search_started: bool,
+    search_completed: bool,
+    excess_action_count: u8,
 }
 
 #[derive(Debug)]
@@ -787,9 +877,11 @@ impl CodexExecTurnAccumulator {
             search_order: Vec::new(),
             structured_urls: Vec::new(),
             structured_url_keys: HashSet::new(),
+            recovery_only_urls: Vec::new(),
+            recovery_only_url_keys: HashSet::new(),
             completed_agent_messages: Vec::new(),
             completed_agent_ids: HashSet::new(),
-            focused_search_count: 0,
+            web_budget: QuickAiWebBudgetState::default(),
             non_search_tool_count: 0,
         }
     }
@@ -808,26 +900,51 @@ impl CodexTurnFailure {
     }
 }
 
+#[derive(Debug)]
+enum CodexEventDecision {
+    Continue(Vec<AgentChatEvent>),
+    CompleteEarly(ValidatedQuickAiAnswer),
+    StopForRecovery(crate::ai::reliability::AppFailureRecord),
+}
+
+#[derive(Debug)]
+enum QuickAiTurnStop {
+    ProviderTerminal,
+    EarlySuccess(ValidatedQuickAiAnswer),
+    PolicyRecovery(crate::ai::reliability::AppFailureRecord),
+    DeadlineRecovery(crate::ai::reliability::AppFailureRecord),
+    Cancelled,
+    Failed(CodexTurnFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedQuickAiAnswer {
+    rendered: String,
+    source_count: usize,
+}
+
 fn apply_codex_exec_event(
     accumulator: &mut CodexExecTurnAccumulator,
     event: CodexExecEvent,
-) -> Result<Vec<AgentChatEvent>, CodexTurnFailure> {
+) -> Result<CodexEventDecision, CodexTurnFailure> {
     if accumulator.terminal_seen {
-        return Ok(Vec::new());
+        return Ok(CodexEventDecision::Continue(Vec::new()));
     }
     match event {
-        CodexExecEvent::ThreadStarted { .. } | CodexExecEvent::TurnStarted => Ok(Vec::new()),
+        CodexExecEvent::ThreadStarted { .. } | CodexExecEvent::TurnStarted => {
+            Ok(CodexEventDecision::Continue(Vec::new()))
+        }
         CodexExecEvent::TurnCompleted => {
             accumulator.terminal_seen = true;
             accumulator.turn_completed_seen = true;
-            Ok(Vec::new())
+            Ok(CodexEventDecision::Continue(Vec::new()))
         }
         CodexExecEvent::TurnFailed { message } | CodexExecEvent::Error { message } => {
             accumulator.terminal_seen = true;
             Err(CodexTurnFailure::protocol(message))
         }
         CodexExecEvent::Item { phase, item } => match item {
-            CodexItem::Safe { .. } => Ok(Vec::new()),
+            CodexItem::Safe { .. } => Ok(CodexEventDecision::Continue(Vec::new())),
             CodexItem::Diagnostic { id, message }
                 if message.starts_with("Skill descriptions were shortened to fit the ") =>
             {
@@ -836,7 +953,7 @@ fn apply_codex_exec_event(
                     event = "codex_quick_ai_ignored_skill_budget_diagnostic",
                     item_id = %id,
                 );
-                Ok(Vec::new())
+                Ok(CodexEventDecision::Continue(Vec::new()))
             }
             CodexItem::Diagnostic { id, message } => Err(CodexTurnFailure::protocol(format!(
                 "quick_ai_codex_error_item:{id}:{message}"
@@ -854,9 +971,17 @@ fn apply_codex_exec_event(
                 {
                     accumulator
                         .completed_agent_messages
-                        .push(CompletedAgentMessage { item_id: id, text });
+                        .push(CompletedAgentMessage {
+                            item_id: id,
+                            text: text.clone(),
+                        });
+                    if accumulator.web_budget.search_completed {
+                        if let Some(answer) = parse_structured_answer_candidate(&text)? {
+                            return Ok(CodexEventDecision::CompleteEarly(answer));
+                        }
+                    }
                 }
-                Ok(Vec::new())
+                Ok(CodexEventDecision::Continue(Vec::new()))
             }
             CodexItem::WebSearch(item) => apply_web_search(accumulator, phase, item),
         },
@@ -867,53 +992,46 @@ fn apply_web_search(
     accumulator: &mut CodexExecTurnAccumulator,
     phase: ItemPhase,
     item: WebSearchItem,
-) -> Result<Vec<AgentChatEvent>, CodexTurnFailure> {
+) -> Result<CodexEventDecision, CodexTurnFailure> {
+    if observe_web_item(&mut accumulator.web_budget, phase, &item) == WebBudgetDecision::Stop {
+        if let Some(url) = observed_action_url(&item) {
+            if let Some(key) = canonical_http_url(&url) {
+                if accumulator.recovery_only_url_keys.insert(key) {
+                    accumulator.recovery_only_urls.push(url);
+                }
+            }
+        }
+        return Ok(CodexEventDecision::StopForRecovery(
+            crate::ai::reliability::quick_ai_search_budget_failure(
+                completed_focused_search_count(accumulator),
+                crate::ai::agent_chat::profiles::QUICK_AI_FOCUSED_SEARCH_BUDGET,
+                partial_answer(accumulator).is_some(),
+                all_recovery_source_count(accumulator),
+            ),
+        ));
+    }
+    if !accumulator.web_budget.search_started {
+        return Ok(CodexEventDecision::Continue(Vec::new()));
+    }
     if !accumulator.search_items.contains_key(&item.id) {
         accumulator.search_order.push(item.id.clone());
         accumulator.search_items.insert(
             item.id.clone(),
             WebSearchState {
-                item_id: item.id.clone(),
-                query: item.query.clone(),
-                action: item.raw_action.clone(),
                 started: false,
                 completed: false,
                 urls: Vec::new(),
                 tool_started_emitted: false,
                 tool_completed_emitted: false,
-                search_counted: false,
             },
         );
-    }
-    if let WebSearchAction::Search { queries } = &item.action {
-        let should_count = accumulator
-            .search_items
-            .get(&item.id)
-            .is_some_and(|state| !state.search_counted);
-        if should_count {
-            let is_focused_search = queries
-                .iter()
-                .any(|query| canonical_http_url(query).is_none());
-            accumulator.focused_search_count += usize::from(is_focused_search);
-            if accumulator.focused_search_count > 2 {
-                return Err(CodexTurnFailure::protocol(
-                    "quick_ai_more_than_two_search_queries",
-                ));
-            }
-        }
     }
     // Codex 0.144.x currently reports visited pages as exact `web_search`
     // items whose `query` is the URL and whose action is `other`. Prefer the
     // explicit open/find action URL when present, then accept that exact
     // item-level query URL. When Codex emits only a search action, finalization
     // may accept an answer URL only after that native search completed.
-    let action_url = match &item.action {
-        WebSearchAction::OpenPage { url } | WebSearchAction::FindInPage { url } => url.as_deref(),
-        _ => None,
-    };
-    let observed_url = action_url
-        .or_else(|| canonical_http_url(&item.query).map(|_| item.query.as_str()))
-        .map(str::to_string);
+    let observed_url = observed_action_url(&item);
     if let Some(raw) = observed_url.as_ref() {
         if let Some(key) = canonical_http_url(raw) {
             if accumulator.structured_url_keys.insert(key) {
@@ -926,11 +1044,6 @@ fn apply_web_search(
             "quick_ai_codex_search_state_missing",
         ));
     };
-    if matches!(item.action, WebSearchAction::Search { .. }) {
-        state.search_counted = true;
-    }
-    state.query = item.query;
-    state.action = item.raw_action;
     if let Some(url) = observed_url {
         if !state.urls.contains(&url) {
             state.urls.push(url);
@@ -941,21 +1054,12 @@ fn apply_web_search(
     let mut events = Vec::new();
     if !state.tool_started_emitted {
         state.tool_started_emitted = true;
-        let action_type = state
-            .action
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("other");
         events.push(AgentChatEvent::ToolCallStarted {
-            tool_call_id: state.item_id.clone(),
-            title: if matches!(action_type, "open_page" | "find_in_page") {
-                "Web source".to_string()
-            } else {
-                "Web search".to_string()
-            },
+            tool_call_id: QUICK_AI_WEB_ROW_ID.to_string(),
+            title: "Searching the web".to_string(),
             status: "running".to_string(),
-            tool_name: Some("web_search".to_string()),
-            raw_input: Some(json!({"query": state.query, "action": state.action})),
+            tool_name: None,
+            raw_input: None,
         });
     }
     if phase == ItemPhase::Updated
@@ -965,8 +1069,8 @@ fn apply_web_search(
             state.tool_completed_emitted = true;
         }
         events.push(AgentChatEvent::ToolCallUpdated {
-            tool_call_id: state.item_id.clone(),
-            title: None,
+            tool_call_id: QUICK_AI_WEB_ROW_ID.to_string(),
+            title: Some("Web results".to_string()),
             status: Some(
                 if state.completed {
                     "complete"
@@ -976,16 +1080,110 @@ fn apply_web_search(
                 .to_string(),
             ),
             body: (!state.urls.is_empty()).then(|| state.urls.join("\n")),
-            raw_input: Some(json!({
-                "query": state.query,
-                "action": state.action,
-                "source_urls": state.urls,
-            })),
+            raw_input: None,
             diff: None,
             is_error: false,
         });
     }
-    Ok(events)
+    Ok(CodexEventDecision::Continue(events))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebBudgetDecision {
+    Admitted,
+    LifecycleOnly,
+    Stop,
+}
+
+fn normalize_focused_queries(action: &WebSearchAction) -> Option<Vec<String>> {
+    let WebSearchAction::Search { queries } = action else {
+        return Some(Vec::new());
+    };
+    let mut normalized = queries
+        .iter()
+        .map(|query| {
+            query
+                .split_ascii_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        })
+        .filter(|query| !query.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    if normalized.is_empty()
+        || normalized.len() > 1
+        || normalized
+            .iter()
+            .any(|query| canonical_http_url(query).is_some())
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn observe_web_item(
+    budget: &mut QuickAiWebBudgetState,
+    phase: ItemPhase,
+    item: &WebSearchItem,
+) -> WebBudgetDecision {
+    let is_page_follow = matches!(
+        item.action,
+        WebSearchAction::OpenPage { .. } | WebSearchAction::FindInPage { .. }
+    ) || matches!(item.action, WebSearchAction::Other)
+        && canonical_http_url(&item.query).is_some();
+    let decision = match budget.admitted_item_id.as_deref() {
+        None if is_page_follow => WebBudgetDecision::Stop,
+        None => {
+            budget.admitted_item_id = Some(item.id.clone());
+            budget.permit_reserved = true;
+            match normalize_focused_queries(&item.action) {
+                None => WebBudgetDecision::Stop,
+                Some(queries) if queries.is_empty() => WebBudgetDecision::LifecycleOnly,
+                Some(queries) => {
+                    budget.admitted_query_key = queries.first().cloned();
+                    budget.search_started = true;
+                    WebBudgetDecision::Admitted
+                }
+            }
+        }
+        Some(admitted_id) if admitted_id != item.id => WebBudgetDecision::Stop,
+        Some(_) if is_page_follow => WebBudgetDecision::Stop,
+        Some(_) => match normalize_focused_queries(&item.action) {
+            None => WebBudgetDecision::Stop,
+            Some(queries) if queries.is_empty() && !budget.search_started => {
+                WebBudgetDecision::LifecycleOnly
+            }
+            Some(queries) if queries.is_empty() => WebBudgetDecision::Stop,
+            Some(queries) => {
+                let query = queries.first().cloned();
+                if budget.admitted_query_key.is_some() && budget.admitted_query_key != query {
+                    WebBudgetDecision::Stop
+                } else {
+                    budget.admitted_query_key = query;
+                    budget.search_started = true;
+                    WebBudgetDecision::Admitted
+                }
+            }
+        },
+    };
+    if decision == WebBudgetDecision::Stop {
+        budget.excess_action_count = budget.excess_action_count.saturating_add(1);
+    } else if budget.search_started && phase == ItemPhase::Completed {
+        budget.search_completed = true;
+    }
+    decision
+}
+
+fn observed_action_url(item: &WebSearchItem) -> Option<String> {
+    match &item.action {
+        WebSearchAction::OpenPage { url } | WebSearchAction::FindInPage { url } => {
+            url.as_deref().and_then(canonical_http_url)
+        }
+        WebSearchAction::Other => canonical_http_url(&item.query),
+        WebSearchAction::Search { .. } => None,
+    }
 }
 
 fn render_final_answer(raw: &str) -> Result<String, CodexTurnFailure> {
@@ -993,41 +1191,114 @@ fn render_final_answer(raw: &str) -> Result<String, CodexTurnFailure> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(trimmed) else {
         return Ok(trimmed.to_string());
     };
+    let (answer, valid_sources) = validate_structured_answer_fields(&object)?;
+    let mut rendered = answer;
+    let answer_urls = http_urls_in_text(&rendered);
+    for source in valid_sources {
+        if !answer_urls
+            .iter()
+            .any(|url| canonical_http_url(url).is_some_and(|url| url == source))
+        {
+            rendered.push_str("\n\nSource: ");
+            rendered.push_str(&source);
+        }
+    }
+    Ok(rendered)
+}
+
+fn validate_structured_answer_fields(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(String, Vec<String>), CodexTurnFailure> {
     let answer = object
         .get("answer")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|answer| !answer.is_empty())
         .ok_or_else(|| CodexTurnFailure::protocol("quick_ai_output_schema_answer_missing"))?;
+    if answer.chars().count() > QUICK_AI_MAX_ANSWER_CHARS {
+        return Err(CodexTurnFailure::protocol(
+            "quick_ai_output_schema_answer_too_long",
+        ));
+    }
     let sources = object
         .get("sources")
         .and_then(Value::as_array)
         .ok_or_else(|| CodexTurnFailure::protocol("quick_ai_output_schema_sources_missing"))?;
-    let mut rendered = answer.to_string();
-    let mut seen = HashSet::new();
-    let valid_sources: Vec<&str> = sources
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|source| canonical_http_url(source).is_some())
-        .filter(|source| seen.insert(canonical_http_url(source).unwrap_or_default()))
-        .collect();
-    if valid_sources.is_empty() {
+    if sources.len() > QUICK_AI_MAX_SOURCES {
         return Err(CodexTurnFailure::protocol(
-            "quick_ai_output_schema_sources_invalid",
+            "quick_ai_output_schema_too_many_sources",
         ));
     }
-    let answer_urls = http_urls_in_text(&rendered);
-    for source in valid_sources {
-        let key = canonical_http_url(source).unwrap_or_default();
-        if !answer_urls
-            .iter()
-            .any(|url| canonical_http_url(url).is_some_and(|url| url == key))
-        {
-            rendered.push_str("\n\nSource: ");
-            rendered.push_str(source);
+    let mut seen = HashSet::new();
+    let mut canonical_sources = Vec::with_capacity(sources.len());
+    for source in sources {
+        let source = source
+            .as_str()
+            .and_then(canonical_http_url)
+            .ok_or_else(|| CodexTurnFailure::protocol("quick_ai_output_schema_source_invalid"))?;
+        if !seen.insert(source.clone()) {
+            return Err(CodexTurnFailure::protocol(
+                "quick_ai_output_schema_source_duplicate",
+            ));
         }
+        canonical_sources.push(source);
     }
-    Ok(rendered)
+    Ok((answer.to_string(), canonical_sources))
+}
+
+fn parse_structured_answer_candidate(
+    raw: &str,
+) -> Result<Option<ValidatedQuickAiAnswer>, CodexTurnFailure> {
+    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(raw.trim()) else {
+        return Ok(None);
+    };
+    let (_, sources) = validate_structured_answer_fields(&object)?;
+    Ok(Some(ValidatedQuickAiAnswer {
+        rendered: render_final_answer(raw)?,
+        source_count: sources.len(),
+    }))
+}
+
+fn completed_focused_search_count(accumulator: &CodexExecTurnAccumulator) -> u8 {
+    u8::from(accumulator.web_budget.search_completed)
+}
+
+fn all_recovery_source_count(accumulator: &CodexExecTurnAccumulator) -> u16 {
+    let mut keys = accumulator
+        .structured_urls
+        .iter()
+        .chain(&accumulator.recovery_only_urls)
+        .filter_map(|url| canonical_http_url(url))
+        .collect::<HashSet<_>>();
+    if let Some(answer) = partial_answer(accumulator) {
+        keys.extend(
+            http_urls_in_text(&answer)
+                .into_iter()
+                .filter_map(|url| canonical_http_url(&url)),
+        );
+    }
+    keys.len().min(u16::MAX as usize) as u16
+}
+
+/// Return only assistant text that Codex actually completed before the policy
+/// boundary. URLs alone are never promoted into an invented answer.
+fn partial_answer(accumulator: &CodexExecTurnAccumulator) -> Option<String> {
+    let raw = accumulator
+        .completed_agent_messages
+        .iter()
+        .rev()
+        .find(|message| !message.text.trim().is_empty())?
+        .text
+        .trim();
+    if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(raw) {
+        return object
+            .get("answer")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|answer| !answer.is_empty())
+            .map(str::to_string);
+    }
+    Some(raw.to_string())
 }
 
 fn finalize_successful_turn(
@@ -1045,10 +1316,19 @@ fn finalize_successful_turn(
         .find(|message| !message.text.trim().is_empty())
         .map(|message| message.text.as_str())
         .ok_or_else(|| CodexTurnFailure::protocol("quick_ai_codex_final_answer_missing"))?;
-    let mut answer = render_final_answer(answer)?;
+    let structured_candidate = parse_structured_answer_candidate(answer)?;
+    let mut answer = structured_candidate
+        .as_ref()
+        .map(|candidate| candidate.rendered.clone())
+        .unwrap_or(render_final_answer(answer)?);
     let answer_urls = http_urls_in_text(&answer);
     if accumulator.structured_urls.is_empty() {
-        if accumulator.focused_search_count == 0 || answer_urls.is_empty() {
+        let honest_empty_result = structured_candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.source_count == 0);
+        if !accumulator.web_budget.search_completed
+            || (answer_urls.is_empty() && !honest_empty_result)
+        {
             return Err(CodexTurnFailure::protocol(
                 "quick_ai_structured_sources_unavailable",
             ));
@@ -1078,6 +1358,106 @@ fn finalize_successful_turn(
     ])
 }
 
+fn emit_successful_answer(
+    tx: &async_channel::Sender<AgentChatEvent>,
+    trace: &TraceSink,
+    accumulator: &CodexExecTurnAccumulator,
+    answer: String,
+    completion_path: &str,
+) {
+    emit_successful_events(
+        tx,
+        trace,
+        accumulator,
+        vec![
+            AgentChatEvent::AgentMessageDelta(answer),
+            AgentChatEvent::completed("stop"),
+        ],
+        completion_path,
+    );
+}
+
+fn emit_successful_events(
+    tx: &async_channel::Sender<AgentChatEvent>,
+    trace: &TraceSink,
+    accumulator: &CodexExecTurnAccumulator,
+    events: Vec<AgentChatEvent>,
+    completion_path: &str,
+) {
+    if let Some(AgentChatEvent::AgentMessageDelta(answer)) = events.first() {
+        trace.write(
+            "final_answer_selected",
+            json!({
+                "answerSha256": sha256_hex(answer),
+                "answerChars": answer.chars().count(),
+                "answerUrls": http_urls_in_text(answer),
+                "sourceProvenance": if accumulator.structured_urls.is_empty() {
+                    "answer-url-after-native-search"
+                } else {
+                    "admitted-native-action"
+                },
+                "completionPath": completion_path,
+            }),
+        );
+    }
+    trace.write("terminal", json!({"kind": "completed"}));
+    for event in events {
+        let _ = tx.send_blocking(event);
+    }
+}
+
+fn emit_codex_failure(
+    tx: &async_channel::Sender<AgentChatEvent>,
+    trace: &TraceSink,
+    accumulator: &CodexExecTurnAccumulator,
+    error: CodexTurnFailure,
+    stderr_text: &str,
+) {
+    let message = if error.message.is_empty() {
+        "quick_ai_codex_turn_failed".to_string()
+    } else {
+        error.message
+    };
+    let raw_failure = if stderr_text.trim().is_empty() {
+        message
+    } else {
+        format!("{message}\n{}", stderr_text.trim())
+    };
+    let failure = crate::ai::reliability::provider_failure(
+        sk_protocol::ai_reliability::ProtocolComponent::Codex,
+        raw_failure,
+    );
+    let fingerprint = failure
+        .failure
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+        .unwrap_or("unavailable");
+    tracing::warn!(
+        target: "script_kit::quick_ai",
+        event = "codex_quick_ai_failed",
+        failure_code = ?failure.failure.code,
+        diagnostic_fingerprint = fingerprint,
+    );
+    trace.write(
+        "protocol_failure",
+        json!({
+            "failureCode": format!("{:?}", failure.failure.code),
+            "diagnosticFingerprint": fingerprint,
+        }),
+    );
+    emit_running_search_failures(tx, accumulator, failure.primary_message(), true);
+    trace.write(
+        "terminal",
+        json!({
+            "kind": "failed",
+            "failureCode": format!("{:?}", failure.failure.code),
+            "diagnosticFingerprint": fingerprint,
+        }),
+    );
+    let _ = tx.send_blocking(AgentChatEvent::TurnFailed { failure });
+}
+
 fn emit_running_search_failures(
     tx: &async_channel::Sender<AgentChatEvent>,
     accumulator: &CodexExecTurnAccumulator,
@@ -1090,15 +1470,11 @@ fn emit_running_search_failures(
         };
         if state.tool_started_emitted && !state.tool_completed_emitted {
             let _ = tx.send_blocking(AgentChatEvent::ToolCallUpdated {
-                tool_call_id: item_id.clone(),
+                tool_call_id: QUICK_AI_WEB_ROW_ID.to_string(),
                 title: None,
                 status: Some("failed".to_string()),
                 body: Some(message.to_string()),
-                raw_input: Some(json!({
-                    "query": state.query,
-                    "action": state.action,
-                    "source_urls": state.urls,
-                })),
+                raw_input: None,
                 diff: None,
                 is_error,
             });
@@ -1159,10 +1535,29 @@ impl ProcessTeardownReport {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TeardownPolicy {
+    term_grace: Duration,
+    poll_interval: Duration,
+    post_kill_verify: Duration,
+}
+
+const USER_CANCEL_TEARDOWN: TeardownPolicy = TeardownPolicy {
+    term_grace: Duration::from_secs(2),
+    poll_interval: Duration::from_millis(20),
+    post_kill_verify: Duration::from_secs(2),
+};
+
+const QUICK_AI_FAST_TEARDOWN: TeardownPolicy = TeardownPolicy {
+    term_grace: Duration::from_millis(75),
+    poll_interval: Duration::from_millis(10),
+    post_kill_verify: Duration::from_millis(200),
+};
+
 pub(crate) fn terminate_and_reap_process_group(
     child: &mut Child,
     pgid: i32,
-    grace: Duration,
+    policy: TeardownPolicy,
 ) -> Result<ProcessTeardownReport> {
     let mut report = ProcessTeardownReport {
         term_sent: false,
@@ -1185,7 +1580,7 @@ pub(crate) fn terminate_and_reap_process_group(
             ));
         }
     }
-    let deadline = Instant::now() + grace;
+    let deadline = Instant::now() + policy.term_grace;
     while Instant::now() < deadline {
         if status.is_none() {
             status = child.try_wait()?;
@@ -1193,7 +1588,7 @@ pub(crate) fn terminate_and_reap_process_group(
         if !process_group_alive(pgid) {
             break;
         }
-        std::thread::sleep(CANCEL_POLL);
+        std::thread::sleep(policy.poll_interval);
     }
     if process_group_alive(pgid) {
         let result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
@@ -1219,11 +1614,12 @@ pub(crate) fn terminate_and_reap_process_group(
         use std::os::unix::process::ExitStatusExt as _;
         report.exit_signal = status.signal();
     }
-    for _ in 0..100 {
+    let verify_deadline = Instant::now() + policy.post_kill_verify;
+    while Instant::now() < verify_deadline {
         if !process_group_alive(pgid) {
             break;
         }
-        std::thread::sleep(CANCEL_POLL);
+        std::thread::sleep(policy.poll_interval);
     }
     report.process_group_alive = process_group_alive(pgid);
     Ok(report)
@@ -1243,16 +1639,38 @@ struct TraceSink {
     run_id: String,
     seq: Arc<AtomicU64>,
     started: Instant,
+    first_protocol_event_seen: Arc<AtomicBool>,
+    web_action_ordinals: Arc<Mutex<HashMap<String, u8>>>,
 }
 
 impl TraceSink {
-    fn new(path: Option<PathBuf>, run_id: String) -> Self {
+    fn new(path: Option<PathBuf>, run_id: String, started: Instant) -> Self {
         Self {
             path,
             run_id,
             seq: Arc::new(AtomicU64::new(1)),
-            started: Instant::now(),
+            started,
+            first_protocol_event_seen: Arc::new(AtomicBool::new(false)),
+            web_action_ordinals: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn observe_first_protocol_event(&self) {
+        if !self.first_protocol_event_seen.swap(true, Ordering::AcqRel) {
+            self.write("first_protocol_event", json!({}));
+        }
+    }
+
+    fn web_action_ordinal(&self, item_id: &str) -> u8 {
+        let Ok(mut ordinals) = self.web_action_ordinals.lock() else {
+            return 0;
+        };
+        if let Some(ordinal) = ordinals.get(item_id) {
+            return *ordinal;
+        }
+        let ordinal = ordinals.len().saturating_add(1).min(u8::MAX as usize) as u8;
+        ordinals.insert(item_id.to_string(), ordinal);
+        ordinal
     }
 
     fn write(&self, event: &str, details: Value) {
@@ -1277,6 +1695,7 @@ impl TraceSink {
 }
 
 fn trace_event_for_protocol(trace: &TraceSink, event: &CodexExecEvent) {
+    trace.observe_first_protocol_event();
     match event {
         CodexExecEvent::ThreadStarted { .. } => trace.write("thread_started", json!({})),
         CodexExecEvent::TurnStarted => trace.write("turn_started", json!({})),
@@ -1284,14 +1703,28 @@ fn trace_event_for_protocol(trace: &TraceSink, event: &CodexExecEvent) {
             phase,
             item: CodexItem::WebSearch(item),
         } => {
-            let event_name = match phase {
-                ItemPhase::Started => "web_search_started",
-                ItemPhase::Updated => "web_search_updated",
-                ItemPhase::Completed => "web_search_completed",
+            let native_lifecycle_phase = match phase {
+                ItemPhase::Started => "started",
+                ItemPhase::Updated => "updated",
+                ItemPhase::Completed => "completed",
+            };
+            let action_class = match &item.action {
+                WebSearchAction::Search { .. } => "search",
+                WebSearchAction::OpenPage { .. } | WebSearchAction::FindInPage { .. } => {
+                    "page-follow"
+                }
+                WebSearchAction::Other if canonical_http_url(&item.query).is_some() => "url-visit",
+                WebSearchAction::Other => "unknown",
             };
             trace.write(
-                event_name,
-                json!({"itemId": item.id, "action": item.raw_action}),
+                "native_web_action",
+                json!({
+                    "nativeLifecyclePhase": native_lifecycle_phase,
+                    "actionClass": action_class,
+                    "actionOrdinal": trace.web_action_ordinal(&item.id),
+                    "querySha256": sha256_hex(&item.query),
+                    "queryChars": item.query.chars().count(),
+                }),
             );
             let action_url = match &item.action {
                 WebSearchAction::OpenPage { url } | WebSearchAction::FindInPage { url } => {
@@ -1303,32 +1736,33 @@ fn trace_event_for_protocol(trace: &TraceSink, event: &CodexExecEvent) {
                 action_url.or_else(|| canonical_http_url(&item.query).map(|_| item.query.as_str()))
             {
                 trace.write(
-                    "structured_source_observed",
-                    json!({"itemId": item.id, "action": item.raw_action, "url": url}),
+                    "source_observed",
+                    json!({
+                        "actionOrdinal": trace.web_action_ordinal(&item.id),
+                        "sourceUrl": canonical_http_url(url),
+                        "sourceClass": "native-action",
+                    }),
                 );
             }
         }
         CodexExecEvent::Item {
             phase: ItemPhase::Completed,
-            item: CodexItem::AgentMessage { id, text },
+            item: CodexItem::AgentMessage { id: _, text },
         } => trace.write(
             "agent_message_buffered",
-            json!({"itemId": id, "textSha256": sha256_hex(text)}),
+            json!({"textSha256": sha256_hex(text), "textChars": text.chars().count()}),
         ),
         CodexExecEvent::Item {
-            item: CodexItem::Forbidden { id, item_type },
+            item: CodexItem::Forbidden { id: _, item_type },
             ..
         } => trace.write(
             "forbidden_item",
-            json!({"itemId": id, "itemType": item_type}),
+            json!({"itemTypeSha256": sha256_hex(item_type)}),
         ),
         CodexExecEvent::Item {
-            item: CodexItem::Diagnostic { id, message },
+            item: CodexItem::Diagnostic { id: _, message },
             ..
-        } => trace.write(
-            "diagnostic",
-            json!({"itemId": id, "messageSha256": sha256_hex(message)}),
-        ),
+        } => trace.write("diagnostic", json!({"messageSha256": sha256_hex(message)})),
         _ => {}
     }
 }
@@ -1372,6 +1806,21 @@ mod tests {
         acc: &mut CodexExecTurnAccumulator,
         line: &str,
     ) -> Result<Vec<AgentChatEvent>, CodexTurnFailure> {
+        match apply_line_decision(acc, line)? {
+            CodexEventDecision::Continue(events) => Ok(events),
+            CodexEventDecision::CompleteEarly(_) => Err(CodexTurnFailure::protocol(
+                "unexpected_early_completion_in_test",
+            )),
+            CodexEventDecision::StopForRecovery(_) => Err(CodexTurnFailure::protocol(
+                "unexpected_typed_recovery_in_test",
+            )),
+        }
+    }
+
+    fn apply_line_decision(
+        acc: &mut CodexExecTurnAccumulator,
+        line: &str,
+    ) -> Result<CodexEventDecision, CodexTurnFailure> {
         apply_codex_exec_event(acc, parse_codex_exec_line(line).unwrap())
     }
 
@@ -1391,6 +1840,7 @@ mod tests {
             "plugins",
             "skills.bundled.enabled=false",
             "model_reasoning_effort=\"low\"",
+            "tools.web_search.context_size=\"low\"",
             "--ephemeral",
             "--ignore-user-config",
             "--ignore-rules",
@@ -1443,27 +1893,153 @@ mod tests {
         let mut acc = accumulator();
         let events = apply_line(&mut acc, r#"{"type":"item.started","item":{"id":"s","type":"web_search","query":"Rust","action":{"type":"search","query":"Rust"}}}"#).unwrap();
         assert!(
-            matches!(events.as_slice(), [AgentChatEvent::ToolCallStarted { tool_name: Some(name), .. }] if name == "web_search")
+            matches!(events.as_slice(), [AgentChatEvent::ToolCallStarted { tool_call_id, tool_name: None, raw_input: None, .. }] if tool_call_id == QUICK_AI_WEB_ROW_ID)
         );
     }
 
     #[test]
-    fn codex_quick_ai_open_and_find_urls_are_preserved_ordered_and_deduplicated() {
-        let mut acc = accumulator();
-        for line in [
-            r#"{"type":"item.completed","item":{"id":"a","type":"web_search","action":{"type":"open_page","url":"https://blog.rust-lang.org/a"}}}"#,
-            r#"{"type":"item.completed","item":{"id":"b","type":"web_search","action":{"type":"find_in_page","url":"https://blog.rust-lang.org/b","pattern":"release"}}}"#,
-            r#"{"type":"item.completed","item":{"id":"c","type":"web_search","action":{"type":"open_page","url":"https://blog.rust-lang.org/a"}}}"#,
+    fn codex_quick_ai_page_follow_after_search_is_budget_exceeded() {
+        for action in [
+            r#"{"type":"open_page","url":"https://blog.rust-lang.org/a"}"#,
+            r#"{"type":"find_in_page","url":"https://blog.rust-lang.org/b","pattern":"release"}"#,
         ] {
-            apply_line(&mut acc, line).unwrap();
+            let mut acc = accumulator();
+            apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"a","type":"web_search","action":{"type":"search","query":"Rust"}}}"#).unwrap();
+            let line = format!(
+                r#"{{"type":"item.completed","item":{{"id":"b","type":"web_search","action":{action}}}}}"#
+            );
+            assert!(matches!(
+                apply_line_decision(&mut acc, &line).unwrap(),
+                CodexEventDecision::StopForRecovery(_)
+            ));
         }
-        assert_eq!(
-            acc.structured_urls,
-            [
-                "https://blog.rust-lang.org/a",
-                "https://blog.rust-lang.org/b"
-            ]
+    }
+
+    #[test]
+    fn codex_quick_ai_same_item_lifecycle_consumes_one_permit() {
+        let mut acc = accumulator();
+        for phase in ["item.started", "item.updated", "item.completed"] {
+            let line = format!(
+                r#"{{"type":"{phase}","item":{{"id":"one","type":"web_search","action":{{"type":"search","query":"Rust release"}}}}}}"#
+            );
+            assert!(matches!(
+                apply_line_decision(&mut acc, &line).unwrap(),
+                CodexEventDecision::Continue(_)
+            ));
+        }
+        assert_eq!(acc.web_budget.admitted_item_id.as_deref(), Some("one"));
+        assert!(acc.web_budget.search_completed);
+        assert_eq!(acc.web_budget.excess_action_count, 0);
+    }
+
+    #[test]
+    fn codex_quick_ai_second_item_same_query_is_budget_exceeded() {
+        let mut acc = accumulator();
+        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"one","type":"web_search","action":{"type":"search","query":"Rust release"}}}"#).unwrap();
+        assert!(matches!(
+            apply_line_decision(&mut acc, r#"{"type":"item.started","item":{"id":"two","type":"web_search","action":{"type":"search","query":"Rust release"}}}"#).unwrap(),
+            CodexEventDecision::StopForRecovery(_)
+        ));
+        assert!(!acc.search_items.contains_key("two"));
+    }
+
+    #[test]
+    fn codex_quick_ai_multiple_queries_in_one_action_are_budget_exceeded() {
+        let mut acc = accumulator();
+        assert!(matches!(
+            apply_line_decision(&mut acc, r#"{"type":"item.started","item":{"id":"one","type":"web_search","action":{"type":"search","queries":["Rust release","Rust blog"]}}}"#).unwrap(),
+            CodexEventDecision::StopForRecovery(_)
+        ));
+    }
+
+    #[test]
+    fn codex_quick_ai_duplicate_queries_in_one_action_are_one_search() {
+        let mut acc = accumulator();
+        assert!(matches!(
+            apply_line_decision(&mut acc, r#"{"type":"item.completed","item":{"id":"one","type":"web_search","action":{"type":"search","queries":[" Rust   release ","rust release"]}}}"#).unwrap(),
+            CodexEventDecision::Continue(_)
+        ));
+        assert!(acc.web_budget.search_completed);
+        assert_eq!(acc.web_budget.excess_action_count, 0);
+    }
+
+    #[test]
+    fn codex_quick_ai_schema_allows_truthful_empty_sources() {
+        let answer = parse_structured_answer_candidate(
+            r#"{"answer":"The search returned no usable result.","sources":[]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(answer.source_count, 0);
+        assert_eq!(answer.rendered, "The search returned no usable result.");
+    }
+
+    #[test]
+    fn codex_quick_ai_app_validation_enforces_schema_limits() {
+        let too_long = format!(
+            r#"{{"answer":"{}","sources":[]}}"#,
+            "x".repeat(QUICK_AI_MAX_ANSWER_CHARS + 1)
         );
+        assert_eq!(
+            parse_structured_answer_candidate(&too_long)
+                .unwrap_err()
+                .message,
+            "quick_ai_output_schema_answer_too_long"
+        );
+        assert_eq!(
+            parse_structured_answer_candidate(
+                r#"{"answer":"ok","sources":["https://a.example","https://b.example","https://c.example","https://d.example"]}"#,
+            )
+            .unwrap_err()
+            .message,
+            "quick_ai_output_schema_too_many_sources"
+        );
+        assert_eq!(
+            parse_structured_answer_candidate(
+                r#"{"answer":"ok","sources":["https://a.example","https://a.example"]}"#,
+            )
+            .unwrap_err()
+            .message,
+            "quick_ai_output_schema_source_duplicate"
+        );
+        assert_eq!(
+            parse_structured_answer_candidate(
+                r#"{"answer":"ok","sources":["file:///tmp/provider-secret"]}"#,
+            )
+            .unwrap_err()
+            .message,
+            "quick_ai_output_schema_source_invalid"
+        );
+    }
+
+    #[test]
+    fn codex_quick_ai_structured_sourced_answer_completes_early() {
+        let mut acc = accumulator();
+        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"one","type":"web_search","action":{"type":"search","query":"Rust release"}}}"#).unwrap();
+        let decision = apply_line_decision(&mut acc, r#"{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"{\"answer\":\"Rust 1.97.1\",\"sources\":[\"https://blog.rust-lang.org/releases/latest/\"]}"}}"#).unwrap();
+        let CodexEventDecision::CompleteEarly(answer) = decision else {
+            panic!("schema-valid sourced answer should complete early");
+        };
+        assert_eq!(answer.source_count, 1);
+        assert!(answer.rendered.contains("https://blog.rust-lang.org/"));
+    }
+
+    #[test]
+    fn codex_quick_ai_trace_redacts_provider_item_and_raw_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace.ndjson");
+        let trace = TraceSink::new(
+            Some(trace_path.clone()),
+            "safe-run".to_string(),
+            Instant::now(),
+        );
+        let event = parse_codex_exec_line(r#"{"type":"item.started","item":{"id":"provider-secret-id","type":"web_search","action":{"type":"search","query":"private query text"}}}"#).unwrap();
+        trace_event_for_protocol(&trace, &event);
+        let output = std::fs::read_to_string(trace_path).unwrap();
+        assert!(!output.contains("provider-secret-id"));
+        assert!(!output.contains("private query text"));
+        assert!(!output.contains("\"action\":"));
+        assert!(output.contains("\"actionOrdinal\":1"));
     }
 
     #[test]
@@ -1483,7 +2059,7 @@ mod tests {
         let mut acc = accumulator();
         for line in [
             r#"{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"preamble"}}"#,
-            r#"{"type":"item.completed","item":{"id":"s","type":"web_search","action":{"type":"open_page","url":"https://example.com/source"}}}"#,
+            r#"{"type":"item.completed","item":{"id":"s","type":"web_search","action":{"type":"search","query":"example source"}}}"#,
             r#"{"type":"item.completed","item":{"id":"m2","type":"agent_message","text":"final https://example.com/source"}}"#,
             r#"{"type":"turn.completed","usage":{}}"#,
         ] {
@@ -1509,17 +2085,69 @@ mod tests {
     }
 
     #[test]
-    fn codex_quick_ai_more_than_two_search_queries_fails_closed() {
+    fn codex_quick_ai_second_focused_search_returns_typed_budget_recovery() {
         let mut acc = accumulator();
-        for id in ["a", "b"] {
-            apply_line(
-                &mut acc,
-                &format!(r#"{{"type":"item.started","item":{{"id":"{id}","type":"web_search","action":{{"type":"search","query":"{id}"}}}}}}"#),
-            )
-            .unwrap();
+        for line in [
+            r#"{"type":"item.started","item":{"id":"a","type":"web_search","action":{"type":"search","query":"first"}}}"#,
+            r#"{"type":"item.completed","item":{"id":"a","type":"web_search","action":{"type":"search","query":"first"}}}"#,
+            r#"{"type":"item.completed","item":{"id":"partial","type":"agent_message","text":"A completed partial answer. https://example.com/source"}}"#,
+        ] {
+            apply_line(&mut acc, line).unwrap();
         }
-        let error = apply_line(&mut acc, r#"{"type":"item.started","item":{"id":"c","type":"web_search","action":{"type":"search","query":"c"}}}"#).unwrap_err();
-        assert_eq!(error.message, "quick_ai_more_than_two_search_queries");
+        let decision = apply_line_decision(
+            &mut acc,
+            r#"{"type":"item.started","item":{"id":"b","type":"web_search","action":{"type":"search","query":"second"}}}"#,
+        )
+        .unwrap();
+        let CodexEventDecision::StopForRecovery(record) = decision else {
+            panic!("the second focused search must stop for typed recovery");
+        };
+        assert!(matches!(
+            record.failure.kind,
+            sk_protocol::ai_reliability::AiFailureKind::Policy(
+                sk_protocol::ai_reliability::PolicyFailure::QuickAiSearchBudgetExceeded {
+                    completed_searches: 1,
+                    budget: 1,
+                    partial_answer_available: true,
+                    source_count: 1,
+                }
+            )
+        ));
+        assert_eq!(
+            partial_answer(&acc).as_deref(),
+            Some("A completed partial answer. https://example.com/source")
+        );
+        assert!(!acc.search_items.contains_key("b"));
+        assert!(!acc.search_order.iter().any(|item| item == "b"));
+    }
+
+    #[test]
+    fn codex_quick_ai_budget_recovery_never_fabricates_answer_from_urls() {
+        let mut acc = accumulator();
+        for line in [
+            r#"{"type":"item.completed","item":{"id":"a","type":"web_search","action":{"type":"search","query":"first"}}}"#,
+        ] {
+            apply_line(&mut acc, line).unwrap();
+        }
+        let decision = apply_line_decision(
+            &mut acc,
+            r#"{"type":"item.started","item":{"id":"b","type":"web_search","action":{"type":"open_page","url":"https://example.com/source"}}}"#,
+        )
+        .unwrap();
+        let CodexEventDecision::StopForRecovery(record) = decision else {
+            panic!("the second focused search must stop for typed recovery");
+        };
+        assert!(matches!(
+            record.failure.kind,
+            sk_protocol::ai_reliability::AiFailureKind::Policy(
+                sk_protocol::ai_reliability::PolicyFailure::QuickAiSearchBudgetExceeded {
+                    partial_answer_available: false,
+                    source_count: 1,
+                    ..
+                }
+            )
+        ));
+        assert!(partial_answer(&acc).is_none());
     }
 
     #[test]
@@ -1537,19 +2165,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_quick_ai_current_wire_diagnostic_and_other_url_are_supported() {
+    fn codex_quick_ai_current_wire_diagnostic_is_ignored_but_url_visit_is_denied() {
         let mut acc = accumulator();
-        for line in [
-            r#"{"type":"item.completed","item":{"id":"warning","type":"error","message":"Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest."}}"#,
-            r#"{"type":"item.completed","item":{"id":"source","type":"web_search","query":"https://blog.rust-lang.org/releases/latest/","action":{"type":"other"}}}"#,
-            r#"{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"Rust 1.97.0: https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/"}}"#,
-            r#"{"type":"turn.completed","usage":{}}"#,
-        ] {
-            assert!(apply_line(&mut acc, line).is_ok());
-        }
-        assert!(finalize_successful_turn(&acc).is_ok());
+        assert!(apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"warning","type":"error","message":"Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest."}}"#).is_ok());
+        assert!(matches!(
+            apply_line_decision(&mut acc, r#"{"type":"item.completed","item":{"id":"source","type":"web_search","query":"https://blog.rust-lang.org/releases/latest/","action":{"type":"other"}}}"#).unwrap(),
+            CodexEventDecision::StopForRecovery(_)
+        ));
         assert_eq!(
-            acc.structured_urls,
+            acc.recovery_only_urls,
             ["https://blog.rust-lang.org/releases/latest/"]
         );
     }
@@ -1598,18 +2222,17 @@ mod tests {
     }
 
     #[test]
-    fn codex_quick_ai_missing_answer_url_appends_structured_source() {
+    fn codex_quick_ai_structured_answer_appends_missing_source_url() {
         let mut acc = accumulator();
         apply_line(&mut acc, r#"{"type":"item.started","item":{"id":"s","type":"web_search","action":{"type":"other"}}}"#).unwrap();
-        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"s","type":"web_search","query":"https://blog.rust-lang.org/releases/latest/","action":{"type":"other"}}}"#).unwrap();
-        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"Rust 1.97.0 was released July 9, 2026."}}"#).unwrap();
-        apply_line(&mut acc, r#"{"type":"turn.completed","usage":{}}"#).unwrap();
-        let events = finalize_successful_turn(&acc).unwrap();
-        assert!(matches!(
-            events.first(),
-            Some(AgentChatEvent::AgentMessageDelta(answer))
-                if answer.ends_with("Source: https://blog.rust-lang.org/releases/latest/")
-        ));
+        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"s","type":"web_search","action":{"type":"search","query":"Rust release"}}}"#).unwrap();
+        let decision = apply_line_decision(&mut acc, r#"{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"{\"answer\":\"Rust 1.97.0 was released July 9, 2026.\",\"sources\":[\"https://blog.rust-lang.org/releases/latest/\"]}"}}"#).unwrap();
+        let CodexEventDecision::CompleteEarly(answer) = decision else {
+            panic!("structured answer should complete early");
+        };
+        assert!(answer
+            .rendered
+            .ends_with("Source: https://blog.rust-lang.org/releases/latest/"));
     }
 
     #[test]
@@ -1640,8 +2263,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"t"}'
 printf '%s\n' '{"type":"turn.started"}'
 printf '%s\n' '{"type":"item.started","item":{"id":"s","type":"web_search","query":"Rust","action":{"type":"search","query":"Rust"}}}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"s","type":"web_search","query":"Rust","action":{"type":"search","query":"Rust"}}}'
-printf '%s\n' '{"type":"item.completed","item":{"id":"o","type":"web_search","action":{"type":"open_page","url":"https://blog.rust-lang.org/source"}}}'
-printf '%s\n' '{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"Rust https://blog.rust-lang.org/source"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"{\"answer\":\"Rust\",\"sources\":[\"https://blog.rust-lang.org/source\"]}"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{}}'
 sleep 1
 "#,
@@ -1658,6 +2280,122 @@ sleep 1
             finished |= matches!(event, AgentChatEvent::TurnCompleted { .. });
         }
         assert!(answer && finished);
+        assert!(connection.active_turns.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("scratch"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_quick_ai_budget_recovery_preserves_partial_and_reaps_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = fake_codex(
+            dir.path(),
+            r#"
+printf '%s\n' '{"type":"thread.started","thread_id":"t"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.started","item":{"id":"a","type":"web_search","action":{"type":"search","query":"first"}}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"a","type":"web_search","action":{"type":"search","query":"first"}}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"partial","type":"agent_message","text":"A real partial answer. https://example.com/source"}}'
+printf '%s\n' '{"type":"item.started","item":{"id":"b","type":"web_search","action":{"type":"search","query":"second"}}}'
+sleep 60
+"#,
+        );
+        let connection = CodexQuickAiExecConnection::new(CodexQuickAiExecSpec {
+            binary,
+            ..CodexQuickAiExecSpec::from_builtin_contract(dir.path().join("scratch"))
+        });
+        let rx = connection.start_turn(turn_request()).unwrap();
+        let mut tool_ids = Vec::new();
+        let mut partial = None;
+        let mut policy_failure = None;
+        while let Ok(event) = rx.recv_blocking() {
+            match event {
+                AgentChatEvent::ToolCallStarted { tool_call_id, .. } => {
+                    tool_ids.push(tool_call_id);
+                }
+                AgentChatEvent::AgentMessageDelta(text) => partial = Some(text),
+                AgentChatEvent::TurnFailed { failure } => {
+                    policy_failure = Some(failure.failure.kind);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            partial.as_deref(),
+            Some("A real partial answer. https://example.com/source")
+        );
+        assert!(!tool_ids.iter().any(|id| id == "b"));
+        assert!(matches!(
+            policy_failure,
+            Some(sk_protocol::ai_reliability::AiFailureKind::Policy(
+                sk_protocol::ai_reliability::PolicyFailure::QuickAiSearchBudgetExceeded {
+                    completed_searches: 1,
+                    budget: 1,
+                    partial_answer_available: true,
+                    source_count: 1,
+                }
+            ))
+        ));
+        assert!(connection.active_turns.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("scratch"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_quick_ai_deadline_preserves_partial_and_reaps_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = fake_codex(
+            dir.path(),
+            r#"
+printf '%s\n' '{"type":"thread.started","thread_id":"t"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"one","type":"web_search","action":{"type":"search","query":"Rust release"}}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"partial","type":"agent_message","text":"A real partial answer. https://example.com/source"}}'
+sleep 60
+"#,
+        );
+        let connection = CodexQuickAiExecConnection::new(CodexQuickAiExecSpec {
+            binary,
+            work_deadline: Duration::from_millis(80),
+            ..CodexQuickAiExecSpec::from_builtin_contract(dir.path().join("scratch"))
+        });
+        let rx = connection.start_turn(turn_request()).unwrap();
+        let mut partial = None;
+        let mut failure = None;
+        while let Ok(event) = rx.recv_blocking() {
+            match event {
+                AgentChatEvent::AgentMessageDelta(text) => partial = Some(text),
+                AgentChatEvent::TurnFailed { failure: record } => {
+                    failure = Some(record.failure.kind)
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            partial.as_deref(),
+            Some("A real partial answer. https://example.com/source")
+        );
+        assert!(matches!(
+            failure,
+            Some(sk_protocol::ai_reliability::AiFailureKind::Policy(
+                sk_protocol::ai_reliability::PolicyFailure::QuickAiDeadlineExceeded {
+                    completed_searches: 1,
+                    partial_answer_available: true,
+                    source_count: 1,
+                    ..
+                }
+            ))
+        ));
         assert!(connection.active_turns.lock().unwrap().is_empty());
         assert_eq!(
             std::fs::read_dir(dir.path().join("scratch"))

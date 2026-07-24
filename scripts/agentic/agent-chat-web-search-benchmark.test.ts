@@ -13,8 +13,8 @@ import {
 	parsePiRpcEvent,
 	piExtensionCommand,
 	piRpcCommand,
-	summarizeRuns,
 	type RunReceipt,
+	summarizeRuns,
 } from "./agent-chat-web-search-benchmark.ts";
 
 describe("Quick AI web-search benchmark", () => {
@@ -24,7 +24,11 @@ describe("Quick AI web-search benchmark", () => {
 		expect(contract.provider).toBe("openai-codex");
 		expect(contract.model).toBe("gpt-5.3-codex-spark");
 		expect(contract.tools).toEqual(["web_search"]);
+		expect(contract.focusedSearchBudget).toBe(1);
 		expect(contract.appendSystemPrompt).toContain("You are Quick AI");
+		expect(contract.appendSystemPrompt).toContain(
+			"exactly one web_search action containing one focused query",
+		);
 	});
 
 	test("Pi RPC command matches the Quick AI launch flags", () => {
@@ -60,11 +64,18 @@ describe("Quick AI web-search benchmark", () => {
 		expect(command.args).toContain("plugins");
 		expect(command.args).toContain("skills.bundled.enabled=false");
 		expect(command.args).toContain('model_reasoning_effort="low"');
+		expect(command.args).toContain('tools.web_search.context_size="low"');
 		expect(command.args).toContain("gpt-5.3-codex-spark");
 		expect(command.args).toContain("read-only");
 		expect(command.args).toContain("--ephemeral");
 		expect(command.args).toContain("--ignore-user-config");
 		expect(command.args).toContain("--output-schema");
+		const schemaPath =
+			command.args[command.args.indexOf("--output-schema") + 1];
+		const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+		expect(JSON.stringify(schema)).not.toContain("uniqueItems");
+		expect(JSON.stringify(schema)).not.toContain("maxItems");
+		expect(JSON.stringify(schema)).not.toContain("maxLength");
 		expect(
 			command.args.find((arg) => arg.startsWith("developer_instructions=")),
 		).toContain("You are Quick AI");

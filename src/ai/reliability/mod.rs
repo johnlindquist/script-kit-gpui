@@ -28,8 +28,9 @@ pub use capability_cache::{
 };
 pub use classify::{
     classify_process_failure, classify_protocol_failure, classify_provider_failure,
-    primary_message_for_failure, AppFailureRecord, FailureContext, FailurePresentationInput,
-    ProcessFailureFacts, ProtocolFailureFacts,
+    primary_message_for_failure, quick_ai_deadline_failure, quick_ai_search_budget_failure,
+    AppFailureRecord, FailureContext, FailurePresentationInput, ProcessFailureFacts,
+    ProtocolFailureFacts,
 };
 pub(crate) use devtools::{
     ai_operation_state_snapshot, ai_reliability_fixture_for_target,

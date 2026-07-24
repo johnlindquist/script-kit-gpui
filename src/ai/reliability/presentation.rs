@@ -294,6 +294,17 @@ fn failure_copy(failure: &AiFailure) -> FailureCopy {
                     "Continue the question in Agent Chat for deeper research."
                 },
             },
+            PolicyFailure::QuickAiDeadlineExceeded {
+                partial_answer_available,
+                ..
+            } => FailureCopy {
+                title: "Quick AI took too long to finish",
+                body: if *partial_answer_available {
+                    "Use the current results or continue the question in Agent Chat."
+                } else {
+                    "Continue the question in Agent Chat for deeper research."
+                },
+            },
             PolicyFailure::ToolDenied { .. } => FailureCopy {
                 title: "AI tool unavailable",
                 body: "This request needs a tool that is not available for the current profile.",

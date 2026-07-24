@@ -212,7 +212,12 @@ fn test_thread_with_profile(
         input: TextInputState::new(),
         status: AgentChatThreadStatus::Idle,
         reliability_state: AiOperationState::ready(
-            AgentChatThread::reliability_identity(profile_id, None, Path::new(".")),
+            AgentChatThread::reliability_identity(
+                AgentChatSessionPolicy::Full,
+                profile_id,
+                None,
+                Path::new("."),
+            ),
             AgentChatThread::reliability_selection(
                 profile_id,
                 None,
@@ -2088,6 +2093,56 @@ fn quick_ai_turn_request_has_web_search_only_tool_policy() {
     thread.set_session_policy_test(AgentChatSessionPolicy::Full);
     let request = thread.turn_request(vec![ContentBlock::Text(TextContent::new("hi"))]);
     assert_eq!(request.tool_policy, AgentChatToolPolicy::Full);
+}
+
+#[test]
+fn quick_ai_handoff_seed_preserves_question_and_only_safe_source_urls() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
+    thread.push_message(
+        AgentChatThreadMessageRole::User,
+        "What changed in the latest Rust release?",
+    );
+    thread.upsert_tool_call_start(
+        "search-1".to_string(),
+        "Web search".to_string(),
+        "running".to_string(),
+        Some("web_search".to_string()),
+        Some(serde_json::json!({"query": "latest Rust release"})),
+    );
+    thread.apply_tool_call_update(
+        "search-1".to_string(),
+        None,
+        Some("complete".to_string()),
+        Some(
+            "https://blog.rust-lang.org/releases/latest/ not-a-url https://blog.rust-lang.org/releases/latest/"
+                .to_string(),
+        ),
+        None,
+        None,
+        false,
+    );
+    thread.push_message(
+        AgentChatThreadMessageRole::Assistant,
+        "The release notes are also mirrored at https://doc.rust-lang.org/releases.html; \
+         ignore file:///tmp/provider-debug.json and token=secret.",
+    );
+
+    let seed = thread.quick_ai_handoff_seed().expect("Quick AI handoff");
+    assert!(seed.starts_with("Quick AI handoff"));
+    assert!(seed.contains("Original question:\nWhat changed in the latest Rust release?"));
+    assert!(seed.contains("- https://blog.rust-lang.org/releases/latest/"));
+    assert_eq!(
+        seed.matches("https://blog.rust-lang.org/releases/latest/")
+            .count(),
+        1
+    );
+    assert!(seed.contains("- https://doc.rust-lang.org/releases.html"));
+    assert!(!seed.contains("not-a-url"));
+    assert!(!seed.contains("provider-debug"));
+    assert!(!seed.contains("token=secret"));
+    assert!(!seed.contains("search-1"));
+    assert!(!seed.contains("web_search"));
 }
 
 /// WP-B2: a forbidden tool-call start fails the turn closed and never renders

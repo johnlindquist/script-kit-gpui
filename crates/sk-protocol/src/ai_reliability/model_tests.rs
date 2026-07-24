@@ -202,6 +202,77 @@ fn blocked_capability_produces_actionable_recovery_without_starting() {
 }
 
 #[test]
+fn quick_ai_search_budget_escalates_without_retry() {
+    let failure = AiFailure::new(
+        AiFailureKind::Policy(PolicyFailure::QuickAiSearchBudgetExceeded {
+            completed_searches: 1,
+            budget: 1,
+            partial_answer_available: true,
+            source_count: 1,
+        }),
+        RetrySafety::Never,
+    );
+    let plan = recovery_plan_for(
+        &identity(),
+        &failure,
+        ready().retry,
+        TurnRisk::ReadOnly,
+        &ProgressSnapshot {
+            partial_output_available: true,
+            mutating_effect_started: false,
+            externally_visible_effect_started: false,
+        },
+    );
+    assert!(
+        plan.option(RecoveryActionKind::ContinueInAgentChat)
+            .is_some_and(|option| option.enabled && option.role == RecoveryRole::Primary)
+    );
+    assert!(
+        plan.option(RecoveryActionKind::UseCurrentResults)
+            .is_some_and(|option| option.enabled && option.role == RecoveryRole::Secondary)
+    );
+    assert!(plan.option(RecoveryActionKind::Retry).is_none());
+}
+
+#[test]
+fn quick_ai_deadline_escalates_without_retry() {
+    for (partial_answer_available, source_count, expect_partial_action) in
+        [(false, 0, false), (true, 0, true), (false, 1, true)]
+    {
+        let failure = AiFailure::new(
+            AiFailureKind::Policy(PolicyFailure::QuickAiDeadlineExceeded {
+                deadline_ms: 11_650,
+                completed_searches: 1,
+                partial_answer_available,
+                source_count,
+            }),
+            RetrySafety::Never,
+        );
+        let plan = recovery_plan_for(
+            &identity(),
+            &failure,
+            ready().retry,
+            TurnRisk::ReadOnly,
+            &ProgressSnapshot {
+                partial_output_available: partial_answer_available || source_count > 0,
+                mutating_effect_started: false,
+                externally_visible_effect_started: false,
+            },
+        );
+        assert!(
+            plan.option(RecoveryActionKind::ContinueInAgentChat)
+                .is_some_and(|option| option.enabled && option.role == RecoveryRole::Primary)
+        );
+        assert_eq!(
+            plan.option(RecoveryActionKind::UseCurrentResults)
+                .is_some_and(|option| option.enabled),
+            expect_partial_action
+        );
+        assert!(plan.option(RecoveryActionKind::Retry).is_none());
+    }
+}
+
+#[test]
 fn external_auth_launch_returns_to_actionable_recovery_until_health_is_observed() {
     let failure = AiFailure::new(
         AiFailureKind::Authentication(AuthenticationFailure::Missing),
@@ -292,11 +363,14 @@ fn automatic_retry_is_bounded_and_preserves_selection() {
 fn mutating_progress_is_never_automatically_replayed() {
     let progressed = transition_ok(
         running_state(),
-        AiOperationEvent::Progressed(ProgressSnapshot {
-            partial_output_available: true,
-            mutating_effect_started: true,
-            externally_visible_effect_started: true,
-        }),
+        AiOperationEvent::Progressed {
+            progress: ProgressSnapshot {
+                partial_output_available: true,
+                mutating_effect_started: true,
+                externally_visible_effect_started: true,
+            },
+            work: work(),
+        },
     );
     let failed = transition_ok(progressed.next, AiOperationEvent::Failed(timeout_failure()));
     assert_eq!(failed.next.phase.tag(), AiPhaseTag::AwaitingRecovery);
@@ -755,7 +829,10 @@ fn representative_events() -> Vec<AiOperationEvent> {
             command_id: CommandId(1),
             turn: TurnRef::from("turn-1"),
         },
-        AiOperationEvent::Progressed(ProgressSnapshot::none()),
+        AiOperationEvent::Progressed {
+            progress: ProgressSnapshot::none(),
+            work: work(),
+        },
         AiOperationEvent::Completed(CompletionKind::Complete),
         AiOperationEvent::Failed(unknown_failure()),
         AiOperationEvent::CancelRequested,
@@ -814,6 +891,12 @@ fn representative_failure_kinds() -> Vec<AiFailureKind> {
             budget: 1,
             partial_answer_available: true,
             source_count: 2,
+        }),
+        AiFailureKind::Policy(PolicyFailure::QuickAiDeadlineExceeded {
+            deadline_ms: 11_650,
+            completed_searches: 1,
+            partial_answer_available: true,
+            source_count: 1,
         }),
         AiFailureKind::Policy(PolicyFailure::ToolDenied {
             tool: Some(ToolId::from("write")),

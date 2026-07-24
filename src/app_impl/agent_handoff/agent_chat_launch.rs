@@ -254,7 +254,10 @@ impl ScriptListApp {
 
         // Compute canonical effective intent once, matching PTY path's normalization.
         let effective_intent = Self::tab_ai_effective_submission_intent(&request);
-        let auto_submit = effective_intent.is_some();
+        let auto_submit = matches!(
+            request.seed_policy,
+            agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn
+        ) && effective_intent.is_some();
 
         // Build Agent Chat initial input via the shared helper, ensuring the same
         // verification contract as the PTY submission path.

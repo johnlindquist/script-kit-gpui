@@ -11,7 +11,7 @@ const QUICK_AI_OUTPUT_SCHEMA = {
 	additionalProperties: false,
 	properties: {
 		answer: { type: "string" },
-		sources: { type: "array", minItems: 1, items: { type: "string" } },
+		sources: { type: "array", items: { type: "string" } },
 	},
 	required: ["answer", "sources"],
 };
@@ -27,6 +27,7 @@ export type QuickAiContract = {
 	model: string;
 	appendSystemPrompt: string;
 	tools: string[];
+	focusedSearchBudget: number;
 	profileSource: string;
 };
 
@@ -161,6 +162,12 @@ export function loadQuickAiContract(
 	)?.[1];
 	if (!toolsBody) throw new Error(`Missing QUICK_AI_PI_TOOLS in ${sourcePath}`);
 	const tools = [...toolsBody.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+	const focusedSearchBudget = Number(
+		source.match(/pub const QUICK_AI_FOCUSED_SEARCH_BUDGET: u8 = (\d+);/)?.[1],
+	);
+	if (!Number.isInteger(focusedSearchBudget)) {
+		throw new Error(`Missing QUICK_AI_FOCUSED_SEARCH_BUDGET in ${sourcePath}`);
+	}
 
 	return {
 		provider: rustStringConstant(source, "DEFAULT_PI_PROVIDER"),
@@ -170,6 +177,7 @@ export function loadQuickAiContract(
 			"QUICK_AI_APPEND_SYSTEM_PROMPT",
 		),
 		tools,
+		focusedSearchBudget,
 		profileSource: sourcePath,
 	};
 }
@@ -257,6 +265,8 @@ export function codexExecCommand(
 			"skills.bundled.enabled=false",
 			"--config",
 			'model_reasoning_effort="low"',
+			"--config",
+			'tools.web_search.context_size="low"',
 			"--model",
 			contract.model,
 			"--sandbox",
@@ -911,6 +921,16 @@ export async function main() {
 	if (contract.tools.join(",") !== "web_search") {
 		throw new Error(
 			`Quick AI tools changed to ${contract.tools.join(",")}; benchmark must be reviewed`,
+		);
+	}
+	if (
+		contract.focusedSearchBudget !== 1 ||
+		!contract.appendSystemPrompt.includes(
+			"exactly one web_search action containing one focused query",
+		)
+	) {
+		throw new Error(
+			"Quick AI search budget and system prompt must stay aligned at one focused search",
 		);
 	}
 

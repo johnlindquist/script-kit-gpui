@@ -1310,6 +1310,18 @@ impl ScriptListApp {
         let AppView::AgentChatView { ref entity } = self.current_view else {
             return DispatchOutcome::not_handled();
         };
+        let entity = entity.clone();
+
+        if entity.update(cx, |view, cx| {
+            view.dispatch_ai_recovery_action(action_id, cx)
+        }) {
+            tracing::info!(
+                target: "script_kit::agent_chat",
+                event = "agent_chat_recovery_action_dispatched",
+                action_id,
+            );
+            return DispatchOutcome::success();
+        }
 
         if let Some(adapter_id) = crate::ai::agent_prompt_handoff::adapter_from_action_id(action_id)
         {

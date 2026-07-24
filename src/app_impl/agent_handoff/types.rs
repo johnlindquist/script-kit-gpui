@@ -82,6 +82,9 @@ pub(crate) struct TabAiLaunchRequest {
     pub(crate) source_view: AppView,
     /// Optional user intent (from Shift+Tab typed query).
     pub(crate) entry_intent: Option<String>,
+    /// Whether the initial text stays in the composer or is submitted as the
+    /// first turn after context bootstrap.
+    pub(crate) seed_policy: super::agent_chat_entry::AgentChatSeedPolicy,
     /// Agent Chat presentation variant. Standard preserves the existing UI.
     pub(crate) ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
     /// Single-source context policy: whether this launch inherits the source
