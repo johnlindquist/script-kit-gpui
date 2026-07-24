@@ -51,6 +51,7 @@ impl GlassMorphVariant {
 struct GlassMorphTuning {
     duration: f64,
     inset_fraction: f64,
+    start_alpha: f64,
     start_scale_x: f64,
     start_scale_y: f64,
     squish_scale_x: f64,
@@ -65,6 +66,13 @@ const GLASS_MORPH_MIN_DURATION: f64 = 0.02;
 const GLASS_MORPH_MIN_INSET: f64 = 0.005;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_DURATION: f64 = 2.0;
+/// Keep native glass materially legible from its first visible entry frame.
+///
+/// Starting the whole owning window at zero alpha exposes the desktop color
+/// directly through every independent glass capsule, so saturated backgrounds
+/// become the button color until the window approaches full opacity.
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 0.85;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_INSET: f64 = 0.4;
 #[cfg(target_os = "macos")]
@@ -501,6 +509,7 @@ fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMo
     Some(GlassMorphTuning {
         duration,
         inset_fraction,
+        start_alpha: GLASS_MORPH_ENTRY_START_ALPHA,
         start_scale_x: 1.0 + inset_fraction * 2.0,
         start_scale_y: 1.0 + inset_fraction * GLASS_MORPH_VERTICAL_DAMPING * 2.0,
         squish_scale_x: 1.0 - squish_fraction * 2.0,
@@ -1983,10 +1992,10 @@ unsafe fn schedule_child_morph_settle(parent: id, window: id, delay_seconds: f64
 }
 
 /// Morph the whole window into place: frame scales up from a centered inset
-/// rect while the window fades in, so the glass backdrop AND the GPUI
-/// content arrive together (animating only the glass view left the content
-/// popping in at full size over a growing background). The glass tracks the
-/// window via its autoresizing mask during the frame animation.
+/// rect while the window settles from a materially stable near-opaque alpha,
+/// so the glass backdrop AND the GPUI content arrive together without exposing
+/// the desktop as the capsule color. The glass tracks the window via its
+/// autoresizing mask during the frame animation.
 ///
 /// Duration and inset come from the theme's glass morph sliders; either at
 /// (near) zero disables the morph.
@@ -2079,7 +2088,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     ];
 
     let _: () = msg_send![window, setFrame: start display: true];
-    let _: () = msg_send![window, setAlphaValue: 0.0f64];
+    let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
 
     // Record the in-flight duration so sibling windows (footer overlay) can
     // hide until the morph settles (glass_morph_remaining).
@@ -2166,11 +2175,12 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} frames={}x{}->{}x{}->{}x{}",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start_alpha={:.2} frames={}x{}->{}x{}->{}x{}",
             window_name,
             GlassMorphVariant::WindowFrame.log_name(),
             tuning.duration,
             tuning.inset_fraction,
+            tuning.start_alpha,
             start.size.width as i64,
             start.size.height as i64,
             squish.size.width as i64,
@@ -3189,6 +3199,7 @@ mod secondary_window_config_tests {
         let epsilon = 1e-12;
         assert!((tuning.start_scale_x - 1.06).abs() < epsilon);
         assert!((tuning.start_scale_y - 1.024).abs() < epsilon);
+        assert!((tuning.start_alpha - 0.85).abs() < epsilon);
         assert!((tuning.squish_scale_x - 0.97).abs() < epsilon);
         assert!((tuning.squish_scale_y - 0.988).abs() < epsilon);
         assert!((tuning.phase1 - 0.14).abs() < epsilon);
