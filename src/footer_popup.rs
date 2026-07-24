@@ -485,6 +485,8 @@ struct MainWindowFooterRefreshSignature {
     left_dot_hex: Option<u32>,
     #[cfg(target_os = "macos")]
     native_glass_signature: crate::platform::NativeGlassStyleSignature,
+    #[cfg(target_os = "macos")]
+    native_visual_theme: NativeFooterVisualTheme,
     /// Active main-menu theme discriminant. The native footer reads the *global*
     /// current theme (not threaded through `config`), so the discriminant is
     /// folded into the signature to force a rebuild on cycle.
@@ -499,6 +501,58 @@ struct MainWindowFooterRefreshSignature {
     /// the AppKit dot layer is created inside the content rebuild, so this is
     /// folded into `footer_content_changed`.
     button_leading_dot_hexes: Vec<Option<u32>>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeFooterVisualTheme {
+    row_palette: crate::theme::MainMenuRowStatePalette,
+    keycap_hex: u32,
+    rest_border_alpha_bits: u32,
+    hover_border_alpha_bits: u32,
+    active_border_alpha_bits: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl NativeFooterVisualTheme {
+    fn border_alpha(self, state: crate::theme::MainMenuRowState) -> f32 {
+        f32::from_bits(match state {
+            crate::theme::MainMenuRowState::Rest => self.rest_border_alpha_bits,
+            crate::theme::MainMenuRowState::Hover => self.hover_border_alpha_bits,
+            crate::theme::MainMenuRowState::Active => self.active_border_alpha_bits,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_native_footer_visual_theme(theme: &crate::theme::Theme) -> NativeFooterVisualTheme {
+    let border_alpha = |state| {
+        crate::components::footer_chrome::footer_keycap_border_alpha_for_state(theme, state)
+    };
+    native_footer_visual_theme_from_parts(
+        crate::components::footer_chrome::resolved_footer_button_visual_colors(theme).row_states,
+        footer_keycap_hex(theme),
+        border_alpha(crate::theme::MainMenuRowState::Rest),
+        border_alpha(crate::theme::MainMenuRowState::Hover),
+        border_alpha(crate::theme::MainMenuRowState::Active),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn native_footer_visual_theme_from_parts(
+    row_palette: crate::theme::MainMenuRowStatePalette,
+    keycap_hex: u32,
+    rest_border_alpha: f32,
+    hover_border_alpha: f32,
+    active_border_alpha: f32,
+) -> NativeFooterVisualTheme {
+    NativeFooterVisualTheme {
+        row_palette,
+        keycap_hex,
+        rest_border_alpha_bits: rest_border_alpha.to_bits(),
+        hover_border_alpha_bits: hover_border_alpha.to_bits(),
+        active_border_alpha_bits: active_border_alpha.to_bits(),
+    }
 }
 
 static MAIN_WINDOW_FOOTER_REFRESH_SIGNATURE: std::sync::Mutex<
@@ -3128,6 +3182,7 @@ unsafe fn refresh_footer_host_impl(
             })
         })
         .collect::<Vec<_>>();
+    let native_visual_theme = resolve_native_footer_visual_theme(&theme);
     let signature = MainWindowFooterRefreshSignature {
         config: config.clone(),
         content_width_bits: content_bounds.size.width.to_bits(),
@@ -3151,6 +3206,7 @@ unsafe fn refresh_footer_host_impl(
             crate::platform::NativeGlassSurfaceRole::FloatingCapsule,
         )
         .signature,
+        native_visual_theme,
         main_menu_theme: crate::designs::current_main_menu_theme() as u8,
         gpui_overlay_owns_glyphs,
         button_leading_dot_hexes,
@@ -3198,6 +3254,7 @@ unsafe fn refresh_footer_host_impl(
                     || previous.hover_rgba != signature.hover_rgba
                     || previous.left_dot_hex != signature.left_dot_hex
                     || previous.native_glass_signature != signature.native_glass_signature
+                    || previous.native_visual_theme != signature.native_visual_theme
                     || previous.main_menu_theme != signature.main_menu_theme
             })
             .unwrap_or(true);
@@ -3300,12 +3357,8 @@ unsafe fn refresh_footer_host_impl(
         }
     }
 
-    let text_color = ns_color_from_rgba(
-        crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
-            .row_states
-            .rest
-            .primary_foreground_rgba,
-    );
+    let text_color =
+        ns_color_from_rgba(native_visual_theme.row_palette.rest.primary_foreground_rgba);
 
     let hints_view = find_subview_by_identifier(footer_view, FOOTER_HINTS_ID);
     let default_hints_frame = footer_hints_frame(content_bounds.size.width);
@@ -3327,13 +3380,14 @@ unsafe fn refresh_footer_host_impl(
                     layout_footer_hints(hints_view, text_color, &config.buttons, &theme);
             }
         } else if footer_visuals_changed {
-            recolor_footer_hint_subviews(hints_view, &theme);
+            recolor_footer_hint_subviews_with_visual_theme(hints_view, &theme, native_visual_theme);
             native_footer_lanes = measure_native_footer_lanes(hints_view, &config.buttons);
         } else {
             native_footer_lanes = measure_native_footer_lanes(hints_view, &config.buttons);
         }
         if footer_content_changed || footer_visuals_changed || effect_theme_changed {
             restyle_footer_glass_capsules(hints_view, &theme);
+            refresh_footer_button_visual_states_with_theme(hints_view, native_visual_theme);
         }
     }
 
@@ -3352,7 +3406,7 @@ unsafe fn refresh_footer_host_impl(
             } else {
                 layout_footer_left_info(left_info_view, config.left_info.as_ref(), text_color);
             }
-            refresh_footer_button_visual_states(left_info_view);
+            refresh_footer_button_visual_states_with_theme(left_info_view, native_visual_theme);
         }
         if footer_content_changed || footer_visuals_changed || effect_theme_changed {
             restyle_footer_glass_capsules(left_info_view, &theme);
@@ -3921,6 +3975,8 @@ unsafe fn layout_footer_left_info(
                 NSSize::new((x - chip_start_x).max(0.0), bounds.size.height),
             ),
             cwd_chip.tooltip.as_deref(),
+            info.selected,
+            true,
         );
 
         x += FOOTER_CWD_CHIP_TRAILING_GAP_PX;
@@ -4039,6 +4095,8 @@ unsafe fn layout_footer_left_info(
             NSPoint::new(hit_start_x, 0.0),
             NSSize::new((x - hit_start_x).max(0.0), bounds.size.height),
         ),
+        info.selected,
+        info.action.is_some(),
     );
 
     ensure_footer_left_info_capsule(left_info_view, x.min(max_content_x), bounds.size.height);
@@ -4624,11 +4682,26 @@ unsafe fn layout_footer_left_keycap(
     keycap_run_width
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeFooterLeftHitTargetFlags {
+    selected: bool,
+    enabled: bool,
+}
+
+fn native_footer_left_hit_target_flags(
+    selected: bool,
+    enabled: bool,
+) -> NativeFooterLeftHitTargetFlags {
+    NativeFooterLeftHitTargetFlags { selected, enabled }
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn layout_footer_cwd_chip_hit_target(
     left_info_view: id,
     frame: cocoa::foundation::NSRect,
     tooltip: Option<&str>,
+    selected: bool,
+    enabled: bool,
 ) {
     use objc::{msg_send, sel, sel_impl};
 
@@ -4650,20 +4723,26 @@ unsafe fn layout_footer_cwd_chip_hit_target(
         let _: () = msg_send![button, setButtonType: 0usize];
         let _: () = msg_send![button, setTransparent: YES];
         if let Some(object) = button.as_mut() {
-            object.set_ivar::<cocoa::base::BOOL>("_isActionsButton", NO);
-            object.set_ivar::<cocoa::base::BOOL>("_selected", NO);
             object.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
-            object.set_ivar::<cocoa::base::BOOL>("_enabled", YES);
             object.set_ivar::<usize>("_stateView", 0);
             object.set_ivar::<usize>("_visualRoot", left_info_view as usize);
         }
         let _: () = msg_send![left_info_view, addSubview: button];
     }
     let _: () = msg_send![button, setFrame: frame];
-    let _: () = msg_send![button, setEnabled: YES];
+    let _: () = msg_send![button, setEnabled: if enabled { YES } else { NO }];
     let _: () = msg_send![button, setTarget: footer_action_target()];
-    let _: () = msg_send![button, setAction: footer_action_selector(FooterAction::Cwd)];
+    let action_selector = footer_action_selector(FooterAction::Cwd);
+    let previous_action: objc::runtime::Sel = msg_send![button, action];
+    let _: () = msg_send![button, setAction: action_selector];
+    let flags = native_footer_left_hit_target_flags(selected, enabled);
     if let Some(object) = button.as_mut() {
+        object.set_ivar::<cocoa::base::BOOL>("_isActionsButton", NO);
+        object.set_ivar::<cocoa::base::BOOL>("_selected", if flags.selected { YES } else { NO });
+        object.set_ivar::<cocoa::base::BOOL>("_enabled", if flags.enabled { YES } else { NO });
+        if previous_action != action_selector {
+            object.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
+        }
         object.set_ivar::<usize>(
             "_stateView",
             find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_STATE_LAYER_ID) as usize,
@@ -4672,6 +4751,7 @@ unsafe fn layout_footer_cwd_chip_hit_target(
     }
     let tooltip = tooltip.map(ns_string).unwrap_or(nil);
     let _: () = msg_send![button, setToolTip: tooltip];
+    refresh_footer_button_visual_states(left_info_view);
 }
 
 #[cfg(target_os = "macos")]
@@ -4679,6 +4759,8 @@ unsafe fn layout_footer_left_info_hit_target(
     left_info_view: id,
     action: Option<FooterAction>,
     frame: cocoa::foundation::NSRect,
+    selected: bool,
+    enabled: bool,
 ) {
     use objc::{msg_send, sel, sel_impl};
 
@@ -4704,26 +4786,33 @@ unsafe fn layout_footer_left_info_hit_target(
         let _: () = msg_send![button, setButtonType: 0usize];
         let _: () = msg_send![button, setTransparent: YES];
         if let Some(object) = button.as_mut() {
-            object.set_ivar::<cocoa::base::BOOL>("_isActionsButton", NO);
-            object.set_ivar::<cocoa::base::BOOL>("_selected", NO);
             object.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
-            object.set_ivar::<cocoa::base::BOOL>("_enabled", YES);
             object.set_ivar::<usize>("_stateView", 0);
             object.set_ivar::<usize>("_visualRoot", left_info_view as usize);
         }
         let _: () = msg_send![left_info_view, addSubview: button];
     }
     let _: () = msg_send![button, setFrame: frame];
-    let _: () = msg_send![button, setEnabled: YES];
+    let _: () = msg_send![button, setEnabled: if enabled { YES } else { NO }];
     let _: () = msg_send![button, setTarget: footer_action_target()];
-    let _: () = msg_send![button, setAction: footer_action_selector(action)];
+    let action_selector = footer_action_selector(action);
+    let previous_action: objc::runtime::Sel = msg_send![button, action];
+    let _: () = msg_send![button, setAction: action_selector];
+    let flags = native_footer_left_hit_target_flags(selected, enabled);
     if let Some(object) = button.as_mut() {
+        object.set_ivar::<cocoa::base::BOOL>("_isActionsButton", NO);
+        object.set_ivar::<cocoa::base::BOOL>("_selected", if flags.selected { YES } else { NO });
+        object.set_ivar::<cocoa::base::BOOL>("_enabled", if flags.enabled { YES } else { NO });
+        if previous_action != action_selector {
+            object.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
+        }
         object.set_ivar::<usize>(
             "_stateView",
             find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_STATE_LAYER_ID) as usize,
         );
         object.set_ivar::<usize>("_visualRoot", left_info_view as usize);
     }
+    refresh_footer_button_visual_states(left_info_view);
 }
 
 #[cfg(target_os = "macos")]
@@ -4890,27 +4979,47 @@ unsafe fn remove_active_dot_scale_animation(layer: id) {
 
 #[cfg(target_os = "macos")]
 unsafe fn recolor_footer_hint_subviews(view: id, theme: &crate::theme::Theme) {
+    recolor_footer_hint_subviews_with_visual_theme(
+        view,
+        theme,
+        resolve_native_footer_visual_theme(theme),
+    );
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn recolor_footer_hint_subviews_with_visual_theme(
+    view: id,
+    _theme: &crate::theme::Theme,
+    visual_theme: NativeFooterVisualTheme,
+) {
     if view == nil {
         return;
     }
 
-    let text_color = ns_color_from_rgba(
-        crate::components::footer_chrome::resolved_footer_button_visual_colors(theme)
-            .row_states
-            .rest
-            .primary_foreground_rgba,
-    );
+    let text_color = ns_color_from_rgba(visual_theme.row_palette.rest.primary_foreground_rgba);
     let border_color = ns_color_from_hex_with_alpha(
-        footer_keycap_hex(theme),
-        footer_keycap_border_alpha(theme, false),
+        visual_theme.keycap_hex,
+        visual_theme.border_alpha(crate::theme::MainMenuRowState::Rest) as f64,
     );
 
     recolor_footer_hint_subviews_with_colors(view, text_color, border_color);
-    refresh_footer_button_visual_states(view);
+    refresh_footer_button_visual_states_with_theme(view, visual_theme);
 }
 
 #[cfg(target_os = "macos")]
 unsafe fn refresh_footer_button_visual_states(view: id) {
+    let theme = crate::theme::get_cached_theme();
+    refresh_footer_button_visual_states_with_theme(
+        view,
+        resolve_native_footer_visual_theme(&theme),
+    );
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn refresh_footer_button_visual_states_with_theme(
+    view: id,
+    visual_theme: NativeFooterVisualTheme,
+) {
     use objc::{msg_send, sel, sel_impl};
 
     if view == nil {
@@ -4920,7 +5029,7 @@ unsafe fn refresh_footer_button_visual_states(view: id) {
     let mut states_by_visual_root = std::collections::HashMap::new();
     collect_footer_button_visual_states(view, &mut states_by_visual_root);
     for (_visual_root, (button, state)) in states_by_visual_root {
-        apply_footer_button_visual_state(button, state);
+        apply_footer_button_visual_state_with_theme(button, state, visual_theme);
     }
 }
 
@@ -4951,13 +5060,10 @@ unsafe fn collect_footer_button_visual_states(
                 is_actions,
             );
             let visual_root = footer_button_visual_root(view) as usize;
-            let state_rank = |state| match state {
-                crate::theme::MainMenuRowState::Rest => 0,
-                crate::theme::MainMenuRowState::Hover => 1,
-                crate::theme::MainMenuRowState::Active => 2,
-            };
             match states_by_visual_root.get(&visual_root) {
-                Some((_, existing_state)) if state_rank(*existing_state) >= state_rank(state) => {}
+                Some((_, existing_state))
+                    if native_footer_visual_root_state(Some(*existing_state), state)
+                        == *existing_state => {}
                 _ => {
                     states_by_visual_root.insert(visual_root, (view, state));
                 }
@@ -4973,6 +5079,28 @@ unsafe fn collect_footer_button_visual_states(
     for index in 0..count {
         let child: id = msg_send![subviews, objectAtIndex: index];
         collect_footer_button_visual_states(child, states_by_visual_root);
+    }
+}
+
+fn native_footer_state_rank(state: crate::theme::MainMenuRowState) -> u8 {
+    match state {
+        crate::theme::MainMenuRowState::Rest => 0,
+        crate::theme::MainMenuRowState::Hover => 1,
+        crate::theme::MainMenuRowState::Active => 2,
+    }
+}
+
+fn native_footer_visual_root_state(
+    current: Option<crate::theme::MainMenuRowState>,
+    incoming: crate::theme::MainMenuRowState,
+) -> crate::theme::MainMenuRowState {
+    match current {
+        Some(current)
+            if native_footer_state_rank(current) >= native_footer_state_rank(incoming) =>
+        {
+            current
+        }
+        _ => incoming,
     }
 }
 
@@ -6157,11 +6285,15 @@ mod footer_layout_tests {
         footer_hint_content_layout_for_button, footer_hint_item_gap, footer_hint_label_widths,
         footer_hint_legacy_extra_padding, footer_hint_max_item_width, footer_hint_slot_width,
         footer_identifier_uses_keycap_border, main_window_detached_footer_regions_appkit,
-        main_window_detached_footer_regions_gpui, native_footer_visual_event_changed,
+        main_window_detached_footer_regions_gpui, native_footer_left_hit_target_flags,
+        native_footer_visual_event_changed, native_footer_visual_root_state,
         resolved_native_footer_button_state, should_use_gpui_footer_overlay, FooterAction,
-        FooterButtonConfig, FooterDotStatus, FOOTER_HINT_KEY_LABEL_GAP, FOOTER_HINT_PADDING_X,
+        FooterButtonConfig, FooterDotStatus, NativeFooterLeftHitTargetFlags,
+        NativeFooterVisualTheme, FOOTER_HINT_KEY_LABEL_GAP, FOOTER_HINT_PADDING_X,
         FOOTER_RUN_HINT_PADDING_X,
     };
+    #[cfg(target_os = "macos")]
+    use super::{native_footer_visual_theme_from_parts, resolve_native_footer_visual_theme};
 
     fn assert_partitions_host(regions: &super::MainWindowDetachedFooterRegions) {
         let partition_height =
@@ -6674,13 +6806,170 @@ mod footer_layout_tests {
     }
 
     #[test]
+    fn left_info_hit_target_carries_selected_state() {
+        assert_eq!(
+            native_footer_left_hit_target_flags(true, true),
+            NativeFooterLeftHitTargetFlags {
+                selected: true,
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn cwd_chip_hit_target_carries_selected_state() {
+        let flags = native_footer_left_hit_target_flags(true, true);
+        assert!(flags.selected);
+        assert!(flags.enabled);
+    }
+
+    #[test]
+    fn left_visual_root_prefers_active_over_sibling_hover() {
+        use crate::theme::MainMenuRowState::{Active, Hover, Rest};
+
+        assert_eq!(native_footer_visual_root_state(None, Rest), Rest);
+        assert_eq!(native_footer_visual_root_state(Some(Rest), Hover), Hover);
+        assert_eq!(native_footer_visual_root_state(Some(Hover), Active), Active);
+        assert_eq!(native_footer_visual_root_state(Some(Active), Hover), Active);
+    }
+
+    #[test]
+    fn reused_left_hit_target_receives_fresh_state() {
+        let initial = native_footer_left_hit_target_flags(false, true);
+        let reused = native_footer_left_hit_target_flags(true, false);
+        assert_ne!(initial, reused);
+        assert!(reused.selected);
+        assert!(!reused.enabled);
+    }
+
+    #[test]
     fn native_footer_visual_event_reports_only_signature_changes() {
         let id = "unit-native-footer-visual-event";
-        assert!(native_footer_visual_event_changed(id, 1, 10));
-        assert!(!native_footer_visual_event_changed(id, 1, 10));
-        assert!(native_footer_visual_event_changed(id, 2, 10));
-        assert!(!native_footer_visual_event_changed(id, 2, 10));
-        assert!(native_footer_visual_event_changed(id, 2, 11));
+        assert!(native_footer_visual_event_changed(id, 1, 10, 0x112233));
+        assert!(!native_footer_visual_event_changed(id, 1, 10, 0x112233));
+        assert!(native_footer_visual_event_changed(id, 2, 10, 0x112233));
+        assert!(!native_footer_visual_event_changed(id, 2, 10, 0x112233));
+        assert!(native_footer_visual_event_changed(id, 2, 11, 0x112233));
+        assert!(native_footer_visual_event_changed(id, 2, 11, 0x445566));
+    }
+
+    #[test]
+    fn native_footer_hover_uses_hover_keycap_border_alpha() {
+        let theme = crate::theme::Theme::dark_default();
+        let visual_theme = resolve_native_footer_visual_theme(&theme);
+        let rest = visual_theme.border_alpha(crate::theme::MainMenuRowState::Rest);
+        let hover = visual_theme.border_alpha(crate::theme::MainMenuRowState::Hover);
+        let active = visual_theme.border_alpha(crate::theme::MainMenuRowState::Active);
+
+        assert_eq!(
+            hover,
+            crate::components::footer_chrome::footer_keycap_border_alpha_for_state(
+                &theme,
+                crate::theme::MainMenuRowState::Hover,
+            )
+        );
+        assert!(hover >= rest);
+        assert!(active >= rest);
+    }
+
+    #[test]
+    fn native_footer_refresh_signature_tracks_canonical_palette() {
+        let theme = crate::theme::Theme::dark_default();
+        let palette =
+            crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
+                .row_states;
+        let baseline = native_footer_visual_theme_from_parts(palette, 0x112233, 0.1, 0.2, 0.3);
+
+        let mut changed = palette;
+        changed.hover.background_rgba = Some(0x44556677);
+        assert_ne!(
+            baseline,
+            native_footer_visual_theme_from_parts(changed, 0x112233, 0.1, 0.2, 0.3)
+        );
+        assert_ne!(
+            baseline,
+            native_footer_visual_theme_from_parts(palette, 0x445566, 0.1, 0.2, 0.3)
+        );
+        assert_ne!(
+            baseline,
+            native_footer_visual_theme_from_parts(palette, 0x112233, 0.1, 0.25, 0.3)
+        );
+    }
+
+    #[test]
+    fn native_footer_refresh_signature_changes_with_text_name_alpha() {
+        let theme = crate::theme::Theme::dark_default();
+        let palette =
+            crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
+                .row_states;
+        let baseline = native_footer_visual_theme_from_parts(palette, 0xffffff, 0.1, 0.2, 0.3);
+        let mut changed = palette;
+        changed.rest.primary_foreground_rgba =
+            (changed.rest.primary_foreground_rgba & 0xffffff00) | 0x7f;
+
+        assert_ne!(
+            baseline,
+            native_footer_visual_theme_from_parts(changed, 0xffffff, 0.1, 0.2, 0.3)
+        );
+    }
+
+    #[test]
+    fn native_footer_refresh_signature_changes_with_row_kind_and_accent() {
+        let theme = crate::theme::Theme::dark_default();
+        let palette =
+            crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
+                .row_states;
+        let baseline = native_footer_visual_theme_from_parts(palette, 0xffffff, 0.1, 0.2, 0.3);
+        let mut accent = palette;
+        accent.active.background_rgba = Some(0x18a0fbff);
+        accent.active.primary_foreground_rgba = 0x001122ff;
+
+        assert_ne!(
+            baseline,
+            native_footer_visual_theme_from_parts(accent, 0xffffff, 0.1, 0.2, 0.3)
+        );
+    }
+
+    #[test]
+    fn native_footer_theme_refresh_preserves_hover_state() {
+        use crate::theme::MainMenuRowState::Hover;
+
+        let theme = crate::theme::Theme::dark_default();
+        let old_visual = resolve_native_footer_visual_theme(&theme);
+        let mut new_palette = old_visual.row_palette;
+        new_palette.hover.background_rgba = Some(0x44556612);
+        let new_visual =
+            native_footer_visual_theme_from_parts(new_palette, 0xffffff, 0.11, 0.37, 0.73);
+
+        assert_eq!(
+            resolved_native_footer_button_state(false, true, false, false),
+            Hover
+        );
+        assert_eq!(
+            new_visual.row_palette.for_state(Hover).background_rgba,
+            Some(0x44556612)
+        );
+    }
+
+    #[test]
+    fn native_footer_theme_refresh_preserves_active_state() {
+        use crate::theme::MainMenuRowState::Active;
+
+        let theme = crate::theme::Theme::dark_default();
+        let old_visual = resolve_native_footer_visual_theme(&theme);
+        let mut new_palette = old_visual.row_palette;
+        new_palette.active.background_rgba = Some(0x77889920);
+        let new_visual =
+            native_footer_visual_theme_from_parts(new_palette, 0xffffff, 0.11, 0.37, 0.73);
+
+        assert_eq!(
+            resolved_native_footer_button_state(true, true, false, false),
+            Active
+        );
+        assert_eq!(
+            new_visual.row_palette.for_state(Active).background_rgba,
+            Some(0x77889920)
+        );
     }
 
     #[test]
@@ -7225,15 +7514,14 @@ unsafe fn set_footer_button_foreground_rgba(view: id, foreground_rgba: u32) {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn set_footer_button_border_alpha(view: id, alpha: f64) {
+unsafe fn set_footer_button_border(view: id, keycap_hex: u32, alpha: f64) {
     use objc::{msg_send, sel, sel_impl};
 
     if view == nil {
         return;
     }
 
-    let theme = crate::theme::get_cached_theme();
-    let color = ns_color_from_hex_with_alpha(theme.colors.text.primary, alpha);
+    let color = ns_color_from_hex_with_alpha(keycap_hex, alpha);
     if color == nil {
         return;
     }
@@ -7261,7 +7549,7 @@ unsafe fn set_footer_button_border_alpha(view: id, alpha: f64) {
     let count: usize = msg_send![subviews, count];
     for i in 0..count {
         let child: id = msg_send![subviews, objectAtIndex: i];
-        set_footer_button_border_alpha(child, alpha);
+        set_footer_button_border(child, keycap_hex, alpha);
     }
 }
 
@@ -7325,18 +7613,26 @@ unsafe fn footer_button_visual_root(button: id) -> id {
 
 #[cfg(target_os = "macos")]
 unsafe fn apply_footer_button_visual_state(button: id, state: crate::theme::MainMenuRowState) {
+    let theme = crate::theme::get_cached_theme();
+    apply_footer_button_visual_state_with_theme(
+        button,
+        state,
+        resolve_native_footer_visual_theme(&theme),
+    );
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_footer_button_visual_state_with_theme(
+    button: id,
+    state: crate::theme::MainMenuRowState,
+    visual_theme: NativeFooterVisualTheme,
+) {
     if button == nil {
         return;
     }
 
-    let theme = crate::theme::get_cached_theme();
-    let colors = crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
-        .row_states
-        .for_state(state);
-    let border_alpha = crate::components::footer_chrome::themed_footer_button_border_alpha(
-        &theme,
-        matches!(state, crate::theme::MainMenuRowState::Active),
-    );
+    let colors = visual_theme.row_palette.for_state(state);
+    let border_alpha = visual_theme.border_alpha(state);
     let state_code = match state {
         crate::theme::MainMenuRowState::Rest => 0usize,
         crate::theme::MainMenuRowState::Hover => 1usize,
@@ -7351,11 +7647,16 @@ unsafe fn apply_footer_button_visual_state(button: id, state: crate::theme::Main
     apply_footer_button_background(button, colors.background_rgba);
     let visual_root = footer_button_visual_root(button);
     set_footer_button_foreground_rgba(visual_root, colors.primary_foreground_rgba);
-    set_footer_button_border_alpha(visual_root, border_alpha as f64);
+    set_footer_button_border(visual_root, visual_theme.keycap_hex, border_alpha as f64);
 
     let button_id =
         appkit_view_identifier(button).unwrap_or_else(|| "unidentified-footer-button".to_string());
-    if !native_footer_visual_event_changed(&button_id, state_signature, color_signature) {
+    if !native_footer_visual_event_changed(
+        &button_id,
+        state_signature,
+        color_signature,
+        visual_theme.keycap_hex,
+    ) {
         return;
     }
     tracing::info!(
@@ -7366,6 +7667,8 @@ unsafe fn apply_footer_button_visual_state(button: id, state: crate::theme::Main
         has_background = colors.background_rgba.is_some(),
         background_rgba = colors.background_rgba.unwrap_or_default(),
         foreground_rgba = colors.primary_foreground_rgba,
+        keycap_border_hex = visual_theme.keycap_hex,
+        keycap_border_alpha_bits = border_alpha.to_bits(),
         "Applied canonical main-menu row colors to native footer button"
     );
 }
@@ -7374,9 +7677,10 @@ fn native_footer_visual_event_changed(
     button_id: &str,
     state_signature: usize,
     color_signature: usize,
+    keycap_hex: u32,
 ) -> bool {
     static LAST_REPORTED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (usize, usize)>>,
+        std::sync::Mutex<std::collections::HashMap<String, (usize, usize, u32)>>,
     > = std::sync::OnceLock::new();
     let reported =
         LAST_REPORTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -7384,7 +7688,7 @@ fn native_footer_visual_event_changed(
         // A poisoned diagnostics cache must never suppress real rendering.
         return true;
     };
-    let signature = (state_signature, color_signature);
+    let signature = (state_signature, color_signature, keycap_hex);
     if reported.get(button_id).copied() == Some(signature) {
         false
     } else {

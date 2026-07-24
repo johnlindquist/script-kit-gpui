@@ -1105,6 +1105,32 @@ pub(crate) fn footer_keycap_border_hover_alpha(theme: &Theme) -> f32 {
         .max(design_alpha)
 }
 
+pub(crate) fn footer_keycap_border_alpha_for_state(
+    theme: &Theme,
+    state: crate::theme::MainMenuRowState,
+) -> f32 {
+    footer_keycap_border_alpha_for_state_values(
+        state,
+        themed_footer_button_border_alpha(theme, false),
+        footer_keycap_border_hover_alpha(theme)
+            .max(themed_footer_button_border_alpha(theme, false)),
+        themed_footer_button_border_alpha(theme, true),
+    )
+}
+
+pub(crate) const fn footer_keycap_border_alpha_for_state_values(
+    state: crate::theme::MainMenuRowState,
+    rest: f32,
+    hover: f32,
+    active: f32,
+) -> f32 {
+    match state {
+        crate::theme::MainMenuRowState::Rest => rest,
+        crate::theme::MainMenuRowState::Hover => hover,
+        crate::theme::MainMenuRowState::Active => active,
+    }
+}
+
 pub(crate) fn footer_hint_text_color(theme: &Theme) -> gpui::Rgba {
     gpui::rgba(
         resolved_footer_button_visual_colors(theme)
@@ -2648,6 +2674,40 @@ mod tests {
         assert!(
             footer_keycap_border_color_for_state(&theme, true).a
                 >= FOOTER_CHIP_BORDER_SELECTED_ALPHA - 0.01
+        );
+    }
+
+    #[test]
+    fn footer_keycap_border_policy_matches_rest_hover_active_contract() {
+        let rest = 0.11;
+        let hover = 0.37;
+        let active = 0.73;
+        assert_eq!(
+            footer_keycap_border_alpha_for_state_values(
+                crate::theme::MainMenuRowState::Rest,
+                rest,
+                hover,
+                active,
+            ),
+            rest
+        );
+        assert_eq!(
+            footer_keycap_border_alpha_for_state_values(
+                crate::theme::MainMenuRowState::Hover,
+                rest,
+                hover,
+                active,
+            ),
+            hover
+        );
+        assert_eq!(
+            footer_keycap_border_alpha_for_state_values(
+                crate::theme::MainMenuRowState::Active,
+                rest,
+                hover,
+                active,
+            ),
+            active
         );
     }
 }
