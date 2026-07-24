@@ -73,6 +73,50 @@ class AdaptiveMotionTests(unittest.TestCase):
         rows[0]["minimumP10BoundaryLuminanceDifference"] = 0.014
         self.assertFalse(motion.boundary_pass_every_frame(rows))
 
+    def test_entry_projection_tracks_the_actual_window_inside_a_fixed_crop(self):
+        appkit = {
+            "windowBounds": {"x": 381, "y": 166, "width": 750, "height": 480},
+            "mainBackdropFrame": {"x": 0, "y": 40, "width": 750, "height": 440},
+            "footerContainerFrame": {"x": 0, "y": 0, "width": 750, "height": 32},
+            "nodes": [
+                {
+                    "id": "script-kit-footer-capsule-actions",
+                    "className": "NSGlassEffectView",
+                    "hidden": False,
+                    "screenshotFrame": {
+                        "x": 504,
+                        "y": 2,
+                        "width": 118,
+                        "height": 28,
+                    },
+                    "layer": {"cornerRadius": 6},
+                }
+            ],
+        }
+        projected = motion.transform_appkit_geometry_for_display_frame(
+            appkit,
+            (381, 166, 750, 480),
+            {"x": 381, "y": 166, "width": 750, "height": 501},
+            (1500, 1002),
+        )
+        frame = projected["nodes"][0]["screenshotFrame"]
+        pixels = contrast.frame_pixels(frame, 2, 1002)
+        self.assertEqual(pixels, (1008, 900, 236, 56))
+        # A larger, up-left transient entry frame must move and scale the mask
+        # with that exact native frame rather than sample settled coordinates.
+        expanded = motion.transform_appkit_geometry_for_display_frame(
+            appkit,
+            (358, 160, 795, 492),
+            {"x": 381, "y": 166, "width": 750, "height": 501},
+            (1500, 1002),
+        )
+        expanded_pixels = contrast.frame_pixels(
+            expanded["nodes"][0]["screenshotFrame"], 2, 1002
+        )
+        self.assertNotEqual(expanded_pixels[0], pixels[0])
+        self.assertNotEqual(expanded_pixels[1], pixels[1])
+        self.assertGreater(expanded_pixels[2], pixels[2])
+
 
 if __name__ == "__main__":
     unittest.main()

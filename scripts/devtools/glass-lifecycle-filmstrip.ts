@@ -343,6 +343,11 @@ try {
   const showRequestedAt = new Date().toISOString();
   driver.send({ type: "show", requestId: "glass-life-main-show" });
   await driver.waitForState({ windowVisible: true }, { timeoutMs: 3_000 });
+  await driver.waitForSettle({ timeoutMs: 3_000 });
+  const mainEntrySettledLayout = await driver.getLayoutInfo(
+    { target: { type: "id", id: "main" } },
+    { timeoutMs: 5_000 },
+  );
   const mainEntryFilmstrip = await finishFilmstrip(mainEntry, mainWindowID);
   (receipt.scenarios as Json[]).push({
     name: "main-entry",
@@ -350,6 +355,8 @@ try {
     observerStartedAt: mainEntry.processStartedAt,
     showRequestedAt,
     streamReady: mainEntryReady,
+    captureBounds: mainBounds,
+    settledLayout: mainEntrySettledLayout,
     filmstrip: mainEntryFilmstrip,
     pass: mainEntryFilmstrip.pass,
   });

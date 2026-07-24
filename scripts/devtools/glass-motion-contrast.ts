@@ -171,13 +171,39 @@ async function runLockedTreatmentCell(options: {
         SCRIPT_KIT_GLASS_SCENARIO: "lifecycle-saturated",
       });
       const lifecycleReceiptPath = join(lifecycleDirectory, "receipt.json");
+      const entryMotionMetricsPath = join(
+        lifecycleDirectory,
+        "main-entry-motion-metrics.json",
+      );
+      const entryMotionMetricsResult = existsSync(lifecycleReceiptPath)
+        ? await run([
+          "python3",
+          resolve(import.meta.dir, "../agentic/glass-motion-color-metrics.py"),
+          "--receipt",
+          mainReceiptPath,
+          "--lifecycle-receipt",
+          lifecycleReceiptPath,
+          "--scenario",
+          "main-entry",
+          "--out",
+          entryMotionMetricsPath,
+        ])
+        : { exitCode: 1, stdout: "", stderr: "lifecycle receipt missing" };
       saturatedLifecycle = {
         exitCode: lifecycleResult.exitCode,
         receiptPath: lifecycleReceiptPath,
         receipt: existsSync(lifecycleReceiptPath)
           ? JSON.parse(readFileSync(lifecycleReceiptPath, "utf8"))
           : null,
-        stderr: lifecycleResult.stderr.slice(-4_000),
+        entryMotionMetricsPath,
+        entryMotionMetricsExitCode: entryMotionMetricsResult.exitCode,
+        entryMotionMetrics: existsSync(entryMotionMetricsPath)
+          ? JSON.parse(readFileSync(entryMotionMetricsPath, "utf8"))
+          : null,
+        stderr:
+          `${lifecycleResult.stderr}\n${entryMotionMetricsResult.stderr}`
+            .trim()
+            .slice(-4_000),
       };
     }
     const childValidationErrors = validateChildReceipt(
@@ -204,6 +230,21 @@ async function runLockedTreatmentCell(options: {
         && Object.values(
           motionMetrics?.summary?.adaptiveCapsules ?? {},
         ).every((capsule: any) => capsule?.pass === true));
+    const entryMotionColorPass = !motionRequired
+      || (saturatedLifecycle?.exitCode === 0
+        && saturatedLifecycle?.receipt?.pass === true
+        && saturatedLifecycle?.entryMotionMetricsExitCode === 0
+        && saturatedLifecycle?.entryMotionMetrics?.pass === true
+        && saturatedLifecycle?.entryMotionMetrics?.motionFrameCount >= 1
+        && saturatedLifecycle?.entryMotionMetrics?.settledFrameCount >= 3
+        && saturatedLifecycle?.entryMotionMetrics?.summary
+          ?.boundaryPassEverySettledFrame === true
+        && saturatedLifecycle?.entryMotionMetrics?.summary
+          ?.maximumNeighboringSettledRelationDeltaE00 <= 6
+        && Object.values(
+          saturatedLifecycle?.entryMotionMetrics?.summary
+            ?.adaptiveCapsules ?? {},
+        ).every((capsule: any) => capsule?.pass === true));
     return {
       slug,
       fixture: options.fixture,
@@ -225,12 +266,14 @@ async function runLockedTreatmentCell(options: {
       materialRelationPass,
       boundaryPass,
       motionColorPass,
+      entryMotionColorPass,
       childValidationErrors,
       pass: childValidationErrors.length === 0
         && structuralPass
         && materialRelationPass
         && boundaryPass
-        && motionColorPass,
+        && motionColorPass
+        && entryMotionColorPass,
       stderr:
         `${mainResult.stderr}\n${metricsResult.stderr}\n${motionMetricsResult.stderr}`
           .trim()

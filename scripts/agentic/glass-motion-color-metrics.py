@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
 import math
@@ -112,43 +113,226 @@ def boundary_pass_every_frame(frame_rows: list[dict]) -> bool:
     )
 
 
+def window_bounds_tuple(value: object) -> tuple[float, float, float, float] | None:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not all(isinstance(row, list) and len(row) == 2 for row in value)
+    ):
+        return None
+    try:
+        return (
+            float(value[0][0]),
+            float(value[0][1]),
+            float(value[1][0]),
+            float(value[1][1]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def transform_appkit_geometry_for_display_frame(
+    appkit: dict,
+    actual_window_bounds: tuple[float, float, float, float],
+    capture_bounds: dict,
+    image_size: tuple[int, int],
+) -> dict:
+    """Project settled AppKit geometry into one fixed display-stream crop.
+
+    AppKit fidelity frames use bottom-left window coordinates. Display-stream
+    PNGs use top-left crop pixels, while entry morphs temporarily change the
+    window frame. Projecting every node through the actual per-frame window
+    bounds keeps rounded masks and foreground exclusions attached to the
+    material they measure instead of sampling stale settled coordinates.
+    """
+    transformed = copy.deepcopy(appkit)
+    base_window = appkit.get("windowBounds", {})
+    base_width = float(base_window.get("width", 0))
+    base_height = float(base_window.get("height", 0))
+    capture_x = float(capture_bounds.get("x", 0))
+    capture_y = float(capture_bounds.get("y", 0))
+    capture_width = float(capture_bounds.get("width", 0))
+    capture_height = float(capture_bounds.get("height", 0))
+    actual_x, actual_y, actual_width, actual_height = actual_window_bounds
+    image_width, image_height = image_size
+    if min(
+        base_width,
+        base_height,
+        capture_width,
+        capture_height,
+        actual_width,
+        actual_height,
+        image_width,
+        image_height,
+    ) <= 0:
+        raise ValueError("entry geometry has a non-positive window or crop dimension")
+    pixel_scale_x = image_width / capture_width
+    pixel_scale_y = image_height / capture_height
+    if abs(pixel_scale_x - pixel_scale_y) > 0.01:
+        raise ValueError("entry display-stream crop has non-uniform pixel scale")
+    pixel_scale = (pixel_scale_x + pixel_scale_y) / 2.0
+    scale_x = actual_width / base_width
+    scale_y = actual_height / base_height
+
+    def project(frame: object) -> dict | None:
+        if not isinstance(frame, dict):
+            return None
+        x = float(frame.get("x", 0))
+        y = float(frame.get("y", 0))
+        width = float(frame.get("width", 0))
+        height = float(frame.get("height", 0))
+        pixel_x = (actual_x - capture_x + x * scale_x) * pixel_scale
+        pixel_y = (
+            actual_y
+            - capture_y
+            + (base_height - (y + height)) * scale_y
+        ) * pixel_scale
+        pixel_width = width * scale_x * pixel_scale
+        pixel_height = height * scale_y * pixel_scale
+        # Convert the projected top-left pixel rect back to the bottom-left
+        # logical coordinate shape consumed by glass-contrast-metrics.py.
+        return {
+            "x": pixel_x / pixel_scale,
+            "y": (image_height - pixel_y - pixel_height) / pixel_scale,
+            "width": pixel_width / pixel_scale,
+            "height": pixel_height / pixel_scale,
+        }
+
+    for node in transformed.get("nodes", []):
+        projected = project(node.get("screenshotFrame"))
+        if projected is not None:
+            node["screenshotFrame"] = projected
+        layer = node.get("layer")
+        if isinstance(layer, dict) and "cornerRadius" in layer:
+            layer["cornerRadius"] = float(layer["cornerRadius"]) * min(scale_x, scale_y)
+    projected_backdrop = project(transformed.get("mainBackdropFrame"))
+    if projected_backdrop is not None:
+        transformed["mainBackdropFrame"] = projected_backdrop
+    transformed["footerContainerFrame"] = {
+        "x": 0,
+        "y": 0,
+        "width": capture_width,
+        "height": capture_height,
+    }
+    transformed["projectedPixelScale"] = pixel_scale
+    return transformed
+
+
+def lifecycle_entry_frames(
+    lifecycle_receipt: dict,
+    scenario_name: str,
+) -> tuple[list[dict], dict, dict, list[str]]:
+    errors: list[str] = []
+    scenario = next(
+        (
+            row
+            for row in lifecycle_receipt.get("scenarios", [])
+            if row.get("name") == scenario_name
+        ),
+        None,
+    )
+    if scenario is None:
+        return [], {}, {}, [f"required lifecycle scenario {scenario_name!r} is missing"]
+    filmstrip = scenario.get("filmstrip", {})
+    frames = filmstrip.get("receipt", {}).get("frames", [])
+    metric_rows = {
+        row.get("sequence"): row
+        for row in filmstrip.get("metrics", {}).get("frames", [])
+    }
+    visible_frames: list[dict] = []
+    for frame in frames:
+        metric = metric_rows.get(frame.get("sequence"), {})
+        if not metric.get("stageVisible") or not metric.get("footerVisible"):
+            continue
+        row = dict(frame)
+        row["_lifecycleMetrics"] = metric
+        visible_frames.append(row)
+    if len(visible_frames) < 4:
+        errors.append(
+            f"{scenario_name}: expected visible entry material frames, found {len(visible_frames)}"
+        )
+    for index, frame in enumerate(visible_frames):
+        frame["_phase"] = (
+            "settled" if index >= max(0, len(visible_frames) - 3) else "motion"
+        )
+    return (
+        visible_frames,
+        scenario.get("settledLayout", {}).get("fidelity", {}).get("appKit", {}),
+        scenario.get("captureBounds", {}),
+        errors,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--trajectory", default="fast-horizontal")
+    parser.add_argument("--lifecycle-receipt")
+    parser.add_argument("--scenario", default="main-entry")
     parser.add_argument("--out")
     args = parser.parse_args()
 
     metrics = load_contrast_module()
     receipt_path = Path(args.receipt).resolve()
     receipt = json.loads(receipt_path.read_text())
-    trial = next(
-        (
-            row
-            for row in receipt.get("trials", [])
-            if row.get("trajectory") == args.trajectory
-        ),
-        None,
-    )
     errors: list[str] = []
-    if trial is None:
-        errors.append(f"required trajectory {args.trajectory!r} is missing")
-        frames = []
+    lifecycle_path: Path | None = None
+    entry_mode = args.lifecycle_receipt is not None
+    if entry_mode:
+        lifecycle_path = Path(args.lifecycle_receipt).resolve()
+        lifecycle_receipt = json.loads(lifecycle_path.read_text())
+        frames, appkit, capture_bounds, lifecycle_errors = lifecycle_entry_frames(
+            lifecycle_receipt,
+            args.scenario,
+        )
+        errors.extend(lifecycle_errors)
     else:
-        frames = trial.get("filmstrip", {}).get("frames", [])
-    motion_frames = [frame for frame in frames if frame.get("phase") == "motion" or float(frame.get("fraction", 0)) < 1]
-    settled_frames = [frame for frame in frames if frame.get("phase") == "settled" or float(frame.get("fraction", 0)) > 1]
+        trial = next(
+            (
+                row
+                for row in receipt.get("trials", [])
+                if row.get("trajectory") == args.trajectory
+            ),
+            None,
+        )
+        if trial is None:
+            errors.append(f"required trajectory {args.trajectory!r} is missing")
+            frames = []
+        else:
+            frames = trial.get("filmstrip", {}).get("frames", [])
+        appkit = receipt.get("layout", {}).get("fidelity", {}).get("appKit", {})
+        capture_bounds = {}
+    motion_frames = [
+        frame
+        for frame in frames
+        if frame.get("_phase") == "motion"
+        or frame.get("phase") == "motion"
+        or (
+            frame.get("_phase") is None
+            and float(frame.get("fraction", 0)) < 1
+        )
+    ]
+    settled_frames = [
+        frame
+        for frame in frames
+        if frame.get("_phase") == "settled"
+        or frame.get("phase") == "settled"
+        or (
+            frame.get("_phase") is None
+            and float(frame.get("fraction", 0)) > 1
+        )
+    ]
     if len(motion_frames) < 15 or len(settled_frames) < 3:
         errors.append(
             f"expected at least 15 motion + 3 settled frames, found "
             f"{len(motion_frames)} + {len(settled_frames)}"
         )
 
-    appkit = receipt.get("layout", {}).get("fidelity", {}).get("appKit", {})
     host_width = float(appkit.get("footerContainerFrame", {}).get("width", 0))
     backdrop = appkit.get("mainBackdropFrame")
     foreground_nodes = appkit.get("nodes", [])
-    capsule_nodes = metrics.node_capsules(receipt)
+    geometry_receipt = {"layout": {"fidelity": {"appKit": appkit}}}
+    capsule_nodes = metrics.node_capsules(geometry_receipt)
     if host_width <= 0 or not backdrop:
         errors.append("exact AppKit host/backdrop geometry is missing")
     if len(capsule_nodes) < 2:
@@ -161,14 +345,43 @@ def main() -> int:
             errors.append(f"filmstrip frame missing: {image_path}")
             continue
         image = Image.open(image_path).convert("RGB")
+        frame_appkit = appkit
+        frame_foreground_nodes = foreground_nodes
+        frame_capsule_nodes = capsule_nodes
+        frame_backdrop = backdrop
+        if entry_mode:
+            actual_bounds = window_bounds_tuple(frame.get("windowBounds"))
+            if actual_bounds is None:
+                errors.append(f"entry frame missing exact window bounds: {image_path}")
+                continue
+            try:
+                frame_appkit = transform_appkit_geometry_for_display_frame(
+                    appkit,
+                    actual_bounds,
+                    capture_bounds,
+                    image.size,
+                )
+            except ValueError as error:
+                errors.append(f"{image_path}: {error}")
+                continue
+            frame_foreground_nodes = frame_appkit.get("nodes", [])
+            frame_capsule_nodes = metrics.node_capsules(
+                {"layout": {"fidelity": {"appKit": frame_appkit}}}
+            )
+            frame_backdrop = frame_appkit.get("mainBackdropFrame")
+            host_width = float(
+                frame_appkit.get("footerContainerFrame", {}).get("width", 0)
+            )
         scale = image.width / host_width if host_width > 0 else 0
         if scale <= 0:
             continue
         capsules = [
-            metrics.capsule_metrics(image, node, scale, foreground_nodes)
-            for node in capsule_nodes
+            metrics.capsule_metrics(image, node, scale, frame_foreground_nodes)
+            for node in frame_capsule_nodes
         ]
-        _, stage_y, _, stage_height = metrics.frame_pixels(backdrop, scale, image.height)
+        _, stage_y, _, stage_height = metrics.frame_pixels(
+            frame_backdrop, scale, image.height
+        )
         stage_pixels = [
             image.getpixel((x, y))
             for y in range(
@@ -186,7 +399,9 @@ def main() -> int:
             continue
         stage_rgb = metrics.median_rgb(stage_pixels)
         for capsule in capsules:
-            local_rgb = metrics.local_stage_rgb(image, capsule, backdrop, scale)
+            local_rgb = metrics.local_stage_rgb(
+                image, capsule, frame_backdrop, scale
+            )
             stage_lab = metrics.rgb_to_lab(local_rgb)
             material_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
             capsule["stageMedianRgb"] = local_rgb
@@ -197,7 +412,11 @@ def main() -> int:
         frame_rows.append(
             {
                 "fraction": frame.get("fraction"),
-                "phase": "motion" if float(frame.get("fraction", 0)) < 1 else "settled",
+                "sequence": frame.get("sequence"),
+                "windowBounds": frame.get("windowBounds"),
+                "windowAlpha": frame.get("windowAlpha"),
+                "phase": frame.get("_phase")
+                or ("motion" if float(frame.get("fraction", 0)) < 1 else "settled"),
                 "path": str(image_path),
                 "sha256": frame.get("sha256"),
                 "stageMedianRgb": stage_rgb,
@@ -240,11 +459,25 @@ def main() -> int:
         metrics,
     )
     errors.extend(adaptive_errors)
-    boundary_pass = boundary_pass_every_frame(frame_rows)
+    boundary_pass_all_frames = boundary_pass_every_frame(frame_rows)
+    # A main-entry display stream intentionally includes the sub-opaque fade
+    # before the controls are interactive. Absolute perimeter contrast tends
+    # to zero with the window alpha, so it is not a meaningful discoverability
+    # gate during those frames. Color coherence remains gated on every visible
+    # frame through the adaptive residual. Absolute perimeter thresholds are
+    # gated on all three fully settled frames and every raw frame value remains
+    # in the receipt for audit.
+    boundary_gate_rows = (
+        [row for row in frame_rows if row["phase"] == "settled"]
+        if entry_mode
+        else frame_rows
+    )
+    boundary_gate_pass = boundary_pass_every_frame(boundary_gate_rows)
     result = {
         "schemaVersion": 1,
         "receipt": str(receipt_path),
-        "trajectory": args.trajectory,
+        "lifecycleReceipt": str(lifecycle_path) if lifecycle_path else None,
+        "trajectory": args.scenario if entry_mode else args.trajectory,
         "frameCount": len(frame_rows),
         "motionFrameCount": sum(row["phase"] == "motion" for row in frame_rows),
         "settledFrameCount": sum(row["phase"] == "settled" for row in frame_rows),
@@ -254,7 +487,15 @@ def main() -> int:
             "maximumNeighboringSettledRelationDeltaE00":
                 maximum_neighbor_relation_difference,
             "settledCapsuleRelationDeltaE00": settled_relations,
-            "boundaryPassEveryFrame": boundary_pass,
+            "boundaryPassEveryFrame": boundary_pass_all_frames,
+            "boundaryPassEverySettledFrame": boundary_pass_every_frame(
+                [row for row in frame_rows if row["phase"] == "settled"]
+            ),
+            "boundaryGateScope": (
+                "settled-opaque-entry-frames"
+                if entry_mode
+                else "every-motion-and-settled-frame"
+            ),
         },
         "errors": errors,
         "pass": (
@@ -264,7 +505,7 @@ def main() -> int:
             and len(adaptive) == len(capsule_ids)
             and all(row["pass"] for row in adaptive.values())
             and maximum_neighbor_relation_difference <= 6.0
-            and boundary_pass
+            and boundary_gate_pass
         ),
     }
     serialized = json.dumps(result, indent=2) + "\n"
