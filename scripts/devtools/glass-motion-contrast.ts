@@ -73,13 +73,14 @@ async function runLockedTreatmentCell(options: {
   outputDirectory: string;
   fixture: string;
   identity: EvidenceIdentity;
+  policyId: string;
 }) {
-  const slug = `${options.fixture}-locked-T55-R`;
+  const slug = `${options.fixture}-locked-${options.policyId}`;
   const cellDirectory = join(options.outputDirectory, slug);
   mkdirSync(cellDirectory, { recursive: true });
   const fixtureReceiptPath = join(cellDirectory, "fixture.json");
   await announceTestStatus(
-    "Glass production T55/R",
+    `Glass production ${options.policyId}`,
     `${options.fixture} · exact-window capture and capsule contrast metrics`,
   );
   const fixture = Bun.spawn([
@@ -363,6 +364,22 @@ async function main() {
     ? resolve(explicitReceiptPath, "..")
     : requestedOutput;
   const mode = has("--all") ? "all" : value("--mode", "red")!;
+  const policyTintFloor = Number(value("--policy-tint-floor", "0.55"));
+  const policyVeilAlpha = Number(value("--policy-veil-alpha", "0.80"));
+  const policyId = value(
+    "--policy-id",
+    `T${Math.round(policyTintFloor * 100)}-R`,
+  )!;
+  if (
+    !Number.isFinite(policyTintFloor)
+    || !Number.isFinite(policyVeilAlpha)
+    || policyTintFloor < 0
+    || policyTintFloor > 1
+    || policyVeilAlpha < 0
+    || policyVeilAlpha > 1
+  ) {
+    throw new Error("policy tint floor and veil alpha must be numbers in [0, 1]");
+  }
   if (!existsSync(binary)) {
     throw new Error(`binary missing: ${binary}`);
   }
@@ -449,6 +466,7 @@ async function main() {
         outputDirectory: lockedDirectory,
         fixture,
         identity,
+        policyId,
       }));
     }
     const stability = cells.find((cell) => cell.fixture === "saturated-stripes");
@@ -458,17 +476,18 @@ async function main() {
       && stability?.motionMetrics?.motionFrameCount >= 15
       && stability?.motionMetrics?.settledFrameCount >= 3
       && stability?.motionMetrics?.summary?.boundaryPassEveryFrame === true
-      && stability?.motionMetrics?.summary?.maximumNeighboringSettledRelationDeltaE00 <= 6
+      && stability?.motionMetrics?.summary?.maximumNeighboringSettledMaterialDeltaE00 <= 6
       && Object.values(
-        stability?.motionMetrics?.summary?.adaptiveCapsules ?? {},
+        stability?.motionMetrics?.summary?.materialStabilityCapsules ?? {},
       ).every((capsule: any) => capsule?.pass === true);
     const neutralPass = neutral.length === 3 && neutral.every((cell) => cell.pass);
     lockedTreatment = {
       helper,
       helperSha256: sha256(helper),
       policy: {
-        tintFloor: 0.55,
-        veilAlpha: 0.80,
+        id: policyId,
+        tintFloor: policyTintFloor,
+        veilAlpha: policyVeilAlpha,
         separation: "R",
         rimWidthPt: 1.0,
         rimAlphaDark: 0.24,

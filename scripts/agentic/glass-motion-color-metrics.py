@@ -24,14 +24,14 @@ def load_contrast_module():
     return module
 
 
-def adaptive_relation_summary(
+def material_stability_summary(
     frame_rows: list[dict],
     capsule_ids: list[str],
     metrics,
 ) -> tuple[dict[str, dict], dict[str, float], float, list[str]]:
     errors: list[str] = []
-    adaptive: dict[str, dict] = {}
-    settled_relation_scalars: list[float] = []
+    stability: dict[str, dict] = {}
+    settled_reference_labs: list[tuple[float, float, float]] = []
     for capsule_id in capsule_ids:
         motion_sample_count = sum(
             row["phase"] == "motion"
@@ -50,22 +50,18 @@ def adaptive_relation_summary(
         ]
         settled_rows = [row for row in settled_rows if row is not None][-3:]
         if len(settled_rows) != 3:
-            errors.append(f"{capsule_id}: expected three settled relation samples")
-            settled_relation_scalars.append(math.inf)
+            errors.append(f"{capsule_id}: expected three settled material samples")
+            settled_reference_labs.append((math.inf, math.inf, math.inf))
             continue
-        offsets = [
-            tuple(
-                material - stage
-                for material, stage in zip(
-                    metrics.rgb_to_lab(tuple(row["materialMedianRgb"])),
-                    metrics.rgb_to_lab(tuple(row["stageMedianRgb"])),
-                )
-            )
+        settled_labs = [
+            metrics.rgb_to_lab(tuple(row["materialMedianRgb"]))
             for row in settled_rows
         ]
-        offset = tuple(
-            statistics.median(item[index] for item in offsets) for index in range(3)
+        settled_reference = tuple(
+            statistics.median(item[index] for item in settled_labs)
+            for index in range(3)
         )
+        settled_reference_labs.append(settled_reference)
         residuals = []
         for row in frame_rows:
             capsule = next(
@@ -74,40 +70,37 @@ def adaptive_relation_summary(
             )
             if capsule is None:
                 continue
-            stage_lab = metrics.rgb_to_lab(tuple(capsule["stageMedianRgb"]))
-            expected_lab = tuple(stage_lab[index] + offset[index] for index in range(3))
             actual_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
-            residual = metrics.delta_e_2000(actual_lab, expected_lab)
-            capsule["adaptiveExpectedLab"] = expected_lab
-            capsule["adaptiveResidualDeltaE00"] = residual
-            residuals.append(residual)
-        adaptive[capsule_id] = {
-            "settledOffsetLab": offset,
+            residual = metrics.delta_e_2000(actual_lab, settled_reference)
+            capsule["settledReferenceLab"] = settled_reference
+            capsule["settledReferenceDeltaE00"] = residual
+            if row["phase"] == "motion":
+                residuals.append(residual)
+        stability[capsule_id] = {
+            "settledReferenceLab": settled_reference,
             "motionSampleCount": motion_sample_count,
-            "residualP95DeltaE00": metrics.percentile(residuals, 0.95),
-            "residualMaximumDeltaE00": max(residuals, default=math.inf),
+            "motionP95DeltaE00": metrics.percentile(residuals, 0.95),
+            "motionMaximumDeltaE00": max(residuals, default=math.inf),
             "pass": (
                 motion_sample_count >= 1
                 and metrics.percentile(residuals, 0.95) <= 5.0
                 and max(residuals, default=math.inf) <= 8.0
             ),
         }
-        settled_values = [row["stageDeltaE00"] for row in settled_rows]
-        settled_relation_scalars.append(statistics.median(settled_values))
-    settled_relations = dict(zip(capsule_ids, settled_relation_scalars))
+    settled_references = dict(zip(capsule_ids, settled_reference_labs))
     neighboring_relation_differences = [
-        abs(left - right)
+        metrics.delta_e_2000(left, right)
         for left, right in zip(
-            settled_relation_scalars,
-            settled_relation_scalars[1:],
+            settled_reference_labs,
+            settled_reference_labs[1:],
         )
     ]
     maximum_neighbor_relation_difference = max(
         neighboring_relation_differences, default=0
     )
     return (
-        adaptive,
-        settled_relations,
+        stability,
+        settled_references,
         maximum_neighbor_relation_difference,
         errors,
     )
@@ -140,6 +133,125 @@ def window_bounds_tuple(value: object) -> tuple[float, float, float, float] | No
         return None
 
 
+def rendered_window_bounds_from_reference(
+    image: Image.Image,
+    reference: Image.Image,
+    appkit: dict,
+    capture_bounds: dict,
+) -> tuple[tuple[float, float, float, float], dict]:
+    """Recover the rendered window envelope from the exact background frame.
+
+    SCStream delivery and CGWindowListCopyWindowInfo are not compositor-atomic,
+    so a separately queried window frame can describe the neighboring display
+    frame during an animation. The explicit post-exit reference makes the
+    actual rendered stage independently observable in each captured PNG.
+    """
+    if image.size != reference.size:
+        raise ValueError("entry frame and explicit background reference sizes differ")
+    base_window = appkit.get("windowBounds", {})
+    backdrop = appkit.get("mainBackdropFrame", {})
+    base_height = float(base_window.get("height", 0))
+    backdrop_height = float(backdrop.get("height", 0))
+    capture_x = float(capture_bounds.get("x", 0))
+    capture_y = float(capture_bounds.get("y", 0))
+    capture_width = float(capture_bounds.get("width", 0))
+    capture_height = float(capture_bounds.get("height", 0))
+    image_width, image_height = image.size
+    if min(
+        base_height,
+        backdrop_height,
+        capture_width,
+        capture_height,
+        image_width,
+        image_height,
+    ) <= 0:
+        raise ValueError("rendered-stage recovery has non-positive geometry")
+    pixel_scale_x = image_width / capture_width
+    pixel_scale_y = image_height / capture_height
+    if abs(pixel_scale_x - pixel_scale_y) > 0.01:
+        raise ValueError("rendered-stage recovery has non-uniform pixel scale")
+    pixel_scale = (pixel_scale_x + pixel_scale_y) / 2.0
+    image_pixels = image.load()
+    reference_pixels = reference.load()
+    sample_step = max(1, min(image_width, image_height) // 160)
+
+    def darkened(x: int, y: int) -> bool:
+        current = image_pixels[x, y]
+        background = reference_pixels[x, y]
+        current_luminance = (
+            0.2126 * current[0] + 0.7152 * current[1] + 0.0722 * current[2]
+        )
+        background_luminance = (
+            0.2126 * background[0]
+            + 0.7152 * background[1]
+            + 0.0722 * background[2]
+        )
+        return background_luminance - current_luminance > 25.0
+
+    sampled_y = list(range(0, image_height, sample_step))
+    column_candidates = [
+        x
+        for x in range(image_width)
+        if (
+            sum(darkened(x, y) for y in sampled_y) / len(sampled_y)
+            >= 0.70
+        )
+    ]
+    if not column_candidates:
+        raise ValueError("rendered stage horizontal envelope was not observable")
+    left = column_candidates[0]
+    right_exclusive = column_candidates[-1] + 1
+
+    sampled_x = list(range(0, image_width, sample_step))
+    row_candidates = [
+        y
+        for y in range(image_height)
+        if (
+            sum(darkened(x, y) for x in sampled_x) / len(sampled_x)
+            >= 0.80
+        )
+    ]
+    if not row_candidates:
+        raise ValueError("rendered stage vertical envelope was not observable")
+    top = row_candidates[0]
+    bottom_exclusive = row_candidates[-1] + 1
+    stage_width_pixels = right_exclusive - left
+    stage_height_pixels = bottom_exclusive - top
+    if (
+        stage_width_pixels < image_width * 0.50
+        or stage_height_pixels < image_height * 0.50
+    ):
+        raise ValueError("rendered stage envelope is implausibly small")
+
+    footer_gap = base_height - backdrop_height
+    actual_bounds = (
+        capture_x + left / pixel_scale,
+        capture_y + top / pixel_scale,
+        stage_width_pixels / pixel_scale,
+        stage_height_pixels / pixel_scale + footer_gap,
+    )
+    evidence = {
+        "method": "explicit-background-reference-darkening-envelope",
+        "sampleStepPixels": sample_step,
+        "darkeningThreshold": 25.0,
+        "minimumColumnFraction": 0.70,
+        "minimumRowFraction": 0.80,
+        "stageFramePixels": {
+            "x": left,
+            "y": top,
+            "width": stage_width_pixels,
+            "height": stage_height_pixels,
+        },
+        "windowBounds": {
+            "x": actual_bounds[0],
+            "y": actual_bounds[1],
+            "width": actual_bounds[2],
+            "height": actual_bounds[3],
+        },
+    }
+    return actual_bounds, evidence
+
+
 def transform_appkit_geometry_for_display_frame(
     appkit: dict,
     actual_window_bounds: tuple[float, float, float, float],
@@ -149,10 +261,11 @@ def transform_appkit_geometry_for_display_frame(
     """Project settled AppKit geometry into one fixed display-stream crop.
 
     AppKit fidelity frames use bottom-left window coordinates. Display-stream
-    PNGs use top-left crop pixels, while entry morphs temporarily change the
-    window frame. Projecting every node through the actual per-frame window
-    bounds keeps rounded masks and foreground exclusions attached to the
-    material they measure instead of sampling stale settled coordinates.
+    PNGs use top-left crop pixels. During a native NSWindow frame animation,
+    CGWindow reports the transient presentation envelope. Footer children keep
+    their model sizes: the left capsule is left-anchored, the action cluster is
+    right-anchored, and the stage stretches with the window. Reproduce those
+    autoresizing rules rather than scaling every child through the envelope.
     """
     transformed = copy.deepcopy(appkit)
     base_window = appkit.get("windowBounds", {})
@@ -180,24 +293,45 @@ def transform_appkit_geometry_for_display_frame(
     if abs(pixel_scale_x - pixel_scale_y) > 0.01:
         raise ValueError("entry display-stream crop has non-uniform pixel scale")
     pixel_scale = (pixel_scale_x + pixel_scale_y) / 2.0
-    scale_x = actual_width / base_width
-    scale_y = actual_height / base_height
 
-    def project(frame: object) -> dict | None:
+    width_delta = actual_width - base_width
+    right_capsule_origins = [
+        float(node["screenshotFrame"]["x"])
+        for node in appkit.get("nodes", [])
+        if (
+            node.get("className") == "NSGlassEffectView"
+            and str(node.get("id", "")).startswith("script-kit-footer-capsule-")
+            and isinstance(node.get("screenshotFrame"), dict)
+        )
+    ]
+    right_anchor_x = min(right_capsule_origins, default=base_width)
+
+    def project(
+        frame: object,
+        *,
+        anchor_right: bool = False,
+        stretch_width: bool = False,
+        stretch_height: bool = False,
+    ) -> dict | None:
         if not isinstance(frame, dict):
             return None
         x = float(frame.get("x", 0))
         y = float(frame.get("y", 0))
         width = float(frame.get("width", 0))
         height = float(frame.get("height", 0))
-        pixel_x = (actual_x - capture_x + x * scale_x) * pixel_scale
+        projected_width = width + width_delta if stretch_width else width
+        projected_height = (
+            height + (actual_height - base_height) if stretch_height else height
+        )
+        projected_x = x + width_delta if anchor_right else x
+        pixel_x = (actual_x - capture_x + projected_x) * pixel_scale
         pixel_y = (
             actual_y
             - capture_y
-            + (base_height - (y + height)) * scale_y
+            + (actual_height - (y + projected_height))
         ) * pixel_scale
-        pixel_width = width * scale_x * pixel_scale
-        pixel_height = height * scale_y * pixel_scale
+        pixel_width = projected_width * pixel_scale
+        pixel_height = projected_height * pixel_scale
         # Convert the projected top-left pixel rect back to the bottom-left
         # logical coordinate shape consumed by glass-contrast-metrics.py.
         return {
@@ -208,13 +342,23 @@ def transform_appkit_geometry_for_display_frame(
         }
 
     for node in transformed.get("nodes", []):
-        projected = project(node.get("screenshotFrame"))
+        frame = node.get("screenshotFrame")
+        frame_x = float(frame.get("x", 0)) if isinstance(frame, dict) else 0
+        projected = project(
+            frame,
+            anchor_right=frame_x >= right_anchor_x,
+            stretch_width=str(node.get("id", "")) in {
+                "script-kit-footer-effect",
+                "script-kit-footer-divider",
+            },
+        )
         if projected is not None:
             node["screenshotFrame"] = projected
-        layer = node.get("layer")
-        if isinstance(layer, dict) and "cornerRadius" in layer:
-            layer["cornerRadius"] = float(layer["cornerRadius"]) * min(scale_x, scale_y)
-    projected_backdrop = project(transformed.get("mainBackdropFrame"))
+    projected_backdrop = project(
+        transformed.get("mainBackdropFrame"),
+        stretch_width=True,
+        stretch_height=True,
+    )
     if projected_backdrop is not None:
         transformed["mainBackdropFrame"] = projected_backdrop
     transformed["footerContainerFrame"] = {
@@ -224,6 +368,12 @@ def transform_appkit_geometry_for_display_frame(
         "height": capture_height,
     }
     transformed["projectedPixelScale"] = pixel_scale
+    transformed["presentationWindowBounds"] = {
+        "x": actual_x,
+        "y": actual_y,
+        "width": actual_width,
+        "height": actual_height,
+    }
     return transformed
 
 
@@ -278,6 +428,31 @@ def lifecycle_entry_frames(
     )
 
 
+def lifecycle_background_reference(
+    lifecycle_receipt: dict,
+) -> tuple[Path | None, list[str]]:
+    scenario = next(
+        (
+            row
+            for row in lifecycle_receipt.get("scenarios", [])
+            if row.get("name") == "main-exit"
+        ),
+        None,
+    )
+    if scenario is None:
+        return None, ["main-exit explicit background reference scenario is missing"]
+    reference = scenario.get("hiddenReference", {})
+    path = Path(reference.get("path", "")).resolve()
+    if (
+        scenario.get("hiddenReferencePass") is not True
+        or reference.get("captureSource")
+        != "explicit-post-exit-display-screenshot"
+        or not path.exists()
+    ):
+        return None, ["valid explicit post-exit background reference is missing"]
+    return path, []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--receipt", required=True)
@@ -301,6 +476,15 @@ def main() -> int:
             args.scenario,
         )
         errors.extend(lifecycle_errors)
+        reference_path, reference_errors = lifecycle_background_reference(
+            lifecycle_receipt
+        )
+        errors.extend(reference_errors)
+        reference_image = (
+            Image.open(reference_path).convert("RGB")
+            if reference_path is not None
+            else None
+        )
     else:
         trial = next(
             (
@@ -317,6 +501,8 @@ def main() -> int:
             frames = trial.get("filmstrip", {}).get("frames", [])
         appkit = receipt.get("layout", {}).get("fidelity", {}).get("appKit", {})
         capture_bounds = {}
+        reference_path = None
+        reference_image = None
     motion_frames = [
         frame
         for frame in frames
@@ -366,11 +552,21 @@ def main() -> int:
         frame_capsule_nodes = capsule_nodes
         frame_backdrop = backdrop
         if entry_mode:
-            actual_bounds = window_bounds_tuple(frame.get("windowBounds"))
-            if actual_bounds is None:
+            reported_bounds = window_bounds_tuple(frame.get("windowBounds"))
+            if reported_bounds is None:
                 errors.append(f"entry frame missing exact window bounds: {image_path}")
                 continue
+            if reference_image is None:
+                continue
             try:
+                actual_bounds, rendered_bounds_evidence = (
+                    rendered_window_bounds_from_reference(
+                        image,
+                        reference_image,
+                        appkit,
+                        capture_bounds,
+                    )
+                )
                 frame_appkit = transform_appkit_geometry_for_display_frame(
                     appkit,
                     actual_bounds,
@@ -443,6 +639,9 @@ def main() -> int:
                 "fraction": frame.get("fraction"),
                 "sequence": frame.get("sequence"),
                 "windowBounds": frame.get("windowBounds"),
+                "renderedWindowBounds": (
+                    rendered_bounds_evidence if entry_mode else None
+                ),
                 "windowAlpha": frame.get("windowAlpha"),
                 "phase": frame.get("_phase")
                 or ("motion" if float(frame.get("fraction", 0)) < 1 else "settled"),
@@ -479,22 +678,22 @@ def main() -> int:
 
     capsule_ids = [str(node.get("id")) for node in capsule_nodes]
     (
-        adaptive,
-        settled_relations,
+        material_stability,
+        settled_references,
         maximum_neighbor_relation_difference,
-        adaptive_errors,
-    ) = adaptive_relation_summary(
+        stability_errors,
+    ) = material_stability_summary(
         frame_rows,
         capsule_ids,
         metrics,
     )
-    errors.extend(adaptive_errors)
+    errors.extend(stability_errors)
     boundary_pass_all_frames = boundary_pass_every_frame(frame_rows)
     # A main-entry display stream intentionally includes the sub-opaque fade
     # before the controls are interactive. Absolute perimeter contrast tends
     # to zero with the window alpha, so it is not a meaningful discoverability
     # gate during those frames. Color coherence remains gated on every visible
-    # frame through the adaptive residual. Absolute perimeter thresholds are
+    # frame through the settled-material residual. Absolute perimeter thresholds are
     # gated on all three fully settled frames and every raw frame value remains
     # in the receipt for audit.
     boundary_gate_rows = (
@@ -507,16 +706,17 @@ def main() -> int:
         "schemaVersion": 1,
         "receipt": str(receipt_path),
         "lifecycleReceipt": str(lifecycle_path) if lifecycle_path else None,
+        "backgroundReference": str(reference_path) if reference_path else None,
         "trajectory": args.scenario if entry_mode else args.trajectory,
         "frameCount": len(frame_rows),
         "motionFrameCount": sum(row["phase"] == "motion" for row in frame_rows),
         "settledFrameCount": sum(row["phase"] == "settled" for row in frame_rows),
         "frames": frame_rows,
         "summary": {
-            "adaptiveCapsules": adaptive,
-            "maximumNeighboringSettledRelationDeltaE00":
+            "materialStabilityCapsules": material_stability,
+            "maximumNeighboringSettledMaterialDeltaE00":
                 maximum_neighbor_relation_difference,
-            "settledCapsuleRelationDeltaE00": settled_relations,
+            "settledCapsuleMaterialLab": settled_references,
             "boundaryPassEveryFrame": boundary_pass_all_frames,
             "boundaryPassEverySettledFrame": boundary_pass_every_frame(
                 [row for row in frame_rows if row["phase"] == "settled"]
@@ -532,8 +732,8 @@ def main() -> int:
             not errors
             and len(motion_frames) >= minimum_motion_frames
             and len(settled_frames) >= 3
-            and len(adaptive) == len(capsule_ids)
-            and all(row["pass"] for row in adaptive.values())
+            and len(material_stability) == len(capsule_ids)
+            and all(row["pass"] for row in material_stability.values())
             and maximum_neighbor_relation_difference <= 6.0
             and boundary_gate_pass
         ),

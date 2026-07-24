@@ -24,7 +24,7 @@ motion = load_module("glass-motion-color-metrics.py", "glass_motion_color_metric
 contrast = load_module("glass-contrast-metrics.py", "glass_contrast_metrics")
 
 
-def frame(phase: str, material_a=(90, 100, 110), material_b=(110, 120, 130)):
+def frame(phase: str, material_a=(90, 100, 110), material_b=(100, 110, 120)):
     capsules = [
         {
             "id": "a",
@@ -51,16 +51,16 @@ def frame(phase: str, material_a=(90, 100, 110), material_b=(110, 120, 130)):
     }
 
 
-class AdaptiveMotionTests(unittest.TestCase):
-    def test_stable_per_capsule_relation_and_every_frame_boundary_pass(self):
+class MaterialStabilityTests(unittest.TestCase):
+    def test_stable_per_capsule_material_and_every_frame_boundary_pass(self):
         rows = [frame("motion") for _ in range(15)] + [
             frame("settled") for _ in range(3)
         ]
-        adaptive, _, neighboring, errors = motion.adaptive_relation_summary(
+        stability, _, neighboring, errors = motion.material_stability_summary(
             rows, ["a", "b"], contrast
         )
         self.assertEqual(errors, [])
-        self.assertTrue(all(result["pass"] for result in adaptive.values()))
+        self.assertTrue(all(result["pass"] for result in stability.values()))
         self.assertLessEqual(neighboring, 6.0)
         self.assertTrue(motion.boundary_pass_every_frame(rows))
 
@@ -68,15 +68,15 @@ class AdaptiveMotionTests(unittest.TestCase):
         rows = [frame("motion") for _ in range(14)]
         rows.append(frame("motion", material_a=(255, 0, 255)))
         rows.extend(frame("settled") for _ in range(3))
-        adaptive, _, _, errors = motion.adaptive_relation_summary(
+        stability, _, _, errors = motion.material_stability_summary(
             rows, ["a", "b"], contrast
         )
         self.assertEqual(errors, [])
-        self.assertFalse(adaptive["a"]["pass"])
+        self.assertFalse(stability["a"]["pass"])
         rows[0]["minimumP10BoundaryLuminanceDifference"] = 0.014
         self.assertFalse(motion.boundary_pass_every_frame(rows))
 
-    def test_entry_projection_tracks_the_actual_window_inside_a_fixed_crop(self):
+    def test_entry_projection_reproduces_footer_autoresizing_anchors(self):
         appkit = {
             "windowBounds": {"x": 381, "y": 166, "width": 750, "height": 480},
             "mainBackdropFrame": {"x": 0, "y": 40, "width": 750, "height": 440},
@@ -105,8 +105,9 @@ class AdaptiveMotionTests(unittest.TestCase):
         frame = projected["nodes"][0]["screenshotFrame"]
         pixels = contrast.frame_pixels(frame, 2, 1002)
         self.assertEqual(pixels, (1008, 900, 236, 56))
-        # A larger, up-left transient entry frame must move and scale the mask
-        # with that exact native frame rather than sample settled coordinates.
+        # CGWindow reports a larger, up-left presentation envelope during the
+        # frame animation. The capsule retains its size and moves with the
+        # right edge rather than being geometrically scaled.
         expanded = motion.transform_appkit_geometry_for_display_frame(
             appkit,
             (358, 160, 795, 492),
@@ -116,9 +117,12 @@ class AdaptiveMotionTests(unittest.TestCase):
         expanded_pixels = contrast.frame_pixels(
             expanded["nodes"][0]["screenshotFrame"], 2, 1002
         )
-        self.assertNotEqual(expanded_pixels[0], pixels[0])
-        self.assertNotEqual(expanded_pixels[1], pixels[1])
-        self.assertGreater(expanded_pixels[2], pixels[2])
+        self.assertEqual(expanded_pixels, (1052, 912, 236, 56))
+        self.assertEqual(
+            expanded["presentationWindowBounds"],
+            {"x": 358, "y": 160, "width": 795, "height": 492},
+        )
+        self.assertEqual(expanded["nodes"][0]["layer"]["cornerRadius"], 6)
 
     def test_expanded_capture_crop_contains_the_full_entry_morph(self):
         appkit = {
@@ -156,6 +160,34 @@ class AdaptiveMotionTests(unittest.TestCase):
         self.assertGreaterEqual(pixels[1], 0)
         self.assertLessEqual(pixels[0] + pixels[2], 1620)
         self.assertLessEqual(pixels[1] + pixels[3], 1084)
+
+    def test_rendered_window_envelope_comes_from_explicit_background(self):
+        reference = Image.new("RGB", (200, 140), (240, 240, 240))
+        rendered = reference.copy()
+        for y in range(10, 110):
+            for x in range(20, 180):
+                rendered.putpixel((x, y), (80, 80, 80))
+        # Footer controls are intentionally disjoint and must not extend the
+        # continuous stage envelope.
+        for left, right in ((30, 70), (100, 130), (140, 170)):
+            for y in range(120, 130):
+                for x in range(left, right):
+                    rendered.putpixel((x, y), (30, 30, 30))
+        appkit = {
+            "windowBounds": {"x": 0, "y": 0, "width": 100, "height": 60},
+            "mainBackdropFrame": {"x": 0, "y": 20, "width": 100, "height": 40},
+        }
+        bounds, evidence = motion.rendered_window_bounds_from_reference(
+            rendered,
+            reference,
+            appkit,
+            {"x": 0, "y": 0, "width": 100, "height": 70},
+        )
+        self.assertEqual(bounds, (10, 5, 80, 70))
+        self.assertEqual(
+            evidence["stageFramePixels"],
+            {"x": 20, "y": 10, "width": 160, "height": 100},
+        )
 
     def test_lifecycle_uses_explicit_settled_captures_not_stream_tail(self):
         with tempfile.TemporaryDirectory() as directory:
