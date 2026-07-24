@@ -59,6 +59,7 @@ try {
     { expect: "externalCommandResult", timeoutMs: 15_000 },
   );
 
+  driver.send({ type: "show" });
   await Bun.sleep(300);
   const windows = (await driver.listAutomationWindows({ timeoutMs: 15_000 })) as {
     windows?: Json[];
@@ -76,20 +77,20 @@ try {
   );
   const strings = collectStrings(elements);
   receipt.elementStrings = strings.filter((value) =>
-    /agent.chat-callout|usage limit|sign in|switch account|retry/i.test(value),
+    /ai-recovery|usage limit|sign in|switch account|retry/i.test(value),
   );
   receipt.semanticCollection = {
     friendlyTitle: strings.some((value) =>
-      /Account usage limit reached/i.test(value),
+      /Usage limit reached/i.test(value),
     ),
     signInAgain: strings.some((value) =>
-      /agent.chat-callout-sign-in|Sign in again/i.test(value),
+      /ai-recovery-sign-in|Sign in again/i.test(value),
     ),
     switchAccount: strings.some((value) =>
-      /agent.chat-callout-switch-account|Switch account/i.test(value),
+      /ai-recovery-switch-account|Switch account/i.test(value),
     ),
     retry: strings.some((value) =>
-      /agent.chat-callout-retry|^Retry$/i.test(value),
+      /ai-recovery-retry|^Retry$/i.test(value),
     ),
     rawJsonHidden: !strings.some((value) => value.includes("plan_type")),
     note:
@@ -119,6 +120,17 @@ try {
     failures.push({ name: "agent_chat_error_state", agentState });
   if (agentState.messageCount !== 2)
     failures.push({ name: "agent_chat_error_message_count", agentState });
+  const reliability = agentState.reliability as Json | undefined;
+  if (
+    reliability?.phase !== "awaitingRecovery" ||
+    reliability?.failureCode !== "UsageExhausted" ||
+    reliability?.primaryActionId !== "ai-recovery-switch-account"
+  ) {
+    failures.push({ name: "typed_recovery_state", reliability });
+  }
+  if ((reliability?.diagnostic as Json | undefined)?.rawPrimaryVisible !== false) {
+    failures.push({ name: "raw_primary_visible", reliability });
+  }
   if (screenshot.error) failures.push({ name: "screenshot", error: screenshot.error });
   receipt.pass = failures.length === 0;
 } catch (error) {

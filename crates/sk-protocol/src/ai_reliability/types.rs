@@ -707,6 +707,7 @@ pub enum AiPhase {
     Recovering {
         action: AiRecoveryAction,
         command_id: CommandId,
+        origin: RecoveryOrigin,
     },
     Recovered {
         action: AiRecoveryAction,
@@ -798,6 +799,11 @@ pub enum AiOperationEvent {
     RestartObserved(RestartSnapshot),
     SessionReattached(ReattachReceipt),
     SessionReattachFailed(AiFailure),
+    SessionReplaced {
+        identity: AiSurfaceIdentity,
+        selection: AiSelectionState,
+        work: AiWorkSnapshot,
+    },
     DismissRequested,
     ResetForNextTurn,
 }
@@ -819,6 +825,7 @@ pub enum AiEventTag {
     RestartObserved,
     SessionReattached,
     SessionReattachFailed,
+    SessionReplaced,
     DismissRequested,
     ResetForNextTurn,
 }
@@ -841,6 +848,7 @@ impl AiOperationEvent {
             Self::RestartObserved(_) => AiEventTag::RestartObserved,
             Self::SessionReattached(_) => AiEventTag::SessionReattached,
             Self::SessionReattachFailed(_) => AiEventTag::SessionReattachFailed,
+            Self::SessionReplaced { .. } => AiEventTag::SessionReplaced,
             Self::DismissRequested => AiEventTag::DismissRequested,
             Self::ResetForNextTurn => AiEventTag::ResetForNextTurn,
         }
@@ -999,10 +1007,24 @@ pub enum RecoveryEffectResult {
     CapabilityRechecked,
     ComponentReady,
     FlowRethreaded,
-    FlowRunRestarted { run_id: RunId },
+    FlowRunRestarted {
+        run_id: RunId,
+    },
     AgentChatOpened,
     ContextTrimmed,
+    /// An external recovery surface was opened, but the app has not yet
+    /// observed that the underlying capability is healthy.
+    ExternalActionLaunched,
     NoChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryOrigin {
+    Failure {
+        failure: AiFailure,
+        plan: RecoveryPlan,
+    },
+    Restart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

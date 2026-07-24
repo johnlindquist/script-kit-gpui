@@ -1,5 +1,4 @@
 /// Dispatch and execution of user-triggered actions (copy, paste, reveal, terminal, AI, etc.).
-
 use crate::action_helpers::{ActionOutcomeStatus, DispatchContext, DispatchOutcome};
 use crate::ai::agent_chat::ui::export::build_agent_chat_conversation_markdown_from_thread;
 
@@ -831,12 +830,14 @@ impl ScriptListApp {
     }
 
     fn active_agent_chat_entity(&self) -> Option<Entity<crate::ai::agent_chat::ui::AgentChatView>> {
-        crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity().or_else(|| {
-            let AppView::AgentChatView { entity } = &self.current_view else {
-                return None;
-            };
-            Some(entity.clone())
-        })
+        crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity().or_else(
+            || {
+                let AppView::AgentChatView { entity } = &self.current_view else {
+                    return None;
+                };
+                Some(entity.clone())
+            },
+        )
     }
 
     /// Reveal a path and return completion back to the UI thread for HUD feedback.
@@ -1315,9 +1316,9 @@ impl ScriptListApp {
             let payload = entity.update(cx, |view, cx| {
                 view.current_prompt_handoff_payload(adapter_id, cx)
             });
-            return match payload
-                .and_then(|payload| crate::ai::agent_prompt_handoff::launch_prompt_handoff(&payload))
-            {
+            return match payload.and_then(|payload| {
+                crate::ai::agent_prompt_handoff::launch_prompt_handoff(&payload)
+            }) {
                 Ok(receipt) => {
                     tracing::info!(
                         target: "script_kit::agent_handoff",
@@ -1350,9 +1351,9 @@ impl ScriptListApp {
                     cx,
                 )
             });
-            return match payload
-                .and_then(|payload| crate::ai::agent_prompt_handoff::export_prompt(&payload, prompt_action))
-            {
+            return match payload.and_then(|payload| {
+                crate::ai::agent_prompt_handoff::export_prompt(&payload, prompt_action)
+            }) {
                 Ok(receipt) => {
                     tracing::info!(
                         target: "script_kit::agent_handoff",
@@ -1384,7 +1385,8 @@ impl ScriptListApp {
             };
         }
 
-        if let Some(action) = crate::ai::agent_chat::ui::view::FocusedTextMiniAction::from_action_id(action_id)
+        if let Some(action) =
+            crate::ai::agent_chat::ui::view::FocusedTextMiniAction::from_action_id(action_id)
         {
             let receipt = entity.update(cx, |view, cx| {
                 view.perform_focused_text_mini_action(action, cx)
@@ -1406,12 +1408,12 @@ impl ScriptListApp {
 
         if matches!(
             action_id,
-            crate::ai::agent_chat::ui::view::AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID
-                | crate::ai::agent_chat::ui::view::AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID
-                | crate::ai::agent_chat::ui::view::AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID
+            crate::ai::agent_chat::ui::view::AGENT_CHAT_RECOVERY_SIGN_IN_ACTION_ID
+                | crate::ai::agent_chat::ui::view::AGENT_CHAT_RECOVERY_SWITCH_ACCOUNT_ACTION_ID
+                | crate::ai::agent_chat::ui::view::AGENT_CHAT_RECOVERY_COPY_DETAILS_ACTION_ID
         ) {
             let handled = entity.update(cx, |view, cx| {
-                view.dispatch_active_callout_action(action_id, cx)
+                view.dispatch_ai_recovery_action(action_id, cx)
             });
             return if handled {
                 DispatchOutcome::success()
@@ -1421,28 +1423,27 @@ impl ScriptListApp {
         }
 
         if let Some(model_id) = crate::actions::agent_chat_switch_model_id_from_action(action_id) {
-            let Some(model_action) = AgentChatModelSwitchHandlerAction::from_action_id(action_id) else {
+            let Some(model_action) = AgentChatModelSwitchHandlerAction::from_action_id(action_id)
+            else {
                 return DispatchOutcome::not_handled();
             };
             let Some((current_selected_model_id, model_display_name)) = ({
                 let view = entity.read(cx);
-                view.thread()
-                    .and_then(|thread| {
-                        let thread = thread.read(cx);
-                        let current_selected_model_id =
-                            thread.selected_model_id().map(str::to_string);
-                        let model_display_name = thread
-                            .available_models()
-                            .iter()
-                            .find(|entry| entry.id == model_id)
-                            .map(|entry| {
-                                entry
-                                    .display_name
-                                    .clone()
-                                    .unwrap_or_else(|| entry.id.clone())
-                            })?;
-                        Some((current_selected_model_id, model_display_name))
-                    })
+                view.thread().and_then(|thread| {
+                    let thread = thread.read(cx);
+                    let current_selected_model_id = thread.selected_model_id().map(str::to_string);
+                    let model_display_name = thread
+                        .available_models()
+                        .iter()
+                        .find(|entry| entry.id == model_id)
+                        .map(|entry| {
+                            entry
+                                .display_name
+                                .clone()
+                                .unwrap_or_else(|| entry.id.clone())
+                        })?;
+                    Some((current_selected_model_id, model_display_name))
+                })
             }) else {
                 return DispatchOutcome::error(
                     crate::action_helpers::ERROR_ACTION_FAILED,
@@ -1782,7 +1783,8 @@ impl ScriptListApp {
                 }
             }
             "agent_chat_copy_all_code" => {
-                let Some(code_copy_action) = AgentChatCodeCopyHandlerAction::from_action_id(action_id)
+                let Some(code_copy_action) =
+                    AgentChatCodeCopyHandlerAction::from_action_id(action_id)
                 else {
                     return DispatchOutcome::not_handled();
                 };
@@ -2190,8 +2192,7 @@ impl ScriptListApp {
                 };
 
                 let char_count = markdown.chars().count();
-                match crate::notes::save_note_with_content_and_source(cx, markdown, thread_source)
-                {
+                match crate::notes::save_note_with_content_and_source(cx, markdown, thread_source) {
                     Ok(_) => {
                         self.close_agent_chat_to_script_list(false, cx);
                         tracing::info!(
@@ -2223,17 +2224,23 @@ impl ScriptListApp {
                 }
             }
             "agent_chat_show_history" => {
-                let Some(panel_action) = AgentChatPanelWindowHandlerAction::from_action_id(action_id)
+                let Some(panel_action) =
+                    AgentChatPanelWindowHandlerAction::from_action_id(action_id)
                 else {
                     return DispatchOutcome::not_handled();
                 };
-                tracing::info!(event = "agent_chat_history_action_invoked", action = "openHistory");
+                tracing::info!(
+                    event = "agent_chat_history_action_invoked",
+                    action = "openHistory"
+                );
                 self.open_builtin_filterable_view(
                     AppView::AgentChatHistoryView {
                         filter: String::new(),
                         selected_index: 0,
                     },
-                    panel_action.history_search_placeholder().unwrap_or_default(),
+                    panel_action
+                        .history_search_placeholder()
+                        .unwrap_or_default(),
                     true,
                     cx,
                 );
@@ -2315,7 +2322,8 @@ impl ScriptListApp {
                 DispatchOutcome::success()
             }
             "agent_chat_detach_window" => {
-                let Some(panel_action) = AgentChatPanelWindowHandlerAction::from_action_id(action_id)
+                let Some(panel_action) =
+                    AgentChatPanelWindowHandlerAction::from_action_id(action_id)
                 else {
                     return DispatchOutcome::not_handled();
                 };
@@ -2359,7 +2367,8 @@ impl ScriptListApp {
                 }
             }
             "agent_chat_reattach_panel" => {
-                let Some(panel_action) = AgentChatPanelWindowHandlerAction::from_action_id(action_id)
+                let Some(panel_action) =
+                    AgentChatPanelWindowHandlerAction::from_action_id(action_id)
                 else {
                     return DispatchOutcome::not_handled();
                 };
@@ -2488,8 +2497,8 @@ impl ScriptListApp {
                             if o.was_handled() {
                                 ("scriptlet", o)
                             } else {
-                                let o = self
-                                    .handle_main_prompt_handoff_action(&action_id_stripped, cx);
+                                let o =
+                                    self.handle_main_prompt_handoff_action(&action_id_stripped, cx);
                                 if o.was_handled() {
                                     ("main_prompt_handoff", o)
                                 } else {

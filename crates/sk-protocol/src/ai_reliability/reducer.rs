@@ -43,9 +43,31 @@ pub fn transition(
         AiOperationEvent::SessionReattachFailed(failure) => {
             session_reattach_failed(state, event_tag, failure)
         }
+        AiOperationEvent::SessionReplaced {
+            identity,
+            selection,
+            work,
+        } => session_replaced(state, identity, selection, work),
         AiOperationEvent::DismissRequested => dismiss_requested(state, event_tag),
         AiOperationEvent::ResetForNextTurn => reset_for_next_turn(state, event_tag),
     }
+}
+
+fn session_replaced(
+    mut state: AiOperationState,
+    identity: AiSurfaceIdentity,
+    selection: AiSelectionState,
+    work: AiWorkSnapshot,
+) -> Result<AiTransition, InvalidTransition> {
+    state.identity = identity;
+    state.selection = selection;
+    state.work = work;
+    state.phase = AiPhase::Ready;
+    state.pending = None;
+    state.diagnostic = None;
+    state.retry.automatic_used = 0;
+    state.retry.manual_used = 0;
+    Ok(no_commands(state))
 }
 
 pub fn recovery_plan_for(
@@ -118,10 +140,12 @@ pub fn recovery_plan_for(
             AuthenticationFailure::Missing | AuthenticationFailure::Expired => vec![
                 enabled(RecoveryActionKind::SignIn, RecoveryRole::Primary),
                 enabled(RecoveryActionKind::SwitchAccount, RecoveryRole::Secondary),
+                enabled(RecoveryActionKind::CheckAgain, RecoveryRole::Secondary),
             ],
             AuthenticationFailure::UsageExhausted => vec![
                 enabled(RecoveryActionKind::SwitchAccount, RecoveryRole::Primary),
                 enabled(RecoveryActionKind::SignIn, RecoveryRole::Secondary),
+                enabled(RecoveryActionKind::CheckAgain, RecoveryRole::Secondary),
             ],
         },
         AiFailureKind::Configuration(configuration) => match configuration {
@@ -489,12 +513,17 @@ fn failed(
         }
     };
     state.diagnostic = failure.diagnostic.clone();
+    let plan = recovery_plan_for(&state.identity, &failure, state.retry, risk, &progress);
     if automatic_retry_allowed(&state, &failure, risk, &progress) {
         state.retry.automatic_used = state.retry.automatic_used.saturating_add(1);
         let command_id = state.take_command_id();
         state.phase = AiPhase::Recovering {
             action: AiRecoveryAction::Retry,
             command_id,
+            origin: RecoveryOrigin::Failure {
+                failure: failure.clone(),
+                plan: plan.clone(),
+            },
         };
         return Ok(AiTransition {
             commands: vec![
@@ -509,7 +538,6 @@ fn failed(
             outcome: None,
         });
     }
-    let plan = recovery_plan_for(&state.identity, &failure, state.retry, risk, &progress);
     state.phase = AiPhase::AwaitingRecovery { failure, plan };
     Ok(no_commands(state))
 }
@@ -723,14 +751,19 @@ fn recovery_selected(
             }
             state.retry.manual_used = state.retry.manual_used.saturating_add(1);
             let command_id = state.take_command_id();
-            state.phase = AiPhase::Recovering { action, command_id };
+            let class = backoff_class(&failure);
+            state.phase = AiPhase::Recovering {
+                action,
+                command_id,
+                origin: RecoveryOrigin::Failure { failure, plan },
+            };
             Ok(AiTransition {
                 commands: vec![
                     AiCommand::PersistWork(state.work.clone()),
                     AiCommand::ScheduleBackoff {
                         command_id,
                         attempt: RetryAttempt::Manual(state.retry.manual_used),
-                        class: backoff_class(&failure),
+                        class,
                     },
                 ],
                 next: state,
@@ -774,7 +807,11 @@ fn recovery_selected(
                     },
                 }),
             };
-            state.phase = AiPhase::Recovering { action, command_id };
+            state.phase = AiPhase::Recovering {
+                action,
+                command_id,
+                origin: RecoveryOrigin::Failure { failure, plan },
+            };
             Ok(AiTransition {
                 next: state,
                 commands: vec![command],
@@ -782,7 +819,7 @@ fn recovery_selected(
             })
         }
         AiRecoveryAction::ContinueInAgentChat => {
-            start_recovery_command(state, action, |command_id, state| {
+            start_recovery_command(state, action, failure, plan, |command_id, state| {
                 AiCommand::ContinueInAgentChat(AgentChatEscalation {
                     command_id,
                     work: state.work.clone(),
@@ -790,26 +827,28 @@ fn recovery_selected(
             })
         }
         AiRecoveryAction::UpdateClient { client } => {
-            start_recovery_command(state, action, |command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
                 AiCommand::OpenClientUpdate(ClientUpdateTarget { command_id, client })
             })
         }
         AiRecoveryAction::CheckAgain => {
-            start_recovery_command(state, action, |command_id, state| {
+            start_recovery_command(state, action, failure, plan, |command_id, state| {
                 AiCommand::RecheckClientCapability(ClientCapabilityKey {
                     command_id,
                     identity: state.identity.clone(),
                 })
             })
         }
-        AiRecoveryAction::SignIn => start_recovery_command(state, action, |command_id, _state| {
-            AiCommand::LaunchAuthentication(AuthRecoveryCommand {
-                command_id,
-                mode: AuthRecoveryMode::SignIn,
+        AiRecoveryAction::SignIn => {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
+                AiCommand::LaunchAuthentication(AuthRecoveryCommand {
+                    command_id,
+                    mode: AuthRecoveryMode::SignIn,
+                })
             })
-        }),
+        }
         AiRecoveryAction::SwitchAccount => {
-            start_recovery_command(state, action, |command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
                 AiCommand::LaunchAuthentication(AuthRecoveryCommand {
                     command_id,
                     mode: AuthRecoveryMode::SwitchAccount,
@@ -817,7 +856,7 @@ fn recovery_selected(
             })
         }
         AiRecoveryAction::ConfigureProvider => {
-            start_recovery_command(state, action, |command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
                 AiCommand::OpenConfiguration(ConfigurationTarget {
                     command_id,
                     kind: ConfigurationTargetKind::Provider,
@@ -825,7 +864,7 @@ fn recovery_selected(
             })
         }
         AiRecoveryAction::RepairComponent { component } => {
-            start_recovery_command(state, action, |command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
                 AiCommand::InstallOrRepairComponent(ComponentRecoveryCommand {
                     command_id,
                     component,
@@ -833,7 +872,7 @@ fn recovery_selected(
             })
         }
         AiRecoveryAction::Reattach { session } => {
-            start_recovery_command(state, action, |_command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |_command_id, _state| {
                 AiCommand::ReattachSession(session)
             })
         }
@@ -845,7 +884,7 @@ fn recovery_selected(
                     InvalidTransitionReason::RecoveryActionUnavailable,
                 );
             };
-            start_recovery_command(state, action, |command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
                 AiCommand::RethreadFlow(RethreadFlowCommand {
                     command_id,
                     flow_id,
@@ -860,7 +899,7 @@ fn recovery_selected(
                     InvalidTransitionReason::RecoveryActionUnavailable,
                 );
             };
-            start_recovery_command(state, action, |command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
                 AiCommand::RestartFlowRun(RestartFlowRunCommand {
                     command_id,
                     flow_id,
@@ -869,7 +908,7 @@ fn recovery_selected(
             })
         }
         AiRecoveryAction::TrimContext => {
-            start_recovery_command(state, action, |command_id, _state| {
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
                 AiCommand::OpenConfiguration(ConfigurationTarget {
                     command_id,
                     kind: ConfigurationTargetKind::Context,
@@ -882,11 +921,17 @@ fn recovery_selected(
 fn start_recovery_command(
     mut state: AiOperationState,
     action: AiRecoveryAction,
+    failure: AiFailure,
+    plan: RecoveryPlan,
     command: impl FnOnce(CommandId, &AiOperationState) -> AiCommand,
 ) -> Result<AiTransition, InvalidTransition> {
     let command_id = state.take_command_id();
     let command = command(command_id, &state);
-    state.phase = AiPhase::Recovering { action, command_id };
+    state.phase = AiPhase::Recovering {
+        action,
+        command_id,
+        origin: RecoveryOrigin::Failure { failure, plan },
+    };
     Ok(AiTransition {
         next: state,
         commands: vec![command],
@@ -903,12 +948,24 @@ fn recovery_command_succeeded(
     let AiPhase::Recovering {
         action,
         command_id: expected,
+        origin,
     } = state.phase.clone()
     else {
         return invalid(&state, event, InvalidTransitionReason::EventNotAllowed);
     };
     if expected != command_id {
         return invalid(&state, event, InvalidTransitionReason::CommandIdMismatch);
+    }
+    if matches!(result, RecoveryEffectResult::ExternalActionLaunched) {
+        let RecoveryOrigin::Failure { failure, plan } = origin else {
+            return invalid(
+                &state,
+                event,
+                InvalidTransitionReason::RecoveryActionUnavailable,
+            );
+        };
+        state.phase = AiPhase::AwaitingRecovery { failure, plan };
+        return Ok(no_commands(state));
     }
     let summary = match result {
         RecoveryEffectResult::SelectionApplied(receipt) => {
@@ -930,6 +987,7 @@ fn recovery_command_succeeded(
         }
         RecoveryEffectResult::AgentChatOpened => RecoverySuccess::AgentChatOpened,
         RecoveryEffectResult::ContextTrimmed => RecoverySuccess::ContextTrimmed,
+        RecoveryEffectResult::ExternalActionLaunched => unreachable!("handled above"),
         RecoveryEffectResult::NoChange => RecoverySuccess::ReadyToRetry,
     };
     state.phase = AiPhase::Recovered {
@@ -991,6 +1049,7 @@ fn backoff_elapsed(
     let AiPhase::Recovering {
         action,
         command_id: expected,
+        ..
     } = state.phase.clone()
     else {
         return invalid(&state, event, InvalidTransitionReason::EventNotAllowed);
@@ -1017,6 +1076,7 @@ fn restart_observed(
                     session: session.clone(),
                 },
                 command_id,
+                origin: RecoveryOrigin::Restart,
             };
             let commands = vec![
                 AiCommand::PersistWork(state.work.clone()),

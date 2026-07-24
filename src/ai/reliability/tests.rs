@@ -1,6 +1,6 @@
 use super::*;
 use sk_protocol::ai_reliability::{
-    AiFailureCode, AiFailureKind, ProtocolComponent, ProtocolFailure,
+    AiFailureCode, AiFailureKind, CapabilityFailure, ClientKind, ProtocolComponent, ProtocolFailure,
 };
 
 fn context(status: Option<u16>) -> FailureContext {
@@ -11,6 +11,25 @@ fn context(status: Option<u16>) -> FailureContext {
         http_status: status,
         retry_after_ms: Some(1_500),
     }
+}
+
+#[test]
+fn codex_named_upgrade_error_wins_over_pi_transport_component() {
+    let vault = DiagnosticVault::default();
+    let mut pi_context = context(Some(400));
+    pi_context.component = ProtocolComponent::Pi;
+    let record = classify_provider_failure(
+        &pi_context,
+        r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}"#,
+        &vault,
+    );
+    assert!(matches!(
+        record.failure.kind,
+        AiFailureKind::Capability(CapabilityFailure::ClientTooOld {
+            client: ClientKind::Codex,
+            ..
+        })
+    ));
 }
 
 #[test]

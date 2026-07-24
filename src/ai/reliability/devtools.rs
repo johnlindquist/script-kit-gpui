@@ -1,8 +1,13 @@
 use crate::protocol::{
-    AiReliabilityIdentitySnapshot, AiReliabilityPreservationSnapshot, AiReliabilityStateSnapshot,
-    AutomationWindowKind,
+    AiReliabilityDiagnosticSnapshot, AiReliabilityIdentitySnapshot,
+    AiReliabilityPreservationSnapshot, AiReliabilityRetrySnapshot, AiReliabilityStateSnapshot,
+    AiReliabilityTransitionSnapshot, AutomationWindowKind,
 };
 use sha2::{Digest, Sha256};
+use sk_protocol::ai_reliability::{
+    AiFailure, AiFailureKind, AiOperationState, AiPhase, AiSelectionState, AiSurfaceIdentity,
+    DiagnosticAvailability, PreservationReceipt, RecoveryRole,
+};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -34,6 +39,228 @@ pub(crate) fn ai_reliability_snapshot_for_target(
         .get(window_id)
         .cloned()
         .unwrap_or_else(|| AiReliabilityStateSnapshot::ready(surface_for_kind(kind)))
+}
+
+pub(crate) fn ai_reliability_fixture_for_target(
+    window_id: &str,
+) -> Option<AiReliabilityStateSnapshot> {
+    fixtures()
+        .lock()
+        .expect("AI reliability fixture mutex poisoned")
+        .get(window_id)
+        .cloned()
+}
+
+/// Project the live provider-independent state machine into the redacted
+/// automation contract. This is intentionally a pure read: fixtures may
+/// describe legacy defects, while live Agent Chat proof must reflect the
+/// thread-owned authority rather than a detached global default.
+pub(crate) fn ai_operation_state_snapshot(
+    surface: &str,
+    state: &AiOperationState,
+    card: Option<&super::AiRecoveryCardSpec>,
+) -> AiReliabilityStateSnapshot {
+    let failure = match &state.phase {
+        AiPhase::AwaitingRecovery { failure, .. } => Some(failure),
+        _ => None,
+    };
+    let recovery_actions = card
+        .map(|card| {
+            card.actions
+                .iter()
+                .filter(|action| action.enabled)
+                .map(|action| action.semantic_id.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let primary_action_id = card.and_then(|card| {
+        card.actions
+            .iter()
+            .find(|action| action.enabled && action.role == RecoveryRole::Primary)
+            .map(|action| action.semantic_id.to_string())
+    });
+
+    AiReliabilityStateSnapshot {
+        schema_version: crate::protocol::AI_RELIABILITY_STATE_SCHEMA_VERSION,
+        surface: surface.to_string(),
+        phase: phase_name(&state.phase).to_string(),
+        failure_category: failure.map(|failure| failure_category(&failure.kind).to_string()),
+        failure_code: failure.map(|failure| format!("{:?}", failure.code)),
+        primary_action_id,
+        recovery_actions,
+        retry: AiReliabilityRetrySnapshot {
+            automatic_used: state.retry.automatic_used,
+            manual_used: state.retry.manual_used,
+            automatic_max: state.retry.policy.automatic_max,
+            manual_max: state.retry.policy.manual_max,
+            exhausted: !state.retry.automatic_available() && !state.retry.manual_available(),
+        },
+        identity: identity_snapshot(&state.identity, &state.selection),
+        preservation: AiReliabilityPreservationSnapshot {
+            transcript_fingerprint: preservation_fingerprint(&state.work.transcript),
+            draft_fingerprint: preservation_fingerprint(&state.work.draft),
+            partial_output_fingerprint: preservation_fingerprint(&state.work.partial_output),
+        },
+        diagnostic: diagnostic_snapshot(failure, state),
+        last_transition: AiReliabilityTransitionSnapshot::default(),
+    }
+}
+
+fn phase_name(phase: &AiPhase) -> &'static str {
+    match phase {
+        AiPhase::Ready => "ready",
+        AiPhase::Preflighting { .. } => "preflighting",
+        AiPhase::Running { .. } => "running",
+        AiPhase::Cancelling { .. } => "cancelling",
+        AiPhase::AwaitingRecovery { .. } => "awaitingRecovery",
+        AiPhase::Recovering { .. } => "recovering",
+        AiPhase::Recovered { .. } => "recovered",
+        AiPhase::Succeeded { .. } => "succeeded",
+        AiPhase::Cancelled { .. } => "cancelled",
+        AiPhase::Dismissed { .. } => "dismissed",
+    }
+}
+
+fn failure_category(kind: &AiFailureKind) -> &'static str {
+    match kind {
+        AiFailureKind::Capability(_) => "capability",
+        AiFailureKind::Policy(_) => "policy",
+        AiFailureKind::Authentication(_) => "authentication",
+        AiFailureKind::Configuration(_) => "configuration",
+        AiFailureKind::Connectivity(_) => "connectivity",
+        AiFailureKind::Provider(_) => "provider",
+        AiFailureKind::Runtime(_) => "runtime",
+        AiFailureKind::Protocol(_) => "protocol",
+        AiFailureKind::Permission(_) => "permission",
+        AiFailureKind::Input(_) => "input",
+        AiFailureKind::Unknown => "unknown",
+    }
+}
+
+fn identity_snapshot(
+    identity: &AiSurfaceIdentity,
+    selection: &AiSelectionState,
+) -> AiReliabilityIdentitySnapshot {
+    let effective = selection
+        .effective
+        .as_ref()
+        .or(selection.requested.as_ref());
+    let mut snapshot = AiReliabilityIdentitySnapshot {
+        provider_id: effective
+            .and_then(|selection| selection.provider_id.as_ref())
+            .map(|id| id.0.clone()),
+        model_id: effective
+            .and_then(|selection| selection.model_id.as_ref())
+            .map(|id| id.0.clone()),
+        profile_id: effective
+            .and_then(|selection| selection.profile_id.as_ref())
+            .map(|id| id.0.clone()),
+        flow_id: None,
+        selection_origin: Some(format!("{:?}", selection.origin)),
+    };
+    match identity {
+        AiSurfaceIdentity::QuickAi {
+            profile_id,
+            provider_id,
+            model_id,
+        }
+        | AiSurfaceIdentity::FocusedText {
+            profile_id,
+            provider_id,
+            model_id,
+        } => {
+            snapshot
+                .profile_id
+                .get_or_insert_with(|| profile_id.0.clone());
+            snapshot
+                .provider_id
+                .get_or_insert_with(|| provider_id.0.clone());
+            snapshot.model_id.get_or_insert_with(|| model_id.0.clone());
+        }
+        AiSurfaceIdentity::AgentChat {
+            profile_id,
+            provider_id,
+            model_id,
+            ..
+        } => {
+            snapshot
+                .profile_id
+                .get_or_insert_with(|| profile_id.0.clone());
+            if let Some(provider_id) = provider_id {
+                snapshot
+                    .provider_id
+                    .get_or_insert_with(|| provider_id.0.clone());
+            }
+            if let Some(model_id) = model_id {
+                snapshot.model_id.get_or_insert_with(|| model_id.0.clone());
+            }
+        }
+        AiSurfaceIdentity::FlowConversation {
+            flow_id,
+            provider_id,
+            model_id,
+            ..
+        } => {
+            snapshot.flow_id = Some(flow_id.0.clone());
+            if let Some(provider_id) = provider_id {
+                snapshot
+                    .provider_id
+                    .get_or_insert_with(|| provider_id.0.clone());
+            }
+            if let Some(model_id) = model_id {
+                snapshot.model_id.get_or_insert_with(|| model_id.0.clone());
+            }
+        }
+        AiSurfaceIdentity::FlowRun { flow_id, .. } => {
+            snapshot.flow_id = Some(flow_id.0.clone());
+        }
+        AiSurfaceIdentity::LegacyChatPrompt {
+            provider_id,
+            model_id,
+            ..
+        }
+        | AiSurfaceIdentity::Other {
+            provider_id,
+            model_id,
+            ..
+        } => {
+            if let Some(provider_id) = provider_id {
+                snapshot
+                    .provider_id
+                    .get_or_insert_with(|| provider_id.0.clone());
+            }
+            if let Some(model_id) = model_id {
+                snapshot.model_id.get_or_insert_with(|| model_id.0.clone());
+            }
+        }
+    }
+    snapshot
+}
+
+fn preservation_fingerprint(receipt: &PreservationReceipt) -> Option<String> {
+    match receipt {
+        PreservationReceipt::Preserved { fingerprint }
+        | PreservationReceipt::Restorable { fingerprint } => Some(fingerprint.0.clone()),
+        PreservationReceipt::NotApplicable | PreservationReceipt::Missing { .. } => None,
+    }
+}
+
+fn diagnostic_snapshot(
+    failure: Option<&AiFailure>,
+    state: &AiOperationState,
+) -> AiReliabilityDiagnosticSnapshot {
+    let descriptor = state
+        .diagnostic
+        .as_ref()
+        .or_else(|| failure.and_then(|failure| failure.diagnostic.as_ref()));
+    AiReliabilityDiagnosticSnapshot {
+        available: descriptor.is_some_and(|descriptor| {
+            !matches!(descriptor.availability, DiagnosticAvailability::Unavailable)
+        }),
+        redacted: true,
+        fingerprint: descriptor.map(|descriptor| descriptor.fingerprint.0.clone()),
+        raw_primary_visible: false,
+    }
 }
 
 pub(crate) fn ai_reliability_fixture_snapshot(

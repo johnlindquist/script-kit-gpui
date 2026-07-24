@@ -873,13 +873,13 @@ impl ScriptListApp {
                         standing_approval_count,
                         thread_summaries,
                         fork_points,
-                        callout_actions,
+                        recovery_actions,
                     ) = {
                         let view = entity.read(cx);
                         let focused_text = view.has_focused_text_context();
                         let focused_text_expanded = view.focused_text_actions_expanded();
                         let thread_summaries = view.retained_thread_summaries(cx);
-                        let callout_actions = view.active_callout_actions(cx);
+                        let recovery_actions = view.ai_recovery_actions(cx);
                         match &view.session {
                             crate::ai::agent_chat::ui::AgentChatSession::Setup(_) => (
                                 None,
@@ -901,7 +901,7 @@ impl ScriptListApp {
                                     thread.standing_approvals().len(),
                                     thread_summaries,
                                     thread.fork_points().to_vec(),
-                                    callout_actions,
+                                    recovery_actions,
                                 )
                             }
                         }
@@ -923,7 +923,7 @@ impl ScriptListApp {
                         standing_approval_count,
                         thread_summaries,
                         fork_points,
-                        callout_actions,
+                        recovery_actions,
                     ))
                 } else {
                     None
@@ -1023,7 +1023,7 @@ impl ScriptListApp {
                     standing_approval_count,
                     ref thread_summaries,
                     ref fork_points,
-                    ref callout_actions,
+                    ref recovery_actions,
                 )) = agent_chat_context
                 {
                     // Agent Chat chat view: use route-based dialog with drill-down model/profile pickers
@@ -1042,7 +1042,7 @@ impl ScriptListApp {
                         std::sync::Arc::clone(&theme_arc),
                         agent_chat_actions_host,
                     );
-                    dialog.prepend_root_route_actions(callout_actions.clone());
+                    dialog.prepend_root_route_actions(recovery_actions.clone());
                     dialog
                 } else {
                     ActionsDialog::with_script(

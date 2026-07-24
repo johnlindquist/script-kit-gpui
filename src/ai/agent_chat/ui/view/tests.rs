@@ -3,8 +3,7 @@ use crate::ai::agent_chat::ui::permission_broker::{
     AgentChatApprovalPreview, AgentChatApprovalRequest,
 };
 use crate::ai::agent_chat::ui::thread::{
-    AgentChatAuthRecovery, AgentChatCallout, AgentChatCalloutSeverity, AgentChatThreadMessage,
-    AgentChatThreadMessageRole, AgentChatThreadStatus,
+    AgentChatThread, AgentChatThreadMessage, AgentChatThreadMessageRole, AgentChatThreadStatus,
 };
 use crate::ai::context_selector::types::{ContextSelectorRow, ContextSelectorRowKind};
 use gpui::{Modifiers, SharedString};
@@ -82,61 +81,51 @@ fn inactive_transient_lanes_consume_zero_height() {
     assert_eq!(super::agent_chat_transient_lane_height(84.0, true), 84.0);
 }
 
-fn retryable_callout() -> AgentChatCallout {
-    AgentChatCallout {
-        severity: AgentChatCalloutSeverity::Error,
-        title: "Turn failed".into(),
-        detail: Some("connection lost".into()),
-        raw_detail: Some("raw provider error".into()),
-        can_retry: true,
-        auth_recovery: Some(AgentChatAuthRecovery::AuthenticationRequired),
-    }
+fn failed_recovery_thread(raw: &str) -> AgentChatThread {
+    let mut thread = AgentChatThread::test_new(Vec::new(), None);
+    thread.apply_event_test(crate::ai::agent_chat::ui::AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        raw,
+    ));
+    thread
 }
 
 #[test]
-fn retryable_error_callout_surfaces_retry_in_footer_contract() {
-    let callout = retryable_callout();
-    let button = AgentChatView::retry_footer_button(AgentChatThreadStatus::Error, Some(&callout))
-        .expect("retryable error callout should add a footer button");
+fn retryable_error_recovery_surfaces_retry_in_footer_contract() {
+    let thread = failed_recovery_thread("connection lost");
+    let button = AgentChatView::retry_footer_button(&thread)
+        .expect("retryable recovery should add a footer button");
     assert_eq!(button.action, crate::footer_popup::FooterAction::Retry);
     assert_eq!(button.key, "⌘⇧R");
     assert_eq!(button.label, "Retry");
     assert!(button.enabled);
     assert_eq!(
         AgentChatView::footer_button_element_id(button.action, 0),
-        "agent_chat-callout-retry",
-        "the moved retry footer button should retain the former callout automation id"
-    );
-    assert!(
-        AgentChatView::retry_footer_button(AgentChatThreadStatus::Idle, Some(&callout)).is_none()
+        "ai-recovery-retry",
+        "footer retry and recovery card must share one semantic action id"
     );
 }
 
 #[test]
-fn active_callout_render_model_is_passive_content_only() {
-    let callout = retryable_callout();
-    let model = AgentChatView::active_callout_render_model(&callout);
-
-    assert_eq!(model.severity, AgentChatCalloutSeverity::Error);
-    assert_eq!(model.title.as_ref(), "Turn failed");
-    assert_eq!(model.detail.as_ref(), "connection lost");
-
-    let action_ids = AgentChatView::active_callout_action_specs(Some(&callout))
+fn recovery_actions_use_shared_semantic_ids() {
+    let thread = failed_recovery_thread("authentication required");
+    let spec = thread.recovery_card_spec().expect("recovery spec");
+    let action_ids = AgentChatView::recovery_action_specs(Some(&spec))
         .into_iter()
         .map(|action| action.id)
         .collect::<Vec<_>>();
-    assert_eq!(
-        action_ids,
-        vec![
-            super::AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID,
-            super::AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID,
-            super::AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID,
-        ],
-        "callout interactions belong to the actions dialog, not the render model"
-    );
+    assert!(action_ids
+        .iter()
+        .any(|id| id == super::AGENT_CHAT_RECOVERY_SIGN_IN_ACTION_ID));
+    assert!(action_ids
+        .iter()
+        .any(|id| id == super::AGENT_CHAT_RECOVERY_SWITCH_ACCOUNT_ACTION_ID));
+    assert!(action_ids
+        .iter()
+        .any(|id| id == super::AGENT_CHAT_RECOVERY_COPY_DETAILS_ACTION_ID));
     assert!(
-        AgentChatView::active_callout_action_specs(None).is_empty(),
-        "recovery rows must not appear without an active callout"
+        AgentChatView::recovery_action_specs(None).is_empty(),
+        "recovery rows must not appear without recovery state"
     );
 }
 

@@ -839,7 +839,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
         weak.upgrade().map(|entity| {
             let view = entity.read(cx);
             let thread_summaries = view.retained_thread_summaries(cx);
-            let callout_actions = view.active_callout_actions(cx);
+            let recovery_actions = view.ai_recovery_actions(cx);
             match &view.session {
                 crate::ai::agent_chat::ui::AgentChatSession::Setup(_) => (
                     None,
@@ -857,7 +857,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
                         thread.standing_approvals().len(),
                         thread_summaries,
                         thread.fork_points().to_vec(),
-                        callout_actions,
+                        recovery_actions,
                     )
                 }
             }
@@ -870,7 +870,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
         standing_approval_count,
         thread_summaries,
         fork_points,
-        callout_actions,
+        recovery_actions,
     ) = agent_chat_context
         .unwrap_or_else(|| (None, Vec::new(), 0, Vec::new(), Vec::new(), Vec::new()));
 
@@ -891,7 +891,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
             theme_arc,
             crate::actions::AgentChatActionsDialogHost::Detached,
         );
-        dialog.prepend_root_route_actions(callout_actions.clone());
+        dialog.prepend_root_route_actions(recovery_actions.clone());
         dialog.set_skip_track_focus(true);
         dialog
     });
@@ -1326,12 +1326,12 @@ fn dispatch_detached_action(
     }
 
     match action_id {
-        super::view::AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID
-        | super::view::AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID
-        | super::view::AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID => {
+        super::view::AGENT_CHAT_RECOVERY_SIGN_IN_ACTION_ID
+        | super::view::AGENT_CHAT_RECOVERY_SWITCH_ACCOUNT_ACTION_ID
+        | super::view::AGENT_CHAT_RECOVERY_COPY_DETAILS_ACTION_ID => {
             if let Some(entity) = entity_weak.upgrade() {
                 entity.update(cx, |chat, cx| {
-                    let _ = chat.dispatch_active_callout_action(action_id, cx);
+                    let _ = chat.dispatch_ai_recovery_action(action_id, cx);
                 });
             }
         }

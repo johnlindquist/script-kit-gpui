@@ -162,7 +162,7 @@ pub fn classify_provider_failure(
         })
     } else if requires_newer_client(&normalized) {
         AiFailureKind::Capability(CapabilityFailure::ClientTooOld {
-            client: client_for_component(context.component),
+            client: client_for_failure_text(&normalized, context.component),
             model: context
                 .model
                 .clone()
@@ -499,6 +499,18 @@ fn client_for_component(component: ProtocolComponent) -> ClientKind {
         ProtocolComponent::Mdflow => ClientKind::Mdflow,
         ProtocolComponent::LocalLlm => ClientKind::LocalLlm,
         ProtocolComponent::Provider => ClientKind::Other,
+    }
+}
+
+fn client_for_failure_text(value: &str, component: ProtocolComponent) -> ClientKind {
+    if value.contains("codex") {
+        ClientKind::Codex
+    } else if value.contains("mdflow") {
+        ClientKind::Mdflow
+    } else if value.contains(" pi ") || value.starts_with("pi ") {
+        ClientKind::Pi
+    } else {
+        client_for_component(component)
     }
 }
 

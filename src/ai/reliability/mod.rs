@@ -32,6 +32,7 @@ pub use classify::{
     ProcessFailureFacts, ProtocolFailureFacts,
 };
 pub(crate) use devtools::{
+    ai_operation_state_snapshot, ai_reliability_fixture_for_target,
     ai_reliability_fixture_snapshot, ai_reliability_snapshot_for_target, redacted_fingerprint,
     set_ai_reliability_fixture,
 };

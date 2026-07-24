@@ -24,7 +24,12 @@ use crate::components::text_input::{
     render_text_input_cursor_selection, TextHighlightRange, TextInlinePillRange,
     TextInputRenderConfig, TextSelection,
 };
+use crate::components::{render_ai_recovery_card, AiRecoveryCardHandlers};
 use crate::theme::{self, AppChromeColors, PromptColors};
+use sk_protocol::ai_reliability::{
+    AiCommand, AiRecoveryAction, AuthRecoveryMode, ConfigurationTargetKind, RecoveryActionKind,
+    RecoveryEffectResult,
+};
 
 use super::composer_state::{
     reduce_agent_chat_composer_picker, AgentChatComposerPickerDismissReason,
@@ -36,7 +41,7 @@ use super::history_popup::{
     HISTORY_POPUP_SEARCH_LIMIT,
 };
 use super::thread::{
-    decide_agent_chat_cwd_resolution, AgentChatCalloutSeverity, AgentChatContextBootstrapState,
+    decide_agent_chat_cwd_resolution, AgentChatContextBootstrapState,
     AgentChatCwdResolutionDecision, AgentChatHostWindowKind, AgentChatHostWindowState,
     AgentChatThread, AgentChatThreadMessage, AgentChatThreadMessageRole, AgentChatThreadStatus,
 };
@@ -1024,17 +1029,9 @@ pub(crate) struct AgentChatTestProbe {
 
 use crate::protocol::AGENT_CHAT_TEST_PROBE_MAX_EVENTS;
 
-pub(crate) const AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID: &str = "agent_chat-callout-sign-in";
-pub(crate) const AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID: &str =
-    "agent_chat-callout-switch-account";
-pub(crate) const AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID: &str = "agent_chat-callout-copy-error";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AgentChatCalloutRenderModel {
-    severity: AgentChatCalloutSeverity,
-    title: SharedString,
-    detail: SharedString,
-}
+pub(crate) const AGENT_CHAT_RECOVERY_SIGN_IN_ACTION_ID: &str = "ai-recovery-sign-in";
+pub(crate) const AGENT_CHAT_RECOVERY_SWITCH_ACCOUNT_ACTION_ID: &str = "ai-recovery-switch-account";
+pub(crate) const AGENT_CHAT_RECOVERY_COPY_DETAILS_ACTION_ID: &str = "ai-recovery-copy-details";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AgentChatSpineProfileAcceptanceEffect {
@@ -1703,8 +1700,10 @@ impl AgentChatView {
         };
         let is_main_window = target.kind == crate::protocol::AutomationWindowKind::Main;
         let is_setup_mode = self.is_setup_mode();
-        let runtime_setup_active =
-            !is_setup_mode && self.live_thread().read(cx).setup_state().is_some();
+        let runtime_setup_active = !is_setup_mode && {
+            let thread = self.live_thread().read(cx);
+            thread.setup_state().is_some() && thread.recovery_card_spec().is_none()
+        };
         let focused_text_active = self.is_focused_text_mini() && !is_setup_mode;
         let footer_inputs = AgentChatFooterInputs {
             uses_external_footer_host: self.uses_external_footer_host(),
@@ -2431,9 +2430,7 @@ impl AgentChatView {
                 });
             }
             AgentChatThreadStatus::Idle | AgentChatThreadStatus::Error => {
-                if let Some(retry) =
-                    Self::retry_footer_button(thread.status, thread.active_callout())
-                {
+                if let Some(retry) = Self::retry_footer_button(thread) {
                     buttons.push(retry);
                 }
                 let input = thread.input.text();
@@ -2483,19 +2480,17 @@ impl AgentChatView {
         buttons
     }
 
-    fn retryable_callout_active(
-        status: AgentChatThreadStatus,
-        callout: Option<&super::thread::AgentChatCallout>,
-    ) -> bool {
-        matches!(status, AgentChatThreadStatus::Error)
-            && callout.is_some_and(|callout| callout.can_retry)
+    fn retryable_recovery_active(thread: &AgentChatThread) -> bool {
+        matches!(thread.status, AgentChatThreadStatus::Error)
+            && thread.recovery_card_spec().is_some_and(|spec| {
+                spec.actions.iter().any(|action| {
+                    action.enabled && action.action.kind() == RecoveryActionKind::Retry
+                })
+            })
     }
 
-    fn retry_footer_button(
-        status: AgentChatThreadStatus,
-        callout: Option<&super::thread::AgentChatCallout>,
-    ) -> Option<AgentChatFooterButtonSpec> {
-        Self::retryable_callout_active(status, callout).then_some(AgentChatFooterButtonSpec {
+    fn retry_footer_button(thread: &AgentChatThread) -> Option<AgentChatFooterButtonSpec> {
+        Self::retryable_recovery_active(thread).then_some(AgentChatFooterButtonSpec {
             action: crate::footer_popup::FooterAction::Retry,
             key: "⌘⇧R",
             label: "Retry",
@@ -4330,7 +4325,7 @@ impl AgentChatView {
         index: usize,
     ) -> &'static str {
         if action == crate::footer_popup::FooterAction::Retry {
-            "agent_chat-callout-retry"
+            "ai-recovery-retry"
         } else if index == 0 {
             "agent-chat-footer-leading-slot"
         } else {
@@ -6096,7 +6091,7 @@ impl AgentChatView {
             AgentChatCwdResolutionDecision::Unchanged => return true,
             AgentChatCwdResolutionDecision::BlockInFlight => {
                 thread_entity.update(cx, |thread, cx| {
-                    thread.set_notice_callout(
+                    thread.push_notice(
                         "Working directory not changed",
                         "Wait for the current Agent Chat turn to finish, then pick the directory again.",
                         cx,
@@ -6125,7 +6120,7 @@ impl AgentChatView {
                 Ok(launch) => launch,
                 Err(error) => {
                     thread_entity.update(cx, |thread, cx| {
-                        thread.set_notice_callout(
+                        thread.push_notice(
                             "Working directory not changed",
                             format!("Failed to resolve Pi Agent Chat session: {error}"),
                             cx,
@@ -6146,7 +6141,7 @@ impl AgentChatView {
             Ok(result) => result,
             Err(error) => {
                 thread_entity.update(cx, |thread, cx| {
-                    thread.set_notice_callout(
+                    thread.push_notice(
                         "Working directory not changed",
                         format!("Failed to start Pi Agent Chat session: {error}"),
                         cx,
@@ -6377,9 +6372,10 @@ impl AgentChatView {
             message_count: thread.messages.len(),
             composer_fingerprint: Some(composer_fingerprint),
             transcript_fingerprint: Some(transcript_fingerprint),
-            reliability: Some(crate::ai::reliability::ai_reliability_snapshot_for_target(
-                "main",
-                crate::protocol::AutomationWindowKind::Main,
+            reliability: Some(crate::ai::reliability::ai_operation_state_snapshot(
+                "agentChat",
+                thread.reliability_state(),
+                thread.recovery_card_spec().as_ref(),
             )),
             retained_thread_count: self.retained_threads.len(),
             fork_point_count: thread.fork_points().len(),
@@ -11279,205 +11275,290 @@ impl AgentChatView {
         }
     }
 
-    pub(crate) fn active_callout_actions(&self, cx: &App) -> Vec<crate::actions::Action> {
+    pub(crate) fn ai_recovery_actions(&self, cx: &App) -> Vec<crate::actions::Action> {
         let thread = self.live_thread().read(cx);
-        Self::active_callout_action_specs(thread.active_callout())
+        Self::recovery_action_specs(thread.recovery_card_spec().as_ref())
     }
 
-    fn active_callout_action_specs(
-        callout: Option<&super::thread::AgentChatCallout>,
+    fn recovery_action_specs(
+        spec: Option<&crate::ai::reliability::AiRecoveryCardSpec>,
     ) -> Vec<crate::actions::Action> {
-        let Some(callout) = callout else {
+        let Some(spec) = spec else {
             return Vec::new();
         };
         use crate::actions::{Action, ActionCategory};
         use crate::designs::icon_variations::IconName;
 
-        let mut actions = Vec::new();
-        if callout.auth_recovery.is_some() {
-            actions.extend([
+        spec.actions
+            .iter()
+            .filter(|recovery| recovery.enabled)
+            .map(|recovery| {
+                let icon = match recovery.action.kind() {
+                    RecoveryActionKind::CopyDetails => IconName::Copy,
+                    RecoveryActionKind::Retry | RecoveryActionKind::CheckAgain => IconName::Refresh,
+                    RecoveryActionKind::ChooseCompatibleModel
+                    | RecoveryActionKind::ChooseProvider
+                    | RecoveryActionKind::ChooseProfile
+                    | RecoveryActionKind::ConfigureProvider
+                    | RecoveryActionKind::UpdateClient
+                    | RecoveryActionKind::SignIn
+                    | RecoveryActionKind::SwitchAccount
+                    | RecoveryActionKind::RepairComponent => IconName::Settings,
+                    RecoveryActionKind::UseCurrentResults
+                    | RecoveryActionKind::ContinueInAgentChat
+                    | RecoveryActionKind::Reattach
+                    | RecoveryActionKind::RethreadFlow
+                    | RecoveryActionKind::RestartFlowRun
+                    | RecoveryActionKind::TrimContext => IconName::ArrowRight,
+                };
                 Action::new(
-                    AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID,
-                    "Sign in again",
-                    Some("Repair the provider sign-in for this failed turn".to_string()),
+                    recovery.semantic_id,
+                    recovery.label.to_string(),
+                    Some("Recover this AI operation without losing your work".to_string()),
                     ActionCategory::ScriptContext,
                 )
-                .with_icon(IconName::Settings)
-                .with_section("Recovery"),
-                Action::new(
-                    AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID,
-                    "Switch account",
-                    Some("Choose a different provider account for this failed turn".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_icon(IconName::Settings)
-                .with_section("Recovery"),
-            ]);
-        }
-        if callout.raw_detail.is_some() {
-            actions.push(
-                Action::new(
-                    AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID,
-                    "Copy Error",
-                    Some("Copy the original provider error details".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_icon(IconName::Copy)
-                .with_section("Recovery"),
-            );
-        }
-        actions
+                .with_icon(icon)
+                .with_section("Recovery")
+            })
+            .collect()
     }
 
-    fn active_callout_render_model(
-        callout: &super::thread::AgentChatCallout,
-    ) -> AgentChatCalloutRenderModel {
-        AgentChatCalloutRenderModel {
-            severity: callout.severity,
-            title: callout.title.clone(),
-            detail: callout
-                .detail
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| "The provider could not complete this turn.".into()),
-        }
-    }
-
-    pub(crate) fn dispatch_active_callout_action(
+    pub(crate) fn dispatch_ai_recovery_action(
         &mut self,
         action_id: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        let (raw_detail, auth_recovery, selected_model_id) = {
+        let action = {
             let thread = self.live_thread().read(cx);
-            let Some(callout) = thread.active_callout() else {
-                return false;
-            };
-            (
-                callout.raw_detail.as_ref().map(ToString::to_string),
-                callout.auth_recovery,
-                thread.selected_model_id().map(str::to_string),
-            )
+            thread
+                .recovery_card_spec()
+                .and_then(|spec| {
+                    spec.actions
+                        .into_iter()
+                        .find(|action| action.semantic_id == action_id && action.enabled)
+                })
+                .map(|spec| spec.action)
         };
-
-        if action_id == AGENT_CHAT_CALLOUT_COPY_ERROR_ACTION_ID {
-            let Some(raw_detail) = raw_detail else {
-                return false;
-            };
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(raw_detail));
-            return true;
-        }
-
-        let recovery_action = match action_id {
-            AGENT_CHAT_CALLOUT_SIGN_IN_ACTION_ID => {
-                crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SignInAgain
-            }
-            AGENT_CHAT_CALLOUT_SWITCH_ACCOUNT_ACTION_ID => {
-                crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SwitchAccount
-            }
-            _ => return false,
-        };
-        if auth_recovery.is_none() {
-            return false;
-        }
-        let Some(provider) =
-            crate::ai::agent_chat::pi::auth_recovery::resolve_auth_recovery_provider(
-                selected_model_id.as_deref(),
-                raw_detail.as_deref(),
-            )
-        else {
+        let Some(action) = action else {
             return false;
         };
-        let Some(binary) = crate::ai::agent_chat::pi::binary::default_pi_binary() else {
-            return false;
-        };
-        if let Err(error) = crate::ai::agent_chat::pi::auth_recovery::launch_pi_auth_recovery(
-            binary,
-            provider,
-            recovery_action,
-        ) {
-            tracing::warn!(
-                target: "script_kit::agent_chat",
-                event = "agent_chat_auth_recovery_launch_failed",
-                action_id,
-                error = %error,
-            );
-        }
+        self.dispatch_recovery_action(action, cx);
         true
     }
 
-    fn render_active_callout(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let callout = {
-            let thread = self.live_thread().read(cx);
-            thread.active_callout().cloned()
+    fn dispatch_recovery_action(&mut self, action: AiRecoveryAction, cx: &mut Context<Self>) {
+        let commands = match self
+            .live_thread()
+            .update(cx, |thread, cx| thread.select_recovery_action(action, cx))
+        {
+            Ok(commands) => commands,
+            Err(error) => {
+                tracing::warn!(
+                    target: "script_kit::agent_chat",
+                    event = "agent_chat_recovery_transition_rejected",
+                    error_code = %error,
+                );
+                return;
+            }
         };
-        let Some(callout) = callout else {
-            return div().id("agent_chat-callout-empty").into_any_element();
-        };
-        let callout = Self::active_callout_render_model(&callout);
+        self.interpret_recovery_commands(commands, cx);
+    }
 
+    fn interpret_recovery_commands(&mut self, commands: Vec<AiCommand>, cx: &mut Context<Self>) {
+        for command in commands {
+            match command {
+                AiCommand::CopyRedactedDiagnostics(_) => {
+                    let receipt = {
+                        let thread = self.live_thread().read(cx);
+                        thread
+                            .reliability_state()
+                            .diagnostic
+                            .as_ref()
+                            .map(|diagnostic| {
+                                format!(
+                                    "AI recovery diagnostic\ncode={:?}\nfingerprint={}",
+                                    match &thread.reliability_state().phase {
+                                        sk_protocol::ai_reliability::AiPhase::AwaitingRecovery {
+                                            failure,
+                                            ..
+                                        } => failure.code,
+                                        _ => sk_protocol::ai_reliability::AiFailureCode::Unknown,
+                                    },
+                                    diagnostic.fingerprint.0
+                                )
+                            })
+                    };
+                    if let Some(receipt) = receipt {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(receipt));
+                    }
+                }
+                AiCommand::LaunchAuthentication(auth) => {
+                    let selected_model_id = self
+                        .live_thread()
+                        .read(cx)
+                        .selected_model_id()
+                        .map(str::to_string);
+                    let action = match auth.mode {
+                        AuthRecoveryMode::SignIn => {
+                            crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SignInAgain
+                        }
+                        AuthRecoveryMode::SwitchAccount => {
+                            crate::ai::agent_chat::pi::auth_recovery::PiAuthRecoveryAction::SwitchAccount
+                        }
+                    };
+                    let launched =
+                        crate::ai::agent_chat::pi::auth_recovery::resolve_auth_recovery_provider(
+                            selected_model_id.as_deref(),
+                            None,
+                        )
+                        .zip(crate::ai::agent_chat::pi::binary::default_pi_binary())
+                        .is_some_and(|(provider, binary)| {
+                            crate::ai::agent_chat::pi::auth_recovery::launch_pi_auth_recovery(
+                                binary, provider, action,
+                            )
+                            .is_ok()
+                        });
+                    if launched {
+                        self.live_thread().update(cx, |thread, cx| {
+                            thread.complete_recovery_command(
+                                auth.command_id,
+                                RecoveryEffectResult::ExternalActionLaunched,
+                                cx,
+                            );
+                        });
+                    } else {
+                        let failure = crate::ai::reliability::provider_failure(
+                            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                            "authentication recovery could not start",
+                        );
+                        self.live_thread().update(cx, |thread, cx| {
+                            thread.fail_recovery_command(auth.command_id, failure.failure, cx);
+                        });
+                    }
+                }
+                AiCommand::OpenConfiguration(target) => match target.kind {
+                    ConfigurationTargetKind::Model
+                    | ConfigurationTargetKind::Provider
+                    | ConfigurationTargetKind::Profile => {
+                        self.open_profile_trigger_picker(cx);
+                    }
+                    ConfigurationTargetKind::Context => {
+                        self.live_thread().update(cx, |thread, cx| {
+                            thread.clear_pending_context_for_new_entry_intent(cx);
+                            thread.complete_recovery_command(
+                                target.command_id,
+                                RecoveryEffectResult::ContextTrimmed,
+                                cx,
+                            );
+                        });
+                    }
+                    ConfigurationTargetKind::Mdflow => {}
+                },
+                AiCommand::RecheckClientCapability(check) => {
+                    self.live_thread().update(cx, |thread, cx| {
+                        thread.complete_recovery_command(
+                            check.command_id,
+                            RecoveryEffectResult::CapabilityRechecked,
+                            cx,
+                        );
+                        if let Err(error) = thread.resume_recovered_turn_from_view(cx) {
+                            tracing::warn!(
+                                target: "script_kit::agent_chat",
+                                event = "agent_chat_recovery_resume_failed",
+                                error_code = %error,
+                            );
+                        }
+                    });
+                }
+                AiCommand::OpenClientUpdate(update) => {
+                    let url = match update.client {
+                        sk_protocol::ai_reliability::ClientKind::Codex => {
+                            "https://github.com/openai/codex/releases/latest"
+                        }
+                        sk_protocol::ai_reliability::ClientKind::Pi
+                        | sk_protocol::ai_reliability::ClientKind::Mdflow
+                        | sk_protocol::ai_reliability::ClientKind::LocalLlm
+                        | sk_protocol::ai_reliability::ClientKind::Other => {
+                            "https://scriptkit.com/"
+                        }
+                    };
+                    match std::process::Command::new("open").arg(url).spawn() {
+                        Ok(_) => {
+                            self.live_thread().update(cx, |thread, cx| {
+                                thread.complete_recovery_command(
+                                    update.command_id,
+                                    RecoveryEffectResult::ExternalActionLaunched,
+                                    cx,
+                                );
+                            });
+                        }
+                        Err(error) => {
+                            let failure = crate::ai::reliability::provider_failure(
+                                sk_protocol::ai_reliability::ProtocolComponent::Codex,
+                                format!("client update page could not open: {error}"),
+                            );
+                            self.live_thread().update(cx, |thread, cx| {
+                                thread.fail_recovery_command(
+                                    update.command_id,
+                                    failure.failure,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                }
+                AiCommand::InstallOrRepairComponent(_) => {
+                    self.open_profile_trigger_picker(cx);
+                }
+                AiCommand::PersistWork(_)
+                | AiCommand::CheckCapabilities(_)
+                | AiCommand::StartTurn(_)
+                | AiCommand::CancelTurn { .. }
+                | AiCommand::ScheduleBackoff { .. }
+                | AiCommand::ApplySelection(_)
+                | AiCommand::ReattachSession(_)
+                | AiCommand::RethreadFlow(_)
+                | AiCommand::RestartFlowRun(_)
+                | AiCommand::ContinueInAgentChat(_)
+                | AiCommand::ClearPendingWork(_)
+                | AiCommand::ScheduleRecoveredDismiss => {}
+            }
+        }
+    }
+
+    fn render_ai_recovery(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let spec = {
+            let thread = self.live_thread().read(cx);
+            thread.recovery_card_spec()
+        };
+        let Some(spec) = spec else {
+            return div().id("agent-chat-recovery-empty").into_any_element();
+        };
         let theme = theme::get_cached_theme();
-        let colors = PromptColors::from_theme(&theme);
-        let accent = match callout.severity {
-            AgentChatCalloutSeverity::Error => theme.colors.ui.error,
+        let weak = cx.entity().downgrade();
+        let action_weak = weak.clone();
+        let dismiss_weak = weak;
+        let handlers = AiRecoveryCardHandlers {
+            on_action: Rc::new(move |action, _window, cx| {
+                if let Some(entity) = action_weak.upgrade() {
+                    entity.update(cx, |view, cx| view.dispatch_recovery_action(action, cx));
+                }
+            }),
+            on_dismiss: Some(Rc::new(move |_window, cx| {
+                if let Some(entity) = dismiss_weak.upgrade() {
+                    entity.update(cx, |view, cx| {
+                        view.live_thread()
+                            .update(cx, |thread, cx| thread.dismiss_recovery(cx));
+                    });
+                }
+            })),
         };
         div()
-            .id("agent_chat-callout-stack")
+            .id("agent-chat-recovery-stack")
             .w_full()
             .px(px(12.0))
             .pb(px(6.0))
-            .child(
-                div()
-                    .id("agent_chat-active-callout")
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .bg(rgba((theme.colors.ui.border << 8) | 0x10))
-                    .border_1()
-                    .border_color(rgba((theme.colors.ui.border << 8) | 0x28))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(div().text_xs().text_color(rgb(accent)).child("⚠"))
-                            .child(
-                                div()
-                                    .flex_grow()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text_primary))
-                                    .child(callout.title),
-                            )
-                            .child(
-                                div()
-                                    .id("agent_chat-callout-dismiss")
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .px(px(5.0))
-                                    .py(px(1.0))
-                                    .rounded(px(999.0))
-                                    .text_color(rgba((theme.colors.text.muted << 8) | 0x70))
-                                    .hover(|el| el.bg(rgba((theme.colors.ui.border << 8) | 0x18)))
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.live_thread().update(cx, |thread, cx| {
-                                            thread.dismiss_active_callout(cx)
-                                        });
-                                    }))
-                                    .child("×"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .text_color(rgb(colors.text_secondary))
-                            .child(callout.detail),
-                    ),
-            )
+            .child(render_ai_recovery_card(spec, &theme, handlers))
             .into_any_element()
     }
 
@@ -15035,7 +15116,7 @@ impl AgentChatView {
             return;
         }
 
-        // ── Cmd+Shift+R → retry an active failed-turn callout ───
+        // ── Cmd+Shift+R → retry an active failed-turn recovery ───
         if self.focused_text.is_none()
             && modifiers.platform
             && modifiers.shift
@@ -15044,7 +15125,7 @@ impl AgentChatView {
             && key.eq_ignore_ascii_case("r")
             && {
                 let thread = self.live_thread().read(cx);
-                Self::retryable_callout_active(thread.status, thread.active_callout())
+                Self::retryable_recovery_active(thread)
             }
         {
             self.retry_last_user_turn(cx);
@@ -16008,7 +16089,7 @@ impl Render for AgentChatView {
                     None
                 },
             ));
-            pre_main.push(self.render_active_callout(cx));
+            pre_main.push(self.render_ai_recovery(cx));
             if let Some((query, current_idx)) = self.search_state.clone() {
                 let match_count = if query.is_empty() {
                     0
@@ -16167,7 +16248,7 @@ impl Render for AgentChatView {
         }
 
         // WP6: bottom-dock shell (BottomDock/DenseLog/Sidecar). The composer is
-        // resolved to the bottom slot, so the transient queue/callout lanes are
+        // resolved to the bottom slot, so the transient queue/recovery lanes are
         // reserved ONCE, just above the composer, and the footer routes through
         // the single resolved owner. (Standard/Quick AI/header-composer
         // variants returned above; FocusedTextMini returned earlier.)
@@ -16310,7 +16391,7 @@ impl Render for AgentChatView {
                 None
             },
         ))
-        .child(self.render_active_callout(cx))
+        .child(self.render_ai_recovery(cx))
         // WP6: bottom docking renders ONLY the input shell (no second
         // header context zone) — the resolved model owns the placement.
         .when(resolved_layout.composer_at_bottom(), |d| {

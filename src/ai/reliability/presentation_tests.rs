@@ -359,3 +359,38 @@ fn dismissal_projection_does_not_mutate_work_or_diagnostics() {
     assert_eq!(state.work, before_work);
     assert_eq!(state.diagnostic, before_diagnostic);
 }
+
+#[test]
+fn codex_upgrade_failure_has_crystal_clear_saved_turn_copy() {
+    let failure = AiFailure::new(
+        AiFailureKind::Capability(CapabilityFailure::ClientTooOld {
+            client: ClientKind::Codex,
+            model: Some("gpt-5.6-sol".into()),
+        }),
+        RetrySafety::Never,
+    );
+    let state = state_with(
+        failure,
+        vec![
+            option(
+                RecoveryActionKind::ChooseCompatibleModel,
+                RecoveryRole::Primary,
+                true,
+            ),
+            option(
+                RecoveryActionKind::UpdateClient,
+                RecoveryRole::Secondary,
+                true,
+            ),
+        ],
+    );
+    let spec = project_recovery(&identity(), &state, &Default::default()).unwrap();
+    assert_eq!(spec.title.as_ref(), "Codex needs an update for this model");
+    assert!(spec.body.contains("Your turn is saved"));
+    assert!(spec.actions.iter().any(|action| {
+        action.enabled && action.action.kind() == RecoveryActionKind::ChooseCompatibleModel
+    }));
+    assert!(spec.actions.iter().all(|action| {
+        !action.label.contains('{') && !action.label.contains("invalid_request_error")
+    }));
+}

@@ -20,6 +20,19 @@ use crate::components::text_input::TextInputState;
 use crate::protocol::AiMessageInfo;
 
 use crate::ai::agent_chat::runtime::{AgentChatConnection, AgentChatTurnRequest};
+use crate::ai::reliability::{
+    process_failure, project_recovery, provider_failure, redacted_fingerprint, AiRecoveryCardSpec,
+    AppFailureRecord, ProcessFailureFacts, SurfaceRecoveryCapabilities,
+};
+use sk_protocol::ai_reliability::{
+    transition, AiCommand, AiFailure, AiFailureKind, AiModelSelection, AiOperationEvent,
+    AiOperationState, AiPhase, AiPhaseTag, AiRecoveryAction, AiSelectionState, AiSurfaceIdentity,
+    AiWorkSnapshot, CapabilityDecision, CapabilityFailure, CompletionKind, Fingerprint,
+    InvalidTransition, ModelAvailabilityReason, ModelId, PartialOutputState, PreservationReceipt,
+    ProfileId, ProtocolComponent, ProviderId, RecoveryActionKind, RecoveryEffectResult,
+    RetryPolicy, RetrySafety, SelectionChangeReceipt, SelectionOrigin, TurnRef, TurnRequestRef,
+    TurnRisk, WorkKey,
+};
 
 use super::capabilities::{
     classify_context_part, AgentChatContextClass, AgentChatSessionPolicy, ContextAdmissionError,
@@ -132,100 +145,6 @@ pub(crate) enum AgentChatHostWindowKind {
 pub(crate) struct AgentChatHostWindowState {
     pub(crate) kind: AgentChatHostWindowKind,
     pub(crate) key: bool,
-}
-
-/// Severity for the active composer callout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentChatCalloutSeverity {
-    Error,
-}
-
-/// Provider authentication recovery offered by a failed-turn callout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentChatAuthRecovery {
-    /// The current account cannot continue because its usage allowance is exhausted.
-    UsageLimitReached,
-    /// The provider rejected or no longer recognizes the current credentials.
-    AuthenticationRequired,
-}
-
-/// Dismissable, actionable callout rendered above the composer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentChatCallout {
-    pub(crate) severity: AgentChatCalloutSeverity,
-    pub(crate) title: SharedString,
-    pub(crate) detail: Option<SharedString>,
-    /// Original provider payload retained for diagnostics and Copy Error.
-    pub(crate) raw_detail: Option<SharedString>,
-    pub(crate) can_retry: bool,
-    pub(crate) auth_recovery: Option<AgentChatAuthRecovery>,
-}
-
-impl AgentChatCallout {
-    fn failed(error: impl Into<SharedString>, can_retry: bool) -> Self {
-        let raw_error = error.into();
-        let presentation = agent_chat_failure_presentation(raw_error.as_ref());
-        Self {
-            severity: AgentChatCalloutSeverity::Error,
-            title: presentation.title.into(),
-            detail: Some(presentation.message.into()),
-            raw_detail: Some(raw_error),
-            can_retry,
-            auth_recovery: presentation.auth_recovery,
-        }
-    }
-
-    fn notice(title: impl Into<SharedString>, detail: impl Into<SharedString>) -> Self {
-        Self {
-            severity: AgentChatCalloutSeverity::Error,
-            title: title.into(),
-            detail: Some(detail.into()),
-            raw_detail: None,
-            can_retry: false,
-            auth_recovery: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentChatFailurePresentation {
-    title: String,
-    message: String,
-    auth_recovery: Option<AgentChatAuthRecovery>,
-}
-
-fn agent_chat_failure_presentation(error: &str) -> AgentChatFailurePresentation {
-    let normalized = error.to_ascii_lowercase();
-    if normalized.contains("usage_limit_reached")
-        || normalized.contains("usage limit reached")
-        || normalized.contains("usage limit has been reached")
-    {
-        return AgentChatFailurePresentation {
-            title: "Account usage limit reached".to_string(),
-            message: "This provider account cannot continue right now. Switch accounts, or sign in again after changing the account in your browser, then retry.".to_string(),
-            auth_recovery: Some(AgentChatAuthRecovery::UsageLimitReached),
-        };
-    }
-
-    if normalized.contains("authentication_required")
-        || normalized.contains("authentication required")
-        || normalized.contains("invalid_api_key")
-        || normalized.contains("invalid api key")
-        || normalized.contains("unauthorized")
-        || normalized.contains("http 401")
-    {
-        return AgentChatFailurePresentation {
-            title: "Provider sign-in required".to_string(),
-            message: "Your provider sign-in is missing or expired. Sign in again, or switch accounts, then retry.".to_string(),
-            auth_recovery: Some(AgentChatAuthRecovery::AuthenticationRequired),
-        };
-    }
-
-    AgentChatFailurePresentation {
-        title: "Turn failed".to_string(),
-        message: error.to_string(),
-        auth_recovery: None,
-    }
 }
 
 /// Role for a message in the thread history.
@@ -518,11 +437,12 @@ pub(crate) struct AgentChatThread {
     pub(crate) input: TextInputState,
     /// Current thread status.
     pub(crate) status: AgentChatThreadStatus,
+    /// Provider-independent authority for submit, runtime, failure, cancellation,
+    /// and recovery. `status` is a compatibility projection for existing UI.
+    reliability_state: AiOperationState,
     /// Monotonic identity for background submit preparation. A cancellation
     /// or newer submit invalidates any late resolution result.
     context_resolution_id: u64,
-    /// Active composer callout, rendered above the composer until dismissed or superseded.
-    active_callout: Option<AgentChatCallout>,
     /// Pending permission request awaiting user decision.
     pub(crate) pending_permission: Option<AgentChatApprovalRequest>,
 
@@ -652,6 +572,223 @@ pub(crate) struct AgentChatThread {
 }
 
 impl AgentChatThread {
+    fn provider_id_from_model(model_id: Option<&str>) -> Option<ProviderId> {
+        model_id
+            .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
+            .filter(|provider| !provider.is_empty())
+            .map(ProviderId::from)
+    }
+
+    fn reliability_identity(
+        profile_id: &str,
+        model_id: Option<&str>,
+        cwd: &Path,
+    ) -> AiSurfaceIdentity {
+        AiSurfaceIdentity::AgentChat {
+            profile_id: ProfileId::from(profile_id),
+            provider_id: Self::provider_id_from_model(model_id),
+            model_id: model_id.map(ModelId::from),
+            cwd_fingerprint: Fingerprint(redacted_fingerprint(&cwd.to_string_lossy())),
+        }
+    }
+
+    fn reliability_selection(
+        profile_id: &str,
+        model_id: Option<&str>,
+        origin: SelectionOrigin,
+    ) -> AiSelectionState {
+        let selection = AiModelSelection {
+            provider_id: Self::provider_id_from_model(model_id),
+            model_id: model_id.map(ModelId::from),
+            profile_id: Some(ProfileId::from(profile_id)),
+        };
+        AiSelectionState {
+            requested: Some(selection.clone()),
+            effective: Some(selection),
+            origin,
+            acknowledged_change: None,
+        }
+    }
+
+    fn preserved(value: &str) -> PreservationReceipt {
+        PreservationReceipt::Preserved {
+            fingerprint: Fingerprint(redacted_fingerprint(value)),
+        }
+    }
+
+    fn current_work_snapshot(&self) -> AiWorkSnapshot {
+        let transcript = self
+            .messages
+            .iter()
+            .map(|message| format!("{:?}:{}", message.role, message.body))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let partial = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                matches!(
+                    message.role,
+                    AgentChatThreadMessageRole::Assistant | AgentChatThreadMessageRole::Thought
+                )
+            })
+            .map(|message| message.body.to_string());
+        AiWorkSnapshot {
+            key: WorkKey::from(self.ui_thread_id.clone()),
+            transcript: Self::preserved(&transcript),
+            draft: Self::preserved(self.input.text()),
+            attachments: if self.pending_context_parts.is_empty()
+                && self.pending_context_blocks.is_empty()
+            {
+                PreservationReceipt::NotApplicable
+            } else {
+                Self::preserved(&format!(
+                    "{}:{}",
+                    self.pending_context_parts.len(),
+                    self.pending_context_blocks.len()
+                ))
+            },
+            partial_output: partial
+                .as_deref()
+                .map(Self::preserved)
+                .unwrap_or(PreservationReceipt::NotApplicable),
+        }
+    }
+
+    fn sync_status_from_reliability(&mut self) {
+        self.status = match self.reliability_state.phase {
+            AiPhase::Preflighting { .. } | AiPhase::Running { .. } | AiPhase::Cancelling { .. } => {
+                AgentChatThreadStatus::Streaming
+            }
+            AiPhase::AwaitingRecovery { .. } | AiPhase::Recovering { .. } => {
+                AgentChatThreadStatus::Error
+            }
+            AiPhase::Ready
+            | AiPhase::Recovered { .. }
+            | AiPhase::Succeeded { .. }
+            | AiPhase::Cancelled { .. }
+            | AiPhase::Dismissed { .. } => AgentChatThreadStatus::Idle,
+        };
+    }
+
+    fn transition_reliability(
+        &mut self,
+        event: AiOperationEvent,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<AiCommand>, InvalidTransition> {
+        let transition = transition(self.reliability_state.clone(), event)?;
+        self.reliability_state = transition.next;
+        self.sync_status_from_reliability();
+        cx.notify();
+        Ok(transition.commands)
+    }
+
+    fn reset_reliability_for_new_turn(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(), InvalidTransition> {
+        match self.reliability_state.phase.tag() {
+            AiPhaseTag::Ready => Ok(()),
+            AiPhaseTag::AwaitingRecovery => {
+                self.transition_reliability(AiOperationEvent::DismissRequested, cx)?;
+                self.transition_reliability(AiOperationEvent::ResetForNextTurn, cx)?;
+                Ok(())
+            }
+            AiPhaseTag::Recovered
+            | AiPhaseTag::Succeeded
+            | AiPhaseTag::Cancelled
+            | AiPhaseTag::Dismissed => {
+                self.transition_reliability(AiOperationEvent::ResetForNextTurn, cx)?;
+                Ok(())
+            }
+            AiPhaseTag::Preflighting
+            | AiPhaseTag::Running
+            | AiPhaseTag::Cancelling
+            | AiPhaseTag::Recovering => Ok(()),
+        }
+    }
+
+    fn begin_reliability_turn(
+        &mut self,
+        capability: CapabilityDecision,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<sk_protocol::ai_reliability::CommandId>, String> {
+        self.reset_reliability_for_new_turn(cx)
+            .map_err(|error| format!("ai_reliability_reset:{:?}", error.reason))?;
+        let request = TurnRequestRef::from(format!(
+            "{}:{}",
+            self.ui_thread_id,
+            self.current_turn_id.wrapping_add(1)
+        ));
+        let selection = Self::reliability_selection(
+            &self.profile_id,
+            self.selected_model_id.as_deref(),
+            SelectionOrigin::PersistedUserChoice,
+        );
+        let work = self.current_work_snapshot();
+        self.transition_reliability(
+            AiOperationEvent::SubmitRequested {
+                request,
+                work,
+                selection,
+                risk: TurnRisk::MayMutate,
+            },
+            cx,
+        )
+        .map_err(|error| format!("ai_reliability_submit:{:?}", error.reason))?;
+        let commands = self
+            .transition_reliability(AiOperationEvent::CapabilityResolved(capability), cx)
+            .map_err(|error| format!("ai_reliability_preflight:{:?}", error.reason))?;
+        Ok(commands.into_iter().find_map(|command| match command {
+            AiCommand::StartTurn(command) => Some(command.command_id),
+            AiCommand::PersistWork(_)
+            | AiCommand::CheckCapabilities(_)
+            | AiCommand::CancelTurn { .. }
+            | AiCommand::ScheduleBackoff { .. }
+            | AiCommand::ApplySelection(_)
+            | AiCommand::LaunchAuthentication(_)
+            | AiCommand::OpenConfiguration(_)
+            | AiCommand::OpenClientUpdate(_)
+            | AiCommand::RecheckClientCapability(_)
+            | AiCommand::ReattachSession(_)
+            | AiCommand::RethreadFlow(_)
+            | AiCommand::RestartFlowRun(_)
+            | AiCommand::ContinueInAgentChat(_)
+            | AiCommand::InstallOrRepairComponent(_)
+            | AiCommand::CopyRedactedDiagnostics(_)
+            | AiCommand::ClearPendingWork(_)
+            | AiCommand::ScheduleRecoveredDismiss => None,
+        }))
+    }
+
+    pub(crate) fn reliability_state(&self) -> &AiOperationState {
+        &self.reliability_state
+    }
+
+    pub(crate) fn recovery_card_spec(&self) -> Option<AiRecoveryCardSpec> {
+        let capabilities = SurfaceRecoveryCapabilities::only([
+            RecoveryActionKind::Retry,
+            RecoveryActionKind::ChooseCompatibleModel,
+            RecoveryActionKind::ChooseProvider,
+            RecoveryActionKind::ChooseProfile,
+            RecoveryActionKind::UpdateClient,
+            RecoveryActionKind::CheckAgain,
+            RecoveryActionKind::SignIn,
+            RecoveryActionKind::SwitchAccount,
+            RecoveryActionKind::ConfigureProvider,
+            RecoveryActionKind::RepairComponent,
+            RecoveryActionKind::TrimContext,
+            RecoveryActionKind::CopyDetails,
+        ])
+        .layout(crate::ai::reliability::AiRecoveryLayout::ComposerInline);
+        project_recovery(
+            &self.reliability_state.identity,
+            &self.reliability_state,
+            &capabilities,
+        )
+    }
+
     pub(crate) fn set_cwd(&mut self, cwd: PathBuf) {
         self.cwd = cwd;
     }
@@ -781,7 +918,11 @@ impl AgentChatThread {
     /// Fail the current turn closed because the backend tried to run a tool the
     /// session policy forbids. Cancels the live turn and surfaces a generic
     /// policy error — the raw tool args are NEVER rendered.
-    fn fail_turn_forbidden_tool(&mut self, tool_name: Option<&str>) {
+    fn fail_turn_forbidden_tool(
+        &mut self,
+        tool_name: Option<&str>,
+        cx: Option<&mut Context<Self>>,
+    ) {
         tracing::error!(
             target: "script_kit::quick_ai",
             event = "quick_ai_forbidden_tool_rejected",
@@ -789,10 +930,13 @@ impl AgentChatThread {
             tool_name = ?tool_name,
         );
         let _ = self.connection.cancel_turn(self.ui_thread_id.clone());
-        self.active_callout = Some(AgentChatCallout::failed(
-            "This response tried to use a tool that isn't available here.",
-            false,
-        ));
+        let failure = provider_failure(
+            ProtocolComponent::Provider,
+            "tool denied by Agent Chat session policy",
+        );
+        if let Some(cx) = cx {
+            let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
+        }
         self.push_message(
             AgentChatThreadMessageRole::Error,
             "Blocked a tool call that isn't allowed in this mode.",
@@ -800,13 +944,18 @@ impl AgentChatThread {
         self.set_status(AgentChatThreadStatus::Error);
     }
 
-    pub(crate) fn set_notice_callout(
+    pub(crate) fn push_notice(
         &mut self,
         title: impl Into<SharedString>,
         detail: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        self.active_callout = Some(AgentChatCallout::notice(title, detail));
+        let title: SharedString = title.into();
+        let detail: SharedString = detail.into();
+        self.push_message(
+            AgentChatThreadMessageRole::System,
+            format!("{title}: {detail}"),
+        );
         cx.notify();
     }
 
@@ -849,7 +998,22 @@ impl AgentChatThread {
         self.setup_state = None;
         self.usage_tokens = None;
         self.usage_cost_usd = None;
-        self.active_callout = None;
+        let _ = self.transition_reliability(
+            AiOperationEvent::SessionReplaced {
+                identity: Self::reliability_identity(
+                    &self.profile_id,
+                    self.selected_model_id.as_deref(),
+                    &self.cwd,
+                ),
+                selection: Self::reliability_selection(
+                    &self.profile_id,
+                    self.selected_model_id.as_deref(),
+                    SelectionOrigin::PersistedUserChoice,
+                ),
+                work: self.current_work_snapshot(),
+            },
+            cx,
+        );
         self.set_status(AgentChatThreadStatus::Idle);
         self.bump_transcript_generation("cwd_respawn");
         cx.notify();
@@ -865,6 +1029,37 @@ impl AgentChatThread {
         init: AgentChatThreadInit,
         cx: &mut Context<Self>,
     ) -> Self {
+        let reliability_state = AiOperationState::ready(
+            Self::reliability_identity(
+                &init.profile_id,
+                init.selected_model_id.as_deref(),
+                &init.cwd,
+            ),
+            Self::reliability_selection(
+                &init.profile_id,
+                init.selected_model_id.as_deref(),
+                SelectionOrigin::PersistedUserChoice,
+            ),
+            AiWorkSnapshot {
+                key: WorkKey::from(init.ui_thread_id.clone()),
+                transcript: PreservationReceipt::NotApplicable,
+                draft: init
+                    .initial_input
+                    .as_deref()
+                    .map(Self::preserved)
+                    .unwrap_or(PreservationReceipt::NotApplicable),
+                attachments: if init.initial_context_parts.is_empty() {
+                    PreservationReceipt::NotApplicable
+                } else {
+                    Self::preserved(&init.initial_context_parts.len().to_string())
+                },
+                partial_output: PreservationReceipt::NotApplicable,
+            },
+            RetryPolicy {
+                automatic_max: 0,
+                manual_max: 2,
+            },
+        );
         let mut this = Self {
             connection,
             permission_rx,
@@ -878,8 +1073,8 @@ impl AgentChatThread {
                 _ => TextInputState::new(),
             },
             status: AgentChatThreadStatus::Idle,
+            reliability_state,
             context_resolution_id: 0,
-            active_callout: None,
             pending_permission: None,
             pending_context_blocks: Vec::new(),
             pending_context_consumed: false,
@@ -1416,13 +1611,48 @@ impl AgentChatThread {
         push_user_message: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.model_selection_mismatch.is_some() {
+        let capability = if let Some(mismatch) = &self.model_selection_mismatch {
+            let model = mismatch
+                .requested_model_id
+                .as_deref()
+                .or(self.selected_model_id.as_deref())
+                .unwrap_or("unknown");
+            CapabilityDecision::Blocked(AiFailure::new(
+                AiFailureKind::Capability(CapabilityFailure::ModelUnavailable {
+                    model: ModelId::from(model),
+                    reason: ModelAvailabilityReason::NotAdvertised,
+                }),
+                RetrySafety::ExplicitUserConfirmation,
+            ))
+        } else {
+            CapabilityDecision::Compatible
+        };
+        let Some(start_command_id) = self.begin_reliability_turn(capability, cx)? else {
             return Err("ai_model_selection_unavailable".to_string());
-        }
-        let rx = self
-            .connection
-            .start_turn(self.turn_request(blocks))
-            .map_err(|error| error.to_string())?;
+        };
+        let rx = match self.connection.start_turn(self.turn_request(blocks)) {
+            Ok(rx) => rx,
+            Err(error) => {
+                let safe = error.failure.primary_message().to_string();
+                let error_code = error.to_string();
+                let _ = self
+                    .transition_reliability(AiOperationEvent::Failed(error.failure.failure), cx);
+                self.push_message(AgentChatThreadMessageRole::Error, safe);
+                return Err(error_code);
+            }
+        };
+        self.transition_reliability(
+            AiOperationEvent::RuntimeStarted {
+                command_id: start_command_id,
+                turn: TurnRef::from(format!(
+                    "{}:{}",
+                    self.ui_thread_id,
+                    self.current_turn_id.wrapping_add(1)
+                )),
+            },
+            cx,
+        )
+        .map_err(|error| format!("ai_reliability_runtime_start:{:?}", error.reason))?;
 
         if push_user_message {
             let msg_id = self.alloc_id();
@@ -1441,7 +1671,6 @@ impl AgentChatThread {
         self.stream_started_at = Some(std::time::Instant::now());
         self.ttft_pending = true;
         self.status = AgentChatThreadStatus::Streaming;
-        self.active_callout = None;
         self.current_turn_id = self.current_turn_id.wrapping_add(1);
 
         self.setup_state = None;
@@ -1491,7 +1720,6 @@ impl AgentChatThread {
             self.input.clear();
         }
         self.status = AgentChatThreadStatus::Streaming;
-        self.active_callout = None;
         self.setup_state = None;
         self.context_resolution_id = self.context_resolution_id.wrapping_add(1);
         let resolution_id = self.context_resolution_id;
@@ -1563,21 +1791,19 @@ impl AgentChatThread {
     }
 
     fn fail_pending_turn_preparation(&mut self, error: String, cx: &mut Context<Self>) {
+        let failure = process_failure(ProtocolComponent::Pi, ProcessFailureFacts::SpawnFailed);
         tracing::warn!(
             target: "script_kit::tab_ai",
             event = "agent_chat_context_resolution_failed",
-            error = %error,
+            error_code = ?failure.failure.code,
+            diagnostic_fingerprint = %redacted_fingerprint(&error),
         );
-        let callout = AgentChatCallout::failed(error, true);
-        let transcript_message = callout
-            .detail
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "The context attachments could not be prepared.".to_string());
-        self.active_callout = Some(callout);
-        self.push_message(AgentChatThreadMessageRole::Error, transcript_message);
-        self.status = AgentChatThreadStatus::Error;
-        cx.notify();
+        if matches!(self.reliability_state.phase, AiPhase::Ready) {
+            let _ = self.begin_reliability_turn(CapabilityDecision::Compatible, cx);
+        }
+        let message = failure.primary_message().to_string();
+        let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
+        self.push_message(AgentChatThreadMessageRole::Error, message);
     }
 
     fn submit_queued_message(
@@ -1622,9 +1848,6 @@ impl AgentChatThread {
         display_user_text: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.model_selection_mismatch.is_some() {
-            return Err("ai_model_selection_unavailable".to_string());
-        }
         if matches!(
             self.status,
             AgentChatThreadStatus::Streaming | AgentChatThreadStatus::WaitingForPermission
@@ -1646,43 +1869,18 @@ impl AgentChatThread {
         }
 
         self.clear_all_pending_context("submit_blocks");
-
-        let msg_id = self.alloc_id();
-        self.messages.push(AgentChatThreadMessage::new(
-            msg_id,
-            AgentChatThreadMessageRole::User,
+        self.start_prepared_turn(
             trimmed_display.to_string(),
-        ));
-        self.publish_sdk_new_message(
-            msg_id,
-            AgentChatThreadMessageRole::User,
-            trimmed_display.to_string(),
-        );
-        self.input.clear();
-        self.stream_started_at = Some(std::time::Instant::now());
-        self.ttft_pending = true;
-        self.status = AgentChatThreadStatus::Streaming;
-
-        let rx = self
-            .connection
-            .start_turn(self.turn_request(blocks))
-            .map_err(|error| error.to_string())?;
-
-        self.active_callout = None;
-        self.setup_state = None;
-        self.bind_stream(rx, cx);
-        cx.notify();
-        Ok(())
+            blocks,
+            Vec::new(),
+            true,
+            true,
+            cx,
+        )
     }
 
-    pub(crate) fn active_callout(&self) -> Option<&AgentChatCallout> {
-        self.active_callout.as_ref()
-    }
-
-    pub(crate) fn dismiss_active_callout(&mut self, cx: &mut Context<Self>) {
-        if self.active_callout.take().is_some() {
-            cx.notify();
-        }
+    pub(crate) fn dismiss_recovery(&mut self, cx: &mut Context<Self>) {
+        let _ = self.transition_reliability(AiOperationEvent::DismissRequested, cx);
     }
 
     fn last_user_turn_text(&self) -> Option<String> {
@@ -1695,8 +1893,8 @@ impl AgentChatThread {
 
     pub(crate) fn retry_last_user_turn(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if !matches!(
-            self.status,
-            AgentChatThreadStatus::Error | AgentChatThreadStatus::Idle
+            self.reliability_state.phase,
+            AiPhase::AwaitingRecovery { .. }
         ) {
             return Ok(());
         }
@@ -1706,14 +1904,175 @@ impl AgentChatThread {
         };
         let prepared = self.prepare_turn_blocks_with_receipt(display_text.trim());
         self.set_context_resolution_note(prepared.receipt.as_ref());
-        self.start_prepared_turn(
-            display_text,
-            prepared.blocks,
-            prepared.attachments,
-            false,
-            false,
+        let retry_commands = self
+            .transition_reliability(
+                AiOperationEvent::RecoverySelected(AiRecoveryAction::Retry),
+                cx,
+            )
+            .map_err(|error| format!("ai_reliability_retry:{:?}", error.reason))?;
+        let command_id = retry_commands
+            .into_iter()
+            .find_map(|command| match command {
+                AiCommand::ScheduleBackoff { command_id, .. } => Some(command_id),
+                _ => None,
+            })
+            .ok_or_else(|| "ai_reliability_missing_backoff_command".to_string())?;
+        self.transition_reliability(AiOperationEvent::BackoffElapsed { command_id }, cx)
+            .map_err(|error| format!("ai_reliability_backoff:{:?}", error.reason))?;
+        let commands = self
+            .transition_reliability(
+                AiOperationEvent::CapabilityResolved(CapabilityDecision::Compatible),
+                cx,
+            )
+            .map_err(|error| format!("ai_reliability_retry_preflight:{:?}", error.reason))?;
+        let start_command_id = commands
+            .into_iter()
+            .find_map(|command| match command {
+                AiCommand::StartTurn(command) => Some(command.command_id),
+                _ => None,
+            })
+            .ok_or_else(|| "ai_reliability_missing_retry_start_command".to_string())?;
+        let rx = match self
+            .connection
+            .start_turn(self.turn_request(prepared.blocks))
+        {
+            Ok(rx) => rx,
+            Err(error) => {
+                let safe = error.failure.primary_message().to_string();
+                let error_code = error.to_string();
+                let _ = self
+                    .transition_reliability(AiOperationEvent::Failed(error.failure.failure), cx);
+                self.push_message(AgentChatThreadMessageRole::Error, safe);
+                return Err(error_code);
+            }
+        };
+        self.transition_reliability(
+            AiOperationEvent::RuntimeStarted {
+                command_id: start_command_id,
+                turn: TurnRef::from(format!(
+                    "{}:{}",
+                    self.ui_thread_id,
+                    self.current_turn_id.wrapping_add(1)
+                )),
+            },
             cx,
         )
+        .map_err(|error| format!("ai_reliability_retry_start:{:?}", error.reason))?;
+        self.stream_started_at = Some(std::time::Instant::now());
+        self.ttft_pending = true;
+        self.current_turn_id = self.current_turn_id.wrapping_add(1);
+        self.setup_state = None;
+        self.bind_stream(rx, cx);
+        Ok(())
+    }
+
+    pub(crate) fn select_recovery_action(
+        &mut self,
+        action: AiRecoveryAction,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<AiCommand>, String> {
+        if matches!(action, AiRecoveryAction::Retry) {
+            self.retry_last_user_turn(cx)?;
+            return Ok(Vec::new());
+        }
+        self.transition_reliability(AiOperationEvent::RecoverySelected(action), cx)
+            .map_err(|error| format!("ai_reliability_recovery:{:?}", error.reason))
+    }
+
+    pub(crate) fn complete_recovery_command(
+        &mut self,
+        command_id: sk_protocol::ai_reliability::CommandId,
+        result: RecoveryEffectResult,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.transition_reliability(
+            AiOperationEvent::RecoveryCommandSucceeded { command_id, result },
+            cx,
+        );
+    }
+
+    pub(crate) fn fail_recovery_command(
+        &mut self,
+        command_id: sk_protocol::ai_reliability::CommandId,
+        failure: AiFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.transition_reliability(
+            AiOperationEvent::RecoveryCommandFailed {
+                command_id,
+                failure,
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn resume_recovered_turn_from_view(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.resume_recovered_turn(cx)
+    }
+
+    fn resume_recovered_turn(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let Some(display_text) = self.last_user_turn_text() else {
+            return Ok(());
+        };
+        let reset_commands = self
+            .transition_reliability(AiOperationEvent::ResetForNextTurn, cx)
+            .map_err(|error| format!("ai_reliability_recovery_reset:{:?}", error.reason))?;
+        if !reset_commands
+            .iter()
+            .any(|command| matches!(command, AiCommand::CheckCapabilities(_)))
+        {
+            return Ok(());
+        }
+        let commands = self
+            .transition_reliability(
+                AiOperationEvent::CapabilityResolved(CapabilityDecision::Compatible),
+                cx,
+            )
+            .map_err(|error| format!("ai_reliability_recovery_preflight:{:?}", error.reason))?;
+        let start_command_id = commands
+            .into_iter()
+            .find_map(|command| match command {
+                AiCommand::StartTurn(command) => Some(command.command_id),
+                _ => None,
+            })
+            .ok_or_else(|| "ai_reliability_missing_recovery_start".to_string())?;
+        let prepared = self.prepare_turn_blocks_with_receipt(display_text.trim());
+        self.set_context_resolution_note(prepared.receipt.as_ref());
+        let rx = match self
+            .connection
+            .start_turn(self.turn_request(prepared.blocks))
+        {
+            Ok(rx) => rx,
+            Err(error) => {
+                let safe = error.failure.primary_message().to_string();
+                let code = error.to_string();
+                let _ = self
+                    .transition_reliability(AiOperationEvent::Failed(error.failure.failure), cx);
+                self.push_message(AgentChatThreadMessageRole::Error, safe);
+                return Err(code);
+            }
+        };
+        self.transition_reliability(
+            AiOperationEvent::RuntimeStarted {
+                command_id: start_command_id,
+                turn: TurnRef::from(format!(
+                    "{}:{}",
+                    self.ui_thread_id,
+                    self.current_turn_id.wrapping_add(1)
+                )),
+            },
+            cx,
+        )
+        .map_err(|error| format!("ai_reliability_recovery_start:{:?}", error.reason))?;
+        self.stream_started_at = Some(std::time::Instant::now());
+        self.ttft_pending = true;
+        self.current_turn_id = self.current_turn_id.wrapping_add(1);
+        self.setup_state = None;
+        self.bind_stream(rx, cx);
+        Ok(())
     }
 
     /// Resolve a pending permission request with the user's selection.
@@ -2540,7 +2899,7 @@ impl AgentChatThread {
                             if this.transcript_generation != generation {
                                 return;
                             }
-                            if this.finish_stream_closed_without_terminal() {
+                            if this.finish_stream_closed_without_terminal_with_context(cx) {
                                 cx.notify();
                             }
                         });
@@ -2736,7 +3095,7 @@ impl AgentChatThread {
                 // tool policy BEFORE tracking/rendering. A forbidden tool fails
                 // the turn closed; its raw args are never rendered.
                 if self.tool_event_is_forbidden(tool_name.as_deref()) {
-                    self.fail_turn_forbidden_tool(tool_name.as_deref());
+                    self.fail_turn_forbidden_tool(tool_name.as_deref(), Some(cx));
                     changed = true;
                 } else {
                     changed |= self.upsert_tool_call_start(
@@ -2825,7 +3184,12 @@ impl AgentChatThread {
                 if self.pending_permission.take().is_some() {
                     changed = true;
                 }
-                changed |= self.set_status(AgentChatThreadStatus::Idle);
+                if matches!(self.reliability_state.phase, AiPhase::Running { .. }) {
+                    let _ = self.transition_reliability(
+                        AiOperationEvent::Completed(CompletionKind::Complete),
+                        cx,
+                    );
+                }
                 if let Some(message) =
                     self.latest_message_with_role(AgentChatThreadMessageRole::Assistant)
                 {
@@ -2971,7 +3335,16 @@ impl AgentChatThread {
                         &auth_methods,
                     ),
                 );
-                changed |= self.set_status(AgentChatThreadStatus::Error);
+                if !matches!(
+                    self.reliability_state.phase,
+                    AiPhase::Preflighting { .. } | AiPhase::Running { .. }
+                ) {
+                    let _ = self.begin_reliability_turn(CapabilityDecision::Compatible, cx);
+                }
+                let failure =
+                    provider_failure(ProtocolComponent::Pi, format!("setup required: {reason}"));
+                let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
+                changed = true;
             }
             AgentChatEvent::TurnFailed { failure } => {
                 let _ = self.flush_streaming_text_buffer();
@@ -2987,17 +3360,9 @@ impl AgentChatThread {
                     safe_message.clone(),
                 );
                 let _ = self.pending_permission.take();
-                let can_retry = self.last_user_turn_text().is_some();
-                let callout = AgentChatCallout::failed(safe_message, can_retry);
-                let transcript_message = callout
-                    .detail
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "The provider could not complete this turn.".to_string());
-                self.active_callout = Some(callout);
+                let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
                 changed = true;
-                changed |= self.push_message(AgentChatThreadMessageRole::Error, transcript_message);
-                changed |= self.set_status(AgentChatThreadStatus::Error);
+                changed |= self.push_message(AgentChatThreadMessageRole::Error, safe_message);
             }
         }
 
@@ -3006,7 +3371,10 @@ impl AgentChatThread {
         }
     }
 
-    fn finish_stream_closed_without_terminal(&mut self) -> bool {
+    fn finish_stream_closed_without_terminal_with_context(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !matches!(
             self.status,
             AgentChatThreadStatus::Streaming | AgentChatThreadStatus::WaitingForPermission
@@ -3033,7 +3401,8 @@ impl AgentChatThread {
         );
 
         if had_assistant_text {
-            self.status = AgentChatThreadStatus::Idle;
+            let _ = self
+                .transition_reliability(AiOperationEvent::Completed(CompletionKind::Partial), cx);
             if let Some(message_id) = assistant_id {
                 crate::ai::subscriptions::publish_stream_complete(
                     &self.ui_thread_id,
@@ -3048,9 +3417,11 @@ impl AgentChatThread {
                 );
             }
         } else {
-            let message = "Agent stream ended before sending a completion event.".to_string();
+            let failure =
+                process_failure(ProtocolComponent::Pi, ProcessFailureFacts::RuntimeClosed);
+            let message = failure.primary_message().to_string();
+            let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
             self.push_message(AgentChatThreadMessageRole::Error, message);
-            self.status = AgentChatThreadStatus::Error;
         }
 
         true
@@ -3835,7 +4206,13 @@ impl AgentChatThread {
 
     /// Select a model by ID. Updates the display name, persists to config, and notifies.
     pub(crate) fn select_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
-        if let Some(entry) = self.available_models.iter().find(|m| m.id == model_id) {
+        if let Some(entry) = self
+            .available_models
+            .iter()
+            .find(|m| m.id == model_id)
+            .cloned()
+        {
+            let previous = self.reliability_state.selection.effective.clone();
             self.selected_model_id = Some(entry.id.clone());
             self.model_selection_mismatch = None;
             self.selected_model_display_name = Some(SharedString::from(
@@ -3860,6 +4237,51 @@ impl AgentChatThread {
                 })
                 .ok();
 
+            let recovering_selection_command = match &self.reliability_state.phase {
+                AiPhase::Recovering {
+                    action:
+                        AiRecoveryAction::ChooseCompatibleModel { .. }
+                        | AiRecoveryAction::ChooseProvider { .. }
+                        | AiRecoveryAction::ChooseProfile { .. },
+                    command_id,
+                    ..
+                } => Some(*command_id),
+                AiPhase::Ready
+                | AiPhase::Preflighting { .. }
+                | AiPhase::Running { .. }
+                | AiPhase::Cancelling { .. }
+                | AiPhase::AwaitingRecovery { .. }
+                | AiPhase::Recovering { .. }
+                | AiPhase::Recovered { .. }
+                | AiPhase::Succeeded { .. }
+                | AiPhase::Cancelled { .. }
+                | AiPhase::Dismissed { .. } => None,
+            };
+            if let Some(command_id) = recovering_selection_command {
+                let applied = AiModelSelection {
+                    provider_id: Self::provider_id_from_model(Some(&entry.id)),
+                    model_id: Some(ModelId::from(entry.id.clone())),
+                    profile_id: Some(ProfileId::from(self.profile_id.clone())),
+                };
+                let _ = self.transition_reliability(
+                    AiOperationEvent::RecoveryCommandSucceeded {
+                        command_id,
+                        result: RecoveryEffectResult::SelectionApplied(SelectionChangeReceipt {
+                            previous,
+                            applied,
+                            origin: SelectionOrigin::RecoveryChoice,
+                        }),
+                    },
+                    cx,
+                );
+                if let Err(error) = self.resume_recovered_turn(cx) {
+                    tracing::warn!(
+                        target: "script_kit::agent_chat",
+                        event = "agent_chat_selection_recovery_resume_failed",
+                        error_code = %error,
+                    );
+                }
+            }
             cx.notify();
         }
     }
@@ -3933,7 +4355,6 @@ impl AgentChatThread {
 
         self.stream_task = None;
         self.pending_permission = None;
-        self.active_callout = None;
         self.messages.clear();
         self.next_message_id = 1;
         self.active_plan_entries.clear();
@@ -3949,6 +4370,23 @@ impl AgentChatThread {
         self.context_bootstrap_state = AgentChatContextBootstrapState::Ready;
         self.context_bootstrap_note = None;
         self.queued_submit_while_bootstrapping = false;
+        self.reliability_state = AiOperationState::ready(
+            Self::reliability_identity(
+                &self.profile_id,
+                self.selected_model_id.as_deref(),
+                &self.cwd,
+            ),
+            Self::reliability_selection(
+                &self.profile_id,
+                self.selected_model_id.as_deref(),
+                SelectionOrigin::PersistedUserChoice,
+            ),
+            self.current_work_snapshot(),
+            RetryPolicy {
+                automatic_max: 0,
+                manual_max: 2,
+            },
+        );
 
         if let Some(message_count) = message_count {
             let message_count = message_count.clamp(1, 2_000);
@@ -4023,17 +4461,12 @@ impl AgentChatThread {
                 "error" | "provider-error" => {
                     let error =
                         assistant_text.unwrap_or_else(|| "Fixture provider error".to_string());
-                    let callout = AgentChatCallout::failed(error, true);
-                    let transcript_message = callout
-                        .detail
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| {
-                            "The provider could not complete this turn.".to_string()
-                        });
-                    self.active_callout = Some(callout);
-                    self.push_message(AgentChatThreadMessageRole::Error, transcript_message);
-                    self.set_status(AgentChatThreadStatus::Error);
+                    let _ = self.begin_reliability_turn(CapabilityDecision::Compatible, cx);
+                    let failure = provider_failure(ProtocolComponent::Provider, error);
+                    let message = failure.primary_message().to_string();
+                    let _ =
+                        self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
+                    self.push_message(AgentChatThreadMessageRole::Error, message);
                 }
                 other => {
                     return Err(format!("unknown setAgentChatTestFixture phase {other:?}"));
@@ -4071,17 +4504,27 @@ impl AgentChatThread {
         self.flush_streaming_text_buffer();
         self.queue_paused = true;
         self.context_resolution_id = self.context_resolution_id.wrapping_add(1);
+        let _ = self.transition_reliability(AiOperationEvent::CancelRequested, cx);
         if let Err(error) = self.connection.cancel_turn(self.ui_thread_id.clone()) {
             tracing::warn!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_cancel_turn_enqueue_failed",
-                error = %error,
+                error_code = ?error.code(),
             );
         }
         self.stream_task = None;
         self.stream_started_at = None;
-        self.status = AgentChatThreadStatus::Idle;
-        cx.notify();
+        let partial = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, AgentChatThreadMessageRole::Assistant))
+            .filter(|message| !message.body.is_empty())
+            .map(|message| PartialOutputState::Preserved {
+                fingerprint: Fingerprint(redacted_fingerprint(message.body.as_ref())),
+            })
+            .unwrap_or(PartialOutputState::None);
+        let _ = self.transition_reliability(AiOperationEvent::RuntimeCancelled { partial }, cx);
     }
 
     /// Load saved messages from a conversation history file.
@@ -4499,8 +4942,30 @@ impl AgentChatThread {
                 _ => TextInputState::new(),
             },
             status: AgentChatThreadStatus::Idle,
+            reliability_state: AiOperationState::ready(
+                Self::reliability_identity(
+                    crate::ai::agent_chat::profiles::BUILTIN_GENERAL_PROFILE_ID,
+                    None,
+                    Path::new("/tmp/test"),
+                ),
+                Self::reliability_selection(
+                    crate::ai::agent_chat::profiles::BUILTIN_GENERAL_PROFILE_ID,
+                    None,
+                    SelectionOrigin::PersistedUserChoice,
+                ),
+                AiWorkSnapshot {
+                    key: WorkKey::from("test-thread"),
+                    transcript: PreservationReceipt::NotApplicable,
+                    draft: PreservationReceipt::NotApplicable,
+                    attachments: PreservationReceipt::NotApplicable,
+                    partial_output: PreservationReceipt::NotApplicable,
+                },
+                RetryPolicy {
+                    automatic_max: 0,
+                    manual_max: 2,
+                },
+            ),
             context_resolution_id: 0,
-            active_callout: None,
             pending_permission: None,
             pending_context_blocks: context_blocks,
             pending_context_consumed: false,
@@ -4557,14 +5022,52 @@ impl AgentChatThread {
         self.session_policy
     }
 
-    pub(super) fn dismiss_active_callout_test(&mut self) {
-        self.active_callout = None;
+    fn transition_reliability_test(&mut self, event: AiOperationEvent) {
+        if let Ok(next) = transition(self.reliability_state.clone(), event) {
+            self.reliability_state = next.next;
+            self.sync_status_from_reliability();
+        }
+    }
+
+    fn finish_stream_closed_without_terminal(&mut self) -> bool {
+        if !matches!(
+            self.status,
+            AgentChatThreadStatus::Streaming | AgentChatThreadStatus::WaitingForPermission
+        ) {
+            return false;
+        }
+        self.flush_streaming_text_buffer();
+        self.pending_permission = None;
+        let has_output = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, AgentChatThreadMessageRole::Assistant))
+            .is_some_and(|message| !message.body.trim().is_empty());
+        if has_output {
+            self.transition_reliability_test(AiOperationEvent::Completed(CompletionKind::Partial));
+            self.status = AgentChatThreadStatus::Idle;
+        } else {
+            let failure =
+                process_failure(ProtocolComponent::Pi, ProcessFailureFacts::RuntimeClosed);
+            self.transition_reliability_test(AiOperationEvent::Failed(failure.failure));
+            self.push_message(
+                AgentChatThreadMessageRole::Error,
+                "The AI connection stopped. Your work is saved and can be recovered.",
+            );
+            self.status = AgentChatThreadStatus::Error;
+        }
+        true
+    }
+
+    pub(super) fn dismiss_recovery_test(&mut self) {
+        self.transition_reliability_test(AiOperationEvent::DismissRequested);
     }
 
     pub(super) fn retry_last_user_turn_test(&mut self) -> Result<(), String> {
         if !matches!(
-            self.status,
-            AgentChatThreadStatus::Error | AgentChatThreadStatus::Idle
+            self.reliability_state.phase,
+            AiPhase::AwaitingRecovery { .. }
         ) {
             return Ok(());
         }
@@ -4575,10 +5078,42 @@ impl AgentChatThread {
         let prepared = self.prepare_turn_blocks_with_receipt(display_text.trim());
         self.set_context_resolution_note(prepared.receipt.as_ref());
         let _request = self.turn_request(prepared.blocks);
+        let retry_transition = transition(
+            self.reliability_state.clone(),
+            AiOperationEvent::RecoverySelected(AiRecoveryAction::Retry),
+        )
+        .map_err(|error| format!("{:?}", error.reason))?;
+        let command_id = retry_transition
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                AiCommand::ScheduleBackoff { command_id, .. } => Some(*command_id),
+                _ => None,
+            })
+            .ok_or_else(|| "missing_backoff".to_string())?;
+        self.reliability_state = retry_transition.next;
+        self.transition_reliability_test(AiOperationEvent::BackoffElapsed { command_id });
+        let preflight_transition = transition(
+            self.reliability_state.clone(),
+            AiOperationEvent::CapabilityResolved(CapabilityDecision::Compatible),
+        )
+        .map_err(|error| format!("{:?}", error.reason))?;
+        let start_command_id = preflight_transition
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                AiCommand::StartTurn(command) => Some(command.command_id),
+                _ => None,
+            })
+            .ok_or_else(|| "missing_start".to_string())?;
+        self.reliability_state = preflight_transition.next;
+        self.transition_reliability_test(AiOperationEvent::RuntimeStarted {
+            command_id: start_command_id,
+            turn: TurnRef::from("test-retry"),
+        });
         self.stream_started_at = Some(std::time::Instant::now());
         self.ttft_pending = true;
         self.status = AgentChatThreadStatus::Streaming;
-        self.active_callout = None;
         self.setup_state = None;
         Ok(())
     }
@@ -4692,7 +5227,7 @@ impl AgentChatThread {
                 // Mirror `apply_event`'s WP-B2 forbidden-tool guard so tests can
                 // exercise the fail-closed path without a GPUI context.
                 if self.tool_event_is_forbidden(tool_name.as_deref()) {
-                    self.fail_turn_forbidden_tool(tool_name.as_deref());
+                    self.fail_turn_forbidden_tool(tool_name.as_deref(), None);
                 } else {
                     self.upsert_tool_call_start(tool_call_id, title, status, tool_name, raw_input);
                     self.set_status(AgentChatThreadStatus::Streaming);
@@ -4782,19 +5317,49 @@ impl AgentChatThread {
                         &auth_methods,
                     ),
                 );
-                self.set_status(AgentChatThreadStatus::Error);
+                if !matches!(
+                    self.reliability_state.phase,
+                    AiPhase::Preflighting { .. } | AiPhase::Running { .. }
+                ) {
+                    let request = TurnRequestRef::from("test-setup-request");
+                    self.transition_reliability_test(AiOperationEvent::SubmitRequested {
+                        request,
+                        work: self.current_work_snapshot(),
+                        selection: Self::reliability_selection(
+                            &self.profile_id,
+                            self.selected_model_id.as_deref(),
+                            SelectionOrigin::PersistedUserChoice,
+                        ),
+                        risk: TurnRisk::MayMutate,
+                    });
+                    self.transition_reliability_test(AiOperationEvent::CapabilityResolved(
+                        CapabilityDecision::Compatible,
+                    ));
+                }
+                let failure =
+                    provider_failure(ProtocolComponent::Pi, format!("setup required: {reason}"));
+                self.transition_reliability_test(AiOperationEvent::Failed(failure.failure));
             }
             super::AgentChatEvent::TurnFailed { failure } => {
-                let can_retry = self.last_user_turn_text().is_some();
-                let callout = AgentChatCallout::failed(failure.primary_message(), can_retry);
-                let transcript_message = callout
-                    .detail
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "The provider could not complete this turn.".to_string());
-                self.active_callout = Some(callout);
-                self.push_message(AgentChatThreadMessageRole::Error, transcript_message);
-                self.set_status(AgentChatThreadStatus::Error);
+                if matches!(self.reliability_state.phase, AiPhase::Ready) {
+                    let request = TurnRequestRef::from("test-request");
+                    self.transition_reliability_test(AiOperationEvent::SubmitRequested {
+                        request,
+                        work: self.current_work_snapshot(),
+                        selection: Self::reliability_selection(
+                            &self.profile_id,
+                            self.selected_model_id.as_deref(),
+                            SelectionOrigin::PersistedUserChoice,
+                        ),
+                        risk: TurnRisk::MayMutate,
+                    });
+                    self.transition_reliability_test(AiOperationEvent::CapabilityResolved(
+                        CapabilityDecision::Compatible,
+                    ));
+                }
+                let message = failure.primary_message().to_string();
+                self.transition_reliability_test(AiOperationEvent::Failed(failure.failure));
+                self.push_message(AgentChatThreadMessageRole::Error, message);
             }
         }
     }

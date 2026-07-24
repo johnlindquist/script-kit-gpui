@@ -4199,19 +4199,18 @@ impl ScriptListApp {
                     }
                 };
                 state.resolved_target = resolved_target;
-                let (reliability_window_id, reliability_window_kind) = match &agent_chat_target {
-                    AgentChatReadTarget::Main { info } => info
-                        .as_ref()
-                        .map(|info| (info.id.as_str(), info.kind))
-                        .unwrap_or(("main", protocol::AutomationWindowKind::Main)),
+                let reliability_window_id = match &agent_chat_target {
+                    AgentChatReadTarget::Main { info } => {
+                        info.as_ref().map(|info| info.id.as_str()).unwrap_or("main")
+                    }
                     AgentChatReadTarget::Detached { info, .. }
-                    | AgentChatReadTarget::Notes { info, .. } => (info.id.as_str(), info.kind),
+                    | AgentChatReadTarget::Notes { info, .. } => info.id.as_str(),
                 };
-                state.reliability =
-                    Some(crate::ai::reliability::ai_reliability_snapshot_for_target(
-                        reliability_window_id,
-                        reliability_window_kind,
-                    ));
+                if let Some(fixture) =
+                    crate::ai::reliability::ai_reliability_fixture_for_target(reliability_window_id)
+                {
+                    state.reliability = Some(fixture);
+                }
 
                 tracing::info!(
                     target: "script_kit::agent_chat_telemetry",

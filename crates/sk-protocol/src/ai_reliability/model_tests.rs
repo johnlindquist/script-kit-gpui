@@ -202,6 +202,47 @@ fn blocked_capability_produces_actionable_recovery_without_starting() {
 }
 
 #[test]
+fn external_auth_launch_returns_to_actionable_recovery_until_health_is_observed() {
+    let failure = AiFailure::new(
+        AiFailureKind::Authentication(AuthenticationFailure::Missing),
+        RetrySafety::ExplicitUserConfirmation,
+    );
+    let blocked = transition_ok(
+        submit(ready()).next,
+        AiOperationEvent::CapabilityResolved(CapabilityDecision::Blocked(failure)),
+    );
+    let signing_in = transition_ok(
+        blocked.next,
+        AiOperationEvent::RecoverySelected(AiRecoveryAction::SignIn),
+    );
+    let command_id = signing_in
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            AiCommand::LaunchAuthentication(command) => Some(command.command_id),
+            _ => None,
+        })
+        .expect("sign-in command");
+    let waiting = transition_ok(
+        signing_in.next,
+        AiOperationEvent::RecoveryCommandSucceeded {
+            command_id,
+            result: RecoveryEffectResult::ExternalActionLaunched,
+        },
+    );
+    let AiPhase::AwaitingRecovery { failure, plan } = waiting.next.phase else {
+        panic!("opening sign-in must not claim authentication is complete");
+    };
+    assert_eq!(failure.code, AiFailureCode::AuthenticationMissing);
+    assert!(
+        plan.option(RecoveryActionKind::CheckAgain)
+            .is_some_and(|option| option.enabled)
+    );
+    assert!(waiting.commands.is_empty());
+    assert!(waiting.outcome.is_none());
+}
+
+#[test]
 fn automatic_retry_is_bounded_and_preserves_selection() {
     let first_failure = transition_ok(running_state(), AiOperationEvent::Failed(timeout_failure()));
     assert_eq!(first_failure.next.retry.automatic_used, 1);
@@ -498,7 +539,7 @@ fn cartesian_state_event_table_is_deterministic_and_explicit() {
             event.tag()
         );
         match event.tag() {
-            AiEventTag::RestartObserved => assert_eq!(
+            AiEventTag::RestartObserved | AiEventTag::SessionReplaced => assert_eq!(
                 rejected.get(&event.tag()).copied().unwrap_or(0),
                 0,
                 "restart observation is deliberately valid from every phase"
@@ -643,7 +684,10 @@ fn representative_states() -> Vec<AiOperationState> {
         &ProgressSnapshot::none(),
     );
     let mut awaiting = ready();
-    awaiting.phase = AiPhase::AwaitingRecovery { failure, plan };
+    awaiting.phase = AiPhase::AwaitingRecovery {
+        failure: failure.clone(),
+        plan: plan.clone(),
+    };
     awaiting.pending = Some(pending());
     states.push(awaiting);
 
@@ -651,6 +695,7 @@ fn representative_states() -> Vec<AiOperationState> {
     recovering.phase = AiPhase::Recovering {
         action: AiRecoveryAction::Retry,
         command_id: CommandId(1),
+        origin: RecoveryOrigin::Failure { failure, plan },
     };
     recovering.pending = Some(pending());
     states.push(recovering);
@@ -661,6 +706,7 @@ fn representative_states() -> Vec<AiOperationState> {
             session: SessionRef::from("session-1"),
         },
         command_id: CommandId(1),
+        origin: RecoveryOrigin::Restart,
     };
     reattaching.pending = Some(pending());
     states.push(reattaching);
@@ -739,6 +785,11 @@ fn representative_events() -> Vec<AiOperationEvent> {
             progress: ProgressSnapshot::none(),
         }),
         AiOperationEvent::SessionReattachFailed(unknown_failure()),
+        AiOperationEvent::SessionReplaced {
+            identity: identity(),
+            selection: selection("spark"),
+            work: work(),
+        },
         AiOperationEvent::DismissRequested,
         AiOperationEvent::ResetForNextTurn,
     ]

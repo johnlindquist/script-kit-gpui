@@ -1,137 +1,147 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentChatWarmFailureKind {
-    SidecarSpawn,
-    Authentication,
-    ProviderConfiguration,
-    NoModels,
-    Timeout,
-    RuntimeClosed,
-    Unknown,
+//! Typed warm/setup recovery projection for Agent Chat launch failures.
+//!
+//! Warm launch owns effects, but it shares the same provider-independent
+//! state machine and recovery-card copy as a live Agent Chat thread.
+
+use std::path::Path;
+
+use sk_protocol::ai_reliability::{
+    transition, AiModelSelection, AiOperationEvent, AiOperationState, AiSelectionState,
+    AiSurfaceIdentity, AiWorkSnapshot, CapabilityDecision, Fingerprint, ModelId,
+    PreservationReceipt, ProfileId, ProviderId, RetryPolicy, SelectionOrigin, TurnRequestRef,
+    TurnRisk, WorkKey,
+};
+
+use crate::ai::reliability::{
+    project_recovery, provider_failure, redacted_fingerprint, AiRecoveryCardSpec, AiRecoveryLayout,
+    SurfaceRecoveryCapabilities,
+};
+
+fn provider_from_model(model_id: Option<&str>) -> Option<ProviderId> {
+    model_id
+        .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
+        .filter(|provider| !provider.is_empty())
+        .map(ProviderId::from)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentChatWarmFailure {
-    pub kind: AgentChatWarmFailureKind,
-    pub detail: String,
+pub(crate) fn warm_recovery_state(
+    profile_id: &str,
+    model_id: Option<&str>,
+    cwd: &Path,
+    detail: &str,
+    attempts: u32,
+) -> AiOperationState {
+    let provider_id = provider_from_model(model_id);
+    let selection = AiModelSelection {
+        provider_id: provider_id.clone(),
+        model_id: model_id.map(ModelId::from),
+        profile_id: Some(ProfileId::from(profile_id)),
+    };
+    let mut state = AiOperationState::ready(
+        AiSurfaceIdentity::AgentChat {
+            profile_id: ProfileId::from(profile_id),
+            provider_id,
+            model_id: model_id.map(ModelId::from),
+            cwd_fingerprint: Fingerprint(redacted_fingerprint(&cwd.to_string_lossy())),
+        },
+        AiSelectionState {
+            requested: Some(selection.clone()),
+            effective: Some(selection),
+            origin: SelectionOrigin::PersistedUserChoice,
+            acknowledged_change: None,
+        },
+        AiWorkSnapshot {
+            key: WorkKey::from("agent-chat-warm-launch"),
+            transcript: PreservationReceipt::NotApplicable,
+            draft: PreservationReceipt::NotApplicable,
+            attachments: PreservationReceipt::NotApplicable,
+            partial_output: PreservationReceipt::NotApplicable,
+        },
+        RetryPolicy {
+            automatic_max: 0,
+            manual_max: 2,
+        },
+    );
+    state.retry.manual_used = attempts.min(u8::MAX as u32) as u8;
+    state = transition(
+        state,
+        AiOperationEvent::SubmitRequested {
+            request: TurnRequestRef::from("agent-chat-warm-launch"),
+            work: AiWorkSnapshot {
+                key: WorkKey::from("agent-chat-warm-launch"),
+                transcript: PreservationReceipt::NotApplicable,
+                draft: PreservationReceipt::NotApplicable,
+                attachments: PreservationReceipt::NotApplicable,
+                partial_output: PreservationReceipt::NotApplicable,
+            },
+            selection: AiSelectionState {
+                requested: None,
+                effective: None,
+                origin: SelectionOrigin::BuiltInDefault,
+                acknowledged_change: None,
+            },
+            risk: TurnRisk::ReadOnly,
+        },
+    )
+    .expect("ready warm recovery submit is valid")
+    .next;
+    state = transition(
+        state,
+        AiOperationEvent::CapabilityResolved(CapabilityDecision::Compatible),
+    )
+    .expect("warm recovery capability transition is valid")
+    .next;
+    let failure = provider_failure(sk_protocol::ai_reliability::ProtocolComponent::Pi, detail);
+    transition(state, AiOperationEvent::Failed(failure.failure))
+        .expect("preflight warm failure is valid")
+        .next
 }
 
-impl AgentChatWarmFailure {
-    pub(crate) fn classify(detail: impl Into<String>) -> Self {
-        let detail = detail.into();
-        let normalized = detail.to_ascii_lowercase();
-        let kind = if normalized.contains("failed to spawn")
-            || normalized.contains("not found")
-            || normalized.contains("permission denied")
-        {
-            AgentChatWarmFailureKind::SidecarSpawn
-        } else if normalized.contains("auth")
-            || normalized.contains("api key")
-            || normalized.contains("unauthorized")
-        {
-            AgentChatWarmFailureKind::Authentication
-        } else if normalized.contains("provider") || normalized.contains("config") {
-            AgentChatWarmFailureKind::ProviderConfiguration
-        } else if normalized.contains("no model") || normalized.contains("model array") {
-            AgentChatWarmFailureKind::NoModels
-        } else if normalized.contains("timed out") || normalized.contains("timeout") {
-            AgentChatWarmFailureKind::Timeout
-        } else if normalized.contains("stream closed") || normalized.contains("exited") {
-            AgentChatWarmFailureKind::RuntimeClosed
-        } else {
-            AgentChatWarmFailureKind::Unknown
-        };
-        Self { kind, detail }
-    }
-
-    pub(crate) fn summary(&self) -> &'static str {
-        match self.kind {
-            AgentChatWarmFailureKind::SidecarSpawn => "The Pi sidecar could not start.",
-            AgentChatWarmFailureKind::Authentication => "Pi needs provider authentication.",
-            AgentChatWarmFailureKind::ProviderConfiguration => {
-                "Pi could not load the provider configuration."
-            }
-            AgentChatWarmFailureKind::NoModels => "Pi did not report any available models.",
-            AgentChatWarmFailureKind::Timeout => "Pi took too long to report available models.",
-            AgentChatWarmFailureKind::RuntimeClosed => "Pi stopped before it became ready.",
-            AgentChatWarmFailureKind::Unknown => "Pi Agent Chat could not become ready.",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AgentChatRecoveryState {
-    Failed {
-        failure: AgentChatWarmFailure,
-        attempts: u32,
-    },
-    Retrying {
-        attempts: u32,
-    },
-    Succeeded,
-    Dismissed,
-}
-
-impl AgentChatRecoveryState {
-    pub(crate) fn failed(detail: impl Into<String>) -> Self {
-        Self::Failed {
-            failure: AgentChatWarmFailure::classify(detail),
-            attempts: 0,
-        }
-    }
-
-    pub(crate) fn retrying(&self) -> Self {
-        let attempts = match self {
-            Self::Failed { attempts, .. } | Self::Retrying { attempts } => attempts + 1,
-            Self::Succeeded | Self::Dismissed => 1,
-        };
-        Self::Retrying { attempts }
-    }
-
-    pub(crate) fn repeated_failure(&self, detail: impl Into<String>) -> Self {
-        let attempts = match self {
-            Self::Retrying { attempts } | Self::Failed { attempts, .. } => *attempts,
-            Self::Succeeded | Self::Dismissed => 0,
-        };
-        Self::Failed {
-            failure: AgentChatWarmFailure::classify(detail),
-            attempts,
-        }
-    }
+pub(crate) fn warm_recovery_spec(state: &AiOperationState) -> Option<AiRecoveryCardSpec> {
+    project_recovery(
+        &state.identity,
+        state,
+        &SurfaceRecoveryCapabilities::all()
+            .layout(AiRecoveryLayout::BlockingPanel)
+            .dismissible(true),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sk_protocol::ai_reliability::{AiPhase, RecoveryActionKind};
 
     #[test]
-    fn warm_failures_are_typed_for_recovery_copy() {
-        assert_eq!(
-            AgentChatWarmFailure::classify("Pi setup required: authentication missing").kind,
-            AgentChatWarmFailureKind::Authentication
+    fn warm_failure_uses_shared_typed_recovery_and_retry_budget() {
+        let state = warm_recovery_state(
+            "general",
+            Some("anthropic/claude"),
+            Path::new("/tmp/project"),
+            "authentication required",
+            0,
         );
-        assert_eq!(
-            AgentChatWarmFailure::classify("model warm-up timed out").kind,
-            AgentChatWarmFailureKind::Timeout
-        );
-        assert_eq!(
-            AgentChatWarmFailure::classify("Failed to spawn Pi runtime").kind,
-            AgentChatWarmFailureKind::SidecarSpawn
-        );
+        assert!(matches!(state.phase, AiPhase::AwaitingRecovery { .. }));
+        let spec = warm_recovery_spec(&state).expect("recovery spec");
+        assert_eq!(spec.layout, AiRecoveryLayout::BlockingPanel);
+        assert!(spec.actions.iter().any(|action| {
+            action.enabled && action.action.kind() == RecoveryActionKind::SignIn
+        }));
     }
 
     #[test]
-    fn recovery_tracks_repeated_attempts_and_terminal_states() {
-        let failed = AgentChatRecoveryState::failed("provider config is invalid");
-        let retrying = failed.retrying();
-        assert_eq!(retrying, AgentChatRecoveryState::Retrying { attempts: 1 });
-        let repeated = retrying.repeated_failure("provider config is still invalid");
-        assert!(matches!(
-            repeated,
-            AgentChatRecoveryState::Failed { attempts: 1, .. }
-        ));
-        assert_ne!(
-            AgentChatRecoveryState::Succeeded,
-            AgentChatRecoveryState::Dismissed
+    fn exhausted_warm_retry_is_not_presented_as_available() {
+        let state = warm_recovery_state(
+            "general",
+            None,
+            Path::new("/tmp/project"),
+            "connection timed out",
+            2,
         );
+        let spec = warm_recovery_spec(&state).expect("recovery spec");
+        assert!(!spec
+            .actions
+            .iter()
+            .any(|action| { action.enabled && action.action.kind() == RecoveryActionKind::Retry }));
     }
 }

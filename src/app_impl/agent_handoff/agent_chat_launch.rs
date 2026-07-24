@@ -877,15 +877,27 @@ impl ScriptListApp {
         let detail = snapshot.failure_message.clone().unwrap_or_else(|| {
             "Pi Agent Chat failed before reporting available models.".to_string()
         });
-        let failure = crate::ai::agent_chat::agent_chat_recovery::AgentChatWarmFailure::classify(
-            detail.clone(),
+        let recovery_state = crate::ai::agent_chat::agent_chat_recovery::warm_recovery_state(
+            &launch.pi_launch.profile.id,
+            launch.pi_launch.selected_model_id.as_deref(),
+            &launch.pi_launch.cwd,
+            &detail,
+            attempts,
         );
+        let recovery =
+            crate::ai::agent_chat::agent_chat_recovery::warm_recovery_spec(&recovery_state)
+                .expect("warm failure must project a recovery card");
         let title = if attempts == 0 {
-            "Pi Agent Chat couldn't start"
+            recovery.title.to_string()
         } else {
-            "Pi Agent Chat still couldn't start"
+            format!("Still unavailable: {}", recovery.title)
         };
-        let body = format!("{} Your current screen is unchanged.", failure.summary());
+        let preservation_note = recovery
+            .preservation_note
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "Your current screen is unchanged.".to_string());
+        let body = format!("{} {}", recovery.body, preservation_note);
         let app = cx.entity().downgrade();
         let retry_launch = launch.clone();
         let details_launch = launch;

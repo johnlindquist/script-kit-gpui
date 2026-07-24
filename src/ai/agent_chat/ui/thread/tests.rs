@@ -211,8 +211,26 @@ fn test_thread_with_profile(
         messages: Vec::new(),
         input: TextInputState::new(),
         status: AgentChatThreadStatus::Idle,
+        reliability_state: AiOperationState::ready(
+            AgentChatThread::reliability_identity(profile_id, None, Path::new(".")),
+            AgentChatThread::reliability_selection(
+                profile_id,
+                None,
+                SelectionOrigin::PersistedUserChoice,
+            ),
+            AiWorkSnapshot {
+                key: WorkKey::from("test-thread"),
+                transcript: PreservationReceipt::NotApplicable,
+                draft: PreservationReceipt::NotApplicable,
+                attachments: PreservationReceipt::NotApplicable,
+                partial_output: PreservationReceipt::NotApplicable,
+            },
+            RetryPolicy {
+                automatic_max: 0,
+                manual_max: 2,
+            },
+        ),
         context_resolution_id: 0,
-        active_callout: None,
         pending_permission: None,
         pending_context_blocks,
         pending_context_consumed,
@@ -1050,7 +1068,7 @@ fn closed_stream_without_terminal_errors_without_assistant_text() {
 }
 
 #[test]
-fn failed_event_creates_error_message_and_retryable_callout() {
+fn failed_event_creates_error_message_and_retryable_recovery_card() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
 
@@ -1064,17 +1082,16 @@ fn failed_event_creates_error_message_and_retryable_callout() {
 
     assert_eq!(thread.messages.len(), 2);
     assert_eq!(thread.messages[1].role, AgentChatThreadMessageRole::Error);
-    assert!(thread.messages[1].body.contains("temporarily unavailable"));
+    assert!(!thread.messages[1].body.contains("connection lost"));
     assert_eq!(thread.status, AgentChatThreadStatus::Error);
-    let callout = thread.active_callout().expect("failed turn arms callout");
-    assert_eq!(callout.severity, AgentChatCalloutSeverity::Error);
-    assert_eq!(callout.title.as_ref(), "Turn failed");
-    assert!(callout
-        .detail
-        .as_ref()
-        .unwrap()
-        .contains("temporarily unavailable"));
-    assert!(callout.can_retry);
+    let card = thread
+        .recovery_card_spec()
+        .expect("failed turn arms recovery card");
+    assert!(!card.body.is_empty());
+    assert!(card
+        .actions
+        .iter()
+        .any(|action| { action.enabled && action.action.kind() == RecoveryActionKind::Retry }));
 }
 
 #[test]
@@ -1091,12 +1108,95 @@ fn usage_limit_failure_surfaces_account_recovery_without_raw_json_as_message() {
         ),
     );
 
-    let callout = thread.active_callout().expect("failure arms callout");
-    assert_eq!(callout.title.as_ref(), "Turn failed");
-    assert!(callout.detail.as_ref().unwrap().contains("usage limit"));
-    assert!(callout.raw_detail.is_none());
+    let card = thread
+        .recovery_card_spec()
+        .expect("failure arms recovery card");
+    assert_eq!(card.title.as_ref(), "Usage limit reached");
+    assert!(card.actions.iter().any(|action| {
+        action.action.kind() == RecoveryActionKind::SwitchAccount && action.enabled
+    }));
     assert!(!thread.messages[1].body.contains("{\"error\""));
-    assert!(thread.messages[1].body.contains("Switch accounts"));
+    assert!(thread.messages[1].body.contains("usage limit"));
+}
+
+#[test]
+fn codex_upgrade_error_becomes_shared_recovery_without_raw_json() {
+    let mut thread = test_thread(Vec::new(), true);
+    thread.push_message(
+        AgentChatThreadMessageRole::User,
+        "What's a popular post from the past 10 minutes?",
+    );
+    let raw = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}"#;
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Pi,
+        raw,
+    ));
+
+    let card = thread.recovery_card_spec().expect("recovery card");
+    assert_eq!(card.title.as_ref(), "Codex needs an update for this model");
+    assert!(card.body.contains("Your turn is saved"));
+    assert!(card.actions.iter().any(|action| {
+        action.enabled && action.action.kind() == RecoveryActionKind::ChooseCompatibleModel
+    }));
+    assert!(thread
+        .messages
+        .iter()
+        .all(|message| !message.body.contains("invalid_request_error")));
+}
+
+#[test]
+fn setup_required_uses_same_typed_recovery_projection_as_failed_turns() {
+    let mut thread = test_thread(Vec::new(), true);
+    thread.apply_event_test(AgentChatEvent::SetupRequired {
+        reason: "authentication required".to_string(),
+        auth_methods: vec!["oauth".to_string()],
+    });
+
+    assert!(thread.setup_state().is_some());
+    let card = thread.recovery_card_spec().expect("shared recovery card");
+    assert_eq!(card.title.as_ref(), "Sign in required");
+    assert!(card
+        .actions
+        .iter()
+        .any(|action| { action.enabled && action.action.kind() == RecoveryActionKind::SignIn }));
+}
+
+#[test]
+fn repeated_manual_failures_exhaust_retry_without_duplicating_user_turn() {
+    let mut thread = test_thread(Vec::new(), true);
+    thread.push_message(AgentChatThreadMessageRole::User, "please try once");
+    for attempt in 0..2 {
+        thread.apply_event_test(AgentChatEvent::failed(
+            sk_protocol::ai_reliability::ProtocolComponent::Provider,
+            "connection lost",
+        ));
+        let before_users = thread
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, AgentChatThreadMessageRole::User))
+            .count();
+        thread.retry_last_user_turn_test().unwrap();
+        assert_eq!(
+            thread
+                .messages
+                .iter()
+                .filter(|message| matches!(message.role, AgentChatThreadMessageRole::User))
+                .count(),
+            before_users,
+            "retry attempt {attempt} must not duplicate the user turn"
+        );
+    }
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        "connection lost",
+    ));
+    let card = thread
+        .recovery_card_spec()
+        .expect("recovery remains visible");
+    assert!(!card
+        .actions
+        .iter()
+        .any(|action| { action.enabled && action.action.kind() == RecoveryActionKind::Retry }));
 }
 
 #[test]
@@ -1121,11 +1221,11 @@ fn retry_from_error_reenters_streaming_without_duplicate_user_message() {
             .count(),
         1
     );
-    assert!(thread.active_callout().is_none());
+    assert!(thread.recovery_card_spec().is_none());
 }
 
 #[test]
-fn dismiss_clears_failed_turn_callout() {
+fn dismiss_clears_failed_turn_recovery_card() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
     thread.apply_event_test(AgentChatEvent::failed(
@@ -1133,13 +1233,13 @@ fn dismiss_clears_failed_turn_callout() {
         "connection lost",
     ));
 
-    thread.dismiss_active_callout_test();
+    thread.dismiss_recovery_test();
 
-    assert!(thread.active_callout().is_none());
+    assert!(thread.recovery_card_spec().is_none());
 }
 
 #[test]
-fn starting_new_turn_clears_failed_turn_callout() {
+fn starting_new_turn_clears_failed_turn_recovery_card() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
     thread.apply_event_test(AgentChatEvent::failed(
@@ -1149,7 +1249,7 @@ fn starting_new_turn_clears_failed_turn_callout() {
 
     thread.retry_last_user_turn_test().unwrap();
 
-    assert!(thread.active_callout().is_none());
+    assert!(thread.recovery_card_spec().is_none());
 }
 
 #[test]

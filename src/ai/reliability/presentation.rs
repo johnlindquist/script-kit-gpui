@@ -260,9 +260,14 @@ struct FailureCopy {
 fn failure_copy(failure: &AiFailure) -> FailureCopy {
     match &failure.kind {
         AiFailureKind::Capability(capability) => match capability {
-            CapabilityFailure::ClientTooOld { .. } => FailureCopy {
-                title: "AI client update needed",
-                body: "Update the AI client or choose a compatible model to continue.",
+            CapabilityFailure::ClientTooOld { client, .. } => FailureCopy {
+                title: match client {
+                    ClientKind::Codex => "Codex needs an update for this model",
+                    ClientKind::Pi => "Pi needs an update for this model",
+                    ClientKind::Mdflow => "mdflow needs an update for this model",
+                    ClientKind::LocalLlm | ClientKind::Other => "AI client update needed",
+                },
+                body: "Your turn is saved. Choose a compatible model or update the client before retrying.",
             },
             CapabilityFailure::ModelUnavailable { .. } => FailureCopy {
                 title: "Model unavailable",
