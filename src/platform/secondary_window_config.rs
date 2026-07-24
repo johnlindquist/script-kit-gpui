@@ -66,13 +66,14 @@ const GLASS_MORPH_MIN_DURATION: f64 = 0.02;
 const GLASS_MORPH_MIN_INSET: f64 = 0.005;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_DURATION: f64 = 2.0;
-/// Keep native glass materially legible from its first visible entry frame.
+/// Keep native glass materially stable from its first visible entry frame.
 ///
 /// Starting the whole owning window at zero alpha exposes the desktop color
 /// directly through every independent glass capsule, so saturated backgrounds
-/// become the button color until the window approaches full opacity.
+/// become the button color until the window approaches full opacity. Entry
+/// motion therefore animates geometry only; exit remains the fade boundary.
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 0.85;
+const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 1.0;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_INSET: f64 = 0.4;
 #[cfg(target_os = "macos")]
@@ -1992,7 +1993,7 @@ unsafe fn schedule_child_morph_settle(parent: id, window: id, delay_seconds: f64
 }
 
 /// Morph the whole window into place: frame scales up from a centered inset
-/// rect while the window settles from a materially stable near-opaque alpha,
+/// rect while the window remains at a materially stable full alpha,
 /// so the glass backdrop AND the GPUI content arrive together without exposing
 /// the desktop as the capsule color. The glass tracks the window via its
 /// autoresizing mask during the frame animation.
@@ -2148,7 +2149,6 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     }
     let animator: id = msg_send![window, animator];
     let _: () = msg_send![animator, setFrame: squish display: true];
-    let _: () = msg_send![animator, setAlphaValue: 1.0f64];
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
 
     // Phase 2: rebound out to the natural size (settle selector, run-loop
@@ -3199,7 +3199,7 @@ mod secondary_window_config_tests {
         let epsilon = 1e-12;
         assert!((tuning.start_scale_x - 1.06).abs() < epsilon);
         assert!((tuning.start_scale_y - 1.024).abs() < epsilon);
-        assert!((tuning.start_alpha - 0.85).abs() < epsilon);
+        assert!((tuning.start_alpha - 1.0).abs() < epsilon);
         assert!((tuning.squish_scale_x - 0.97).abs() < epsilon);
         assert!((tuning.squish_scale_y - 0.988).abs() < epsilon);
         assert!((tuning.phase1 - 0.14).abs() < epsilon);
