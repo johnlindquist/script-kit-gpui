@@ -215,8 +215,23 @@ def capsule_metrics(
     outside = 1
     radius = max(2, round(float(node.get("layer", {}).get("cornerRadius", 6)) * scale))
     differences: list[float] = []
+    excluded, active_state_overlay = foreground_exclusion_rects(
+        node, foreground_nodes, scale, image.height
+    )
+    excluded_boundary_pairs = 0
+
+    def is_excluded(point: tuple[int, int]) -> bool:
+        px, py = point
+        return any(
+            ex <= px < ex + ew and ey <= py < ey + eh
+            for ex, ey, ew, eh in excluded
+        )
 
     def add_pair(inner: tuple[int, int], outer: tuple[int, int]) -> None:
+        nonlocal excluded_boundary_pairs
+        if is_excluded(inner) or is_excluded(outer):
+            excluded_boundary_pairs += 1
+            return
         if (
             0 <= inner[0] < image.width
             and 0 <= inner[1] < image.height
@@ -259,9 +274,6 @@ def capsule_metrics(
     # Erode by exactly three device pixels. The rounded interior mask excludes
     # corner pixels as well as every rendered foreground descendant.
     erode = 3
-    excluded, active_state_overlay = foreground_exclusion_rects(
-        node, foreground_nodes, scale, image.height
-    )
     inner_rect = (x + erode, y + erode, width - erode * 2, height - erode * 2)
     inner_radius = max(0, radius - erode)
     material_pixels: list[tuple[int, ...]] = []
@@ -285,6 +297,7 @@ def capsule_metrics(
             "erosionDevicePixels": erode,
             "foregroundDescendantCount": len(excluded),
             "activeStateOverlay": active_state_overlay,
+            "excludedBoundaryPairCount": excluded_boundary_pairs,
         },
         "medianBoundaryLuminanceDifference": statistics.median(differences),
         "p10BoundaryLuminanceDifference": percentile(differences, 0.10),

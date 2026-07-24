@@ -109,6 +109,42 @@ class RoundedMaskTests(unittest.TestCase):
             {"content", "keycap", "glyph"},
         )
 
+    def test_foreground_at_perimeter_is_excluded_from_boundary_samples(self):
+        clean = Image.new("RGB", (140, 80), (20, 20, 20))
+        draw = ImageDraw.Draw(clean)
+        draw.rounded_rectangle((20, 20, 119, 59), radius=12, fill=(100, 110, 120))
+        contaminated = clean.copy()
+        contaminated_draw = ImageDraw.Draw(contaminated)
+        contaminated_draw.rectangle((48, 20, 72, 28), fill=(255, 0, 255))
+        capsule = {
+            "id": "script-kit-footer-capsule-test",
+            "screenshotFrame": {"x": 20, "y": 20, "width": 100, "height": 40},
+            "layer": {"cornerRadius": 12},
+        }
+        foreground = {
+            "id": "script-kit-footer-label-test",
+            "parentId": capsule["id"],
+            "className": "NSTextField",
+            # AppKit screenshot frames are bottom-left coordinates.
+            "screenshotFrame": {"x": 48, "y": 51, "width": 25, "height": 9},
+        }
+        clean_result = metrics.capsule_metrics(clean, capsule, 1.0, [capsule])
+        contaminated_result = metrics.capsule_metrics(
+            contaminated, capsule, 1.0, [capsule, foreground]
+        )
+        self.assertEqual(
+            contaminated_result["medianBoundaryLuminanceDifference"],
+            clean_result["medianBoundaryLuminanceDifference"],
+        )
+        self.assertEqual(
+            contaminated_result["p10BoundaryLuminanceDifference"],
+            clean_result["p10BoundaryLuminanceDifference"],
+        )
+        self.assertGreater(
+            contaminated_result["mask"]["excludedBoundaryPairCount"],
+            0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

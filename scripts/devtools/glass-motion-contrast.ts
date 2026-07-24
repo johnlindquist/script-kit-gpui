@@ -422,7 +422,9 @@ async function main() {
       neutralPass,
       complete: cells.length === 4
         && cells.every((cell) => typeof cell.pass === "boolean"),
-      pass: stabilityPass && neutralPass,
+      pass: stabilityPass
+        && neutralPass
+        && stability?.pass === true,
     };
     writeFileSync(
       join(lockedDirectory, "production-policy.json"),

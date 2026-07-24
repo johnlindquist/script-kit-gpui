@@ -180,6 +180,9 @@ const driver = await Driver.launch({
   sandboxHome: true,
   sessionName: `glass-lifecycle-filmstrip-${process.pid}`,
   defaultTimeoutMs: 8_000,
+  env: {
+    SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
+  },
 });
 
 function startFilmstrip(
@@ -329,6 +332,12 @@ try {
     filmstrip: mainExitFilmstrip,
     pass: mainExitFilmstrip.pass,
   });
+  const pointerPreparation = await run(["cliclick", "m:2,2"]);
+  if (pointerPreparation.exitCode !== 0) {
+    throw new Error(
+      `failed to park pointer away from entry capsules: ${pointerPreparation.stderr}`,
+    );
+  }
   await announceTestStatus(
     "Lifecycle filmstrip · Main entry",
     "Observer starts while hidden; the same CGWindowID and detached gutter emerge together",
@@ -356,6 +365,12 @@ try {
     showRequestedAt,
     streamReady: mainEntryReady,
     captureBounds: mainBounds,
+    pointerPreparation: {
+      command: ["cliclick", "m:2,2"],
+      exitCode: pointerPreparation.exitCode,
+      target: { x: 2, y: 2 },
+      purpose: "prevent an inherited hover state from obscuring base material",
+    },
     settledLayout: mainEntrySettledLayout,
     filmstrip: mainEntryFilmstrip,
     pass: mainEntryFilmstrip.pass,

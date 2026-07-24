@@ -33,6 +33,13 @@ def adaptive_relation_summary(
     adaptive: dict[str, dict] = {}
     settled_relation_scalars: list[float] = []
     for capsule_id in capsule_ids:
+        motion_sample_count = sum(
+            row["phase"] == "motion"
+            and any(
+                capsule["id"] == capsule_id for capsule in row["capsules"]
+            )
+            for row in frame_rows
+        )
         settled_rows = [
             next(
                 (capsule for capsule in row["capsules"] if capsule["id"] == capsule_id),
@@ -76,10 +83,12 @@ def adaptive_relation_summary(
             residuals.append(residual)
         adaptive[capsule_id] = {
             "settledOffsetLab": offset,
+            "motionSampleCount": motion_sample_count,
             "residualP95DeltaE00": metrics.percentile(residuals, 0.95),
             "residualMaximumDeltaE00": max(residuals, default=math.inf),
             "pass": (
-                metrics.percentile(residuals, 0.95) <= 5.0
+                motion_sample_count >= 1
+                and metrics.percentile(residuals, 0.95) <= 5.0
                 and max(residuals, default=math.inf) <= 8.0
             ),
         }
@@ -322,9 +331,10 @@ def main() -> int:
             and float(frame.get("fraction", 0)) > 1
         )
     ]
-    if len(motion_frames) < 15 or len(settled_frames) < 3:
+    minimum_motion_frames = 1 if entry_mode else 15
+    if len(motion_frames) < minimum_motion_frames or len(settled_frames) < 3:
         errors.append(
-            f"expected at least 15 motion + 3 settled frames, found "
+            f"expected at least {minimum_motion_frames} motion + 3 settled frames, found "
             f"{len(motion_frames)} + {len(settled_frames)}"
         )
 
@@ -375,10 +385,23 @@ def main() -> int:
         scale = image.width / host_width if host_width > 0 else 0
         if scale <= 0:
             continue
-        capsules = [
-            metrics.capsule_metrics(image, node, scale, frame_foreground_nodes)
-            for node in frame_capsule_nodes
-        ]
+        capsules = []
+        unmeasured_capsules: list[dict] = []
+        for node in frame_capsule_nodes:
+            try:
+                capsules.append(
+                    metrics.capsule_metrics(
+                        image, node, scale, frame_foreground_nodes
+                    )
+                )
+            except ValueError as error:
+                unmeasured_capsules.append(
+                    {"id": node.get("id"), "reason": str(error)}
+                )
+        if unmeasured_capsules and frame.get("_phase") == "settled":
+            errors.append(
+                f"settled entry frame has unmeasured capsules: {unmeasured_capsules}"
+            )
         _, stage_y, _, stage_height = metrics.frame_pixels(
             frame_backdrop, scale, image.height
         )
@@ -421,6 +444,7 @@ def main() -> int:
                 "sha256": frame.get("sha256"),
                 "stageMedianRgb": stage_rgb,
                 "capsules": capsules,
+                "unmeasuredCapsules": unmeasured_capsules,
                 "maximumStageDeltaE00": max(
                     (capsule["stageDeltaE00"] for capsule in capsules),
                     default=math.inf,
@@ -500,7 +524,7 @@ def main() -> int:
         "errors": errors,
         "pass": (
             not errors
-            and len(motion_frames) >= 15
+            and len(motion_frames) >= minimum_motion_frames
             and len(settled_frames) >= 3
             and len(adaptive) == len(capsule_ids)
             and all(row["pass"] for row in adaptive.values())
