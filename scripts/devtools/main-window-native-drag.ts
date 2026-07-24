@@ -984,9 +984,169 @@ type AppKitNode = {
     shadowOffsetY?: number;
     hasShadowPath?: boolean;
   };
-  text?: { value?: string; color?: { alpha?: number } };
+  text?: { value?: string; color?: AppKitColor };
   image?: unknown;
 };
+
+type AppKitColor = {
+  red?: number;
+  green?: number;
+  blue?: number;
+  alpha?: number;
+};
+
+export type FooterColorStateReceipt = {
+  buttonId: string;
+  expectedState: "Rest" | "Hover" | "Active";
+  expected: {
+    hasBackground: boolean;
+    backgroundRgba: number | null;
+    foregroundRgba: number;
+    sourceLog: Record<string, unknown> | null;
+  } | null;
+  observed: {
+    backgroundRgba: number | null;
+    foregroundRgba: number[];
+    foregroundNodeIds: string[];
+  };
+  errors: string[];
+  pass: boolean;
+};
+
+function appKitColorRgba(color: AppKitColor | null | undefined): number | null {
+  if (
+    color == null
+    || ![color.red, color.green, color.blue, color.alpha].every(
+      (component) => typeof component === "number" && Number.isFinite(component),
+    )
+  ) {
+    return null;
+  }
+  const byte = (component: number | undefined) =>
+    Math.max(0, Math.min(255, Math.round(Number(component) * 255)));
+  return (
+    (byte(color.red) << 24)
+    | (byte(color.green) << 16)
+    | (byte(color.blue) << 8)
+    | byte(color.alpha)
+  ) >>> 0;
+}
+
+function parseFooterVisualStateLog(
+  entries: Array<Record<string, unknown>>,
+  buttonId: string,
+  expectedState: "Rest" | "Hover" | "Active",
+) {
+  const matches = entries.filter((entry) => {
+    const message = String(entry.message ?? "");
+    return message.includes("event=native_footer_button_visual_state_applied")
+      && message.includes(`button_id=${buttonId}`)
+      && message.includes(`state=${expectedState}`);
+  });
+  const sourceLog = matches.at(-1) ?? null;
+  if (sourceLog == null) return null;
+  const message = String(sourceLog.message ?? "");
+  const numberField = (field: string) => {
+    const match = message.match(new RegExp(`(?:^|\\s)${field}=(\\d+)`));
+    return match == null ? null : Number(match[1]);
+  };
+  const boolField = (field: string) => {
+    const match = message.match(new RegExp(`(?:^|\\s)${field}=(true|false)`));
+    return match == null ? null : match[1] === "true";
+  };
+  const hasBackground = boolField("has_background");
+  const backgroundRgba = numberField("background_rgba");
+  const foregroundRgba = numberField("foreground_rgba");
+  if (
+    hasBackground == null
+    || backgroundRgba == null
+    || foregroundRgba == null
+  ) {
+    return null;
+  }
+  return {
+    hasBackground,
+    backgroundRgba: hasBackground ? backgroundRgba >>> 0 : null,
+    foregroundRgba: foregroundRgba >>> 0,
+    sourceLog,
+  };
+}
+
+export function analyzeFooterColorState(
+  layout: any,
+  logs: any,
+  options: {
+    buttonId: string;
+    stateLayerId: string;
+    foregroundNodeIds: string[];
+    expectedState: "Rest" | "Hover" | "Active";
+  },
+): FooterColorStateReceipt {
+  const nodes = ((layout?.fidelity?.appKit?.nodes ?? []) as AppKitNode[]);
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const entries = ((logs?.entries ?? []) as Array<Record<string, unknown>>);
+  const expected = parseFooterVisualStateLog(
+    entries,
+    options.buttonId,
+    options.expectedState,
+  );
+  const stateLayer = byId.get(options.stateLayerId);
+  const observedBackground = appKitColorRgba(
+    stateLayer?.layer?.backgroundColor as AppKitColor | null | undefined,
+  );
+  const foregroundNodes = options.foregroundNodeIds
+    .map((id) => byId.get(id))
+    .filter((node): node is AppKitNode => node != null && node.hidden !== true);
+  const foregroundRgba = foregroundNodes
+    .map((node) =>
+      appKitColorRgba(
+        node.text?.color
+          ?? ((node.image as { tint?: AppKitColor } | undefined)?.tint ?? null),
+      )
+    )
+    .filter((color): color is number => color != null);
+  const errors: string[] = [];
+  if (expected == null) {
+    errors.push(
+      `missing canonical ${options.expectedState} color log for ${options.buttonId}`,
+    );
+  }
+  if (stateLayer == null) {
+    errors.push(`missing AppKit state layer ${options.stateLayerId}`);
+  }
+  if (foregroundNodes.length === 0) {
+    errors.push(`no visible foreground nodes for ${options.buttonId}`);
+  } else if (foregroundRgba.length !== foregroundNodes.length) {
+    errors.push(`some foreground colors were unavailable for ${options.buttonId}`);
+  }
+  if (expected != null) {
+    if (observedBackground !== expected.backgroundRgba) {
+      errors.push(
+        `background ${observedBackground ?? "none"} != canonical ${expected.backgroundRgba ?? "none"}`,
+      );
+    }
+    const mismatchedForegrounds = foregroundRgba.filter(
+      (rgba) => rgba !== expected.foregroundRgba,
+    );
+    if (mismatchedForegrounds.length > 0) {
+      errors.push(
+        `foregrounds ${mismatchedForegrounds.join(",")} != canonical ${expected.foregroundRgba}`,
+      );
+    }
+  }
+  return {
+    buttonId: options.buttonId,
+    expectedState: options.expectedState,
+    expected,
+    observed: {
+      backgroundRgba: observedBackground,
+      foregroundRgba,
+      foregroundNodeIds: foregroundNodes.map((node) => node.id),
+    },
+    errors,
+    pass: errors.length === 0,
+  };
+}
 
 export function analyzeStationaryFidelity(
   layout: any,
@@ -1972,6 +2132,49 @@ async function cli() {
         stationaryOnly ? { expectedHostSize: { width: 750, height: 480 } } : {},
       );
       const captures: Array<Record<string, unknown>> = [];
+      const colorStates: FooterColorStateReceipt[] = [];
+      const foregroundIdsForAction = (layout: any, action: string) =>
+        (((layout?.fidelity?.appKit?.nodes ?? []) as AppKitNode[])
+          .filter((node) =>
+            node.id === `script-kit-footer-label-${action}`
+            || node.id.startsWith(`script-kit-footer-keycap-glyph-${action}-`)
+          )
+          .map((node) => node.id));
+      const leftForegroundIds = (layout: any) =>
+        (((layout?.fidelity?.appKit?.nodes ?? []) as AppKitNode[])
+          .filter((node) =>
+            node.id === "script-kit-footer-cwd-chip-icon"
+            || node.id === "script-kit-footer-cwd-chip-label"
+            || node.id.startsWith("script-kit-footer-cwd-chip-keycap-glyph-")
+            || node.id === "script-kit-footer-left-profile-icon"
+            || node.id === "script-kit-footer-model-label"
+            || node.id.startsWith("script-kit-footer-left-info-keycap-glyph-")
+          )
+          .map((node) => node.id));
+      const captureColorState = async (
+        layout: any,
+        options: Parameters<typeof analyzeFooterColorState>[2],
+      ) => {
+        const logs = await driver.getLogs({
+          limit: 500,
+          target: "script_kit::footer_popup",
+          contains: "native_footer_button_visual_state_applied",
+        });
+        const state = analyzeFooterColorState(layout, logs, options);
+        colorStates.push(state);
+        if (!state.pass) {
+          structural.errors.push(
+            `${options.buttonId} ${options.expectedState} colors: ${state.errors.join("; ")}`,
+          );
+        }
+        return state;
+      };
+      await captureColorState(receipt.layout, {
+        buttonId: "script-kit-footer-button-actions",
+        stateLayerId: "script-kit-footer-state-layer-actions",
+        foregroundNodeIds: foregroundIdsForAction(receipt.layout, "actions"),
+        expectedState: "Rest",
+      });
       const defaultCapture = await captureNativeWindow(
         Number(main.pid),
         pinnedMainWindow.windowId,
@@ -2142,6 +2345,16 @@ async function cli() {
         const hover = await run(["cliclick", `m:${hoverX},${hoverY}`]);
         await Bun.sleep(350);
         if (hover.exitCode === 0) {
+          const hoverLayout = await driver.getLayoutInfo(
+            { target: { type: "id", id: "main" } },
+            { timeoutMs: 15_000 },
+          );
+          await captureColorState(hoverLayout, {
+            buttonId: "script-kit-footer-button-actions",
+            stateLayerId: "script-kit-footer-state-layer-actions",
+            foregroundNodeIds: foregroundIdsForAction(hoverLayout, "actions"),
+            expectedState: "Hover",
+          });
           captures.push(await captureNativeWindow(
             Number(main.pid),
             pinnedMainWindow.windowId,
@@ -2155,6 +2368,16 @@ async function cli() {
         const select = await run(["cliclick", `c:${hoverX},${hoverY}`]);
         await Bun.sleep(500);
         if (select.exitCode === 0) {
+          const activeLayout = await driver.getLayoutInfo(
+            { target: { type: "id", id: "main" } },
+            { timeoutMs: 15_000 },
+          );
+          await captureColorState(activeLayout, {
+            buttonId: "script-kit-footer-button-actions",
+            stateLayerId: "script-kit-footer-state-layer-actions",
+            foregroundNodeIds: foregroundIdsForAction(activeLayout, "actions"),
+            expectedState: "Active",
+          });
           captures.push(await captureNativeWindow(
             Number(main.pid),
             pinnedMainWindow.windowId,
@@ -2188,9 +2411,7 @@ async function cli() {
           }).catch(() => null);
           await Bun.sleep(150);
         }
-        driver.send({ type: "show" });
-        await driver.waitForState({ windowVisible: true }, { timeoutMs: 15_000 });
-        await driver.waitForSettle({ timeoutMs: 10_000 });
+        await ensureMainWindowVisible("mwnd-left-hover-main-show");
         const footerHeight = Number((receipt.layout as any)?.fidelity?.appKit?.footerContainerFrame?.height ?? 32);
         const leftX = Math.round(finalMain.bounds.x + leftFrame.x + leftFrame.width / 2);
         const leftY = Math.round(
@@ -2204,6 +2425,16 @@ async function cli() {
         const leftHover = await run(["cliclick", `m:${leftX},${leftY}`]);
         await Bun.sleep(350);
         if (leftHover.exitCode === 0) {
+          const leftHoverLayout = await driver.getLayoutInfo(
+            { target: { type: "id", id: "main" } },
+            { timeoutMs: 15_000 },
+          );
+          await captureColorState(leftHoverLayout, {
+            buttonId: String(leftButton?.id ?? ""),
+            stateLayerId: "script-kit-footer-left-info-state-layer",
+            foregroundNodeIds: leftForegroundIds(leftHoverLayout),
+            expectedState: "Hover",
+          });
           captures.push(await captureNativeWindow(
             Number(main.pid),
             pinnedMainWindow.windowId,
@@ -2572,9 +2803,14 @@ async function cli() {
       structural.pass = structural.errors.length === 0;
       const distinctFooterStates = new Set(captures.map((capture: any) => capture.footerCropSha256));
       receipt.stationary = {
-        pass: structural.pass && captures.length >= 3 && distinctFooterStates.size >= 2,
+        pass: structural.pass
+          && colorStates.length >= 4
+          && colorStates.every((state) => state.pass)
+          && captures.length >= 3
+          && distinctFooterStates.size >= 2,
         structural,
         captures,
+        colorStates,
         leftInteraction,
         distinctFooterStateCount: distinctFooterStates.size,
         captureMethod:

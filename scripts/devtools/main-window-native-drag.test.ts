@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  analyzeFooterColorState,
   analyzeIntegratedFilmstrip,
   analyzeStationaryFidelity,
   analyzeTrace,
@@ -9,6 +10,66 @@ import {
   type DragSample,
   type NativeTrace,
 } from "./main-window-native-drag.ts";
+
+function appKitColor(rgba: number) {
+  return {
+    red: ((rgba >>> 24) & 0xff) / 255,
+    green: ((rgba >>> 16) & 0xff) / 255,
+    blue: ((rgba >>> 8) & 0xff) / 255,
+    alpha: (rgba & 0xff) / 255,
+  };
+}
+
+function footerColorFixture(options: {
+  state: "Rest" | "Hover" | "Active";
+  backgroundRgba: number | null;
+  foregroundRgba: number;
+}) {
+  const buttonId = "script-kit-footer-action-agent";
+  const stateLayerId = `${buttonId}-state`;
+  const foregroundNodeIds = [
+    `${buttonId}-label`,
+    `${buttonId}-keycap-glyph-0`,
+  ];
+  const nodes = [
+    {
+      id: stateLayerId,
+      layer: {
+        backgroundColor:
+          options.backgroundRgba == null
+            ? null
+            : appKitColor(options.backgroundRgba),
+      },
+    },
+    ...foregroundNodeIds.map((id) => ({
+      id,
+      hidden: false,
+      text: { color: appKitColor(options.foregroundRgba) },
+    })),
+  ];
+  return {
+    layout: { fidelity: { appKit: { nodes } } },
+    logs: {
+      entries: [
+        {
+          message:
+            "event=native_footer_button_visual_state_applied"
+            + ` button_id=${buttonId}`
+            + ` state=${options.state}`
+            + ` has_background=${options.backgroundRgba != null}`
+            + ` background_rgba=${options.backgroundRgba ?? 0}`
+            + ` foreground_rgba=${options.foregroundRgba}`,
+        },
+      ],
+    },
+    options: {
+      buttonId,
+      stateLayerId,
+      foregroundNodeIds,
+      expectedState: options.state,
+    },
+  } as const;
+}
 
 type TraceOptions = {
   driftAt?: (index: number) => number;
@@ -641,6 +702,98 @@ describe("stationary native footer analyzer", () => {
     expect(
       result.errors.some((error) => error.includes("left footer icon has no rendered image")),
     ).toBe(true);
+  });
+});
+
+describe("native footer color-state analyzer", () => {
+  test("accepts an exact rest state without a background fill", () => {
+    const fixture = footerColorFixture({
+      state: "Rest",
+      backgroundRgba: null,
+      foregroundRgba: 0x112233ff,
+    });
+    const result = analyzeFooterColorState(
+      fixture.layout,
+      fixture.logs,
+      fixture.options,
+    );
+    expect(result.pass).toBe(true);
+    expect(result.observed.backgroundRgba).toBeNull();
+    expect(result.observed.foregroundRgba).toEqual([
+      0x112233ff,
+      0x112233ff,
+    ]);
+  });
+
+  test("accepts exact hover background and foreground bytes", () => {
+    const fixture = footerColorFixture({
+      state: "Hover",
+      backgroundRgba: 0x11223312,
+      foregroundRgba: 0xaabbccff,
+    });
+    const result = analyzeFooterColorState(
+      fixture.layout,
+      fixture.logs,
+      fixture.options,
+    );
+    expect(result.pass).toBe(true);
+    expect(result.expected?.backgroundRgba).toBe(0x11223312);
+    expect(result.observed.backgroundRgba).toBe(0x11223312);
+  });
+
+  test("rejects an AppKit foreground that drifts from the canonical bytes", () => {
+    const fixture = footerColorFixture({
+      state: "Active",
+      backgroundRgba: 0x11223320,
+      foregroundRgba: 0xffffffff,
+    });
+    fixture.layout.fidelity.appKit.nodes[1].text.color =
+      appKitColor(0xffffffcc);
+    const result = analyzeFooterColorState(
+      fixture.layout,
+      fixture.logs,
+      fixture.options,
+    );
+    expect(result.pass).toBe(false);
+    expect(result.errors.some((error) => error.includes("foregrounds"))).toBe(
+      true,
+    );
+  });
+
+  test("quantizes AppKit floating alpha before making an exact-byte decision", () => {
+    const fixture = footerColorFixture({
+      state: "Rest",
+      backgroundRgba: null,
+      foregroundRgba: 0xffffffff,
+    });
+    fixture.layout.fidelity.appKit.nodes[1].text.color.alpha =
+      0.800000011920929;
+    const result = analyzeFooterColorState(
+      fixture.layout,
+      fixture.logs,
+      fixture.options,
+    );
+    expect(result.pass).toBe(false);
+    expect(result.observed.foregroundRgba[0]).toBe(0xffffffcc);
+    expect(result.expected?.foregroundRgba).toBe(0xffffffff);
+  });
+
+  test("rejects one-byte background drift", () => {
+    const fixture = footerColorFixture({
+      state: "Hover",
+      backgroundRgba: 0x11223312,
+      foregroundRgba: 0xffffffff,
+    });
+    fixture.layout.fidelity.appKit.nodes[0].layer.backgroundColor =
+      appKitColor(0x11223311);
+    const result = analyzeFooterColorState(
+      fixture.layout,
+      fixture.logs,
+      fixture.options,
+    );
+    expect(result.pass).toBe(false);
+    expect(result.observed.backgroundRgba).toBe(0x11223311);
+    expect(result.expected?.backgroundRgba).toBe(0x11223312);
   });
 });
 
