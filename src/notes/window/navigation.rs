@@ -432,6 +432,56 @@ impl NotesApp {
                 "ageMs": entry.recorded_at.elapsed().as_millis() as u64,
             })
         });
+        let footer_hit_regions = self
+            .entry_reveal
+            .native_window_number
+            .and_then(crate::platform::footer_hit_regions::snapshot_for_native_window_number)
+            .map(|snapshot| {
+                serde_json::json!({
+                    "coordinateSpace": "gpuiWindowLogicalPxYDown",
+                    "nativeWindowNumber": snapshot.native_window_number,
+                    "windowSize": {
+                        "width": snapshot.window_width,
+                        "height": snapshot.window_height,
+                    },
+                    "layoutGeneration": snapshot.layout_generation,
+                    "regions": snapshot.regions.iter().map(|region| serde_json::json!({
+                        "group": region.group,
+                        "index": region.index,
+                        "elementId": format!("glass-capsule-{}-{}", region.group, region.index),
+                        "bounds": {
+                            "x": region.x,
+                            "y": region.y,
+                            "width": region.width,
+                            "height": region.height,
+                        },
+                    })).collect::<Vec<_>>(),
+                })
+            });
+        let bottom_resize = self.last_bottom_resize_receipt.as_ref().map(|receipt| {
+            let protected_region = match &receipt.route {
+                resize::NotesBottomResizeRoute::ProtectedFooterButton { group, index } => {
+                    Some(serde_json::json!({"group": group, "index": index}))
+                }
+                _ => None,
+            };
+            serde_json::json!({
+                "route": receipt.route.as_str(),
+                "position": {"x": receipt.x, "y": receipt.y},
+                "beforeSize": {
+                    "width": receipt.before_width,
+                    "height": receipt.before_height,
+                },
+                "afterSize": {
+                    "width": receipt.after_width,
+                    "height": receipt.after_height,
+                },
+                "footerLayoutGeneration": receipt.footer_layout_generation,
+                "nativeWindowNumber": receipt.native_window_number,
+                "protectedRegion": protected_region,
+                "ageMs": receipt.recorded_at.elapsed().as_millis() as u64,
+            })
+        });
 
         serde_json::json!({
             "schemaVersion": 1,
@@ -526,6 +576,8 @@ impl NotesApp {
                 "revealRequestedAtMonotonicNs": self.entry_reveal.reveal_requested_at_monotonic_ns,
                 "visibleAtMonotonicNs": self.entry_reveal.visible_at_monotonic_ns,
             },
+            "footerHitRegions": footer_hit_regions,
+            "bottomResize": bottom_resize,
             "windowLifecycle": {
                 "schemaVersion": 2,
                 "phase": if NOTES_EXIT_TICKET

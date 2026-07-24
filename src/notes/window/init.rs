@@ -164,6 +164,7 @@ impl NotesApp {
             last_window_height: initial_height, // Track for manual resize detection
             autosize_generation: 0,
             last_autosize_transition: None,
+            last_bottom_resize_receipt: None,
             focus_handle,
             _subscriptions: vec![editor_sub, editor_hover_observation, search_sub],
             last_deeplink_hover_hint: None,

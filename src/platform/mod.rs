@@ -17,6 +17,7 @@
 
 pub mod accessibility;
 mod display;
+pub(crate) mod footer_hit_regions;
 #[cfg(target_os = "macos")]
 pub(crate) mod glass_button_host;
 pub(crate) mod gpui_event_simulator;

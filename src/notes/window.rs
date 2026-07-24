@@ -6,8 +6,8 @@
 use anyhow::Result;
 use gpui::{
     div, prelude::*, px, rgba, size, AnyElement, App, Context, CursorStyle, Entity, FocusHandle,
-    Focusable, IntoElement, KeyDownEvent, MouseMoveEvent, ParentElement, Render, Styled,
-    Subscription, Window, WindowBounds, WindowOptions,
+    Focusable, IntoElement, KeyDownEvent, MouseDownEvent, MouseMoveEvent, ParentElement, Render,
+    Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
 
 use chrono::NaiveDate;
@@ -582,6 +582,8 @@ pub struct NotesApp {
     autosize_generation: u64,
     /// Last auto-resize decision for before/after resize comparison proof.
     last_autosize_transition: Option<NotesAutosizeTransition>,
+    /// Last root pointer-down classification for bottom-resize verification.
+    last_bottom_resize_receipt: Option<resize::NotesBottomResizeReceipt>,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
 
@@ -716,6 +718,7 @@ mod render_editor_body;
 mod render_editor_footer;
 mod render_editor_titlebar;
 mod render_ui;
+mod resize;
 mod traits;
 mod vibrancy;
 mod window_ops;

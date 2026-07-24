@@ -1072,6 +1072,11 @@ fn open_notes_window_with_close_behavior(
         // Use PopUp for floating panel behavior - allows keyboard input without
         // activating the app (Raycast-like). Creates NSPanel with NonactivatingPanel mask.
         kind: gpui::WindowKind::PopUp,
+        // Notes owns a precise bottom-edge resize handoff so its floating
+        // footer buttons can remain protected. AppKit's ordinary resizable
+        // frame intercepts those overlapping button pixels before GPUI can
+        // classify them, so native frame resizing must stay disabled here.
+        is_resizable: false,
         ..Default::default()
     };
 
@@ -1585,6 +1590,7 @@ pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
                 crate::platform::record_glass_exit_commit(ticket);
                 retire_notes_window_registrations(transition);
                 let _ = any_handle.update(cx, |_root, window, _cx| {
+                    crate::components::footer_chrome::remove_glass_capsule_window(window);
                     window.remove_window();
                 });
                 if transition.restore_launcher_after_removal {
@@ -1599,7 +1605,10 @@ pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
             retire_notes_window_registrations,
             || restore_launcher_after_notes_close_if_needed(cx),
             || {
-                window.on_next_frame(|window, _cx| window.remove_window());
+                window.on_next_frame(|window, _cx| {
+                    crate::components::footer_chrome::remove_glass_capsule_window(window);
+                    window.remove_window();
+                });
                 window.request_animation_frame();
             },
         );
@@ -1641,6 +1650,7 @@ pub fn close_notes_window(cx: &mut App) {
             {
                 Some((ticket, window.window_handle()))
             } else {
+                crate::components::footer_chrome::remove_glass_capsule_window(window);
                 window.remove_window();
                 None
             }
@@ -1677,6 +1687,9 @@ pub fn close_notes_window(cx: &mut App) {
                             crate::platform::record_glass_exit_commit(ticket);
                             retire_notes_window_registrations(transition);
                             let _ = any_handle.update(cx, |_root, window, _cx| {
+                                crate::components::footer_chrome::remove_glass_capsule_window(
+                                    window,
+                                );
                                 window.remove_window();
                             });
                             if transition.restore_launcher_after_removal {

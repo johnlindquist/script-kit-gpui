@@ -129,14 +129,22 @@ fn glass_capsule_row_with_cleanup(
     let row = row.children(capsules);
 
     #[cfg(target_os = "macos")]
-    let row = if enabled {
-        row.on_children_prepainted(move |bounds, window, _cx| {
+    let row = row.on_children_prepainted(move |bounds, window, _cx| {
+        for stale_group in &groups_to_remove {
+            crate::platform::footer_hit_regions::remove_group(window, stale_group);
+        }
+        let capsule_bounds = bounds
+            .into_iter()
+            .skip(skip_leading_children)
+            .collect::<Vec<_>>();
+        crate::platform::footer_hit_regions::sync_for_window(window, group, &capsule_bounds);
+
+        if enabled {
             for stale_group in &groups_to_remove {
                 crate::platform::glass_button_host::remove_group(window, stale_group);
             }
-            let frames = bounds
-                .into_iter()
-                .skip(skip_leading_children)
+            let frames = capsule_bounds
+                .iter()
                 .map(|bounds| {
                     (
                         f64::from(bounds.origin.x.as_f32()),
@@ -148,10 +156,8 @@ fn glass_capsule_row_with_cleanup(
                 })
                 .collect::<Vec<_>>();
             crate::platform::glass_button_host::sync_for_window(window, group, &frames);
-        })
-    } else {
-        row
-    };
+        }
+    });
 
     #[cfg(not(target_os = "macos"))]
     let _ = (enabled, radius, skip_leading_children);
@@ -175,6 +181,7 @@ pub(crate) fn glass_capsule(
 }
 
 pub(crate) fn remove_glass_capsule_group(window: &Window, group: &'static str) {
+    crate::platform::footer_hit_regions::remove_group(window, group);
     #[cfg(target_os = "macos")]
     crate::platform::glass_button_host::remove_group(window, group);
     #[cfg(not(target_os = "macos"))]
@@ -182,6 +189,7 @@ pub(crate) fn remove_glass_capsule_group(window: &Window, group: &'static str) {
 }
 
 pub(crate) fn remove_glass_capsule_window(window: &Window) {
+    crate::platform::footer_hit_regions::remove_for_window(window);
     #[cfg(target_os = "macos")]
     crate::platform::glass_button_host::remove_for_window(window);
     #[cfg(not(target_os = "macos"))]

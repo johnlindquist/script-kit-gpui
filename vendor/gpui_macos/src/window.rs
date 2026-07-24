@@ -10,17 +10,17 @@ use block::ConcreteBlock;
 use cocoa::{
     appkit::{
         NSAppKitVersionNumber, NSAppKitVersionNumber12_0, NSApplication, NSBackingStoreBuffered,
-        NSColor, NSEvent, NSEventModifierFlags, NSFilenamesPboardType, NSPasteboard, NSScreen,
-        NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial,
-        NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowButton,
+        NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFilenamesPboardType,
+        NSPasteboard, NSScreen, NSView, NSViewHeightSizable, NSViewWidthSizable,
+        NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowButton,
         NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode,
         NSWindowStyleMask, NSWindowTitleVisibility,
     },
     base::{id, nil},
     foundation::{
-        NSArray, NSAutoreleasePool, NSDictionary, NSFastEnumeration, NSInteger, NSNotFound,
-        NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSUInteger,
-        NSUserDefaults,
+        NSArray, NSAutoreleasePool, NSDefaultRunLoopMode, NSDictionary, NSFastEnumeration,
+        NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect, NSSize,
+        NSString, NSUInteger, NSUserDefaults,
     },
 };
 use dispatch2::DispatchQueue;
@@ -29,7 +29,7 @@ use gpui::{
     ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, SharedString, Size, SystemWindowTab, WindowAppearance,
+    RequestFrameOptions, ResizeEdge, SharedString, Size, SystemWindowTab, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams, point,
     px, size,
 };
@@ -64,7 +64,7 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use util::ResultExt;
 
@@ -1073,6 +1073,33 @@ fn if_window_not_closed(closed: Arc<AtomicBool>, f: impl FnOnce()) {
     }
 }
 
+/// Resolve a bottom-edge drag while keeping the frame's top edge fixed.
+///
+/// AppKit screen coordinates grow upward, so moving the pointer downward
+/// produces a negative `pointer_delta_y` and therefore increases the height.
+fn bottom_resize_frame(
+    initial_frame: NSRect,
+    pointer_delta_y: f64,
+    minimum_size: NSSize,
+    maximum_size: NSSize,
+) -> NSRect {
+    let minimum_height = minimum_size.height.max(1.0);
+    let maximum_height = if maximum_size.height.is_finite() && maximum_size.height >= minimum_height
+    {
+        maximum_size.height
+    } else {
+        f64::MAX
+    };
+    let height =
+        (initial_frame.size.height - pointer_delta_y).clamp(minimum_height, maximum_height);
+    let top = initial_frame.origin.y + initial_frame.size.height;
+
+    NSRect::new(
+        NSPoint::new(initial_frame.origin.x, top - height),
+        NSSize::new(initial_frame.size.width, height),
+    )
+}
+
 impl PlatformWindow for MacWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.as_ref().lock().bounds()
@@ -1733,10 +1760,194 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn start_window_resize(&self, edge: ResizeEdge) {
+        if edge != ResizeEdge::Bottom {
+            return;
+        }
+
+        // Capture the mouse-down synchronously, but do not enter AppKit's resize
+        // tracking loop while GPUI is still dispatching that mouse event. Every
+        // setFrame: synchronously emits resize callbacks, and those callbacks
+        // must be able to borrow the application after the input handler has
+        // returned.
+        let (window, closed, executor) = {
+            let this = self.0.lock();
+            (
+                this.native_window,
+                this.closed.clone(),
+                this.foreground_executor.clone(),
+            )
+        };
+        let Some((initial_frame, initial_pointer, minimum_size, maximum_size, window_number)) = (unsafe {
+            if window == nil {
+                None
+            } else {
+                let app = NSApplication::sharedApplication(nil);
+                let current_event: id = msg_send![app, currentEvent];
+                let event_window: id = if current_event == nil {
+                    nil
+                } else {
+                    msg_send![current_event, window]
+                };
+                if current_event == nil
+                    || current_event.eventType() != NSEventType::NSLeftMouseDown
+                    || event_window != window
+                {
+                    None
+                } else {
+                    let _: id = msg_send![window, retain];
+                    let window_number: NSInteger = msg_send![window, windowNumber];
+                    Some((
+                        NSWindow::frame(window),
+                        NSEvent::mouseLocation(nil),
+                        window.minSize(),
+                        window.maxSize(),
+                        window_number,
+                    ))
+                }
+            }
+        }) else {
+            return;
+        };
+
+        log::info!(
+            target: "gpui_macos",
+            "event=macos_window_resize_started window_number={} edge=bottom initial_x={:.2} initial_y={:.2} initial_width={:.2} initial_height={:.2} min_height={:.2} max_height={:.2}",
+            window_number,
+            initial_frame.origin.x,
+            initial_frame.origin.y,
+            initial_frame.size.width,
+            initial_frame.size.height,
+            minimum_size.height,
+            maximum_size.height,
+        );
+
+        executor
+            .spawn(async move {
+                if closed.load(Ordering::Acquire) {
+                    unsafe {
+                        let _: () = msg_send![window, release];
+                    }
+                    return;
+                }
+
+                unsafe {
+                    let app = NSApplication::sharedApplication(nil);
+                    let event_mask =
+                        (NSEventMask::NSLeftMouseDraggedMask | NSEventMask::NSLeftMouseUpMask).bits()
+                            as NSUInteger;
+                    let started_at = Instant::now();
+                    let safety_timeout = Duration::from_secs(15);
+                    let mut sample_count = 0usize;
+                    let mut ended_with_mouse_up = false;
+
+                    while started_at.elapsed() < safety_timeout {
+                        let until: id =
+                            msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: 0.05f64];
+                        let event = app.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                            event_mask,
+                            until,
+                            NSDefaultRunLoopMode,
+                            YES,
+                        );
+                        if closed.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if event == nil {
+                            continue;
+                        }
+
+                        match event.eventType() {
+                            NSEventType::NSLeftMouseDragged => {
+                                let pointer = NSEvent::mouseLocation(nil);
+                                let frame = bottom_resize_frame(
+                                    initial_frame,
+                                    pointer.y - initial_pointer.y,
+                                    minimum_size,
+                                    maximum_size,
+                                );
+                                window.setFrame_display_(frame, YES);
+                                sample_count += 1;
+                            }
+                            NSEventType::NSLeftMouseUp => {
+                                ended_with_mouse_up = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let final_frame = NSWindow::frame(window);
+                    let initial_top = initial_frame.origin.y + initial_frame.size.height;
+                    let final_top = final_frame.origin.y + final_frame.size.height;
+                    log::info!(
+                        target: "gpui_macos",
+                        "event=macos_window_resize_completed window_number={} edge=bottom sample_count={} final_x={:.2} final_y={:.2} final_width={:.2} final_height={:.2} height_delta={:.2} top_drift={:.3} width_drift={:.3} ended_with_mouse_up={}",
+                        window_number,
+                        sample_count,
+                        final_frame.origin.x,
+                        final_frame.origin.y,
+                        final_frame.size.width,
+                        final_frame.size.height,
+                        final_frame.size.height - initial_frame.size.height,
+                        final_top - initial_top,
+                        final_frame.size.width - initial_frame.size.width,
+                        ended_with_mouse_up,
+                    );
+                    let _: () = msg_send![window, release];
+                }
+            })
+            .detach();
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
+    }
+}
+
+#[cfg(test)]
+mod bottom_resize_tests {
+    use super::*;
+
+    fn frame() -> NSRect {
+        NSRect::new(NSPoint::new(20.0, 100.0), NSSize::new(350.0, 280.0))
+    }
+
+    #[test]
+    fn bottom_drag_keeps_top_x_and_width_fixed() {
+        let initial = frame();
+        let resized = bottom_resize_frame(
+            initial,
+            -80.0,
+            NSSize::new(0.0, 120.0),
+            NSSize::new(f64::MAX, f64::MAX),
+        );
+
+        assert_eq!(resized.origin.x, initial.origin.x);
+        assert_eq!(resized.size.width, initial.size.width);
+        assert_eq!(
+            resized.origin.y + resized.size.height,
+            initial.origin.y + initial.size.height
+        );
+        assert_eq!(resized.size.height, 360.0);
+    }
+
+    #[test]
+    fn bottom_drag_honors_native_height_limits() {
+        let initial = frame();
+        let min = NSSize::new(0.0, 200.0);
+        let max = NSSize::new(f64::MAX, 420.0);
+
+        assert_eq!(
+            bottom_resize_frame(initial, 500.0, min, max).size.height,
+            200.0
+        );
+        assert_eq!(
+            bottom_resize_frame(initial, -500.0, min, max).size.height,
+            420.0
+        );
     }
 }
 

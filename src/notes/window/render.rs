@@ -116,6 +116,7 @@ impl NotesApp {
     }
 
     fn process_render_side_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_bottom_resize_observation(window);
         self.detect_manual_resize(window);
         self.drain_pending_focus(window, cx);
         self.maybe_update_theme_cache();
@@ -197,6 +198,15 @@ impl Render for NotesApp {
         } else {
             None
         };
+        if footer.is_none() {
+            crate::components::footer_chrome::remove_glass_capsule_group(
+                window,
+                "notes-footer-action-rail",
+            );
+            crate::platform::footer_hit_regions::sync_for_window(window, "notes-footer-empty", &[]);
+        } else {
+            crate::platform::footer_hit_regions::remove_group(window, "notes-footer-empty");
+        }
 
         let content = if in_agent_chat_mode {
             self.render_agent_chat_surface(cx)
@@ -242,7 +252,11 @@ impl Render for NotesApp {
             .text_color(cx.theme().foreground)
             .track_focus(&self.focus_handle)
             .when(mouse_cursor_hidden, |d| d.cursor(CursorStyle::None))
-            .on_any_mouse_down(cx.listener(|this, _, window, cx| {
+            .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                let overlay_was_active = this.command_bar.is_open()
+                    || this.note_switcher.is_open()
+                    || confirm::is_confirm_window_open()
+                    || window.has_active_dialog(cx);
                 if this.command_bar.is_open() {
                     this.close_actions_panel(window, cx);
                 }
@@ -252,6 +266,7 @@ impl Render for NotesApp {
                 if confirm::is_confirm_window_open() {
                     confirm::route_key_to_confirm_popup("escape", cx);
                 }
+                this.handle_bottom_resize_mouse_down(event, overlay_was_active, window, cx);
             }))
             .on_hover(cx.listener(|this, hovered, _, cx| {
                 if this.force_hovered {

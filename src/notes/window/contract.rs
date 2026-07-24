@@ -28,6 +28,15 @@ pub(crate) const NOTES_DEFAULT_HEIGHT: f32 = 280.0;
 /// Edge padding from the display's top-right corner for default placement.
 pub(crate) const NOTES_DEFAULT_EDGE_PADDING: f32 = 20.0;
 
+/// Physical bottom-edge band that routes a GPUI pointer-down into AppKit's
+/// native resize tracker. This is interaction geometry only; it paints no
+/// strip and does not change the footer layout.
+pub(crate) const NOTES_BOTTOM_RESIZE_HIT_HEIGHT_PX: f32 = 6.0;
+/// Avoid ambiguous diagonal/corner ownership; this feature is bottom-only.
+pub(crate) const NOTES_BOTTOM_RESIZE_CORNER_GUARD_PX: f32 = 6.0;
+/// Small rounding guard around every measured floating-button rectangle.
+pub(crate) const NOTES_BOTTOM_RESIZE_BUTTON_GUARD_PX: f32 = 1.0;
+
 // ── Titlebar chrome ────────────────────────────────────────────────────────
 
 /// Horizontal titlebar padding (was an inline `.px_3()` in
