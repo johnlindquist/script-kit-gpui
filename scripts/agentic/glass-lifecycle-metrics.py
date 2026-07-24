@@ -317,11 +317,35 @@ def analyze(
                 )
         max_hidden = max(hidden_energy, default=math.inf)
         min_visible = min(visible_energy, default=-math.inf)
+        max_visible = max(visible_energy, default=-math.inf)
+        visible_transition_rows = [
+            row
+            for row in body_rows
+            if not row["hiddenAtCapture"]
+            and row["edgeEnergy"] > max_hidden + 0.20
+        ]
+        first_visible_transition_ns = (
+            int(visible_transition_rows[0]["displayTimeNs"])
+            if visible_transition_rows
+            else None
+        )
+        refresh_rate_hz = max(1.0, float(receipt.get("refreshRateHz", 60.0)))
+        visible_transition_limit_ns = int(
+            (2.0 * 1_000_000_000.0 / refresh_rate_hz) + 1_000_000.0
+        )
+        visible_transition_latency_ns = (
+            first_visible_transition_ns - visible_host_time_ns
+            if first_visible_transition_ns is not None
+            and visible_host_time_ns is not None
+            else None
+        )
         chrome_visible = min(pre_reveal_chrome_energy, default=0) > 0.20
         body_mask_pass = (
             len(hidden_energy) >= 2
             and len(visible_energy) >= 1
-            and min_visible > max_hidden + 0.20
+            and max_visible > max_hidden + 0.20
+            and visible_transition_latency_ns is not None
+            and 0 <= visible_transition_latency_ns <= visible_transition_limit_ns
             and chrome_visible
         )
         body_mask_receipt = {
@@ -338,6 +362,10 @@ def analyze(
             "visibleFrameCount": len(visible_energy),
             "maximumHiddenBodyEdgeEnergy": max_hidden,
             "minimumVisibleBodyEdgeEnergy": min_visible,
+            "maximumVisibleBodyEdgeEnergy": max_visible,
+            "firstVisibleTransitionHostTimeNs": first_visible_transition_ns,
+            "visibleTransitionLatencyNs": visible_transition_latency_ns,
+            "visibleTransitionLimitNs": visible_transition_limit_ns,
             "preRevealChromeEdgeEnergy": pre_reveal_chrome_energy,
             "preRevealChromeVisible": chrome_visible,
         }

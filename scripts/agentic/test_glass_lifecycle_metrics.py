@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -82,6 +83,46 @@ class GlassLifecycleMetricsTests(unittest.TestCase):
             if row["windowBounds"] is not None
         }
         self.assertEqual(len(bounds), 2)
+
+    def test_notes_body_transition_may_land_on_next_rendered_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            frames = []
+            times = [900_000_000, 991_000_000, 1_008_000_000, 1_013_000_000]
+            for sequence, display_time_ns in enumerate(times):
+                image = Image.new("RGB", (100, 100), (24, 30, 38))
+                draw = ImageDraw.Draw(image)
+                draw.rectangle((0, 0, 99, 19), fill=(120, 130, 145))
+                if sequence == 3:
+                    for y in range(24, 76, 8):
+                        draw.line((8, y, 90, y), fill=(230, 232, 235), width=2)
+                path = Path(directory) / f"frame-{sequence}.png"
+                image.save(path)
+                frames.append(
+                    {
+                        "sequence": sequence,
+                        "displayTimeNs": display_time_ns,
+                        "windowBounds": [[0, 0], [100, 100]],
+                        "windowAlpha": 1.0,
+                        "windowOnscreen": True,
+                        "sha256": str(sequence),
+                        "path": str(path),
+                    }
+                )
+            result = METRICS.analyze(
+                {
+                    "frames": frames,
+                    "captureScale": 1,
+                    "refreshRateHz": 120,
+                },
+                "notes-entry",
+                (0, 20, 100, 60),
+                1_000_000_000,
+            )
+            self.assertTrue(result["bodyMaskPass"])
+            self.assertEqual(
+                result["bodyMask"]["visibleTransitionLatencyNs"],
+                13_000_000,
+            )
 
 
 if __name__ == "__main__":

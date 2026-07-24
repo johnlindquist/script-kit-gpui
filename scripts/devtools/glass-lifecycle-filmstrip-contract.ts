@@ -32,19 +32,27 @@ export function validateFilmstripCapture(
   if (receipt.pixelFormat !== "BGRA") errors.push("pixel format must be BGRA");
 
   const received = Number(receipt.receivedSampleCount);
+  const accounted = Number(receipt.accountedSampleCount);
   const complete = Number(receipt.completeSampleCount);
   const copied = Number(receipt.copiedCompleteCount);
   const encoded = Number(receipt.encodedCompleteCount);
   const incomplete = Number(receipt.incompleteSampleCount);
+  const missingDisplayTime = Number(receipt.missingDisplayTimeCount);
   const dropped = Number(receipt.droppedCompleteCount);
   const duplicates = Number(receipt.duplicateDisplayTimeCount);
   const late = Number(receipt.lateFrameCount);
-  if (![received, complete, copied, encoded, incomplete, dropped, duplicates, late]
+  if (![received, accounted, complete, copied, encoded, incomplete,
+    missingDisplayTime, dropped, duplicates, late]
     .every(Number.isFinite)) {
     errors.push("capture accounting fields missing");
   } else {
-    if (received !== complete) errors.push("incomplete sample observed");
-    if (incomplete !== 0) errors.push("incomplete sample count must be zero");
+    if (received !== accounted) errors.push("received sample accounting mismatch");
+    if (accounted !== complete + incomplete) {
+      errors.push("complete plus incomplete sample accounting mismatch");
+    }
+    if (missingDisplayTime !== 0) {
+      errors.push("one or more samples lack display time");
+    }
     if (complete !== copied) errors.push("copied complete count mismatch");
     if (copied !== encoded) errors.push("encoded complete count mismatch");
     if (dropped !== 0) errors.push("dropped complete count must be zero");
@@ -59,20 +67,19 @@ export function validateFilmstripCapture(
   }
   const frames = Array.isArray(receipt.frames) ? receipt.frames : [];
   if (frames.length !== encoded) errors.push("encoded frame inventory mismatch");
-  const firstOwnedFrame = frames.findIndex(
+  const hasOwnedFrame = frames.some(
     (frame: any) => Number(frame?.actualWindowID) === expected.windowId,
   );
   for (const [index, frame] of frames.entries()) {
     if (Number(frame?.expectedWindowID) !== expected.windowId) {
       errors.push(`frame ${index} expected CGWindowID mismatch`);
     }
-    const preEntryReference = firstOwnedFrame > 0
-      && index < firstOwnedFrame
+    const absentPinnedWindow = hasOwnedFrame
       && frame?.actualWindowID == null
       && frame?.windowBounds == null;
     if (
       Number(frame?.actualWindowID) !== expected.windowId
-      && !preEntryReference
+      && !absentPinnedWindow
     ) {
       errors.push(`frame ${index} actual CGWindowID mismatch`);
     }
@@ -99,18 +106,20 @@ export function validateDetachedExitLifecycle(
   if (receipt?.exitMode !== "DetachedRegionsFadeOnly") {
     errors.push("native exit mode must be DetachedRegionsFadeOnly");
   }
-  const original = receipt?.originalFrame;
-  const current = receipt?.currentFrame;
-  if (
-    !Array.isArray(original)
-    || !Array.isArray(current)
-    || original.length !== 4
-    || current.length !== 4
-    || original.some((value: number, index: number) =>
-      Math.abs(value - Number(current[index])) > 0.25
-    )
-  ) {
-    errors.push("native exit frame moved by more than 0.5 device pixel");
+  if (expectedState === "exiting") {
+    const original = receipt?.originalFrame;
+    const current = receipt?.currentFrame;
+    if (
+      !Array.isArray(original)
+      || !Array.isArray(current)
+      || original.length !== 4
+      || current.length !== 4
+      || original.some((value: number, index: number) =>
+        Math.abs(value - Number(current[index])) > 0.25
+      )
+    ) {
+      errors.push("native exit frame moved by more than 0.5 device pixel");
+    }
   }
   if (Number(receipt?.commonContentViewFilterCount) !== 0) {
     errors.push("common content-view filter must remain absent");

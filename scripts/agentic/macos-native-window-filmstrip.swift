@@ -176,10 +176,12 @@ private struct Receipt: Codable {
     let captureScale: Double
     let pixelFormat: String
     let receivedSampleCount: Int
+    let accountedSampleCount: Int
     let completeSampleCount: Int
     let copiedCompleteCount: Int
     let encodedCompleteCount: Int
     let incompleteSampleCount: Int
+    let missingDisplayTimeCount: Int
     let droppedCompleteCount: Int
     let duplicateDisplayTimeCount: Int
     let lateFrameCount: Int
@@ -214,6 +216,8 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
     private var receivedSampleCount = 0
     private var completeSampleCount = 0
     private var incompleteSampleCount = 0
+    private var missingDisplayTimeCount = 0
+    private var receivedDisplayTimes: [UInt64] = []
     private let context = CIContext(options: [.cacheIntermediates: false])
 
     init(outputDirectory: URL, windowID: CGWindowID) {
@@ -227,13 +231,19 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         of outputType: SCStreamOutputType
     ) {
         guard outputType == .screen else { return }
-        lock.lock()
-        receivedSampleCount += 1
-        lock.unlock()
         let attachments = CMSampleBufferGetSampleAttachmentsArray(
             sampleBuffer,
             createIfNecessary: false
         ) as? [[SCStreamFrameInfo: Any]]
+        let displayTime = (attachments?.first?[.displayTime] as? NSNumber)?.uint64Value ?? 0
+        lock.lock()
+        receivedSampleCount += 1
+        if displayTime > 0 {
+            receivedDisplayTimes.append(displayTime)
+        } else {
+            missingDisplayTimeCount += 1
+        }
+        lock.unlock()
         guard let status = attachments?.first?[.status] as? NSNumber,
               status.intValue == SCFrameStatus.complete.rawValue,
               sampleBuffer.isValid,
@@ -243,7 +253,6 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
             lock.unlock()
             return
         }
-        let displayTime = (attachments?.first?[.displayTime] as? NSNumber)?.uint64Value ?? 0
         let state = windowState(windowID)
         lock.lock()
         completeSampleCount += 1
@@ -268,6 +277,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         copied: Int,
         encoded: Int,
         incomplete: Int,
+        missingDisplayTime: Int,
         dropped: Int,
         duplicates: Int,
         late: Int,
@@ -278,6 +288,8 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         let received = receivedSampleCount
         let complete = completeSampleCount
         let incomplete = incompleteSampleCount
+        let missingDisplayTime = missingDisplayTimeCount
+        let allDisplayTimes = receivedDisplayTimes
         var finalizeErrors = errors
         lock.unlock()
 
@@ -326,18 +338,17 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
                 sha256: sha256(png)
             ))
         }
-        let displayTimes = frames.map(\.displayTime).sorted()
+        let displayTimes = allDisplayTimes.sorted()
         let duplicateCount = displayTimes.count - Set(displayTimes).count
-        let changingVisualGaps: [UInt64] = zip(
-            frames,
-            frames.dropFirst()
-        ).compactMap { pair in
+        let sampleGaps: [UInt64] = zip(
+            displayTimes,
+            displayTimes.dropFirst()
+        ).map { pair in
             let (previous, current) = pair
-            guard previous.sha256 != current.sha256 else { return nil }
-            return current.displayTimeNs - previous.displayTimeNs
+            return hostTicksToNs(current) - hostTicksToNs(previous)
         }
-        let maximumGap = changingVisualGaps.max() ?? 0
-        let lateCount = changingVisualGaps.filter { $0 > maximumAllowedGapNs }.count
+        let maximumGap = sampleGaps.max() ?? 0
+        let lateCount = sampleGaps.filter { $0 > maximumAllowedGapNs }.count
         return (
             frames,
             finalizeErrors,
@@ -346,6 +357,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
             samples.count,
             frames.count,
             incomplete,
+            missingDisplayTime,
             max(0, complete - samples.count),
             duplicateCount,
             lateCount,
@@ -563,6 +575,7 @@ private enum Main {
             copied: 0,
             encoded: 0,
             incomplete: 0,
+            missingDisplayTime: 0,
             dropped: 0,
             duplicates: 0,
             late: 0,
@@ -579,17 +592,23 @@ private enum Main {
             index, frame in
             guard frame.expectedWindowID == resolvedWindowID else { return false }
             if frame.actualWindowID == resolvedWindowID { return true }
-            guard let firstOwnedFrame else { return false }
-            return index < firstOwnedFrame
-                && frame.actualWindowID == nil
-                && frame.windowBounds == nil
+            guard firstOwnedFrame != nil else { return false }
+            // A pinned window stream remains the same stream while the
+            // WindowServer inventory legitimately has no row before entry or
+            // after orderOut. `nil` means absent, never a substituted ID.
+            return frame.actualWindowID == nil && frame.windowBounds == nil
         }
         if !frameIdentitiesExact {
             errors.append("one or more frames changed exact CGWindowID")
         }
-        if finalized.incomplete > 0 {
+        if finalized.received != finalized.complete + finalized.incomplete {
             errors.append(
-                "ScreenCaptureKit produced \(finalized.incomplete) incomplete frames"
+                "sample accounting mismatch received=\(finalized.received) complete=\(finalized.complete) incomplete=\(finalized.incomplete)"
+            )
+        }
+        if finalized.missingDisplayTime > 0 {
+            errors.append(
+                "capture contains \(finalized.missingDisplayTime) samples without display time"
             )
         }
         if finalized.complete != finalized.copied
@@ -625,10 +644,12 @@ private enum Main {
             captureScale: captureScale,
             pixelFormat: "BGRA",
             receivedSampleCount: finalized.received,
+            accountedSampleCount: finalized.complete + finalized.incomplete,
             completeSampleCount: finalized.complete,
             copiedCompleteCount: finalized.copied,
             encodedCompleteCount: finalized.encoded,
             incompleteSampleCount: finalized.incomplete,
+            missingDisplayTimeCount: finalized.missingDisplayTime,
             droppedCompleteCount: finalized.dropped,
             duplicateDisplayTimeCount: finalized.duplicates,
             lateFrameCount: finalized.late,

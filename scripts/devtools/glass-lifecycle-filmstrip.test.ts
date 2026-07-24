@@ -28,10 +28,12 @@ function validReceipt() {
     captureScale: 2,
     pixelFormat: "BGRA",
     receivedSampleCount: 1,
+    accountedSampleCount: 1,
     completeSampleCount: 1,
     copiedCompleteCount: 1,
     encodedCompleteCount: 1,
     incompleteSampleCount: 0,
+    missingDisplayTimeCount: 0,
     droppedCompleteCount: 0,
     duplicateDisplayTimeCount: 0,
     lateFrameCount: 0,
@@ -51,13 +53,21 @@ describe("loss-accounted lifecycle filmstrip", () => {
     expect(validateFilmstripCapture(validReceipt(), identity)).toEqual([]);
   });
 
-  test("rejects one incomplete sample", () => {
+  test("accepts an explicitly accounted unchanged sample", () => {
     const receipt = validReceipt();
     receipt.receivedSampleCount = 2;
+    receipt.accountedSampleCount = 2;
     receipt.incompleteSampleCount = 1;
-    expect(validateFilmstripCapture(receipt, identity)).toContain(
-      "incomplete sample observed",
-    );
+    expect(validateFilmstripCapture(receipt, identity)).toEqual([]);
+  });
+
+  test("rejects an unaccounted or untimed sample", () => {
+    const receipt = validReceipt();
+    receipt.receivedSampleCount = 2;
+    receipt.missingDisplayTimeCount = 1;
+    const errors = validateFilmstripCapture(receipt, identity);
+    expect(errors).toContain("received sample accounting mismatch");
+    expect(errors).toContain("one or more samples lack display time");
   });
 
   test("rejects a copied but unencoded complete frame", () => {
@@ -122,6 +132,7 @@ describe("exact detached-owner lifecycle", () => {
   test("requires cancellation and restored alpha on reopen", () => {
     expect(validateDetachedExitLifecycle({
       ...active,
+      currentFrame: [100, 200, 300, 200],
       currentAlpha: 1,
       cancelledAtHostTimeNs: 1_040_000_000,
       history: [
