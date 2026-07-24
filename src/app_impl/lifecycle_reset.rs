@@ -286,10 +286,11 @@ impl ScriptListApp {
 
     pub(crate) fn close_and_reset_window(&mut self, cx: &mut Context<Self>) {
         let Some(visibility_generation) =
-            self.prepare_main_window_close(cx, "close_and_reset_window", true, true)
+            self.prepare_main_window_close(cx, "close_and_reset_window", true, false)
         else {
             return;
         };
+        let app_entity = cx.entity().downgrade();
 
         logging::log(
             "VISIBILITY",
@@ -315,14 +316,34 @@ impl ScriptListApp {
                     platform::defer_hide_main_window_with_completion(
                         cx,
                         visibility_generation,
-                        move |outcome, cx| {
-                            if matches!(
-                                outcome,
-                                crate::platform::MainWindowHideCompletion::Hidden(_)
-                            ) {
+                        move |outcome, cx| match outcome {
+                            crate::platform::MainWindowHideCompletion::Hidden(native_hidden) => {
+                                let request = HiddenMainWindowResetRequest {
+                                    _native_hidden: native_hidden,
+                                    visibility_generation,
+                                    reason: "close_and_reset_window",
+                                    reset_mini_bounds_after_hidden_reset: false,
+                                };
                                 crate::footer_popup::close_main_footer_popup_after_hidden_settle(
                                     cx,
                                     visibility_generation,
+                                );
+                                cx.update(|cx| {
+                                    if let Some(app_entity) = app_entity.upgrade() {
+                                        app_entity.update(cx, |app, cx| {
+                                            app.complete_hidden_main_window_script_list_reset(
+                                                request, cx,
+                                            );
+                                        });
+                                    }
+                                });
+                            }
+                            failure => {
+                                logging::log(
+                                    "VISIBILITY",
+                                    &format!(
+                                        "Main native hide/reset barrier failed closed: {failure:?}"
+                                    ),
                                 );
                             }
                         },
@@ -334,24 +355,35 @@ impl ScriptListApp {
             platform::defer_hide_main_window_with_completion(
                 &mut *cx,
                 visibility_generation,
-                move |outcome, cx| {
-                    if matches!(
-                        outcome,
-                        crate::platform::MainWindowHideCompletion::Hidden(_)
-                    ) {
+                move |outcome, cx| match outcome {
+                    crate::platform::MainWindowHideCompletion::Hidden(native_hidden) => {
+                        let request = HiddenMainWindowResetRequest {
+                            _native_hidden: native_hidden,
+                            visibility_generation,
+                            reason: "close_and_reset_window",
+                            reset_mini_bounds_after_hidden_reset: false,
+                        };
                         crate::footer_popup::close_main_footer_popup_after_hidden_settle(
                             cx,
                             visibility_generation,
+                        );
+                        cx.update(|cx| {
+                            if let Some(app_entity) = app_entity.upgrade() {
+                                app_entity.update(cx, |app, cx| {
+                                    app.complete_hidden_main_window_script_list_reset(request, cx);
+                                });
+                            }
+                        });
+                    }
+                    failure => {
+                        logging::log(
+                            "VISIBILITY",
+                            &format!("Main native hide/reset barrier failed closed: {failure:?}"),
                         );
                     }
                 },
             );
         }
-        self.defer_reset_to_script_list_after_main_window_hidden(
-            cx,
-            "close_and_reset_window",
-            false,
-        );
         logging::log("VISIBILITY", "=== Window closed ===");
     }
 
@@ -440,6 +472,36 @@ impl ScriptListApp {
         self.rekey_main_automation_surface_from_current_view();
         crate::windows::set_automation_visibility("main", false);
         let hidden_reset_is_mini = was_mini || post_reset_is_mini;
+        if request.reset_mini_bounds_after_hidden_reset || hidden_reset_is_mini {
+            crate::window_resize::resize_to_mini_main_window_sync();
+        }
+    }
+
+    /// Reset the ordinary launcher route only after AppKit has confirmed the
+    /// native main window hidden. Changing mode or rendering ScriptList during
+    /// the fade produces a duplicate in-window footer beside the still-visible
+    /// detached footer.
+    fn complete_hidden_main_window_script_list_reset(
+        &mut self,
+        request: HiddenMainWindowResetRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if !hidden_main_window_reset_is_current(
+            request.visibility_generation,
+            script_kit_gpui::main_window_visibility_generation(),
+            script_kit_gpui::is_main_window_visible(),
+        ) {
+            logging::log(
+                "VISIBILITY",
+                &format!(
+                    "Skipping stale hidden main window reset after {}",
+                    request.reason
+                ),
+            );
+            return;
+        }
+
+        let hidden_reset_is_mini = self.reset_hidden_main_window_to_script_list(cx, request.reason);
         if request.reset_mini_bounds_after_hidden_reset || hidden_reset_is_mini {
             crate::window_resize::resize_to_mini_main_window_sync();
         }

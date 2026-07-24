@@ -103,21 +103,26 @@ try {
   const timing = {
     configured: Number(reveal?.configuredAtMonotonicNs),
     firstFrame: Number(reveal?.firstFrameAtMonotonicNs),
-    settleComplete: Number(reveal?.settleCompleteAtMonotonicNs),
+    revealAnchor: Number(
+      reveal?.revealAnchorAtMonotonicNs
+        ?? reveal?.settleCompleteAtMonotonicNs,
+    ),
     revealRequested: Number(reveal?.revealRequestedAtMonotonicNs),
     visible: Number(reveal?.visibleAtMonotonicNs),
   };
   const ordered = Object.values(timing).every(Number.isFinite)
     && timing.configured <= timing.firstFrame
-    && timing.firstFrame <= timing.settleComplete
-    && timing.settleComplete <= timing.revealRequested
+    && timing.firstFrame <= timing.revealAnchor
+    && timing.revealAnchor <= timing.revealRequested
     && timing.revealRequested <= timing.visible;
   const minimumFallbackNs = 250_000_000 + 2 * (1_000_000_000 / 60);
+  const revealAnchorDelayNs = timing.revealAnchor - timing.configured;
   const fallbackDelayNs = timing.visible - timing.configured;
   receipt.hostClockTiming = {
     times: timing,
     ordered,
     minimumFallbackNs,
+    revealAnchorDelayNs,
     fallbackDelayNs,
   };
   receipt.pass = reveal?.bodyVisible === true
@@ -125,9 +130,11 @@ try {
     && reveal?.nativeConfigured === false
     && Number(reveal?.completedFrameCount ?? 0) >= 2
     && typeof reveal?.firstFrameAtMonotonicNs === "number"
-    && typeof reveal?.settleCompleteAtMonotonicNs === "number"
+    && typeof reveal?.revealAnchorAtMonotonicNs === "number"
     && typeof reveal?.visibleAtMonotonicNs === "number"
     && ordered
+    && revealAnchorDelayNs >= 250_000_000 - 1_000_000
+    && revealAnchorDelayNs <= 350_000_000
     && fallbackDelayNs >= minimumFallbackNs - 1_000_000
     && fallbackDelayNs <= 450_000_000
     && elapsedMs >= 280

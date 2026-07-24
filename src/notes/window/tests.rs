@@ -1106,6 +1106,7 @@ fn notes_entry_reveal_fallback_is_bounded_and_still_requires_two_frames() {
         10,
         20,
         250,
+        250,
         false,
     );
     assert!(reveal.fallback_used);

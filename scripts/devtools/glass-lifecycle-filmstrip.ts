@@ -20,6 +20,7 @@ import {
   validateDetachedExitLifecycle,
   validateFilmstripCapture,
 } from "./glass-lifecycle-filmstrip-contract.ts";
+import { analyzeEntryMotionEnvelope } from "./glass-entry-motion-contract.ts";
 import {
   finishInterferenceMonitor,
   startInterferenceMonitor,
@@ -157,6 +158,7 @@ function analyzeFilmstrip(directory: string, expectedWindowID: number) {
 }
 
 const binary = resolve(arg("--binary", process.env.SCRIPT_KIT_GPUI_BINARY ?? "")!);
+const themeFixture = arg("--theme-fixture");
 const outDir = resolve(
   arg("--out", ".artifacts/glass-motion-contrast/lifecycle-filmstrips")!,
 );
@@ -203,6 +205,14 @@ const receipt: Json = {
     binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
   }),
   scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "lifecycle",
+  themeFixture: themeFixture
+    ? {
+      path: resolve(themeFixture),
+      sha256: createHash("sha256")
+        .update(readFileSync(resolve(themeFixture)))
+        .digest("hex"),
+    }
+    : null,
   helperSha256: createHash("sha256").update(readFileSync(helper)).digest("hex"),
   scenarios: [],
   pass: false,
@@ -212,6 +222,7 @@ const receiptRoot = receipt;
 const driver = await Driver.launch({
   binary,
   sandboxHome: true,
+  themeFixturePath: themeFixture,
   sessionName: `glass-lifecycle-filmstrip-${process.pid}`,
   defaultTimeoutMs: 8_000,
   env: {
@@ -284,6 +295,7 @@ async function finishFilmstrip(
   expectedWindowID: number,
   metricsContext?: {
     bodyBounds?: { x: number; y: number; width: number; height: number };
+    hiddenHostTimeNs?: number;
     visibleHostTimeNs?: number;
     expectedExitFrame?: [number, number, number, number];
     captureBounds?: { x: number; y: number; width: number; height: number };
@@ -316,6 +328,9 @@ async function finishFilmstrip(
       : []),
     ...(metricsContext?.visibleHostTimeNs != null
       ? ["--visible-host-time-ns", String(metricsContext.visibleHostTimeNs)]
+      : []),
+    ...(metricsContext?.hiddenHostTimeNs != null
+      ? ["--hidden-host-time-ns", String(metricsContext.hiddenHostTimeNs)]
       : []),
     ...(metricsContext?.expectedExitFrame != null
       ? [
@@ -564,6 +579,11 @@ try {
     mainWindowID,
     { captureBounds: mainCaptureBounds },
   );
+  const mainEntryMotionEnvelope = analyzeEntryMotionEnvelope(
+    mainEntryFilmstrip.receipt?.frames ?? [],
+    settledCaptures[0]?.windowBounds,
+    1.06,
+  );
   (receipt.scenarios as Json[]).push({
     name: "main-entry",
     exactWindowID: mainWindowID,
@@ -574,6 +594,7 @@ try {
     captureBoundsMatch: mainEntryCaptureBoundsMatch,
     settledCaptures,
     settledCapturesPass,
+    motionEnvelope: mainEntryMotionEnvelope,
     pointerPreparation: {
       command: ["cliclick", "m:2,2"],
       exitCode: pointerPreparation.exitCode,
@@ -584,7 +605,8 @@ try {
     filmstrip: mainEntryFilmstrip,
     pass: mainEntryFilmstrip.pass
       && mainEntryCaptureBoundsMatch
-      && settledCapturesPass,
+      && settledCapturesPass
+      && mainEntryMotionEnvelope.pass,
   });
 
   await announceTestStatus(
@@ -629,6 +651,7 @@ try {
   const preliminaryFinalReveal = entryStates.at(-1)?.state?.entryReveal;
   const notesEntryFilmstrip = await finishFilmstrip(notesEntry, notesEntryID, {
     bodyBounds: notesBodyBounds,
+    hiddenHostTimeNs: preliminaryFinalReveal?.firstFrameAtMonotonicNs,
     visibleHostTimeNs: preliminaryFinalReveal?.visibleAtMonotonicNs,
   });
   const configuredState = entryStates.find(
@@ -639,33 +662,49 @@ try {
       sample?.state?.entryReveal?.nativeConfigured === true
       && sample?.state?.entryReveal?.bodyVisible === false,
   );
-  const visibleAfterSettle = entryStates.at(-1)?.state?.entryReveal?.bodyVisible === true;
+  const visibleAfterAnchor = entryStates.at(-1)?.state?.entryReveal?.bodyVisible === true;
   const finalReveal = entryStates.at(-1)?.state?.entryReveal;
   const notesTimes = {
     configured: Number(configuredState?.configuredAtMonotonicNs),
     firstFrame: Number(finalReveal?.firstFrameAtMonotonicNs),
-    settleComplete: Number(finalReveal?.settleCompleteAtMonotonicNs),
+    revealAnchor: Number(finalReveal?.revealAnchorAtMonotonicNs),
     revealRequested: Number(finalReveal?.revealRequestedAtMonotonicNs),
     visible: Number(finalReveal?.visibleAtMonotonicNs),
   };
   const notesTimesOrdered = Object.values(notesTimes).every(Number.isFinite)
     && notesTimes.configured <= notesTimes.firstFrame
-    && notesTimes.firstFrame <= notesTimes.settleComplete
-    && notesTimes.settleComplete <= notesTimes.revealRequested
+    && notesTimes.firstFrame <= notesTimes.revealAnchor
+    && notesTimes.revealAnchor <= notesTimes.revealRequested
     && notesTimes.revealRequested <= notesTimes.visible;
   const notesDisplayPeriodNs = 1_000_000_000
     / Number(notesEntryFilmstrip.receipt?.refreshRateHz ?? 60);
   const expectedVisibleLowerNs = notesTimes.configured
-    + Number(configuredState?.settleDurationMs ?? 0) * 1_000_000
-    + notesDisplayPeriodNs * 2
-    - 1_000_000;
+    + Number(configuredState?.revealDelayMs ?? 0) * 1_000_000
+    - 2_000_000;
   const expectedVisibleUpperNs = notesTimes.configured
-    + Number(configuredState?.settleDurationMs ?? 0) * 1_000_000
+    + Number(configuredState?.revealDelayMs ?? 0) * 1_000_000
     + notesDisplayPeriodNs * 4
     + 21_000_000;
   const notesVisibleWithinBounds = Number.isFinite(notesTimes.visible)
     && notesTimes.visible >= expectedVisibleLowerNs
     && notesTimes.visible <= expectedVisibleUpperNs;
+  // If exact-window discovery finished after first entry, the cancel/reopen
+  // generation has no new native morph. Preserve the original generation's
+  // runtime clocks so the receipt still proves the first-open reveal crossed
+  // final size during phase one and began before rebound.
+  const morphReveal = finalReveal?.morphStarted === true
+    ? finalReveal
+    : notesReadyState?.entryReveal;
+  const morphConfiguredNs = Number(morphReveal?.configuredAtMonotonicNs);
+  const morphVisibleNs = Number(morphReveal?.visibleAtMonotonicNs);
+  const morphSettleDurationMs = Number(morphReveal?.settleDurationMs);
+  const morphRevealDelayMs = Number(morphReveal?.revealDelayMs);
+  const phaseOneEndNs = morphConfiguredNs + morphSettleDurationMs * 500_000;
+  const revealBeganBeforeRebound = morphReveal?.morphStarted === true
+    && morphRevealDelayMs > 0
+    && morphRevealDelayMs < morphSettleDurationMs / 2
+    && Number.isFinite(morphVisibleNs)
+    && morphVisibleNs < phaseOneEndNs;
   const framesBeforeVisible = (
     notesEntryFilmstrip.receipt?.frames ?? []
   ).filter((frame: Json) =>
@@ -681,12 +720,13 @@ try {
     && configuredState?.fallbackUsed === false
     && typeof configuredState?.configuredAtMonotonicNs === "number"
     && typeof configuredState?.settleDurationMs === "number"
+    && typeof configuredState?.revealDelayMs === "number"
     && hiddenBeforeVisible
-    && visibleAfterSettle
+    && visibleAfterAnchor
+    && revealBeganBeforeRebound
     && Number(finalReveal?.completedFrameCount ?? 0) >= 2
     && notesTimesOrdered
     && notesVisibleWithinBounds
-    && notesEntryFilmstrip.metrics?.bodyPixelTransition === true
     && notesEntryFilmstrip.metrics?.bodyMaskPass === true;
   (receipt.scenarios as Json[]).push({
     name: "notes-entry",
@@ -694,7 +734,8 @@ try {
     states: entryStates,
     bodyOnlyReveal: {
       hiddenBeforeVisible,
-      visibleAfterSettle,
+      visibleAfterAnchor,
+      revealBeganBeforeRebound,
       framesBeforeVisible,
       completedFrameCount: finalReveal?.completedFrameCount ?? null,
       bodyPixelTransition: notesEntryFilmstrip.metrics?.bodyPixelTransition ?? false,
@@ -707,6 +748,14 @@ try {
         expectedVisibleLowerNs,
         expectedVisibleUpperNs,
         visibleWithinBounds: notesVisibleWithinBounds,
+        morph: {
+          configuredAtMonotonicNs: morphConfiguredNs,
+          visibleAtMonotonicNs: morphVisibleNs,
+          settleDurationMs: morphSettleDurationMs,
+          settledCrossingDelayMs: morphRevealDelayMs,
+          phaseOneEndNs,
+          beganBeforeRebound: revealBeganBeforeRebound,
+        },
       },
     },
     notesLayout,

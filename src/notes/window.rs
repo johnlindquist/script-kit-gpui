@@ -245,10 +245,11 @@ struct NotesEntryReveal {
     configured_at_monotonic_ns: Option<u64>,
     native_configured_at_unix_ms: Option<u64>,
     settle_duration_ms: u64,
+    reveal_delay_ms: u64,
     morph_started: bool,
     completed_frame_count: u8,
     first_frame_at_monotonic_ns: Option<u64>,
-    settle_complete_at_monotonic_ns: Option<u64>,
+    reveal_anchor_at_monotonic_ns: Option<u64>,
     reveal_requested_at_monotonic_ns: Option<u64>,
     visible_at_monotonic_ns: Option<u64>,
 }
@@ -270,10 +271,11 @@ impl NotesEntryReveal {
             configured_at_monotonic_ns: None,
             native_configured_at_unix_ms: None,
             settle_duration_ms: 0,
+            reveal_delay_ms: 0,
             morph_started: false,
             completed_frame_count: 0,
             first_frame_at_monotonic_ns: None,
-            settle_complete_at_monotonic_ns: None,
+            reveal_anchor_at_monotonic_ns: None,
             reveal_requested_at_monotonic_ns: None,
             visible_at_monotonic_ns: None,
         }
@@ -319,6 +321,7 @@ impl NotesEntryReveal {
         configured_at_monotonic_ns: u64,
         configured_at_unix_ms: u64,
         settle_duration_ms: u64,
+        reveal_delay_ms: u64,
         morph_started: bool,
     ) {
         self.native_window_number = Some(window_number);
@@ -331,6 +334,7 @@ impl NotesEntryReveal {
         self.configured_at_monotonic_ns = Some(configured_at_monotonic_ns);
         self.native_configured_at_unix_ms = Some(configured_at_unix_ms);
         self.settle_duration_ms = settle_duration_ms;
+        self.reveal_delay_ms = reveal_delay_ms;
         self.morph_started = morph_started;
     }
 
@@ -355,10 +359,11 @@ impl NotesEntryReveal {
         self.configured_at_monotonic_ns = None;
         self.native_configured_at_unix_ms = None;
         self.settle_duration_ms = 0;
+        self.reveal_delay_ms = 0;
         self.morph_started = false;
         self.completed_frame_count = 0;
         self.first_frame_at_monotonic_ns = None;
-        self.settle_complete_at_monotonic_ns = None;
+        self.reveal_anchor_at_monotonic_ns = None;
         self.reveal_requested_at_monotonic_ns = None;
         self.visible_at_monotonic_ns = None;
         self.generation

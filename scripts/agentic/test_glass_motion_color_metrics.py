@@ -52,6 +52,30 @@ def frame(phase: str, material_a=(90, 100, 110), material_b=(100, 110, 120)):
 
 
 class MaterialStabilityTests(unittest.TestCase):
+    def test_entry_material_recovery_removes_shared_window_alpha(self):
+        background = Image.new("RGB", (2, 1), (200, 100, 40))
+        content = Image.new("RGB", (2, 1), (40, 60, 80))
+        alpha = 0.5
+        composited = Image.new("RGB", content.size)
+        composited.putdata(
+            [
+                tuple(
+                    round(alpha * foreground[channel] + (1 - alpha) * backdrop[channel])
+                    for channel in range(3)
+                )
+                for foreground, backdrop in zip(
+                    content.getdata(),
+                    background.getdata(),
+                )
+            ]
+        )
+        recovered = motion.recover_content_before_window_alpha(
+            composited,
+            background,
+            alpha,
+        )
+        self.assertEqual(list(recovered.getdata()), list(content.getdata()))
+
     def test_stable_per_capsule_material_and_every_frame_boundary_pass(self):
         rows = [frame("motion") for _ in range(15)] + [
             frame("settled") for _ in range(3)
@@ -75,6 +99,25 @@ class MaterialStabilityTests(unittest.TestCase):
         self.assertFalse(stability["a"]["pass"])
         rows[0]["minimumP10BoundaryLuminanceDifference"] = 0.014
         self.assertFalse(motion.boundary_pass_every_frame(rows))
+
+    def test_entry_stability_excludes_recorded_subopaque_fade_but_not_opaque_motion(self):
+        faded = frame("motion", material_a=(255, 0, 255))
+        faded["materialStabilityEligible"] = False
+        opaque = frame("motion")
+        opaque["materialStabilityEligible"] = True
+        rows = [faded, opaque] + [frame("settled") for _ in range(3)]
+        stability, _, _, errors = motion.material_stability_summary(
+            rows, ["a", "b"], contrast
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(stability["a"]["rawMotionSampleCount"], 2)
+        self.assertEqual(stability["a"]["motionSampleCount"], 1)
+        self.assertTrue(stability["a"]["pass"])
+        opaque["capsules"][0]["materialMedianRgb"] = (255, 0, 255)
+        stability, _, _, _ = motion.material_stability_summary(
+            rows, ["a", "b"], contrast
+        )
+        self.assertFalse(stability["a"]["pass"])
 
     def test_entry_projection_reproduces_footer_autoresizing_anchors(self):
         appkit = {

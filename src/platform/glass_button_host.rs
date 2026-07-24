@@ -10,7 +10,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 const DEFAULT_GLASS_SPACING: f64 = 4.0;
-const DEFAULT_GLASS_HOVER_SCALE: f64 = 1.12;
+/// Hover feedback belongs to the GPUI foreground state layer. The native
+/// material backing must keep its layout-derived size so detached controls do
+/// not pulse or crowd neighboring capsules under the pointer.
+const GLASS_HOVER_SCALE: f64 = 1.0;
 const GLASS_HOVER_DURATION_SECONDS: f64 = 0.18;
 /// A capsule group that hasn't re-synced within this window is unmounted.
 ///
@@ -362,13 +365,13 @@ pub(crate) fn set_hover(window: &gpui::Window, group: &'static str, index: usize
         state.host.set_hover(flat_index, hovered);
         tracing::debug!(
             target: "script_kit::glass_buttons",
-            event = "glass_button_hover_animated",
+            event = "glass_button_hover_state_changed",
             window_key = ns_window as usize,
             group,
             index,
             hovered,
             scale = glass_hover_scale(),
-            "glass_button_hover_animated"
+            "glass_button_hover_state_changed"
         );
     });
 }
@@ -585,12 +588,7 @@ pub(crate) fn shared_glass_spacing() -> f64 {
 }
 
 fn glass_hover_scale() -> f64 {
-    std::env::var("SCRIPT_KIT_GLASS_HOVER_SCALE")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value >= 1.0)
-        .map(|value| value.min(1.2))
-        .unwrap_or(DEFAULT_GLASS_HOVER_SCALE)
+    GLASS_HOVER_SCALE
 }
 
 /// Scale only the backing layer, leaving `setFrame:` as the permanent layout
@@ -720,6 +718,11 @@ mod tests {
         assert_eq!(NativeViewOrdering::AboveGpui.appkit_value(), 1);
         assert!(shared_glass_spacing().is_finite());
         assert!(shared_glass_spacing() >= 0.0);
+    }
+
+    #[test]
+    fn floating_glass_hover_preserves_the_layout_scale() {
+        assert_eq!(glass_hover_scale(), 1.0);
     }
 
     /// A group that stops syncing (its element unmounted on a view switch)

@@ -1,4 +1,7 @@
 use super::*;
+use gpui::AnimationExt;
+
+const NOTES_BODY_REVEAL_FADE_MS: u64 = 90;
 
 impl NotesApp {
     pub(super) fn selected_note_title(&self, is_trash: bool) -> String {
@@ -29,7 +32,8 @@ impl NotesApp {
 
     pub(super) fn render_editor(
         &mut self,
-        body_opacity: f32,
+        body_visible: bool,
+        body_reveal_generation: u64,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_trash = self.view_mode == NotesViewMode::Trash;
@@ -53,6 +57,25 @@ impl NotesApp {
 
         let editor_body = self.render_editor_body(is_trash, has_selection, is_preview, cx);
 
+        let editor_body = div()
+            .id("notes-editor-body-reveal")
+            .flex_1()
+            .min_h(px(0.))
+            .h_full()
+            .child(editor_body);
+        let editor_body = if body_visible {
+            editor_body
+                .with_animation(
+                    ("notes-editor-body-reveal-fade", body_reveal_generation),
+                    gpui::Animation::new(Duration::from_millis(NOTES_BODY_REVEAL_FADE_MS))
+                        .with_easing(crate::transitions::ease_out_quad),
+                    |style, delta| style.opacity(delta),
+                )
+                .into_any_element()
+        } else {
+            editor_body.opacity(0.0).into_any_element()
+        };
+
         div()
             .flex_1()
             .flex()
@@ -69,14 +92,6 @@ impl NotesApp {
             // Keep the titlebar/search/toolbar and the native stage mounted
             // while entry material settles. Only note body pixels are gated;
             // its input entity remains alive and accepts edits throughout.
-            .child(
-                div()
-                    .id("notes-editor-body-reveal")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .h_full()
-                    .opacity(body_opacity)
-                    .child(editor_body),
-            )
+            .child(editor_body)
     }
 }

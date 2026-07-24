@@ -148,9 +148,72 @@ Theme and visual values must be tokenized:
 Cross-surface behavior must stay predictable:
 
 - Main window, prompt/make windows, built-ins, and Agent Chat/Agent Chat should share inputs, menu/search behavior, list rows, prompt shells, hint strips, footer affordances, popup/dropdown mechanics, and chrome tokens wherever possible.
+- Native left-pinned and trailing footer keycaps must both resolve token-specific
+  x/y glyph offsets and horizontal padding through the shared
+  `footer_appkit_glyph_x`, `footer_appkit_glyph_y`, and
+  `footer_keycap_padding_x_for_token` helpers. Do not duplicate or locally
+  approximate keycap centering formulas.
 - Actions UI should feel like the main list: same row language, same search treatment, same shortcut/keycap conventions, and no extra local chrome unless the owning contract requires it.
 - Expanded/preview surfaces may differ in layout, but their list side, footer, and chrome should still use the shared anatomy and tokens.
 - Any intentional divergence must be documented in the code or PR summary with the owning surface, the reused alternatives considered, and why the shared component could not fit.
+
+## Glass Motion Calibration Lock
+
+The main-window, Actions, Notes, Dictation, and popup glass motion was calibrated
+against frame-by-frame Spotlight reference footage. **Agents must not retune,
+normalize, simplify, or "clean up" these values unless the user explicitly asks
+for animation retuning or unlocks the calibration in the current request.** A
+generic bug fix, refactor, theme change, or contrast task is not permission.
+If a requested change appears to require different motion values, preserve the
+calibration and ask for explicit permission instead.
+
+The locked production contract is:
+
+- default entry duration `0.28s`;
+- entry inset `0.03`, producing a main-window `106% → 97% → 100%` width path
+  and an Actions/popup `94% → 103% → 100%` path;
+- entry start alpha `0.0`, animated to `1.0` during phase one;
+- vertical damping `0.4`, squish factor `0.5`, and equal phase split `0.5`;
+- Notes body reveal is derived from the calibrated geometry: it starts at the
+  phase-one settled-size crossing (`84ms` with the default calibration), then
+  fades over `90ms` while the window compresses and rebounds;
+- detached main-window exit is fixed-frame fade-only;
+- popup exit duration `0.12s`, removal delay `135ms`, grow x/y `0.03/0.012`,
+  shrink x/y `0.05/0.035`, and blur radius `8.0`.
+
+Owning sources and anti-drift evidence:
+
+- defaults: `src/theme/opacity.rs`;
+- native physics/lifecycle: `src/platform/secondary_window_config.rs`;
+- named production fixture:
+  `scripts/agentic/fixtures/glass-motion-calibration-theme.json`;
+- geometry envelope:
+  `scripts/devtools/glass-entry-motion-contract.ts`;
+- frame/runtime probes:
+  `scripts/devtools/glass-lifecycle-filmstrip.ts`,
+  `scripts/devtools/actions-entry-filmstrip.ts`, and
+  `scripts/devtools/rapid-toggle-stress.ts`.
+
+Do not update the fixture, envelope thresholds, expected geometry, or their
+tests merely to make a changed animation pass. With explicit user permission,
+retune from new frame-by-frame evidence, update all owning sources together,
+and report the before/after measurements. Without that permission, restore the
+locked values.
+
+Minimum anti-drift check:
+
+```bash
+bun test scripts/devtools/glass-entry-motion-contract.test.ts \
+  scripts/devtools/glass-lifecycle-filmstrip.test.ts \
+  scripts/devtools/rapid-toggle-stress.test.ts
+./scripts/agentic/agent-cargo.sh test --lib \
+  platform::secondary_window_config_tests::glass_motion_fixture_matches_the_measured_production_calibration
+```
+
+For runtime/visual changes, also run the lifecycle, Actions-entry, and rapid
+toggle probes with `SCRIPT_KIT_TEST_STATUS=1` and the named calibration fixture.
+An `INVALID_INTERFERENCE` receipt means rerun when input is quiet; it is not a
+product failure and must not be converted into a green result.
 
 ## Agent Chat Entry Context Contract
 

@@ -153,11 +153,8 @@ impl NotesApp {
 impl Render for NotesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mouse_cursor_hidden = self.mouse_cursor_hidden;
-        let body_opacity = if self.entry_reveal.body_visible {
-            1.0
-        } else {
-            0.0
-        };
+        let body_visible = self.entry_reveal.body_visible;
+        let body_reveal_generation = self.entry_reveal.generation;
 
         self.process_render_side_effects(window, cx);
 
@@ -211,7 +208,8 @@ impl Render for NotesApp {
         let content = if in_agent_chat_mode {
             self.render_agent_chat_surface(cx)
         } else {
-            self.render_editor(body_opacity, cx).into_any_element()
+            self.render_editor(body_visible, body_reveal_generation, cx)
+                .into_any_element()
         };
 
         let stage = if detached_footer {

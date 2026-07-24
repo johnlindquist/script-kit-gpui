@@ -37,6 +37,7 @@
 
 import {
   mkdirSync,
+  copyFileSync,
   existsSync,
   rmdirSync,
   statSync,
@@ -180,6 +181,13 @@ export interface DriverOptions {
    * driven app never touches real user data and starts from a known state.
    */
   sandboxHome?: boolean;
+  /**
+   * With sandboxHome, copy this deterministic theme.json fixture into the
+   * fresh SK_PATH before the app starts. This lets motion/contrast probes
+   * exercise an exact calibration without reading or mutating the user's
+   * live theme.
+   */
+  themeFixturePath?: string;
   /**
    * With sandboxHome, symlink the real ~/.scriptkit/models into the sandbox
    * so the app reuses the multi-GB dictation/brain model downloads instead
@@ -743,6 +751,13 @@ export class Driver extends ProtocolCore {
       mkdirSync(kitDir, { recursive: true });
       env.HOME = home;
       env.SK_PATH = kitDir;
+      if (options.themeFixturePath) {
+        const themeFixturePath = resolve(options.themeFixturePath);
+        if (!existsSync(themeFixturePath)) {
+          throw new Error(`Theme fixture not found: ${themeFixturePath}`);
+        }
+        copyFileSync(themeFixturePath, join(kitDir, "theme.json"));
+      }
       if (options.sharedModels !== false) {
         // Every model path resolves under $SK_PATH/models (dictation
         // Whisper/Parakeet, brain GGUF). Symlink the real cache so sandboxed

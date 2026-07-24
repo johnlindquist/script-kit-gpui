@@ -13,6 +13,9 @@ from pathlib import Path
 
 from PIL import Image
 
+MIN_ANALYZABLE_ENTRY_ALPHA = 0.15
+MIN_ENTRY_MATERIAL_STABILITY_ALPHA = 0.85
+
 
 def load_contrast_module():
     source = Path(__file__).with_name("glass-contrast-metrics.py")
@@ -34,6 +37,14 @@ def material_stability_summary(
     settled_reference_labs: list[tuple[float, float, float]] = []
     for capsule_id in capsule_ids:
         motion_sample_count = sum(
+            row["phase"] == "motion"
+            and row.get("materialStabilityEligible", True)
+            and any(
+                capsule["id"] == capsule_id for capsule in row["capsules"]
+            )
+            for row in frame_rows
+        )
+        raw_motion_sample_count = sum(
             row["phase"] == "motion"
             and any(
                 capsule["id"] == capsule_id for capsule in row["capsules"]
@@ -74,10 +85,14 @@ def material_stability_summary(
             residual = metrics.delta_e_2000(actual_lab, settled_reference)
             capsule["settledReferenceLab"] = settled_reference
             capsule["settledReferenceDeltaE00"] = residual
-            if row["phase"] == "motion":
+            if (
+                row["phase"] == "motion"
+                and row.get("materialStabilityEligible", True)
+            ):
                 residuals.append(residual)
         stability[capsule_id] = {
             "settledReferenceLab": settled_reference,
+            "rawMotionSampleCount": raw_motion_sample_count,
             "motionSampleCount": motion_sample_count,
             "motionP95DeltaE00": metrics.percentile(residuals, 0.95),
             "motionMaximumDeltaE00": max(residuals, default=math.inf),
@@ -113,6 +128,50 @@ def boundary_pass_every_frame(frame_rows: list[dict]) -> bool:
         and row["minimumFractionAtLeast015"] >= 0.80
         for row in frame_rows
     )
+
+
+def recover_content_before_window_alpha(
+    image: Image.Image,
+    reference: Image.Image,
+    alpha: float,
+) -> Image.Image:
+    """Undo the owning NSWindow alpha for material-color measurements.
+
+    Entry intentionally fades the one physical window from transparent. Raw
+    ScreenCaptureKit pixels therefore move toward the desktop fixture even
+    when the backdrop and every capsule keep a stable internal material. Undo
+    that *shared* compositor alpha before comparing motion frames with the
+    settled material; otherwise the observer reports the intended whole-window
+    fade as capsule-only hue drift.
+    """
+    if image.size != reference.size:
+        raise ValueError("entry frame and explicit background reference sizes differ")
+    if not math.isfinite(alpha) or alpha <= 0 or alpha > 1:
+        raise ValueError(f"entry frame has invalid window alpha {alpha!r}")
+    if alpha >= 0.999:
+        return image
+
+    inverse_alpha = 1.0 / alpha
+    reference_weight = 1.0 - alpha
+    recovered = [
+        tuple(
+            max(
+                0,
+                min(
+                    255,
+                    round(
+                        (current[channel] - reference_weight * background[channel])
+                        * inverse_alpha
+                    ),
+                ),
+            )
+            for channel in range(3)
+        )
+        for current, background in zip(image.getdata(), reference.getdata())
+    ]
+    result = Image.new("RGB", image.size)
+    result.putdata(recovered)
+    return result
 
 
 def window_bounds_tuple(value: object) -> tuple[float, float, float, float] | None:
@@ -541,12 +600,14 @@ def main() -> int:
         errors.append(f"expected at least two visible capsules, found {len(capsule_nodes)}")
 
     frame_rows: list[dict] = []
+    previsible_entry_frames: list[dict] = []
     for frame in frames:
         image_path = Path(frame.get("path", "")).resolve()
         if not image_path.exists():
             errors.append(f"filmstrip frame missing: {image_path}")
             continue
         image = Image.open(image_path).convert("RGB")
+        analysis_image = image
         frame_appkit = appkit
         frame_foreground_nodes = foreground_nodes
         frame_capsule_nodes = capsule_nodes
@@ -574,6 +635,21 @@ def main() -> int:
                     image.size,
                 )
             except ValueError as error:
+                window_alpha = float(frame.get("windowAlpha") or 0)
+                if (
+                    window_alpha <= MIN_ANALYZABLE_ENTRY_ALPHA
+                    and "rendered stage" in str(error)
+                ):
+                    previsible_entry_frames.append(
+                        {
+                            "sequence": frame.get("sequence"),
+                            "path": str(image_path),
+                            "sha256": frame.get("sha256"),
+                            "windowAlpha": window_alpha,
+                            "reason": str(error),
+                        }
+                    )
+                    continue
                 errors.append(f"{image_path}: {error}")
                 continue
             frame_foreground_nodes = frame_appkit.get("nodes", [])
@@ -584,6 +660,16 @@ def main() -> int:
             host_width = float(
                 frame_appkit.get("footerContainerFrame", {}).get("width", 0)
             )
+            window_alpha = float(frame.get("windowAlpha") or 0)
+            try:
+                analysis_image = recover_content_before_window_alpha(
+                    image,
+                    reference_image,
+                    window_alpha,
+                )
+            except ValueError as error:
+                errors.append(f"{image_path}: {error}")
+                continue
         scale = image.width / host_width if host_width > 0 else 0
         if scale <= 0:
             continue
@@ -593,7 +679,7 @@ def main() -> int:
             try:
                 capsules.append(
                     metrics.capsule_metrics(
-                        image, node, scale, frame_foreground_nodes
+                        analysis_image, node, scale, frame_foreground_nodes
                     )
                 )
             except ValueError as error:
@@ -608,7 +694,7 @@ def main() -> int:
             frame_backdrop, scale, image.height
         )
         stage_pixels = [
-            image.getpixel((x, y))
+            analysis_image.getpixel((x, y))
             for y in range(
                 stage_y + max(8, stage_height - round(40 * scale)),
                 stage_y + stage_height - 8,
@@ -625,7 +711,7 @@ def main() -> int:
         stage_rgb = metrics.median_rgb(stage_pixels)
         for capsule in capsules:
             local_rgb = metrics.local_stage_rgb(
-                image, capsule, frame_backdrop, scale
+                analysis_image, capsule, frame_backdrop, scale
             )
             stage_lab = metrics.rgb_to_lab(local_rgb)
             material_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
@@ -643,6 +729,12 @@ def main() -> int:
                     rendered_bounds_evidence if entry_mode else None
                 ),
                 "windowAlpha": frame.get("windowAlpha"),
+                "windowAlphaRemovedForMaterialMetrics": entry_mode,
+                "materialStabilityEligible": (
+                    not entry_mode
+                    or float(frame.get("windowAlpha") or 0)
+                    >= MIN_ENTRY_MATERIAL_STABILITY_ALPHA
+                ),
                 "phase": frame.get("_phase")
                 or ("motion" if float(frame.get("fraction", 0)) < 1 else "settled"),
                 "path": str(image_path),
@@ -712,6 +804,7 @@ def main() -> int:
         "motionFrameCount": sum(row["phase"] == "motion" for row in frame_rows),
         "settledFrameCount": sum(row["phase"] == "settled" for row in frame_rows),
         "frames": frame_rows,
+        "previsibleEntryFrames": previsible_entry_frames,
         "summary": {
             "materialStabilityCapsules": material_stability,
             "maximumNeighboringSettledMaterialDeltaE00":
@@ -725,6 +818,11 @@ def main() -> int:
                 "settled-opaque-entry-frames"
                 if entry_mode
                 else "every-motion-and-settled-frame"
+            ),
+            "materialMetricScope": (
+                f"owning-window-alpha-normalized-at-or-above-{MIN_ENTRY_MATERIAL_STABILITY_ALPHA:.2f}"
+                if entry_mode
+                else "captured-motion-pixels"
             ),
         },
         "errors": errors,

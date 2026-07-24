@@ -21,6 +21,9 @@ pub(crate) struct NativeGlassEntryReceipt {
     pub(crate) style_signature: NativeGlassStyleSignature,
     pub(crate) morph_started: bool,
     pub(crate) settle_duration_ms: u64,
+    /// Time from native morph start until phase one first crosses the final
+    /// window size. Content can begin revealing here and finish during rebound.
+    pub(crate) settled_crossing_delay_ms: u64,
     pub(crate) configured_at_monotonic_ns: u64,
     pub(crate) configured_at_unix_ms: u64,
 }
@@ -61,19 +64,55 @@ struct GlassMorphTuning {
 }
 
 #[cfg(target_os = "macos")]
+fn cubic_bezier_axis(t: f64, first: f64, second: f64) -> f64 {
+    let inverse = 1.0 - t;
+    3.0 * inverse * inverse * t * first + 3.0 * inverse * t * t * second + t * t * t
+}
+
+/// Convert a phase-one geometry progress to elapsed time for AppKit's
+/// `easeInEaseOut` timing function (`cubic-bezier(0.42, 0, 0.58, 1)`).
+#[cfg(target_os = "macos")]
+fn ease_in_out_time_fraction_for_progress(progress: f64) -> f64 {
+    let progress = progress.clamp(0.0, 1.0);
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..32 {
+        let parameter = (low + high) * 0.5;
+        let value = cubic_bezier_axis(parameter, 0.0, 1.0);
+        if value < progress {
+            low = parameter;
+        } else {
+            high = parameter;
+        }
+    }
+    cubic_bezier_axis((low + high) * 0.5, 0.42, 0.58)
+}
+
+#[cfg(target_os = "macos")]
+fn settled_size_crossing_delay_ms(tuning: GlassMorphTuning) -> u64 {
+    let phase_distance = tuning.start_scale_x - tuning.squish_scale_x;
+    if phase_distance <= f64::EPSILON {
+        return 0;
+    }
+    let geometry_progress = ((tuning.start_scale_x - 1.0) / phase_distance).clamp(0.0, 1.0);
+    let time_fraction = ease_in_out_time_fraction_for_progress(geometry_progress);
+    (tuning.phase1 * time_fraction * 1000.0).round() as u64
+}
+
+#[cfg(target_os = "macos")]
 const GLASS_MORPH_MIN_DURATION: f64 = 0.02;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MIN_INSET: f64 = 0.005;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_DURATION: f64 = 2.0;
-/// Keep native glass materially stable from its first visible entry frame.
+/// Hide the deliberately exaggerated calibration frame until it starts moving.
 ///
-/// Starting the whole owning window at zero alpha exposes the desktop color
-/// directly through every independent glass capsule, so saturated backgrounds
-/// become the button color until the window approaches full opacity. Entry
-/// motion therefore animates geometry only; exit remains the fade boundary.
+/// The main window and child popups intentionally begin on opposite sides of
+/// their final geometry. At full alpha those calibration frames read as a huge
+/// launcher and a tiny Actions menu. Fade the owning window in with phase one
+/// so the measured geometry remains unchanged without exposing either extreme.
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 1.0;
+const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 0.0;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_INSET: f64 = 0.4;
 #[cfg(target_os = "macos")]
@@ -670,6 +709,13 @@ unsafe fn configure_window_vibrancy_common(
         settle_duration_ms: if glass_created {
             morph_tuning
                 .map(|tuning| (tuning.duration * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        settled_crossing_delay_ms: if glass_created {
+            morph_tuning
+                .map(settled_size_crossing_delay_ms)
                 .unwrap_or(0)
         } else {
             0
@@ -2149,6 +2195,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     }
     let animator: id = msg_send![window, animator];
     let _: () = msg_send![animator, setFrame: squish display: true];
+    let _: () = msg_send![animator, setAlphaValue: 1.0f64];
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
 
     // Phase 2: rebound out to the natural size (settle selector, run-loop
@@ -3199,11 +3246,50 @@ mod secondary_window_config_tests {
         let epsilon = 1e-12;
         assert!((tuning.start_scale_x - 1.06).abs() < epsilon);
         assert!((tuning.start_scale_y - 1.024).abs() < epsilon);
-        assert!((tuning.start_alpha - 1.0).abs() < epsilon);
+        assert!((tuning.start_alpha - 0.0).abs() < epsilon);
         assert!((tuning.squish_scale_x - 0.97).abs() < epsilon);
         assert!((tuning.squish_scale_y - 0.988).abs() < epsilon);
         assert!((tuning.phase1 - 0.14).abs() < epsilon);
         assert!((tuning.phase2 - 0.14).abs() < epsilon);
+        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 84);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn glass_motion_fixture_matches_the_measured_production_calibration() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../scripts/agentic/fixtures/glass-motion-calibration-theme.json"
+        ))
+        .expect("glass motion calibration fixture should be valid JSON");
+        let duration = fixture["opacity"]["glass_morph_duration"]
+            .as_f64()
+            .expect("fixture duration");
+        let inset = fixture["opacity"]["glass_morph_inset"]
+            .as_f64()
+            .expect("fixture inset");
+
+        let epsilon = 1e-6;
+        assert!(
+            (duration - f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)).abs()
+                < epsilon
+        );
+        assert!(
+            (inset - f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)).abs() < epsilon
+        );
+        assert_eq!(super::GLASS_MORPH_ENTRY_START_ALPHA, 0.0);
+        assert_eq!(super::GLASS_MORPH_VERTICAL_DAMPING, 0.4);
+        assert_eq!(super::GLASS_MORPH_SQUISH_FACTOR, 0.5);
+        assert_eq!(super::GLASS_MORPH_PHASE1_FRACTION, 0.5);
+        let tuning =
+            super::glass_morph_tuning_from(duration, inset).expect("fixture enables glass morph");
+        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 84);
+        assert_eq!(super::GLASS_EXIT_DURATION, 0.12);
+        assert_eq!(super::GLASS_EXIT_REMOVE_DELAY_MS, 135);
+        assert_eq!(super::GLASS_EXIT_GROW_X, 0.03);
+        assert_eq!(super::GLASS_EXIT_SHRINK_X, 0.05);
+        assert_eq!(super::GLASS_EXIT_SHRINK_Y, 0.035);
+        assert_eq!(super::GLASS_EXIT_GROW_Y, 0.012);
+        assert_eq!(super::GLASS_EXIT_BLUR_RADIUS, 8.0);
     }
 
     #[cfg(target_os = "macos")]

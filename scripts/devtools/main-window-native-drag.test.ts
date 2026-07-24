@@ -501,11 +501,18 @@ function stationaryFixture(hostHeight = 480) {
     id: "script-kit-footer-left-info-keycap",
     parentId: "script-kit-footer-left-info-capsule-content",
     frame: { x: 8, y: 4, width: 41, height: 20 },
+    layer: { contentsScale: 2, cornerRadius: 0, borderWidth: 0 },
+  });
+  nodes.push({
+    id: "script-kit-footer-left-info-keycap-0",
+    parentId: "script-kit-footer-left-info-keycap",
+    className: "NSView",
+    frame: { x: 0, y: 0, width: 41, height: 20 },
     layer: { contentsScale: 2, cornerRadius: 6, borderWidth: 1 },
   });
   nodes.push({
-    id: "script-kit-footer-left-info-keycap-glyph",
-    parentId: "script-kit-footer-left-info-keycap",
+    id: "script-kit-footer-left-info-keycap-glyph-0",
+    parentId: "script-kit-footer-left-info-keycap-0",
     text: { value: "Space", color: { alpha: 0.8 } },
     layer: { contentsScale: 2 },
   });

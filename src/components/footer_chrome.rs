@@ -1194,7 +1194,7 @@ pub(crate) fn footer_key_glyph_nudge_x(key: &str) -> f32 {
     }
 }
 
-fn footer_keycap_padding_x_for_token(
+pub(crate) fn footer_keycap_padding_x_for_token(
     token: &str,
     metrics: &crate::designs::FooterMetricsTokens,
 ) -> f32 {
@@ -1203,6 +1203,10 @@ fn footer_keycap_padding_x_for_token(
     } else {
         metrics.keycap_padding_x
     }
+}
+
+pub(crate) fn footer_appkit_glyph_x(key: &str, chip_width: f64, glyph_width: f64) -> f64 {
+    ((chip_width - glyph_width) / 2.0).round() + footer_key_glyph_nudge_x(key) as f64
 }
 
 pub(crate) fn footer_appkit_glyph_y(key: &str, chip_height: f64, glyph_height: f64) -> f64 {
@@ -2203,6 +2207,12 @@ mod tests {
         assert_eq!(
             footer_key_glyph_nudge_y("↵"),
             metrics.key_glyph_nudge_y + metrics.return_glyph_nudge_y
+        );
+        assert_eq!(footer_appkit_glyph_x("⌘", 20.0, 10.0), 5.5);
+        assert_eq!(footer_appkit_glyph_x("↵", 20.0, 10.0), 5.0);
+        assert_eq!(
+            footer_appkit_glyph_y("↵", 20.0, 10.0),
+            5.0 - metrics.key_glyph_nudge_y as f64 - metrics.return_glyph_nudge_y as f64
         );
     }
 

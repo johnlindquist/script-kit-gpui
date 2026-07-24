@@ -965,6 +965,7 @@ function summarizeNativeWindowInventory(trace: NativeTrace) {
 type AppKitNode = {
   id: string;
   parentId?: string;
+  subviewOrder?: number;
   className?: string;
   hidden?: boolean;
   alpha?: number;
@@ -1139,11 +1140,43 @@ export function analyzeStationaryFidelity(
   const primaryLeftHitTarget = byId.get("script-kit-footer-left-info-hit-target");
   const cwdLeftHitTarget = byId.get("script-kit-footer-cwd-chip-hit");
   const leftHitTarget = primaryLeftHitTarget ?? cwdLeftHitTarget;
-  const leftKeycap = byId.get("script-kit-footer-left-info-keycap")
+  const leftKeycapRun = byId.get("script-kit-footer-left-info-keycap")
     ?? byId.get("script-kit-footer-cwd-chip-keycap");
-  const leftKeycapGlyph = byId.get("script-kit-footer-left-info-keycap-glyph")
-    ?? byId.get("script-kit-footer-cwd-chip-keycap-glyph");
-  const leftGlyph = leftKeycapGlyph?.text?.value?.trim() ?? "";
+  const tokenKeycaps = leftKeycapRun == null
+    ? []
+    : nodes
+      .filter((node) =>
+        node.parentId === leftKeycapRun.id
+        && node.className === "NSView"
+        && node.hidden !== true
+      )
+      .sort((left, right) =>
+        Number(left.frame?.x ?? left.subviewOrder ?? 0)
+        - Number(right.frame?.x ?? right.subviewOrder ?? 0)
+      );
+  // Older receipts used the run itself as the one bordered keycap. Current
+  // production keeps that stable outer identity as a transparent container
+  // and renders one calibrated keycap per shortcut token, exactly like the
+  // trailing action lane.
+  const leftKeycapSurfaces = tokenKeycaps.length > 0
+    ? tokenKeycaps
+    : leftKeycapRun == null
+    ? []
+    : [leftKeycapRun];
+  const leftKeycapSurfaceIds = new Set(leftKeycapSurfaces.map((node) => node.id));
+  const leftKeycapGlyphs = nodes
+    .filter((node) =>
+      leftKeycapSurfaceIds.has(node.parentId ?? "")
+      && node.hidden !== true
+      && typeof node.text?.value === "string"
+    )
+    .sort((left, right) =>
+      Number(left.windowFrame?.x ?? left.frame?.x ?? left.subviewOrder ?? 0)
+      - Number(right.windowFrame?.x ?? right.frame?.x ?? right.subviewOrder ?? 0)
+    );
+  const leftGlyph = leftKeycapGlyphs
+    .map((node) => node.text?.value?.trim() ?? "")
+    .join("");
   const leftIcon = byId.get("script-kit-footer-left-profile-icon")
     ?? byId.get("script-kit-footer-cwd-chip-icon");
   if (!leftCapsule) errors.push("left footer capsule is missing");
@@ -1152,13 +1185,23 @@ export function analyzeStationaryFidelity(
     if (!primaryLeftHitTarget) {
       errors.push("visible left footer capsule is missing its primary hit target");
     }
-    if (!leftKeycap) {
+    if (!leftKeycapRun || leftKeycapSurfaces.length === 0) {
       errors.push("visible left footer shortcut keycap is missing");
     } else {
-      if (leftKeycap.frame?.height !== 20) errors.push("left footer shortcut keycap is not 20pt high");
-      if (leftKeycap.layer?.cornerRadius !== 6) errors.push("left footer shortcut keycap radius is not 6pt");
-      if (leftKeycap.layer?.borderWidth !== 1) errors.push("left footer shortcut keycap border is not 1pt");
-      if (leftKeycap.layer?.contentsScale !== 2) errors.push("left footer shortcut keycap is not rendered at 2x");
+      for (const keycap of leftKeycapSurfaces) {
+        if (keycap.frame?.height !== 20) {
+          errors.push(`${keycap.id} is not 20pt high`);
+        }
+        if (keycap.layer?.cornerRadius !== 6) {
+          errors.push(`${keycap.id} radius is not 6pt`);
+        }
+        if (keycap.layer?.borderWidth !== 1) {
+          errors.push(`${keycap.id} border is not 1pt`);
+        }
+        if (keycap.layer?.contentsScale !== 2) {
+          errors.push(`${keycap.id} is not rendered at 2x`);
+        }
+      }
     }
     if (leftGlyph.length === 0) {
       errors.push(
@@ -2037,13 +2080,17 @@ async function cli() {
           baselineRightDimensions != null
           && JSON.stringify(row.structural?.trailingCapsuleDimensions)
             === JSON.stringify(baselineRightDimensions);
-        const expectedDegradation = row.requestedWidth === 750
-          ? "full"
+        const allowedDegradations = row.requestedWidth === 750
+          ? ["full"]
           : row.requestedWidth === 560
-          ? "primaryOnly"
-          : "hidden";
-        row.expectedDegradation = expectedDegradation;
-        row.exactDegradationPass = row.degradation === expectedDegradation;
+          // The content-derived allocator may keep the primary label when it
+          // fits or deliberately collapse to icon + shortcut for a longer
+          // label. Both preserve the required affordance and closed lane.
+          ? ["primaryOnly", "primaryAffordanceOnly"]
+          : ["hidden"];
+        row.allowedDegradations = allowedDegradations;
+        row.expectedDegradation = allowedDegradations.join("|");
+        row.exactDegradationPass = allowedDegradations.includes(row.degradation);
         row.exactSpaceGlyphPass = row.expectedLeftVisible
           ? row.observedShortcutGlyph === "Space"
           : row.observedShortcutGlyph == null;

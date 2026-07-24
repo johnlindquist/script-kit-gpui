@@ -4455,6 +4455,11 @@ unsafe fn layout_footer_left_keycap(
 
     let metrics = crate::components::footer_chrome::current_main_menu_footer_metrics();
     let keycap_height = metrics.keycap_height as f64;
+    let shortcut_tokens = crate::components::footer_chrome::split_footer_shortcut(glyph);
+    if shortcut_tokens.is_empty() {
+        remove_identified_subview(search_root, keycap_id);
+        return 0.0;
+    }
     let font: id = msg_send![
         class!(NSFont),
         systemFontOfSize: metrics.keycap_font_size as f64
@@ -4472,59 +4477,130 @@ unsafe fn layout_footer_left_keycap(
         let _: () = msg_send![visual_parent, addSubview: keycap];
     }
 
-    let mut glyph_view = find_subview_by_identifier(keycap, glyph_id);
-    if glyph_view == nil {
-        glyph_view = make_footer_hint_text_field(glyph, font, text_color, 1usize);
-        if glyph_view == nil {
-            return 0.0;
-        }
-        set_footer_view_identifier(glyph_view, glyph_id);
-        let _: () = msg_send![keycap, addSubview: glyph_view];
+    // The left lane used to treat a shortcut such as ⌘↵ as one text run in
+    // one wide chip. Trailing buttons split that shortcut into one keycap per
+    // token, so the left return glyph never received the calibrated ↵ offset.
+    // Keep the outer view as a transparent run container, then build every
+    // token with the same tokenizer, gap, padding, and optical correction
+    // helpers as the trailing button path.
+    remove_identified_subview(keycap, glyph_id);
+    let keycap_layer: id = msg_send![keycap, layer];
+    if keycap_layer != nil {
+        let _: () = msg_send![keycap_layer, setCornerRadius: 0.0_f64];
+        let _: () = msg_send![keycap_layer, setBorderWidth: 0.0_f64];
     }
-    let value = ns_string(glyph);
-    if value != nil {
-        let _: () = msg_send![glyph_view, setStringValue: value];
-    }
-    if font != nil {
-        let _: () = msg_send![glyph_view, setFont: font];
-    }
-    if text_color != nil {
-        let _: () = msg_send![glyph_view, setTextColor: text_color];
-    }
-    let _: () = msg_send![glyph_view, sizeToFit];
-    let glyph_size: NSSize = msg_send![glyph_view, fittingSize];
-    let keycap_width =
-        (glyph_size.width + metrics.keycap_padding_x as f64 * 2.0).max(keycap_height);
-    let glyph_x = ((keycap_width - glyph_size.width) / 2.0).round();
-    let glyph_y = ((keycap_height - glyph_size.height) / 2.0
-        + crate::components::footer_chrome::FOOTER_KEY_GLYPH_NUDGE_Y_PX as f64)
-        .round();
-    let _: () =
-        msg_send![glyph_view, setFrame: NSRect::new(NSPoint::new(glyph_x, glyph_y), glyph_size)];
 
     let theme = crate::theme::get_cached_theme();
     let border = ns_color_from_hex_with_alpha(
         footer_keycap_hex(&theme),
         footer_keycap_border_alpha(&theme, false),
     );
-    let layer: id = msg_send![keycap, layer];
-    if layer != nil {
-        let _: () = msg_send![layer, setCornerRadius: metrics.keycap_radius as f64];
-        let _: () = msg_send![layer, setBorderWidth: 1.0_f64];
-        if border != nil {
-            let cg: id = msg_send![border, CGColor];
-            if cg != nil {
-                let _: () = msg_send![layer, setBorderColor: cg];
+    let key_gap = metrics.content_gap as f64;
+    let mut keycap_run_width = 0.0_f64;
+
+    for (index, token) in shortcut_tokens.iter().enumerate() {
+        let token_keycap_id = format!("{keycap_id}-{index}");
+        let token_glyph_id = format!("{glyph_id}-{index}");
+        let mut token_keycap = find_subview_by_identifier(keycap, &token_keycap_id);
+        if token_keycap == nil {
+            token_keycap = msg_send![class!(NSView), alloc];
+            token_keycap = msg_send![
+                token_keycap,
+                initWithFrame: NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(keycap_height, keycap_height)
+                )
+            ];
+            if token_keycap == nil {
+                continue;
+            }
+            set_footer_view_identifier(token_keycap, &token_keycap_id);
+            let _: () = msg_send![token_keycap, setWantsLayer: YES];
+            let _: () = msg_send![keycap, addSubview: token_keycap];
+        }
+
+        let mut glyph_view = find_subview_by_identifier(token_keycap, &token_glyph_id);
+        if glyph_view == nil {
+            glyph_view = make_footer_hint_text_field(token, font, text_color, 1usize);
+            if glyph_view == nil {
+                continue;
+            }
+            set_footer_view_identifier(glyph_view, &token_glyph_id);
+            let _: () = msg_send![token_keycap, addSubview: glyph_view];
+        }
+        let value = ns_string(token);
+        if value != nil {
+            let _: () = msg_send![glyph_view, setStringValue: value];
+        }
+        if font != nil {
+            let _: () = msg_send![glyph_view, setFont: font];
+        }
+        if text_color != nil {
+            let _: () = msg_send![glyph_view, setTextColor: text_color];
+        }
+        let _: () = msg_send![glyph_view, sizeToFit];
+        let glyph_size: NSSize = msg_send![glyph_view, fittingSize];
+        let keycap_padding_x =
+            crate::components::footer_chrome::footer_keycap_padding_x_for_token(token, &metrics)
+                as f64;
+        let token_keycap_width = (glyph_size.width + keycap_padding_x * 2.0).max(keycap_height);
+        let glyph_x = crate::components::footer_chrome::footer_appkit_glyph_x(
+            token,
+            token_keycap_width,
+            glyph_size.width,
+        );
+        let glyph_y = metrics.keycap_padding_y as f64
+            + crate::components::footer_chrome::footer_appkit_glyph_y(
+                token,
+                (keycap_height - metrics.keycap_padding_y as f64 * 2.0).max(0.0),
+                glyph_size.height,
+            );
+        let _: () = msg_send![
+            glyph_view,
+            setFrame: NSRect::new(NSPoint::new(glyph_x, glyph_y), glyph_size)
+        ];
+
+        let token_layer: id = msg_send![token_keycap, layer];
+        if token_layer != nil {
+            let _: () = msg_send![
+                token_layer,
+                setCornerRadius: metrics.keycap_radius as f64
+            ];
+            let _: () = msg_send![token_layer, setBorderWidth: 1.0_f64];
+            if border != nil {
+                let cg: id = msg_send![border, CGColor];
+                if cg != nil {
+                    let _: () = msg_send![token_layer, setBorderColor: cg];
+                }
             }
         }
+        let _: () = msg_send![
+            token_keycap,
+            setFrame: NSRect::new(
+                NSPoint::new(keycap_run_width, 0.0),
+                NSSize::new(token_keycap_width, keycap_height)
+            )
+        ];
+        let _: () = msg_send![token_keycap, setHidden: NO];
+        keycap_run_width += token_keycap_width;
+        if index + 1 < shortcut_tokens.len() {
+            keycap_run_width += key_gap;
+        }
+    }
+
+    // A tip can rotate from a longer shortcut to a shorter one while the
+    // native footer host is reused. Remove any no-longer-owned token views.
+    for index in shortcut_tokens.len()..16 {
+        let stale_id = format!("{keycap_id}-{index}");
+        remove_identified_subview(keycap, &stale_id);
     }
     let keycap_y = ((host_height - keycap_height) / 2.0).round();
     let _: () = msg_send![keycap, setFrame: NSRect::new(
         NSPoint::new(x + visual_offset_x, keycap_y + visual_offset_y),
-        NSSize::new(keycap_width, keycap_height),
+        NSSize::new(keycap_run_width, keycap_height),
     )];
     let _: () = msg_send![keycap, setHidden: NO];
-    keycap_width
+    keycap_run_width
 }
 
 #[cfg(target_os = "macos")]
@@ -5632,7 +5708,9 @@ unsafe fn make_footer_hint_item(
         }
 
         let is_icon = crate::components::footer_chrome::is_footer_icon_token(key_str);
-        let chip_padding_x = metrics.keycap_padding_x as f64;
+        let chip_padding_x =
+            crate::components::footer_chrome::footer_keycap_padding_x_for_token(key_str, &metrics)
+                as f64;
         let chip_padding_y = metrics.keycap_padding_y as f64;
         let chip_height = metrics.keycap_height as f64;
         let (glyph_view, glyph_size) = if is_icon {
@@ -5683,7 +5761,11 @@ unsafe fn make_footer_hint_item(
         }
         let chip_width = (glyph_size.width + chip_padding_x * 2.0).max(chip_height);
 
-        let glyph_x = ((chip_width - glyph_size.width) / 2.0).round();
+        let glyph_x = crate::components::footer_chrome::footer_appkit_glyph_x(
+            key_str,
+            chip_width,
+            glyph_size.width,
+        );
         let glyph_y = chip_padding_y
             + crate::components::footer_chrome::footer_appkit_glyph_y(
                 key_str,

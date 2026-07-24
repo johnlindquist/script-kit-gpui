@@ -199,6 +199,7 @@ def analyze(
     receipt: dict,
     scenario: str,
     body_bounds: tuple[float, float, float, float] | None = None,
+    hidden_host_time_ns: int | None = None,
     visible_host_time_ns: int | None = None,
     expected_exit_frame: tuple[float, float, float, float] | None = None,
     capture_bounds: tuple[float, float, float, float] | None = None,
@@ -335,6 +336,13 @@ def analyze(
             classification["analysisCropPixels"] = analysis_crop
             classification["sequence"] = row["sequence"]
             classification["referenceSource"] = reference_source
+            # The first alpha-ramp sample can be only ~0.7% opaque. At that
+            # level ScreenCaptureKit detects a stage delta before the detached
+            # footer produces stable 8-bit pixels. It is not a perceptible
+            # ownership frame, so defer the gutter assertion until 1% alpha.
+            classification["evaluatedForGutter"] = (
+                row["windowAlpha"] is None or float(row["windowAlpha"]) >= 0.01
+            )
             frame_classifications.append(classification)
             rows[index].update(
                 {
@@ -346,7 +354,8 @@ def analyze(
         active = [
             classification
             for classification in frame_classifications
-            if classification["stageVisible"] or classification["footerVisible"]
+            if classification["evaluatedForGutter"]
+            and (classification["stageVisible"] or classification["footerVisible"])
         ]
         gutter_pass = bool(active) and all(
             classification["stageVisible"]
@@ -359,8 +368,11 @@ def analyze(
         failing_sequences = [
             str(classification["sequence"])
             for classification in frame_classifications
-            if classification["footerMissingWhileStageVisible"]
-            or classification["footerOrphanedAfterStageExit"]
+            if classification["evaluatedForGutter"]
+            and (
+                classification["footerMissingWhileStageVisible"]
+                or classification["footerOrphanedAfterStageExit"]
+            )
         ]
         errors.append(
             "transparent footer gutter was not preserved while the main stage "
@@ -403,20 +415,41 @@ def analyze(
                     "sequence": frame.get("sequence"),
                     "displayTimeNs": frame.get("displayTimeNs"),
                     "edgeEnergy": energy,
-                    "hiddenAtCapture": visible_host_time_ns is not None
-                    and int(frame.get("displayTimeNs", 0)) < visible_host_time_ns,
+                    # Cancel/reopen probes can retain pixels from the outgoing
+                    # generation until GPUI commits the first frame of the new
+                    # generation. Do not misclassify those old pixels as the
+                    # new generation's hidden-body interval.
+                    "inProofWindow": hidden_host_time_ns is None
+                    or int(frame.get("displayTimeNs", 0)) >= hidden_host_time_ns,
+                    "hiddenAtCapture": (
+                        (
+                            hidden_host_time_ns is None
+                            or int(frame.get("displayTimeNs", 0))
+                            >= hidden_host_time_ns
+                        )
+                        and visible_host_time_ns is not None
+                        and int(frame.get("displayTimeNs", 0))
+                        < visible_host_time_ns
+                    ),
                 }
             )
         hidden_energy = [
             row["edgeEnergy"] for row in body_rows if row["hiddenAtCapture"]
         ]
         visible_energy = [
-            row["edgeEnergy"] for row in body_rows if not row["hiddenAtCapture"]
+            row["edgeEnergy"]
+            for row in body_rows
+            if row["inProofWindow"] and not row["hiddenAtCapture"]
         ]
         pre_reveal_chrome_energy = []
         title_bottom = max(1, crop_box[1])
         for frame, image in loaded_frames:
             if (
+                (
+                    hidden_host_time_ns is None
+                    or int(frame.get("displayTimeNs", 0)) >= hidden_host_time_ns
+                )
+                and
                 visible_host_time_ns is not None
                 and int(frame.get("displayTimeNs", 0)) < visible_host_time_ns
             ):
@@ -434,7 +467,8 @@ def analyze(
         visible_transition_rows = [
             row
             for row in body_rows
-            if not row["hiddenAtCapture"]
+            if row["inProofWindow"]
+            and not row["hiddenAtCapture"]
             and max_hidden is not None
             and row["edgeEnergy"] > max_hidden + 0.20
         ]
@@ -454,9 +488,23 @@ def analyze(
             else None
         )
         chrome_visible = min(pre_reveal_chrome_energy, default=0) > 0.20
+        hidden_interval_ns = (
+            visible_host_time_ns - hidden_host_time_ns
+            if visible_host_time_ns is not None and hidden_host_time_ns is not None
+            else None
+        )
         body_mask_pass = (
-            len(hidden_energy) >= 2
+            # ScreenCaptureKit emits damage-driven samples, so a one-frame
+            # hidden interval may have only one encoded frame. Require that
+            # pixel frame plus a positive host-clock interval at least half a
+            # display; the lifecycle receipt separately proves the two GPUI
+            # callbacks (hidden commit, then reveal commit).
+            len(hidden_energy) >= 1
             and len(visible_energy) >= 1
+            and (
+                hidden_interval_ns is None
+                or hidden_interval_ns >= int(0.5 * 1_000_000_000.0 / refresh_rate_hz)
+            )
             and max_hidden is not None
             and max_visible is not None
             and max_visible > max_hidden + 0.20
@@ -472,7 +520,9 @@ def analyze(
                 "height": height,
             },
             "boundsPixels": crop_box,
+            "hiddenHostTimeNs": hidden_host_time_ns,
             "visibleHostTimeNs": visible_host_time_ns,
+            "hiddenIntervalNs": hidden_interval_ns,
             "frames": body_rows,
             "hiddenFrameCount": len(hidden_energy),
             "visibleFrameCount": len(visible_energy),
@@ -518,24 +568,28 @@ def analyze(
             "adjacencyRows": 12,
             "minimumGapRows": round(8 * float(receipt.get("captureScale", 1))),
             "stageVisibleFrameCount": sum(
-                classification["stageVisible"]
+                classification["evaluatedForGutter"]
+                and classification["stageVisible"]
                 for classification in frame_classifications
             ),
             "minimumBoundedGapHeightPixels": min(
                 (
                     classification["gutterRun"]["height"]
                     for classification in frame_classifications
-                    if classification["stageVisible"]
+                    if classification["evaluatedForGutter"]
+                    and classification["stageVisible"]
                     and classification["gutterRun"] is not None
                 ),
                 default=None,
             ),
             "footerMissingWhileStageVisible": any(
-                classification["footerMissingWhileStageVisible"]
+                classification["evaluatedForGutter"]
+                and classification["footerMissingWhileStageVisible"]
                 for classification in frame_classifications
             ),
             "footerOrphanedAfterStageExit": any(
-                classification["footerOrphanedAfterStageExit"]
+                classification["evaluatedForGutter"]
+                and classification["footerOrphanedAfterStageExit"]
                 for classification in frame_classifications
             ),
             "stageFooterDisconnected": gutter_pass,
@@ -559,6 +613,7 @@ def main() -> int:
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--out")
     parser.add_argument("--body-bounds", nargs=4, type=float)
+    parser.add_argument("--hidden-host-time-ns", type=int)
     parser.add_argument("--visible-host-time-ns", type=int)
     parser.add_argument("--expected-exit-frame", nargs=4, type=float)
     parser.add_argument("--capture-bounds", nargs=4, type=float)
@@ -569,6 +624,7 @@ def main() -> int:
         receipt,
         args.scenario,
         tuple(args.body_bounds) if args.body_bounds else None,
+        args.hidden_host_time_ns,
         args.visible_host_time_ns,
         tuple(args.expected_exit_frame) if args.expected_exit_frame else None,
         tuple(args.capture_bounds) if args.capture_bounds else None,

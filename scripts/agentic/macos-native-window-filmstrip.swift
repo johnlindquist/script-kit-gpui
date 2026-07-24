@@ -11,6 +11,7 @@ private struct Arguments {
     var windowID: CGWindowID?
     var pid: pid_t?
     var title: String?
+    var maxWidth: Double?
     var outputDirectory: String?
     var readyPath: String?
     var durationMs = 250
@@ -41,6 +42,11 @@ private func parseArguments() -> Arguments {
         case "--title":
             if index + 1 < values.count {
                 result.title = values[index + 1]
+                index += 1
+            }
+        case "--max-width":
+            if index + 1 < values.count {
+                result.maxWidth = Double(values[index + 1])
                 index += 1
             }
         case "--out":
@@ -388,7 +394,10 @@ private func resolveWindow(_ arguments: Arguments) async throws -> SCWindow {
             guard let pid = arguments.pid else { return false }
             let pidMatches = candidate.owningApplication?.processID == pid
             let titleMatches = arguments.title == nil || candidate.title == arguments.title
-            return pidMatches && titleMatches
+            let widthMatches =
+                arguments.maxWidth == nil
+                || candidate.frame.width <= arguments.maxWidth!
+            return pidMatches && titleMatches && widthMatches
         }) {
             return window
         }

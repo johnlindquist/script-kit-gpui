@@ -181,6 +181,7 @@ async function notesLifecycleState(driver: Driver) {
 }
 
 const binary = resolve(arg("--binary", process.env.SCRIPT_KIT_GPUI_BINARY ?? "")!);
+const themeFixture = arg("--theme-fixture");
 const outPath = resolve(
   arg(
     "--out",
@@ -220,6 +221,14 @@ const receipt: Json = {
     binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
   }),
   scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "rapid-toggle",
+  themeFixture: themeFixture
+    ? {
+      path: resolve(themeFixture),
+      sha256: createHash("sha256")
+        .update(readFileSync(resolve(themeFixture)))
+        .digest("hex"),
+    }
+    : null,
   phases: {},
   pass: false,
 };
@@ -227,6 +236,7 @@ const receipt: Json = {
 const driver = await Driver.launch({
   binary,
   sandboxHome: true,
+  themeFixturePath: themeFixture,
   sessionName: "mwnd15-rapid-toggle",
   defaultTimeoutMs: 8_000,
 });
@@ -363,7 +373,7 @@ try {
 
   await announceTestStatus(
     "MWND-15B · Notes hammer",
-    "16 immediate Notes toggles, duplicate-window watch, then reopen recovery",
+    "16 immediate Notes toggles, reopen recovery, then real Cmd+W close",
   );
   const notesErrorBaseline = ((await driver.getLogs({
     limit: 500,
@@ -463,7 +473,11 @@ try {
     ),
   ];
   const notesCloseStarted = performance.now();
-  driver.send({ type: "openNotes", requestId: "mwnd15-notes-recovery-close" });
+  const notesShortcutDispatch = await driver.simulateGpuiKeyDown("w", {
+    modifiers: ["cmd"],
+    target: { type: "kind", kind: "notes", index: 0 },
+    timeoutMs: 5_000,
+  });
   const notesClose = await waitForKindCount(driver, "notes", 0, 2_000);
   const notesCloseMs = performance.now() - notesCloseStarted;
   const notesErrors = boundedErrors(
@@ -485,6 +499,8 @@ try {
     && beforeTail.topology?.pass === true
     && afterTail.topology?.pass === true
     && revealAfterReopen?.entryReveal?.bodyVisible === true
+    && notesShortcutDispatch?.success === true
+    && notesShortcutDispatch?.dispatchPath === "exact_handle"
     && notesClose.pass
     && notesOpenMs <= 750
     && notesCloseMs <= 750
@@ -496,6 +512,10 @@ try {
     maxNotesWindows,
     notesOpenMs: Number(notesOpenMs.toFixed(2)),
     notesCloseMs: Number(notesCloseMs.toFixed(2)),
+    cmdWClose: {
+      dispatch: notesShortcutDispatch,
+      closed: notesClose,
+    },
     hiddenInput: {
       accepted: hiddenInputAccepted,
       bodyVisibleBefore: hiddenInputBefore?.entryReveal?.bodyVisible ?? null,

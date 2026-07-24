@@ -1781,13 +1781,21 @@ impl ScriptListApp {
     }
 
     pub(crate) fn main_window_uses_native_footer(&self) -> bool {
-        crate::is_main_window_visible()
-            && self
-                .main_window_footer_surface()
-                .is_some_and(|expected_surface| {
-                    crate::footer_popup::active_main_window_footer_surface()
+        self.main_window_footer_surface()
+            .is_some_and(|expected_surface| {
+                // Tahoe glass has one canonical footer owner: the native host
+                // in the main NSWindow. Logical visibility flips false before
+                // AppKit's exit fade completes, so it must not participate in
+                // this ownership decision; doing so paints an in-stage GPUI
+                // fallback beside the still-visible detached footer.
+                //
+                // Do not paint a GPUI fallback on the installation frame
+                // either. Non-glass mode still waits for the installed-host
+                // receipt before suppressing its fallback.
+                crate::footer_popup::glass_scroll_bands_active()
+                    || crate::footer_popup::active_main_window_footer_surface()
                         == Some(expected_surface)
-                })
+            })
     }
 
     /// When the native main-window footer is active, replace the GPUI footer

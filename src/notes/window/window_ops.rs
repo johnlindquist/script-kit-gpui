@@ -86,6 +86,7 @@ struct NotesNativeEntryConfig {
     configured_at_monotonic_ns: u64,
     configured_at_unix_ms: u64,
     settle_duration_ms: u64,
+    settled_crossing_delay_ms: u64,
     morph_started: bool,
 }
 
@@ -153,6 +154,18 @@ fn schedule_notes_entry_reveal(
             .map(|config| config.settle_duration_ms)
             .unwrap_or(0)
     };
+    let reveal_delay_ms = if fallback_used {
+        settle_duration_ms
+    } else {
+        native
+            .as_ref()
+            .map(|config| config.settled_crossing_delay_ms)
+            .unwrap_or(0)
+    };
+    let configured_at_monotonic_ns = native
+        .as_ref()
+        .map(|config| config.configured_at_monotonic_ns)
+        .unwrap_or_else(crate::platform::host_clock::host_time_ns);
     let generation = notes_app.update(cx, |app, cx| {
         let generation = app.entry_reveal.generation;
         if let Some(native) = native.as_ref() {
@@ -167,6 +180,7 @@ fn schedule_notes_entry_reveal(
                 native.configured_at_monotonic_ns,
                 native.configured_at_unix_ms,
                 settle_duration_ms,
+                reveal_delay_ms,
                 native.morph_started,
             );
         } else {
@@ -184,6 +198,7 @@ fn schedule_notes_entry_reveal(
                     .unwrap_or_default()
                     .as_millis() as u64,
                 settle_duration_ms,
+                reveal_delay_ms,
                 false,
             );
         }
@@ -226,9 +241,16 @@ fn schedule_notes_entry_reveal(
             let weak = weak.clone();
             let owner = owner.clone();
             let any_handle = window.window_handle();
-            let settle_delay = std::time::Duration::from_millis(settle_duration_ms);
+            // The timer is anchored to native configuration, not this GPUI
+            // callback. That aligns body reveal with phase one's first crossing
+            // of the final window size even if the callback itself arrives late.
+            let reveal_target_ns = configured_at_monotonic_ns
+                .saturating_add(reveal_delay_ms.saturating_mul(1_000_000));
+            let reveal_delay = std::time::Duration::from_nanos(
+                reveal_target_ns.saturating_sub(crate::platform::host_clock::host_time_ns()),
+            );
             cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                cx.background_executor().timer(settle_delay).await;
+                cx.background_executor().timer(reveal_delay).await;
                 cx.update(|cx| {
                     if !notes_entry_owner_is_current(handle, &owner)
                         || !notes_entry_lifecycle_is_open()
@@ -242,7 +264,7 @@ fn schedule_notes_entry_reveal(
                                 .advance(generation, NotesEntryRevealPhase::AwaitingRevealFrame)
                             {
                                 let now = crate::platform::host_clock::host_time_ns();
-                                app.entry_reveal.settle_complete_at_monotonic_ns = Some(now);
+                                app.entry_reveal.reveal_anchor_at_monotonic_ns = Some(now);
                                 app.entry_reveal.reveal_requested_at_monotonic_ns = Some(now);
                                 cx.notify();
                                 true
@@ -1544,24 +1566,15 @@ fn run_current_notes_window_close_sequence(
 
 /// Finish a close initiated from inside the live Notes window.
 ///
-/// Calling `close_notes_window` here would try to lease the same GPUI window
-/// recursively. Retire the same-crate globals and registries directly, hand
-/// focus back while GPUI can still service the native active-status callback,
-/// then release the window once on the next frame. Removing it before the
-/// focus handoff makes GPUI's callback log `window not found`.
+/// The caller already owns the live `NotesApp` lease and must cancel its entry
+/// reveal before entering here. Never update `NOTES_APP_ENTITY` from this
+/// function: doing so recursively leases the same entity and aborts the app.
+/// Retire the same-crate globals and registries directly, hand focus back while
+/// GPUI can still service the native active-status callback, then release the
+/// window once on the next frame. Removing it before the focus handoff makes
+/// GPUI's callback log `window not found`.
 pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
     let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
-    if let Some(notes_app) = NOTES_APP_ENTITY
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-    {
-        notes_app.update(cx, |app, cx| {
-            app.entry_reveal.cancel();
-            cx.notify();
-        });
-    }
     if let Some(ticket) =
         crate::platform::begin_gpui_window_exit_with_ticket(window, "PANEL", "Notes")
     {
@@ -1864,6 +1877,7 @@ fn configure_notes_as_floating_panel(gpui_window: &gpui::Window) -> Option<Notes
             configured_at_monotonic_ns: receipt.configured_at_monotonic_ns,
             configured_at_unix_ms: receipt.configured_at_unix_ms,
             settle_duration_ms: receipt.settle_duration_ms,
+            settled_crossing_delay_ms: receipt.settled_crossing_delay_ms,
             morph_started: receipt.morph_started,
         })
     }

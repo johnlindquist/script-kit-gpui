@@ -241,7 +241,7 @@ class GlassLifecycleMetricsTests(unittest.TestCase):
                 },
                 "notes-entry",
                 (0, 20, 100, 60),
-                1_000_000_000,
+                visible_host_time_ns=1_000_000_000,
             )
             self.assertTrue(result["bodyMaskPass"])
             self.assertEqual(
@@ -281,7 +281,7 @@ class GlassLifecycleMetricsTests(unittest.TestCase):
                 },
                 "notes-entry",
                 (0, 20, 100, 60),
-                1_000_000_000,
+                visible_host_time_ns=1_000_000_000,
             )
             self.assertTrue(result["bodyMaskPass"])
             self.assertEqual(
