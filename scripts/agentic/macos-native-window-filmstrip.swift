@@ -14,6 +14,7 @@ private struct Arguments {
     var readyPath: String?
     var durationMs = 250
     var frameRate = 120
+    var displayStream = false
 }
 
 private func parseArguments() -> Arguments {
@@ -57,6 +58,8 @@ private func parseArguments() -> Arguments {
                 result.frameRate = Int(values[index + 1]) ?? result.frameRate
                 index += 1
             }
+        case "--display-stream":
+            result.displayStream = true
         default:
             break
         }
@@ -260,20 +263,82 @@ private enum Main {
         var errors: [String] = []
         var resolvedWindowID = arguments.windowID ?? 0
         do {
-            let window = try await resolveWindow(arguments)
-            resolvedWindowID = window.windowID
-            let receiver = Capture(outputDirectory: directory, windowID: window.windowID)
+            let windowID: CGWindowID
+            let filter: SCContentFilter
+            let captureFrame: CGRect
+            let captureMode: String
+            if arguments.displayStream {
+                guard let pinnedWindowID = arguments.windowID else {
+                    throw NSError(
+                        domain: "macos-native-window-filmstrip",
+                        code: 2,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "--display-stream requires an exact --window-id"
+                        ]
+                    )
+                }
+                guard let pinnedBounds = windowState(pinnedWindowID).bounds else {
+                    throw NSError(
+                        domain: "macos-native-window-filmstrip",
+                        code: 3,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "hidden pinned window \(pinnedWindowID) has no retained bounds"
+                        ]
+                    )
+                }
+                let content = try await SCShareableContent.excludingDesktopWindows(
+                    false,
+                    onScreenWindowsOnly: false
+                )
+                let center = CGPoint(x: pinnedBounds.midX, y: pinnedBounds.midY)
+                guard let display = content.displays.first(where: {
+                    $0.frame.contains(center)
+                }) else {
+                    throw NSError(
+                        domain: "macos-native-window-filmstrip",
+                        code: 4,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "no ScreenCaptureKit display contains pinned bounds \(pinnedBounds)"
+                        ]
+                    )
+                }
+                windowID = pinnedWindowID
+                captureFrame = pinnedBounds
+                captureMode = "display-pinned-window-bounds"
+                filter = SCContentFilter(display: display, excludingWindows: [])
+            } else {
+                let window = try await resolveWindow(arguments)
+                windowID = window.windowID
+                captureFrame = window.frame
+                captureMode = "desktop-independent-window"
+                filter = SCContentFilter(desktopIndependentWindow: window)
+            }
+            resolvedWindowID = windowID
+            let receiver = Capture(outputDirectory: directory, windowID: windowID)
             let configuration = SCStreamConfiguration()
-            configuration.width = max(1, Int(window.frame.width * 2))
-            configuration.height = max(1, Int(window.frame.height * 2))
+            configuration.width = max(1, Int(captureFrame.width * 2))
+            configuration.height = max(1, Int(captureFrame.height * 2))
             configuration.showsCursor = false
             configuration.queueDepth = 8
+            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            if arguments.displayStream {
+                let displayFrame = filter.contentRect
+                configuration.sourceRect = CGRect(
+                    x: captureFrame.minX - displayFrame.minX,
+                    y: captureFrame.minY - displayFrame.minY,
+                    width: captureFrame.width,
+                    height: captureFrame.height
+                )
+            }
             configuration.minimumFrameInterval = CMTime(
                 value: 1,
                 timescale: CMTimeScale(max(1, arguments.frameRate))
             )
             let createdStream = SCStream(
-                filter: SCContentFilter(desktopIndependentWindow: window),
+                filter: filter,
                 configuration: configuration,
                 delegate: nil
             )
@@ -290,8 +355,16 @@ private enum Main {
             capture = receiver
             if let readyPath = arguments.readyPath {
                 let ready = [
-                    "windowID": Int(window.windowID),
+                    "windowID": Int(windowID),
                     "startedAt": ISO8601DateFormatter().string(from: Date()),
+                    "captureMode": captureMode,
+                    "pixelFormat": "BGRA",
+                    "captureBounds": [
+                        "x": captureFrame.minX,
+                        "y": captureFrame.minY,
+                        "width": captureFrame.width,
+                        "height": captureFrame.height,
+                    ],
                 ] as [String: Any]
                 let data = try JSONSerialization.data(
                     withJSONObject: ready,

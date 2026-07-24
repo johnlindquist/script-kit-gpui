@@ -184,7 +184,12 @@ const driver = await Driver.launch({
 
 function startFilmstrip(
   name: string,
-  selector: { windowID?: number; pid?: number; title?: string },
+  selector: {
+    windowID?: number;
+    pid?: number;
+    title?: string;
+    displayStream?: boolean;
+  },
   durationMs: number,
 ) {
   const directory = join(outDir, name);
@@ -200,6 +205,7 @@ function startFilmstrip(
         String(selector.pid),
         ...(selector.title ? ["--title", selector.title] : []),
       ]),
+    ...(selector.displayStream ? ["--display-stream"] : []),
     "--out",
     directory,
     "--ready",
@@ -302,10 +308,14 @@ try {
     "Lifecycle filmstrip · Main entry",
     "Observer starts while hidden; the same CGWindowID and detached gutter emerge together",
   );
-  const mainEntry = startFilmstrip("main-entry", { windowID: mainWindowID }, 700);
+  const mainEntry = startFilmstrip(
+    "main-entry",
+    { windowID: mainWindowID, displayStream: true },
+    700,
+  );
+  const mainEntryReady = await waitForFile(mainEntry.readyPath);
   const showRequestedAt = new Date().toISOString();
   driver.send({ type: "show", requestId: "glass-life-main-show" });
-  const mainEntryReady = await waitForFile(mainEntry.readyPath);
   await driver.waitForState({ windowVisible: true }, { timeoutMs: 3_000 });
   const mainEntryFilmstrip = await finishFilmstrip(mainEntry, mainWindowID);
   (receipt.scenarios as Json[]).push({
