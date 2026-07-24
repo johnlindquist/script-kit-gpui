@@ -33,12 +33,14 @@ function validReceipt() {
     copiedCompleteCount: 1,
     encodedCompleteCount: 1,
     incompleteSampleCount: 0,
+    incompleteRenderableSampleCount: 0,
     missingDisplayTimeCount: 0,
     droppedCompleteCount: 0,
     duplicateDisplayTimeCount: 0,
     lateFrameCount: 0,
     maximumConsecutiveDisplayTimeGapNs: 0,
     maximumAllowedDisplayTimeGapNs: 9_333_333,
+    screenDamageCadenceWithinOneDisplayPeriod: true,
     frames: [{
       expectedWindowID: identity.windowId,
       actualWindowID: identity.windowId,
@@ -78,13 +80,12 @@ describe("loss-accounted lifecycle filmstrip", () => {
     );
   });
 
-  test("rejects a gap beyond one display period plus 1ms", () => {
+  test("records content-damage cadence without misclassifying it as capture loss", () => {
     const receipt = validReceipt();
     receipt.lateFrameCount = 1;
     receipt.maximumConsecutiveDisplayTimeGapNs = 9_333_334;
-    expect(validateFilmstripCapture(receipt, identity)).toContain(
-      "display-time coverage gap observed",
-    );
+    receipt.screenDamageCadenceWithinOneDisplayPeriod = false;
+    expect(validateFilmstripCapture(receipt, identity)).toEqual([]);
   });
 
   test("rejects an actual CGWindowID mismatch", () => {

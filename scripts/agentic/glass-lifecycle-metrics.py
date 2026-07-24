@@ -315,13 +315,14 @@ def analyze(
                         ).mean[0]
                     )
                 )
-        max_hidden = max(hidden_energy, default=math.inf)
-        min_visible = min(visible_energy, default=-math.inf)
-        max_visible = max(visible_energy, default=-math.inf)
+        max_hidden = max(hidden_energy) if hidden_energy else None
+        min_visible = min(visible_energy) if visible_energy else None
+        max_visible = max(visible_energy) if visible_energy else None
         visible_transition_rows = [
             row
             for row in body_rows
             if not row["hiddenAtCapture"]
+            and max_hidden is not None
             and row["edgeEnergy"] > max_hidden + 0.20
         ]
         first_visible_transition_ns = (
@@ -343,6 +344,8 @@ def analyze(
         body_mask_pass = (
             len(hidden_energy) >= 2
             and len(visible_energy) >= 1
+            and max_hidden is not None
+            and max_visible is not None
             and max_visible > max_hidden + 0.20
             and visible_transition_latency_ns is not None
             and 0 <= visible_transition_latency_ns <= visible_transition_limit_ns

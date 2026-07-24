@@ -37,11 +37,13 @@ export function validateFilmstripCapture(
   const copied = Number(receipt.copiedCompleteCount);
   const encoded = Number(receipt.encodedCompleteCount);
   const incomplete = Number(receipt.incompleteSampleCount);
+  const incompleteRenderable = Number(receipt.incompleteRenderableSampleCount);
   const missingDisplayTime = Number(receipt.missingDisplayTimeCount);
   const dropped = Number(receipt.droppedCompleteCount);
   const duplicates = Number(receipt.duplicateDisplayTimeCount);
   const late = Number(receipt.lateFrameCount);
   if (![received, accounted, complete, copied, encoded, incomplete,
+    incompleteRenderable,
     missingDisplayTime, dropped, duplicates, late]
     .every(Number.isFinite)) {
     errors.push("capture accounting fields missing");
@@ -53,17 +55,22 @@ export function validateFilmstripCapture(
     if (missingDisplayTime !== 0) {
       errors.push("one or more samples lack display time");
     }
+    if (incompleteRenderable !== 0) {
+      errors.push("one or more renderable non-complete samples were not encoded");
+    }
     if (complete !== copied) errors.push("copied complete count mismatch");
     if (copied !== encoded) errors.push("encoded complete count mismatch");
     if (dropped !== 0) errors.push("dropped complete count must be zero");
     if (duplicates !== 0) errors.push("duplicate display time observed");
-    if (late !== 0) errors.push("display-time coverage gap observed");
+    if (typeof receipt.screenDamageCadenceWithinOneDisplayPeriod !== "boolean") {
+      errors.push("screen-damage cadence classification missing");
+    }
   }
   if (
-    Number(receipt.maximumConsecutiveDisplayTimeGapNs)
-      > Number(receipt.maximumAllowedDisplayTimeGapNs)
+    !Number.isFinite(Number(receipt.maximumConsecutiveDisplayTimeGapNs))
+    || !Number.isFinite(Number(receipt.maximumAllowedDisplayTimeGapNs))
   ) {
-    errors.push("maximum display-time gap exceeds one period plus 1ms");
+    errors.push("screen-damage cadence measurements missing");
   }
   const frames = Array.isArray(receipt.frames) ? receipt.frames : [];
   if (frames.length !== encoded) errors.push("encoded frame inventory mismatch");

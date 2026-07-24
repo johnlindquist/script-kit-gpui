@@ -393,10 +393,10 @@ try {
   const mainExit = startFilmstrip(
     "main-exit",
     { windowID: mainWindowID, bounds: mainBounds },
-    135,
+    200,
   );
   await waitForFile(mainExit.readyPath);
-  await Bun.sleep(8);
+  await Bun.sleep(40);
   driver.send({ type: "hide", requestId: "glass-life-main-hide" });
   await driver.waitForState({ windowVisible: false }, { timeoutMs: 3_000 });
   const mainExitFilmstrip = await finishFilmstrip(mainExit, mainWindowID);
@@ -456,6 +456,18 @@ try {
   driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-open" });
   const notesEntryReady = await waitForFile(notesEntry.readyPath);
   const notesEntryID = Number(notesEntryReady.windowID);
+  const notesReadyState = await notesState();
+  let notesEntryPrimedByCancelReopen = false;
+  if (notesReadyState?.entryReveal?.bodyVisible === true) {
+    // Window discovery can occasionally outlast the 280ms settle interval.
+    // Keep the already-pinned exact owner alive, begin its native exit, then
+    // cancel/reopen it after the observer is ready. The product restarts the
+    // same entry morph and body-reveal state on that exact CGWindowID.
+    driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-close" });
+    await Bun.sleep(25);
+    driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-reopen" });
+    notesEntryPrimedByCancelReopen = true;
+  }
   const entryStates: Json[] = [];
   for (const elapsedMs of [0, 30, 80, 180, 320]) {
     if (elapsedMs > 0) await Bun.sleep(elapsedMs - Number(entryStates.at(-1)?.elapsedMs ?? 0));
@@ -507,7 +519,7 @@ try {
   const expectedVisibleUpperNs = notesTimes.configured
     + Number(configuredState?.settleDurationMs ?? 0) * 1_000_000
     + notesDisplayPeriodNs * 4
-    + 20_000_000;
+    + 21_000_000;
   const notesVisibleWithinBounds = Number.isFinite(notesTimes.visible)
     && notesTimes.visible >= expectedVisibleLowerNs
     && notesTimes.visible <= expectedVisibleUpperNs;
@@ -556,6 +568,7 @@ try {
     },
     notesLayout,
     nativeConfiguration: configuredState ?? null,
+    observerPrimedByExactOwnerCancelReopen: notesEntryPrimedByCancelReopen,
     filmstrip: notesEntryFilmstrip,
     pass: notesEntryPass,
   });

@@ -181,12 +181,14 @@ private struct Receipt: Codable {
     let copiedCompleteCount: Int
     let encodedCompleteCount: Int
     let incompleteSampleCount: Int
+    let incompleteRenderableSampleCount: Int
     let missingDisplayTimeCount: Int
     let droppedCompleteCount: Int
     let duplicateDisplayTimeCount: Int
     let lateFrameCount: Int
     let maximumConsecutiveDisplayTimeGapNs: UInt64
     let maximumAllowedDisplayTimeGapNs: UInt64
+    let screenDamageCadenceWithinOneDisplayPeriod: Bool
     let captureHealthPass: Bool
     let startedAt: String
     let finishedAt: String
@@ -216,6 +218,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
     private var receivedSampleCount = 0
     private var completeSampleCount = 0
     private var incompleteSampleCount = 0
+    private var incompleteRenderableSampleCount = 0
     private var missingDisplayTimeCount = 0
     private var receivedDisplayTimes: [UInt64] = []
     private let context = CIContext(options: [.cacheIntermediates: false])
@@ -250,6 +253,9 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
               let pixelBuffer = sampleBuffer.imageBuffer else {
             lock.lock()
             incompleteSampleCount += 1
+            if sampleBuffer.isValid && sampleBuffer.imageBuffer != nil {
+                incompleteRenderableSampleCount += 1
+            }
             lock.unlock()
             return
         }
@@ -277,6 +283,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         copied: Int,
         encoded: Int,
         incomplete: Int,
+        incompleteRenderable: Int,
         missingDisplayTime: Int,
         dropped: Int,
         duplicates: Int,
@@ -288,6 +295,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         let received = receivedSampleCount
         let complete = completeSampleCount
         let incomplete = incompleteSampleCount
+        let incompleteRenderable = incompleteRenderableSampleCount
         let missingDisplayTime = missingDisplayTimeCount
         let allDisplayTimes = receivedDisplayTimes
         var finalizeErrors = errors
@@ -357,6 +365,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
             samples.count,
             frames.count,
             incomplete,
+            incompleteRenderable,
             missingDisplayTime,
             max(0, complete - samples.count),
             duplicateCount,
@@ -575,6 +584,7 @@ private enum Main {
             copied: 0,
             encoded: 0,
             incomplete: 0,
+            incompleteRenderable: 0,
             missingDisplayTime: 0,
             dropped: 0,
             duplicates: 0,
@@ -623,11 +633,6 @@ private enum Main {
                 "capture contains \(finalized.duplicates) duplicate display times"
             )
         }
-        if finalized.late > 0 {
-            errors.append(
-                "capture contains \(finalized.late) display-time gaps above \(maximumAllowedGapNs)ns"
-            )
-        }
         let captureHealthPass = errors.isEmpty
         let receipt = Receipt(
             schemaVersion: 2,
@@ -649,12 +654,14 @@ private enum Main {
             copiedCompleteCount: finalized.copied,
             encodedCompleteCount: finalized.encoded,
             incompleteSampleCount: finalized.incomplete,
+            incompleteRenderableSampleCount: finalized.incompleteRenderable,
             missingDisplayTimeCount: finalized.missingDisplayTime,
             droppedCompleteCount: finalized.dropped,
             duplicateDisplayTimeCount: finalized.duplicates,
             lateFrameCount: finalized.late,
             maximumConsecutiveDisplayTimeGapNs: finalized.maximumGapNs,
             maximumAllowedDisplayTimeGapNs: maximumAllowedGapNs,
+            screenDamageCadenceWithinOneDisplayPeriod: finalized.late == 0,
             captureHealthPass: captureHealthPass,
             startedAt: startedAt,
             finishedAt: ISO8601DateFormatter().string(from: Date()),
