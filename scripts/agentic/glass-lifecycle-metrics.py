@@ -62,9 +62,11 @@ def classify_main_frame(
     image: Image.Image,
     reference: Image.Image,
     *,
+    channel_tolerance: int = 16,
     changed_threshold: float = 0.01,
     component_threshold: float = 0.08,
     adjacency_rows: int = 12,
+    minimum_gap_rows: int = 4,
 ) -> dict:
     """Find the full-width transparent run separating stage and footer.
 
@@ -74,7 +76,11 @@ def classify_main_frame(
     above *and* below it. This fails closed when the footer disappears while
     the main stage is still visible.
     """
-    occupancies = changed_row_occupancies(image, reference)
+    occupancies = changed_row_occupancies(
+        image,
+        reference,
+        channel_tolerance=channel_tolerance,
+    )
     height = len(occupancies)
     lower_start = round(height * 0.50)
     transparent_rows = [
@@ -88,7 +94,11 @@ def classify_main_frame(
         below = occupancies[end + 1 : min(height, end + 1 + adjacency_rows)]
         above_max = max(above, default=0.0)
         below_max = max(below, default=0.0)
-        if above_max >= component_threshold and below_max >= component_threshold:
+        if (
+            end - start + 1 >= minimum_gap_rows
+            and above_max >= component_threshold
+            and below_max >= component_threshold
+        ):
             candidates.append(
                 {
                     "start": start,
@@ -109,7 +119,10 @@ def classify_main_frame(
     footer_occupancy = max(footer_region, default=0.0)
     footer_visible = footer_occupancy >= component_threshold
     disconnected = gutter is not None
-    broad_bridge_pass = not stage_visible or disconnected
+    active = stage_visible or footer_visible
+    broad_bridge_pass = not active or (
+        stage_visible and footer_visible and disconnected
+    )
     return {
         "changedRowOccupancies": occupancies,
         "maximumChangedFraction": max(occupancies, default=0.0),
@@ -121,6 +134,7 @@ def classify_main_frame(
         "stageFooterDisconnected": disconnected,
         "broadBridgePass": broad_bridge_pass,
         "footerMissingWhileStageVisible": stage_visible and not disconnected,
+        "footerOrphanedAfterStageExit": footer_visible and not stage_visible,
     }
 
 
@@ -179,21 +193,24 @@ def analyze(receipt: dict, scenario: str) -> dict:
                     if key != "changedRowOccupancies"
                 }
             )
-        gated = [
+        active = [
             classification
             for classification in frame_classifications
-            if classification["stageVisible"]
+            if classification["stageVisible"] or classification["footerVisible"]
         ]
-        gutter_pass = bool(gated) and all(
-            classification["stageFooterDisconnected"]
+        gutter_pass = bool(active) and all(
+            classification["stageVisible"]
+            and classification["footerVisible"]
+            and classification["stageFooterDisconnected"]
             and classification["broadBridgePass"]
-            for classification in gated
+            for classification in active
         )
     if scenario.startswith("main-") and not gutter_pass:
         failing_sequences = [
             str(classification["sequence"])
             for classification in frame_classifications
             if classification["footerMissingWhileStageVisible"]
+            or classification["footerOrphanedAfterStageExit"]
         ]
         errors.append(
             "transparent footer gutter was not preserved while the main stage "
@@ -225,10 +242,11 @@ def analyze(receipt: dict, scenario: str) -> dict:
                 "display-stream per-row comparison against the hidden background; "
                 "a <=1% changed run must be bounded by >=8% changed stage/footer rows",
             "referenceFrame": "first" if scenario == "main-entry" else "last",
-            "channelTolerance": 1,
+            "channelTolerance": 16,
             "changedRowThreshold": 0.01,
             "componentThreshold": 0.08,
             "adjacencyRows": 12,
+            "minimumGapRows": 4,
             "stageVisibleFrameCount": sum(
                 classification["stageVisible"]
                 for classification in frame_classifications
@@ -244,6 +262,10 @@ def analyze(receipt: dict, scenario: str) -> dict:
             ),
             "footerMissingWhileStageVisible": any(
                 classification["footerMissingWhileStageVisible"]
+                for classification in frame_classifications
+            ),
+            "footerOrphanedAfterStageExit": any(
+                classification["footerOrphanedAfterStageExit"]
                 for classification in frame_classifications
             ),
             "stageFooterDisconnected": gutter_pass,

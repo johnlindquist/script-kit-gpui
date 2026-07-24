@@ -708,6 +708,7 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
         view.was_window_focused = false;
     });
     sync_main_automation_window(current_main_automation_bounds(), false, false);
+    let visibility_generation = crate::main_window_visibility_generation();
 
     // 3. Check secondary windows BEFORE the update closure
     let notes_open = notes::is_notes_window_open();
@@ -781,24 +782,63 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
                     return;
                 }
                 // Keep the native footer host installed for the entire window
-                // fade. Removing it at hide-request time leaves one captured
-                // frame where the stage is still visible but its detached
-                // capsules have already vanished.
-                crate::footer_popup::close_main_footer_popup(cx);
+                // fade and through native orderOut:. Removing it before
+                // orderOut lets GPUI draw its fallback footer inside the
+                // stage for one frame — the visible "rejoin" glitch.
+                let cleanup = |outcome, cx: &mut gpui::AsyncApp| {
+                    if matches!(
+                        outcome,
+                        crate::platform::MainWindowHideCompletion::Hidden(_)
+                    ) {
+                        cx.update(|cx| {
+                            crate::footer_popup::close_main_footer_popup(cx);
+                        });
+                    }
+                };
                 if trace {
-                    platform::defer_hide_main_window_with_geometry_trace(cx, geometry_cycle_id);
+                    platform::defer_hide_main_window_with_geometry_trace_and_completion(
+                        cx,
+                        visibility_generation,
+                        geometry_cycle_id,
+                        cleanup,
+                    );
                 } else {
-                    platform::defer_hide_main_window(cx);
+                    platform::defer_hide_main_window_with_completion(
+                        cx,
+                        visibility_generation,
+                        cleanup,
+                    );
                 }
             });
         })
         .detach();
     } else if platform::main_window_geometry_trace_enabled() {
-        crate::footer_popup::close_main_footer_popup(cx);
-        platform::defer_hide_main_window_with_geometry_trace(cx, geometry_cycle_id);
+        platform::defer_hide_main_window_with_geometry_trace_and_completion(
+            cx,
+            visibility_generation,
+            geometry_cycle_id,
+            |outcome, cx| {
+                if matches!(
+                    outcome,
+                    crate::platform::MainWindowHideCompletion::Hidden(_)
+                ) {
+                    cx.update(|cx| crate::footer_popup::close_main_footer_popup(cx));
+                }
+            },
+        );
     } else {
-        crate::footer_popup::close_main_footer_popup(cx);
-        platform::defer_hide_main_window(cx);
+        platform::defer_hide_main_window_with_completion(
+            cx,
+            visibility_generation,
+            |outcome, cx| {
+                if matches!(
+                    outcome,
+                    crate::platform::MainWindowHideCompletion::Hidden(_)
+                ) {
+                    cx.update(|cx| crate::footer_popup::close_main_footer_popup(cx));
+                }
+            },
+        );
     }
     app_entity.update(cx, |view, ctx| {
         view.defer_reset_to_script_list_after_main_window_hidden(

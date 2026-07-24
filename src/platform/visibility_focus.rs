@@ -211,7 +211,7 @@ pub fn defer_hide_main_window_with_completion(
     completion: impl FnOnce(MainWindowHideCompletion, &mut gpui::AsyncApp) + 'static,
 ) {
     cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-        let outcome = hide_main_window_with_completion(expected_visibility_generation);
+        let outcome = hide_main_window_with_completion(expected_visibility_generation, None);
         completion(outcome, cx);
     })
     .detach();
@@ -220,6 +220,7 @@ pub fn defer_hide_main_window_with_completion(
 #[cfg(target_os = "macos")]
 fn hide_main_window_with_completion(
     expected_visibility_generation: u64,
+    geometry_cycle_id: Option<u64>,
 ) -> MainWindowHideCompletion {
     if require_main_thread("hide_main_window_with_completion") {
         return MainWindowHideCompletion::WrongThread;
@@ -240,6 +241,9 @@ fn hide_main_window_with_completion(
             return MainWindowHideCompletion::MissingWindow;
         };
 
+        if let Some(cycle_id) = geometry_cycle_id {
+            trace_main_window_native_geometry("before_order_out", cycle_id, None, None);
+        }
         let _: () = msg_send![window, orderOut:nil];
 
         if main_window_hide_was_superseded(
@@ -258,6 +262,9 @@ fn hide_main_window_with_completion(
         // Glass mode: park at alpha 0 so the next show (whichever path wins)
         // cannot flash a full-alpha frame before the appear morph runs.
         park_hidden_window_for_glass_morph(window);
+        if let Some(cycle_id) = geometry_cycle_id {
+            trace_main_window_native_geometry("after_order_out", cycle_id, None, None);
+        }
     }
 
     logging::log(
@@ -270,8 +277,25 @@ fn hide_main_window_with_completion(
 #[cfg(not(target_os = "macos"))]
 fn hide_main_window_with_completion(
     _expected_visibility_generation: u64,
+    _geometry_cycle_id: Option<u64>,
 ) -> MainWindowHideCompletion {
     MainWindowHideCompletion::UnsupportedPlatform
+}
+
+/// Geometry-traced counterpart to [`defer_hide_main_window_with_completion`].
+/// The completion still runs only after the same native hidden-state check.
+pub fn defer_hide_main_window_with_geometry_trace_and_completion(
+    cx: &mut gpui::App,
+    expected_visibility_generation: u64,
+    cycle_id: u64,
+    completion: impl FnOnce(MainWindowHideCompletion, &mut gpui::AsyncApp) + 'static,
+) {
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        let outcome =
+            hide_main_window_with_completion(expected_visibility_generation, Some(cycle_id));
+        completion(outcome, cx);
+    })
+    .detach();
 }
 
 #[cfg(test)]

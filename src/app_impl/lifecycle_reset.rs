@@ -285,12 +285,11 @@ impl ScriptListApp {
     }
 
     pub(crate) fn close_and_reset_window(&mut self, cx: &mut Context<Self>) {
-        if self
-            .prepare_main_window_close(cx, "close_and_reset_window", true, true)
-            .is_none()
-        {
+        let Some(visibility_generation) =
+            self.prepare_main_window_close(cx, "close_and_reset_window", true, true)
+        else {
             return;
-        }
+        };
 
         logging::log(
             "VISIBILITY",
@@ -313,17 +312,36 @@ impl ScriptListApp {
                         );
                         return;
                     }
-                    // Preserve the installed native footer through the whole
-                    // common-ancestor fade, then remove it while the window
-                    // is visually transparent.
-                    crate::footer_popup::close_main_footer_popup(cx);
-                    platform::defer_hide_main_window(cx);
+                    platform::defer_hide_main_window_with_completion(
+                        cx,
+                        visibility_generation,
+                        |outcome, cx| {
+                            if matches!(
+                                outcome,
+                                crate::platform::MainWindowHideCompletion::Hidden(_)
+                            ) {
+                                cx.update(|cx| {
+                                    crate::footer_popup::close_main_footer_popup(cx);
+                                });
+                            }
+                        },
+                    );
                 });
             })
             .detach();
         } else {
-            crate::footer_popup::close_main_footer_popup(&mut *cx);
-            platform::defer_hide_main_window(cx);
+            platform::defer_hide_main_window_with_completion(
+                &mut *cx,
+                visibility_generation,
+                |outcome, cx| {
+                    if matches!(
+                        outcome,
+                        crate::platform::MainWindowHideCompletion::Hidden(_)
+                    ) {
+                        cx.update(|cx| crate::footer_popup::close_main_footer_popup(cx));
+                    }
+                },
+            );
         }
         self.defer_reset_to_script_list_after_main_window_hidden(
             cx,
@@ -351,7 +369,6 @@ impl ScriptListApp {
         ) else {
             return;
         };
-        crate::footer_popup::close_main_footer_popup(&mut *cx);
         let app_entity = cx.entity().downgrade();
         platform::defer_hide_main_window_with_completion(
             cx,
@@ -364,11 +381,14 @@ impl ScriptListApp {
                         reason: "close_agent_chat_native_hide_barrier",
                         reset_mini_bounds_after_hidden_reset: false,
                     };
-                    if let Some(app_entity) = app_entity.upgrade() {
-                        app_entity.update(cx, |app, cx| {
-                            app.complete_hidden_main_window_reset(request, cx);
-                        });
-                    }
+                    cx.update(|cx| {
+                        crate::footer_popup::close_main_footer_popup(cx);
+                        if let Some(app_entity) = app_entity.upgrade() {
+                            app_entity.update(cx, |app, cx| {
+                                app.complete_hidden_main_window_reset(request, cx);
+                            });
+                        }
+                    });
                 }
                 failure => {
                     logging::log(
