@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   aggregateDisposition,
+  compositeEvaluator,
   validateChildReceipt,
   validateUniqueScenarioSet,
   type EvidenceIdentity,
@@ -74,6 +75,18 @@ describe("glass evidence contract", () => {
       { pass: false, disposition: "EVALUABLE_FAIL" },
     ])).toBe("EVALUABLE_FAIL");
     expect(aggregateDisposition([], ["missing child"])).toBe("INVALID_SETUP");
+  });
+
+  test("composite observer crashes cannot aggregate as evaluable passes", () => {
+    const evaluator = compositeEvaluator(false, true);
+    expect(evaluator).toEqual({
+      pass: false,
+      disposition: "INVALID_OBSERVER",
+    });
+    expect(aggregateDisposition([
+      { pass: true, disposition: "EVALUABLE_PASS" },
+      evaluator,
+    ])).toBe("INVALID_OBSERVER");
   });
 
   test("fails closed when a main child omits one required width row", () => {

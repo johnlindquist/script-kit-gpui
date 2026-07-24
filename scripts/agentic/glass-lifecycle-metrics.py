@@ -58,6 +58,33 @@ def contiguous_runs(indices: list[int]) -> list[tuple[int, int]]:
     return runs
 
 
+def exit_geometry_rows(
+    rows: list[dict],
+    expected_exit_frame: tuple[float, float, float, float],
+) -> list[dict]:
+    """Discard pre-exit entry settling, then retain every subsequent frame.
+
+    CGWindow bounds use a top-left display origin while NSWindow receipts use
+    a bottom-left display origin, so x/width/height are the shared exact
+    coordinates. Once the captured owner reaches the ticket's original frame,
+    every later captured frame remains in the geometry proof; a later resize
+    therefore still fails rather than being filtered away.
+    """
+    expected_x, _, expected_width, expected_height = expected_exit_frame
+    first_exact = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if row.get("windowBounds") is not None
+            and abs(float(row["windowBounds"][0][0]) - expected_x) <= 0.25
+            and abs(float(row["windowBounds"][1][0]) - expected_width) <= 0.25
+            and abs(float(row["windowBounds"][1][1]) - expected_height) <= 0.25
+        ),
+        None,
+    )
+    return rows[first_exact:] if first_exact is not None else []
+
+
 def classify_main_frame(
     image: Image.Image,
     reference: Image.Image,
@@ -147,6 +174,7 @@ def analyze(
     scenario: str,
     body_bounds: tuple[float, float, float, float] | None = None,
     visible_host_time_ns: int | None = None,
+    expected_exit_frame: tuple[float, float, float, float] | None = None,
 ) -> dict:
     errors: list[str] = []
     rows = []
@@ -176,28 +204,37 @@ def analyze(
         errors.append(f"only {len(rows)}/4 analyzable frames")
     geometry_rows = rows
     if "exit" in scenario or "close-before-settle" in scenario:
-        first_fading = next(
-            (
-                index
-                for index, row in enumerate(rows)
-                if row["windowAlpha"] is not None
-                and float(row["windowAlpha"]) < 0.999
-            ),
-            None,
-        )
-        if first_fading is not None:
-            end = next(
+        if expected_exit_frame is not None:
+            geometry_rows = exit_geometry_rows(rows, expected_exit_frame)
+            if not geometry_rows:
+                errors.append(
+                    "filmstrip never reached the native exit ticket's original frame"
+                )
+        else:
+            first_fading = next(
                 (
                     index
-                    for index in range(first_fading + 1, len(rows))
-                    if rows[index]["windowAlpha"] is not None
-                    and float(rows[index]["windowAlpha"]) >= 0.999
+                    for index, row in enumerate(rows)
+                    if row["windowAlpha"] is not None
+                    and float(row["windowAlpha"]) < 0.999
                 ),
-                len(rows),
+                None,
             )
-            geometry_rows = rows[first_fading:end]
-        else:
-            geometry_rows = [row for row in rows if row["windowBounds"] is not None]
+            if first_fading is not None:
+                end = next(
+                    (
+                        index
+                        for index in range(first_fading + 1, len(rows))
+                        if rows[index]["windowAlpha"] is not None
+                        and float(rows[index]["windowAlpha"]) >= 0.999
+                    ),
+                    len(rows),
+                )
+                geometry_rows = rows[first_fading:end]
+            else:
+                geometry_rows = [
+                    row for row in rows if row["windowBounds"] is not None
+                ]
     bounds = [
         json.dumps(row["windowBounds"], sort_keys=True)
         for row in geometry_rows
@@ -387,6 +424,7 @@ def analyze(
         "frames": rows,
         "geometryStable": geometry_stable,
         "geometryStateCount": len(set(bounds)),
+        "expectedExitFrame": expected_exit_frame,
         "gutterPass": gutter_pass,
         "gutterReference": {
             "method":
@@ -443,6 +481,7 @@ def main() -> int:
     parser.add_argument("--out")
     parser.add_argument("--body-bounds", nargs=4, type=float)
     parser.add_argument("--visible-host-time-ns", type=int)
+    parser.add_argument("--expected-exit-frame", nargs=4, type=float)
     args = parser.parse_args()
     receipt = json.loads(Path(args.receipt).read_text())
     result = analyze(
@@ -450,6 +489,7 @@ def main() -> int:
         args.scenario,
         tuple(args.body_bounds) if args.body_bounds else None,
         args.visible_host_time_ns,
+        tuple(args.expected_exit_frame) if args.expected_exit_frame else None,
     )
     serialized = json.dumps(result, indent=2) + "\n"
     if args.out:

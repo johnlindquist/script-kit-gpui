@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  expandCaptureBounds,
   validateDetachedExitLifecycle,
   validateFilmstripCapture,
   type FilmstripIdentity,
@@ -51,6 +52,25 @@ function validReceipt() {
 }
 
 describe("loss-accounted lifecycle filmstrip", () => {
+  test("capture crop encloses the full 106% entry morph", () => {
+    const expanded = expandCaptureBounds({
+      x: 381,
+      y: 166,
+      width: 750,
+      height: 501,
+    });
+    expect(expanded).toEqual({
+      x: 351,
+      y: 145,
+      width: 810,
+      height: 542,
+    });
+    expect(expanded.x).toBeLessThanOrEqual(358);
+    expect(expanded.x + expanded.width).toBeGreaterThanOrEqual(358 + 795);
+    expect(expanded.y).toBeLessThanOrEqual(160);
+    expect(expanded.y + expanded.height).toBeGreaterThanOrEqual(160 + 492);
+  });
+
   test("accepts an exact complete immutable capture", () => {
     expect(validateFilmstripCapture(validReceipt(), identity)).toEqual([]);
   });

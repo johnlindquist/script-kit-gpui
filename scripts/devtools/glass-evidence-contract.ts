@@ -174,3 +174,17 @@ export function aggregateDisposition(
   }
   return "EVALUABLE_PASS";
 }
+
+export function compositeEvaluator(
+  pass: boolean,
+  observerFailed: boolean,
+): { pass: boolean; disposition: EvidenceDisposition } {
+  return {
+    pass,
+    disposition: pass
+      ? "EVALUABLE_PASS"
+      : observerFailed
+      ? "INVALID_OBSERVER"
+      : "EVALUABLE_FAIL",
+  };
+}

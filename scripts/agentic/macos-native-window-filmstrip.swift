@@ -442,7 +442,7 @@ private enum Main {
                 let pinnedBounds: CGRect
                 if let requestedWindowID = arguments.windowID {
                     guard let retainedBounds =
-                        windowState(requestedWindowID).bounds ?? arguments.pinnedBounds
+                        arguments.pinnedBounds ?? windowState(requestedWindowID).bounds
                     else {
                         throw NSError(
                             domain: "macos-native-window-filmstrip",

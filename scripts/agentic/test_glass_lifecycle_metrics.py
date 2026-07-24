@@ -89,6 +89,24 @@ class GlassLifecycleMetricsTests(unittest.TestCase):
         }
         self.assertEqual(len(bounds), 2)
 
+    def test_exit_geometry_discards_only_prefix_entry_settling(self) -> None:
+        rows = [
+            {"windowBounds": [[476, 867], [559, 100]], "windowAlpha": 1.0},
+            {"windowBounds": [[476, 867], [560, 100]], "windowAlpha": 1.0},
+            {"windowBounds": [[476, 867], [560, 100]], "windowAlpha": 0.8},
+        ]
+        selected = METRICS.exit_geometry_rows(rows, (476, 15, 560, 100))
+        self.assertEqual(selected, rows[1:])
+        rows.append(
+            {"windowBounds": [[476, 867], [561, 100]], "windowAlpha": 0.6}
+        )
+        selected = METRICS.exit_geometry_rows(rows, (476, 15, 560, 100))
+        self.assertEqual(selected, rows[1:])
+        self.assertEqual(
+            len({str(row["windowBounds"]) for row in selected}),
+            2,
+        )
+
     def test_notes_body_transition_may_land_on_next_rendered_frame(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             frames = []

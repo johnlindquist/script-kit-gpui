@@ -6,6 +6,36 @@ export type FilmstripIdentity = {
   windowId: number;
 };
 
+export type CaptureBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export function expandCaptureBounds(
+  bounds: CaptureBounds,
+  scale = 1.08,
+): CaptureBounds {
+  if (
+    !Number.isFinite(scale)
+    || scale < 1
+    || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+    || bounds.width <= 0
+    || bounds.height <= 0
+  ) {
+    throw new Error("capture bounds and expansion scale must be finite and positive");
+  }
+  const width = Math.ceil(bounds.width * scale);
+  const height = Math.ceil(bounds.height * scale);
+  return {
+    x: Math.floor(bounds.x - (width - bounds.width) / 2),
+    y: Math.floor(bounds.y - (height - bounds.height) / 2),
+    width,
+    height,
+  };
+}
+
 export function validateFilmstripCapture(
   receipt: any,
   expected: FilmstripIdentity,

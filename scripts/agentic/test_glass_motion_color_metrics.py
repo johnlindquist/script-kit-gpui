@@ -117,6 +117,43 @@ class AdaptiveMotionTests(unittest.TestCase):
         self.assertNotEqual(expanded_pixels[1], pixels[1])
         self.assertGreater(expanded_pixels[2], pixels[2])
 
+    def test_expanded_capture_crop_contains_the_full_entry_morph(self):
+        appkit = {
+            "windowBounds": {"x": 381, "y": 166, "width": 750, "height": 480},
+            "mainBackdropFrame": {"x": 0, "y": 40, "width": 750, "height": 440},
+            "footerContainerFrame": {"x": 0, "y": 0, "width": 750, "height": 32},
+            "nodes": [
+                {
+                    "id": "script-kit-footer-capsule-ai",
+                    "className": "NSGlassEffectView",
+                    "hidden": False,
+                    "screenshotFrame": {
+                        "x": 641,
+                        "y": 2,
+                        "width": 108,
+                        "height": 28,
+                    },
+                    "layer": {"cornerRadius": 6},
+                }
+            ],
+        }
+        capture = {"x": 351, "y": 145, "width": 810, "height": 542}
+        projected = motion.transform_appkit_geometry_for_display_frame(
+            appkit,
+            (358, 160, 795, 492),
+            capture,
+            (1620, 1084),
+        )
+        pixels = contrast.frame_pixels(
+            projected["nodes"][0]["screenshotFrame"],
+            2,
+            1084,
+        )
+        self.assertGreaterEqual(pixels[0], 0)
+        self.assertGreaterEqual(pixels[1], 0)
+        self.assertLessEqual(pixels[0] + pixels[2], 1620)
+        self.assertLessEqual(pixels[1] + pixels[3], 1084)
+
 
 if __name__ == "__main__":
     unittest.main()

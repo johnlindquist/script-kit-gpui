@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   aggregateDisposition,
   assertFreshOutputDirectory,
+  compositeEvaluator,
   newRunId,
   sha256File,
   validateChildReceipt,
@@ -719,11 +720,28 @@ async function main() {
     notesFallback?.receipt,
     lifecycleFilmstrip?.receipt,
   ].filter(Boolean);
+  const lockedObserverFailed = (lockedTreatment?.cells ?? []).some(
+    (cell: any) =>
+      (cell?.metricsExitCode !== 0 && cell?.metrics == null)
+      || (cell?.motionMetricsExitCode !== 0 && cell?.motionMetrics == null)
+      || (
+        cell?.saturatedLifecycle?.entryMotionMetricsExitCode !== 0
+        && cell?.saturatedLifecycle?.entryMotionMetrics == null
+      ),
+  );
+  const compositeEvaluators = [
+    ...(lockedTreatment == null
+      ? []
+      : [compositeEvaluator(lockedTreatment.pass === true, lockedObserverFailed)]),
+  ];
   const finalBinarySha256 = sha256File(binary);
   if (finalBinarySha256 !== identity.binarySha256) {
     setupErrors.push("binary changed during evidence run");
   }
-  const finalDisposition = aggregateDisposition(children, setupErrors);
+  const finalDisposition = aggregateDisposition(
+    [...children, ...compositeEvaluators],
+    setupErrors,
+  );
   const receipt = {
     schemaVersion: 2,
     ...identity,

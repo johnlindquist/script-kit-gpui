@@ -16,6 +16,7 @@ import {
 } from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 import {
+  expandCaptureBounds,
   validateDetachedExitLifecycle,
   validateFilmstripCapture,
 } from "./glass-lifecycle-filmstrip-contract.ts";
@@ -284,6 +285,7 @@ async function finishFilmstrip(
   metricsContext?: {
     bodyBounds?: { x: number; y: number; width: number; height: number };
     visibleHostTimeNs?: number;
+    expectedExitFrame?: [number, number, number, number];
   },
 ) {
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -312,6 +314,12 @@ async function finishFilmstrip(
       : []),
     ...(metricsContext?.visibleHostTimeNs != null
       ? ["--visible-host-time-ns", String(metricsContext.visibleHostTimeNs)]
+      : []),
+    ...(metricsContext?.expectedExitFrame != null
+      ? [
+        "--expected-exit-frame",
+        ...metricsContext.expectedExitFrame.map(String),
+      ]
       : []),
   ]);
   const metrics = existsSync(metricsPath)
@@ -366,6 +374,12 @@ try {
     throw new Error(`main native window ${mainWindowID} bounds are missing`);
   }
   receipt.initialCompleteNativeInventory = mainNative;
+  const mainCaptureBounds = expandCaptureBounds({
+    x: Number(mainBounds.x),
+    y: Number(mainBounds.y),
+    width: Number(mainBounds.width),
+    height: Number(mainBounds.height),
+  });
   const initialTopology = classifyNativeInventory(
     mainNative.completeWindows as any[],
     pid,
@@ -392,7 +406,7 @@ try {
   );
   const mainExit = startFilmstrip(
     "main-exit",
-    { windowID: mainWindowID, bounds: mainBounds },
+    { windowID: mainWindowID, bounds: mainCaptureBounds },
     200,
   );
   await waitForFile(mainExit.readyPath);
@@ -412,10 +426,17 @@ try {
   );
   const mainEntry = startFilmstrip(
     "main-entry",
-    { windowID: mainWindowID, displayStream: true, bounds: mainBounds },
+    { windowID: mainWindowID, displayStream: true, bounds: mainCaptureBounds },
     700,
   );
   const mainEntryReady = await waitForFile(mainEntry.readyPath);
+  const mainEntryCaptureBoundsMatch = ["x", "y", "width", "height"].every(
+    (key) =>
+      Math.abs(
+        Number(mainEntryReady?.captureBounds?.[key])
+        - Number(mainCaptureBounds[key as keyof typeof mainCaptureBounds]),
+      ) <= 0.01,
+  );
   await Bun.sleep(40);
   const showRequestedAt = new Date().toISOString();
   driver.send({ type: "show", requestId: "glass-life-main-show" });
@@ -432,7 +453,8 @@ try {
     observerStartedAt: mainEntry.processStartedAt,
     showRequestedAt,
     streamReady: mainEntryReady,
-    captureBounds: mainBounds,
+    captureBounds: mainCaptureBounds,
+    captureBoundsMatch: mainEntryCaptureBoundsMatch,
     pointerPreparation: {
       command: ["cliclick", "m:2,2"],
       exitCode: pointerPreparation.exitCode,
@@ -441,7 +463,7 @@ try {
     },
     settledLayout: mainEntrySettledLayout,
     filmstrip: mainEntryFilmstrip,
-    pass: mainEntryFilmstrip.pass,
+    pass: mainEntryFilmstrip.pass && mainEntryCaptureBoundsMatch,
   });
 
   await announceTestStatus(
@@ -597,7 +619,14 @@ try {
   const afterReopen = await notesState();
   const notesAfterNative = await nativeWindowIds(pid, "Notes");
   const notesCompleteAfter = await nativeWindowIds(pid);
-  const notesReopenFilmstrip = await finishFilmstrip(notesReopen, notesReopenID);
+  const notesReopenFilmstrip = await finishFilmstrip(
+    notesReopen,
+    notesReopenID,
+    {
+      expectedExitFrame:
+        duringExit?.windowLifecycle?.nativeExit?.originalFrame,
+    },
+  );
   const notesActiveExitErrors = validateDetachedExitLifecycle(
     duringExit?.windowLifecycle?.nativeExit,
     notesReopenID,
@@ -682,7 +711,14 @@ try {
   const dictationAfter = (await driver.getState({ timeoutMs: 5_000 }))?.dictation;
   const dictationNativeAfter = await nativeWindowIds(pid, "Script Kit Dictation");
   const dictationCompleteAfter = await nativeWindowIds(pid);
-  const dictationFilmstrip = await finishFilmstrip(dictation, dictationID);
+  const dictationFilmstrip = await finishFilmstrip(
+    dictation,
+    dictationID,
+    {
+      expectedExitFrame:
+        dictationDuringExit?.windowLifecycle?.nativeExit?.originalFrame,
+    },
+  );
   const dictationActiveExitErrors = validateDetachedExitLifecycle(
     dictationDuringExit?.windowLifecycle?.nativeExit,
     dictationID,
