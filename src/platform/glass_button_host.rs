@@ -28,6 +28,15 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+pub(crate) fn host_attached(window_key: usize) -> bool {
+    HOSTS_BY_WINDOW.with(|registry| {
+        registry
+            .borrow()
+            .get(&window_key)
+            .is_some_and(|state| state.host.window_is_alive())
+    })
+}
+
 struct GlassGroup {
     frames: Vec<GlassButtonFrame>,
     last_synced: std::time::Instant,

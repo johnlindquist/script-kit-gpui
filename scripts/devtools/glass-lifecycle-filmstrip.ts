@@ -15,6 +15,16 @@ import {
   newRunId,
 } from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
+import {
+  validateDetachedExitLifecycle,
+  validateFilmstripCapture,
+} from "./glass-lifecycle-filmstrip-contract.ts";
+import {
+  finishInterferenceMonitor,
+  startInterferenceMonitor,
+  waitForInterferenceReady,
+} from "./glass-interference.ts";
+import { classifyNativeInventory } from "./glass-topology-contract.ts";
 
 function arg(name: string, fallback?: string) {
   const index = process.argv.indexOf(name);
@@ -117,6 +127,13 @@ function analyzeFilmstrip(directory: string, expectedWindowID: number) {
   );
   const errors = [
     ...(receipt?.errors ?? []),
+    ...validateFilmstripCapture(receipt, {
+      runId: String(receiptRoot.runId),
+      gitCommit: String(receiptRoot.gitCommit),
+      binarySha256: String(receiptRoot.binarySha256),
+      pid: Number(driver.pid),
+      windowId: expectedWindowID,
+    }),
     ...(receipt?.windowID === expectedWindowID
       ? []
       : [
@@ -159,6 +176,21 @@ const compile = await run([
 if (compile.exitCode !== 0) {
   throw new Error(`filmstrip helper compile failed: ${compile.stderr}`);
 }
+const interferenceHelper = join(outDir, "macos-glass-interference-monitor");
+const interferenceCompile = await run([
+  "xcrun",
+  "swiftc",
+  "-O",
+  resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
+  "-o",
+  interferenceHelper,
+]);
+if (interferenceCompile.exitCode !== 0) {
+  throw new Error(
+    `interference helper compile failed: ${interferenceCompile.stderr}`,
+  );
+}
+let interferenceMonitor: ReturnType<typeof startInterferenceMonitor> | null = null;
 
 const receipt: Json = {
   schemaVersion: 2,
@@ -174,6 +206,7 @@ const receipt: Json = {
   scenarios: [],
   pass: false,
 };
+const receiptRoot = receipt;
 
 const driver = await Driver.launch({
   binary,
@@ -203,7 +236,7 @@ function startFilmstrip(
   const command = [
     helper,
     ...(selector.windowID != null
-      ? ["--window-id", String(selector.windowID)]
+      ? ["--window-id", String(selector.windowID), "--pid", String(driver.pid)]
       : [
         "--pid",
         String(selector.pid),
@@ -227,6 +260,12 @@ function startFilmstrip(
     String(durationMs),
     "--fps",
     "120",
+    "--run-id",
+    String(receipt.runId),
+    "--git-commit",
+    String(receipt.gitCommit),
+    "--binary-sha256",
+    String(receipt.binarySha256),
   ];
   const process = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   return {
@@ -242,6 +281,10 @@ function startFilmstrip(
 async function finishFilmstrip(
   started: ReturnType<typeof startFilmstrip>,
   expectedWindowID: number,
+  metricsContext?: {
+    bodyBounds?: { x: number; y: number; width: number; height: number };
+    visibleHostTimeNs?: number;
+  },
 ) {
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(started.process.stdout).text(),
@@ -258,6 +301,18 @@ async function finishFilmstrip(
     started.name,
     "--out",
     metricsPath,
+    ...(metricsContext?.bodyBounds
+      ? [
+        "--body-bounds",
+        String(metricsContext.bodyBounds.x),
+        String(metricsContext.bodyBounds.y),
+        String(metricsContext.bodyBounds.width),
+        String(metricsContext.bodyBounds.height),
+      ]
+      : []),
+    ...(metricsContext?.visibleHostTimeNs != null
+      ? ["--visible-host-time-ns", String(metricsContext.visibleHostTimeNs)]
+      : []),
   ]);
   const metrics = existsSync(metricsPath)
     ? JSON.parse(readFileSync(metricsPath, "utf8"))
@@ -311,6 +366,25 @@ try {
     throw new Error(`main native window ${mainWindowID} bounds are missing`);
   }
   receipt.initialCompleteNativeInventory = mainNative;
+  const initialTopology = classifyNativeInventory(
+    mainNative.completeWindows as any[],
+    pid,
+    mainWindowID,
+  );
+  receipt.initialNativeTopology = initialTopology;
+  if (!initialTopology.pass) {
+    throw new Error(
+      `initial complete same-PID topology invalid: ${JSON.stringify(initialTopology.errors)}`,
+    );
+  }
+  const pointerPreparation = await run(["cliclick", "m:2,2"]);
+  if (pointerPreparation.exitCode !== 0) {
+    throw new Error(
+      `failed to park pointer away from entry capsules: ${pointerPreparation.stderr}`,
+    );
+  }
+  interferenceMonitor = startInterferenceMonitor(interferenceHelper, outDir);
+  receipt.interferenceReady = await waitForInterferenceReady(interferenceMonitor);
 
   await announceTestStatus(
     "Lifecycle filmstrip · Main exit",
@@ -319,10 +393,10 @@ try {
   const mainExit = startFilmstrip(
     "main-exit",
     { windowID: mainWindowID, bounds: mainBounds },
-    650,
+    135,
   );
   await waitForFile(mainExit.readyPath);
-  await Bun.sleep(80);
+  await Bun.sleep(8);
   driver.send({ type: "hide", requestId: "glass-life-main-hide" });
   await driver.waitForState({ windowVisible: false }, { timeoutMs: 3_000 });
   const mainExitFilmstrip = await finishFilmstrip(mainExit, mainWindowID);
@@ -332,12 +406,6 @@ try {
     filmstrip: mainExitFilmstrip,
     pass: mainExitFilmstrip.pass,
   });
-  const pointerPreparation = await run(["cliclick", "m:2,2"]);
-  if (pointerPreparation.exitCode !== 0) {
-    throw new Error(
-      `failed to park pointer away from entry capsules: ${pointerPreparation.stderr}`,
-    );
-  }
   await announceTestStatus(
     "Lifecycle filmstrip · Main entry",
     "Observer starts while hidden; the same CGWindowID and detached gutter emerge together",
@@ -393,7 +461,21 @@ try {
     if (elapsedMs > 0) await Bun.sleep(elapsedMs - Number(entryStates.at(-1)?.elapsedMs ?? 0));
     entryStates.push({ elapsedMs, state: await notesState() });
   }
-  const notesEntryFilmstrip = await finishFilmstrip(notesEntry, notesEntryID);
+  const notesLayout = await driver.getLayoutInfo(
+    { target: { type: "id", id: "notes" } },
+    { timeoutMs: 5_000 },
+  );
+  const notesBodyBounds = (notesLayout?.components ?? []).find(
+    (component: Json) =>
+      ["NotesEditor", "NotesPreview", "NotesEmbeddedAgentChat"].includes(
+        String(component?.name ?? ""),
+      ),
+  )?.bounds;
+  const preliminaryFinalReveal = entryStates.at(-1)?.state?.entryReveal;
+  const notesEntryFilmstrip = await finishFilmstrip(notesEntry, notesEntryID, {
+    bodyBounds: notesBodyBounds,
+    visibleHostTimeNs: preliminaryFinalReveal?.visibleAtMonotonicNs,
+  });
   const configuredState = entryStates.find(
     (sample) => sample?.state?.entryReveal?.nativeConfigured === true,
   )?.state?.entryReveal;
@@ -404,6 +486,31 @@ try {
   );
   const visibleAfterSettle = entryStates.at(-1)?.state?.entryReveal?.bodyVisible === true;
   const finalReveal = entryStates.at(-1)?.state?.entryReveal;
+  const notesTimes = {
+    configured: Number(configuredState?.configuredAtMonotonicNs),
+    firstFrame: Number(finalReveal?.firstFrameAtMonotonicNs),
+    settleComplete: Number(finalReveal?.settleCompleteAtMonotonicNs),
+    revealRequested: Number(finalReveal?.revealRequestedAtMonotonicNs),
+    visible: Number(finalReveal?.visibleAtMonotonicNs),
+  };
+  const notesTimesOrdered = Object.values(notesTimes).every(Number.isFinite)
+    && notesTimes.configured <= notesTimes.firstFrame
+    && notesTimes.firstFrame <= notesTimes.settleComplete
+    && notesTimes.settleComplete <= notesTimes.revealRequested
+    && notesTimes.revealRequested <= notesTimes.visible;
+  const notesDisplayPeriodNs = 1_000_000_000
+    / Number(notesEntryFilmstrip.receipt?.refreshRateHz ?? 60);
+  const expectedVisibleLowerNs = notesTimes.configured
+    + Number(configuredState?.settleDurationMs ?? 0) * 1_000_000
+    + notesDisplayPeriodNs * 2
+    - 1_000_000;
+  const expectedVisibleUpperNs = notesTimes.configured
+    + Number(configuredState?.settleDurationMs ?? 0) * 1_000_000
+    + notesDisplayPeriodNs * 4
+    + 20_000_000;
+  const notesVisibleWithinBounds = Number.isFinite(notesTimes.visible)
+    && notesTimes.visible >= expectedVisibleLowerNs
+    && notesTimes.visible <= expectedVisibleUpperNs;
   const framesBeforeVisible = (
     notesEntryFilmstrip.receipt?.frames ?? []
   ).filter((frame: Json) =>
@@ -422,7 +529,10 @@ try {
     && hiddenBeforeVisible
     && visibleAfterSettle
     && Number(finalReveal?.completedFrameCount ?? 0) >= 2
-    && notesEntryFilmstrip.metrics?.bodyPixelTransition === true;
+    && notesTimesOrdered
+    && notesVisibleWithinBounds
+    && notesEntryFilmstrip.metrics?.bodyPixelTransition === true
+    && notesEntryFilmstrip.metrics?.bodyMaskPass === true;
   (receipt.scenarios as Json[]).push({
     name: "notes-entry",
     exactWindowID: notesEntryID,
@@ -433,7 +543,18 @@ try {
       framesBeforeVisible,
       completedFrameCount: finalReveal?.completedFrameCount ?? null,
       bodyPixelTransition: notesEntryFilmstrip.metrics?.bodyPixelTransition ?? false,
+      bodyMaskPass: notesEntryFilmstrip.metrics?.bodyMaskPass ?? false,
+      bodyBounds: notesBodyBounds ?? null,
+      hostClockTiming: {
+        times: notesTimes,
+        ordered: notesTimesOrdered,
+        displayPeriodNs: notesDisplayPeriodNs,
+        expectedVisibleLowerNs,
+        expectedVisibleUpperNs,
+        visibleWithinBounds: notesVisibleWithinBounds,
+      },
     },
+    notesLayout,
     nativeConfiguration: configuredState ?? null,
     filmstrip: notesEntryFilmstrip,
     pass: notesEntryPass,
@@ -464,6 +585,21 @@ try {
   const notesAfterNative = await nativeWindowIds(pid, "Notes");
   const notesCompleteAfter = await nativeWindowIds(pid);
   const notesReopenFilmstrip = await finishFilmstrip(notesReopen, notesReopenID);
+  const notesActiveExitErrors = validateDetachedExitLifecycle(
+    duringExit?.windowLifecycle?.nativeExit,
+    notesReopenID,
+    "exiting",
+  );
+  const notesCancelledExitErrors = validateDetachedExitLifecycle(
+    afterReopen?.windowLifecycle?.nativeExit,
+    notesReopenID,
+    "cancelled",
+  );
+  const notesTopology = classifyNativeInventory(
+    notesCompleteAfter.completeWindows as any[],
+    pid,
+    mainWindowID,
+  );
   const notesReopenPass = notesReopenFilmstrip.pass
     && duringExit?.windowLifecycle?.phase === "Exiting"
     && duringExit?.windowLifecycle?.hasExitTicket === true
@@ -474,7 +610,10 @@ try {
     && notesAfterNative.ids.length === 1
     && notesAfterNative.ids[0] === notesReopenID
     && notesCompleteAfter.completeWindowIds.includes(mainWindowID)
-    && notesCompleteAfter.completeWindowIds.includes(notesReopenID);
+    && notesCompleteAfter.completeWindowIds.includes(notesReopenID)
+    && notesTopology.pass
+    && notesActiveExitErrors.length === 0
+    && notesCancelledExitErrors.length === 0;
   (receipt.scenarios as Json[]).push({
     name: "notes-close-before-settle-reopen",
     exactWindowID: notesReopenID,
@@ -483,6 +622,11 @@ try {
     afterReopen,
     nativeWindowIdsAfterReopen: notesAfterNative.ids,
     completeNativeInventoryAfterReopen: notesCompleteAfter,
+    completeNativeTopologyAfterReopen: notesTopology,
+    nativeExitValidation: {
+      activeErrors: notesActiveExitErrors,
+      cancelledErrors: notesCancelledExitErrors,
+    },
     filmstrip: notesReopenFilmstrip,
     pass: notesReopenPass,
   });
@@ -526,6 +670,21 @@ try {
   const dictationNativeAfter = await nativeWindowIds(pid, "Script Kit Dictation");
   const dictationCompleteAfter = await nativeWindowIds(pid);
   const dictationFilmstrip = await finishFilmstrip(dictation, dictationID);
+  const dictationActiveExitErrors = validateDetachedExitLifecycle(
+    dictationDuringExit?.windowLifecycle?.nativeExit,
+    dictationID,
+    "exiting",
+  );
+  const dictationCancelledExitErrors = validateDetachedExitLifecycle(
+    dictationAfter?.windowLifecycle?.nativeExit,
+    dictationID,
+    "cancelled",
+  );
+  const dictationTopology = classifyNativeInventory(
+    dictationCompleteAfter.completeWindows as any[],
+    pid,
+    mainWindowID,
+  );
   const dictationPass = dictationFilmstrip.pass
     && dictationDuringExit?.windowLifecycle?.phase === "Exiting"
     && dictationDuringExit?.windowLifecycle?.handleRegistered === true
@@ -536,7 +695,10 @@ try {
     && dictationNativeAfter.ids.length === 1
     && dictationNativeAfter.ids[0] === dictationID
     && dictationCompleteAfter.completeWindowIds.includes(mainWindowID)
-    && dictationCompleteAfter.completeWindowIds.includes(dictationID);
+    && dictationCompleteAfter.completeWindowIds.includes(dictationID)
+    && dictationTopology.pass
+    && dictationActiveExitErrors.length === 0
+    && dictationCancelledExitErrors.length === 0;
   (receipt.scenarios as Json[]).push({
     name: "dictation-exit-reopen",
     exactWindowID: dictationID,
@@ -547,6 +709,11 @@ try {
     afterReopen: dictationAfter,
     nativeWindowIdsAfterReopen: dictationNativeAfter.ids,
     completeNativeInventoryAfterReopen: dictationCompleteAfter,
+    completeNativeTopologyAfterReopen: dictationTopology,
+    nativeExitValidation: {
+      activeErrors: dictationActiveExitErrors,
+      cancelledErrors: dictationCancelledExitErrors,
+    },
     noMicrophoneCapture: true,
     filmstrip: dictationFilmstrip,
     pass: dictationPass,
@@ -579,11 +746,17 @@ try {
   receipt.error = String(error);
   receipt.pass = false;
 } finally {
+  if (interferenceMonitor) {
+    receipt.interference = await finishInterferenceMonitor(interferenceMonitor);
+    receipt.pass = receipt.pass === true && receipt.interference.pass === true;
+  }
   await driver.close();
   receipt.cleanedUp = !driver.alive;
   receipt.finishedAt = new Date().toISOString();
   receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
-  receipt.disposition = receipt.pass === true
+  receipt.disposition = receipt.interference?.disposition === "INVALID_INTERFERENCE"
+    ? "INVALID_INTERFERENCE"
+    : receipt.pass === true
     ? "EVALUABLE_PASS"
     : receipt.error
     ? "INVALID_OBSERVER"

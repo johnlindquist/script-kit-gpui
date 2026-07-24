@@ -1,6 +1,7 @@
 import CoreImage
 import CoreMedia
 import CoreVideo
+import CryptoKit
 import Foundation
 import ImageIO
 import ScreenCaptureKit
@@ -16,6 +17,9 @@ private struct Arguments {
     var frameRate = 120
     var displayStream = false
     var pinnedBounds: CGRect?
+    var runID: String?
+    var gitCommit: String?
+    var binarySHA256: String?
 }
 
 private func parseArguments() -> Arguments {
@@ -75,6 +79,21 @@ private func parseArguments() -> Arguments {
                 )
                 index += 4
             }
+        case "--run-id":
+            if index + 1 < values.count {
+                result.runID = values[index + 1]
+                index += 1
+            }
+        case "--git-commit":
+            if index + 1 < values.count {
+                result.gitCommit = values[index + 1]
+                index += 1
+            }
+        case "--binary-sha256":
+            if index + 1 < values.count {
+                result.binarySHA256 = values[index + 1]
+                index += 1
+            }
         default:
             break
         }
@@ -90,6 +109,8 @@ private struct FrameReceipt: Codable {
     let windowBounds: CGRect?
     let windowAlpha: Double?
     let windowOnscreen: Bool?
+    let expectedWindowID: UInt32
+    let actualWindowID: UInt32?
     let path: String
     let sha256: String
 }
@@ -105,6 +126,21 @@ private func hostTicksToNs(_ ticks: UInt64) -> UInt64 {
     let remainder = ticks % UInt64(machTimebase.denom)
     return quotient * UInt64(machTimebase.numer)
         + remainder * UInt64(machTimebase.numer) / UInt64(machTimebase.denom)
+}
+
+@MainActor
+private func displayRefreshRate(_ displayID: CGDirectDisplayID, fallback: Double) -> Double {
+    for screen in NSScreen.screens {
+        let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+            as? NSNumber
+        if number?.uint32Value == displayID {
+            return Double(max(1, screen.maximumFramesPerSecond))
+        }
+    }
+    if let mode = CGDisplayCopyDisplayMode(displayID), mode.refreshRate > 0 {
+        return mode.refreshRate
+    }
+    return fallback
 }
 
 private func windowState(_ windowID: CGWindowID) -> (
@@ -131,30 +167,53 @@ private struct Receipt: Codable {
     let windowID: UInt32
     let requestedDurationMs: Int
     let requestedFrameRate: Int
+    let runID: String?
+    let gitCommit: String?
+    let binarySHA256: String?
+    let pid: Int32?
+    let displayID: UInt32?
+    let refreshRateHz: Double
+    let captureScale: Double
+    let pixelFormat: String
+    let receivedSampleCount: Int
+    let completeSampleCount: Int
+    let copiedCompleteCount: Int
+    let encodedCompleteCount: Int
+    let incompleteSampleCount: Int
+    let droppedCompleteCount: Int
+    let duplicateDisplayTimeCount: Int
+    let lateFrameCount: Int
+    let maximumConsecutiveDisplayTimeGapNs: UInt64
+    let maximumAllowedDisplayTimeGapNs: UInt64
+    let captureHealthPass: Bool
     let startedAt: String
     let finishedAt: String
     let frames: [FrameReceipt]
     let errors: [String]
 }
 
-private func sha256(_ path: String) -> String {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
-    process.arguments = ["-a", "256", path]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    try? process.run()
-    process.waitUntilExit()
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    return String(data: data, encoding: .utf8)?.split(separator: " ").first.map(String.init) ?? ""
+private func sha256(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
 private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
+    private struct CapturedSample {
+        let displayTime: UInt64
+        let pixelBuffer: CVPixelBuffer
+        let windowBounds: CGRect?
+        let windowAlpha: Double?
+        let windowOnscreen: Bool?
+        let actualWindowID: CGWindowID?
+    }
+
     private let lock = NSLock()
     private let outputDirectory: URL
     private let windowID: CGWindowID
-    private var receipts: [FrameReceipt] = []
+    private var captured: [CapturedSample] = []
     private var errors: [String] = []
+    private var receivedSampleCount = 0
+    private var completeSampleCount = 0
+    private var incompleteSampleCount = 0
     private let context = CIContext(options: [.cacheIntermediates: false])
 
     init(outputDirectory: URL, windowID: CGWindowID) {
@@ -167,59 +226,131 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
-        guard outputType == .screen, sampleBuffer.isValid,
-              let pixelBuffer = sampleBuffer.imageBuffer else { return }
+        guard outputType == .screen else { return }
+        lock.lock()
+        receivedSampleCount += 1
+        lock.unlock()
         let attachments = CMSampleBufferGetSampleAttachmentsArray(
             sampleBuffer,
             createIfNecessary: false
         ) as? [[SCStreamFrameInfo: Any]]
         guard let status = attachments?.first?[.status] as? NSNumber,
-              status.intValue == SCFrameStatus.complete.rawValue else { return }
+              status.intValue == SCFrameStatus.complete.rawValue,
+              sampleBuffer.isValid,
+              let pixelBuffer = sampleBuffer.imageBuffer else {
+            lock.lock()
+            incompleteSampleCount += 1
+            lock.unlock()
+            return
+        }
         let displayTime = (attachments?.first?[.displayTime] as? NSNumber)?.uint64Value ?? 0
         let state = windowState(windowID)
         lock.lock()
-        let sequence = receipts.count
-        lock.unlock()
-        let path = outputDirectory.appendingPathComponent(String(format: "frame-%04d.png", sequence)).path
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let rendered = context.createCGImage(image, from: image.extent),
-              let destination = CGImageDestinationCreateWithURL(
-                URL(fileURLWithPath: path) as CFURL,
-                "public.png" as CFString,
-                1,
-                nil
-              ) else {
-            lock.lock()
-            errors.append("frame \(sequence) render failed")
-            lock.unlock()
-            return
-        }
-        CGImageDestinationAddImage(destination, rendered, nil)
-        guard CGImageDestinationFinalize(destination) else {
-            lock.lock()
-            errors.append("frame \(sequence) PNG finalization failed")
-            lock.unlock()
-            return
-        }
-        let receipt = FrameReceipt(
-            sequence: sequence,
+        completeSampleCount += 1
+        captured.append(CapturedSample(
             displayTime: displayTime,
-            displayTimeNs: hostTicksToNs(displayTime),
+            pixelBuffer: pixelBuffer,
             windowBounds: state.bounds,
             windowAlpha: state.alpha,
             windowOnscreen: state.onscreen,
-            path: path,
-            sha256: sha256(path)
-        )
-        lock.lock()
-        receipts.append(receipt)
+            actualWindowID: state.bounds == nil ? nil : windowID
+        ))
         lock.unlock()
     }
 
-    func snapshot() -> (frames: [FrameReceipt], errors: [String]) {
+    func finalize(
+        maximumAllowedGapNs: UInt64
+    ) -> (
+        frames: [FrameReceipt],
+        errors: [String],
+        received: Int,
+        complete: Int,
+        copied: Int,
+        encoded: Int,
+        incomplete: Int,
+        dropped: Int,
+        duplicates: Int,
+        late: Int,
+        maximumGapNs: UInt64
+    ) {
         lock.lock()
-        defer { lock.unlock() }
-        return (receipts, errors)
+        let samples = captured
+        let received = receivedSampleCount
+        let complete = completeSampleCount
+        let incomplete = incompleteSampleCount
+        var finalizeErrors = errors
+        lock.unlock()
+
+        var frames: [FrameReceipt] = []
+        for (sequence, sample) in samples.enumerated() {
+            let path = outputDirectory
+                .appendingPathComponent(String(format: "frame-%04d.png", sequence))
+                .path
+            let image = CIImage(cvPixelBuffer: sample.pixelBuffer)
+            guard let rendered = context.createCGImage(image, from: image.extent) else {
+                finalizeErrors.append("frame \(sequence) render failed")
+                continue
+            }
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                data,
+                "public.png" as CFString,
+                1,
+                nil
+            ) else {
+                finalizeErrors.append("frame \(sequence) PNG destination failed")
+                continue
+            }
+            CGImageDestinationAddImage(destination, rendered, nil)
+            guard CGImageDestinationFinalize(destination) else {
+                finalizeErrors.append("frame \(sequence) PNG finalization failed")
+                continue
+            }
+            let png = data as Data
+            do {
+                try png.write(to: URL(fileURLWithPath: path), options: .atomic)
+            } catch {
+                finalizeErrors.append("frame \(sequence) write failed: \(error)")
+                continue
+            }
+            frames.append(FrameReceipt(
+                sequence: sequence,
+                displayTime: sample.displayTime,
+                displayTimeNs: hostTicksToNs(sample.displayTime),
+                windowBounds: sample.windowBounds,
+                windowAlpha: sample.windowAlpha,
+                windowOnscreen: sample.windowOnscreen,
+                expectedWindowID: windowID,
+                actualWindowID: sample.actualWindowID,
+                path: path,
+                sha256: sha256(png)
+            ))
+        }
+        let displayTimes = frames.map(\.displayTime).sorted()
+        let duplicateCount = displayTimes.count - Set(displayTimes).count
+        let changingVisualGaps: [UInt64] = zip(
+            frames,
+            frames.dropFirst()
+        ).compactMap { pair in
+            let (previous, current) = pair
+            guard previous.sha256 != current.sha256 else { return nil }
+            return current.displayTimeNs - previous.displayTimeNs
+        }
+        let maximumGap = changingVisualGaps.max() ?? 0
+        let lateCount = changingVisualGaps.filter { $0 > maximumAllowedGapNs }.count
+        return (
+            frames,
+            finalizeErrors,
+            received,
+            complete,
+            samples.count,
+            frames.count,
+            incomplete,
+            max(0, complete - samples.count),
+            duplicateCount,
+            lateCount,
+            maximumGap
+        )
     }
 }
 
@@ -277,6 +408,9 @@ private enum Main {
         var capture: Capture?
         var errors: [String] = []
         var resolvedWindowID = arguments.windowID ?? 0
+        var resolvedDisplayID: CGDirectDisplayID?
+        var refreshRateHz = Double(max(1, arguments.frameRate))
+        let captureScale = 2.0
         do {
             let windowID: CGWindowID
             let filter: SCContentFilter
@@ -325,19 +459,34 @@ private enum Main {
                 windowID = pinnedWindowID
                 captureFrame = pinnedBounds
                 captureMode = "display-pinned-window-bounds"
+                resolvedDisplayID = display.displayID
                 filter = SCContentFilter(display: display, excludingWindows: [])
             } else {
                 let window = try await resolveWindow(arguments)
                 windowID = window.windowID
                 captureFrame = window.frame
                 captureMode = "desktop-independent-window"
+                let content = try await SCShareableContent.excludingDesktopWindows(
+                    false,
+                    onScreenWindowsOnly: false
+                )
+                let center = CGPoint(x: captureFrame.midX, y: captureFrame.midY)
+                resolvedDisplayID = content.displays.first(where: {
+                    $0.frame.contains(center)
+                })?.displayID
                 filter = SCContentFilter(desktopIndependentWindow: window)
+            }
+            if let displayID = resolvedDisplayID {
+                refreshRateHz = displayRefreshRate(
+                    displayID,
+                    fallback: refreshRateHz
+                )
             }
             resolvedWindowID = windowID
             let receiver = Capture(outputDirectory: directory, windowID: windowID)
             let configuration = SCStreamConfiguration()
-            configuration.width = max(1, Int(captureFrame.width * 2))
-            configuration.height = max(1, Int(captureFrame.height * 2))
+            configuration.width = max(1, Int(captureFrame.width * captureScale))
+            configuration.height = max(1, Int(captureFrame.height * captureScale))
             configuration.showsCursor = false
             configuration.queueDepth = 8
             configuration.pixelFormat = kCVPixelFormatType_32BGRA
@@ -373,6 +522,10 @@ private enum Main {
             if let readyPath = arguments.readyPath {
                 let ready = [
                     "windowID": Int(windowID),
+                    "pid": arguments.pid.map(Int.init) as Any,
+                    "displayID": resolvedDisplayID.map(Int.init) as Any,
+                    "refreshRateHz": refreshRateHz,
+                    "captureScale": captureScale,
                     "startedAt": ISO8601DateFormatter().string(from: Date()),
                     "captureMode": captureMode,
                     "pixelFormat": "BGRA",
@@ -397,20 +550,94 @@ private enum Main {
                 try? await stream.stopCapture()
             }
         }
-        let snapshot = capture?.snapshot() ?? (frames: [], errors: [])
-        errors.append(contentsOf: snapshot.errors)
-        if snapshot.frames.isEmpty {
+        let maximumAllowedGapNs = UInt64(
+            (1_000_000_000.0 / max(1.0, refreshRateHz)) + 1_000_000.0
+        )
+        let finalized = capture?.finalize(
+            maximumAllowedGapNs: maximumAllowedGapNs
+        ) ?? (
+            frames: [],
+            errors: [],
+            received: 0,
+            complete: 0,
+            copied: 0,
+            encoded: 0,
+            incomplete: 0,
+            dropped: 0,
+            duplicates: 0,
+            late: 0,
+            maximumGapNs: 0
+        )
+        errors.append(contentsOf: finalized.errors)
+        if finalized.frames.isEmpty {
             errors.append("ScreenCaptureKit produced no complete frames")
         }
+        let firstOwnedFrame = finalized.frames.firstIndex {
+            $0.actualWindowID == resolvedWindowID
+        }
+        let frameIdentitiesExact = finalized.frames.enumerated().allSatisfy {
+            index, frame in
+            guard frame.expectedWindowID == resolvedWindowID else { return false }
+            if frame.actualWindowID == resolvedWindowID { return true }
+            guard let firstOwnedFrame else { return false }
+            return index < firstOwnedFrame
+                && frame.actualWindowID == nil
+                && frame.windowBounds == nil
+        }
+        if !frameIdentitiesExact {
+            errors.append("one or more frames changed exact CGWindowID")
+        }
+        if finalized.incomplete > 0 {
+            errors.append(
+                "ScreenCaptureKit produced \(finalized.incomplete) incomplete frames"
+            )
+        }
+        if finalized.complete != finalized.copied
+            || finalized.copied != finalized.encoded
+            || finalized.dropped > 0 {
+            errors.append(
+                "capture accounting mismatch complete=\(finalized.complete) copied=\(finalized.copied) encoded=\(finalized.encoded) dropped=\(finalized.dropped)"
+            )
+        }
+        if finalized.duplicates > 0 {
+            errors.append(
+                "capture contains \(finalized.duplicates) duplicate display times"
+            )
+        }
+        if finalized.late > 0 {
+            errors.append(
+                "capture contains \(finalized.late) display-time gaps above \(maximumAllowedGapNs)ns"
+            )
+        }
+        let captureHealthPass = errors.isEmpty
         let receipt = Receipt(
-            schemaVersion: 1,
-            status: errors.isEmpty ? "ok" : "invalid",
+            schemaVersion: 2,
+            status: captureHealthPass ? "ok" : "invalid",
             windowID: resolvedWindowID,
             requestedDurationMs: arguments.durationMs,
             requestedFrameRate: arguments.frameRate,
+            runID: arguments.runID,
+            gitCommit: arguments.gitCommit,
+            binarySHA256: arguments.binarySHA256,
+            pid: arguments.pid,
+            displayID: resolvedDisplayID,
+            refreshRateHz: refreshRateHz,
+            captureScale: captureScale,
+            pixelFormat: "BGRA",
+            receivedSampleCount: finalized.received,
+            completeSampleCount: finalized.complete,
+            copiedCompleteCount: finalized.copied,
+            encodedCompleteCount: finalized.encoded,
+            incompleteSampleCount: finalized.incomplete,
+            droppedCompleteCount: finalized.dropped,
+            duplicateDisplayTimeCount: finalized.duplicates,
+            lateFrameCount: finalized.late,
+            maximumConsecutiveDisplayTimeGapNs: finalized.maximumGapNs,
+            maximumAllowedDisplayTimeGapNs: maximumAllowedGapNs,
+            captureHealthPass: captureHealthPass,
             startedAt: startedAt,
             finishedAt: ISO8601DateFormatter().string(from: Date()),
-            frames: snapshot.frames,
+            frames: finalized.frames,
             errors: errors
         )
         do {
@@ -422,6 +649,6 @@ private enum Main {
             fputs("receipt write failed: \(error.localizedDescription)\n", stderr)
             exit(1)
         }
-        exit(errors.isEmpty ? 0 : 1)
+        exit(captureHealthPass ? 0 : 1)
     }
 }

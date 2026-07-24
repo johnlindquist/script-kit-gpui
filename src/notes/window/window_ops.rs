@@ -89,15 +89,6 @@ struct NotesNativeEntryConfig {
     morph_started: bool,
 }
 
-fn notes_entry_monotonic_ns() -> u64 {
-    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    ORIGIN
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_nanos()
-        .min(u128::from(u64::MAX)) as u64
-}
-
 fn notes_entry_owner_is_current(
     handle: gpui::WindowHandle<Root>,
     notes_app: &Entity<NotesApp>,
@@ -187,7 +178,7 @@ fn schedule_notes_entry_reveal(
                 false,
                 true,
                 "unavailable".to_string(),
-                notes_entry_monotonic_ns(),
+                crate::platform::host_clock::host_time_ns(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -223,7 +214,7 @@ fn schedule_notes_entry_reveal(
                     if first {
                         app.entry_reveal.completed_frame_count = 1;
                         app.entry_reveal.first_frame_at_monotonic_ns =
-                            Some(notes_entry_monotonic_ns());
+                            Some(crate::platform::host_clock::host_time_ns());
                         cx.notify();
                     }
                     first
@@ -250,7 +241,7 @@ fn schedule_notes_entry_reveal(
                                 .entry_reveal
                                 .advance(generation, NotesEntryRevealPhase::AwaitingRevealFrame)
                             {
-                                let now = notes_entry_monotonic_ns();
+                                let now = crate::platform::host_clock::host_time_ns();
                                 app.entry_reveal.settle_complete_at_monotonic_ns = Some(now);
                                 app.entry_reveal.reveal_requested_at_monotonic_ns = Some(now);
                                 cx.notify();
@@ -282,7 +273,7 @@ fn schedule_notes_entry_reveal(
                                 {
                                     app.entry_reveal.completed_frame_count = 2;
                                     app.entry_reveal.visible_at_monotonic_ns =
-                                        Some(notes_entry_monotonic_ns());
+                                        Some(crate::platform::host_clock::host_time_ns());
                                     cx.notify();
                                 }
                             });
@@ -994,6 +985,7 @@ fn open_notes_window_with_close_behavior(
                             .lock()
                             .unwrap_or_else(|poison| poison.into_inner())
                             .take();
+                        crate::platform::record_glass_exit_commit(ticket);
                         retire_notes_window_registrations(notes_window_close_transition(
                             NotesWindowCloseOrigin::CurrentWindow,
                         ));
@@ -1590,6 +1582,7 @@ pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
                     .take();
+                crate::platform::record_glass_exit_commit(ticket);
                 retire_notes_window_registrations(transition);
                 let _ = any_handle.update(cx, |_root, window, _cx| {
                     window.remove_window();
@@ -1681,6 +1674,7 @@ pub fn close_notes_window(cx: &mut App) {
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
                                 .take();
+                            crate::platform::record_glass_exit_commit(ticket);
                             retire_notes_window_registrations(transition);
                             let _ = any_handle.update(cx, |_root, window, _cx| {
                                 window.remove_window();

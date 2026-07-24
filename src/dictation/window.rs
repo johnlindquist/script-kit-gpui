@@ -1126,6 +1126,7 @@ impl DictationOverlay {
                         return;
                     }
                     DICTATION_OVERLAY_EXIT_TICKET.lock().take();
+                    crate::platform::record_glass_exit_commit(ticket);
                     let _ = any_handle.update(cx, |_view, window, _cx| {
                         crate::components::footer_chrome::remove_glass_capsule_window(window);
                         prepare_overlay_window_for_close(window);
@@ -3323,6 +3324,7 @@ pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
                             return;
                         }
                         DICTATION_OVERLAY_EXIT_TICKET.lock().take();
+                        crate::platform::record_glass_exit_commit(ticket);
                         let _ = any_handle.update(cx, |_view, window, _cx| {
                             crate::components::footer_chrome::remove_glass_capsule_window(window);
                             prepare_overlay_window_for_close(window);
@@ -3372,7 +3374,7 @@ pub(crate) fn dictation_window_lifecycle_receipt() -> serde_json::Value {
         .is_some();
     let ticket = *DICTATION_OVERLAY_EXIT_TICKET.lock();
     serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "phase": if DICTATION_OVERLAY_EXIT_IN_PROGRESS.load(Ordering::SeqCst) {
             "Exiting"
         } else if handle_registered {
@@ -3387,6 +3389,7 @@ pub(crate) fn dictation_window_lifecycle_receipt() -> serde_json::Value {
         "automationRegistered": crate::windows::list_automation_windows()
             .iter()
             .any(|window| window.id == DICTATION_OVERLAY_AUTOMATION_ID),
+        "nativeExit": crate::platform::glass_exit_lifecycle_receipt("Dictation overlay"),
     })
 }
 

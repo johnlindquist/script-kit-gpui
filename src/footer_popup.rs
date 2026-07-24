@@ -1212,6 +1212,17 @@ pub(crate) fn active_main_window_footer_surface() -> Option<&'static str> {
     main_window_footer_host_snapshot().installed_surface
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn native_footer_host_attached(ns_window: cocoa::base::id) -> bool {
+    if ns_window == cocoa::base::nil {
+        return false;
+    }
+    find_subview_by_identifier(
+        reusable_window_footer_search_root(ns_window),
+        FOOTER_EFFECT_ID,
+    ) != cocoa::base::nil
+}
+
 pub(crate) fn footer_action_channel() -> &'static (
     async_channel::Sender<FooterAction>,
     async_channel::Receiver<FooterAction>,

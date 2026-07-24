@@ -66,6 +66,76 @@ export function validateChildReceipt(
   if (exitCode === 0 && receipt.pass !== true) {
     errors.push("zero child exit requires pass=true");
   }
+  if (!(Number(receipt.pid) > 0)) errors.push("child PID missing");
+  if (receipt.disposition !== "EVALUABLE_PASS" && receipt.pass === true) {
+    errors.push("passing child must be EVALUABLE_PASS");
+  }
+  if (expectedScenario === "main-window") {
+    if (receipt.visualMatrix?.states?.length !== 4) {
+      errors.push("main-window visual matrix must contain exactly four states");
+    }
+    if (receipt.widthMatrix?.rows?.length !== 6) {
+      errors.push("main-window width matrix must contain exactly six rows");
+    }
+    if (receipt.initialCompleteNativeInventory?.pass !== true) {
+      errors.push("main-window initial complete topology missing");
+    }
+    if (receipt.finalCompleteNativeInventory?.pass !== true) {
+      errors.push("main-window final complete topology missing");
+    }
+  } else if (expectedScenario.startsWith("locked:")) {
+    if (receipt.stationary?.pass !== true) {
+      errors.push("locked treatment stationary proof missing");
+    }
+  } else if (expectedScenario === "rapid-toggle") {
+    if (
+      !["actions", "notes", "dictation"].every(
+        (name) => receipt.phases?.[name]?.pass === true,
+      )
+    ) {
+      errors.push("rapid-toggle exact phase set missing or failed");
+    }
+    if (receipt.initialNativeInventory?.topology?.pass !== true) {
+      errors.push("rapid-toggle complete topology missing");
+    }
+    if (receipt.interference?.receipt == null) {
+      errors.push("rapid-toggle interference telemetry missing");
+    }
+  } else if (expectedScenario === "notes-fallback") {
+    if (receipt.hostClockTiming?.ordered !== true) {
+      errors.push("notes fallback shared-host-clock timing missing");
+    }
+    if (receipt.interference?.receipt == null) {
+      errors.push("notes fallback interference telemetry missing");
+    }
+  } else if (expectedScenario.startsWith("lifecycle")) {
+    const required = [
+      "main-exit",
+      "main-entry",
+      "notes-entry",
+      "notes-close-before-settle-reopen",
+      "dictation-exit-reopen",
+    ];
+    errors.push(...validateUniqueScenarioSet(
+      (receipt.scenarios ?? []).map((scenario: any) => scenario?.name),
+      required,
+    ).map((error) => `lifecycle ${error}`));
+    if (
+      !(receipt.scenarios ?? []).every(
+        (scenario: any) =>
+          scenario?.filmstrip?.receipt?.captureHealthPass === true
+          && scenario?.filmstrip?.pass === true,
+      )
+    ) {
+      errors.push("lifecycle complete capture health missing");
+    }
+    if (receipt.initialNativeTopology?.pass !== true) {
+      errors.push("lifecycle complete initial topology missing");
+    }
+    if (receipt.interference?.receipt == null) {
+      errors.push("lifecycle interference telemetry missing");
+    }
+  }
   return errors;
 }
 

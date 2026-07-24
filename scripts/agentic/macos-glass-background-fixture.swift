@@ -1,6 +1,7 @@
 #!/usr/bin/env swift
 
 import AppKit
+import CryptoKit
 import Foundation
 
 private struct Arguments {
@@ -117,20 +118,51 @@ private final class FixtureDelegate: NSObject, NSApplicationDelegate {
         )
         window.level = .normal
         window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        window.ignoresMouseEvents = true
         window.isOpaque = true
         window.backgroundColor = .black
         window.contentView = PatternView(frame: screen.frame, mode: arguments.mode)
         window.orderFrontRegardless()
         self.window = window
 
+        let configuration: [String: Any] = [
+            "mode": arguments.mode,
+            "displayID": screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 ?? 0,
+            "backingScale": screen.backingScaleFactor,
+            "frame": [
+                "x": screen.frame.origin.x,
+                "y": screen.frame.origin.y,
+                "width": screen.frame.width,
+                "height": screen.frame.height,
+            ],
+            "palette": [
+                "dark-terminal": ["white:0.035", "white:0.18"],
+                "light-document": ["white:0.94", "white:0.80"],
+                "material-matched": ["rgb:0.105,0.105,0.125"],
+                "saturated-stripes": [
+                    "systemPink", "systemPurple", "systemBlue", "systemTeal",
+                    "systemGreen", "systemYellow", "systemOrange", "systemRed",
+                ],
+            ][arguments.mode] ?? ["white:0.035", "white:0.18"],
+        ]
+        let configurationData = try! JSONSerialization.data(
+            withJSONObject: configuration,
+            options: [.sortedKeys]
+        )
+        let configurationSHA256 = SHA256.hash(data: configurationData)
+            .map { String(format: "%02x", $0) }
+            .joined()
         let receipt: [String: Any] = [
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "status": "ready",
             "pid": ProcessInfo.processInfo.processIdentifier,
             "mode": arguments.mode,
             "windowNumber": window.windowNumber,
             "displayID": screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 ?? 0,
             "backingScale": screen.backingScaleFactor,
+            "ignoresMouseEvents": window.ignoresMouseEvents,
+            "configuration": configuration,
+            "configurationSha256": configurationSHA256,
             "frame": [
                 "x": screen.frame.origin.x,
                 "y": screen.frame.origin.y,

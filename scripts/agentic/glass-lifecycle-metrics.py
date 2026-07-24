@@ -63,10 +63,10 @@ def classify_main_frame(
     reference: Image.Image,
     *,
     channel_tolerance: int = 16,
-    changed_threshold: float = 0.01,
+    changed_threshold: float = 0.0,
     component_threshold: float = 0.08,
     adjacency_rows: int = 12,
-    minimum_gap_rows: int = 4,
+    expected_gap_rows: int = 8,
 ) -> dict:
     """Find the full-width transparent run separating stage and footer.
 
@@ -95,7 +95,7 @@ def classify_main_frame(
         above_max = max(above, default=0.0)
         below_max = max(below, default=0.0)
         if (
-            end - start + 1 >= minimum_gap_rows
+            end - start + 1 == expected_gap_rows
             and above_max >= component_threshold
             and below_max >= component_threshold
         ):
@@ -138,7 +138,12 @@ def classify_main_frame(
     }
 
 
-def analyze(receipt: dict, scenario: str) -> dict:
+def analyze(
+    receipt: dict,
+    scenario: str,
+    body_bounds: tuple[float, float, float, float] | None = None,
+    visible_host_time_ns: int | None = None,
+) -> dict:
     errors: list[str] = []
     rows = []
     loaded_frames: list[tuple[dict, Image.Image]] = []
@@ -165,12 +170,38 @@ def analyze(receipt: dict, scenario: str) -> dict:
         )
     if len(rows) < 4:
         errors.append(f"only {len(rows)}/4 analyzable frames")
+    geometry_rows = rows
+    if "exit" in scenario or "close-before-settle" in scenario:
+        first_fading = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if row["windowAlpha"] is not None
+                and float(row["windowAlpha"]) < 0.999
+            ),
+            None,
+        )
+        if first_fading is not None:
+            end = next(
+                (
+                    index
+                    for index in range(first_fading + 1, len(rows))
+                    if rows[index]["windowAlpha"] is not None
+                    and float(rows[index]["windowAlpha"]) >= 0.999
+                ),
+                len(rows),
+            )
+            geometry_rows = rows[first_fading:end]
+        else:
+            geometry_rows = [row for row in rows if row["windowBounds"] is not None]
     bounds = [
         json.dumps(row["windowBounds"], sort_keys=True)
-        for row in rows
+        for row in geometry_rows
         if row["windowBounds"] is not None
     ]
-    geometry_stable = len(set(bounds)) <= 1 and len(bounds) == len(rows)
+    geometry_stable = bool(bounds) and len(set(bounds)) == 1
+    if scenario != "main-entry" and scenario != "notes-entry" and not geometry_stable:
+        errors.append("exit geometry changed by more than the fixed-frame contract")
     frame_classifications: list[dict] = []
     gutter_pass = True
     if scenario.startswith("main-") and loaded_frames:
@@ -180,7 +211,13 @@ def analyze(receipt: dict, scenario: str) -> dict:
             else loaded_frames[-1][1]
         ).convert("RGB")
         for index, ((_, image), row) in enumerate(zip(loaded_frames, rows)):
-            classification = classify_main_frame(image, reference_image)
+            classification = classify_main_frame(
+                image,
+                reference_image,
+                channel_tolerance=1,
+                changed_threshold=0.0,
+                expected_gap_rows=round(8 * float(receipt.get("captureScale", 1))),
+            )
             classification["sequence"] = row["sequence"]
             classification["referenceFrame"] = (
                 0 if scenario == "main-entry" else len(loaded_frames) - 1
@@ -229,6 +266,85 @@ def analyze(receipt: dict, scenario: str) -> dict:
         max(edge_values[-max(1, len(edge_values) // 3):], default=0)
         > min(edge_values[:max(1, len(edge_values) // 3)], default=math.inf) + 0.20
     )
+    body_mask_pass = scenario != "notes-entry"
+    body_mask_receipt = None
+    if scenario == "notes-entry" and body_bounds is not None and loaded_frames:
+        scale = float(receipt.get("captureScale", 1))
+        x, y, width, height = body_bounds
+        crop_box = (
+            round(x * scale),
+            round(y * scale),
+            round((x + width) * scale),
+            round((y + height) * scale),
+        )
+        body_rows = []
+        for frame, image in loaded_frames:
+            body = image.crop(crop_box)
+            energy = float(
+                ImageStat.Stat(
+                    body.convert("L").filter(ImageFilter.FIND_EDGES)
+                ).mean[0]
+            )
+            body_rows.append(
+                {
+                    "sequence": frame.get("sequence"),
+                    "displayTimeNs": frame.get("displayTimeNs"),
+                    "edgeEnergy": energy,
+                    "hiddenAtCapture": visible_host_time_ns is not None
+                    and int(frame.get("displayTimeNs", 0)) < visible_host_time_ns,
+                }
+            )
+        hidden_energy = [
+            row["edgeEnergy"] for row in body_rows if row["hiddenAtCapture"]
+        ]
+        visible_energy = [
+            row["edgeEnergy"] for row in body_rows if not row["hiddenAtCapture"]
+        ]
+        pre_reveal_chrome_energy = []
+        title_bottom = max(1, crop_box[1])
+        for frame, image in loaded_frames:
+            if (
+                visible_host_time_ns is not None
+                and int(frame.get("displayTimeNs", 0)) < visible_host_time_ns
+            ):
+                chrome = image.crop((0, 0, image.width, title_bottom))
+                pre_reveal_chrome_energy.append(
+                    float(
+                        ImageStat.Stat(
+                            chrome.convert("L").filter(ImageFilter.FIND_EDGES)
+                        ).mean[0]
+                    )
+                )
+        max_hidden = max(hidden_energy, default=math.inf)
+        min_visible = min(visible_energy, default=-math.inf)
+        chrome_visible = min(pre_reveal_chrome_energy, default=0) > 0.20
+        body_mask_pass = (
+            len(hidden_energy) >= 2
+            and len(visible_energy) >= 1
+            and min_visible > max_hidden + 0.20
+            and chrome_visible
+        )
+        body_mask_receipt = {
+            "boundsPoints": {
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+            },
+            "boundsPixels": crop_box,
+            "visibleHostTimeNs": visible_host_time_ns,
+            "frames": body_rows,
+            "hiddenFrameCount": len(hidden_energy),
+            "visibleFrameCount": len(visible_energy),
+            "maximumHiddenBodyEdgeEnergy": max_hidden,
+            "minimumVisibleBodyEdgeEnergy": min_visible,
+            "preRevealChromeEdgeEnergy": pre_reveal_chrome_energy,
+            "preRevealChromeVisible": chrome_visible,
+        }
+        if not body_mask_pass:
+            errors.append(
+                "Notes body mask did not prove hidden body text with visible chrome"
+            )
     return {
         "schemaVersion": 1,
         "scenario": scenario,
@@ -240,13 +356,13 @@ def analyze(receipt: dict, scenario: str) -> dict:
         "gutterReference": {
             "method":
                 "display-stream per-row comparison against the hidden background; "
-                "a <=1% changed run must be bounded by >=8% changed stage/footer rows",
+                "an exactly 8pt fully unchanged run must be bounded by >=8% changed stage/footer rows",
             "referenceFrame": "first" if scenario == "main-entry" else "last",
-            "channelTolerance": 16,
-            "changedRowThreshold": 0.01,
+            "channelTolerance": 1,
+            "changedRowThreshold": 0.0,
             "componentThreshold": 0.08,
             "adjacencyRows": 12,
-            "minimumGapRows": 4,
+            "expectedGapRows": round(8 * float(receipt.get("captureScale", 1))),
             "stageVisibleFrameCount": sum(
                 classification["stageVisible"]
                 for classification in frame_classifications
@@ -276,6 +392,8 @@ def analyze(receipt: dict, scenario: str) -> dict:
         "alphaProgressionPass": alpha_progression_pass,
         "distinctVisualStates": distinct_visual_states,
         "bodyPixelTransition": body_pixel_transition,
+        "bodyMaskPass": body_mask_pass,
+        "bodyMask": body_mask_receipt,
         "errors": errors,
         "pass": not errors,
     }
@@ -286,9 +404,16 @@ def main() -> int:
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--out")
+    parser.add_argument("--body-bounds", nargs=4, type=float)
+    parser.add_argument("--visible-host-time-ns", type=int)
     args = parser.parse_args()
     receipt = json.loads(Path(args.receipt).read_text())
-    result = analyze(receipt, args.scenario)
+    result = analyze(
+        receipt,
+        args.scenario,
+        tuple(args.body_bounds) if args.body_bounds else None,
+        args.visible_host_time_ns,
+    )
     serialized = json.dumps(result, indent=2) + "\n"
     if args.out:
         Path(args.out).write_text(serialized)

@@ -9,13 +9,22 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Driver, type Json } from "./driver.ts";
 import {
   identityFromEnvironment,
   newRunId,
 } from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
+import {
+  classifyNativeInventory,
+  deriveUniqueOwnerDelta,
+} from "./glass-topology-contract.ts";
+import {
+  finishInterferenceMonitor,
+  startInterferenceMonitor,
+  waitForInterferenceReady,
+} from "./glass-interference.ts";
 
 type WindowSnapshot = {
   id?: string;
@@ -97,7 +106,11 @@ async function activatePid(pid: number) {
   return { exitCode, stderr: stderr.trim().slice(0, 400) };
 }
 
-async function nativeWindowIds(pid: number, title: string) {
+async function nativeWindowInventory(
+  pid: number,
+  title?: string,
+  expectedMainWindowId = 0,
+) {
   const child = Bun.spawn([
     "swift",
     resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
@@ -113,18 +126,37 @@ async function nativeWindowIds(pid: number, title: string) {
     child.exited,
   ]);
   if (exitCode !== 0) {
-    return { ids: [], error: stderr.trim().slice(0, 400) };
+    return {
+      ids: [],
+      windows: [],
+      topology: null,
+      mainWindowId: expectedMainWindowId,
+      error: stderr.trim().slice(0, 400),
+    };
   }
   const parsed = JSON.parse(stdout);
-  return {
-    ids: (parsed.windows ?? [])
+  const windows = (parsed.windows ?? []) as Json[];
+  const mainWindowId = expectedMainWindowId || Number(
+    windows
       .filter((window: Json) =>
-        window?.title === title
+        String(window?.title ?? "") === ""
+        && Number(window?.layer) === 101
+      )
+      .sort((left: Json, right: Json) =>
+        Number(right?.bounds?.width ?? 0) * Number(right?.bounds?.height ?? 0)
+        - Number(left?.bounds?.width ?? 0) * Number(left?.bounds?.height ?? 0)
+      )[0]?.windowId ?? 0,
+  );
+  return {
+    ids: windows
+      .filter((window: Json) =>
+        (title == null || window?.title === title)
         && Number(window?.windowId ?? 0) > 0
-        && window?.onscreen === true
-        && Number(window?.alpha ?? 0) > 0
       )
       .map((window: Json) => Number(window.windowId)),
+    windows,
+    topology: classifyNativeInventory(windows as any[], pid, mainWindowId),
+    mainWindowId,
     error: null,
   };
 }
@@ -159,6 +191,24 @@ if (!binary || !existsSync(binary)) {
   throw new Error(`binary missing: ${binary || "<unset>"}`);
 }
 mkdirSync(dirname(outPath), { recursive: true });
+const interferenceHelper = join(
+  dirname(outPath),
+  "macos-glass-interference-monitor",
+);
+const interferenceCompile = Bun.spawnSync([
+  "xcrun",
+  "swiftc",
+  "-O",
+  resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
+  "-o",
+  interferenceHelper,
+]);
+if (interferenceCompile.exitCode !== 0) {
+  throw new Error(
+    `interference helper compile failed: ${interferenceCompile.stderr.toString()}`,
+  );
+}
+let interferenceMonitor: ReturnType<typeof startInterferenceMonitor> | null = null;
 
 const receipt: Json = {
   schemaVersion: 2,
@@ -186,8 +236,23 @@ try {
   receipt.sessionDir = driver.sessionDir;
   driver.send({ type: "show" });
   const mainVisible = await waitForKindCount(driver, "main", 1, 5_000);
+  const initialNativeInventory = await nativeWindowInventory(Number(driver.pid));
+  const mainWindowId = initialNativeInventory.mainWindowId;
+  if (!mainWindowId || initialNativeInventory.topology?.pass !== true) {
+    throw new Error(
+      `initial complete same-PID topology invalid: ${
+        JSON.stringify(initialNativeInventory.topology?.errors ?? [])
+      }`,
+    );
+  }
+  receipt.initialNativeInventory = initialNativeInventory;
   const activation = driver.pid ? await activatePid(driver.pid) : null;
   await driver.waitForSettle({ timeoutMs: 5_000 });
+  interferenceMonitor = startInterferenceMonitor(
+    interferenceHelper,
+    dirname(outPath),
+  );
+  receipt.interferenceReady = await waitForInterferenceReady(interferenceMonitor);
   const errorBaseline = await driver.getLogs({ limit: 500, level: "error" });
   const baselineErrorCount = ((errorBaseline?.entries ?? []) as Json[]).length;
 
@@ -198,6 +263,7 @@ try {
   const actionLatencies: number[] = [];
   const actionDispatches: Json[] = [];
   let maxActionWindows = 0;
+  let maxNativeActionWindows = 0;
   for (let index = 0; index < 20; index += 1) {
     const started = performance.now();
     const dispatch = await driver.simulateGpuiKeyDown("k", {
@@ -214,6 +280,16 @@ try {
     });
     const windows = await driver.listAutomationWindows({ timeoutMs: 5_000 });
     maxActionWindows = Math.max(maxActionWindows, countKind(windows, "actionsDialog"));
+    const native = await nativeWindowInventory(
+      Number(driver.pid),
+      undefined,
+      mainWindowId,
+    );
+    const actionOwners = native.topology?.rows?.filter(
+      (window: Json) => window?.classification === "Actions",
+    ) ?? [];
+    maxNativeActionWindows = Math.max(maxNativeActionWindows, actionOwners.length);
+    actionDispatches.at(-1)!.nativeTopology = native.topology;
   }
   await Bun.sleep(350);
   await driver.waitForSettle({ timeoutMs: 5_000 });
@@ -257,6 +333,8 @@ try {
   const actionsPass = mainVisible.pass
     && actionDispatches.every((dispatch) => dispatch.success)
     && maxActionWindows <= 1
+    && maxNativeActionWindows <= 1
+    && actionDispatches.every((dispatch) => dispatch.nativeTopology?.pass === true)
     && inputRecoveryMs <= 300
     && deliberateOpen.pass
     && deliberateClose.pass
@@ -275,6 +353,7 @@ try {
       max: actionLatencies.length ? Number(Math.max(...actionLatencies).toFixed(2)) : null,
     },
     maxActionWindows,
+    maxNativeActionWindows,
     actionsOpenAfterBurst,
     inputRecoveryMs: Number(inputRecoveryMs.toFixed(2)),
     deliberateOpenMs: Number(deliberateOpenMs.toFixed(2)),
@@ -302,7 +381,7 @@ try {
     const count = countKind(windows, "notes");
     maxNotesWindows = Math.max(maxNotesWindows, count);
     const native = driver.pid
-      ? await nativeWindowIds(driver.pid, "Notes")
+      ? await nativeWindowInventory(driver.pid, "Notes", mainWindowId)
       : { ids: [], error: "driver PID unavailable" };
     const notesState = count > 0 ? await notesLifecycleState(driver) : null;
     notesSamples.push({
@@ -311,6 +390,7 @@ try {
       nativeWindowIds: native.ids,
       nativeWindowCount: native.ids.length,
       nativeWindowError: native.error,
+      nativeTopology: native.topology,
       notesState,
     });
   }
@@ -340,7 +420,7 @@ try {
       !== hiddenInputAfter?.editor?.textFingerprint
     && Number(hiddenInputAfter?.editor?.textLength ?? 0) === hiddenInputText.length;
   const beforeTail = driver.pid
-    ? await nativeWindowIds(driver.pid, "Notes")
+    ? await nativeWindowInventory(driver.pid, "Notes", mainWindowId)
     : { ids: [], error: "driver PID unavailable" };
   driver.send({ type: "openNotes", requestId: "mwnd15-notes-close-before-tail" });
   await Bun.sleep(40);
@@ -348,11 +428,18 @@ try {
   driver.send({ type: "openNotes", requestId: "mwnd15-notes-reopen-before-tail" });
   const notesReopened = await waitForKindCount(driver, "notes", 1, 2_000);
   const afterTail = driver.pid
-    ? await nativeWindowIds(driver.pid, "Notes")
+    ? await nativeWindowInventory(driver.pid, "Notes", mainWindowId)
     : { ids: [], error: "driver PID unavailable" };
   const reusedNativeWindow = beforeTail.ids.length === 1
     && afterTail.ids.length === 1
     && beforeTail.ids[0] === afterTail.ids[0];
+  const notesOwnerDelta = deriveUniqueOwnerDelta(
+    initialNativeInventory.windows as any[],
+    beforeTail.windows as any[],
+    "Notes",
+    Number(driver.pid),
+    mainWindowId,
+  );
   let revealAfterReopen = await notesLifecycleState(driver);
   const revealDeadline = performance.now() + 2_000;
   while (
@@ -385,6 +472,7 @@ try {
   );
   const notesPass = maxNotesWindows <= 1
     && notesSamples.every((sample) => Number(sample?.nativeWindowCount ?? 0) <= 1)
+    && notesSamples.every((sample) => sample?.nativeTopology?.pass === true)
     && notesOpen.pass
     && hiddenInputAccepted
     && notesRevealGenerations.length >= 2
@@ -393,6 +481,9 @@ try {
     && typeof duringNotesExit?.windowLifecycle?.exitGeneration === "number"
     && notesReopened.pass
     && reusedNativeWindow
+    && notesOwnerDelta.pass
+    && beforeTail.topology?.pass === true
+    && afterTail.topology?.pass === true
     && revealAfterReopen?.entryReveal?.bodyVisible === true
     && notesClose.pass
     && notesOpenMs <= 750
@@ -418,6 +509,9 @@ try {
       beforeNativeWindowIds: beforeTail.ids,
       afterNativeWindowIds: afterTail.ids,
       reusedNativeWindow,
+      ownerDelta: notesOwnerDelta,
+      beforeTopology: beforeTail.topology,
+      afterTopology: afterTail.topology,
       reopened: notesReopened,
       duringExit: duringNotesExit,
       entryReveal: revealAfterReopen,
@@ -457,7 +551,7 @@ try {
     const count = countKind(windows, "dictation");
     maxDictationWindows = Math.max(maxDictationWindows, count);
     const native = driver.pid
-      ? await nativeWindowIds(driver.pid, "Script Kit Dictation")
+      ? await nativeWindowInventory(driver.pid, "Script Kit Dictation", mainWindowId)
       : { ids: [], error: "driver PID unavailable" };
     maxNativeDictationWindows = Math.max(maxNativeDictationWindows, native.ids.length);
     const state = await driver.getState({ timeoutMs: 5_000 });
@@ -468,6 +562,7 @@ try {
       nativeWindowIds: native.ids,
       nativeWindowCount: native.ids.length,
       nativeWindowError: native.error,
+      nativeTopology: native.topology,
       generation: dictation?.generation ?? null,
       recordingStateGeneration: dictation?.recordingStateGeneration ?? null,
       isRecording: dictation?.isRecording ?? null,
@@ -526,7 +621,7 @@ try {
   });
   const fixtureOpened = await waitForKindCount(driver, "dictation", 1, 2_000);
   const fixtureInitialNative = driver.pid
-    ? await nativeWindowIds(driver.pid, "Script Kit Dictation")
+    ? await nativeWindowInventory(driver.pid, "Script Kit Dictation", mainWindowId)
     : { ids: [], error: "driver PID unavailable" };
   const fixturePinnedWindowId = fixtureInitialNative.ids.length === 1
     ? fixtureInitialNative.ids[0]
@@ -554,7 +649,7 @@ try {
     const afterReopenState = await driver.getState({ timeoutMs: 5_000 });
     const afterReopen = afterReopenState?.dictation?.windowLifecycle ?? null;
     const native = driver.pid
-      ? await nativeWindowIds(driver.pid, "Script Kit Dictation")
+      ? await nativeWindowInventory(driver.pid, "Script Kit Dictation", mainWindowId)
       : { ids: [], error: "driver PID unavailable" };
     fixtureCycles.push({
       index,
@@ -565,6 +660,7 @@ try {
       afterReopen,
       nativeWindowIds: native.ids,
       nativeWindowError: native.error,
+      nativeTopology: native.topology,
     });
   }
   const fixturePass = fixtureOpened.pass
@@ -583,6 +679,7 @@ try {
       && Array.isArray(cycle?.nativeWindowIds)
       && cycle.nativeWindowIds.length === 1
       && cycle.nativeWindowIds[0] === fixturePinnedWindowId
+      && cycle?.nativeTopology?.pass === true
     );
   await driver.simulateGpuiKeyDown("escape", {
     target: { type: "id", id: "dictation" },
@@ -597,6 +694,7 @@ try {
 
   const dictationPass = maxDictationWindows <= 1
     && maxNativeDictationWindows <= 1
+    && dictationSamples.every((sample) => sample?.nativeTopology?.pass === true)
     && exercisedRealToggle
     && dictationCleanup.isRecording === false
     && dictationCleanup.captureActive === false
@@ -660,11 +758,17 @@ try {
   receipt.error = String(error);
   receipt.pass = false;
 } finally {
+  if (interferenceMonitor) {
+    receipt.interference = await finishInterferenceMonitor(interferenceMonitor);
+    receipt.pass = receipt.pass === true && receipt.interference.pass === true;
+  }
   await driver.close();
   receipt.cleanedUp = !driver.alive;
   receipt.finishedAt = new Date().toISOString();
   receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
-  receipt.disposition = receipt.pass === true
+  receipt.disposition = receipt.interference?.disposition === "INVALID_INTERFERENCE"
+    ? "INVALID_INTERFERENCE"
+    : receipt.pass === true
     ? "EVALUABLE_PASS"
     : receipt.error
     ? "INVALID_OBSERVER"

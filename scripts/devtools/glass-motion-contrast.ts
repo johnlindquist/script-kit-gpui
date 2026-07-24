@@ -93,8 +93,15 @@ async function runLockedTreatmentCell(options: {
     stderr: "pipe",
   });
   let mainResult: CommandResult | null = null;
+  const binarySha256Before = sha256File(options.binary);
   try {
     await waitForFile(fixtureReceiptPath);
+    const fixtureReceipt = JSON.parse(readFileSync(fixtureReceiptPath, "utf8"));
+    const fixtureIdentityPass = fixtureReceipt?.schemaVersion === 2
+      && fixtureReceipt?.ignoresMouseEvents === true
+      && /^[a-f0-9]{64}$/.test(
+        String(fixtureReceipt?.configurationSha256 ?? ""),
+      );
     const mainDirectory = join(cellDirectory, "main-window");
     const motionRequired = options.fixture === "saturated-stripes";
     const mainCommand = [
@@ -136,6 +143,15 @@ async function runLockedTreatmentCell(options: {
     const metrics = existsSync(metricsPath)
       ? JSON.parse(readFileSync(metricsPath, "utf8"))
       : null;
+    if (metrics) {
+      Object.assign(metrics, {
+        runId: options.identity.runId,
+        gitCommit: options.identity.gitCommit,
+        binarySha256: options.identity.binarySha256,
+        scenario: `locked:${options.fixture}:stationary-metrics`,
+      });
+      writeFileSync(metricsPath, `${JSON.stringify(metrics, null, 2)}\n`);
+    }
     const motionMetricsPath = join(cellDirectory, "motion-metrics.json");
     const motionMetricsResult = motionRequired && existsSync(mainReceiptPath)
       ? await run([
@@ -152,8 +168,18 @@ async function runLockedTreatmentCell(options: {
     const motionMetrics = existsSync(motionMetricsPath)
       ? JSON.parse(readFileSync(motionMetricsPath, "utf8"))
       : null;
+    if (motionMetrics) {
+      Object.assign(motionMetrics, {
+        runId: options.identity.runId,
+        gitCommit: options.identity.gitCommit,
+        binarySha256: options.identity.binarySha256,
+        scenario: `locked:${options.fixture}:motion-metrics`,
+      });
+      writeFileSync(motionMetricsPath, `${JSON.stringify(motionMetrics, null, 2)}\n`);
+    }
     let saturatedLifecycle: any = null;
     if (motionRequired) {
+      const lifecycleBinarySha256Before = sha256File(options.binary);
       const lifecycleDirectory = join(cellDirectory, "saturated-lifecycle");
       const lifecycleResult = await run([
         "bun",
@@ -204,8 +230,23 @@ async function runLockedTreatmentCell(options: {
           `${lifecycleResult.stderr}\n${entryMotionMetricsResult.stderr}`
             .trim()
             .slice(-4_000),
+        binarySha256Before: lifecycleBinarySha256Before,
+        binarySha256After: sha256File(options.binary),
       };
+      if (saturatedLifecycle.entryMotionMetrics) {
+        Object.assign(saturatedLifecycle.entryMotionMetrics, {
+          runId: options.identity.runId,
+          gitCommit: options.identity.gitCommit,
+          binarySha256: options.identity.binarySha256,
+          scenario: "lifecycle-saturated:main-entry-motion-metrics",
+        });
+        writeFileSync(
+          entryMotionMetricsPath,
+          `${JSON.stringify(saturatedLifecycle.entryMotionMetrics, null, 2)}\n`,
+        );
+      }
     }
+    const binarySha256After = sha256File(options.binary);
     const childValidationErrors = validateChildReceipt(
       mainReceipt,
       options.identity,
@@ -251,7 +292,10 @@ async function runLockedTreatmentCell(options: {
       tintFloor: "T55",
       effectiveTintFloor: 0.55,
       separation: "R",
-      fixtureReceipt: JSON.parse(readFileSync(fixtureReceiptPath, "utf8")),
+      fixtureReceipt,
+      fixtureIdentityPass,
+      binarySha256Before,
+      binarySha256After,
       mainReceiptPath,
       metricsPath,
       motionRequired,
@@ -269,6 +313,9 @@ async function runLockedTreatmentCell(options: {
       entryMotionColorPass,
       childValidationErrors,
       pass: childValidationErrors.length === 0
+        && fixtureIdentityPass
+        && binarySha256Before === options.identity.binarySha256
+        && binarySha256After === options.identity.binarySha256
         && structuralPass
         && materialRelationPass
         && boundaryPass
@@ -338,6 +385,7 @@ async function main() {
   );
 
   const mainOutput = join(outputDirectory, "main-window");
+  const mainBinarySha256Before = sha256File(binary);
   const mainResult = await run([
     "bun",
     resolve(import.meta.dir, "main-window-native-drag.ts"),
@@ -355,12 +403,19 @@ async function main() {
   const mainReceipt = existsSync(mainReceiptPath)
     ? JSON.parse(readFileSync(mainReceiptPath, "utf8"))
     : null;
+  const mainBinarySha256After = sha256File(binary);
   const setupErrors = validateChildReceipt(
     mainReceipt,
     identity,
     "main-window",
     mainResult.exitCode,
   );
+  if (
+    mainBinarySha256Before !== identity.binarySha256
+    || mainBinarySha256After !== identity.binarySha256
+  ) {
+    setupErrors.push("main-window binary changed before or after child");
+  }
   const disposition = classify(mainResult, mainReceipt);
   let lockedTreatment: any = null;
   if (mode === "all" || mode === "locked") {
@@ -441,6 +496,7 @@ async function main() {
   let notesFallback: any = null;
   if (mode === "all" || mode === "green") {
     const rapidPath = join(outputDirectory, "rapid-toggle.json");
+    const rapidBinarySha256Before = sha256File(binary);
     const rapidResult = await run([
       "bun",
       resolve(import.meta.dir, "rapid-toggle-stress.ts"),
@@ -460,8 +516,11 @@ async function main() {
         ? JSON.parse(readFileSync(rapidPath, "utf8"))
         : null,
       stderr: rapidResult.stderr.slice(-4_000),
+      binarySha256Before: rapidBinarySha256Before,
+      binarySha256After: sha256File(binary),
     };
     const notesFallbackPath = join(outputDirectory, "notes-fallback.json");
+    const notesFallbackBinarySha256Before = sha256File(binary);
     const notesFallbackResult = await run([
       "bun",
       resolve(import.meta.dir, "notes-glass-entry-fallback.ts"),
@@ -481,6 +540,8 @@ async function main() {
         ? JSON.parse(readFileSync(notesFallbackPath, "utf8"))
         : null,
       stderr: notesFallbackResult.stderr.slice(-4_000),
+      binarySha256Before: notesFallbackBinarySha256Before,
+      binarySha256After: sha256File(binary),
     };
     lifecycleFilmstrip = mode === "all"
       ? lockedTreatment?.cells?.find(
@@ -489,6 +550,7 @@ async function main() {
       : null;
     if (lifecycleFilmstrip == null) {
       const lifecycleDirectory = join(outputDirectory, "lifecycle-filmstrips");
+      const lifecycleBinarySha256Before = sha256File(binary);
       const lifecycleResult = await run([
         "bun",
         resolve(import.meta.dir, "glass-lifecycle-filmstrip.ts"),
@@ -509,27 +571,71 @@ async function main() {
           ? JSON.parse(readFileSync(lifecycleReceiptPath, "utf8"))
           : null,
         stderr: lifecycleResult.stderr.slice(-4_000),
+        binarySha256Before: lifecycleBinarySha256Before,
+        binarySha256After: sha256File(binary),
       };
     }
   }
+  const exactSet = (observed: string[], required: string[]) =>
+    validateUniqueScenarioSet(observed, required).length === 0;
+  const mainVisualMatrixComplete = exactSet(
+    (mainReceipt?.visualMatrix?.states ?? []).map((state: any) => state?.name),
+    [
+      "matrix-full-expanded-2x",
+      "matrix-disabled-confirm-2x",
+      "matrix-bright-light-2x",
+      "matrix-dark-plain-2x",
+    ],
+  );
+  const mainWidthMatrixComplete = exactSet(
+    (mainReceipt?.widthMatrix?.rows ?? []).map(
+      (row: any) => String(row?.requestedWidth),
+    ),
+    ["750", "560", "480", "400", "320", "280"],
+  );
+  const lockedCellsComplete = exactSet(
+    (lockedTreatment?.cells ?? []).map((cell: any) => cell?.fixture),
+    [
+      "saturated-stripes",
+      "dark-terminal",
+      "light-document",
+      "material-matched",
+    ],
+  );
+  const lifecycleComplete = exactSet(
+    (lifecycleFilmstrip?.receipt?.scenarios ?? []).map(
+      (scenario: any) => scenario?.name,
+    ),
+    [
+      "main-exit",
+      "main-entry",
+      "notes-entry",
+      "notes-close-before-settle-reopen",
+      "dictation-exit-reopen",
+    ],
+  );
+  const rapidComplete = exactSet(
+    Object.keys(rapidToggle?.receipt?.phases ?? {}),
+    ["actions", "notes", "dictation"],
+  );
   const evidenceComplete = mode === "all"
-    ? mainReceipt?.visualMatrix?.states?.length === 4
-      && mainReceipt?.widthMatrix?.rows?.length === 6
-      && lockedTreatment?.cells?.length === 4
+    ? mainVisualMatrixComplete
+      && mainWidthMatrixComplete
+      && lockedCellsComplete
       && lockedTreatment?.cells?.find(
           (cell: any) => cell.fixture === "saturated-stripes",
         )?.motionMetrics?.frames?.length >= 18
-      && lifecycleFilmstrip?.receipt?.scenarios?.length === 5
-      && Object.keys(rapidToggle?.receipt?.phases ?? {}).length === 3
+      && lifecycleComplete
+      && rapidComplete
     : mode === "green"
-    ? lifecycleFilmstrip?.receipt?.scenarios?.length === 5
-      && Object.keys(rapidToggle?.receipt?.phases ?? {}).length === 3
+    ? lifecycleComplete
+      && rapidComplete
     : mode === "locked"
-    ? lockedTreatment?.cells?.length === 4
+    ? lockedCellsComplete
       && lockedTreatment?.cells?.find(
           (cell: any) => cell.fixture === "saturated-stripes",
         )?.motionMetrics?.frames?.length >= 18
-      && lifecycleFilmstrip?.receipt?.scenarios?.length === 5
+      && lifecycleComplete
     : true;
   if (rapidToggle != null) {
     setupErrors.push(...validateChildReceipt(
@@ -538,6 +644,10 @@ async function main() {
       "rapid-toggle",
       rapidToggle.exitCode,
     ));
+    if (
+      rapidToggle.binarySha256Before !== identity.binarySha256
+      || rapidToggle.binarySha256After !== identity.binarySha256
+    ) setupErrors.push("rapid-toggle binary changed before or after child");
   }
   if (lifecycleFilmstrip != null) {
     setupErrors.push(...validateChildReceipt(
@@ -546,6 +656,14 @@ async function main() {
       mode === "all" || mode === "locked" ? "lifecycle-saturated" : "lifecycle",
       lifecycleFilmstrip.exitCode,
     ));
+    const lifecycleBefore = lifecycleFilmstrip.binarySha256Before
+      ?? identity.binarySha256;
+    const lifecycleAfter = lifecycleFilmstrip.binarySha256After
+      ?? identity.binarySha256;
+    if (
+      lifecycleBefore !== identity.binarySha256
+      || lifecycleAfter !== identity.binarySha256
+    ) setupErrors.push("lifecycle binary changed before or after child");
   }
   if (notesFallback != null) {
     setupErrors.push(...validateChildReceipt(
@@ -554,6 +672,10 @@ async function main() {
       "notes-fallback",
       notesFallback.exitCode,
     ));
+    if (
+      notesFallback.binarySha256Before !== identity.binarySha256
+      || notesFallback.binarySha256After !== identity.binarySha256
+    ) setupErrors.push("notes fallback binary changed before or after child");
   }
   const requiredChildScenarios = [
     "main-window",
@@ -581,6 +703,9 @@ async function main() {
     observedChildScenarios,
     requiredChildScenarios,
   ));
+  if (!evidenceComplete) {
+    setupErrors.push("exact whole-premise evidence registry is incomplete");
+  }
   const children = [
     mainReceipt,
     ...(lockedTreatment?.cells ?? []).map((cell: any) =>

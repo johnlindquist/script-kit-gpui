@@ -2,13 +2,18 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Driver, type Json } from "./driver.ts";
 import {
   identityFromEnvironment,
   newRunId,
 } from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
+import {
+  finishInterferenceMonitor,
+  startInterferenceMonitor,
+  waitForInterferenceReady,
+} from "./glass-interference.ts";
 
 const arg = (name: string, fallback?: string) => {
   const index = process.argv.indexOf(name);
@@ -21,6 +26,24 @@ const out = resolve(
 );
 if (!binary || !existsSync(binary)) throw new Error(`binary missing: ${binary}`);
 mkdirSync(dirname(out), { recursive: true });
+const interferenceHelper = join(
+  dirname(out),
+  "macos-glass-interference-monitor",
+);
+const interferenceCompile = Bun.spawnSync([
+  "xcrun",
+  "swiftc",
+  "-O",
+  resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
+  "-o",
+  interferenceHelper,
+]);
+if (interferenceCompile.exitCode !== 0) {
+  throw new Error(
+    `interference helper compile failed: ${interferenceCompile.stderr.toString()}`,
+  );
+}
+let interferenceMonitor: ReturnType<typeof startInterferenceMonitor> | null = null;
 
 const receipt: Json = {
   schemaVersion: 2,
@@ -53,6 +76,11 @@ try {
   receipt.pid = driver.pid;
   driver.send({ type: "show", requestId: "notes-fallback-main" });
   await driver.waitForState({ windowVisible: true }, { timeoutMs: 5_000 });
+  interferenceMonitor = startInterferenceMonitor(
+    interferenceHelper,
+    dirname(out),
+  );
+  receipt.interferenceReady = await waitForInterferenceReady(interferenceMonitor);
   const openedAt = performance.now();
   driver.send({ type: "openNotes", requestId: "notes-fallback-open" });
   let reveal: Json = null;
@@ -72,6 +100,26 @@ try {
   const elapsedMs = performance.now() - openedAt;
   receipt.finalReveal = reveal;
   receipt.elapsedMs = Number(elapsedMs.toFixed(2));
+  const timing = {
+    configured: Number(reveal?.configuredAtMonotonicNs),
+    firstFrame: Number(reveal?.firstFrameAtMonotonicNs),
+    settleComplete: Number(reveal?.settleCompleteAtMonotonicNs),
+    revealRequested: Number(reveal?.revealRequestedAtMonotonicNs),
+    visible: Number(reveal?.visibleAtMonotonicNs),
+  };
+  const ordered = Object.values(timing).every(Number.isFinite)
+    && timing.configured <= timing.firstFrame
+    && timing.firstFrame <= timing.settleComplete
+    && timing.settleComplete <= timing.revealRequested
+    && timing.revealRequested <= timing.visible;
+  const minimumFallbackNs = 250_000_000 + 2 * (1_000_000_000 / 60);
+  const fallbackDelayNs = timing.visible - timing.configured;
+  receipt.hostClockTiming = {
+    times: timing,
+    ordered,
+    minimumFallbackNs,
+    fallbackDelayNs,
+  };
   receipt.pass = reveal?.bodyVisible === true
     && reveal?.fallbackUsed === true
     && reveal?.nativeConfigured === false
@@ -79,18 +127,27 @@ try {
     && typeof reveal?.firstFrameAtMonotonicNs === "number"
     && typeof reveal?.settleCompleteAtMonotonicNs === "number"
     && typeof reveal?.visibleAtMonotonicNs === "number"
-    && elapsedMs >= 200
-    && elapsedMs <= 1_200;
+    && ordered
+    && fallbackDelayNs >= minimumFallbackNs - 1_000_000
+    && fallbackDelayNs <= 450_000_000
+    && elapsedMs >= 280
+    && elapsedMs <= 700;
   driver.send({ type: "openNotes", requestId: "notes-fallback-close" });
 } catch (error) {
   receipt.error = String(error);
   receipt.pass = false;
 } finally {
+  if (interferenceMonitor) {
+    receipt.interference = await finishInterferenceMonitor(interferenceMonitor);
+    receipt.pass = receipt.pass === true && receipt.interference.pass === true;
+  }
   await driver.close();
   receipt.cleanedUp = !driver.alive;
   receipt.finishedAt = new Date().toISOString();
   receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
-  receipt.disposition = receipt.pass === true
+  receipt.disposition = receipt.interference?.disposition === "INVALID_INTERFERENCE"
+    ? "INVALID_INTERFERENCE"
+    : receipt.pass === true
     ? "EVALUABLE_PASS"
     : receipt.error
     ? "INVALID_OBSERVER"

@@ -35,15 +35,6 @@ struct TahoeGlassBackdropResult {
     style_signature: NativeGlassStyleSignature,
 }
 
-fn glass_monotonic_ns() -> u64 {
-    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    ORIGIN
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_nanos()
-        .min(u128::from(u64::MAX)) as u64
-}
-
 #[cfg(target_os = "macos")]
 impl GlassMorphVariant {
     fn log_name(self) -> &'static str {
@@ -142,6 +133,29 @@ pub(crate) fn glass_entry_settle_delay() -> std::time::Duration {
 static GLASS_EXIT_GENERATIONS: std::sync::Mutex<Vec<(usize, u64)>> =
     std::sync::Mutex::new(Vec::new());
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+struct GlassExitLifecycle {
+    window_key: usize,
+    window_name: String,
+    native_window_number: i64,
+    generation: u64,
+    mode: &'static str,
+    original_frame: [f64; 4],
+    request_host_time_ns: u64,
+    fade_duration_ns: u64,
+    expected_removal_deadline_ns: u64,
+    cancelled_at_host_time_ns: Option<u64>,
+    committed_at_host_time_ns: Option<u64>,
+    removed_at_host_time_ns: Option<u64>,
+    host_teardown_at_host_time_ns: Option<u64>,
+    events: Vec<(&'static str, u64)>,
+}
+
+#[cfg(target_os = "macos")]
+static GLASS_EXIT_LIFECYCLES: std::sync::Mutex<Vec<GlassExitLifecycle>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GlassExitTicket {
     window_key: usize,
@@ -152,6 +166,178 @@ impl GlassExitTicket {
     pub(crate) fn generation(self) -> u64 {
         self.generation
     }
+}
+
+#[cfg(target_os = "macos")]
+fn record_glass_exit_begin(window: id, ticket: GlassExitTicket, window_name: &str) {
+    use cocoa::foundation::NSRect;
+    let now = crate::platform::host_clock::host_time_ns();
+    let frame: NSRect = unsafe { msg_send![window, frame] };
+    let native_window_number: i64 = unsafe { msg_send![window, windowNumber] };
+    let fade_duration_ns = (GLASS_EXIT_DURATION * 1_000_000_000.0).round() as u64;
+    let deadline_ns = now.saturating_add(
+        glass_exit_remove_delay()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64,
+    );
+    let mut records = GLASS_EXIT_LIFECYCLES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    records.push(GlassExitLifecycle {
+        window_key: ticket.window_key,
+        window_name: window_name.to_string(),
+        native_window_number,
+        generation: ticket.generation,
+        mode: match glass_exit_mode(window_name) {
+            GlassExitMode::DetachedRegionsFadeOnly => "DetachedRegionsFadeOnly",
+            GlassExitMode::PopupTransformAndBlur => "PopupTransformAndBlur",
+        },
+        original_frame: [
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        ],
+        request_host_time_ns: now,
+        fade_duration_ns,
+        expected_removal_deadline_ns: deadline_ns,
+        cancelled_at_host_time_ns: None,
+        committed_at_host_time_ns: None,
+        removed_at_host_time_ns: None,
+        host_teardown_at_host_time_ns: None,
+        events: vec![("ticketBegin", now)],
+    });
+    if records.len() > 64 {
+        let drain = records.len() - 64;
+        records.drain(0..drain);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mutate_glass_exit_lifecycle(
+    ticket: GlassExitTicket,
+    event: &'static str,
+    mutate: impl FnOnce(&mut GlassExitLifecycle, u64),
+) {
+    let now = crate::platform::host_clock::host_time_ns();
+    let mut records = GLASS_EXIT_LIFECYCLES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(record) = records.iter_mut().rev().find(|record| {
+        record.window_key == ticket.window_key && record.generation == ticket.generation
+    }) {
+        mutate(record, now);
+        record.events.push((event, now));
+        if record.events.len() > 24 {
+            record.events.remove(0);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_glass_exit_commit(ticket: GlassExitTicket) {
+    mutate_glass_exit_lifecycle(ticket, "ticketCommit", |record, now| {
+        record.committed_at_host_time_ns = Some(now);
+        // This receipt mutation runs on the main thread immediately before
+        // `remove_window`. Treat that commit point as the native removal and
+        // host-teardown boundary too: after it returns, `window_key` may be a
+        // dangling NSWindow pointer and must never be messaged again.
+        record.removed_at_host_time_ns = Some(now);
+        record.host_teardown_at_host_time_ns = Some(now);
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn record_glass_exit_commit(_ticket: GlassExitTicket) {}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn glass_exit_lifecycle_receipt(window_name: &str) -> serde_json::Value {
+    use cocoa::foundation::NSRect;
+    let record = GLASS_EXIT_LIFECYCLES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .iter()
+        .rev()
+        .find(|record| record.window_name == window_name)
+        .cloned();
+    let Some(record) = record else {
+        return serde_json::json!({
+            "schemaVersion": 2,
+            "windowName": window_name,
+            "phase": "Open",
+            "history": [],
+        });
+    };
+    let (current_frame, current_alpha, filter_count, glass_host_attached) =
+        if record.removed_at_host_time_ns.is_some() {
+            // Do not dereference the retained raw pointer after the commit
+            // boundary. The last live invariants are already represented by
+            // `originalFrame`; removal guarantees alpha zero, no attached
+            // host, and no surviving content-view filters.
+            (record.original_frame, 0.0, 0, false)
+        } else {
+            let window = record.window_key as id;
+            unsafe {
+                let frame: NSRect = msg_send![window, frame];
+                let alpha: f64 = msg_send![window, alphaValue];
+                let content_view: id = msg_send![window, contentView];
+                let filters: id = if content_view == nil {
+                    nil
+                } else {
+                    let layer: id = msg_send![content_view, layer];
+                    if layer == nil {
+                        nil
+                    } else {
+                        msg_send![layer, filters]
+                    }
+                };
+                let count: u64 = if filters == nil {
+                    0
+                } else {
+                    msg_send![filters, count]
+                };
+                let attached = crate::platform::glass_button_host::host_attached(record.window_key)
+                    || crate::footer_popup::native_footer_host_attached(window);
+                (
+                    [
+                        frame.origin.x,
+                        frame.origin.y,
+                        frame.size.width,
+                        frame.size.height,
+                    ],
+                    alpha,
+                    count,
+                    attached,
+                )
+            }
+        };
+    serde_json::json!({
+        "schemaVersion": 2,
+        "windowName": record.window_name,
+        "nativeWindowNumber": record.native_window_number,
+        "exitGeneration": record.generation,
+        "exitMode": record.mode,
+        "originalFrame": record.original_frame,
+        "requestHostTimeNs": record.request_host_time_ns,
+        "fadeDurationNs": record.fade_duration_ns,
+        "expectedRemovalDeadlineNs": record.expected_removal_deadline_ns,
+        "cancelledAtHostTimeNs": record.cancelled_at_host_time_ns,
+        "committedAtHostTimeNs": record.committed_at_host_time_ns,
+        "removedAtHostTimeNs": record.removed_at_host_time_ns,
+        "hostTeardownAtHostTimeNs": record.host_teardown_at_host_time_ns,
+        "currentFrame": current_frame,
+        "currentAlpha": current_alpha,
+        "commonContentViewFilterCount": filter_count,
+        "glassHostAttached": glass_host_attached,
+        "history": record.events.iter().map(|(event, host_time_ns)| {
+            serde_json::json!({"event": event, "hostTimeNs": host_time_ns})
+        }).collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn glass_exit_lifecycle_receipt(window_name: &str) -> serde_json::Value {
+    serde_json::json!({"schemaVersion": 2, "windowName": window_name, "history": []})
 }
 
 #[cfg(target_os = "macos")]
@@ -252,7 +438,26 @@ unsafe fn cancel_ns_window_exit_dematerialize(window: id) -> bool {
     if window == nil {
         return false;
     }
-    advance_glass_exit_generation(window as usize);
+    let window_key = window as usize;
+    let ticket = {
+        let records = GLASS_EXIT_LIFECYCLES
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        records
+            .iter()
+            .rev()
+            .find(|record| record.window_key == window_key)
+            .map(|record| GlassExitTicket {
+                window_key,
+                generation: record.generation,
+            })
+    };
+    if let Some(ticket) = ticket {
+        mutate_glass_exit_lifecycle(ticket, "ticketCancel", |record, now| {
+            record.cancelled_at_host_time_ns = Some(now);
+        });
+    }
+    advance_glass_exit_generation(window_key);
     cancel_pending_glass_window_selectors(window);
     clear_exit_dematerialize_blur(window);
     let content_view: id = msg_send![window, contentView];
@@ -431,7 +636,7 @@ unsafe fn configure_window_vibrancy_common(
             )
             .signature
         });
-    let configured_at_monotonic_ns = glass_monotonic_ns();
+    let configured_at_monotonic_ns = crate::platform::host_clock::host_time_ns();
     let configured_at_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1197,8 +1402,12 @@ pub(crate) fn begin_gpui_window_exit_with_ticket(
     // SAFETY: ns_view belongs to a live GPUI window on the main thread.
     unsafe {
         let ns_window = ns_window_from_gpui_window(window)?;
-        begin_ns_window_exit_dematerialize(ns_window, log_target, window_name)
-            .then(|| advance_glass_exit_generation(ns_window as usize))
+        if !begin_ns_window_exit_dematerialize(ns_window, log_target, window_name) {
+            return None;
+        }
+        let ticket = advance_glass_exit_generation(ns_window as usize);
+        record_glass_exit_begin(ns_window, ticket, window_name);
+        Some(ticket)
     }
 }
 
@@ -1230,6 +1439,7 @@ pub fn dematerialize_then_remove_gpui_window<V: 'static>(
                 if !glass_exit_ticket_is_current(ticket) {
                     return;
                 }
+                record_glass_exit_commit(ticket);
                 let _ = any_handle.update(cx, |_view, window, _cx| {
                     window.remove_window();
                 });
@@ -1285,6 +1495,7 @@ fn remove_gpui_window_after_glass_exit_from_app_with_ticket(
             if !glass_exit_ticket_is_current(ticket) {
                 return;
             }
+            record_glass_exit_commit(ticket);
             let _ = any_handle.update(cx, |_view, window, _cx| {
                 window.remove_window();
             });

@@ -20,6 +20,7 @@ mod display;
 #[cfg(target_os = "macos")]
 pub(crate) mod glass_button_host;
 pub(crate) mod gpui_event_simulator;
+pub(crate) mod host_clock;
 pub mod permiso;
 pub mod permiso_detect;
 pub mod visual_context;

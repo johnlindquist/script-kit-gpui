@@ -20,6 +20,11 @@ const receipt = {
   startedAt: "2026-07-23T00:00:00Z",
   finishedAt: "2026-07-23T00:00:01Z",
   disposition: "EVALUABLE_PASS",
+  pid: 42,
+  visualMatrix: { states: [{}, {}, {}, {}] },
+  widthMatrix: { rows: [{}, {}, {}, {}, {}, {}] },
+  initialCompleteNativeInventory: { pass: true },
+  finalCompleteNativeInventory: { pass: true },
   pass: true,
 };
 
@@ -69,5 +74,15 @@ describe("glass evidence contract", () => {
       { pass: false, disposition: "EVALUABLE_FAIL" },
     ])).toBe("EVALUABLE_FAIL");
     expect(aggregateDisposition([], ["missing child"])).toBe("INVALID_SETUP");
+  });
+
+  test("fails closed when a main child omits one required width row", () => {
+    const errors = validateChildReceipt(
+      { ...receipt, widthMatrix: { rows: [{}, {}, {}, {}, {}] } },
+      identity,
+      "main-window",
+      0,
+    );
+    expect(errors).toContain("main-window width matrix must contain exactly six rows");
   });
 });

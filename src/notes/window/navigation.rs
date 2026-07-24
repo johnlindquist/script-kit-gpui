@@ -527,7 +527,7 @@ impl NotesApp {
                 "visibleAtMonotonicNs": self.entry_reveal.visible_at_monotonic_ns,
             },
             "windowLifecycle": {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "phase": if NOTES_EXIT_TICKET
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
@@ -547,6 +547,7 @@ impl NotesApp {
                     .as_ref()
                     .copied()
                     .map(crate::platform::GlassExitTicket::generation),
+                "nativeExit": crate::platform::glass_exit_lifecycle_receipt("Notes"),
             },
             "autosize": {
                 "schemaVersion": 1,

@@ -974,6 +974,8 @@ type AppKitNode = {
   layer?: {
     contentsScale?: number;
     borderWidth?: number;
+    backgroundColor?: unknown;
+    borderColor?: unknown;
     cornerRadius?: number;
     shadowOpacity?: number;
     shadowRadius?: number;
@@ -1136,7 +1138,6 @@ export function analyzeStationaryFidelity(
   const leftCapsule = byId.get("script-kit-footer-left-info-capsule");
   const primaryLeftHitTarget = byId.get("script-kit-footer-left-info-hit-target");
   const cwdLeftHitTarget = byId.get("script-kit-footer-cwd-chip-hit");
-  const leftHitTarget = primaryLeftHitTarget ?? cwdLeftHitTarget;
   const leftKeycap = byId.get("script-kit-footer-left-info-keycap")
     ?? byId.get("script-kit-footer-cwd-chip-keycap");
   const leftKeycapGlyph = byId.get("script-kit-footer-left-info-keycap-glyph")
@@ -1147,7 +1148,6 @@ export function analyzeStationaryFidelity(
   if (!leftCapsule) errors.push("left footer capsule is missing");
   const leftCapsuleVisible = leftCapsule != null && leftCapsule.hidden !== true;
   if (leftCapsuleVisible) {
-    if (!leftHitTarget) errors.push("visible left footer hit target is missing");
     if (!primaryLeftHitTarget) {
       errors.push("visible left footer capsule is missing its primary hit target");
     }
@@ -1171,7 +1171,7 @@ export function analyzeStationaryFidelity(
     ) {
       errors.push("visible left footer icon has no rendered image");
     }
-  } else if (leftHitTarget) {
+  } else if (primaryLeftHitTarget || cwdLeftHitTarget) {
     errors.push("hidden left footer capsule retained an active hit target");
   }
 
@@ -1259,6 +1259,52 @@ export function analyzeStationaryFidelity(
   ) {
     errors.push("runtime left-lane allocation telemetry is missing");
   }
+  const leftLane = leftCapsule?.windowFrame ?? null;
+  const hitTargetChecks = [
+    ["primary", primaryLeftHitTarget],
+    ["cwd", cwdLeftHitTarget],
+  ].map(([segment, target]) => {
+    const frame = (target as AppKitNode | undefined)?.windowFrame ?? null;
+    const horizontallyBounded = frame != null
+      && leftLane != null
+      && frame.x >= leftLane.x
+      && frame.x + frame.width <= leftLane.x + leftLane.width;
+    if (frame && !horizontallyBounded) {
+      errors.push(`${segment} left hit target escapes the allocated capsule lane`);
+    }
+    return { segment, present: frame != null, frame, horizontallyBounded };
+  });
+
+  const materialSignature = (capsule: AppKitNode) => {
+    const contentId = capsule.id === "script-kit-footer-left-info-capsule"
+      ? "script-kit-footer-left-info-capsule-content"
+      : capsule.id.replace(
+        "script-kit-footer-capsule-",
+        "script-kit-footer-capsule-content-",
+      );
+    const content = byId.get(contentId);
+    return JSON.stringify({
+      backgroundColor: content?.layer?.backgroundColor ?? null,
+      borderColor: content?.layer?.borderColor ?? null,
+      borderWidth: content?.layer?.borderWidth ?? null,
+      cornerRadius: content?.layer?.cornerRadius ?? null,
+      contentsScale: content?.layer?.contentsScale ?? null,
+    });
+  };
+  const capsuleMaterialSignatures = sortedCapsules.map((capsule) => ({
+    id: capsule.id,
+    signature: materialSignature(capsule),
+  }));
+  if (
+    new Set(capsuleMaterialSignatures.map((entry) => entry.signature)).size > 1
+  ) {
+    errors.push("left and trailing capsules do not share one material signature");
+  }
+  const trailingCapsuleDimensions = trailingCapsules.map((capsule) => ({
+    id: capsule.id,
+    width: capsule.windowFrame?.width ?? null,
+    height: capsule.windowFrame?.height ?? null,
+  }));
 
   return {
     pass: errors.length === 0,
@@ -1268,7 +1314,10 @@ export function analyzeStationaryFidelity(
     openGaps,
     trailingGaps,
     leftCapsuleVisible,
+    hitTargetChecks,
     leftShortcutGlyph: leftGlyph || null,
+    capsuleMaterialSignatures,
+    trailingCapsuleDimensions,
     leftAllocation,
     leftRightGap,
     leftHitOverlapWidth: round(leftHitOverlapWidth),
@@ -1978,6 +2027,38 @@ async function cli() {
             && allocationPass
             && completeInventory.pass,
         });
+      }
+      const baselineRightDimensions = (widthMatrix.find((row: any) =>
+        row.requestedWidth === 750
+      ) as any)?.structural?.trailingCapsuleDimensions ?? null;
+      for (const row of widthMatrix as any[]) {
+        row.rightActionDimensionsMatchBaseline =
+          baselineRightDimensions != null
+          && JSON.stringify(row.structural?.trailingCapsuleDimensions)
+            === JSON.stringify(baselineRightDimensions);
+        const expectedDegradation = row.requestedWidth === 750
+          ? "full"
+          : row.requestedWidth === 560
+          ? "primaryOnly"
+          : "hidden";
+        row.expectedDegradation = expectedDegradation;
+        row.exactDegradationPass = row.degradation === expectedDegradation;
+        row.exactSpaceGlyphPass = row.expectedLeftVisible
+          ? row.observedShortcutGlyph === "Space"
+          : row.observedShortcutGlyph == null;
+        row.absentHitTargetsPass = row.expectedLeftVisible
+          || row.structural?.hitTargetChecks?.every(
+            (target: any) => target.present === false,
+          );
+        row.clampPass = row.requestedWidth >= 480
+          ? row.actualWidth === row.requestedWidth
+          : row.actualWidth === 480 && row.clampedByWindowMinimum === true;
+        row.pass = row.pass === true
+          && row.rightActionDimensionsMatchBaseline
+          && row.exactDegradationPass
+          && row.exactSpaceGlyphPass
+          && row.absentHitTargetsPass
+          && row.clampPass;
       }
       if (widths.length > 0) {
         await setNativeWindowSize(
