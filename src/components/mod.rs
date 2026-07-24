@@ -25,6 +25,7 @@
 //! - **IntoElement trait**: Compatible with GPUI's element system
 //! - **Theme integration**: Use `from_theme()` or `from_design()` for colors
 
+pub mod ai_recovery;
 pub mod alias_input;
 pub(crate) mod braille_loading;
 pub(crate) mod builtin_leading_separator;
@@ -66,6 +67,11 @@ pub mod unified_list_item;
 mod unified_list_item_tests;
 
 // Re-export commonly used types
+pub use ai_recovery::{
+    decide_recovery_key, recovery_semantic_tree, render_ai_recovery_card, AiRecoveryActionHandler,
+    AiRecoveryCardHandlers, AiRecoveryDismissHandler, AiRecoveryFocusTarget, AiRecoveryKey,
+    AiRecoveryKeyDecision, AiRecoverySemanticNode,
+};
 #[allow(unused_imports)]
 pub use alias_input::{AliasInput, AliasInputAction, AliasInputColors};
 pub use button::{Button, ButtonColors, ButtonVariant};

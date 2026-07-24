@@ -9,6 +9,9 @@ mod capability_cache;
 mod classify;
 mod devtools;
 mod diagnostics;
+mod presentation;
+#[cfg(test)]
+mod presentation_tests;
 mod runtime_boundary;
 mod selection;
 
@@ -33,6 +36,11 @@ pub(crate) use devtools::{
     set_ai_reliability_fixture,
 };
 pub use diagnostics::{redact_diagnostic, DiagnosticVault, RedactedDiagnostic};
+pub use presentation::{
+    project_recovery, AiRecoveryActionSpec, AiRecoveryCardSpec, AiRecoveryLayout,
+    AiRecoveryProgress, AiRecoveryTone, SurfaceRecoveryCapabilities, AI_RECOVERY_BODY_ID,
+    AI_RECOVERY_CARD_ID, AI_RECOVERY_DISMISS_ID, AI_RECOVERY_PROGRESS_ID, AI_RECOVERY_TITLE_ID,
+};
 pub(crate) use runtime_boundary::{
     process_failure, protocol_failure, provider_failure, AiAdapterError, AiAdapterResult,
     AiTurnRuntimeOutcome,
