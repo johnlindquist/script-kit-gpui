@@ -239,6 +239,8 @@ function invariantFingerprint(state: Json) {
     surfaceMode: state?.view?.surfaceMode ?? null,
     preview: state?.view?.previewEnabled ?? null,
     focusMode: state?.view?.focusMode ?? null,
+    currentFocusSurface:
+      state?.shortcutRegistry?.currentFocusSurface ?? null,
   };
 }
 
@@ -292,6 +294,7 @@ try {
   driver.send({ type: "openNotes", requestId: "notes-bottom-resize-open" });
   let state = await ensureSelectedNote(driver);
   const beforeFingerprint = invariantFingerprint(state);
+  receipt.initialFingerprint = beforeFingerprint;
   const windowId = Number(state.entryReveal.nativeWindowNumber);
   const nativeBefore = await exactWindow(driver.pid, windowId);
   receipt.initialNotesWindowId = windowId;

@@ -31,6 +31,8 @@ function validReceipt(): any {
       result: { untaggedInputCount: 0 },
     }],
     persistence: { pass: true },
+    initialFingerprint: { currentFocusSurface: "Editor" },
+    finalFingerprint: { currentFocusSurface: "Editor" },
     topology: { visibleNotesOwners: [{ windowId: 42 }] },
     screenshots: Array.from({ length: 5 }, (_, index) => ({
       path: `/tmp/${index}.png`,
@@ -66,5 +68,15 @@ describe("Notes bottom-resize receipt contract", () => {
       "every resized footer region must have one button-origin trial",
     );
     expect(result.failures).toContain("edge trials observed untagged input");
+  });
+
+  test("rejects focus loss across resize and reopen", () => {
+    const receipt = validReceipt();
+    receipt.finalFingerprint.currentFocusSurface = "None";
+    const result = validateNotesBottomResizeReceipt(receipt);
+    expect(result.pass).toBe(false);
+    expect(result.failures).toContain(
+      "Notes editor focus changed across resize and reopen",
+    );
   });
 });

@@ -64,6 +64,15 @@ export function validateNotesBottomResizeReceipt(
   }
 
   require(receipt?.persistence?.pass === true, "resized bounds did not persist");
+  require(
+    receipt?.initialFingerprint?.currentFocusSurface === "Editor",
+    "Notes editor must own focus before resize",
+  );
+  require(
+    receipt?.finalFingerprint?.currentFocusSurface
+      === receipt?.initialFingerprint?.currentFocusSurface,
+    "Notes editor focus changed across resize and reopen",
+  );
   require(receipt?.cleanedUp === true, "sandbox app did not clean up");
   require(
     Array.isArray(receipt?.topology?.visibleNotesOwners)
