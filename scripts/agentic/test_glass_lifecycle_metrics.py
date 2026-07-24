@@ -66,11 +66,16 @@ class GlassLifecycleMetricsTests(unittest.TestCase):
         self.assertTrue(result["footerMissingWhileStageVisible"])
         self.assertFalse(result["broadBridgePass"])
 
-    def test_seven_or_nine_pixel_gap_fails_exact_eight_pixel_contract(self) -> None:
-        for footer_top in (80, 82):
-            candidate, reference = frame(stage_bottom=72, footer_top=footer_top)
-            result = METRICS.classify_main_frame(candidate, reference)
-            self.assertFalse(result["stageFooterDisconnected"])
+    def test_gap_shorter_than_structural_minimum_fails(self) -> None:
+        candidate, reference = frame(stage_bottom=72, footer_top=80)
+        result = METRICS.classify_main_frame(candidate, reference)
+        self.assertFalse(result["stageFooterDisconnected"])
+
+    def test_transparent_footer_inset_may_extend_rendered_gutter(self) -> None:
+        candidate, reference = frame(stage_bottom=72, footer_top=82)
+        result = METRICS.classify_main_frame(candidate, reference)
+        self.assertTrue(result["stageFooterDisconnected"])
+        self.assertEqual(result["gutterRun"]["height"], 9)
 
     def test_subpixel_geometry_drift_fails_exit_analysis(self) -> None:
         rows = [

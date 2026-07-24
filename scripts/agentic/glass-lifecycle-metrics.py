@@ -66,15 +66,19 @@ def classify_main_frame(
     changed_threshold: float = 0.0,
     component_threshold: float = 0.08,
     adjacency_rows: int = 12,
-    expected_gap_rows: int = 8,
+    minimum_gap_rows: int = 8,
 ) -> dict:
     """Find the full-width transparent run separating stage and footer.
 
     The window scales during entry, so a fixed y-coordinate is not evidence.
     Instead, compare every captured row with a hidden-background reference and
     require a transparent run with substantial changed pixels immediately
-    above *and* below it. This fails closed when the footer disappears while
-    the main stage is still visible.
+    above *and* below it. The native footer capsules are inset inside their
+    transparent host, so the rendered desktop run can be wider than the exact
+    structural gutter. AppKit geometry proves the gutter is exactly 8 points;
+    this pixel check proves that at least those 8 points remain transparent and
+    that visible stage/footer material stays disconnected. This fails closed
+    when the footer disappears while the main stage is still visible.
     """
     occupancies = changed_row_occupancies(
         image,
@@ -95,7 +99,7 @@ def classify_main_frame(
         above_max = max(above, default=0.0)
         below_max = max(below, default=0.0)
         if (
-            end - start + 1 == expected_gap_rows
+            end - start + 1 >= minimum_gap_rows
             and above_max >= component_threshold
             and below_max >= component_threshold
         ):
@@ -216,7 +220,7 @@ def analyze(
                 reference_image,
                 channel_tolerance=1,
                 changed_threshold=0.0,
-                expected_gap_rows=round(8 * float(receipt.get("captureScale", 1))),
+                minimum_gap_rows=round(8 * float(receipt.get("captureScale", 1))),
             )
             classification["sequence"] = row["sequence"]
             classification["referenceFrame"] = (
@@ -387,13 +391,15 @@ def analyze(
         "gutterReference": {
             "method":
                 "display-stream per-row comparison against the hidden background; "
-                "an exactly 8pt fully unchanged run must be bounded by >=8% changed stage/footer rows",
+                "an at-least-8pt fully unchanged run must be bounded by >=8% "
+                "changed stage/footer rows; exact 8pt gutter geometry is proven "
+                "separately by the AppKit layout receipt",
             "referenceFrame": "first" if scenario == "main-entry" else "last",
             "channelTolerance": 1,
             "changedRowThreshold": 0.0,
             "componentThreshold": 0.08,
             "adjacencyRows": 12,
-            "expectedGapRows": round(8 * float(receipt.get("captureScale", 1))),
+            "minimumGapRows": round(8 * float(receipt.get("captureScale", 1))),
             "stageVisibleFrameCount": sum(
                 classification["stageVisible"]
                 for classification in frame_classifications
