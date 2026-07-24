@@ -252,6 +252,7 @@ fn test_thread_with_profile(
         session_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full,
         available_models: Vec::new(),
         selected_model_id: None,
+        model_selection_mismatch: None,
         selected_model_display_name: None,
         profile_display_name: None,
         profile_icon_name: None,
@@ -728,7 +729,7 @@ fn models_available_preserves_user_selection_when_still_valid() {
 }
 
 #[test]
-fn models_available_falls_back_to_current_when_selection_dropped() {
+fn models_available_reports_recovery_without_changing_dropped_selection() {
     use super::super::config::AgentChatModelEntry;
 
     let mut thread = test_thread(Vec::new(), true);
@@ -756,9 +757,40 @@ fn models_available_falls_back_to_current_when_selection_dropped() {
 
     assert_eq!(
         thread.selected_model_id(),
-        Some("claude-opus-4-7"),
-        "selection should fall back to the agent's declared current model"
+        Some("claude-retired-model"),
+        "runtime current model must not silently replace the user's selection"
     );
+    let mismatch = thread
+        .model_selection_mismatch()
+        .expect("missing selection should produce recovery state");
+    assert_eq!(
+        mismatch.runtime_model_id.as_deref(),
+        Some("claude-opus-4-7")
+    );
+    assert_eq!(
+        mismatch.candidate_model_ids,
+        vec!["claude-opus-4-7", "claude-sonnet-4-6"]
+    );
+}
+
+#[test]
+fn models_available_empty_catalog_blocks_turn_for_recovery() {
+    let mut thread = test_thread(Vec::new(), true);
+    thread.selected_model_id = Some("gpt-5.6-sol".into());
+
+    apply_event_test(
+        &mut thread,
+        AgentChatEvent::ModelsAvailable {
+            current_model_id: None,
+            models: Vec::new(),
+        },
+    );
+
+    let mismatch = thread
+        .model_selection_mismatch()
+        .expect("empty catalog must produce recovery state");
+    assert_eq!(mismatch.requested_model_id.as_deref(), Some("gpt-5.6-sol"));
+    assert!(mismatch.candidate_model_ids.is_empty());
 }
 
 #[test]

@@ -6,7 +6,8 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use crate::ai::agent_chat::pi::launch_spec::PiLaunchSpec;
 use crate::ai::agent_chat::pi::{PiRpcLaunchSpec, PiRpcRuntime};
 use crate::ai::agent_chat::profiles::{
-    resolve_effective_profile, AgentChatProfileContext, ResolvedAgentChatProfile,
+    resolve_effective_profile, resolve_effective_profile_decision,
+    resolve_quick_ai_profile_decision, AgentChatProfileContext, ResolvedAgentChatProfile,
     BUILTIN_QUICK_AI_PROFILE_ID, BUILTIN_TEXT_PROFILE_ID, QUICK_AI_APPEND_SYSTEM_PROMPT,
     QUICK_AI_PI_MODEL, QUICK_AI_PI_TOOLS,
 };
@@ -193,7 +194,9 @@ pub(crate) fn resolve_selected_pi_launch_with_cwd_override(
     ctx: &AgentChatProfileContext,
     cwd_override: Option<PathBuf>,
 ) -> Result<PiAgentChatLaunch> {
-    let profile = resolve_effective_profile(ai, ctx);
+    let profile = resolve_effective_profile_decision(ai, ctx)
+        .into_result()
+        .map_err(anyhow::Error::msg)?;
     PiAgentChatLaunch::from_profile_with_cwd_override(profile, cwd_override)
 }
 
@@ -248,7 +251,9 @@ pub(crate) fn resolve_quick_ai_pi_launch(
     ai: &AiPreferences,
     ctx: &AgentChatProfileContext,
 ) -> Result<PiAgentChatLaunch> {
-    let mut profile = crate::ai::agent_chat::profiles::resolve_quick_ai_profile(ai, ctx);
+    let mut profile = resolve_quick_ai_profile_decision(ai, ctx)
+        .into_result()
+        .map_err(anyhow::Error::msg)?;
     if profile.pi_binary.is_none() {
         profile.pi_binary = crate::ai::agent_chat::profiles::clean_opt(ai.pi_binary.as_deref())
             .map(crate::ai::agent_chat::pi::binary::expand_tilde_path)
@@ -263,7 +268,9 @@ pub(crate) fn resolve_quick_ai_launch(
     ai: &AiPreferences,
     ctx: &AgentChatProfileContext,
 ) -> Result<ResolvedQuickAiLaunch> {
-    let profile = crate::ai::agent_chat::profiles::resolve_quick_ai_profile(ai, ctx);
+    let profile = resolve_quick_ai_profile_decision(ai, ctx)
+        .into_result()
+        .map_err(anyhow::Error::msg)?;
     if profile.id == BUILTIN_QUICK_AI_PROFILE_ID {
         return CodexQuickAiExecLaunch::from_builtin_profile(profile)
             .map(ResolvedQuickAiLaunch::CodexExec);
@@ -618,15 +625,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_quick_ai_stale_profile_fallback_resolves_to_builtin_exec() {
+    fn codex_quick_ai_stale_profile_blocks_before_any_launch() {
         let ai = AiPreferences {
             quick_ai_profile_id: Some("deleted-profile".to_string()),
             ..AiPreferences::default()
         };
-        assert!(matches!(
-            resolve_quick_ai_launch(&ai, &ctx()).unwrap(),
-            ResolvedQuickAiLaunch::CodexExec(_)
-        ));
+        let error = resolve_quick_ai_launch(&ai, &ctx()).expect_err("stale selection must block");
+        assert_eq!(
+            error.to_string(),
+            "ai_profile_selection_unavailable:deleted-profile"
+        );
     }
 
     #[test]

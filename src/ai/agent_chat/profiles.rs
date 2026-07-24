@@ -216,6 +216,31 @@ pub struct ResolvedAgentChatProfile {
     pub session_durability: Option<String>,
 }
 
+/// Truthful profile resolution used at launch boundaries.
+///
+/// `Unavailable` preserves the user's persisted intent instead of silently
+/// changing it to a built-in profile. Callers must show recovery or return a
+/// typed launch error before a process is spawned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentChatProfileResolution {
+    Resolved(ResolvedAgentChatProfile),
+    Unavailable {
+        requested_id: String,
+        available_profile_ids: Vec<String>,
+    },
+}
+
+impl AgentChatProfileResolution {
+    pub fn into_result(self) -> Result<ResolvedAgentChatProfile, String> {
+        match self {
+            Self::Resolved(profile) => Ok(profile),
+            Self::Unavailable { requested_id, .. } => {
+                Err(format!("ai_profile_selection_unavailable:{requested_id}"))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentChatProfilePickerEntry {
     pub id: String,
@@ -467,6 +492,20 @@ pub fn resolve_effective_profile(
     ai: &AiPreferences,
     ctx: &AgentChatProfileContext,
 ) -> ResolvedAgentChatProfile {
+    match resolve_effective_profile_decision(ai, ctx) {
+        AgentChatProfileResolution::Resolved(profile) => profile,
+        AgentChatProfileResolution::Unavailable { .. } => {
+            // Non-launch display callers retain the historical preview default.
+            // Launch boundaries use the decision API below and fail truthfully.
+            apply_ai_fallbacks(built_in_brain_profile(ctx), ai)
+        }
+    }
+}
+
+pub fn resolve_effective_profile_decision(
+    ai: &AiPreferences,
+    ctx: &AgentChatProfileContext,
+) -> AgentChatProfileResolution {
     let built_ins = built_in_profiles(ctx);
     let mdflow_profiles = resolved_mdflow_profiles(ctx);
 
@@ -475,19 +514,27 @@ pub fn resolve_effective_profile(
             clean_opt(profile.id.as_deref()) == Some(selected_id)
                 || generated_legacy_profile_id(&profile.name) == selected_id
         }) {
-            return apply_ai_fallbacks(resolve_user_profile(profile), ai);
+            return AgentChatProfileResolution::Resolved(apply_ai_fallbacks(
+                resolve_user_profile(profile),
+                ai,
+            ));
         }
 
         if let Some(profile) = mdflow_profiles
             .iter()
             .find(|profile| profile.id == selected_id)
         {
-            return apply_ai_fallbacks(profile.clone(), ai);
+            return AgentChatProfileResolution::Resolved(apply_ai_fallbacks(profile.clone(), ai));
         }
 
         if let Some(profile) = built_ins.iter().find(|profile| profile.id == selected_id) {
-            return apply_ai_fallbacks(profile.clone(), ai);
+            return AgentChatProfileResolution::Resolved(apply_ai_fallbacks(profile.clone(), ai));
         }
+
+        return AgentChatProfileResolution::Unavailable {
+            requested_id: selected_id.to_string(),
+            available_profile_ids: available_profile_ids(ai, &built_ins, &mdflow_profiles),
+        };
     }
 
     if let Some(selected_name) = clean_opt(ai.selected_profile_name.as_deref()) {
@@ -496,28 +543,36 @@ pub fn resolve_effective_profile(
             .iter()
             .find(|profile| profile.name.trim() == selected_name)
         {
-            return apply_ai_fallbacks(resolve_user_profile(profile), ai);
+            return AgentChatProfileResolution::Resolved(apply_ai_fallbacks(
+                resolve_user_profile(profile),
+                ai,
+            ));
         }
 
         if let Some(profile) = mdflow_profiles
             .iter()
             .find(|profile| profile.name.eq_ignore_ascii_case(selected_name))
         {
-            return apply_ai_fallbacks(profile.clone(), ai);
+            return AgentChatProfileResolution::Resolved(apply_ai_fallbacks(profile.clone(), ai));
         }
 
         if let Some(profile) = built_ins
             .iter()
             .find(|profile| profile.name.eq_ignore_ascii_case(selected_name))
         {
-            return apply_ai_fallbacks(profile.clone(), ai);
+            return AgentChatProfileResolution::Resolved(apply_ai_fallbacks(profile.clone(), ai));
         }
+
+        return AgentChatProfileResolution::Unavailable {
+            requested_id: selected_name.to_string(),
+            available_profile_ids: available_profile_ids(ai, &built_ins, &mdflow_profiles),
+        };
     }
 
     // No explicit selection: the memory-aware Brain profile is the default —
     // quick questions typed into the launcher should land on the profile that
     // knows the user.
-    apply_ai_fallbacks(built_in_brain_profile(ctx), ai)
+    AgentChatProfileResolution::Resolved(apply_ai_fallbacks(built_in_brain_profile(ctx), ai))
 }
 
 /// Resolve the profile the launcher's Quick AI mode should launch with.
@@ -532,23 +587,58 @@ pub fn resolve_quick_ai_profile(
     ai: &AiPreferences,
     ctx: &AgentChatProfileContext,
 ) -> ResolvedAgentChatProfile {
+    match resolve_quick_ai_profile_decision(ai, ctx) {
+        AgentChatProfileResolution::Resolved(profile) => profile,
+        AgentChatProfileResolution::Unavailable { .. } => built_in_quick_ai_profile(ctx),
+    }
+}
+
+pub fn resolve_quick_ai_profile_decision(
+    ai: &AiPreferences,
+    ctx: &AgentChatProfileContext,
+) -> AgentChatProfileResolution {
     if let Some(selected_id) = clean_opt(ai.quick_ai_profile_id.as_deref()) {
         if selected_id != BUILTIN_QUICK_AI_PROFILE_ID {
-            if let Some(profile) = resolved_agent_chat_profile_picker_profiles(ai, ctx)
-                .into_iter()
-                .find(|profile| profile.id == selected_id)
-            {
-                return apply_ai_fallbacks(profile, ai);
+            let profiles = resolved_agent_chat_profile_picker_profiles(ai, ctx);
+            if let Some(profile) = profiles.iter().find(|profile| profile.id == selected_id) {
+                return AgentChatProfileResolution::Resolved(apply_ai_fallbacks(
+                    profile.clone(),
+                    ai,
+                ));
             }
             tracing::warn!(
                 target: "script_kit::agent_chat",
                 event = "quick_ai_profile_selection_missing",
                 profile_id = %selected_id,
-                "Quick AI profile selection no longer resolves; using the built-in default"
+                "Quick AI profile selection no longer resolves; launch is blocked for recovery"
             );
+            return AgentChatProfileResolution::Unavailable {
+                requested_id: selected_id.to_string(),
+                available_profile_ids: profiles.into_iter().map(|profile| profile.id).collect(),
+            };
         }
     }
-    built_in_quick_ai_profile(ctx)
+    AgentChatProfileResolution::Resolved(built_in_quick_ai_profile(ctx))
+}
+
+fn available_profile_ids(
+    ai: &AiPreferences,
+    built_ins: &[ResolvedAgentChatProfile],
+    mdflow_profiles: &[ResolvedAgentChatProfile],
+) -> Vec<String> {
+    let mut ids: Vec<String> = built_ins
+        .iter()
+        .chain(mdflow_profiles)
+        .map(|profile| profile.id.clone())
+        .collect();
+    ids.extend(
+        ai.profiles
+            .iter()
+            .filter(|profile| !profile.name.trim().is_empty())
+            .map(resolve_user_profile)
+            .map(|profile| profile.id),
+    );
+    ids
 }
 
 /// Persist the profile Quick AI should use. Accepts any pickable profile id
@@ -845,13 +935,17 @@ mod quick_ai_profile_selection_tests {
     }
 
     #[test]
-    fn quick_ai_falls_back_to_built_in_for_stale_selection() {
+    fn quick_ai_reports_stale_selection_without_implicit_fallback() {
         let ai = AiPreferences {
             quick_ai_profile_id: Some("plugin:gone/never-existed".to_string()),
             ..AiPreferences::default()
         };
-        let profile = resolve_quick_ai_profile(&ai, &ctx());
-        assert_eq!(profile.id, BUILTIN_QUICK_AI_PROFILE_ID);
+        let resolution = resolve_quick_ai_profile_decision(&ai, &ctx());
+        assert!(matches!(
+            resolution,
+            AgentChatProfileResolution::Unavailable { requested_id, .. }
+                if requested_id == "plugin:gone/never-existed"
+        ));
     }
 
     #[test]

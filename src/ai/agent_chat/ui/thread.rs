@@ -408,6 +408,13 @@ pub(crate) struct AgentChatThreadInit {
     pub session_policy: AgentChatSessionPolicy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentChatModelSelectionMismatch {
+    pub requested_model_id: Option<String>,
+    pub runtime_model_id: Option<String>,
+    pub candidate_model_ids: Vec<String>,
+}
+
 /// One-shot context payload consumed by `prepare_turn_blocks()`.
 ///
 /// Holds the resolved hidden blocks and the resolution receipt from typed
@@ -628,6 +635,10 @@ pub(crate) struct AgentChatThread {
     available_models: Vec<super::config::AgentChatModelEntry>,
     /// Currently selected model ID.
     selected_model_id: Option<String>,
+    /// Runtime evidence that the requested model is absent. The runtime's
+    /// `current_model_id` is evidence only; it never silently changes the
+    /// user's selection.
+    model_selection_mismatch: Option<AgentChatModelSelectionMismatch>,
     /// Display name for the selected model.
     selected_model_display_name: Option<SharedString>,
     /// Stable identifier for the selected Agent Chat profile.
@@ -822,6 +833,7 @@ impl AgentChatThread {
         self.profile_icon_name = profile_icon_name;
         self.available_models = available_models;
         self.selected_model_id = selected_model_id;
+        self.model_selection_mismatch = None;
         self.selected_model_display_name = None;
         self.active_plan_entries.clear();
         self.active_mode_id = None;
@@ -920,6 +932,7 @@ impl AgentChatThread {
                 })
             },
             selected_model_id: init.selected_model_id,
+            model_selection_mismatch: None,
             available_models: init.available_models,
         };
         this.bind_permission_listener(cx);
@@ -1401,6 +1414,9 @@ impl AgentChatThread {
         push_user_message: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.model_selection_mismatch.is_some() {
+            return Err("ai_model_selection_unavailable".to_string());
+        }
         let rx = self
             .connection
             .start_turn(self.turn_request(blocks))
@@ -1604,6 +1620,9 @@ impl AgentChatThread {
         display_user_text: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.model_selection_mismatch.is_some() {
+            return Err("ai_model_selection_unavailable".to_string());
+        }
         if matches!(
             self.status,
             AgentChatThreadStatus::Streaming | AgentChatThreadStatus::WaitingForPermission
@@ -3492,17 +3511,26 @@ impl AgentChatThread {
 
     /// Replace the available model list with the agent's live advertisement
     /// from `session/new`. Preserves the user's current selection if it is
-    /// still in the new list; otherwise falls back to the agent's declared
-    /// current model, or the first entry. Returns `true` if anything changed.
+    /// still in the new list. If it is missing, records a typed recovery state
+    /// and leaves the requested selection unchanged. Returns `true` if
+    /// anything changed.
     fn apply_agent_models(
         &mut self,
         current_model_id: Option<String>,
         models: Vec<super::config::AgentChatModelEntry>,
     ) -> bool {
         if models.is_empty() {
-            return false;
+            let mismatch = AgentChatModelSelectionMismatch {
+                requested_model_id: self.selected_model_id.clone(),
+                runtime_model_id: current_model_id,
+                candidate_model_ids: Vec::new(),
+            };
+            let changed = self.model_selection_mismatch.as_ref() != Some(&mismatch);
+            self.model_selection_mismatch = Some(mismatch);
+            return changed;
         }
 
+        let previous_mismatch = self.model_selection_mismatch.clone();
         let mut changed = self.available_models != models;
         self.available_models = models;
 
@@ -3512,29 +3540,31 @@ impl AgentChatThread {
             .map(|sel| self.available_models.iter().any(|m| m.id == sel))
             .unwrap_or(false);
 
-        if !selection_still_valid {
-            let fallback = current_model_id
-                .as_deref()
-                .and_then(|id| self.available_models.iter().find(|m| m.id == id))
-                .or_else(|| self.available_models.first());
-            if let Some(entry) = fallback {
-                self.selected_model_id = Some(entry.id.clone());
-                self.selected_model_display_name = Some(SharedString::from(
-                    entry
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| entry.id.clone()),
-                ));
-                changed = true;
-            }
+        if selection_still_valid {
+            self.model_selection_mismatch = None;
+        } else {
+            self.model_selection_mismatch = Some(AgentChatModelSelectionMismatch {
+                requested_model_id: self.selected_model_id.clone(),
+                runtime_model_id: current_model_id,
+                candidate_model_ids: self
+                    .available_models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect(),
+            });
         }
 
+        changed |= self.model_selection_mismatch != previous_mismatch;
         changed
     }
 
     /// Currently selected model ID, if any.
     pub(crate) fn selected_model_id(&self) -> Option<&str> {
         self.selected_model_id.as_deref()
+    }
+
+    pub(crate) fn model_selection_mismatch(&self) -> Option<&AgentChatModelSelectionMismatch> {
+        self.model_selection_mismatch.as_ref()
     }
 
     /// Start a view-owned auxiliary turn that must not mutate this thread's
@@ -3800,6 +3830,7 @@ impl AgentChatThread {
     pub(crate) fn select_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
         if let Some(entry) = self.available_models.iter().find(|m| m.id == model_id) {
             self.selected_model_id = Some(entry.id.clone());
+            self.model_selection_mismatch = None;
             self.selected_model_display_name = Some(SharedString::from(
                 entry
                     .display_name
@@ -4502,6 +4533,7 @@ impl AgentChatThread {
             session_policy: AgentChatSessionPolicy::Full,
             available_models: Vec::new(),
             selected_model_id: None,
+            model_selection_mismatch: None,
             selected_model_display_name: None,
             profile_display_name: None,
             profile_icon_name: None,
