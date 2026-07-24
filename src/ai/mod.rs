@@ -46,6 +46,7 @@ pub(crate) mod presets;
 pub(crate) mod providers;
 #[cfg(test)]
 mod public_contract_tests;
+pub mod reliability;
 pub mod result_cards;
 pub(crate) mod script_generation;
 pub(crate) mod sdk_handlers;
