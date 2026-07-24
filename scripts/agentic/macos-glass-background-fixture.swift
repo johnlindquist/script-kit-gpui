@@ -116,7 +116,13 @@ private final class FixtureDelegate: NSObject, NSApplicationDelegate {
             defer: false,
             screen: screen
         )
-        window.level = .normal
+        // Script Kit's PopUp owners render at level 101. Keep this fixture one
+        // level below the product so it is visible through the glass while
+        // remaining above normal applications such as terminals and editors.
+        let backingLevel = NSWindow.Level(
+            rawValue: NSWindow.Level.popUpMenu.rawValue - 1
+        )
+        window.level = backingLevel
         window.collectionBehavior = [.canJoinAllSpaces, .stationary]
         window.ignoresMouseEvents = true
         window.isOpaque = true
@@ -161,6 +167,8 @@ private final class FixtureDelegate: NSObject, NSApplicationDelegate {
             "displayID": screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 ?? 0,
             "backingScale": screen.backingScaleFactor,
             "ignoresMouseEvents": window.ignoresMouseEvents,
+            "windowLevel": window.level.rawValue,
+            "orderingContract": "one-level-below-popup-owner",
             "configuration": configuration,
             "configurationSha256": configurationSHA256,
             "frame": [

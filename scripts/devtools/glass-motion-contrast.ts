@@ -100,6 +100,8 @@ async function runLockedTreatmentCell(options: {
     const fixtureReceipt = JSON.parse(readFileSync(fixtureReceiptPath, "utf8"));
     const fixtureIdentityPass = fixtureReceipt?.schemaVersion === 2
       && fixtureReceipt?.ignoresMouseEvents === true
+      && fixtureReceipt?.windowLevel === 100
+      && fixtureReceipt?.orderingContract === "one-level-below-popup-owner"
       && /^[a-f0-9]{64}$/.test(
         String(fixtureReceipt?.configurationSha256 ?? ""),
       );
