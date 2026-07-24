@@ -5,6 +5,7 @@
 //! to redacted secondary diagnostics; primary UI never receives the raw input.
 
 mod classify;
+mod devtools;
 mod diagnostics;
 
 #[cfg(test)]
@@ -14,5 +15,9 @@ pub use classify::{
     classify_process_failure, classify_protocol_failure, classify_provider_failure,
     AppFailureRecord, FailureContext, FailurePresentationInput, ProcessFailureFacts,
     ProtocolFailureFacts,
+};
+pub(crate) use devtools::{
+    ai_reliability_fixture_snapshot, ai_reliability_snapshot_for_target, redacted_fingerprint,
+    set_ai_reliability_fixture,
 };
 pub use diagnostics::{redact_diagnostic, DiagnosticVault, RedactedDiagnostic};

@@ -6355,6 +6355,11 @@ impl AgentChatView {
         };
         let redact_focused_text_input =
             self.ui_variant == AgentChatUiVariant::FocusedTextMini && self.focused_text.is_some();
+        let composer_fingerprint = crate::ai::reliability::redacted_fingerprint(&input_text);
+        let transcript_fingerprint = crate::ai::reliability::redacted_fingerprint(&format!(
+            "messages:{}",
+            thread.messages.len()
+        ));
 
         crate::protocol::AgentChatStateSnapshot {
             schema_version: crate::protocol::AGENT_CHAT_STATE_SCHEMA_VERSION,
@@ -6370,6 +6375,12 @@ impl AgentChatView {
             has_selection,
             selection_range,
             message_count: thread.messages.len(),
+            composer_fingerprint: Some(composer_fingerprint),
+            transcript_fingerprint: Some(transcript_fingerprint),
+            reliability: Some(crate::ai::reliability::ai_reliability_snapshot_for_target(
+                "main",
+                crate::protocol::AutomationWindowKind::Main,
+            )),
             retained_thread_count: self.retained_threads.len(),
             fork_point_count: thread.fork_points().len(),
             awaiting_first_assistant_text: thread.awaiting_first_assistant_text(),

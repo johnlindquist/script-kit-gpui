@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the Agent Chat state response envelope.
-pub const AGENT_CHAT_STATE_SCHEMA_VERSION: u32 = 5;
+pub const AGENT_CHAT_STATE_SCHEMA_VERSION: u32 = 6;
 
 /// Resolved automation target echoed back in Agent Chat state/probe responses.
 ///
@@ -59,6 +59,19 @@ pub struct AgentChatStateSnapshot {
 
     /// Number of messages in the thread history.
     pub message_count: usize,
+
+    /// SHA-256 fingerprint of the composer contents. No composer text is
+    /// embedded in this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_fingerprint: Option<String>,
+
+    /// SHA-256 fingerprint of redacted transcript identity/count facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_fingerprint: Option<String>,
+
+    /// Shared typed reliability state for the same resolved target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliability: Option<super::AiReliabilityStateSnapshot>,
 
     /// Number of retained background threads in the live thread pool
     /// (threads kept streaming after Cmd+N / thread switching).
@@ -153,6 +166,9 @@ impl Default for AgentChatStateSnapshot {
             has_selection: false,
             selection_range: None,
             message_count: 0,
+            composer_fingerprint: None,
+            transcript_fingerprint: None,
+            reliability: None,
             retained_thread_count: 0,
             fork_point_count: 0,
             awaiting_first_assistant_text: false,
@@ -1073,6 +1089,11 @@ mod tests {
             has_selection: false,
             selection_range: None,
             message_count: 3,
+            composer_fingerprint: Some("composer-fingerprint".to_string()),
+            transcript_fingerprint: Some("transcript-fingerprint".to_string()),
+            reliability: Some(crate::protocol::AiReliabilityStateSnapshot::ready(
+                "agentChat",
+            )),
             retained_thread_count: 0,
             fork_point_count: 0,
             awaiting_first_assistant_text: true,

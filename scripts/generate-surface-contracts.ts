@@ -165,6 +165,33 @@ function dismissPolicy(token: string): SurfaceContractEntry["dismissPolicy"] {
       cmdW: "CloseMainWindow",
     };
   }
+  if (token === "DismissPolicy::cancel_to_script_prompt()") {
+    return {
+      policy: "cancelToScriptPrompt",
+      windowBlur: "CloseMainWindow",
+      backdropClick: "CloseMainWindow",
+      escape: "LetViewHandle",
+      cmdW: "CloseMainWindow",
+    };
+  }
+  if (token === "DismissPolicy::sticky_escape_closes()") {
+    return {
+      policy: "stickyEscapeCloses",
+      windowBlur: "Ignore",
+      backdropClick: "Ignore",
+      escape: "CloseMainWindow",
+      cmdW: "CloseMainWindow",
+    };
+  }
+  if (token === "DismissPolicy::blur_closes_escape_view_owned()") {
+    return {
+      policy: "blurClosesEscapeViewOwned",
+      windowBlur: "CloseMainWindow",
+      backdropClick: "CloseMainWindow",
+      escape: "LetViewHandle",
+      cmdW: "CloseMainWindow",
+    };
+  }
   throw new Error(`Unknown dismiss policy token: ${token}`);
 }
 
@@ -183,7 +210,7 @@ function parseContractMatrix(): SurfaceContractMatrix {
       throw new Error(`Missing vocabulary tuple for SurfaceKind::${kind}`);
     }
     const policyAndSurface = body.match(
-      /\)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*(standard|explicit)\s*,\s*"([^"]+)"/,
+      /\)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*(standard|explicit|DismissPolicy::[A-Za-z0-9_]+\(\))\s*,\s*"([^"]+)"/,
     );
     if (!policyAndSurface) {
       throw new Error(

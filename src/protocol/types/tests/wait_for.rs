@@ -451,6 +451,11 @@ fn agent_chat_state_result_round_trips() {
         has_selection: false,
         selection_range: None,
         message_count: 2,
+        composer_fingerprint: Some("composer-fingerprint".to_string()),
+        transcript_fingerprint: Some("transcript-fingerprint".to_string()),
+        reliability: Some(crate::protocol::AiReliabilityStateSnapshot::ready(
+            "agentChat",
+        )),
         retained_thread_count: 0,
         fork_point_count: 0,
         awaiting_first_assistant_text: false,

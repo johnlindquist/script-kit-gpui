@@ -264,6 +264,18 @@ fn prompt_message_from_protocol_message(
         Message::GetAgentChatState { request_id, target } => {
             Some(PromptMessage::GetAgentChatState { request_id, target })
         }
+        Message::GetAiReliabilityState { request_id, target } => {
+            Some(PromptMessage::GetAiReliabilityState { request_id, target })
+        }
+        Message::SetAiReliabilityTestFixture {
+            request_id,
+            fixture_id,
+            target,
+        } => Some(PromptMessage::SetAiReliabilityTestFixture {
+            request_id,
+            fixture_id,
+            target,
+        }),
         Message::PerformAgentChatSetupAction {
             request_id,
             action,

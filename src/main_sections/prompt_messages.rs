@@ -267,6 +267,17 @@ enum PromptMessage {
         request_id: String,
         target: Option<protocol::AutomationWindowTarget>,
     },
+    /// Request target-scoped shared AI reliability state
+    GetAiReliabilityState {
+        request_id: String,
+        target: Option<protocol::AutomationWindowTarget>,
+    },
+    /// Install a deterministic AI reliability fixture for DevTools
+    SetAiReliabilityTestFixture {
+        request_id: String,
+        fixture_id: String,
+        target: Option<protocol::AutomationWindowTarget>,
+    },
     /// Reset the Agent Chat test probe ring buffer
     ResetAgentChatTestProbe {
         request_id: String,

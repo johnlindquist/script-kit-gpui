@@ -603,6 +603,47 @@ macro_rules! protocol_message_variants_query_ops {
         state: AgentChatStateSnapshot,
     },
 
+    /// Request redacted reliability state for one automation target.
+    #[serde(rename = "getAiReliabilityState")]
+    GetAiReliabilityState {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<AutomationWindowTarget>,
+    },
+
+    /// Response with redacted reliability state for the resolved target.
+    #[serde(rename = "aiReliabilityStateResult")]
+    AiReliabilityStateResult {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(flatten)]
+        state: AiReliabilityStateSnapshot,
+    },
+
+    /// Install a deterministic, payload-free reliability fixture on a target.
+    #[serde(rename = "setAiReliabilityTestFixture")]
+    SetAiReliabilityTestFixture {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "fixtureId")]
+        fixture_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<AutomationWindowTarget>,
+    },
+
+    /// Result of installing a deterministic reliability fixture.
+    #[serde(rename = "aiReliabilityTestFixtureResult")]
+    AiReliabilityTestFixtureResult {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<AiReliabilityStateSnapshot>,
+    },
+
     // ============================================================
     // Agent Chat TEST PROBE
     // ============================================================

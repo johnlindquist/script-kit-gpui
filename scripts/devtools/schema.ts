@@ -90,6 +90,31 @@ const targetIdentityFields = [
 
 const primitiveSchemas = [
   {
+    primitive: "devtools.aiReliability.inspect",
+    requiredResultFields: [
+      "resolvedTarget.id",
+      "state.schemaVersion",
+      "state.surface",
+      "state.phase",
+      "state.failureCategory",
+      "state.failureCode",
+      "state.recoveryActions",
+      "state.retry",
+      "state.identity",
+      "state.preservation",
+      "state.diagnostic.redacted",
+      "state.diagnostic.rawPrimaryVisible",
+      "state.lastTransition",
+    ],
+    failClosedWhen: [
+      "target identity does not match state/elements/layout target",
+      "raw provider payload or user text is present",
+      "fixture category differs from the expected screenshot defect",
+    ],
+    implementation:
+      "bun scripts/devtools/{agent_chat,chat_prompt,flows}.ts inspect --fixture <id> --strict",
+  },
+  {
     primitive: "devtools.inspect.orchestrate",
     requiredResultFields: [
       "bug.text",

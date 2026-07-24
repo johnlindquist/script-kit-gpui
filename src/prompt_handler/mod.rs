@@ -4199,6 +4199,19 @@ impl ScriptListApp {
                     }
                 };
                 state.resolved_target = resolved_target;
+                let (reliability_window_id, reliability_window_kind) = match &agent_chat_target {
+                    AgentChatReadTarget::Main { info } => info
+                        .as_ref()
+                        .map(|info| (info.id.as_str(), info.kind))
+                        .unwrap_or(("main", protocol::AutomationWindowKind::Main)),
+                    AgentChatReadTarget::Detached { info, .. }
+                    | AgentChatReadTarget::Notes { info, .. } => (info.id.as_str(), info.kind),
+                };
+                state.reliability =
+                    Some(crate::ai::reliability::ai_reliability_snapshot_for_target(
+                        reliability_window_id,
+                        reliability_window_kind,
+                    ));
 
                 tracing::info!(
                     target: "script_kit::agent_chat_telemetry",
@@ -4241,6 +4254,51 @@ impl ScriptListApp {
                 }
             }
 
+            PromptMessage::GetAiReliabilityState { request_id, target } => {
+                let state = match crate::windows::resolve_automation_window(target.as_ref()) {
+                    Ok(resolved) => crate::ai::reliability::ai_reliability_snapshot_for_target(
+                        &resolved.id,
+                        resolved.kind,
+                    ),
+                    Err(error) => {
+                        let mut state = protocol::AiReliabilityStateSnapshot::ready("unresolved");
+                        state.last_transition.invalid_transition =
+                            Some(format!("target_resolution_failed:{error}"));
+                        state
+                    }
+                };
+                if let Some(ref sender) = self.response_sender {
+                    let _ = sender.try_send(Message::AiReliabilityStateResult {
+                        request_id: request_id.clone(),
+                        state,
+                    });
+                }
+            }
+
+            PromptMessage::SetAiReliabilityTestFixture {
+                request_id,
+                fixture_id,
+                target,
+            } => {
+                let result = crate::windows::resolve_automation_window(target.as_ref())
+                    .map_err(|error| error.to_string())
+                    .and_then(|resolved| {
+                        crate::ai::reliability::set_ai_reliability_fixture(resolved.id, &fixture_id)
+                    });
+                let (success, error, state) = match result {
+                    Ok(state) => (true, None, Some(state)),
+                    Err(error) => (false, Some(error), None),
+                };
+                if let Some(ref sender) = self.response_sender {
+                    let _ = sender.try_send(Message::AiReliabilityTestFixtureResult {
+                        request_id: request_id.clone(),
+                        success,
+                        error,
+                        state,
+                    });
+                }
+            }
+
             PromptMessage::PerformAgentChatSetupAction {
                 request_id,
                 action,
@@ -4279,21 +4337,22 @@ impl ScriptListApp {
 
                 // For Main targets, verify the main window is actually showing AgentChatView.
                 if matches!(agent_chat_target, AgentChatReadTarget::Main { .. })
-                    && !matches!(self.current_view, AppView::AgentChatView { .. }) {
-                        tracing::warn!(
-                            target: "script_kit::automation",
-                            request_id = %request_id,
-                            "automation.agent_chat_action_target_main_view_missing"
-                        );
-                        let response = Message::agent_chat_setup_action_result_error(
+                    && !matches!(self.current_view, AppView::AgentChatView { .. })
+                {
+                    tracing::warn!(
+                        target: "script_kit::automation",
+                        request_id = %request_id,
+                        "automation.agent_chat_action_target_main_view_missing"
+                    );
+                    let response = Message::agent_chat_setup_action_result_error(
                             request_id.clone(),
                             "performAgentChatSetupAction resolved the main Agent Chat target but the main window is not currently showing AgentChatView".to_string(),
                         );
-                        if let Some(ref sender) = self.response_sender {
-                            let _ = sender.try_send(response);
-                        }
-                        return;
+                    if let Some(ref sender) = self.response_sender {
+                        let _ = sender.try_send(response);
                     }
+                    return;
+                }
 
                 tracing::info!(
                     target: "script_kit::automation",

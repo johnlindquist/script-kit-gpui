@@ -41,7 +41,7 @@
       "appViewFooters": [
         {
           "variant": "About",
-          "nativeFooterSurface": null
+          "nativeFooterSurface": "about"
         }
       ],
       "vocabulary": {
@@ -99,10 +99,6 @@
         "ArgPrompt",
         "DivPrompt",
         "FormPrompt",
-        "SelectPrompt",
-        "PathPrompt",
-        "DropPrompt",
-        "TemplatePrompt",
         "HotkeyPrompt",
         "ChatPrompt",
         "MiniPrompt",
@@ -122,22 +118,6 @@
           "nativeFooterSurface": "form_prompt"
         },
         {
-          "variant": "SelectPrompt",
-          "nativeFooterSurface": "select_prompt"
-        },
-        {
-          "variant": "PathPrompt",
-          "nativeFooterSurface": "path_prompt"
-        },
-        {
-          "variant": "DropPrompt",
-          "nativeFooterSurface": "drop_prompt"
-        },
-        {
-          "variant": "TemplatePrompt",
-          "nativeFooterSurface": "template_prompt"
-        },
-        {
           "variant": "HotkeyPrompt",
           "nativeFooterSurface": "hotkey_prompt"
         },
@@ -151,7 +131,7 @@
         },
         {
           "variant": "MicroPrompt",
-          "nativeFooterSurface": null
+          "nativeFooterSurface": "micro_prompt"
         }
       ],
       "vocabulary": {
@@ -174,6 +154,51 @@
       "automationSemanticSurface": "scriptList"
     },
     {
+      "surfaceKind": "PromptEntityCancelsToScript",
+      "appViewVariants": [
+        "SelectPrompt",
+        "PathPrompt",
+        "DropPrompt",
+        "TemplatePrompt"
+      ],
+      "appViewFooters": [
+        {
+          "variant": "SelectPrompt",
+          "nativeFooterSurface": "select_prompt"
+        },
+        {
+          "variant": "PathPrompt",
+          "nativeFooterSurface": "path_prompt"
+        },
+        {
+          "variant": "DropPrompt",
+          "nativeFooterSurface": "drop_prompt"
+        },
+        {
+          "variant": "TemplatePrompt",
+          "nativeFooterSurface": "template_prompt"
+        }
+      ],
+      "vocabulary": {
+        "family": "ScriptPrompt",
+        "inputOwnership": "PromptEntity",
+        "previewRole": "NoPersistentPreview"
+      },
+      "focusPolicy": "PromptEntityFocus",
+      "keyboardPolicy": "PromptEntityKeyboard",
+      "actionsPolicy": "PromptEntityActions",
+      "proofPolicy": "StateReceiptProof",
+      "visualPolicy": "CompactLauncherVisual",
+      "dismissPolicy": {
+        "policy": "cancelToScriptPrompt",
+        "windowBlur": "CloseMainWindow",
+        "backdropClick": "CloseMainWindow",
+        "escape": "LetViewHandle",
+        "cmdW": "CloseMainWindow"
+      },
+      "automationSemanticSurface": "scriptList"
+    },
+    {
       "surfaceKind": "PromptChildContent",
       "appViewVariants": [
         "TermPrompt",
@@ -182,7 +207,7 @@
       "appViewFooters": [
         {
           "variant": "TermPrompt",
-          "nativeFooterSurface": null
+          "nativeFooterSurface": "term_prompt"
         },
         {
           "variant": "EditorPrompt",
@@ -226,7 +251,7 @@
         },
         {
           "variant": "CreateAiPresetView",
-          "nativeFooterSurface": null
+          "nativeFooterSurface": "create_ai_preset"
         }
       ],
       "vocabulary": {
@@ -270,10 +295,10 @@
       "proofPolicy": "ChildViewStateProof",
       "visualPolicy": "ContentPaneVisual",
       "dismissPolicy": {
-        "policy": "explicit",
+        "policy": "stickyEscapeCloses",
         "windowBlur": "Ignore",
         "backdropClick": "Ignore",
-        "escape": "LetViewHandle",
+        "escape": "CloseMainWindow",
         "cmdW": "CloseMainWindow"
       },
       "automationSemanticSurface": "scriptList"
@@ -494,6 +519,36 @@
       "automationSemanticSurface": "kitStoreBrowse"
     },
     {
+      "surfaceKind": "MigrateV1",
+      "appViewVariants": [
+        "MigrateV1View"
+      ],
+      "appViewFooters": [
+        {
+          "variant": "MigrateV1View",
+          "nativeFooterSurface": "migrate_v1"
+        }
+      ],
+      "vocabulary": {
+        "family": "FilterableLauncherList",
+        "inputOwnership": "LauncherFilter",
+        "previewRole": "NoPersistentPreview"
+      },
+      "focusPolicy": "LauncherFilterFocus",
+      "keyboardPolicy": "LauncherListKeyboard",
+      "actionsPolicy": "HostRowActions",
+      "proofPolicy": "StateAndElementsProof",
+      "visualPolicy": "CompactLauncherVisual",
+      "dismissPolicy": {
+        "policy": "standard",
+        "windowBlur": "CloseMainWindow",
+        "backdropClick": "CloseMainWindow",
+        "escape": "CloseMainWindow",
+        "cmdW": "CloseMainWindow"
+      },
+      "automationSemanticSurface": "migrate_v1"
+    },
+    {
       "surfaceKind": "KitStoreInstalled",
       "appViewVariants": [
         "InstalledKitsView"
@@ -554,6 +609,36 @@
       "automationSemanticSurface": "processManager"
     },
     {
+      "surfaceKind": "FlowUx",
+      "appViewVariants": [
+        "FlowUxView"
+      ],
+      "appViewFooters": [
+        {
+          "variant": "FlowUxView",
+          "nativeFooterSurface": "flow_ux"
+        }
+      ],
+      "vocabulary": {
+        "family": "FilterableLauncherList",
+        "inputOwnership": "LauncherFilter",
+        "previewRole": "NoPersistentPreview"
+      },
+      "focusPolicy": "LauncherFilterFocus",
+      "keyboardPolicy": "LauncherListKeyboard",
+      "actionsPolicy": "HostRowActions",
+      "proofPolicy": "StateAndElementsProof",
+      "visualPolicy": "CompactLauncherVisual",
+      "dismissPolicy": {
+        "policy": "explicit",
+        "windowBlur": "Ignore",
+        "backdropClick": "Ignore",
+        "escape": "LetViewHandle",
+        "cmdW": "CloseMainWindow"
+      },
+      "automationSemanticSurface": "flowUx"
+    },
+    {
       "surfaceKind": "CurrentAppCommands",
       "appViewVariants": [
         "CurrentAppCommandsView"
@@ -582,6 +667,36 @@
         "cmdW": "CloseMainWindow"
       },
       "automationSemanticSurface": "currentAppCommands"
+    },
+    {
+      "surfaceKind": "PermissionsWizard",
+      "appViewVariants": [
+        "PermissionsWizardView"
+      ],
+      "appViewFooters": [
+        {
+          "variant": "PermissionsWizardView",
+          "nativeFooterSurface": "permissions_wizard"
+        }
+      ],
+      "vocabulary": {
+        "family": "UtilityWorkspace",
+        "inputOwnership": "NoEditableInput",
+        "previewRole": "NoPersistentPreview"
+      },
+      "focusPolicy": "NoEditableFocus",
+      "keyboardPolicy": "NoEditableKeyboard",
+      "actionsPolicy": "NoSurfaceActions",
+      "proofPolicy": "StateAndElementsProof",
+      "visualPolicy": "CompactLauncherVisual",
+      "dismissPolicy": {
+        "policy": "explicit",
+        "windowBlur": "Ignore",
+        "backdropClick": "Ignore",
+        "escape": "LetViewHandle",
+        "cmdW": "CloseMainWindow"
+      },
+      "automationSemanticSurface": "permissionsWizard"
     },
     {
       "surfaceKind": "UtilityChildContent",
@@ -617,6 +732,36 @@
         "cmdW": "CloseMainWindow"
       },
       "automationSemanticSurface": "scriptList"
+    },
+    {
+      "surfaceKind": "FlowSession",
+      "appViewVariants": [
+        "FlowSessionView"
+      ],
+      "appViewFooters": [
+        {
+          "variant": "FlowSessionView",
+          "nativeFooterSurface": "flow_session"
+        }
+      ],
+      "vocabulary": {
+        "family": "UtilityWorkspace",
+        "inputOwnership": "ChildView",
+        "previewRole": "ContentPane"
+      },
+      "focusPolicy": "ChildViewFocus",
+      "keyboardPolicy": "ChildViewKeyboard",
+      "actionsPolicy": "ChildViewActions",
+      "proofPolicy": "ChildViewStateProof",
+      "visualPolicy": "ContentPaneVisual",
+      "dismissPolicy": {
+        "policy": "blurClosesEscapeViewOwned",
+        "windowBlur": "CloseMainWindow",
+        "backdropClick": "CloseMainWindow",
+        "escape": "LetViewHandle",
+        "cmdW": "CloseMainWindow"
+      },
+      "automationSemanticSurface": "flowSession"
     },
     {
       "surfaceKind": "FileSearchMini",
@@ -811,7 +956,37 @@
       "appViewFooters": [
         {
           "variant": "SdkReferenceView",
-          "nativeFooterSurface": null
+          "nativeFooterSurface": "sdk_reference"
+        }
+      ],
+      "vocabulary": {
+        "family": "FilterableLauncherList",
+        "inputOwnership": "LauncherFilter",
+        "previewRole": "RequiredSplitPreview"
+      },
+      "focusPolicy": "LauncherFilterFocus",
+      "keyboardPolicy": "LauncherListKeyboard",
+      "actionsPolicy": "HostRowActions",
+      "proofPolicy": "StateAndElementsProof",
+      "visualPolicy": "SplitPreviewVisual",
+      "dismissPolicy": {
+        "policy": "explicit",
+        "windowBlur": "Ignore",
+        "backdropClick": "Ignore",
+        "escape": "LetViewHandle",
+        "cmdW": "CloseMainWindow"
+      },
+      "automationSemanticSurface": "scriptList"
+    },
+    {
+      "surfaceKind": "Tips",
+      "appViewVariants": [
+        "TipsView"
+      ],
+      "appViewFooters": [
+        {
+          "variant": "TipsView",
+          "nativeFooterSurface": "tips"
         }
       ],
       "vocabulary": {
@@ -841,7 +1016,7 @@
       "appViewFooters": [
         {
           "variant": "ScriptTemplateCatalogView",
-          "nativeFooterSurface": null
+          "nativeFooterSurface": "script_template_catalog"
         }
       ],
       "vocabulary": {
@@ -911,7 +1086,7 @@
         },
         {
           "variant": "NotesBrowseView",
-          "nativeFooterSurface": null
+          "nativeFooterSurface": "notes_browse"
         }
       ],
       "vocabulary": {
@@ -962,6 +1137,36 @@
         "cmdW": "CloseMainWindow"
       },
       "automationSemanticSurface": "agentChatChat"
+    },
+    {
+      "surfaceKind": "DayPage",
+      "appViewVariants": [
+        "DayPage"
+      ],
+      "appViewFooters": [
+        {
+          "variant": "DayPage",
+          "nativeFooterSurface": "day_page"
+        }
+      ],
+      "vocabulary": {
+        "family": "AssistantWorkspace",
+        "inputOwnership": "ChildView",
+        "previewRole": "ContentPane"
+      },
+      "focusPolicy": "ChildViewFocus",
+      "keyboardPolicy": "ChildViewKeyboard",
+      "actionsPolicy": "MainMenuActions",
+      "proofPolicy": "ChildViewStateProof",
+      "visualPolicy": "ContentPaneVisual",
+      "dismissPolicy": {
+        "policy": "standard",
+        "windowBlur": "CloseMainWindow",
+        "backdropClick": "CloseMainWindow",
+        "escape": "CloseMainWindow",
+        "cmdW": "CloseMainWindow"
+      },
+      "automationSemanticSurface": "dayPage"
     },
     {
       "surfaceKind": "ConfirmPrompt",

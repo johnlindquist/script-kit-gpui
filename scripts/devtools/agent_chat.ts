@@ -1,13 +1,16 @@
 #!/usr/bin/env bun
 
+import { inspectAiReliabilityFixture } from "./ai_reliability_cli.ts";
+
 type JsonObject = Record<string, unknown>;
 
 type Args = {
-  command: "open-detached-placeholder" | "open-kitchen-sink";
+  command: "open-detached-placeholder" | "open-kitchen-sink" | "inspect";
   session: string;
   start: boolean;
   show: boolean;
   timeoutMs: number;
+  fixture?: string;
 };
 
 function usage() {
@@ -15,6 +18,7 @@ function usage() {
     "Usage:",
     "  bun scripts/devtools/agent_chat.ts open-detached-placeholder [--session <name>] [--start] [--show] [--timeout <ms>]",
     "  bun scripts/devtools/agent_chat.ts open-kitchen-sink [--session <name>] [--start] [--show] [--timeout <ms>]",
+    "  bun scripts/devtools/agent_chat.ts inspect --fixture image-2-search-budget [--strict]",
   ].join("\n");
 }
 
@@ -23,7 +27,11 @@ function parseArgs(argv: string[]): Args {
     console.log(usage());
     process.exit(0);
   }
-  if (argv[0] !== "open-detached-placeholder" && argv[0] !== "open-kitchen-sink") {
+  if (
+    argv[0] !== "open-detached-placeholder" &&
+    argv[0] !== "open-kitchen-sink" &&
+    argv[0] !== "inspect"
+  ) {
     console.error(usage());
     process.exit(2);
   }
@@ -44,6 +52,8 @@ function parseArgs(argv: string[]): Args {
       args.show = true;
     } else if (arg === "--timeout") {
       args.timeoutMs = Number(argv[++index] ?? args.timeoutMs);
+    } else if (arg === "--fixture") {
+      args.fixture = argv[++index];
     }
   }
   return args;
@@ -224,7 +234,18 @@ async function openKitchenSink(args: Args) {
 }
 
 const args = parseArgs(Bun.argv.slice(2));
-if (args.command === "open-kitchen-sink") {
+if (args.command === "inspect") {
+  if (!args.fixture) {
+    console.error("--fixture is required");
+    process.exit(2);
+  }
+  await inspectAiReliabilityFixture(
+    "script-kit-devtools.agent_chat",
+    args.fixture,
+    "quickAi",
+    Bun.argv.includes("--strict"),
+  );
+} else if (args.command === "open-kitchen-sink") {
   await openKitchenSink(args);
 } else {
   await openDetachedPlaceholder(args);

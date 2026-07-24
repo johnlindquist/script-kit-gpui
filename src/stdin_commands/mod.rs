@@ -965,6 +965,10 @@ impl StdinCommand {
                 crate::protocol::Message::GetState { .. } => "getState",
                 crate::protocol::Message::GetElements { .. } => "getElements",
                 crate::protocol::Message::GetAgentChatState { .. } => "getAgentChatState",
+                crate::protocol::Message::GetAiReliabilityState { .. } => "getAiReliabilityState",
+                crate::protocol::Message::SetAiReliabilityTestFixture { .. } => {
+                    "setAiReliabilityTestFixture"
+                }
                 crate::protocol::Message::PerformAgentChatSetupAction { .. } => {
                     "performAgentChatSetupAction"
                 }
@@ -992,6 +996,8 @@ impl StdinCommand {
                 crate::protocol::Message::GetState { request_id, .. }
                 | crate::protocol::Message::GetElements { request_id, .. }
                 | crate::protocol::Message::GetAgentChatState { request_id, .. }
+                | crate::protocol::Message::GetAiReliabilityState { request_id, .. }
+                | crate::protocol::Message::SetAiReliabilityTestFixture { request_id, .. }
                 | crate::protocol::Message::PerformAgentChatSetupAction { request_id, .. }
                 | crate::protocol::Message::ResetAgentChatTestProbe { request_id, .. }
                 | crate::protocol::Message::GetAgentChatTestProbe { request_id, .. }

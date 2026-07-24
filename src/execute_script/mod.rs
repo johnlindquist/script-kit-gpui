@@ -1897,6 +1897,37 @@ impl ScriptListApp {
                                         continue;
                                     }
 
+                                    if let Message::GetAiReliabilityState { request_id, target } =
+                                        &msg
+                                    {
+                                        let prompt_msg = PromptMessage::GetAiReliabilityState {
+                                            request_id: request_id.clone(),
+                                            target: target.clone(),
+                                        };
+                                        if tx.send_blocking(prompt_msg).is_err() {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+
+                                    if let Message::SetAiReliabilityTestFixture {
+                                        request_id,
+                                        fixture_id,
+                                        target,
+                                    } = &msg
+                                    {
+                                        let prompt_msg =
+                                            PromptMessage::SetAiReliabilityTestFixture {
+                                                request_id: request_id.clone(),
+                                                fixture_id: fixture_id.clone(),
+                                                target: target.clone(),
+                                            };
+                                        if tx.send_blocking(prompt_msg).is_err() {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+
                                     // Handle PerformAgentChatSetupAction - forward to UI thread
                                     if let Message::PerformAgentChatSetupAction {
                                         request_id,

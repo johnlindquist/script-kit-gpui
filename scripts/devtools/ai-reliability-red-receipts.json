@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "generatedFrom": "deterministic payload-free runtime fixtures",
+  "receipts": [
+    {
+      "surface": "quickAi",
+      "fixtureId": "image-2-search-budget",
+      "failureCategory": "policy",
+      "failureCode": "QuickAiSearchBudgetExceeded",
+      "classification": "reproduced",
+      "targetId": "main",
+      "rawPrimaryVisible": true,
+      "recoveryActionCount": 0,
+      "sha256": "1985eaa2c947d1293efcf32aa61fcbaef274b204af6757c2d315c0db2f22f5a5"
+    },
+    {
+      "surface": "chatPrompt",
+      "fixtureId": "image-1-client-too-old",
+      "failureCategory": "capability",
+      "failureCode": "ClientTooOld",
+      "classification": "reproduced",
+      "targetId": "main",
+      "rawPrimaryVisible": true,
+      "recoveryActionCount": 0,
+      "sha256": "a190c8d6c2ec0ae5b7c1699dc072d5aab2dbbf9466b6d5a12433fa8518db9166"
+    },
+    {
+      "surface": "flowConversation",
+      "fixtureId": "protocol-failure",
+      "failureCategory": "protocol",
+      "failureCode": "ProtocolVersionMismatch",
+      "classification": "reproduced",
+      "targetId": "main",
+      "rawPrimaryVisible": true,
+      "recoveryActionCount": 0,
+      "sha256": "0c83efb7dc5cbb71c340d6d756ea52c2f1bb5aa5494861e9815d230badef85d6"
+    }
+  ],
+  "redaction": {
+    "providerPayloadsStored": false,
+    "userTextStored": false,
+    "rawPathsStored": false,
+    "credentialsUsed": false
+  }
+}

@@ -11,6 +11,7 @@
 
 pub(crate) mod agent_chat_state;
 mod ai;
+pub mod ai_reliability_state;
 pub mod automation_inspect;
 pub mod automation_inspect_geometry;
 pub mod automation_surface;
@@ -36,6 +37,11 @@ pub use agent_chat_state::{
     AGENT_CHAT_TEST_PROBE_SCHEMA_VERSION,
 };
 pub use ai::{AiChatInfo, AiContextPartInput, AiMessageInfo};
+pub use ai_reliability_state::{
+    AiReliabilityDiagnosticSnapshot, AiReliabilityIdentitySnapshot,
+    AiReliabilityPreservationSnapshot, AiReliabilityRetrySnapshot, AiReliabilityStateSnapshot,
+    AiReliabilityTransitionSnapshot, AI_RELIABILITY_STATE_SCHEMA_VERSION,
+};
 #[allow(unused_imports)]
 pub use automation_inspect::{
     AutomationInspectSnapshot, InspectBoundsInScreenshot, InspectPoint, PixelProbe,
