@@ -773,7 +773,7 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(135))
                 .await;
-            cx.update(|cx| {
+            cx.update(move |cx| {
                 if crate::is_main_window_visible() {
                     logging::log(
                         "VISIBILITY",
@@ -785,14 +785,15 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
                 // fade and through native orderOut:. Removing it before
                 // orderOut lets GPUI draw its fallback footer inside the
                 // stage for one frame — the visible "rejoin" glitch.
-                let cleanup = |outcome, cx: &mut gpui::AsyncApp| {
+                let cleanup = move |outcome, cx: &mut gpui::AsyncApp| {
                     if matches!(
                         outcome,
                         crate::platform::MainWindowHideCompletion::Hidden(_)
                     ) {
-                        cx.update(|cx| {
-                            crate::footer_popup::close_main_footer_popup(cx);
-                        });
+                        crate::footer_popup::close_main_footer_popup_after_hidden_settle(
+                            cx,
+                            visibility_generation,
+                        );
                     }
                 };
                 if trace {
@@ -817,12 +818,15 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
             cx,
             visibility_generation,
             geometry_cycle_id,
-            |outcome, cx| {
+            move |outcome, cx| {
                 if matches!(
                     outcome,
                     crate::platform::MainWindowHideCompletion::Hidden(_)
                 ) {
-                    cx.update(|cx| crate::footer_popup::close_main_footer_popup(cx));
+                    crate::footer_popup::close_main_footer_popup_after_hidden_settle(
+                        cx,
+                        visibility_generation,
+                    );
                 }
             },
         );
@@ -830,12 +834,15 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
         platform::defer_hide_main_window_with_completion(
             cx,
             visibility_generation,
-            |outcome, cx| {
+            move |outcome, cx| {
                 if matches!(
                     outcome,
                     crate::platform::MainWindowHideCompletion::Hidden(_)
                 ) {
-                    cx.update(|cx| crate::footer_popup::close_main_footer_popup(cx));
+                    crate::footer_popup::close_main_footer_popup_after_hidden_settle(
+                        cx,
+                        visibility_generation,
+                    );
                 }
             },
         );

@@ -223,7 +223,7 @@ impl ScriptListApp {
         if self.show_actions_popup || is_actions_window_open() {
             self.clear_actions_popup_state();
             cx.spawn(async move |_this, cx| {
-                cx.update(|cx| {
+                cx.update(move |cx| {
                     close_actions_window(cx);
                 });
             })
@@ -315,14 +315,15 @@ impl ScriptListApp {
                     platform::defer_hide_main_window_with_completion(
                         cx,
                         visibility_generation,
-                        |outcome, cx| {
+                        move |outcome, cx| {
                             if matches!(
                                 outcome,
                                 crate::platform::MainWindowHideCompletion::Hidden(_)
                             ) {
-                                cx.update(|cx| {
-                                    crate::footer_popup::close_main_footer_popup(cx);
-                                });
+                                crate::footer_popup::close_main_footer_popup_after_hidden_settle(
+                                    cx,
+                                    visibility_generation,
+                                );
                             }
                         },
                     );
@@ -333,12 +334,15 @@ impl ScriptListApp {
             platform::defer_hide_main_window_with_completion(
                 &mut *cx,
                 visibility_generation,
-                |outcome, cx| {
+                move |outcome, cx| {
                     if matches!(
                         outcome,
                         crate::platform::MainWindowHideCompletion::Hidden(_)
                     ) {
-                        cx.update(|cx| crate::footer_popup::close_main_footer_popup(cx));
+                        crate::footer_popup::close_main_footer_popup_after_hidden_settle(
+                            cx,
+                            visibility_generation,
+                        );
                     }
                 },
             );
@@ -381,8 +385,11 @@ impl ScriptListApp {
                         reason: "close_agent_chat_native_hide_barrier",
                         reset_mini_bounds_after_hidden_reset: false,
                     };
+                    crate::footer_popup::close_main_footer_popup_after_hidden_settle(
+                        cx,
+                        visibility_generation,
+                    );
                     cx.update(|cx| {
-                        crate::footer_popup::close_main_footer_popup(cx);
                         if let Some(app_entity) = app_entity.upgrade() {
                             app_entity.update(cx, |app, cx| {
                                 app.complete_hidden_main_window_reset(request, cx);

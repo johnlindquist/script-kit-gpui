@@ -1417,6 +1417,40 @@ pub(crate) fn close_main_footer_popup(cx: &mut App) {
     });
 }
 
+/// Remove the main footer host only after WindowServer has retired the final
+/// ordered-out surface. AppKit reports `isVisible == false` before the last
+/// composited frame is necessarily gone; mutating the hidden host immediately
+/// can therefore leak one fallback-footer frame into an exit filmstrip.
+///
+/// A rapid re-show advances the visibility generation and leaves the reusable
+/// host intact, so hammering the launcher hotkey cannot race a stale cleanup.
+pub(crate) fn close_main_footer_popup_after_hidden_settle(
+    cx: &mut gpui::AsyncApp,
+    expected_visibility_generation: u64,
+) {
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(80))
+            .await;
+        cx.update(|cx| {
+            if crate::is_main_window_visible()
+                || crate::main_window_visibility_generation() != expected_visibility_generation
+            {
+                tracing::info!(
+                    target: "script_kit::footer_popup",
+                    event = "main_footer_hidden_cleanup_superseded",
+                    expected_visibility_generation,
+                    current_visibility_generation = crate::main_window_visibility_generation(),
+                    "Skipped stale footer cleanup after a rapid main-window re-show"
+                );
+                return;
+            }
+            close_main_footer_popup(cx);
+        });
+    })
+    .detach();
+}
+
 #[cfg(target_os = "macos")]
 fn window_gpui_view_and_ns_window(window: &Window) -> Option<(id, id)> {
     if let Ok(window_handle) = raw_window_handle::HasWindowHandle::window_handle(window) {
