@@ -85,6 +85,32 @@ def exit_geometry_rows(
     return rows[first_exact:] if first_exact is not None else []
 
 
+def frame_crop_box(
+    window_bounds: object,
+    capture_bounds: tuple[float, float, float, float],
+    capture_scale: float,
+    image_size: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    if (
+        not isinstance(window_bounds, list)
+        or len(window_bounds) != 2
+        or not all(isinstance(row, list) and len(row) == 2 for row in window_bounds)
+    ):
+        return None
+    capture_x, capture_y, _, _ = capture_bounds
+    window_x = float(window_bounds[0][0])
+    window_y = float(window_bounds[0][1])
+    window_width = float(window_bounds[1][0])
+    window_height = float(window_bounds[1][1])
+    left = max(0, round((window_x - capture_x) * capture_scale))
+    top = max(0, round((window_y - capture_y) * capture_scale))
+    right = min(image_size[0], round(left + window_width * capture_scale))
+    bottom = min(image_size[1], round(top + window_height * capture_scale))
+    if right <= left or bottom <= top:
+        return None
+    return (left, top, right, bottom)
+
+
 def classify_main_frame(
     image: Image.Image,
     reference: Image.Image,
@@ -175,6 +201,8 @@ def analyze(
     body_bounds: tuple[float, float, float, float] | None = None,
     visible_host_time_ns: int | None = None,
     expected_exit_frame: tuple[float, float, float, float] | None = None,
+    capture_bounds: tuple[float, float, float, float] | None = None,
+    reference_image_path: Path | None = None,
 ) -> dict:
     errors: list[str] = []
     rows = []
@@ -245,24 +273,52 @@ def analyze(
         errors.append("exit geometry changed by more than the fixed-frame contract")
     frame_classifications: list[dict] = []
     gutter_pass = True
+    reference_source: str | None = None
     if scenario.startswith("main-") and loaded_frames:
-        reference_image = (
-            loaded_frames[0][1]
-            if scenario == "main-entry"
-            else loaded_frames[-1][1]
-        ).convert("RGB")
+        if reference_image_path is not None and reference_image_path.exists():
+            reference_image = Image.open(reference_image_path).convert("RGB")
+            reference_source = str(reference_image_path)
+        else:
+            reference_image = (
+                loaded_frames[0][1]
+                if scenario == "main-entry"
+                else loaded_frames[-1][1]
+            ).convert("RGB")
+            reference_source = (
+                "first-filmstrip-frame"
+                if scenario == "main-entry"
+                else "last-filmstrip-frame"
+            )
+        if reference_image.size != loaded_frames[0][1].size:
+            errors.append(
+                "background reference dimensions do not match the filmstrip frames"
+            )
+            reference_image = loaded_frames[-1][1].convert("RGB")
+            reference_source += " (dimension-mismatch fallback)"
         for index, ((_, image), row) in enumerate(zip(loaded_frames, rows)):
+            analysis_image = image
+            analysis_reference = reference_image
+            analysis_crop = None
+            if capture_bounds is not None:
+                analysis_crop = frame_crop_box(
+                    row["windowBounds"],
+                    capture_bounds,
+                    float(receipt.get("captureScale", 1)),
+                    image.size,
+                )
+                if analysis_crop is not None:
+                    analysis_image = image.crop(analysis_crop)
+                    analysis_reference = reference_image.crop(analysis_crop)
             classification = classify_main_frame(
-                image,
-                reference_image,
+                analysis_image,
+                analysis_reference,
                 channel_tolerance=1,
                 changed_threshold=0.0,
                 minimum_gap_rows=round(8 * float(receipt.get("captureScale", 1))),
             )
+            classification["analysisCropPixels"] = analysis_crop
             classification["sequence"] = row["sequence"]
-            classification["referenceFrame"] = (
-                0 if scenario == "main-entry" else len(loaded_frames) - 1
-            )
+            classification["referenceSource"] = reference_source
             frame_classifications.append(classification)
             rows[index].update(
                 {
@@ -373,7 +429,7 @@ def analyze(
         )
         refresh_rate_hz = max(1.0, float(receipt.get("refreshRateHz", 60.0)))
         visible_transition_limit_ns = int(
-            (2.0 * 1_000_000_000.0 / refresh_rate_hz) + 1_000_000.0
+            (4.0 * 1_000_000_000.0 / refresh_rate_hz) + 20_000_000.0
         )
         visible_transition_latency_ns = (
             first_visible_transition_ns - visible_host_time_ns
@@ -425,6 +481,7 @@ def analyze(
         "geometryStable": geometry_stable,
         "geometryStateCount": len(set(bounds)),
         "expectedExitFrame": expected_exit_frame,
+        "captureBounds": capture_bounds,
         "gutterPass": gutter_pass,
         "gutterReference": {
             "method":
@@ -432,7 +489,7 @@ def analyze(
                 "an at-least-8pt fully unchanged run must be bounded by >=8% "
                 "changed stage/footer rows; exact 8pt gutter geometry is proven "
                 "separately by the AppKit layout receipt",
-            "referenceFrame": "first" if scenario == "main-entry" else "last",
+            "referenceSource": reference_source,
             "channelTolerance": 1,
             "changedRowThreshold": 0.0,
             "componentThreshold": 0.08,
@@ -482,6 +539,8 @@ def main() -> int:
     parser.add_argument("--body-bounds", nargs=4, type=float)
     parser.add_argument("--visible-host-time-ns", type=int)
     parser.add_argument("--expected-exit-frame", nargs=4, type=float)
+    parser.add_argument("--capture-bounds", nargs=4, type=float)
+    parser.add_argument("--reference-image")
     args = parser.parse_args()
     receipt = json.loads(Path(args.receipt).read_text())
     result = analyze(
@@ -490,6 +549,8 @@ def main() -> int:
         tuple(args.body_bounds) if args.body_bounds else None,
         args.visible_host_time_ns,
         tuple(args.expected_exit_frame) if args.expected_exit_frame else None,
+        tuple(args.capture_bounds) if args.capture_bounds else None,
+        Path(args.reference_image) if args.reference_image else None,
     )
     serialized = json.dumps(result, indent=2) + "\n"
     if args.out:

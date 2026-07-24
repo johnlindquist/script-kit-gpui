@@ -255,17 +255,23 @@ def lifecycle_entry_frames(
             continue
         row = dict(frame)
         row["_lifecycleMetrics"] = metric
+        row["_phase"] = "motion"
         visible_frames.append(row)
-    if len(visible_frames) < 4:
+    if len(visible_frames) < 1:
         errors.append(
             f"{scenario_name}: expected visible entry material frames, found {len(visible_frames)}"
         )
-    for index, frame in enumerate(visible_frames):
-        frame["_phase"] = (
-            "settled" if index >= max(0, len(visible_frames) - 3) else "motion"
+    settled_frames = []
+    for frame in scenario.get("settledCaptures", []):
+        row = dict(frame)
+        row["_phase"] = "settled"
+        settled_frames.append(row)
+    if scenario.get("settledCapturesPass") is not True or len(settled_frames) != 3:
+        errors.append(
+            f"{scenario_name}: expected exactly three valid explicit settled captures"
         )
     return (
-        visible_frames,
+        visible_frames + settled_frames,
         scenario.get("settledLayout", {}).get("fidelity", {}).get("appKit", {}),
         scenario.get("captureBounds", {}),
         errors,

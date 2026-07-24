@@ -286,6 +286,8 @@ async function finishFilmstrip(
     bodyBounds?: { x: number; y: number; width: number; height: number };
     visibleHostTimeNs?: number;
     expectedExitFrame?: [number, number, number, number];
+    captureBounds?: { x: number; y: number; width: number; height: number };
+    referenceImagePath?: string;
   },
 ) {
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -320,6 +322,18 @@ async function finishFilmstrip(
         "--expected-exit-frame",
         ...metricsContext.expectedExitFrame.map(String),
       ]
+      : []),
+    ...(metricsContext?.captureBounds != null
+      ? [
+        "--capture-bounds",
+        String(metricsContext.captureBounds.x),
+        String(metricsContext.captureBounds.y),
+        String(metricsContext.captureBounds.width),
+        String(metricsContext.captureBounds.height),
+      ]
+      : []),
+    ...(metricsContext?.referenceImagePath != null
+      ? ["--reference-image", metricsContext.referenceImagePath]
       : []),
   ]);
   const metrics = existsSync(metricsPath)
@@ -358,6 +372,17 @@ try {
   driver.send({ type: "show" });
   await waitForWindowCount(driver, "main", 1, 5_000);
   await driver.waitForSettle({ timeoutMs: 5_000 });
+  await announceTestStatus(
+    "Lifecycle setup · Normalize main owner",
+    "Warm one hide/show lifecycle before pinning the exact native window and bounds",
+  );
+  driver.send({ type: "hide", requestId: "glass-life-warm-hide" });
+  await driver.waitForState({ windowVisible: false }, { timeoutMs: 3_000 });
+  await Bun.sleep(220);
+  driver.send({ type: "show", requestId: "glass-life-warm-show" });
+  await driver.waitForState({ windowVisible: true }, { timeoutMs: 3_000 });
+  await driver.waitForSettle({ timeoutMs: 3_000 });
+  await Bun.sleep(350);
   const pid = Number(driver.pid);
   const mainNative = await nativeWindowIds(pid);
   const mainWindowID = mainNative.ids[0];
@@ -413,12 +438,53 @@ try {
   await Bun.sleep(40);
   driver.send({ type: "hide", requestId: "glass-life-main-hide" });
   await driver.waitForState({ windowVisible: false }, { timeoutMs: 3_000 });
-  const mainExitFilmstrip = await finishFilmstrip(mainExit, mainWindowID);
+  await Bun.sleep(220);
+  const mainExitReferencePath = join(mainExit.directory, "hidden-reference.png");
+  const mainExitReferenceCapture = await run([
+    "screencapture",
+    "-x",
+    `-R${mainCaptureBounds.x},${mainCaptureBounds.y},${mainCaptureBounds.width},${mainCaptureBounds.height}`,
+    mainExitReferencePath,
+  ]);
+  const mainAfterExit = await nativeWindowIds(pid);
+  const exitedOwner = mainAfterExit.completeWindows.find(
+    (window: Json) => Number(window?.windowId) === mainWindowID,
+  );
+  const mainExitReference = {
+    path: mainExitReferencePath,
+    captureSource: "explicit-post-exit-display-screenshot",
+    capturedAt: new Date().toISOString(),
+    captureExitCode: mainExitReferenceCapture.exitCode,
+    captureStderr: mainExitReferenceCapture.stderr.trim(),
+    sha256: mainExitReferenceCapture.exitCode === 0
+        && existsSync(mainExitReferencePath)
+      ? createHash("sha256")
+        .update(readFileSync(mainExitReferencePath))
+        .digest("hex")
+      : null,
+    expectedWindowID: mainWindowID,
+    ownerOnscreenAfterExit: exitedOwner?.onscreen ?? false,
+    ownerAlphaAfterExit: exitedOwner?.alpha ?? 0,
+  };
+  const mainExitReferencePass = mainExitReference.captureExitCode === 0
+    && /^[a-f0-9]{64}$/.test(String(mainExitReference.sha256 ?? ""))
+    && mainExitReference.ownerOnscreenAfterExit === false
+    && Number(mainExitReference.ownerAlphaAfterExit) <= 0;
+  const mainExitFilmstrip = await finishFilmstrip(
+    mainExit,
+    mainWindowID,
+    {
+      captureBounds: mainCaptureBounds,
+      referenceImagePath: mainExitReferencePath,
+    },
+  );
   (receipt.scenarios as Json[]).push({
     name: "main-exit",
     exactWindowID: mainWindowID,
+    hiddenReference: mainExitReference,
+    hiddenReferencePass: mainExitReferencePass,
     filmstrip: mainExitFilmstrip,
-    pass: mainExitFilmstrip.pass,
+    pass: mainExitFilmstrip.pass && mainExitReferencePass,
   });
   await announceTestStatus(
     "Lifecycle filmstrip · Main entry",
@@ -446,7 +512,58 @@ try {
     { target: { type: "id", id: "main" } },
     { timeoutMs: 5_000 },
   );
-  const mainEntryFilmstrip = await finishFilmstrip(mainEntry, mainWindowID);
+  const settledCaptures: Json[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const path = join(
+      mainEntry.directory,
+      `settled-${String(index).padStart(4, "0")}.png`,
+    );
+    const capture = await run([
+      "screencapture",
+      "-x",
+      `-R${mainCaptureBounds.x},${mainCaptureBounds.y},${mainCaptureBounds.width},${mainCaptureBounds.height}`,
+      path,
+    ]);
+    const native = await nativeWindowIds(pid);
+    const owner = native.completeWindows.find(
+      (window: Json) => Number(window?.windowId) === mainWindowID,
+    );
+    settledCaptures.push({
+      sequence: `settled-${index}`,
+      captureSource: "explicit-post-settle-display-screenshot",
+      path,
+      sha256: capture.exitCode === 0 && existsSync(path)
+        ? createHash("sha256").update(readFileSync(path)).digest("hex")
+        : null,
+      capturedAt: new Date().toISOString(),
+      captureExitCode: capture.exitCode,
+      captureStderr: capture.stderr.trim(),
+      windowBounds: owner
+        ? [
+          [Number(owner.bounds.x), Number(owner.bounds.y)],
+          [Number(owner.bounds.width), Number(owner.bounds.height)],
+        ]
+        : null,
+      windowAlpha: owner?.alpha ?? null,
+      windowOnscreen: owner?.onscreen ?? null,
+      actualWindowID: owner?.windowId ?? null,
+      expectedWindowID: mainWindowID,
+    });
+    await Bun.sleep(17);
+  }
+  const settledCapturesPass = settledCaptures.length === 3
+    && settledCaptures.every((capture) =>
+      capture.captureExitCode === 0
+      && /^[a-f0-9]{64}$/.test(String(capture.sha256 ?? ""))
+      && capture.actualWindowID === mainWindowID
+      && Number(capture.windowAlpha) >= 0.999
+      && capture.windowOnscreen === true
+    );
+  const mainEntryFilmstrip = await finishFilmstrip(
+    mainEntry,
+    mainWindowID,
+    { captureBounds: mainCaptureBounds },
+  );
   (receipt.scenarios as Json[]).push({
     name: "main-entry",
     exactWindowID: mainWindowID,
@@ -455,6 +572,8 @@ try {
     streamReady: mainEntryReady,
     captureBounds: mainCaptureBounds,
     captureBoundsMatch: mainEntryCaptureBoundsMatch,
+    settledCaptures,
+    settledCapturesPass,
     pointerPreparation: {
       command: ["cliclick", "m:2,2"],
       exitCode: pointerPreparation.exitCode,
@@ -463,7 +582,9 @@ try {
     },
     settledLayout: mainEntrySettledLayout,
     filmstrip: mainEntryFilmstrip,
-    pass: mainEntryFilmstrip.pass && mainEntryCaptureBoundsMatch,
+    pass: mainEntryFilmstrip.pass
+      && mainEntryCaptureBoundsMatch
+      && settledCapturesPass,
   });
 
   await announceTestStatus(

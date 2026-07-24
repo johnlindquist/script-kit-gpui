@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
+
+from PIL import Image
 
 
 def load_module(filename: str, module_name: str):
@@ -153,6 +156,61 @@ class AdaptiveMotionTests(unittest.TestCase):
         self.assertGreaterEqual(pixels[1], 0)
         self.assertLessEqual(pixels[0] + pixels[2], 1620)
         self.assertLessEqual(pixels[1] + pixels[3], 1084)
+
+    def test_lifecycle_uses_explicit_settled_captures_not_stream_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for index in range(4):
+                path = Path(directory) / f"frame-{index}.png"
+                Image.new("RGB", (20, 20), (index, index, index)).save(path)
+                paths.append(path)
+            receipt = {
+                "scenarios": [
+                    {
+                        "name": "main-entry",
+                        "filmstrip": {
+                            "receipt": {
+                                "frames": [
+                                    {
+                                        "sequence": 0,
+                                        "path": str(paths[0]),
+                                        "windowBounds": [[0, 0], [10, 10]],
+                                    }
+                                ]
+                            },
+                            "metrics": {
+                                "frames": [
+                                    {
+                                        "sequence": 0,
+                                        "stageVisible": True,
+                                        "footerVisible": True,
+                                    }
+                                ]
+                            },
+                        },
+                        "settledCapturesPass": True,
+                        "settledCaptures": [
+                            {
+                                "sequence": f"settled-{index}",
+                                "path": str(paths[index + 1]),
+                                "windowBounds": [[0, 0], [10, 10]],
+                            }
+                            for index in range(3)
+                        ],
+                        "settledLayout": {"fidelity": {"appKit": {}}},
+                        "captureBounds": {},
+                    }
+                ]
+            }
+            frames, _, _, errors = motion.lifecycle_entry_frames(
+                receipt,
+                "main-entry",
+            )
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [frame["_phase"] for frame in frames],
+                ["motion", "settled", "settled", "settled"],
+            )
 
 
 if __name__ == "__main__":

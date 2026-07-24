@@ -722,10 +722,19 @@ async function main() {
   ].filter(Boolean);
   const lockedObserverFailed = (lockedTreatment?.cells ?? []).some(
     (cell: any) =>
-      (cell?.metricsExitCode !== 0 && cell?.metrics == null)
-      || (cell?.motionMetricsExitCode !== 0 && cell?.motionMetrics == null)
+      (
+        typeof cell?.metricsExitCode === "number"
+        && cell.metricsExitCode !== 0
+        && cell?.metrics == null
+      )
       || (
-        cell?.saturatedLifecycle?.entryMotionMetricsExitCode !== 0
+        typeof cell?.motionMetricsExitCode === "number"
+        && cell.motionMetricsExitCode !== 0
+        && cell?.motionMetrics == null
+      )
+      || (
+        typeof cell?.saturatedLifecycle?.entryMotionMetricsExitCode === "number"
+        && cell.saturatedLifecycle.entryMotionMetricsExitCode !== 0
         && cell?.saturatedLifecycle?.entryMotionMetrics == null
       ),
   );
