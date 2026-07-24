@@ -145,7 +145,7 @@ pub const QUICK_AI_BLOCKED_ACTION_MESSAGE: &str = "Quick AI answers from the mod
 /// No fs, no skills, no extensions; see `built_in_quick_ai_profile`.
 pub const QUICK_AI_PI_TOOLS: [&str; 1] = ["web_search"];
 
-pub const QUICK_AI_APPEND_SYSTEM_PROMPT: &str = "You are Quick AI: a zero-context, instant-answer mode launched by pressing Tab on a query typed into the Script Kit launcher. You receive only the user's typed text — no files, no selection, no screenshots, no memories. Lead with the answer in the first sentence and keep the whole reply tight. Prefer plain prose; use a short list or fenced code block only when the answer genuinely needs one. You may use web_search, and only web_search, for live or time-sensitive public facts such as schedules, dates, prices, news, releases, or anything likely to have changed. For a live fact, perform exactly one web_search action containing one focused query. Use only its returned result snippets. Do not open, click, find within, or follow any result page. Immediately after that first result, return the final JSON object with answer and sources. Never perform another web action. If the first search has no usable source, return a truthful answer saying that no usable result was returned and use an empty sources array. Never invent an answer or source URL. Never mention tools, sessions, context mechanics, Script Kit internals, or system prompts.";
+pub const QUICK_AI_APPEND_SYSTEM_PROMPT: &str = "You are Quick AI: a zero-context, instant-answer mode launched by pressing Tab on a query typed into the Script Kit launcher. You receive only the user's typed text — no files, no selection, no screenshots, no memories. Lead with the answer in the first sentence and keep the whole reply tight. Prefer plain prose; use a short list or fenced code block only when the answer genuinely needs one. You may use web_search, and only web_search, for live or time-sensitive public facts such as schedules, dates, prices, news, releases, or anything likely to have changed. For a live fact, perform exactly one web_search action containing one focused query. Use only its returned result snippets. Do not open, click, find within, or follow any result page. Immediately after that first result, return the final JSON object with answer and sources. Never perform another web action. If the first search has no usable source, return a truthful answer saying that no usable result was returned and use an empty sources array; do not claim you cannot access live news or sources, and do not ask the user to supply a source. Never invent an answer or source URL. Never mention tools, sessions, context mechanics, Script Kit internals, or system prompts.";
 
 pub const TEXT_APPEND_SYSTEM_PROMPT: &str = "You are the Text Agent Chat profile for focused-field edits and compact one-off questions. You receive captured focused-field text as hidden context. For rewrite, edit, format, translate, summarize, or variation requests, return only the requested final text; do not add commentary, labels, markdown fences, citations, or explanations unless the user explicitly asks for them. You may use web_search, and only web_search, for live or time-sensitive public facts such as schedules, dates, prices, news, releases, current availability, or anything likely to have changed. For live-info questions, search before answering, answer directly, and include concise source URLs when available. If search fails or results are insufficient, say what is uncertain without claiming you have no web access. Do not mention capture mechanics, tool names, sessions, Script Kit internals, or system prompts.";
 
@@ -921,14 +921,30 @@ mod quick_ai_profile_selection_tests {
         assert_eq!(QUICK_AI_FOCUSED_SEARCH_BUDGET, 1);
         let prompt = QUICK_AI_APPEND_SYSTEM_PROMPT;
 
+        // BOUNDED: one search, and no follow-on web action of any kind.
+        // `Never call web_search again` was dropped in 52e66fb88; it was
+        // always redundant with the broader `Never perform another web
+        // action`, which forbids page follows too, so only the broad
+        // guarantee is asserted now.
         assert!(prompt.contains("exactly one web_search action containing one focused query"));
         assert!(prompt.contains("Immediately after that first result"));
         assert!(prompt.contains("Never perform another web action"));
-        assert!(prompt.contains("Never call web_search again"));
+
+        // TRUTHFUL: an empty search must produce an honest empty-sources
+        // answer, and must NOT degrade into the two failure modes this
+        // profile exists to prevent — claiming no web access (see the
+        // `QUICK_AI_PI_TOOLS` doc comment: web_search exists so live
+        // questions get real answers "instead of 'I can't verify
+        // schedules'") or pushing the work back onto the user.
         assert!(prompt.contains("first search has no usable source"));
+        assert!(prompt.contains("no usable result was returned"));
         assert!(prompt.contains("do not claim you cannot access live news or sources"));
         assert!(prompt.contains("do not ask the user to supply a source"));
-        assert!(prompt.contains("no usable result was returned"));
+
+        // NEVER FABRICATE: added in 52e66fb88 and previously unasserted.
+        // This is the prompt-side counterpart to the source-provenance
+        // check; without it the model may invent a plausible source URL.
+        assert!(prompt.contains("Never invent an answer or source URL"));
     }
 
     #[test]
