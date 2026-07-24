@@ -1250,6 +1250,21 @@ pub(crate) fn sync_main_footer_popup(
     config: Option<&MainWindowFooterConfig>,
     cx: &mut App,
 ) {
+    // Logical visibility flips before the native exit fade begins so rapid
+    // hotkeys can supersede it. A render in that interval resolves `None`;
+    // treating that as ordinary footer removal makes GPUI draw its fallback
+    // footer inside the stage for one frame. The native-hidden completion
+    // path owns teardown for this case.
+    if config.is_none() && !crate::is_main_window_visible() {
+        close_gpui_footer_overlay(cx);
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "main_footer_preserved_for_native_exit",
+            "Preserved detached footer host until the native exit surface retires"
+        );
+        return;
+    }
+
     // The in-window AppKit host rides the main NSWindow's frame morph. The
     // separate GPUI overlay NSWindow does not, so glass mode keeps only the
     // native host active and always closes the overlay.
