@@ -60,7 +60,13 @@ pub mod user_themes;
 pub(crate) mod validation;
 
 // Re-export shared chrome contract for app surfaces
-pub(crate) use chrome::{AppChromeColors, DangerActionColors, SemanticChipColors};
+pub use chrome::MainMenuRowFillBase;
+pub(crate) use chrome::{
+    main_menu_row_state_from_flags, resolve_main_menu_row_state_fill,
+    resolve_main_menu_row_state_palette, resolve_main_menu_row_state_palette_from_parts,
+    AppChromeColors, DangerActionColors, MainMenuRowColorInputs, MainMenuRowState,
+    MainMenuRowStatePalette, SemanticChipColors,
+};
 
 // Re-export contrast audit helpers
 #[allow(unused_imports)]

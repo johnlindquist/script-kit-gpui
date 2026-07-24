@@ -72,14 +72,8 @@ pub enum MainMenuRowKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FooterButtonTheme {
-    pub rest: Option<u32>,
-    pub hover: u32,
-    pub active: u32,
     pub border_alpha: u32,
     pub hover_border_alpha: u32,
-    pub hover_text_alpha: u32,
-    pub hover_glyph_alpha: u32,
-    pub uses_accent: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -290,8 +284,6 @@ pub struct FooterMetricsTokens {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FooterTheme {
-    pub text_accent: bool,
-    pub keycap_accent: bool,
     pub divider_accent: bool,
     pub divider_alpha: u32,
     pub button: FooterButtonTheme,
@@ -724,19 +716,11 @@ fn base_main_menu_theme_def(
 ) -> MainMenuThemeDef {
     let row_kind = MainMenuRowKind::IconTile;
     let footer = FooterTheme {
-        text_accent: false,
-        keycap_accent: false,
         divider_accent: false,
         divider_alpha: 20,
         button: FooterButtonTheme {
-            rest: None,
-            hover: 0x10,
-            active: 0x24,
             border_alpha: 50,
             hover_border_alpha: MAIN_MENU_ACTION_BUTTON_HOVER_BORDER_ALPHA,
-            hover_text_alpha: 0xff,
-            hover_glyph_alpha: 0xff,
-            uses_accent: false,
         },
         metrics: FooterMetricsTokens {
             height_px: 32.0,
@@ -946,13 +930,12 @@ mod tests {
     }
 
     #[test]
-    fn footer_button_state_ladder_never_gets_weaker() {
+    fn footer_button_theme_only_owns_keycap_border_policy() {
         for theme in MainMenuThemeVariant::all() {
             let button = theme.def().footer.button;
-            let rest = button.rest.unwrap_or(0);
             assert!(
-                rest <= button.hover && button.hover <= button.active,
-                "{theme:?} must satisfy rest <= hover <= active"
+                button.border_alpha <= button.hover_border_alpha,
+                "{theme:?} hover keycap border must not be weaker than rest"
             );
         }
     }

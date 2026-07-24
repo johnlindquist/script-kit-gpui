@@ -596,6 +596,7 @@ pub(crate) fn main_footer_overlay_fidelity_snapshot(
 struct GpuiFooterOverlay {
     config: MainWindowFooterConfig,
     overlay_width_px: f32,
+    last_reported_row_palette: Option<crate::theme::MainMenuRowStatePalette>,
 }
 
 impl GpuiFooterOverlay {
@@ -603,6 +604,7 @@ impl GpuiFooterOverlay {
         Self {
             config,
             overlay_width_px,
+            last_reported_row_palette: None,
         }
     }
 
@@ -626,6 +628,21 @@ impl GpuiFooterOverlay {
             "footer-left-info"
         };
         let interactive = info.action.is_some();
+        let row_states =
+            crate::components::footer_chrome::resolved_footer_button_visual_colors(theme)
+                .row_states;
+        let base_state = if interactive && info.selected {
+            row_states.active
+        } else {
+            row_states.rest
+        };
+        let hover_state = if interactive && info.selected {
+            row_states.active
+        } else {
+            row_states.hover
+        };
+        let base_foreground = rgba(base_state.primary_foreground_rgba);
+        let hover_foreground: gpui::Hsla = rgba(hover_state.primary_foreground_rgba).into();
         let mut row = div()
             .id(row_id)
             .debug_selector(|| "agent-chat.footer-overlay.profile".to_string())
@@ -640,10 +657,19 @@ impl GpuiFooterOverlay {
             // are real footer buttons: same hover pill, radius, and pressed
             // fill as the trailing action buttons, with label/keycap/glyph
             // brightening through the shared footer-action-button group.
-            let chrome = crate::theme::AppChromeColors::from_theme(theme);
             let metrics = crate::components::footer_chrome::current_main_menu_footer_metrics();
-            let hover_bg = rgba(chrome.hover_rgba);
-            let active_bg = rgba(chrome.selection_rgba);
+            let hover_bg = rgba(
+                row_states
+                    .hover
+                    .background_rgba
+                    .expect("main-menu hover row state always provides a background"),
+            );
+            let active_bg = rgba(
+                row_states
+                    .active
+                    .background_rgba
+                    .expect("main-menu active row state always provides a background"),
+            );
             row = row
                 .h(px(crate::components::footer_chrome::footer_button_height(
                     crate::components::footer_chrome::current_main_menu_footer_height(),
@@ -654,7 +680,9 @@ impl GpuiFooterOverlay {
                 .rounded(px(metrics.button_radius))
                 .group("footer-action-button")
                 .cursor_pointer()
-                .hover(move |style| style.bg(hover_bg))
+                .when(!info.selected, |style| {
+                    style.hover(move |style| style.bg(hover_bg))
+                })
                 .active(move |style| style.bg(active_bg))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -671,12 +699,15 @@ impl GpuiFooterOverlay {
             row = row.flex_1();
         }
 
-        if info.selected {
+        if info.selected && interactive {
+            row =
+                row.bg(rgba(row_states.active.background_rgba.expect(
+                    "main-menu active row state always provides a background",
+                )));
+        } else if info.selected {
             let accent = theme.colors.accent.selected;
             row = row.bg(rgba((accent << 8) | 0x18));
-            if !interactive {
-                row = row.rounded(px(4.0)).px(px(4.0)).py(px(1.0));
-            }
+            row = row.rounded(px(4.0)).px(px(4.0)).py(px(1.0));
         }
 
         if info.icon_token.is_none() && !matches!(info.dot_status, FooterDotStatus::Hidden) {
@@ -722,31 +753,24 @@ impl GpuiFooterOverlay {
             .as_deref()
             .and_then(crate::components::footer_chrome::footer_icon_path)
         {
-            let hover_glyph =
-                crate::components::footer_chrome::footer_hover_glyph_color(theme, None);
             row = row.child(
                 svg()
                     .path(path)
                     .size(px(13.0))
                     .flex_shrink_0()
-                    .text_color(crate::components::footer_chrome::footer_hint_text_color(
-                        theme,
-                    ))
+                    .text_color(base_foreground)
                     .group_hover("footer-action-button", move |style| {
-                        style.text_color(hover_glyph)
+                        style.text_color(hover_foreground)
                     }),
             );
         }
 
         if let Some(keycap) = info.keycap.as_ref().filter(|key| !key.trim().is_empty()) {
             row = row.child(
-                crate::components::footer_chrome::render_footer_shortcut_keycaps_with_metrics(
+                crate::components::footer_chrome::render_footer_shortcut_keycaps_for_state(
                     keycap.clone(),
                     theme,
-                    None,
-                    None,
-                    None,
-                    None,
+                    interactive && info.selected,
                 ),
             );
         }
@@ -758,7 +782,6 @@ impl GpuiFooterOverlay {
             } else {
                 metrics.font_weight
             };
-            let hover_text = crate::components::footer_chrome::footer_hover_text_color(theme, None);
             row = row.child(
                 div()
                     .id("agent_chat-model-display")
@@ -767,11 +790,9 @@ impl GpuiFooterOverlay {
                     .font_family(crate::list_item::FONT_SYSTEM_UI)
                     .font_weight(label_weight)
                     .text_size(px(metrics.label_font_size))
-                    .text_color(crate::components::footer_chrome::footer_hint_text_color(
-                        theme,
-                    ))
+                    .text_color(base_foreground)
                     .group_hover("footer-action-button", move |style| {
-                        style.text_color(hover_text)
+                        style.text_color(hover_foreground)
                     })
                     .overflow_hidden()
                     .text_ellipsis()
@@ -803,11 +824,23 @@ impl GpuiFooterOverlay {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chrome = crate::theme::AppChromeColors::from_theme(theme);
+        let row_states =
+            crate::components::footer_chrome::resolved_footer_button_visual_colors(theme)
+                .row_states;
         let action = button.action;
-        let selected_bg = rgba(footer_selected_background_rgba(action, &chrome));
-        let hover_bg = rgba(chrome.hover_rgba);
-        let active_bg = rgba(chrome.selection_rgba);
+        let selected_bg = rgba(
+            row_states
+                .active
+                .background_rgba
+                .expect("main-menu active row state always provides a background"),
+        );
+        let hover_bg = rgba(
+            row_states
+                .hover
+                .background_rgba
+                .expect("main-menu hover row state always provides a background"),
+        );
+        let active_bg = selected_bg;
         let item_height = crate::components::footer_chrome::footer_button_height(
             crate::components::footer_chrome::current_main_menu_footer_height(),
         );
@@ -854,7 +887,17 @@ impl GpuiFooterOverlay {
             .justify_center()
             .group("footer-action-button")
             .when(button.selected, |style| style.bg(selected_bg))
-            .child(
+            .child(if button.selected {
+                crate::components::footer_chrome::render_footer_hint_content_flex_for_state(
+                    button.label.clone(),
+                    button.key.clone(),
+                    crate::components::footer_chrome::FooterHintKeyMode::Shortcut,
+                    theme,
+                    key_first,
+                    justify,
+                    button.selected,
+                )
+            } else {
                 crate::components::footer_chrome::render_footer_hint_content_flex(
                     button.label.clone(),
                     button.key.clone(),
@@ -862,13 +905,15 @@ impl GpuiFooterOverlay {
                     theme,
                     key_first,
                     justify,
-                ),
-            );
+                )
+            });
 
         if button.enabled {
             item = item
                 .cursor_pointer()
-                .hover(move |style| style.bg(hover_bg))
+                .when(!button.selected, |style| {
+                    style.hover(move |style| style.bg(hover_bg))
+                })
                 .active(move |style| style.bg(active_bg))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -909,6 +954,24 @@ impl Render for GpuiFooterOverlay {
         }
 
         let theme = crate::theme::get_cached_theme();
+        let row_palette =
+            crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
+                .row_states;
+        if self.last_reported_row_palette != Some(row_palette) {
+            tracing::info!(
+                target: "script_kit::footer_popup",
+                event = "gpui_footer_row_palette_resolved",
+                rest_background_rgba = row_palette.rest.background_rgba.unwrap_or_default(),
+                rest_has_background = row_palette.rest.background_rgba.is_some(),
+                rest_foreground_rgba = row_palette.rest.primary_foreground_rgba,
+                hover_background_rgba = row_palette.hover.background_rgba.unwrap_or_default(),
+                hover_foreground_rgba = row_palette.hover.primary_foreground_rgba,
+                active_background_rgba = row_palette.active.background_rgba.unwrap_or_default(),
+                active_foreground_rgba = row_palette.active.primary_foreground_rgba,
+                "Resolved GPUI footer controls from the canonical main-menu row palette"
+            );
+            self.last_reported_row_palette = Some(row_palette);
+        }
         let left_pinned_buttons: Vec<_> = self
             .config
             .buttons
@@ -2888,46 +2951,16 @@ unsafe fn ensure_reusable_window_footer_host(ns_window: id) -> bool {
     ) != nil
 }
 
-/// Hex (0xRRGGBB) for the native footer's label / hint text.
-#[cfg(target_os = "macos")]
-fn footer_text_hex(theme: &crate::theme::Theme) -> u32 {
-    if crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .text_accent
-    {
-        crate::theme::AppChromeColors::from_theme(theme).accent_hex
-    } else {
-        theme.colors.text.primary
-    }
-}
-
 /// Hex (0xRRGGBB) for the native footer's keycap borders.
 #[cfg(target_os = "macos")]
 fn footer_keycap_hex(theme: &crate::theme::Theme) -> u32 {
-    if crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .keycap_accent
-    {
-        crate::theme::AppChromeColors::from_theme(theme).accent_hex
-    } else {
-        theme.colors.text.primary
-    }
+    theme.colors.text.primary
 }
 
 /// Border alpha for the native footer's keycaps.
 #[cfg(target_os = "macos")]
 fn footer_keycap_border_alpha(theme: &crate::theme::Theme, selected: bool) -> f64 {
-    if crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .keycap_accent
-    {
-        0.9
-    } else {
-        crate::components::footer_chrome::themed_footer_button_border_alpha(theme, selected) as f64
-    }
+    crate::components::footer_chrome::themed_footer_button_border_alpha(theme, selected) as f64
 }
 
 /// Resting button-background rgba for the current main-menu theme.
@@ -2936,28 +2969,22 @@ fn footer_button_rest_fill_rgba(theme: &crate::theme::Theme) -> Option<u32> {
     crate::components::footer_chrome::themed_footer_button_rest_rgba(theme)
 }
 
-/// Hover background rgba for a footer button.
-#[cfg(target_os = "macos")]
-fn footer_button_hover_fill_rgba(theme: &crate::theme::Theme) -> u32 {
-    crate::components::footer_chrome::themed_footer_button_hover_rgba(theme)
-}
-
 /// Active/selected background rgba for a footer button.
 #[cfg(target_os = "macos")]
 fn footer_button_active_fill_rgba(_action: FooterAction, theme: &crate::theme::Theme) -> u32 {
     crate::components::footer_chrome::themed_footer_button_active_rgba(theme)
 }
 
-/// Active/selected background rgba addressed by the cached `_isActionsButton`
-/// ivar (used in hover-exit restore). Mirrors [`footer_button_active_fill_rgba`]
-/// but resolves the action from the ivar so all buttons stay in sync.
-#[cfg(target_os = "macos")]
-fn footer_button_active_fill_rgba_for_actions(
-    is_actions: cocoa::base::BOOL,
-    theme: &crate::theme::Theme,
-) -> u32 {
-    let _ = is_actions;
-    crate::components::footer_chrome::themed_footer_button_active_rgba(theme)
+fn resolved_native_footer_button_state(
+    selected: bool,
+    hovered: bool,
+    actions_window_open: bool,
+    is_actions: bool,
+) -> crate::theme::MainMenuRowState {
+    crate::theme::main_menu_row_state_from_flags(
+        selected || (is_actions && actions_window_open),
+        hovered,
+    )
 }
 
 /// Packed RGBA for the native footer's top divider line. Replaces the default
@@ -3273,19 +3300,12 @@ unsafe fn refresh_footer_host_impl(
         }
     }
 
-    // Accent footer text renders at full opacity so the (often soft) theme
-    // accent reads boldly against the translucent footer; non-accent text keeps
-    // the muted hint opacity.
-    let alpha = if crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .text_accent
-    {
-        1.0
-    } else {
-        crate::window_resize::main_layout::HINT_TEXT_OPACITY as f64
-    };
-    let text_color = ns_color_from_hex_with_alpha(footer_text_hex(&theme), alpha);
+    let text_color = ns_color_from_rgba(
+        crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
+            .row_states
+            .rest
+            .primary_foreground_rgba,
+    );
 
     let hints_view = find_subview_by_identifier(footer_view, FOOTER_HINTS_ID);
     let default_hints_frame = footer_hints_frame(content_bounds.size.width);
@@ -3332,6 +3352,7 @@ unsafe fn refresh_footer_host_impl(
             } else {
                 layout_footer_left_info(left_info_view, config.left_info.as_ref(), text_color);
             }
+            refresh_footer_button_visual_states(left_info_view);
         }
         if footer_content_changed || footer_visuals_changed || effect_theme_changed {
             restyle_footer_glass_capsules(left_info_view, &theme);
@@ -4631,8 +4652,10 @@ unsafe fn layout_footer_cwd_chip_hit_target(
         if let Some(object) = button.as_mut() {
             object.set_ivar::<cocoa::base::BOOL>("_isActionsButton", NO);
             object.set_ivar::<cocoa::base::BOOL>("_selected", NO);
+            object.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
             object.set_ivar::<cocoa::base::BOOL>("_enabled", YES);
             object.set_ivar::<usize>("_stateView", 0);
+            object.set_ivar::<usize>("_visualRoot", left_info_view as usize);
         }
         let _: () = msg_send![left_info_view, addSubview: button];
     }
@@ -4645,6 +4668,7 @@ unsafe fn layout_footer_cwd_chip_hit_target(
             "_stateView",
             find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_STATE_LAYER_ID) as usize,
         );
+        object.set_ivar::<usize>("_visualRoot", left_info_view as usize);
     }
     let tooltip = tooltip.map(ns_string).unwrap_or(nil);
     let _: () = msg_send![button, setToolTip: tooltip];
@@ -4682,8 +4706,10 @@ unsafe fn layout_footer_left_info_hit_target(
         if let Some(object) = button.as_mut() {
             object.set_ivar::<cocoa::base::BOOL>("_isActionsButton", NO);
             object.set_ivar::<cocoa::base::BOOL>("_selected", NO);
+            object.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
             object.set_ivar::<cocoa::base::BOOL>("_enabled", YES);
             object.set_ivar::<usize>("_stateView", 0);
+            object.set_ivar::<usize>("_visualRoot", left_info_view as usize);
         }
         let _: () = msg_send![left_info_view, addSubview: button];
     }
@@ -4696,6 +4722,7 @@ unsafe fn layout_footer_left_info_hit_target(
             "_stateView",
             find_subview_by_identifier(left_info_view, FOOTER_LEFT_INFO_STATE_LAYER_ID) as usize,
         );
+        object.set_ivar::<usize>("_visualRoot", left_info_view as usize);
     }
 }
 
@@ -4867,22 +4894,86 @@ unsafe fn recolor_footer_hint_subviews(view: id, theme: &crate::theme::Theme) {
         return;
     }
 
-    let text_alpha = if crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .text_accent
-    {
-        1.0
-    } else {
-        crate::window_resize::main_layout::HINT_TEXT_OPACITY as f64
-    };
-    let text_color = ns_color_from_hex_with_alpha(footer_text_hex(theme), text_alpha);
+    let text_color = ns_color_from_rgba(
+        crate::components::footer_chrome::resolved_footer_button_visual_colors(theme)
+            .row_states
+            .rest
+            .primary_foreground_rgba,
+    );
     let border_color = ns_color_from_hex_with_alpha(
         footer_keycap_hex(theme),
         footer_keycap_border_alpha(theme, false),
     );
 
     recolor_footer_hint_subviews_with_colors(view, text_color, border_color);
+    refresh_footer_button_visual_states(view);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn refresh_footer_button_visual_states(view: id) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if view == nil {
+        return;
+    }
+
+    let mut states_by_visual_root = std::collections::HashMap::new();
+    collect_footer_button_visual_states(view, &mut states_by_visual_root);
+    for (_visual_root, (button, state)) in states_by_visual_root {
+        apply_footer_button_visual_state(button, state);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn collect_footer_button_visual_states(
+    view: id,
+    states_by_visual_root: &mut std::collections::HashMap<
+        usize,
+        (id, crate::theme::MainMenuRowState),
+    >,
+) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if view == nil {
+        return;
+    }
+
+    let is_footer_button: cocoa::base::BOOL = msg_send![view, isKindOfClass: footer_button_class()];
+    if is_footer_button == YES {
+        if let Some(object) = view.as_ref() {
+            let selected = *object.get_ivar::<cocoa::base::BOOL>("_selected") == YES;
+            let hovered = *object.get_ivar::<cocoa::base::BOOL>("_hovered") == YES;
+            let is_actions = *object.get_ivar::<cocoa::base::BOOL>("_isActionsButton") == YES;
+            let state = resolved_native_footer_button_state(
+                selected,
+                hovered,
+                crate::actions::is_actions_window_open(),
+                is_actions,
+            );
+            let visual_root = footer_button_visual_root(view) as usize;
+            let state_rank = |state| match state {
+                crate::theme::MainMenuRowState::Rest => 0,
+                crate::theme::MainMenuRowState::Hover => 1,
+                crate::theme::MainMenuRowState::Active => 2,
+            };
+            match states_by_visual_root.get(&visual_root) {
+                Some((_, existing_state)) if state_rank(*existing_state) >= state_rank(state) => {}
+                _ => {
+                    states_by_visual_root.insert(visual_root, (view, state));
+                }
+            }
+        }
+    }
+
+    let subviews: id = msg_send![view, subviews];
+    if subviews == nil {
+        return;
+    }
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let child: id = msg_send![subviews, objectAtIndex: index];
+        collect_footer_button_visual_states(child, states_by_visual_root);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -4929,7 +5020,11 @@ unsafe fn recolor_footer_hint_subviews_with_colors(view: id, text_color: id, bor
         }
     }
 
-    if border_color != nil {
+    if border_color != nil
+        && appkit_view_identifier(view)
+            .as_deref()
+            .is_some_and(footer_identifier_uses_keycap_border)
+    {
         let layer: id = msg_send![view, layer];
         if layer != nil {
             let border_width: f64 = msg_send![layer, borderWidth];
@@ -4951,6 +5046,10 @@ unsafe fn recolor_footer_hint_subviews_with_colors(view: id, text_color: id, bor
         let child: id = msg_send![subviews, objectAtIndex: i];
         recolor_footer_hint_subviews_with_colors(child, text_color, border_color);
     }
+}
+
+fn footer_identifier_uses_keycap_border(identifier: &str) -> bool {
+    identifier.contains("keycap")
 }
 
 #[cfg(target_os = "macos")]
@@ -5302,30 +5401,6 @@ fn footer_hint_content_layout_for_button(
 }
 
 #[cfg(target_os = "macos")]
-fn footer_selected_background_rgba(
-    action: FooterAction,
-    chrome: &crate::theme::AppChromeColors,
-) -> u32 {
-    if matches!(action, FooterAction::Actions) {
-        chrome.hover_rgba
-    } else {
-        chrome.selection_rgba
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn footer_selected_background_rgba_for_actions_button(
-    is_actions_button: cocoa::base::BOOL,
-    chrome: &crate::theme::AppChromeColors,
-) -> u32 {
-    if is_actions_button == YES {
-        footer_selected_background_rgba(FooterAction::Actions, chrome)
-    } else {
-        chrome.selection_rgba
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn footer_hint_label_widths(
     natural_label_width: f64,
     label_padding_x: f64,
@@ -5496,7 +5571,7 @@ unsafe fn make_footer_hint_leading_dot_view(
 unsafe fn make_footer_hint_item(
     button_cfg: &FooterButtonConfig,
     font: id,
-    text_color: id,
+    _text_color: id,
     max_item_width: Option<f64>,
     theme: &crate::theme::Theme,
 ) -> id {
@@ -5504,6 +5579,14 @@ unsafe fn make_footer_hint_item(
     use objc::{class, msg_send, sel, sel_impl};
 
     let metrics = crate::components::footer_chrome::current_main_menu_footer_metrics();
+    let row_states =
+        crate::components::footer_chrome::resolved_footer_button_visual_colors(theme).row_states;
+    let initial_state = if button_cfg.selected {
+        row_states.active
+    } else {
+        row_states.rest
+    };
+    let text_color = ns_color_from_rgba(initial_state.primary_foreground_rgba);
     let item_height =
         crate::components::footer_chrome::footer_button_height(footer_height() as f32) as f64;
 
@@ -5999,11 +6082,13 @@ unsafe fn make_footer_hint_item(
                 "_selected",
                 if button_cfg.selected { YES } else { NO },
             );
+            obj.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
             obj.set_ivar::<cocoa::base::BOOL>(
                 "_enabled",
                 if button_cfg.enabled { YES } else { NO },
             );
             obj.set_ivar::<usize>("_stateView", state_background_view as usize);
+            obj.set_ivar::<usize>("_visualRoot", visual_content_parent as usize);
         }
     }
 
@@ -6013,6 +6098,10 @@ unsafe fn make_footer_hint_item(
     let _: () = msg_send![visual_content_parent, addSubview: keys_view];
     if button != nil {
         let _: () = msg_send![container, addSubview: button];
+        apply_footer_button_visual_state(
+            button,
+            crate::theme::main_menu_row_state_from_flags(button_cfg.selected, false),
+        );
     }
     let _: () = msg_send![
         container,
@@ -6067,8 +6156,9 @@ mod footer_layout_tests {
         footer_active_dot_hex, footer_dot_hex, footer_hint_content_layout,
         footer_hint_content_layout_for_button, footer_hint_item_gap, footer_hint_label_widths,
         footer_hint_legacy_extra_padding, footer_hint_max_item_width, footer_hint_slot_width,
-        footer_selected_background_rgba, main_window_detached_footer_regions_appkit,
-        main_window_detached_footer_regions_gpui, should_use_gpui_footer_overlay, FooterAction,
+        footer_identifier_uses_keycap_border, main_window_detached_footer_regions_appkit,
+        main_window_detached_footer_regions_gpui, native_footer_visual_event_changed,
+        resolved_native_footer_button_state, should_use_gpui_footer_overlay, FooterAction,
         FooterButtonConfig, FooterDotStatus, FOOTER_HINT_KEY_LABEL_GAP, FOOTER_HINT_PADDING_X,
         FOOTER_RUN_HINT_PADDING_X,
     };
@@ -6541,19 +6631,74 @@ mod footer_layout_tests {
     }
 
     #[test]
-    fn actions_selected_background_uses_hover_opacity() {
+    fn all_selected_footer_actions_use_the_main_menu_active_row_fill() {
         let theme = crate::theme::Theme::dark_default();
-        let chrome = crate::theme::AppChromeColors::from_theme(&theme);
+        let active = crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
+            .row_states
+            .active
+            .background_rgba
+            .expect("active rows have a fill");
+
+        for _action in [FooterAction::Actions, FooterAction::Run, FooterAction::Ai] {
+            assert_eq!(
+                crate::components::footer_chrome::themed_footer_button_active_rgba(&theme),
+                active
+            );
+        }
+    }
+
+    #[test]
+    fn native_footer_state_keeps_active_precedence_over_hover() {
+        use crate::theme::MainMenuRowState::{Active, Hover, Rest};
 
         assert_eq!(
-            footer_selected_background_rgba(FooterAction::Actions, &chrome),
-            chrome.hover_rgba
+            resolved_native_footer_button_state(false, false, false, false),
+            Rest
         );
         assert_eq!(
-            footer_selected_background_rgba(FooterAction::Run, &chrome),
-            chrome.selection_rgba
+            resolved_native_footer_button_state(false, true, false, false),
+            Hover
         );
-        assert_ne!(chrome.hover_rgba, chrome.selection_rgba);
+        assert_eq!(
+            resolved_native_footer_button_state(true, true, false, false),
+            Active
+        );
+        assert_eq!(
+            resolved_native_footer_button_state(false, true, true, true),
+            Active
+        );
+        assert_eq!(
+            resolved_native_footer_button_state(false, false, false, true),
+            Rest
+        );
+    }
+
+    #[test]
+    fn native_footer_visual_event_reports_only_signature_changes() {
+        let id = "unit-native-footer-visual-event";
+        assert!(native_footer_visual_event_changed(id, 1, 10));
+        assert!(!native_footer_visual_event_changed(id, 1, 10));
+        assert!(native_footer_visual_event_changed(id, 2, 10));
+        assert!(!native_footer_visual_event_changed(id, 2, 10));
+        assert!(native_footer_visual_event_changed(id, 2, 11));
+    }
+
+    #[test]
+    fn footer_state_recolors_only_keycap_borders_not_glass_capsule_rims() {
+        for identifier in [
+            "script-kit-footer-keycap-actions-0",
+            "script-kit-footer-left-info-keycap-0",
+            "script-kit-footer-cwd-chip-keycap-0",
+        ] {
+            assert!(footer_identifier_uses_keycap_border(identifier));
+        }
+        for identifier in [
+            "script-kit-footer-capsule-content-actions",
+            "script-kit-footer-left-info-capsule-content",
+            "script-kit-footer-state-layer-actions",
+        ] {
+            assert!(!footer_identifier_uses_keycap_border(identifier));
+        }
     }
 
     #[test]
@@ -6918,8 +7063,10 @@ fn footer_button_class() -> *const objc::runtime::Class {
             decl.add_ivar::<usize>("_selectedCGColor");
             decl.add_ivar::<cocoa::base::BOOL>("_isActionsButton");
             decl.add_ivar::<cocoa::base::BOOL>("_selected");
+            decl.add_ivar::<cocoa::base::BOOL>("_hovered");
             decl.add_ivar::<cocoa::base::BOOL>("_enabled");
             decl.add_ivar::<usize>("_stateView");
+            decl.add_ivar::<usize>("_visualRoot");
             decl.add_method(
                 sel!(acceptsFirstMouse:),
                 footer_button_accepts_first_mouse
@@ -7045,15 +7192,14 @@ extern "C" fn footer_button_update_tracking_areas(
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn set_footer_button_text_opacity(view: id, opacity: f64) {
+unsafe fn set_footer_button_foreground_rgba(view: id, foreground_rgba: u32) {
     use objc::{class, msg_send, sel, sel_impl};
 
     if view == nil {
         return;
     }
 
-    let theme = crate::theme::get_cached_theme();
-    let color = ns_color_from_hex_with_alpha(theme.colors.text.primary, opacity);
+    let color = ns_color_from_rgba(foreground_rgba);
     if color == nil {
         return;
     }
@@ -7074,7 +7220,7 @@ unsafe fn set_footer_button_text_opacity(view: id, opacity: f64) {
     let count: usize = msg_send![subviews, count];
     for i in 0..count {
         let child: id = msg_send![subviews, objectAtIndex: i];
-        set_footer_button_text_opacity(child, opacity);
+        set_footer_button_foreground_rgba(child, foreground_rgba);
     }
 }
 
@@ -7092,13 +7238,18 @@ unsafe fn set_footer_button_border_alpha(view: id, alpha: f64) {
         return;
     }
 
-    let layer: id = msg_send![view, layer];
-    if layer != nil {
-        let border_width: f64 = msg_send![layer, borderWidth];
-        if border_width > 0.0 {
-            let cg_border: id = msg_send![color, CGColor];
-            if cg_border != nil {
-                let _: () = msg_send![layer, setBorderColor: cg_border];
+    if appkit_view_identifier(view)
+        .as_deref()
+        .is_some_and(footer_identifier_uses_keycap_border)
+    {
+        let layer: id = msg_send![view, layer];
+        if layer != nil {
+            let border_width: f64 = msg_send![layer, borderWidth];
+            if border_width > 0.0 {
+                let cg_border: id = msg_send![color, CGColor];
+                if cg_border != nil {
+                    let _: () = msg_send![layer, setBorderColor: cg_border];
+                }
             }
         }
     }
@@ -7161,14 +7312,97 @@ unsafe fn footer_button_visual_root(button: id) -> id {
     if button == nil {
         return nil;
     }
-    let state_view = button
+    let visual_root = button
         .as_ref()
-        .map(|object| *object.get_ivar::<usize>("_stateView") as id)
+        .map(|object| *object.get_ivar::<usize>("_visualRoot") as id)
         .unwrap_or(nil);
-    if state_view != nil {
-        state_view
+    if visual_root != nil {
+        visual_root
     } else {
         msg_send![button, superview]
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_footer_button_visual_state(button: id, state: crate::theme::MainMenuRowState) {
+    if button == nil {
+        return;
+    }
+
+    let theme = crate::theme::get_cached_theme();
+    let colors = crate::components::footer_chrome::resolved_footer_button_visual_colors(&theme)
+        .row_states
+        .for_state(state);
+    let border_alpha = crate::components::footer_chrome::themed_footer_button_border_alpha(
+        &theme,
+        matches!(state, crate::theme::MainMenuRowState::Active),
+    );
+    let state_code = match state {
+        crate::theme::MainMenuRowState::Rest => 0usize,
+        crate::theme::MainMenuRowState::Hover => 1usize,
+        crate::theme::MainMenuRowState::Active => 2usize,
+    };
+    let state_signature = state_code
+        | ((colors.background_rgba.is_some() as usize) << 8)
+        | ((colors.background_rgba.unwrap_or_default() as usize) << 16);
+    let color_signature =
+        colors.primary_foreground_rgba as usize | ((border_alpha.to_bits() as usize) << 32);
+
+    apply_footer_button_background(button, colors.background_rgba);
+    let visual_root = footer_button_visual_root(button);
+    set_footer_button_foreground_rgba(visual_root, colors.primary_foreground_rgba);
+    set_footer_button_border_alpha(visual_root, border_alpha as f64);
+
+    let button_id =
+        appkit_view_identifier(button).unwrap_or_else(|| "unidentified-footer-button".to_string());
+    if !native_footer_visual_event_changed(&button_id, state_signature, color_signature) {
+        return;
+    }
+    tracing::info!(
+        target: "script_kit::footer_popup",
+        event = "native_footer_button_visual_state_applied",
+        button_id = %button_id,
+        state = ?state,
+        has_background = colors.background_rgba.is_some(),
+        background_rgba = colors.background_rgba.unwrap_or_default(),
+        foreground_rgba = colors.primary_foreground_rgba,
+        "Applied canonical main-menu row colors to native footer button"
+    );
+}
+
+fn native_footer_visual_event_changed(
+    button_id: &str,
+    state_signature: usize,
+    color_signature: usize,
+) -> bool {
+    static LAST_REPORTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (usize, usize)>>,
+    > = std::sync::OnceLock::new();
+    let reported =
+        LAST_REPORTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let Ok(mut reported) = reported.lock() else {
+        // A poisoned diagnostics cache must never suppress real rendering.
+        return true;
+    };
+    let signature = (state_signature, color_signature);
+    if reported.get(button_id).copied() == Some(signature) {
+        false
+    } else {
+        reported.insert(button_id.to_string(), signature);
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn refresh_footer_button_visual_state_group(button: id) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if button == nil {
+        return;
+    }
+    let group_root: id = msg_send![button, superview];
+    if group_root != nil {
+        refresh_footer_button_visual_states(group_root);
     }
 }
 
@@ -7202,21 +7436,7 @@ extern "C" fn footer_button_mouse_down(
         if let Some(obj) = button_id.as_mut() {
             obj.set_ivar::<cocoa::base::BOOL>("_selected", YES);
         }
-        let theme = crate::theme::get_cached_theme();
-        apply_footer_button_background(
-            button_id,
-            Some(footer_button_active_fill_rgba(
-                FooterAction::Actions,
-                &theme,
-            )),
-        );
-        let visual_root = footer_button_visual_root(button_id);
-        set_footer_button_text_opacity(visual_root, 1.0);
-        set_footer_button_border_alpha(
-            visual_root,
-            crate::components::footer_chrome::themed_footer_button_border_alpha(&theme, true)
-                as f64,
-        );
+        refresh_footer_button_visual_state_group(button_id);
 
         tracing::debug!(
             target: "script_kit::footer_popup",
@@ -7234,8 +7454,6 @@ extern "C" fn footer_button_mouse_entered(
     _: objc::runtime::Sel,
     _event: id,
 ) {
-    use objc::{msg_send, sel, sel_impl};
-
     // SAFETY: Set hover background on the parent container's layer.
     // Recompute color from theme each time to avoid dangling CGColor pointers.
     unsafe {
@@ -7244,6 +7462,10 @@ extern "C" fn footer_button_mouse_entered(
             return;
         }
         let is_actions: cocoa::base::BOOL = *this.get_ivar::<cocoa::base::BOOL>("_isActionsButton");
+        let selected: cocoa::base::BOOL = *this.get_ivar::<cocoa::base::BOOL>("_selected");
+        if let Some(object) = (this as *const _ as id).as_mut() {
+            object.set_ivar::<cocoa::base::BOOL>("_hovered", YES);
+        }
         tracing::debug!(
             target: "script_kit::footer_popup",
             event = "native_footer_button_hover_entered",
@@ -7251,26 +7473,7 @@ extern "C" fn footer_button_mouse_entered(
             "Native footer button hover entered"
         );
 
-        let visual_root = footer_button_visual_root(this as *const _ as id);
-        if visual_root == nil {
-            return;
-        }
-        let layer: id = msg_send![visual_root, layer];
-        if layer == nil {
-            return;
-        }
-        let theme = crate::theme::get_cached_theme();
-        apply_footer_button_background(
-            this as *const _ as id,
-            Some(footer_button_hover_fill_rgba(&theme)),
-        );
-        set_footer_button_text_opacity(visual_root, 1.0);
-        set_footer_button_border_alpha(
-            visual_root,
-            crate::components::footer_chrome::footer_keycap_border_hover_alpha(&theme).max(
-                crate::components::footer_chrome::themed_footer_button_border_alpha(&theme, false),
-            ) as f64,
-        );
+        refresh_footer_button_visual_state_group(this as *const _ as id);
     }
 }
 
@@ -7280,8 +7483,6 @@ extern "C" fn footer_button_mouse_exited(
     _: objc::runtime::Sel,
     _event: id,
 ) {
-    use objc::{msg_send, sel, sel_impl};
-
     // SAFETY: Clear hover background on the parent container's layer.
     // If this button has _selected set, restore the selected color instead
     // of clearing.
@@ -7289,6 +7490,9 @@ extern "C" fn footer_button_mouse_exited(
         let selected: cocoa::base::BOOL = *this.get_ivar::<cocoa::base::BOOL>("_selected");
         let is_actions: cocoa::base::BOOL = *this.get_ivar::<cocoa::base::BOOL>("_isActionsButton");
         let actions_window_open = crate::actions::is_actions_window_open();
+        if let Some(object) = (this as *const _ as id).as_mut() {
+            object.set_ivar::<cocoa::base::BOOL>("_hovered", NO);
+        }
         tracing::debug!(
             target: "script_kit::footer_popup",
             event = "native_footer_button_hover_exited",
@@ -7298,42 +7502,7 @@ extern "C" fn footer_button_mouse_exited(
             "Native footer button hover exited"
         );
 
-        let visual_root = footer_button_visual_root(this as *const _ as id);
-        if visual_root == nil {
-            return;
-        }
-        let layer: id = msg_send![visual_root, layer];
-        if layer == nil {
-            return;
-        }
-
-        let theme = crate::theme::get_cached_theme();
-        if selected == YES || (is_actions == YES && actions_window_open) {
-            apply_footer_button_background(
-                this as *const _ as id,
-                Some(footer_button_active_fill_rgba_for_actions(
-                    is_actions, &theme,
-                )),
-            );
-        } else {
-            // Restore the resting state: accent-fill variations keep a subtle
-            // tint at rest (Some), all others clear to transparent (None).
-            apply_footer_button_background(
-                this as *const _ as id,
-                footer_button_rest_fill_rgba(&theme),
-            );
-        }
-        set_footer_button_text_opacity(
-            visual_root,
-            crate::theme::opacity::OPACITY_TEXT_MUTED as f64,
-        );
-        set_footer_button_border_alpha(
-            visual_root,
-            crate::components::footer_chrome::themed_footer_button_border_alpha(
-                &theme,
-                selected == YES || (is_actions == YES && actions_window_open),
-            ) as f64,
-        );
+        refresh_footer_button_visual_state_group(this as *const _ as id);
     }
 }
 

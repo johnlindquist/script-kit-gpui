@@ -79,6 +79,181 @@ pub(crate) struct AppChromeColors {
     pub drop_target_active_border_rgba: u32,
 }
 
+/// Which theme color owns a main-menu row's hover/active fill.
+///
+/// This lives in the renderer-neutral theme layer so list rows and floating
+/// buttons cannot independently choose different fill bases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MainMenuRowFillBase {
+    TextPrimary,
+    Accent,
+}
+
+/// Semantic state shared by main-menu rows and floating footer buttons.
+///
+/// Active deliberately wins over hover so an open/selected Actions button
+/// cannot dim merely because the pointer is still over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MainMenuRowState {
+    Rest,
+    Hover,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainMenuRowStateColors {
+    pub background_rgba: Option<u32>,
+    /// One primary foreground serves labels and shortcut glyphs. Keeping one
+    /// field makes their parity structural rather than a rendering convention.
+    pub primary_foreground_rgba: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainMenuRowStatePalette {
+    pub rest: MainMenuRowStateColors,
+    pub hover: MainMenuRowStateColors,
+    pub active: MainMenuRowStateColors,
+}
+
+impl MainMenuRowStatePalette {
+    pub(crate) fn for_state(self, state: MainMenuRowState) -> MainMenuRowStateColors {
+        match state {
+            MainMenuRowState::Rest => self.rest,
+            MainMenuRowState::Hover => self.hover,
+            MainMenuRowState::Active => self.active,
+        }
+    }
+}
+
+/// Primitive row-color inputs used by renderers with effective metric
+/// overrides. No renderer type crosses this theme-layer boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MainMenuRowColorInputs {
+    pub row_kind: crate::designs::MainMenuRowKind,
+    pub row_hover_fill_alpha: u8,
+    pub row_selected_fill_alpha: u8,
+    pub theme_hover_opacity: f32,
+    pub text_primary_hex: u32,
+    pub accent_selected_hex: u32,
+    pub text_on_accent_hex: u32,
+    pub primary_name_alpha: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedMainMenuRowStateFill {
+    pub base: MainMenuRowFillBase,
+    pub hover_alpha: u8,
+    pub active_alpha: u8,
+}
+
+pub(crate) fn resolve_main_menu_row_state_fill(
+    row_kind: crate::designs::MainMenuRowKind,
+    row_hover_fill_alpha: u8,
+    row_selected_fill_alpha: u8,
+    theme_hover_opacity: f32,
+) -> ResolvedMainMenuRowStateFill {
+    use crate::designs::MainMenuRowKind as K;
+
+    let base = match row_kind {
+        K::IconTile
+        | K::GraphitePill
+        | K::Smoke
+        | K::BlueGlass
+        | K::LiquidPrism
+        | K::MilkGlass
+        | K::SpotlightLuxe => MainMenuRowFillBase::TextPrimary,
+        K::WarmGold
+        | K::FrostedCommand
+        | K::AuroraSlate
+        | K::OceanGlass
+        | K::StudioPaperGlass
+        | K::OperatorMonoGlass
+        | K::ProConsole
+        | K::CarbonNeon => MainMenuRowFillBase::Accent,
+    };
+    let hover_alpha = if matches!(row_kind, K::IconTile) {
+        ((theme_hover_opacity * 255.0) as u32)
+            .max(u32::from(row_hover_fill_alpha))
+            .min(u32::from(u8::MAX)) as u8
+    } else {
+        row_hover_fill_alpha
+    };
+
+    ResolvedMainMenuRowStateFill {
+        base,
+        hover_alpha,
+        active_alpha: row_selected_fill_alpha,
+    }
+}
+
+pub(crate) fn resolve_main_menu_row_state_palette_from_parts(
+    inputs: MainMenuRowColorInputs,
+) -> MainMenuRowStatePalette {
+    use crate::designs::MainMenuRowKind as K;
+
+    let fill = resolve_main_menu_row_state_fill(
+        inputs.row_kind,
+        inputs.row_hover_fill_alpha,
+        inputs.row_selected_fill_alpha,
+        inputs.theme_hover_opacity,
+    );
+    let fill_hex = match fill.base {
+        MainMenuRowFillBase::TextPrimary => inputs.text_primary_hex,
+        MainMenuRowFillBase::Accent => inputs.accent_selected_hex,
+    };
+    let primary_foreground_rgba =
+        (inputs.text_primary_hex << 8) | u32::from(inputs.primary_name_alpha);
+    let active_foreground_hex = match inputs.row_kind {
+        K::CarbonNeon => inputs.text_on_accent_hex,
+        K::OperatorMonoGlass => inputs.accent_selected_hex,
+        _ => inputs.text_primary_hex,
+    };
+    let active_foreground_rgba = (active_foreground_hex << 8) | 0xFF;
+
+    MainMenuRowStatePalette {
+        rest: MainMenuRowStateColors {
+            background_rgba: None,
+            primary_foreground_rgba,
+        },
+        hover: MainMenuRowStateColors {
+            background_rgba: Some((fill_hex << 8) | u32::from(fill.hover_alpha)),
+            primary_foreground_rgba,
+        },
+        active: MainMenuRowStateColors {
+            background_rgba: Some((fill_hex << 8) | u32::from(fill.active_alpha)),
+            primary_foreground_rgba: active_foreground_rgba,
+        },
+    }
+}
+
+pub(crate) fn resolve_main_menu_row_state_palette(
+    theme: &Theme,
+    variant: crate::designs::MainMenuThemeVariant,
+) -> MainMenuRowStatePalette {
+    let def = variant.def();
+    let opacity = theme.get_opacity();
+    resolve_main_menu_row_state_palette_from_parts(MainMenuRowColorInputs {
+        row_kind: def.row_kind,
+        row_hover_fill_alpha: def.row.hover_fill_alpha as u8,
+        row_selected_fill_alpha: def.row.selected_fill_alpha as u8,
+        theme_hover_opacity: opacity.hover,
+        text_primary_hex: theme.colors.text.primary,
+        accent_selected_hex: theme.colors.accent.selected,
+        text_on_accent_hex: theme.colors.text.on_accent,
+        primary_name_alpha: crate::theme::types::opacity_to_alpha(opacity.text_name) as u8,
+    })
+}
+
+pub(crate) fn main_menu_row_state_from_flags(active: bool, hovered: bool) -> MainMenuRowState {
+    if active {
+        MainMenuRowState::Active
+    } else if hovered {
+        MainMenuRowState::Hover
+    } else {
+        MainMenuRowState::Rest
+    }
+}
+
 /// Contrast-safe colors for semantic status chips (OK, Err, Warn, Info).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SemanticChipColors {
@@ -255,9 +430,96 @@ impl AppChromeColors {
 
 #[cfg(test)]
 mod tests {
-    use super::AppChromeColors;
+    use super::{
+        main_menu_row_state_from_flags, resolve_main_menu_row_state_palette,
+        resolve_main_menu_row_state_palette_from_parts, AppChromeColors, MainMenuRowColorInputs,
+        MainMenuRowState,
+    };
+    use crate::designs::{MainMenuRowKind, MainMenuThemeVariant};
     use crate::theme::Theme;
     use crate::ui_foundation::hex_to_rgba_with_opacity;
+
+    fn custom_row_inputs(row_kind: MainMenuRowKind) -> MainMenuRowColorInputs {
+        MainMenuRowColorInputs {
+            row_kind,
+            row_hover_fill_alpha: 0x12,
+            row_selected_fill_alpha: 0x20,
+            theme_hover_opacity: 0.0,
+            text_primary_hex: 0x112233,
+            accent_selected_hex: 0x445566,
+            text_on_accent_hex: 0xF0E0D0,
+            primary_name_alpha: 0xA1,
+        }
+    }
+
+    #[test]
+    fn main_menu_row_state_palette_matches_info_bar_base_bytes() {
+        for theme in [Theme::dark_default(), Theme::light_default()] {
+            let palette =
+                resolve_main_menu_row_state_palette(&theme, MainMenuThemeVariant::InfoBarBase);
+            let primary = theme.colors.text.primary;
+
+            assert_eq!(palette.rest.background_rgba, None);
+            assert_eq!(palette.hover.background_rgba, Some((primary << 8) | 0x12));
+            assert_eq!(palette.active.background_rgba, Some((primary << 8) | 0x20));
+            assert_eq!(palette.rest.primary_foreground_rgba, (primary << 8) | 0xFF);
+            assert_eq!(palette.hover.primary_foreground_rgba, (primary << 8) | 0xFF);
+            assert_eq!(
+                palette.active.primary_foreground_rgba,
+                (primary << 8) | 0xFF
+            );
+        }
+    }
+
+    #[test]
+    fn main_menu_row_state_palette_respects_text_name_and_hover_overrides() {
+        let palette = resolve_main_menu_row_state_palette_from_parts(MainMenuRowColorInputs {
+            theme_hover_opacity: 0.22,
+            ..custom_row_inputs(MainMenuRowKind::IconTile)
+        });
+
+        assert_eq!(palette.rest.primary_foreground_rgba, 0x112233A1);
+        assert_eq!(palette.hover.primary_foreground_rgba, 0x112233A1);
+        assert_eq!(palette.active.primary_foreground_rgba, 0x112233FF);
+        assert_eq!(palette.hover.background_rgba, Some(0x11223338));
+        assert_eq!(palette.active.background_rgba, Some(0x11223320));
+    }
+
+    #[test]
+    fn main_menu_row_state_palette_resolves_accent_row_kinds() {
+        let accent = resolve_main_menu_row_state_palette_from_parts(custom_row_inputs(
+            MainMenuRowKind::WarmGold,
+        ));
+        assert_eq!(accent.hover.background_rgba, Some(0x44556612));
+        assert_eq!(accent.active.background_rgba, Some(0x44556620));
+        assert_eq!(accent.active.primary_foreground_rgba, 0x112233FF);
+
+        let on_accent = resolve_main_menu_row_state_palette_from_parts(custom_row_inputs(
+            MainMenuRowKind::CarbonNeon,
+        ));
+        assert_eq!(on_accent.active.primary_foreground_rgba, 0xF0E0D0FF);
+
+        let accent_text = resolve_main_menu_row_state_palette_from_parts(custom_row_inputs(
+            MainMenuRowKind::OperatorMonoGlass,
+        ));
+        assert_eq!(accent_text.active.primary_foreground_rgba, 0x445566FF);
+    }
+
+    #[test]
+    fn main_menu_row_state_prefers_active_over_hover() {
+        assert_eq!(
+            main_menu_row_state_from_flags(true, true),
+            MainMenuRowState::Active
+        );
+        assert_eq!(
+            main_menu_row_state_from_flags(false, true),
+            MainMenuRowState::Hover
+        );
+        assert_eq!(
+            main_menu_row_state_from_flags(false, false),
+            MainMenuRowState::Rest
+        );
+    }
 
     #[test]
     fn light_theme_selection_follows_selected_subtle_and_theme_selected_opacity() {

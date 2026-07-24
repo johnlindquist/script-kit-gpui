@@ -7,7 +7,6 @@
 
 use crate::designs::icon_variations::{icon_name_from_str, IconName};
 use crate::logging;
-use crate::ui_foundation::HexColorExt;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -273,12 +272,7 @@ impl ListItemMetricsOverride {
     }
 }
 
-/// Which base color a main-menu row's selection/hover fill derives from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MainMenuRowFillBase {
-    TextPrimary,
-    Accent,
-}
+pub use crate::theme::MainMenuRowFillBase;
 
 /// Fill bytes a main-menu row actually paints. Shared by `ListItem::render`
 /// and the design-contract exporter (`design/mockups`) so the HTML mockups
@@ -299,29 +293,12 @@ pub fn resolved_main_menu_row_fill(
     theme_hover_opacity: f32,
 ) -> ResolvedMainMenuRowFill {
     use crate::designs::MainMenuRowKind as K;
-    let base = match row_kind {
-        K::IconTile
-        | K::GraphitePill
-        | K::Smoke
-        | K::BlueGlass
-        | K::LiquidPrism
-        | K::MilkGlass
-        | K::SpotlightLuxe => MainMenuRowFillBase::TextPrimary,
-        K::WarmGold
-        | K::FrostedCommand
-        | K::AuroraSlate
-        | K::OceanGlass
-        | K::StudioPaperGlass
-        | K::OperatorMonoGlass
-        | K::ProConsole
-        | K::CarbonNeon => MainMenuRowFillBase::Accent,
-    };
-    // IconTile lets the theme's hover opacity win when it is stronger than
-    // the component token; every other kind paints the component token as-is.
-    let hover_alpha = match row_kind {
-        K::IconTile => ((theme_hover_opacity * 255.0) as u32).max(metrics.row_hover_fill_alpha),
-        _ => metrics.row_hover_fill_alpha,
-    } as u8;
+    let fill = crate::theme::resolve_main_menu_row_state_fill(
+        row_kind,
+        metrics.row_hover_fill_alpha as u8,
+        metrics.row_selected_fill_alpha as u8,
+        theme_hover_opacity,
+    );
     let icon_tile_alpha_floor: u32 = match row_kind {
         K::MilkGlass => 0xB8,
         K::ProConsole => 0xC8,
@@ -339,9 +316,9 @@ pub fn resolved_main_menu_row_fill(
         _ => 7.0,
     };
     ResolvedMainMenuRowFill {
-        base,
-        selected_alpha: metrics.row_selected_fill_alpha as u8,
-        hover_alpha,
+        base: fill.base,
+        selected_alpha: fill.active_alpha,
+        hover_alpha: fill.hover_alpha,
         icon_tile_alpha: metrics.icon_tile_fill_alpha.max(icon_tile_alpha_floor),
         icon_tile_radius: metrics.icon_tile_radius.max(icon_tile_radius_floor),
     }
@@ -1028,7 +1005,7 @@ mod icon_kind_tests {
 
 #[cfg(test)]
 mod list_item_colors_tests {
-    use super::{ListItemColors, ALPHA_DIVIDER};
+    use super::{ListItemColors, ListItemMetricsOverride, ALPHA_DIVIDER};
 
     #[test]
     fn test_from_theme_sets_text_on_accent_from_theme_text_on_accent() {
@@ -1059,6 +1036,40 @@ mod list_item_colors_tests {
     #[test]
     fn test_alpha_divider_matches_ui_foundation_constant() {
         assert_eq!(ALPHA_DIVIDER, crate::ui_foundation::ALPHA_DIVIDER as u32);
+    }
+
+    #[test]
+    fn list_item_render_inputs_resolve_through_canonical_state_palette() {
+        let theme = crate::theme::Theme::dark_default();
+        let mut colors = ListItemColors::from_theme(&theme);
+        colors.text_primary = 0x102030;
+        colors.accent_selected = 0x405060;
+        colors.text_on_accent = 0xF0E0D0;
+        colors.alpha_name = 0xA1;
+        colors.hover_opacity = 0.22;
+        let mut metrics = ListItemMetricsOverride::from_main_menu_theme(
+            crate::designs::MainMenuThemeVariant::InfoBarBase,
+        );
+        metrics.row_hover_fill_alpha = 0x12;
+        metrics.row_selected_fill_alpha = 0x20;
+
+        let palette = crate::theme::resolve_main_menu_row_state_palette_from_parts(
+            crate::theme::MainMenuRowColorInputs {
+                row_kind: crate::designs::MainMenuRowKind::IconTile,
+                row_hover_fill_alpha: metrics.row_hover_fill_alpha as u8,
+                row_selected_fill_alpha: metrics.row_selected_fill_alpha as u8,
+                theme_hover_opacity: colors.hover_opacity,
+                text_primary_hex: colors.text_primary,
+                accent_selected_hex: colors.accent_selected,
+                text_on_accent_hex: colors.text_on_accent,
+                primary_name_alpha: colors.alpha_name as u8,
+            },
+        );
+
+        assert_eq!(palette.rest.primary_foreground_rgba, 0x102030A1);
+        assert_eq!(palette.hover.background_rgba, Some(0x10203038));
+        assert_eq!(palette.active.background_rgba, Some(0x10203020));
+        assert_eq!(palette.active.primary_foreground_rgba, 0x102030FF);
     }
 }
 
@@ -1668,10 +1679,6 @@ impl RenderOnce for ListItem {
             MainMenuRowKind::CarbonNeon | MainMenuRowKind::OceanGlass
         ) && selected
             && matches!(row_kind, MainMenuRowKind::CarbonNeon);
-        let name_is_accent = matches!(
-            row_kind,
-            MainMenuRowKind::CarbonNeon | MainMenuRowKind::OperatorMonoGlass
-        ) && selected;
         let icon_is_accent_bright = matches!(
             row_kind,
             MainMenuRowKind::BlueGlass
@@ -1710,16 +1717,32 @@ impl RenderOnce for ListItem {
         // default. The byte resolution is shared with the design-contract
         // exporter — change resolved_main_menu_row_fill, not this call site.
         let row_fill = resolved_main_menu_row_fill(row_kind, &metrics, colors.hover_opacity);
-        let (selected_bg, hover_bg): (Hsla, Hsla) = match row_fill.base {
-            MainMenuRowFillBase::TextPrimary => (
-                colors.text_primary.rgba8(row_fill.selected_alpha),
-                colors.text_primary.rgba8(row_fill.hover_alpha),
-            ),
-            MainMenuRowFillBase::Accent => (
-                accent_at(row_fill.selected_alpha as u32).into(),
-                accent_at(row_fill.hover_alpha as u32).into(),
-            ),
-        };
+        let row_states = crate::theme::resolve_main_menu_row_state_palette_from_parts(
+            crate::theme::MainMenuRowColorInputs {
+                row_kind,
+                row_hover_fill_alpha: metrics.row_hover_fill_alpha as u8,
+                row_selected_fill_alpha: metrics.row_selected_fill_alpha as u8,
+                theme_hover_opacity: colors.hover_opacity,
+                text_primary_hex: colors.text_primary,
+                accent_selected_hex: colors.accent_selected,
+                text_on_accent_hex: colors.text_on_accent,
+                primary_name_alpha: colors.alpha_name as u8,
+            },
+        );
+        let selected_bg: Hsla = rgba(
+            row_states
+                .active
+                .background_rgba
+                .expect("active main-menu rows always have a background"),
+        )
+        .into();
+        let hover_bg: Hsla = rgba(
+            row_states
+                .hover
+                .background_rgba
+                .expect("hovered main-menu rows always have a background"),
+        )
+        .into();
 
         // Icon element (if present) - displayed on the left
         // Supports both emoji strings and PNG image data
@@ -1841,12 +1864,10 @@ impl RenderOnce for ListItem {
                 rgb(color)
             } else if on_accent_text {
                 rgb(colors.text_on_accent)
-            } else if name_is_accent {
-                accent_at(0xFF)
             } else if self.selected {
-                rgb(colors.text_primary)
+                rgba(row_states.active.primary_foreground_rgba)
             } else {
-                rgba((colors.text_primary << 8) | colors.alpha_name)
+                rgba(row_states.rest.primary_foreground_rgba)
             };
             let highlight_style = HighlightStyle {
                 color: Some(highlight_color.into()),
@@ -1892,12 +1913,10 @@ impl RenderOnce for ListItem {
                 rgb(color)
             } else if on_accent_text {
                 rgb(colors.text_on_accent)
-            } else if name_is_accent {
-                accent_at(0xFF)
             } else if self.selected {
-                rgb(colors.text_primary)
+                rgba(row_states.active.primary_foreground_rgba)
             } else {
-                rgba((colors.text_primary << 8) | colors.alpha_name)
+                rgba(row_states.rest.primary_foreground_rgba)
             };
             div()
                 .text_size(px(metrics.name_font_size))
@@ -2041,9 +2060,13 @@ impl RenderOnce for ListItem {
                     "footer-keycap-selected-only",
                 );
                 let theme = crate::theme::get_cached_theme();
+                let shortcut_state = row_states.for_state(
+                    crate::theme::main_menu_row_state_from_flags(selected, hover_visible),
+                );
                 crate::components::footer_chrome::render_footer_row_shortcut_keycaps_from_tokens(
                     shortcut_tokens.iter().map(String::as_str),
                     &theme,
+                    shortcut_state.primary_foreground_rgba,
                 )
             } else {
                 div().into_any_element()

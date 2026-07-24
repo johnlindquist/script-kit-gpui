@@ -6,7 +6,6 @@ use gpui::{
 use std::time::Duration;
 
 use crate::list_item::FONT_SYSTEM_UI;
-use crate::theme::opacity::OPACITY_TEXT_MUTED;
 use crate::theme::Theme;
 use crate::ui_foundation::HexColorExt;
 
@@ -259,6 +258,10 @@ pub(crate) struct FooterHintButtonSpec {
     pub(crate) label_font_size_px: Option<f32>,
     pub(crate) keycap_font_size_px: Option<f32>,
     pub(crate) keycap_height_px: Option<f32>,
+    /// Explicit non-footer rest styling for shared hint anatomy (for example,
+    /// header context chips). Floating footer buttons leave this unset so the
+    /// canonical main-menu row palette owns their foreground.
+    pub(crate) rest_text_alpha: Option<u32>,
     pub(crate) hover_text_alpha: Option<u32>,
     pub(crate) hover_glyph_alpha: Option<u32>,
     pub(crate) hover_keycap_border_alpha: Option<u32>,
@@ -341,6 +344,7 @@ pub(crate) fn current_main_menu_footer_appkit_font_weight() -> f64 {
 
 pub(crate) fn footer_rail_chrome(theme: &Theme) -> FooterRailChrome {
     let chrome = crate::theme::AppChromeColors::from_theme(theme);
+    let row_states = resolved_footer_button_visual_colors(theme).row_states;
     let metrics = current_main_menu_footer_metrics();
     FooterRailChrome {
         height_px: metrics.height_px,
@@ -348,8 +352,14 @@ pub(crate) fn footer_rail_chrome(theme: &Theme) -> FooterRailChrome {
         item_gap_px: metrics.item_gap_px,
         surface_rgba: chrome.inline_dropdown_surface_rgba,
         divider_rgba: chrome.divider_rgba,
-        hover_rgba: chrome.hover_rgba,
-        active_rgba: chrome.selection_rgba,
+        hover_rgba: row_states
+            .hover
+            .background_rgba
+            .expect("hovered main-menu rows always have a background"),
+        active_rgba: row_states
+            .active
+            .background_rgba
+            .expect("active main-menu rows always have a background"),
         button_radius_px: metrics.button_radius,
     }
 }
@@ -529,10 +539,31 @@ where
 {
     let metrics = current_main_menu_footer_metrics();
     let interactive = action.is_some();
-    let hover_bg = rgba(themed_footer_button_hover_rgba(theme));
-    let active_bg = rgba(themed_footer_button_active_rgba(theme));
-    let hover_text = footer_hover_text_color(theme, None);
-    let hover_glyph = footer_hover_glyph_color(theme, None);
+    let row_states = resolved_footer_button_visual_colors(theme).row_states;
+    let base_state = if selected {
+        row_states.active
+    } else {
+        row_states.rest
+    };
+    let hover_state = if selected {
+        row_states.active
+    } else {
+        row_states.hover
+    };
+    let hover_bg = rgba(
+        row_states
+            .hover
+            .background_rgba
+            .expect("hovered main-menu rows always have a background"),
+    );
+    let active_bg = rgba(
+        row_states
+            .active
+            .background_rgba
+            .expect("active main-menu rows always have a background"),
+    );
+    let base_foreground = rgba(base_state.primary_foreground_rgba);
+    let hover_foreground: gpui::Hsla = rgba(hover_state.primary_foreground_rgba).into();
     let mut marker = div()
         .id(id)
         .h(px(footer_button_height(metrics.height_px)))
@@ -549,7 +580,9 @@ where
     if interactive {
         marker = marker
             .cursor_pointer()
-            .hover(move |style| style.bg(hover_bg))
+            .when(!selected, |style| {
+                style.hover(move |style| style.bg(hover_bg))
+            })
             .active(move |style| style.bg(active_bg));
     }
 
@@ -577,20 +610,17 @@ where
                 .path(path)
                 .size(px(13.0))
                 .flex_none()
-                .text_color(footer_hint_text_color(theme))
+                .text_color(base_foreground)
                 .group_hover("config-footer-left-marker", move |style| {
-                    style.text_color(hover_glyph)
+                    style.text_color(hover_foreground)
                 }),
         );
     }
     if let Some(keycap) = keycap.filter(|key| !key.trim().is_empty()) {
-        marker = marker.child(render_footer_shortcut_keycaps_with_metrics(
+        marker = marker.child(render_footer_shortcut_keycaps_for_state(
             keycap.to_string(),
             theme,
-            None,
-            None,
-            None,
-            None,
+            selected,
         ));
     }
     if !label.trim().is_empty() {
@@ -604,9 +634,9 @@ where
                     metrics.font_weight
                 })
                 .text_size(px(metrics.label_font_size))
-                .text_color(footer_hint_text_color(theme))
+                .text_color(base_foreground)
                 .group_hover("config-footer-left-marker", move |style| {
-                    style.text_color(hover_text)
+                    style.text_color(hover_foreground)
                 })
                 .overflow_hidden()
                 .text_ellipsis()
@@ -991,42 +1021,48 @@ pub(crate) fn render_clickable_footer_hint_action_rail(
     render_footer_action_rail(id, buttons)
 }
 
-fn current_footer_button_theme_rgba(theme: &Theme, alpha: u32) -> u32 {
-    let def = crate::designs::current_main_menu_theme().def();
-    let chrome = crate::theme::AppChromeColors::from_theme(theme);
-    let hex = if def.footer.button.uses_accent {
-        chrome.accent_hex
-    } else {
-        theme.colors.text.primary
-    };
-    (hex << 8) | alpha
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FooterButtonVisualColors {
+    pub row_states: crate::theme::MainMenuRowStatePalette,
+}
+
+pub(crate) fn resolved_footer_button_visual_colors_for_variant(
+    theme: &Theme,
+    variant: crate::designs::MainMenuThemeVariant,
+) -> FooterButtonVisualColors {
+    FooterButtonVisualColors {
+        row_states: crate::theme::resolve_main_menu_row_state_palette(theme, variant),
+    }
+}
+
+pub(crate) fn resolved_footer_button_visual_colors(theme: &Theme) -> FooterButtonVisualColors {
+    resolved_footer_button_visual_colors_for_variant(
+        theme,
+        crate::designs::current_main_menu_theme(),
+    )
 }
 
 pub(crate) fn themed_footer_button_rest_rgba(theme: &Theme) -> Option<u32> {
-    crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .button
+    resolved_footer_button_visual_colors(theme)
+        .row_states
         .rest
-        .map(|alpha| current_footer_button_theme_rgba(theme, alpha))
+        .background_rgba
 }
 
 pub(crate) fn themed_footer_button_hover_rgba(theme: &Theme) -> u32 {
-    let alpha = crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .button
-        .hover;
-    current_footer_button_theme_rgba(theme, alpha)
+    resolved_footer_button_visual_colors(theme)
+        .row_states
+        .hover
+        .background_rgba
+        .expect("hovered main-menu rows always have a background")
 }
 
 pub(crate) fn themed_footer_button_active_rgba(theme: &Theme) -> u32 {
-    let alpha = crate::designs::current_main_menu_theme()
-        .def()
-        .footer
-        .button
-        .active;
-    current_footer_button_theme_rgba(theme, alpha)
+    resolved_footer_button_visual_colors(theme)
+        .row_states
+        .active
+        .background_rgba
+        .expect("active main-menu rows always have a background")
 }
 
 pub(crate) fn themed_footer_button_border_alpha(theme: &Theme, selected: bool) -> f32 {
@@ -1070,12 +1106,12 @@ pub(crate) fn footer_keycap_border_hover_alpha(theme: &Theme) -> f32 {
 }
 
 pub(crate) fn footer_hint_text_color(theme: &Theme) -> gpui::Rgba {
-    theme
-        .colors
-        .text
-        .primary
-        .with_opacity(OPACITY_TEXT_MUTED)
-        .to_rgb()
+    gpui::rgba(
+        resolved_footer_button_visual_colors(theme)
+            .row_states
+            .rest
+            .primary_foreground_rgba,
+    )
 }
 
 pub(crate) fn footer_keycap_border_color_for_state(theme: &Theme, selected: bool) -> gpui::Hsla {
@@ -1265,8 +1301,10 @@ pub(crate) fn render_footer_hint_content(
         None,
         None,
         None,
+        None,
         false,
         FooterHintButtonLayoutOverrides::default(),
+        false,
     )
 }
 
@@ -1283,6 +1321,18 @@ pub(crate) fn render_footer_hint_content_flex(
     key_first: bool,
     justify: FooterHintContentJustify,
 ) -> AnyElement {
+    render_footer_hint_content_flex_for_state(label, key, mode, theme, key_first, justify, false)
+}
+
+pub(crate) fn render_footer_hint_content_flex_for_state(
+    label: SharedString,
+    key: SharedString,
+    mode: FooterHintKeyMode,
+    theme: &Theme,
+    key_first: bool,
+    justify: FooterHintContentJustify,
+    selected: bool,
+) -> AnyElement {
     render_footer_hint_content_flex_with_layout(
         label,
         key,
@@ -1291,11 +1341,12 @@ pub(crate) fn render_footer_hint_content_flex(
         key_first,
         justify,
         FooterHintButtonLayoutOverrides::default(),
+        selected,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_footer_hint_content_flex_with_layout(
+fn render_footer_hint_content_flex_with_layout(
     label: SharedString,
     key: SharedString,
     mode: FooterHintKeyMode,
@@ -1303,10 +1354,22 @@ pub(crate) fn render_footer_hint_content_flex_with_layout(
     key_first: bool,
     justify: FooterHintContentJustify,
     layout: FooterHintButtonLayoutOverrides,
+    selected: bool,
 ) -> AnyElement {
-    let footer_text = footer_hint_text_color(theme);
-    let hover_text = footer_hover_text_color(theme, None);
-    let hover_glyph = footer_hover_glyph_color(theme, None);
+    let row_states = resolved_footer_button_visual_colors(theme).row_states;
+    let base_state = if selected {
+        row_states.active
+    } else {
+        row_states.rest
+    };
+    let hover_state = if selected {
+        row_states.active
+    } else {
+        row_states.hover
+    };
+    let footer_text = gpui::rgba(base_state.primary_foreground_rgba);
+    let hover_text: gpui::Hsla = gpui::rgba(hover_state.primary_foreground_rgba).into();
+    let hover_glyph = hover_text;
     let metrics = current_main_menu_footer_metrics();
     let default_edge_padding_x = match justify {
         FooterHintContentJustify::KeyAnchored => metrics.run_button_padding_x,
@@ -1341,6 +1404,7 @@ pub(crate) fn render_footer_hint_content_flex_with_layout(
             None,
             Some(content_gap),
             Some(FooterKeycapHoverStyle {
+                base: footer_text,
                 text: hover_text,
                 glyph: hover_glyph,
                 border_alpha: None,
@@ -1394,7 +1458,9 @@ pub(crate) fn render_footer_hint_button_like_with_layout(
     layout: FooterHintButtonLayoutOverrides,
     theme: &Theme,
 ) -> AnyElement {
-    render_footer_hint_button_like_with_layout_and_shrinkable_label(spec, layout, false, theme)
+    render_footer_hint_button_like_with_layout_and_shrinkable_label(
+        spec, layout, false, false, theme,
+    )
 }
 
 /// Footer-language hint content whose label yields to its keycaps under real
@@ -1408,6 +1474,7 @@ pub(crate) fn render_footer_hint_button_like_shrinkable(
         spec,
         FooterHintButtonLayoutOverrides::default(),
         true,
+        false,
         theme,
     )
 }
@@ -1416,6 +1483,7 @@ fn render_footer_hint_button_like_with_layout_and_shrinkable_label(
     spec: FooterHintButtonSpec,
     layout: FooterHintButtonLayoutOverrides,
     shrinkable_label: bool,
+    selected: bool,
     theme: &Theme,
 ) -> AnyElement {
     render_footer_hint_content_impl(
@@ -1429,11 +1497,13 @@ fn render_footer_hint_button_like_with_layout_and_shrinkable_label(
         spec.label_font_size_px,
         spec.keycap_font_size_px,
         spec.keycap_height_px,
+        spec.rest_text_alpha,
         spec.hover_text_alpha,
         spec.hover_glyph_alpha,
         spec.hover_keycap_border_alpha,
         shrinkable_label,
         layout,
+        selected,
     )
 }
 
@@ -1476,25 +1546,34 @@ pub(crate) fn render_footer_hint_action_button_frame(
             spec.key_first,
             spec.justify,
             content_layout,
+            spec.selected,
         )
     } else {
-        render_footer_hint_button_like_with_layout(
-            FooterHintButtonSpec {
-                label: spec.label,
-                key: spec.key,
-                slot_width_px: Some(spec.slot_width_px),
-                key_first: spec.key_first,
-                justify: spec.justify,
-                label_font_size_px: None,
-                keycap_font_size_px: None,
-                keycap_height_px: None,
-                hover_text_alpha: None,
-                hover_glyph_alpha: None,
-                hover_keycap_border_alpha: None,
-            },
-            content_layout,
-            theme,
-        )
+        let button_spec = FooterHintButtonSpec {
+            label: spec.label,
+            key: spec.key,
+            slot_width_px: Some(spec.slot_width_px),
+            key_first: spec.key_first,
+            justify: spec.justify,
+            label_font_size_px: None,
+            keycap_font_size_px: None,
+            keycap_height_px: None,
+            rest_text_alpha: None,
+            hover_text_alpha: None,
+            hover_glyph_alpha: None,
+            hover_keycap_border_alpha: None,
+        };
+        if spec.selected {
+            render_footer_hint_button_like_with_layout_and_shrinkable_label(
+                button_spec,
+                content_layout,
+                false,
+                true,
+                theme,
+            )
+        } else {
+            render_footer_hint_button_like_with_layout(button_spec, content_layout, theme)
+        }
     };
 
     let hug_frame = spec.layout.hug_frame_to_content;
@@ -1523,39 +1602,33 @@ pub(crate) fn render_footer_hint_action_button_frame(
                 .overflow_hidden()
                 .rounded(px(radius))
                 .when(spec.selected, |style| style.bg(active_bg))
-                .group_hover("footer-action-button-slot", move |style| style.bg(hover_bg))
+                .when(!spec.selected, |style| {
+                    style.group_hover("footer-action-button-slot", move |style| style.bg(hover_bg))
+                })
                 .child(content),
         )
 }
 
 pub(crate) fn footer_hover_text_color(theme: &Theme, alpha: Option<u32>) -> gpui::Hsla {
-    let alpha = alpha.unwrap_or_else(|| {
-        crate::designs::current_main_menu_theme()
-            .def()
-            .footer
-            .button
-            .hover_text_alpha
-    });
-    theme
-        .colors
-        .text
-        .primary
-        .with_opacity((alpha as f32 / 255.0).clamp(0.0, 1.0))
+    if let Some(alpha) = alpha {
+        theme
+            .colors
+            .text
+            .primary
+            .with_opacity((alpha as f32 / 255.0).clamp(0.0, 1.0))
+    } else {
+        gpui::rgba(
+            resolved_footer_button_visual_colors(theme)
+                .row_states
+                .hover
+                .primary_foreground_rgba,
+        )
+        .into()
+    }
 }
 
 pub(crate) fn footer_hover_glyph_color(theme: &Theme, alpha: Option<u32>) -> gpui::Hsla {
-    let alpha = alpha.unwrap_or_else(|| {
-        crate::designs::current_main_menu_theme()
-            .def()
-            .footer
-            .button
-            .hover_glyph_alpha
-    });
-    theme
-        .colors
-        .text
-        .primary
-        .with_opacity((alpha as f32 / 255.0).clamp(0.0, 1.0))
+    footer_hover_text_color(theme, alpha)
 }
 
 // Keycap borders no longer change on hover (glass extrusion is the hover
@@ -1581,15 +1654,42 @@ fn render_footer_hint_content_impl(
     label_font_size_px: Option<f32>,
     keycap_font_size_px: Option<f32>,
     keycap_height_px: Option<f32>,
+    rest_text_alpha: Option<u32>,
     hover_text_alpha: Option<u32>,
     hover_glyph_alpha: Option<u32>,
     hover_keycap_border_alpha: Option<u32>,
     shrinkable_label: bool,
     layout: FooterHintButtonLayoutOverrides,
+    selected: bool,
 ) -> AnyElement {
-    let footer_text = footer_hint_text_color(theme);
-    let hover_text = footer_hover_text_color(theme, hover_text_alpha);
-    let hover_glyph = footer_hover_glyph_color(theme, hover_glyph_alpha);
+    let row_states = resolved_footer_button_visual_colors(theme).row_states;
+    let base_state = if selected {
+        row_states.active
+    } else {
+        row_states.rest
+    };
+    let footer_text = if selected {
+        gpui::rgba(base_state.primary_foreground_rgba)
+    } else if let Some(alpha) = rest_text_alpha {
+        theme
+            .colors
+            .text
+            .primary
+            .with_opacity((alpha as f32 / 255.0).clamp(0.0, 1.0))
+            .to_rgb()
+    } else {
+        gpui::rgba(base_state.primary_foreground_rgba)
+    };
+    let hover_text = if selected {
+        gpui::rgba(row_states.active.primary_foreground_rgba).into()
+    } else {
+        footer_hover_text_color(theme, hover_text_alpha)
+    };
+    let hover_glyph = if selected {
+        hover_text
+    } else {
+        footer_hover_glyph_color(theme, hover_glyph_alpha)
+    };
     let metrics = current_main_menu_footer_metrics();
     let default_edge_padding_x = match justify {
         FooterHintContentJustify::KeyAnchored => metrics.run_button_padding_x,
@@ -1641,6 +1741,7 @@ fn render_footer_hint_content_impl(
             keycap_height_px,
             Some(content_gap),
             Some(FooterKeycapHoverStyle {
+                base: footer_text,
                 text: hover_text,
                 glyph: hover_glyph,
                 border_alpha: hover_keycap_border_alpha,
@@ -1871,6 +1972,7 @@ fn render_footer_labelcap_constrained(
 
 #[derive(Clone, Copy)]
 pub(crate) struct FooterKeycapHoverStyle {
+    base: gpui::Rgba,
     text: gpui::Hsla,
     glyph: gpui::Hsla,
     border_alpha: Option<u32>,
@@ -1878,6 +1980,38 @@ pub(crate) struct FooterKeycapHoverStyle {
 
 pub(crate) fn render_footer_shortcut_keycaps(shortcut: String, theme: &Theme) -> AnyElement {
     render_footer_shortcut_keycaps_with_metrics(shortcut, theme, None, None, None, None)
+}
+
+pub(crate) fn render_footer_shortcut_keycaps_for_state(
+    shortcut: String,
+    theme: &Theme,
+    selected: bool,
+) -> AnyElement {
+    let row_states = resolved_footer_button_visual_colors(theme).row_states;
+    let base_state = if selected {
+        row_states.active
+    } else {
+        row_states.rest
+    };
+    let hover_state = if selected {
+        row_states.active
+    } else {
+        row_states.hover
+    };
+    let hover_foreground: gpui::Hsla = gpui::rgba(hover_state.primary_foreground_rgba).into();
+    render_footer_shortcut_keycaps_with_metrics(
+        shortcut,
+        theme,
+        None,
+        None,
+        None,
+        Some(FooterKeycapHoverStyle {
+            base: gpui::rgba(base_state.primary_foreground_rgba),
+            text: hover_foreground,
+            glyph: hover_foreground,
+            border_alpha: None,
+        }),
+    )
 }
 
 pub(crate) fn render_footer_shortcut_keycaps_with_metrics(
@@ -1902,13 +2036,28 @@ pub(crate) fn render_footer_shortcut_keycaps_with_metrics(
 pub(crate) fn render_footer_row_shortcut_keycaps_from_tokens<'a>(
     tokens: impl IntoIterator<Item = &'a str>,
     theme: &Theme,
+    primary_foreground_rgba: u32,
 ) -> AnyElement {
+    let foreground = gpui::rgba(primary_foreground_rgba);
+    let foreground_hsla: gpui::Hsla = foreground.into();
     div()
         .flex()
         .flex_none()
         .items_center()
         .group("footer-action-button")
-        .child(render_footer_shortcut_keycaps_from_tokens(tokens, theme))
+        .child(render_footer_shortcut_keycaps_from_tokens_with_metrics(
+            tokens,
+            theme,
+            None,
+            None,
+            None,
+            Some(FooterKeycapHoverStyle {
+                base: foreground,
+                text: foreground_hsla,
+                glyph: foreground_hsla,
+                border_alpha: None,
+            }),
+        ))
         .into_any_element()
 }
 
@@ -2026,7 +2175,9 @@ fn render_footer_keycap_with_metrics(
     keycap_height_px: Option<f32>,
     hover_style: Option<FooterKeycapHoverStyle>,
 ) -> AnyElement {
-    let footer_text = footer_hint_text_color(theme);
+    let footer_text = hover_style
+        .map(|style| style.base)
+        .unwrap_or_else(|| footer_hint_text_color(theme));
     let hover_text = hover_style
         .map(|style| style.text)
         .unwrap_or_else(|| footer_hover_text_color(theme, None));
@@ -2373,7 +2524,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_action_chrome_tokens_match_native_footer_contract() {
+    fn footer_action_chrome_matches_canonical_main_menu_row_palette() {
         assert_eq!(FOOTER_ACTION_ITEM_GAP_PX, 2.0);
         assert_eq!(FOOTER_GLASS_BUTTON_GAP_PX, 6.0);
         assert_eq!(FOOTER_ACTION_CONTENT_GAP_PX, 4.0);
@@ -2399,6 +2550,10 @@ mod tests {
         theme.opacity = Some(opacity);
 
         let chrome = crate::theme::AppChromeColors::from_theme(&theme);
+        let palette = crate::theme::resolve_main_menu_row_state_palette(
+            &theme,
+            crate::designs::current_main_menu_theme(),
+        );
         let rail = footer_rail_chrome(&theme);
         assert_eq!(rail.height_px, current_main_menu_footer_height());
         assert_eq!(
@@ -2407,9 +2562,62 @@ mod tests {
         );
         assert_eq!(rail.surface_rgba, chrome.inline_dropdown_surface_rgba);
         assert_eq!(rail.divider_rgba, chrome.divider_rgba);
-        assert_eq!(rail.hover_rgba, chrome.hover_rgba);
-        assert_eq!(rail.active_rgba, chrome.selection_rgba);
+        assert_eq!(
+            rail.hover_rgba,
+            palette.hover.background_rgba.expect("hover has a fill")
+        );
+        assert_eq!(
+            rail.active_rgba,
+            palette.active.background_rgba.expect("active has a fill")
+        );
+        assert_eq!(
+            themed_footer_button_rest_rgba(&theme),
+            palette.rest.background_rgba
+        );
+        assert_eq!(themed_footer_button_hover_rgba(&theme), rail.hover_rgba);
+        assert_eq!(themed_footer_button_active_rgba(&theme), rail.active_rgba);
+        assert_eq!(
+            footer_hint_text_color(&theme),
+            gpui::rgba(palette.rest.primary_foreground_rgba)
+        );
+        let expected_hover_foreground: gpui::Hsla =
+            gpui::rgba(palette.hover.primary_foreground_rgba).into();
+        assert_eq!(
+            footer_hover_text_color(&theme, None),
+            expected_hover_foreground
+        );
         assert_eq!(rail.button_radius_px, FOOTER_ACTION_BUTTON_RADIUS_PX);
+    }
+
+    #[test]
+    fn footer_button_colors_match_main_menu_rows_in_dark_and_light() {
+        for theme in [Theme::dark_default(), Theme::light_default()] {
+            for variant in crate::designs::MainMenuThemeVariant::all() {
+                let row_palette =
+                    crate::theme::resolve_main_menu_row_state_palette(&theme, *variant);
+                let footer_palette =
+                    resolved_footer_button_visual_colors_for_variant(&theme, *variant).row_states;
+
+                assert_eq!(
+                    footer_palette, row_palette,
+                    "footer/list palette drift for {:?}",
+                    variant
+                );
+                for state in [
+                    crate::theme::MainMenuRowState::Rest,
+                    crate::theme::MainMenuRowState::Hover,
+                    crate::theme::MainMenuRowState::Active,
+                ] {
+                    let footer_state = footer_palette.for_state(state);
+                    let row_state = row_palette.for_state(state);
+                    assert_eq!(footer_state.background_rgba, row_state.background_rgba);
+                    assert_eq!(
+                        footer_state.primary_foreground_rgba,
+                        row_state.primary_foreground_rgba
+                    );
+                }
+            }
+        }
     }
 
     #[test]

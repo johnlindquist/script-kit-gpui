@@ -243,6 +243,19 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     let chrome = AppChromeColors::from_theme(&theme);
     let metrics = ListItemMetricsOverride::from_main_menu_def(def);
     let fill = resolved_main_menu_row_fill(def.row_kind, &metrics, opacity.hover);
+    let list_colors = crate::theme::ListItemColors::from_theme(&theme);
+    let row_states = crate::theme::resolve_main_menu_row_state_palette_from_parts(
+        crate::theme::MainMenuRowColorInputs {
+            row_kind: def.row_kind,
+            row_hover_fill_alpha: metrics.row_hover_fill_alpha as u8,
+            row_selected_fill_alpha: metrics.row_selected_fill_alpha as u8,
+            theme_hover_opacity: list_colors.hover_opacity,
+            text_primary_hex: list_colors.text_primary,
+            accent_selected_hex: list_colors.accent_selected,
+            text_on_accent_hex: list_colors.text_on_accent,
+            primary_name_alpha: list_colors.alpha_name as u8,
+        },
+    );
 
     let mut b = BundleBuilder::new();
 
@@ -1033,14 +1046,20 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     b.resolved_color(
         "resolved.footer.buttonHover",
         "--sk-footer-button-hover",
-        (colors.text.primary << 8) | button.hover,
-        &["theme.colors.text.primary", "FooterButtonTheme.hover"],
+        row_states
+            .hover
+            .background_rgba
+            .expect("main-menu hover rows have a fill"),
+        &["resolved.mainMenu.row.hoverBackground"],
     );
     b.resolved_color(
         "resolved.footer.buttonActive",
         "--sk-footer-button-active",
-        (colors.text.primary << 8) | button.active,
-        &["theme.colors.text.primary", "FooterButtonTheme.active"],
+        row_states
+            .active
+            .background_rgba
+            .expect("main-menu active rows have a fill"),
+        &["resolved.mainMenu.row.selectedBackground"],
     );
     b.resolved_color(
         "resolved.footer.divider",
@@ -1051,8 +1070,8 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     b.resolved_color(
         "resolved.footer.text",
         "--sk-footer-text",
-        chrome.text_strong_rgba,
-        &["theme.colors.text.primary", "theme.opacity.textStrong"],
+        row_states.rest.primary_foreground_rgba,
+        &["resolved.mainMenu.row.primaryForeground"],
     );
 
     // ── Background effect (Starfield palette) ───────────────────────────

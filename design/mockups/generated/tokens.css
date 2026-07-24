@@ -3,7 +3,7 @@
  * and re-run the exporter; Rust is the single authority.
  */
 :root {
-  /* bundleHash: sha256:40fb1c5881759e88644725ac80aed44d8ddc0dfc7508af6ea2b588d46db56de7 */
+  /* bundleHash: sha256:26ac43b150d20a74151d339e0e5c98b8c923928c836717b9ed919bdc60cea487 */
   --sk-actions-dialog-list-padding-bottom: 6px;
   --sk-actions-dialog-list-padding-top: 0px;
   --sk-actions-dialog-row-height: 36px;
@@ -288,13 +288,13 @@
   --sk-confirm-title-default: rgb(255 255 255);
   --sk-starfield-color-a: rgb(235 184 52 / 0.5019607843);
   --sk-starfield-color-b: rgb(235 140 52 / 0.5019607843);
-  --sk-footer-button-active: rgb(255 255 255 / 0.1411764706);
+  --sk-footer-button-active: rgb(255 255 255 / 0.1254901961);
   --sk-footer-keycap-border: rgb(255 255 255 / 0.1960784314);
   --sk-footer-button-height: 32px;
-  --sk-footer-button-hover: rgb(255 255 255 / 0.0627450980);
+  --sk-footer-button-hover: rgb(255 255 255 / 0.0705882353);
   --sk-footer-centered-edge-padding-x: 10px;
   --sk-footer-divider: rgb(52 52 52 / 0.0784313725);
-  --sk-footer-text: rgb(255 255 255 / 0.8000000000);
+  --sk-footer-text: rgb(255 255 255);
   --sk-framework-gap-1: 4px;
   --sk-framework-text-sm-font-size: 14px;
   --sk-framework-text-xs-font-size: 12px;
