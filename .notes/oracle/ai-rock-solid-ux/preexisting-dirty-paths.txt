@@ -1,0 +1,24 @@
+# S00 pre-existing dirty-path exclusion set
+# branch: ## main...origin/main [ahead 296]
+# format: status<TAB>sha256-or-MISSING<TAB>path
+ M	61aab192bf1d84ffc2962808c4317fd9edb25e5ab37a380062e0bcda85f2814f	CLAUDE.md
+ M	3380b6c97b841d842defa9fe1a37096fca936b1725da9082c4089f67af123fba	scripts/agentic/glass-lifecycle-metrics.py
+ M	8ee7a2d48c151fb4777557f376d4510ba70eb5d2445aa6903316cacc86179317	scripts/agentic/macos-native-window-filmstrip.swift
+ M	81bcea4aeddb597823f3c6585707a91ad783d07c56c9474306da13ad099ea082	scripts/devtools/driver.ts
+ M	325db2116c864aca664abaf9990f8c36c7dd54d3fb3d2aa8e767bcb27fcc14df	scripts/devtools/glass-lifecycle-filmstrip.ts
+ M	f0425a831ad91e965b1e5b741591d1308871f93dd5f184dfb5c0adf0b637d350	scripts/devtools/rapid-toggle-stress.ts
+ M	e90fbe0412d868b8cd40f2e779dc82451c6db6cfdc15f9c1e41a2f0c4453fc8e	src/app_impl/lifecycle_reset.rs
+ M	938a12c7ba02f271a9aa6c3386b6763271d0b5c286fda65e8683f9b3a7850462	src/app_impl/ui_window.rs
+ M	b084dcc04df2b66e763cd01d39bc19d5e5645fd450d1f259cd36249086b21df6	src/components/footer_chrome.rs
+ M	93ba417ec025bf287065b85b7d2c411a876dd33670de37c5b65eb87fd1cbb091	src/footer_popup.rs
+ M	0c4319112dbbd0c4dcdaac213fd1340744baa3299a294b8afe66150bf652ca4a	src/notes/window.rs
+ M	a2a0f24b0873084fb14763c6513878c0e2c03e9d6b0122638c628326470d1349	src/notes/window/navigation.rs
+ M	57ae13418d078989b73bab8025c3e84843ff5b0ed31cb9e7b1fa8558e9ddd730	src/notes/window/render.rs
+ M	019ea3e063528af4297976850026ab8b4e26df2c8d5eddb737c7241a68b7f56c	src/notes/window/render_editor.rs
+ M	698c9531c4c1c1e962050c40e328b5adcc05aa2293c0be01677da289ec85360a	src/notes/window/tests.rs
+ M	4bb70485c11a9c8704399aa0ccc0dd5166d6092eff476251c4c6a09c96028143	src/notes/window/window_ops.rs
+ M	d40f5ff86d4d4da0c81b157084e56c418f888353896adb74f578f630a33d2228	src/platform/secondary_window_config.rs
+??	a869903b1267c2af03eac88704f34f5d81719bf5c7984c71ce8b928bfa49896c	scripts/agentic/fixtures/glass-motion-calibration-theme.json
+??	12a43ed24017bcc6adcadd37e42dcbcb8713bbe97d17315f8759d971505ca33f	scripts/devtools/actions-entry-filmstrip.ts
+??	5e3360c78d4db2700780f17d9b3593e315ab0450647bdadc02a71de024d6a8c1	scripts/devtools/glass-entry-motion-contract.test.ts
+??	68530d25bdf5095762c7aa38eadb6d80663ae33536d8f01199f7b05b9484dbcc	scripts/devtools/glass-entry-motion-contract.ts
