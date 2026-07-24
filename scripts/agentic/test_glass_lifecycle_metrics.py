@@ -152,6 +152,63 @@ class GlassLifecycleMetricsTests(unittest.TestCase):
                 str(reference_path),
             )
 
+    def test_same_stream_owner_absent_frame_avoids_cross_pipeline_color_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            # The explicit reference simulates a differently color-managed
+            # capture pipeline. It remains an owner-absence receipt, but pixels
+            # must be compared with the same-stream terminal frame.
+            explicit = Image.new("RGB", (160, 120), (60, 70, 80))
+            explicit_path = directory_path / "explicit-hidden.png"
+            explicit.save(explicit_path)
+            same_stream_reference = Image.new("RGB", (160, 120), (24, 30, 38))
+            frames = []
+            for sequence in range(3):
+                candidate, _ = frame()
+                path = directory_path / f"frame-{sequence}.png"
+                candidate.save(path)
+                frames.append(
+                    {
+                        "sequence": sequence,
+                        "displayTimeNs": sequence,
+                        "windowBounds": [[0, 0], [160, 120]],
+                        "windowAlpha": 1.0,
+                        "windowOnscreen": True,
+                        "sha256": str(sequence),
+                        "path": str(path),
+                    }
+                )
+            terminal_path = directory_path / "frame-3.png"
+            same_stream_reference.save(terminal_path)
+            frames.append(
+                {
+                    "sequence": 3,
+                    "displayTimeNs": 3,
+                    "windowBounds": None,
+                    "windowAlpha": None,
+                    "windowOnscreen": None,
+                    "sha256": "3",
+                    "path": str(terminal_path),
+                }
+            )
+            result = METRICS.analyze(
+                {"frames": frames, "captureScale": 1},
+                "main-exit",
+                capture_bounds=(0, 0, 160, 120),
+                reference_image_path=explicit_path,
+            )
+            self.assertTrue(result["gutterPass"])
+            self.assertEqual(
+                result["gutterReference"]["referenceSource"],
+                f"{terminal_path}#same-stream-owner-absent",
+            )
+            self.assertEqual(
+                result["gutterReference"]["explicitPostExitReference"],
+                str(explicit_path),
+            )
+
     def test_notes_body_transition_may_land_on_next_rendered_frame(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             frames = []

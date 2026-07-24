@@ -275,7 +275,23 @@ def analyze(
     gutter_pass = True
     reference_source: str | None = None
     if scenario.startswith("main-") and loaded_frames:
-        if reference_image_path is not None and reference_image_path.exists():
+        same_stream_reference = next(
+            (
+                (frame, image)
+                for frame, image in reversed(loaded_frames)
+                if scenario == "main-exit"
+                and frame.get("windowBounds") is None
+                and frame.get("windowAlpha") is None
+            ),
+            None,
+        )
+        if same_stream_reference is not None:
+            reference_frame, reference_image = same_stream_reference
+            reference_image = reference_image.convert("RGB")
+            reference_source = (
+                f"{reference_frame.get('path')}#same-stream-owner-absent"
+            )
+        elif reference_image_path is not None and reference_image_path.exists():
             reference_image = Image.open(reference_image_path).convert("RGB")
             reference_source = str(reference_image_path)
         else:
@@ -485,11 +501,17 @@ def analyze(
         "gutterPass": gutter_pass,
         "gutterReference": {
             "method":
-                "display-stream per-row comparison against the hidden background; "
+                "display-stream per-row comparison against a same-stream "
+                "owner-absent background when available; "
                 "an at-least-8pt fully unchanged run must be bounded by >=8% "
                 "changed stage/footer rows; exact 8pt gutter geometry is proven "
                 "separately by the AppKit layout receipt",
             "referenceSource": reference_source,
+            "explicitPostExitReference": (
+                str(reference_image_path)
+                if reference_image_path is not None
+                else None
+            ),
             "channelTolerance": 1,
             "changedRowThreshold": 0.0,
             "componentThreshold": 0.08,
