@@ -364,8 +364,8 @@ async function main() {
     ? resolve(explicitReceiptPath, "..")
     : requestedOutput;
   const mode = has("--all") ? "all" : value("--mode", "red")!;
-  const policyTintFloor = Number(value("--policy-tint-floor", "0.55"));
-  const policyVeilAlpha = Number(value("--policy-veil-alpha", "0.94"));
+  const policyTintFloor = Number(value("--policy-tint-floor", "0.35"));
+  const policyVeilAlpha = Number(value("--policy-veil-alpha", "0.80"));
   const policyId = value(
     "--policy-id",
     `T${Math.round(policyTintFloor * 100)}-V${Math.round(policyVeilAlpha * 100)}-R`,

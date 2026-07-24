@@ -167,16 +167,25 @@ generic bug fix, refactor, theme change, or contrast task is not permission.
 If a requested change appears to require different motion values, preserve the
 calibration and ask for explicit permission instead.
 
-The locked production contract is:
+The locked production contract is (retuned 2026-07-24 from side-by-side
+Spotlight/Script Kit footage, `CleanShot 2026-07-24 at 09.18.40.mp4`, against
+the measurement page https://eager-hollow-dyyf.here.now/):
 
-- default entry duration `0.28s`;
-- entry inset `0.03`, producing a main-window `106% → 97% → 100%` width path
-  and an Actions/popup `94% → 103% → 100%` path;
+- default entry duration `0.28s`: compression `140ms`, squish hold `50ms`
+  (Spotlight rests ~3 frames at max compression), rebound `90ms`;
+- entry inset `0.03`, producing a main-window `106% → 98.5% → 100%` width path
+  and an Actions/popup `94% → 101.5% → 100%` path — Spotlight's measured max
+  undershoot is `−1.3%` of TOTAL width; the earlier `97%`/`103%` mid-points
+  had doubled the measurement via a per-side ×2 and read rubbery;
 - entry start alpha `0.0`, animated to `1.0` during phase one;
-- vertical damping `0.4`, squish factor `0.5`, and equal phase split `0.5`;
+- vertical damping `0.4`, squish factor `0.25` (per side, of the inset,
+  clamped `0.006–0.015`), squish hold `0.05s`, phase-one fraction `0.5`;
 - Notes body reveal is derived from the calibrated geometry: it starts at the
-  phase-one settled-size crossing (`84ms` with the default calibration), then
+  phase-one settled-size crossing (`97ms` with the default calibration), then
   fades over `90ms` while the window compresses and rebounds;
+- glass material: stability tint floor `0.35` and capsule veil `0.80`
+  (`src/ui/chrome/tokens.rs`) — the Jul 23 `0.55`/`0.94` stack read
+  near-solid mid-entry, visibly heavier than the Spotlight reference fade;
 - detached main-window exit is fixed-frame fade-only;
 - popup exit duration `0.12s`, removal delay `135ms`, grow x/y `0.03/0.012`,
   shrink x/y `0.05/0.035`, and blur radius `8.0`.

@@ -117,12 +117,25 @@ const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 0.0;
 const GLASS_MORPH_MAX_INSET: f64 = 0.4;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_VERTICAL_DAMPING: f64 = 0.4;
+/// Squish depth as a fraction of the entry inset, applied PER SIDE (the frame
+/// math doubles it into total width). Spotlight's measured maximum undershoot
+/// is −1.3% of total width (https://eager-hollow-dyyf.here.now/, re-verified
+/// frame-by-frame against CleanShot 2026-07-24 09.18.40.mp4); 0.25 × the
+/// 0.03 production inset yields 1.5% total, which renders ≈1.3% at 57fps
+/// sampling. The earlier 0.5 factor doubled the measurement (−3% total) and
+/// made the entry read rubbery next to Spotlight.
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_SQUISH_FACTOR: f64 = 0.5;
+const GLASS_MORPH_SQUISH_FACTOR: f64 = 0.25;
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_MIN_SQUISH: f64 = 0.012;
+const GLASS_MORPH_MIN_SQUISH: f64 = 0.006;
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_MAX_SQUISH: f64 = 0.03;
+const GLASS_MORPH_MAX_SQUISH: f64 = 0.015;
+/// Rest at max compression before the rebound. Spotlight holds its minimum
+/// width for ~3 frames at 57fps (~50ms) — the pause is what makes the turn
+/// read as physical settling instead of a sharp V. Taken out of phase two so
+/// the total entry stays at the locked duration.
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_SQUISH_HOLD: f64 = 0.05;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_PHASE1_FRACTION: f64 = 0.5;
 #[cfg(target_os = "macos")]
@@ -555,7 +568,8 @@ fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMo
         squish_scale_x: 1.0 - squish_fraction * 2.0,
         squish_scale_y: 1.0 - squish_fraction * GLASS_MORPH_VERTICAL_DAMPING * 2.0,
         phase1,
-        phase2: (duration - phase1).max(GLASS_MORPH_MIN_REBOUND_DURATION),
+        phase2: (duration - phase1 - GLASS_MORPH_SQUISH_HOLD)
+            .max(GLASS_MORPH_MIN_REBOUND_DURATION),
     })
 }
 
@@ -2147,8 +2161,8 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     }
 
     // Squish target: compress BELOW the final size — the released-elastic
-    // physics the Spotlight enter has. Visible (~1.5% of each dimension),
-    // scaled off the start outset.
+    // physics the Spotlight enter has. Measured: −1.3% of TOTAL width
+    // (squish_fraction is per side; the ×2 below doubles it).
     let squish_fraction = (tuning.inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
         .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
     let squish_x = final_frame.size.width * squish_fraction;
@@ -2165,10 +2179,10 @@ unsafe fn animate_tahoe_glass_appearance_directed(
         ),
     );
 
-    // Phase 1: wide -> squished-under-final, soft on both ends (the window
-    // momentarily comes to rest at max compression — physically natural).
-    // Measured Spotlight split: compression and rebound take EQUAL time,
-    // but the rebound travels ~1/4 the distance, so it reads far gentler.
+    // Phase 1: wide -> squished-under-final, soft on both ends, then a
+    // ~50ms rest at max compression before the rebound (measured: Spotlight
+    // holds its minimum width ~3 frames at 57fps). The rebound travels ~1/5
+    // the compression distance, so it reads far gentler.
     let phase1 = tuning.phase1;
     let phase2 = tuning.phase2;
 
@@ -2216,7 +2230,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
         glass_view,
         performSelector: sel!(settleOwnWindowFrame)
         withObject: nil
-        afterDelay: phase1
+        afterDelay: (phase1 + GLASS_MORPH_SQUISH_HOLD)
     ];
 
     logging::log(
@@ -3247,11 +3261,11 @@ mod secondary_window_config_tests {
         assert!((tuning.start_scale_x - 1.06).abs() < epsilon);
         assert!((tuning.start_scale_y - 1.024).abs() < epsilon);
         assert!((tuning.start_alpha - 0.0).abs() < epsilon);
-        assert!((tuning.squish_scale_x - 0.97).abs() < epsilon);
-        assert!((tuning.squish_scale_y - 0.988).abs() < epsilon);
+        assert!((tuning.squish_scale_x - 0.985).abs() < epsilon);
+        assert!((tuning.squish_scale_y - 0.994).abs() < epsilon);
         assert!((tuning.phase1 - 0.14).abs() < epsilon);
-        assert!((tuning.phase2 - 0.14).abs() < epsilon);
-        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 84);
+        assert!((tuning.phase2 - 0.09).abs() < epsilon);
+        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 97);
     }
 
     #[cfg(target_os = "macos")]
@@ -3278,11 +3292,12 @@ mod secondary_window_config_tests {
         );
         assert_eq!(super::GLASS_MORPH_ENTRY_START_ALPHA, 0.0);
         assert_eq!(super::GLASS_MORPH_VERTICAL_DAMPING, 0.4);
-        assert_eq!(super::GLASS_MORPH_SQUISH_FACTOR, 0.5);
+        assert_eq!(super::GLASS_MORPH_SQUISH_FACTOR, 0.25);
+        assert_eq!(super::GLASS_MORPH_SQUISH_HOLD, 0.05);
         assert_eq!(super::GLASS_MORPH_PHASE1_FRACTION, 0.5);
         let tuning =
             super::glass_morph_tuning_from(duration, inset).expect("fixture enables glass morph");
-        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 84);
+        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 97);
         assert_eq!(super::GLASS_EXIT_DURATION, 0.12);
         assert_eq!(super::GLASS_EXIT_REMOVE_DELAY_MS, 135);
         assert_eq!(super::GLASS_EXIT_GROW_X, 0.03);
@@ -3352,7 +3367,7 @@ mod secondary_window_config_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn native_glass_style_locks_t55_r_and_preserves_requested_tint_semantics() {
+    fn native_glass_style_locks_tint_floor_and_preserves_requested_tint_semantics() {
         let mut inherited = crate::theme::Theme::default();
         inherited.opacity.as_mut().unwrap().glass_tint_opacity = None;
         let mut explicit_zero = inherited.clone();
@@ -3362,9 +3377,9 @@ mod secondary_window_config_tests {
             .unwrap()
             .glass_tint_opacity = Some(0.0);
         let mut below_floor = inherited.clone();
-        below_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.54);
+        below_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.34);
         let mut at_floor = inherited.clone();
-        at_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.55);
+        at_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.35);
         let mut above_floor = inherited.clone();
         above_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.72);
         let light = crate::theme::Theme::light_default();
@@ -3409,16 +3424,16 @@ mod secondary_window_config_tests {
             Some(0.0_f32.to_bits())
         );
         for style in [backdrop, capsule, explicit, below, at] {
-            assert_eq!(style.effective_tint_alpha, 0.55);
+            assert_eq!(style.effective_tint_alpha, 0.35);
         }
         assert_eq!(above.effective_tint_alpha, 0.72);
         assert_eq!(backdrop.veil_alpha, 0.0);
         assert_eq!(backdrop.rim_width, 0.0);
         assert_eq!(backdrop.signature.rim_rgba, 0xFFFF_FF00);
-        assert_eq!(capsule.veil_alpha, 0.94);
+        assert_eq!(capsule.veil_alpha, 0.80);
         assert_eq!(capsule.rim_width, 1.0);
         assert_eq!(capsule.signature.rim_rgba, 0xFFFF_FF3D);
-        assert_eq!(light_capsule.veil_alpha, 0.94);
+        assert_eq!(light_capsule.veil_alpha, 0.80);
         assert_eq!(light_capsule.rim_width, 1.0);
         assert_eq!(light_capsule.signature.rim_rgba, 0x0000_002E);
         assert_ne!(backdrop.signature, explicit.signature);

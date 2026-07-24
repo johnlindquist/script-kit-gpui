@@ -15,11 +15,17 @@ pub const LIQUID_GLASS_PREFERRED_CENTER_GAP_PX: f32 = 60.0;
 /// Minimum native `NSGlassEffectView.tintColor` alpha used by the shared
 /// window/capsule material policy. This stabilizes the sampled hue while
 /// preserving enough translucency to read as native glass.
-pub const LIQUID_GLASS_STABILITY_TINT_ALPHA_FLOOR: f32 = 0.55;
+///
+/// 0.35 is the airy calibration (user retune 2026-07-24): the Jul 23 value
+/// of 0.55 made the window read near-solid mid-entry, visibly heavier than
+/// the Spotlight reference fade. Saturated-background hue drift is partially
+/// re-exposed at this level — an accepted trade for the lighter material.
+pub const LIQUID_GLASS_STABILITY_TINT_ALPHA_FLOOR: f32 = 0.35;
 /// Small matched-color veil inside each discrete capsule. It damps local
 /// desktop hue sampling without replacing the native material or filling the
-/// transparent gaps between capsules.
-pub const LIQUID_GLASS_CAPSULE_VEIL_ALPHA: f32 = 0.94;
+/// transparent gaps between capsules. 0.80 is the pre-amplification value;
+/// the 0.94 bump (e1743576f) traded too much translucency for hue stability.
+pub const LIQUID_GLASS_CAPSULE_VEIL_ALPHA: f32 = 0.80;
 pub const LIQUID_GLASS_CAPSULE_RIM_WIDTH_PX: f32 = 1.0;
 pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_DARK: f32 = 0.24;
 pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_LIGHT: f32 = 0.18;
