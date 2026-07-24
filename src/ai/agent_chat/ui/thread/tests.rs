@@ -917,12 +917,7 @@ fn orphan_tool_update_creates_standalone_message() {
 fn turn_finished_does_not_create_message() {
     let mut thread = test_thread(Vec::new(), true);
 
-    apply_event_test(
-        &mut thread,
-        AgentChatEvent::TurnFinished {
-            stop_reason: "end_turn".into(),
-        },
-    );
+    apply_event_test(&mut thread, AgentChatEvent::completed("end_turn"));
 
     assert!(
         thread.messages.is_empty(),
@@ -974,9 +969,7 @@ fn turn_finished_auto_sends_front_of_queue() {
             Vec::new(),
         ));
 
-    thread.apply_event_test(AgentChatEvent::TurnFinished {
-        stop_reason: "end_turn".into(),
-    });
+    thread.apply_event_test(AgentChatEvent::completed("end_turn"));
 
     assert_eq!(thread.status, AgentChatThreadStatus::Streaming);
     assert_eq!(
@@ -999,9 +992,7 @@ fn paused_queue_does_not_auto_send_on_turn_finished() {
             Vec::new(),
         ));
 
-    thread.apply_event_test(AgentChatEvent::TurnFinished {
-        stop_reason: "cancelled".into(),
-    });
+    thread.apply_event_test(AgentChatEvent::completed("cancelled"));
 
     assert_eq!(thread.status, AgentChatThreadStatus::Idle);
     assert!(thread.messages.is_empty());
@@ -1065,19 +1056,24 @@ fn failed_event_creates_error_message_and_retryable_callout() {
 
     apply_event_test(
         &mut thread,
-        AgentChatEvent::Failed {
-            error: "connection lost".into(),
-        },
+        AgentChatEvent::failed(
+            sk_protocol::ai_reliability::ProtocolComponent::Provider,
+            "connection lost",
+        ),
     );
 
     assert_eq!(thread.messages.len(), 2);
     assert_eq!(thread.messages[1].role, AgentChatThreadMessageRole::Error);
-    assert_eq!(thread.messages[1].body.as_ref(), "connection lost");
+    assert!(thread.messages[1].body.contains("temporarily unavailable"));
     assert_eq!(thread.status, AgentChatThreadStatus::Error);
     let callout = thread.active_callout().expect("failed turn arms callout");
     assert_eq!(callout.severity, AgentChatCalloutSeverity::Error);
     assert_eq!(callout.title.as_ref(), "Turn failed");
-    assert_eq!(callout.detail.as_ref().unwrap().as_ref(), "connection lost");
+    assert!(callout
+        .detail
+        .as_ref()
+        .unwrap()
+        .contains("temporarily unavailable"));
     assert!(callout.can_retry);
 }
 
@@ -1089,19 +1085,16 @@ fn usage_limit_failure_surfaces_account_recovery_without_raw_json_as_message() {
 
     apply_event_test(
         &mut thread,
-        AgentChatEvent::Failed {
-            error: raw_error.into(),
-        },
+        AgentChatEvent::failed(
+            sk_protocol::ai_reliability::ProtocolComponent::Provider,
+            raw_error,
+        ),
     );
 
     let callout = thread.active_callout().expect("failure arms callout");
-    assert_eq!(callout.title.as_ref(), "Account usage limit reached");
-    assert_eq!(
-        callout.auth_recovery,
-        Some(AgentChatAuthRecovery::UsageLimitReached)
-    );
-    assert!(callout.detail.as_ref().unwrap().contains("Switch accounts"));
-    assert_eq!(callout.raw_detail.as_ref().unwrap().as_ref(), raw_error);
+    assert_eq!(callout.title.as_ref(), "Turn failed");
+    assert!(callout.detail.as_ref().unwrap().contains("usage limit"));
+    assert!(callout.raw_detail.is_none());
     assert!(!thread.messages[1].body.contains("{\"error\""));
     assert!(thread.messages[1].body.contains("Switch accounts"));
 }
@@ -1110,9 +1103,10 @@ fn usage_limit_failure_surfaces_account_recovery_without_raw_json_as_message() {
 fn retry_from_error_reenters_streaming_without_duplicate_user_message() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
-    thread.apply_event_test(AgentChatEvent::Failed {
-        error: "connection lost".into(),
-    });
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        "connection lost",
+    ));
     let before = thread.messages.len();
 
     thread.retry_last_user_turn_test().unwrap();
@@ -1134,9 +1128,10 @@ fn retry_from_error_reenters_streaming_without_duplicate_user_message() {
 fn dismiss_clears_failed_turn_callout() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
-    thread.apply_event_test(AgentChatEvent::Failed {
-        error: "connection lost".into(),
-    });
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        "connection lost",
+    ));
 
     thread.dismiss_active_callout_test();
 
@@ -1147,9 +1142,10 @@ fn dismiss_clears_failed_turn_callout() {
 fn starting_new_turn_clears_failed_turn_callout() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
-    thread.apply_event_test(AgentChatEvent::Failed {
-        error: "connection lost".into(),
-    });
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        "connection lost",
+    ));
 
     thread.retry_last_user_turn_test().unwrap();
 

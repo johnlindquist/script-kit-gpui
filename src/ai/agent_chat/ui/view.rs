@@ -2881,8 +2881,8 @@ impl AgentChatView {
         if self.focused_text_editing_variation == Some(index) {
             if matches!(
                 event,
-                AgentChatEvent::TurnFinished { .. }
-                    | AgentChatEvent::Failed { .. }
+                AgentChatEvent::TurnCompleted { .. }
+                    | AgentChatEvent::TurnFailed { .. }
                     | AgentChatEvent::SetupRequired { .. }
             ) {
                 if let Some(variation) = self.focused_text_variations.get_mut(index) {
@@ -2901,16 +2901,16 @@ impl AgentChatView {
                 variation.status = FocusedTextVariationStatus::Streaming;
                 variation.error = None;
             }
-            AgentChatEvent::TurnFinished { .. } => {
+            AgentChatEvent::TurnCompleted { .. } => {
                 let variation = &mut self.focused_text_variations[index];
                 if variation.status != FocusedTextVariationStatus::Error {
                     variation.status = FocusedTextVariationStatus::Complete;
                 }
             }
-            AgentChatEvent::Failed { error } => {
+            AgentChatEvent::TurnFailed { failure } => {
                 let variation = &mut self.focused_text_variations[index];
                 variation.status = FocusedTextVariationStatus::Error;
-                variation.error = Some(error);
+                variation.error = Some(failure.primary_message().to_string());
             }
             AgentChatEvent::SetupRequired { reason, .. } => {
                 let variation = &mut self.focused_text_variations[index];
@@ -2946,8 +2946,8 @@ impl AgentChatView {
             while let Ok(event) = rx.recv().await {
                 let terminal = matches!(
                     event,
-                    AgentChatEvent::TurnFinished { .. }
-                        | AgentChatEvent::Failed { .. }
+                    AgentChatEvent::TurnCompleted { .. }
+                        | AgentChatEvent::TurnFailed { .. }
                         | AgentChatEvent::SetupRequired { .. }
                 );
                 let view_ref = view.clone();

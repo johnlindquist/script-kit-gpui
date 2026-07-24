@@ -447,12 +447,14 @@ pub struct ConversationTurn {
     pub model: Option<String>,
     pub streaming: bool,
     pub error: Option<String>,
+    pub failure: Option<sk_protocol::ai_reliability::AiFailure>,
     pub message_id: Option<String>,
     pub user_image: Option<Arc<RenderImage>>,
 }
 
 pub(super) fn conversation_turn_pending_indicator_visible(turn: &ConversationTurn) -> bool {
     turn.error.is_none()
+        && turn.failure.is_none()
         && turn.streaming
         && turn
             .assistant_response
@@ -462,6 +464,7 @@ pub(super) fn conversation_turn_pending_indicator_visible(turn: &ConversationTur
 
 pub(super) fn conversation_turn_streaming_copy_available(turn: &ConversationTurn) -> bool {
     turn.error.is_none()
+        && turn.failure.is_none()
         && turn.streaming
         && turn
             .assistant_response
@@ -520,6 +523,7 @@ pub(super) fn build_conversation_turns(
                 model: None,
                 streaming: false,
                 error: None,
+                failure: None,
                 message_id: msg.id.clone(),
                 user_image,
             };
@@ -532,6 +536,7 @@ pub(super) fn build_conversation_turns(
                     turn.model = next_msg.model.clone();
                     turn.streaming = next_msg.streaming;
                     turn.error = next_msg.error.clone();
+                    turn.failure = next_msg.failure.clone();
                     turn.message_id = next_msg.id.clone().or(turn.message_id);
                     i += 1;
                 }
@@ -547,6 +552,7 @@ pub(super) fn build_conversation_turns(
                 model: msg.model.clone(),
                 streaming: msg.streaming,
                 error: msg.error.clone(),
+                failure: msg.failure.clone(),
                 message_id: msg.id.clone(),
                 user_image: None,
             };

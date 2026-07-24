@@ -80,9 +80,16 @@ impl ChatPrompt {
         }
 
         // Error state - show error message with optional retry button
-        if let Some(ref error_str) = turn.error {
+        if turn.failure.is_some() || turn.error.is_some() {
+            let typed_message = turn
+                .failure
+                .as_ref()
+                .map(|failure| crate::ai::reliability::primary_message_for_failure(failure));
+            let error_str = typed_message
+                .or(turn.error.as_deref())
+                .unwrap_or("The AI request did not finish.");
             let error_type = ChatErrorType::from_error_string(error_str);
-            let error_message = error_type.display_message();
+            let error_message = typed_message.unwrap_or_else(|| error_type.display_message());
             let can_retry = error_type.can_retry() && has_retry_callback;
 
             let error_fidelity_id = response_fidelity_id.clone();
@@ -127,7 +134,7 @@ impl ChatPrompt {
 
             // Show raw error detail so the actual cause is visible
             let detail = error_str.trim();
-            if !detail.is_empty() && detail != error_message {
+            if typed_message.is_none() && !detail.is_empty() && detail != error_message {
                 // Unknown errors: full opacity + more chars since raw message is the only info
                 let is_unknown = error_type == ChatErrorType::Unknown;
                 let max_chars = if is_unknown { 400 } else { 200 };
@@ -314,6 +321,7 @@ mod tests {
                 model: None,
                 streaming,
                 error: error.map(str::to_string),
+                failure: None,
                 message_id: None,
                 user_image: None,
             }

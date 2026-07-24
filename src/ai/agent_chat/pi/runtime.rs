@@ -110,20 +110,28 @@ impl PiRpcRuntime {
 }
 
 impl AgentChatConnection for PiRpcRuntime {
-    fn start_turn(&self, request: AgentChatTurnRequest) -> Result<AgentChatEventRx> {
+    fn start_turn(
+        &self,
+        request: AgentChatTurnRequest,
+    ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
         let (event_tx, event_rx) = async_channel::bounded(256);
         self.tx
             .send_blocking(PiRpcRuntimeCommand::StartTurn { request, event_tx })
-            .context("Pi RPC worker channel closed")?;
+            .context("Pi RPC worker channel closed")
+            .map_err(crate::ai::reliability::AiAdapterError::from)?;
         Ok(event_rx)
     }
 
     fn start_isolated_turn(
         &self,
         request: AgentChatTurnRequest,
-    ) -> Result<crate::ai::agent_chat::runtime::IsolatedTurnHandle> {
+    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::runtime::IsolatedTurnHandle>
+    {
         let Some(spec) = self.spec.clone() else {
-            anyhow::bail!("Pi RPC isolated turns are unavailable for sender-only test runtime");
+            return Err(anyhow::anyhow!(
+                "Pi RPC isolated turns are unavailable for sender-only test runtime"
+            )
+            .into());
         };
         let (event_tx, event_rx) = async_channel::bounded(256);
         let cancel = spawn_single_turn_runtime(spec, request, event_tx)?;
@@ -133,17 +141,18 @@ impl AgentChatConnection for PiRpcRuntime {
         })
     }
 
-    fn cancel_turn(&self, ui_thread_id: String) -> Result<()> {
+    fn cancel_turn(&self, ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
         self.tx
             .send_blocking(PiRpcRuntimeCommand::CancelTurn { ui_thread_id })
             .context("Pi RPC worker channel closed")
+            .map_err(Into::into)
     }
 
     fn prepare_session(
         &self,
         ui_thread_id: String,
         cwd: std::path::PathBuf,
-    ) -> Result<AgentChatEventRx> {
+    ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
         let (event_tx, event_rx) = async_channel::bounded(8);
         self.tx
             .send_blocking(PiRpcRuntimeCommand::PrepareSession {
@@ -151,24 +160,43 @@ impl AgentChatConnection for PiRpcRuntime {
                 cwd,
                 event_tx,
             })
-            .context("Pi RPC worker channel closed")?;
+            .context("Pi RPC worker channel closed")
+            .map_err(crate::ai::reliability::AiAdapterError::from)?;
         Ok(event_rx)
     }
 
-    fn fork_points(&self) -> Result<AgentChatEventRx> {
+    fn fork_points(&self) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
         let (event_tx, event_rx) = async_channel::bounded(8);
         self.tx
             .send_blocking(PiRpcRuntimeCommand::GetForkPoints { event_tx })
-            .context("Pi RPC worker channel closed")?;
+            .context("Pi RPC worker channel closed")
+            .map_err(crate::ai::reliability::AiAdapterError::from)?;
         Ok(event_rx)
     }
 
-    fn fork_to_entry(&self, entry_id: String) -> Result<AgentChatEventRx> {
+    fn fork_to_entry(
+        &self,
+        entry_id: String,
+    ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
         let (event_tx, event_rx) = async_channel::bounded(8);
         self.tx
             .send_blocking(PiRpcRuntimeCommand::Fork { entry_id, event_tx })
-            .context("Pi RPC worker channel closed")?;
+            .context("Pi RPC worker channel closed")
+            .map_err(crate::ai::reliability::AiAdapterError::from)?;
         Ok(event_rx)
+    }
+}
+
+fn pi_failure(raw: impl AsRef<str>) -> AgentChatEvent {
+    AgentChatEvent::failed(sk_protocol::ai_reliability::ProtocolComponent::Pi, raw)
+}
+
+fn cancelled_outcome() -> AgentChatEvent {
+    AgentChatEvent::TurnCompleted {
+        outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
+            kind: sk_protocol::ai_reliability::CancellationKind::UserCancelled,
+            partial: sk_protocol::ai_reliability::PartialOutputState::None,
+        },
     }
 }
 
@@ -254,9 +282,7 @@ async fn run_pi_rpc_event_loop(
                         Ok(selection) => selection,
                         Err(error) => {
                             let _ = event_tx
-                                .send(AgentChatEvent::Failed {
-                                    error: format!("Invalid Pi model selection: {error}"),
-                                })
+                                .send(pi_failure(format!("Invalid Pi model selection: {error}")))
                                 .await;
                             continue;
                         }
@@ -270,11 +296,7 @@ async fn run_pi_rpc_event_loop(
                             }
                             Err(error) => {
                                 applied_model = None;
-                                let _ = event_tx
-                                    .send(AgentChatEvent::Failed {
-                                        error: error.to_string(),
-                                    })
-                                    .await;
+                                let _ = event_tx.send(pi_failure(error.to_string())).await;
                                 continue;
                             }
                         }
@@ -302,11 +324,7 @@ async fn run_pi_rpc_event_loop(
                         write_json(&mut stdin, &build_prompt_command(prompt_id, payload)).await?;
                     }
                     Err(error) => {
-                        let _ = event_tx
-                            .send(AgentChatEvent::Failed {
-                                error: error.to_string(),
-                            })
-                            .await;
+                        let _ = event_tx.send(pi_failure(error.to_string())).await;
                     }
                 }
             }
@@ -458,9 +476,7 @@ async fn run_pi_rpc_single_turn(
             Ok(selection) => selection,
             Err(error) => {
                 let _ = event_tx
-                    .send(AgentChatEvent::Failed {
-                        error: format!("Invalid Pi model selection: {error}"),
-                    })
+                    .send(pi_failure(format!("Invalid Pi model selection: {error}")))
                     .await;
                 let _ = child.kill().await;
                 return Ok(());
@@ -475,11 +491,7 @@ async fn run_pi_rpc_single_turn(
         )
         .await
         {
-            let _ = event_tx
-                .send(AgentChatEvent::Failed {
-                    error: error.to_string(),
-                })
-                .await;
+            let _ = event_tx.send(pi_failure(error.to_string())).await;
             let _ = child.kill().await;
             return Ok(());
         }
@@ -499,11 +511,7 @@ async fn run_pi_rpc_single_turn(
     let payload = match build_prompt_payload(&request.blocks) {
         Ok(payload) => payload,
         Err(error) => {
-            let _ = event_tx
-                .send(AgentChatEvent::Failed {
-                    error: error.to_string(),
-                })
-                .await;
+            let _ = event_tx.send(pi_failure(error.to_string())).await;
             let _ = child.kill().await;
             return Ok(());
         }
@@ -516,11 +524,7 @@ async fn run_pi_rpc_single_turn(
     });
 
     if let Err(error) = write_json(&mut stdin, &build_prompt_command(prompt_id, payload)).await {
-        let _ = event_tx
-            .send(AgentChatEvent::Failed {
-                error: error.to_string(),
-            })
-            .await;
+        let _ = event_tx.send(pi_failure(error.to_string())).await;
         let _ = child.kill().await;
         return Err(error);
     }
@@ -536,18 +540,12 @@ async fn run_pi_rpc_single_turn(
                         target: "script_kit::tab_ai",
                         event = "pi_rpc_isolated_turn_cancelled",
                     );
-                    let _ = event_tx
-                        .send(AgentChatEvent::Failed {
-                            error: "cancelled".to_string(),
-                        })
-                        .await;
+                    let _ = event_tx.send(cancelled_outcome()).await;
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
                     let _ = event_tx
-                        .send(AgentChatEvent::Failed {
-                            error: "Pi RPC isolated turn timed out".to_string(),
-                        })
+                        .send(pi_failure("Pi RPC isolated turn timed out"))
                         .await;
                     break;
                 }
@@ -576,9 +574,7 @@ async fn read_single_turn_stdout<R>(
             Err(error) => {
                 send_to_active(
                     &active_turn,
-                    AgentChatEvent::Failed {
-                        error: format!("Invalid Pi RPC output: {error}"),
-                    },
+                    pi_failure(format!("Invalid Pi RPC output: {error}")),
                 )
                 .await;
                 terminal_event_seen = true;
@@ -605,12 +601,12 @@ async fn read_single_turn_stdout<R>(
             if response.command.as_deref() == Some("prompt") && !response.success {
                 send_to_active(
                     &active_turn,
-                    AgentChatEvent::Failed {
-                        error: response
+                    pi_failure(
+                        response
                             .error
                             .clone()
                             .unwrap_or_else(|| "Pi RPC prompt failed".to_string()),
-                    },
+                    ),
                 )
                 .await;
                 terminal_event_seen = true;
@@ -623,7 +619,7 @@ async fn read_single_turn_stdout<R>(
         let closes_turn = events.iter().any(|event| {
             matches!(
                 event,
-                AgentChatEvent::TurnFinished { .. } | AgentChatEvent::Failed { .. }
+                AgentChatEvent::TurnCompleted { .. } | AgentChatEvent::TurnFailed { .. }
             )
         });
         let event_tx = active_turn
@@ -643,12 +639,10 @@ async fn read_single_turn_stdout<R>(
     if !terminal_event_seen {
         send_to_active(
             &active_turn,
-            AgentChatEvent::Failed {
-                error: pi_rpc_process_exit_error(
-                    "Pi RPC isolated turn ended before completion",
-                    stderr_failure_hint.as_ref(),
-                ),
-            },
+            pi_failure(pi_rpc_process_exit_error(
+                "Pi RPC isolated turn ended before completion",
+                stderr_failure_hint.as_ref(),
+            )),
         )
         .await;
     }
@@ -754,9 +748,7 @@ async fn read_stdout<R>(
             Err(error) => {
                 send_to_active(
                     &active_turn,
-                    AgentChatEvent::Failed {
-                        error: format!("Invalid Pi RPC output: {error}"),
-                    },
+                    pi_failure(format!("Invalid Pi RPC output: {error}")),
                 )
                 .await;
                 continue;
@@ -782,12 +774,12 @@ async fn read_stdout<R>(
             if response.command.as_deref() == Some("prompt") && !response.success {
                 send_to_active(
                     &active_turn,
-                    AgentChatEvent::Failed {
-                        error: response
+                    pi_failure(
+                        response
                             .error
                             .clone()
                             .unwrap_or_else(|| "Pi RPC prompt failed".to_string()),
-                    },
+                    ),
                 )
                 .await;
             }
@@ -798,7 +790,7 @@ async fn read_stdout<R>(
         let closes_turn = events.iter().any(|event| {
             matches!(
                 event,
-                AgentChatEvent::TurnFinished { .. } | AgentChatEvent::Failed { .. }
+                AgentChatEvent::TurnCompleted { .. } | AgentChatEvent::TurnFailed { .. }
             )
         });
         let event_tx = active_turn
@@ -824,13 +816,7 @@ async fn read_stdout<R>(
     );
     // A turn that was mid-stream when the process died lives in `active_turn`,
     // not `pending` — without a terminal event its receiver waits forever.
-    send_to_active(
-        &active_turn,
-        AgentChatEvent::Failed {
-            error: error.clone(),
-        },
-    )
-    .await;
+    send_to_active(&active_turn, pi_failure(error.clone())).await;
     fail_pending_responses(&pending, &error).await;
 }
 
@@ -878,11 +864,7 @@ async fn fail_pending_responses(pending: &PendingResponses, error: &str) {
     for (id, pending_response) in pending_responses {
         match pending_response {
             PendingResponse::Events(event_tx) => {
-                let _ = event_tx
-                    .send(AgentChatEvent::Failed {
-                        error: error.to_string(),
-                    })
-                    .await;
+                let _ = event_tx.send(pi_failure(error.to_string())).await;
             }
             PendingResponse::Rpc(response_tx) => {
                 let _ = response_tx.send(PiRpcResponse {
@@ -1164,8 +1146,9 @@ mod tests {
             let event = event_rx.recv().await.unwrap();
             assert!(matches!(
                 event,
-                AgentChatEvent::Failed { error } if error.contains("exited before responding")
-                    && error.contains("No API key found for provider anthropic")
+                AgentChatEvent::TurnFailed { failure }
+                    if failure.failure.code
+                        == sk_protocol::ai_reliability::AiFailureCode::AuthenticationMissing
             ));
         });
     }
@@ -1193,7 +1176,9 @@ mod tests {
             assert!(
                 matches!(
                     event,
-                    AgentChatEvent::Failed { error } if error.contains("exited before responding")
+                    AgentChatEvent::TurnFailed { failure }
+                        if failure.failure.code
+                            == sk_protocol::ai_reliability::AiFailureCode::Unknown
                 ),
                 "active streaming turn must receive a terminal Failed event when Pi dies"
             );

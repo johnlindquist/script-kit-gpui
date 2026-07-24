@@ -40,6 +40,7 @@ impl ChatPrompt {
             model: None,
             streaming: false,
             error: None,
+            failure: None,
             created_at: None,
             image: None,
         };
@@ -89,6 +90,7 @@ impl ChatPrompt {
                 model: self.model.clone(),
                 streaming,
                 error,
+                failure: None,
                 created_at: None,
                 image: None,
             });
@@ -388,6 +390,7 @@ impl ChatPrompt {
             model: self.model.clone(),
             streaming: true,
             error: None,
+            failure: None,
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             image: None,
         };
@@ -653,13 +656,18 @@ impl ChatPrompt {
 
     /// Set an error on a message (typically on streaming failure)
     pub fn set_message_error(&mut self, message_id: &str, error: String, cx: &mut Context<Self>) {
+        let failure = crate::ai::reliability::provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Provider,
+            error,
+        );
         if let Some(msg) = self
             .messages
             .iter_mut()
             .rev()
             .find(|m| m.id.as_deref() == Some(message_id))
         {
-            msg.error = Some(error);
+            msg.error = Some(failure.primary_message().to_string());
+            msg.failure = Some(failure.failure);
             msg.streaming = false; // Stop streaming indicator
         }
         if self.streaming_message_id.as_deref() == Some(message_id) {
@@ -679,6 +687,7 @@ impl ChatPrompt {
             .find(|m| m.id.as_deref() == Some(message_id))
         {
             msg.error = None;
+            msg.failure = None;
         }
         self.mark_conversation_turns_dirty();
         self.ensure_conversation_turns_cache();

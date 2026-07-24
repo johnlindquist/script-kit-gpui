@@ -308,7 +308,9 @@ impl ChatPrompt {
         // Shared buffer between provider thread and reveal loop
         let shared_content = Arc::new(std::sync::Mutex::new(String::new()));
         let shared_done = Arc::new(AtomicBool::new(false));
-        let shared_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let shared_error = Arc::new(std::sync::Mutex::new(
+            None::<crate::ai::reliability::AppFailureRecord>,
+        ));
 
         let content_clone = shared_content.clone();
         let done_clone = shared_done.clone();
@@ -349,9 +351,16 @@ impl ChatPrompt {
                     done_clone.store(true, Ordering::SeqCst);
                 }
                 Err(e) => {
-                    logging::log("CHAT", &format!("Provider stream_message failed: {}", e));
+                    let failure = crate::ai::reliability::provider_failure(
+                        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+                        e.to_string(),
+                    );
+                    logging::log(
+                        "CHAT",
+                        &format!("Provider stream_message failed: {:?}", failure.failure.code),
+                    );
                     if let Ok(mut err) = error_clone.lock() {
-                        *err = Some(e.to_string());
+                        *err = Some(failure);
                     }
                     done_clone.store(true, Ordering::SeqCst);
                 }
@@ -407,8 +416,11 @@ impl ChatPrompt {
                         }
 
                         // Error path
-                        if let Some(err) = &error {
-                            logging::log("CHAT", &format!("Built-in AI error: {}", err));
+                        if let Some(failure) = &error {
+                            logging::log(
+                                "CHAT",
+                                &format!("Built-in AI error: {:?}", failure.failure.code),
+                            );
                             chat.builtin_is_streaming = false;
                             chat.streaming_message_id = None;
                             if let Some(msg) = chat
@@ -416,7 +428,8 @@ impl ChatPrompt {
                                 .iter_mut()
                                 .find(|m| m.id.as_deref() == Some(&msg_id))
                             {
-                                msg.error = Some(err.clone());
+                                msg.error = Some(failure.primary_message().to_string());
+                                msg.failure = Some(failure.failure.clone());
                                 msg.streaming = false;
                             }
                             chat.mark_conversation_turns_dirty();

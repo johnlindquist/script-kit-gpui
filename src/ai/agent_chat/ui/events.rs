@@ -78,15 +78,38 @@ pub(crate) enum AgentChatEvent {
     /// message's original text, returned so the composer can prefill it for
     /// editing.
     ForkCompleted { text: String },
-    /// The turn completed normally.
-    TurnFinished { stop_reason: String },
+    /// The turn reached a typed non-failure terminal outcome.
+    TurnCompleted {
+        outcome: crate::ai::reliability::AiTurnRuntimeOutcome,
+    },
     /// Agent requires setup (authentication, install, etc.).
     SetupRequired {
         reason: String,
         auth_methods: Vec<String>,
     },
-    /// The turn failed with an error.
-    Failed { error: String },
+    /// The turn failed with a classified, redacted record.
+    TurnFailed {
+        failure: crate::ai::reliability::AppFailureRecord,
+    },
+}
+
+impl AgentChatEvent {
+    pub(crate) fn completed(stop_reason: impl Into<String>) -> Self {
+        Self::TurnCompleted {
+            outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Completed {
+                stop_reason: Some(stop_reason.into()),
+            },
+        }
+    }
+
+    pub(crate) fn failed(
+        component: sk_protocol::ai_reliability::ProtocolComponent,
+        raw: impl AsRef<str>,
+    ) -> Self {
+        Self::TurnFailed {
+            failure: crate::ai::reliability::provider_failure(component, raw),
+        }
+    }
 }
 
 #[cfg(test)]

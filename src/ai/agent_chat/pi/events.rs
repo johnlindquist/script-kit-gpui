@@ -16,12 +16,13 @@ pub(crate) fn map_rpc_line_to_events(line: PiRpcLine) -> Vec<AgentChatEvent> {
 
 pub(crate) fn map_rpc_response_to_events(response: &PiRpcResponse) -> Vec<AgentChatEvent> {
     if !response.success {
-        return vec![AgentChatEvent::Failed {
-            error: response
+        return vec![AgentChatEvent::failed(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            response
                 .error
                 .clone()
                 .unwrap_or_else(|| "Pi RPC command failed".to_string()),
-        }];
+        )];
     }
 
     if response.command.as_deref() == Some("get_available_models") {
@@ -135,21 +136,21 @@ pub(crate) fn map_rpc_event_to_events(event: &Value) -> Vec<AgentChatEvent> {
         }
         Some("agent_end") => {
             if let Some(error) = get_str(event, "error").filter(|error| !error.trim().is_empty()) {
-                vec![AgentChatEvent::Failed {
-                    error: error.to_string(),
-                }]
+                vec![AgentChatEvent::failed(
+                    sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                    error,
+                )]
             } else {
-                vec![AgentChatEvent::TurnFinished {
-                    stop_reason: "stop".to_string(),
-                }]
+                vec![AgentChatEvent::completed("stop")]
             }
         }
-        Some("event_serialize_error") | Some("extension_error") => vec![AgentChatEvent::Failed {
-            error: get_str(event, "error")
+        Some("event_serialize_error") | Some("extension_error") => vec![AgentChatEvent::failed(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            get_str(event, "error")
                 .or_else(|| get_str(event, "message"))
                 .unwrap_or("Pi RPC event error")
                 .to_string(),
-        }],
+        )],
         _ => Vec::new(),
     }
 }
@@ -741,7 +742,8 @@ mod tests {
         let events = map_rpc_response_to_events(&response);
         assert!(matches!(
             events.as_slice(),
-            [AgentChatEvent::Failed { error }] if error == "nope"
+            [AgentChatEvent::TurnFailed { failure }]
+                if failure.failure.code == sk_protocol::ai_reliability::AiFailureCode::Unknown
         ));
     }
 
@@ -754,7 +756,8 @@ mod tests {
 
         assert!(matches!(
             events.as_slice(),
-            [AgentChatEvent::Failed { error }] if error == "failed"
+            [AgentChatEvent::TurnFailed { failure }]
+                if failure.failure.code == sk_protocol::ai_reliability::AiFailureCode::Unknown
         ));
     }
 
@@ -764,7 +767,11 @@ mod tests {
 
         assert!(matches!(
             events.as_slice(),
-            [AgentChatEvent::TurnFinished { stop_reason }] if stop_reason == "stop"
+            [AgentChatEvent::TurnCompleted {
+                outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Completed {
+                    stop_reason: Some(stop_reason)
+                }
+            }] if stop_reason == "stop"
         ));
     }
 
@@ -829,7 +836,8 @@ mod tests {
         let events = map_rpc_response_to_events(&response);
         assert!(matches!(
             events.as_slice(),
-            [AgentChatEvent::Failed { error }] if error == "entry not found"
+            [AgentChatEvent::TurnFailed { failure }]
+                if failure.failure.code == sk_protocol::ai_reliability::AiFailureCode::Unknown
         ));
     }
 

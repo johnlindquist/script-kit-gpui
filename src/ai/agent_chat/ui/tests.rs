@@ -332,9 +332,10 @@ fn tool_call_lifecycle_tracks_state_for_view() {
 fn error_event_creates_error_message_and_sets_status() {
     let mut thread = AgentChatThread::test_new(vec![], None);
 
-    thread.apply_event_test(AgentChatEvent::Failed {
-        error: "Agent Chat connection lost".into(),
-    });
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        "Agent Chat connection lost",
+    ));
 
     assert_eq!(thread.status, AgentChatThreadStatus::Error);
     assert_eq!(thread.messages.len(), 1);
@@ -348,9 +349,7 @@ fn turn_finished_returns_to_idle_from_streaming() {
     thread.apply_event_test(AgentChatEvent::AgentMessageDelta("hello".into()));
     assert_eq!(thread.status, AgentChatThreadStatus::Streaming);
 
-    thread.apply_event_test(AgentChatEvent::TurnFinished {
-        stop_reason: "end_turn".into(),
-    });
+    thread.apply_event_test(AgentChatEvent::completed("end_turn"));
     assert_eq!(thread.status, AgentChatThreadStatus::Idle);
 }
 

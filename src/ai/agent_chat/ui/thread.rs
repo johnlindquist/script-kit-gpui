@@ -51,11 +51,12 @@ impl AgentChatConnection for TestAgentChatConnection {
     fn start_turn(
         &self,
         _request: AgentChatTurnRequest,
-    ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
-        anyhow::bail!("test connection does not start turns")
+    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+    {
+        Err(anyhow::anyhow!("test connection does not start turns").into())
     }
 
-    fn cancel_turn(&self, _ui_thread_id: String) -> anyhow::Result<()> {
+    fn cancel_turn(&self, _ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
         Ok(())
     }
 
@@ -63,8 +64,9 @@ impl AgentChatConnection for TestAgentChatConnection {
         &self,
         _ui_thread_id: String,
         _cwd: PathBuf,
-    ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
-        anyhow::bail!("test connection does not prepare sessions")
+    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+    {
+        Err(anyhow::anyhow!("test connection does not prepare sessions").into())
     }
 }
 
@@ -2487,7 +2489,7 @@ impl AgentChatThread {
                 crate::chat_hot_counters::record_agent_event_received();
                 let should_stop = matches!(
                     event,
-                    AgentChatEvent::TurnFinished { .. } | AgentChatEvent::Failed { .. }
+                    AgentChatEvent::TurnCompleted { .. } | AgentChatEvent::TurnFailed { .. }
                 );
 
                 let entity_alive = entity.upgrade().is_some();
@@ -2818,7 +2820,7 @@ impl AgentChatThread {
                 changed |= self.flush_streaming_text_buffer();
                 changed |= self.apply_fork_completed(text, cx);
             }
-            AgentChatEvent::TurnFinished { .. } => {
+            AgentChatEvent::TurnCompleted { .. } => {
                 changed |= self.flush_streaming_text_buffer();
                 if self.pending_permission.take().is_some() {
                     changed = true;
@@ -2971,21 +2973,22 @@ impl AgentChatThread {
                 );
                 changed |= self.set_status(AgentChatThreadStatus::Error);
             }
-            AgentChatEvent::Failed { error } => {
+            AgentChatEvent::TurnFailed { failure } => {
                 let _ = self.flush_streaming_text_buffer();
+                let safe_message = failure.primary_message().to_string();
                 self.maybe_notify_agent_chat_event(
                     AgentChatNotificationEvent::Failed,
                     "Agent Chat — turn failed",
-                    error.clone(),
+                    safe_message.clone(),
                 );
                 crate::ai::subscriptions::publish_error(
                     Some(&self.ui_thread_id),
-                    "AGENT_CHAT_TURN_FAILED".to_string(),
-                    error.clone(),
+                    format!("{:?}", failure.failure.code),
+                    safe_message.clone(),
                 );
                 let _ = self.pending_permission.take();
                 let can_retry = self.last_user_turn_text().is_some();
-                let callout = AgentChatCallout::failed(error, can_retry);
+                let callout = AgentChatCallout::failed(safe_message, can_retry);
                 let transcript_message = callout
                     .detail
                     .as_ref()
@@ -3723,15 +3726,19 @@ impl AgentChatThread {
                         );
                         if is_fork_event {
                             this.apply_event(event, cx);
-                        } else if let AgentChatEvent::Failed { error } = event {
+                        } else if let AgentChatEvent::TurnFailed { failure } = event {
                             tracing::warn!(
                                 target: "script_kit::tab_ai",
                                 event = "agent_chat_fork_rpc_failed",
                                 context = context_label,
-                                error = %error,
+                                failure_code = ?failure.failure.code,
+                                diagnostic_fingerprint = ?failure.failure.diagnostic.as_ref().map(|d| &d.fingerprint.0),
                             );
                             if this.pending_fork_ordinal.take().is_some() {
-                                this.push_system_message(format!("Rewind failed: {error}"), cx);
+                                this.push_system_message(
+                                    format!("Rewind failed: {}", failure.primary_message()),
+                                    cx,
+                                );
                             }
                         }
                     });
@@ -4752,7 +4759,7 @@ impl AgentChatThread {
                     self.set_status(AgentChatThreadStatus::Idle);
                 }
             }
-            super::AgentChatEvent::TurnFinished { .. } => {
+            super::AgentChatEvent::TurnCompleted { .. } => {
                 self.set_status(AgentChatThreadStatus::Idle);
                 if !self.queue_paused {
                     if let Some(message) = self.queued_messages.pop_front() {
@@ -4777,9 +4784,9 @@ impl AgentChatThread {
                 );
                 self.set_status(AgentChatThreadStatus::Error);
             }
-            super::AgentChatEvent::Failed { error } => {
+            super::AgentChatEvent::TurnFailed { failure } => {
                 let can_retry = self.last_user_turn_text().is_some();
-                let callout = AgentChatCallout::failed(error, can_retry);
+                let callout = AgentChatCallout::failed(failure.primary_message(), can_retry);
                 let transcript_message = callout
                     .detail
                     .as_ref()

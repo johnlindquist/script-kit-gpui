@@ -25,6 +25,13 @@ use super::session::{resolve_mdflow_turn_arg, MdflowTurnArg};
 /// Bounded SIGTERM→SIGKILL escalation window (protocol §3).
 const CANCEL_ESCALATION: Duration = Duration::from_secs(2);
 
+fn mdflow_failure(raw: impl AsRef<str>) -> crate::ai::reliability::AppFailureRecord {
+    crate::ai::reliability::provider_failure(
+        sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+        raw,
+    )
+}
+
 /// Launch a flow run. Returns the registry-local run id immediately; all
 /// process work happens on background threads. `input_overrides` are
 /// (name, value) pairs passed as `--_<name> <value>` (collected natively —
@@ -131,19 +138,25 @@ fn run_flow_process(
         return;
     }
     let Some(binary) = mdflow_binary() else {
-        registry.mark_failed(local_id, "mdflow CLI not found on PATH (npm i -g mdflow)");
+        registry.mark_failed(
+            local_id,
+            mdflow_failure("mdflow CLI not found on PATH (npm i -g mdflow)"),
+        );
         return;
     };
 
     let turn_arg = if capture_conversation {
         let Some((_, prompt)) = overrides.iter().find(|(name, _)| name == "task") else {
-            registry.mark_failed(local_id, "Threadline run missing its turn prompt");
+            registry.mark_failed(
+                local_id,
+                mdflow_failure("Threadline run missing its turn prompt"),
+            );
             return;
         };
         match resolve_mdflow_turn_arg(binary, flow_path, cwd, prompt) {
             Ok(arg) => Some(arg),
             Err(err) => {
-                registry.mark_failed(local_id, &err);
+                registry.mark_failed(local_id, mdflow_failure(err));
                 return;
             }
         }
@@ -159,7 +172,10 @@ fn run_flow_process(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            registry.mark_failed(local_id, &format!("failed to spawn {binary}: {err}"));
+            registry.mark_failed(
+                local_id,
+                mdflow_failure(format!("failed to spawn {binary}: {err}")),
+            );
             return;
         }
     };
@@ -181,7 +197,7 @@ fn run_flow_process(
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            registry.mark_failed(local_id, "child stdout unavailable");
+            registry.mark_failed(local_id, mdflow_failure("child stdout unavailable"));
             let _ = child.kill();
             return;
         }
@@ -200,7 +216,12 @@ fn run_flow_process(
                     if line.trim().is_empty() {
                         continue;
                     }
-                    stderr_registry.push_raw_stderr(local_id, &line);
+                    let redacted = crate::ai::reliability::redact_diagnostic(&line);
+                    let safe_line = redacted
+                        .copyable_detail
+                        .as_deref()
+                        .unwrap_or("[diagnostic redacted]");
+                    stderr_registry.push_raw_stderr(local_id, safe_line);
                 }
             })
             .ok();
@@ -237,16 +258,26 @@ fn run_flow_process(
     }
 
     if let Some(detail) = &protocol_failure {
+        let failure = mdflow_failure(format!("protocol violation: {detail}"));
+        let fingerprint = failure
+            .failure
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+            .unwrap_or("unavailable");
         crate::logging::log(
             "FLOWS",
-            &format!("run {local_id}: protocol violation — {detail}"),
+            &format!(
+                "run {local_id}: protocol violation code={:?} fingerprint={fingerprint}",
+                failure.failure.code
+            ),
         );
         // A cancel already in flight keeps its outcome; otherwise the run
         // fails closed. Either way the untrustworthy process is killed.
         if registry.get(local_id).map(|run| run.phase) == Some(RunPhase::Cancelling) {
             registry.mark_cancelled(local_id);
         } else {
-            registry.mark_failed(local_id, &format!("protocol violation: {detail}"));
+            registry.mark_failed(local_id, failure);
         }
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGTERM);
@@ -279,15 +310,20 @@ fn run_flow_process(
                 match status {
                     Ok(status) if status.success() => registry.mark_failed(
                         local_id,
-                        &format!("run ended without a terminal protocol event{stderr_note}"),
+                        mdflow_failure(format!(
+                            "run ended without a terminal protocol event{stderr_note}"
+                        )),
                     ),
                     Ok(status) => registry.mark_failed(
                         local_id,
-                        &format!("process exited {status} without terminal event{stderr_note}"),
+                        mdflow_failure(format!(
+                            "process exited {status} without terminal event{stderr_note}"
+                        )),
                     ),
-                    Err(err) => {
-                        registry.mark_failed(local_id, &format!("wait failed: {err}{stderr_note}"))
-                    }
+                    Err(err) => registry.mark_failed(
+                        local_id,
+                        mdflow_failure(format!("wait failed: {err}{stderr_note}")),
+                    ),
                 }
             }
         }

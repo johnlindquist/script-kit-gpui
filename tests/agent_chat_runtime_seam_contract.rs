@@ -23,7 +23,7 @@ fn agent_chat_connection_trait_is_backend_neutral_and_object_safe_by_shape() {
     assert!(AGENT_CHAT_RUNTIME_SOURCE.contains("Send + Sync + 'static"));
     assert!(AGENT_CHAT_RUNTIME_SOURCE.contains("fn start_turn(&self"));
     assert!(AGENT_CHAT_RUNTIME_SOURCE.contains("fn cancel_turn(&self"));
-    assert!(AGENT_CHAT_RUNTIME_SOURCE.contains("fn prepare_session(&self"));
+    assert!(AGENT_CHAT_RUNTIME_SOURCE.contains("fn prepare_session("));
     assert!(
         !AGENT_CHAT_RUNTIME_SOURCE.contains("async fn"),
         "runtime seam must remain object-safe"

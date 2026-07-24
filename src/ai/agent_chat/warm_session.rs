@@ -348,13 +348,24 @@ impl AgentChatWarmSessionManager {
         spawn_result: std::io::Result<()>,
     ) -> Result<()> {
         if let Err(error) = spawn_result {
-            let message = format!("Failed to spawn Pi warm prepare worker: {error}");
+            let failure = crate::ai::reliability::provider_failure(
+                sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                format!("Failed to spawn Pi warm prepare worker: {error}"),
+            );
+            let message = failure.primary_message().to_string();
+            let fingerprint = failure
+                .failure
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+                .unwrap_or("unavailable");
             tracing::error!(
                 target: "script_kit::tab_ai",
                 event = "warm_background_thread_spawn_failed",
                 generation = snapshot.generation,
                 key = %snapshot.key,
-                error = %message,
+                failure_code = ?failure.failure.code,
+                diagnostic_fingerprint = fingerprint,
             );
             self.mark_preparing_generation_failed(
                 &snapshot.key,
@@ -740,15 +751,19 @@ impl AgentChatWarmSessionManager {
                                 );
                                 (AgentChatWarmSessionState::Ready, None)
                             }
-                            PrepareReadyOutcome::RuntimeFailed(error) => {
+                            PrepareReadyOutcome::RuntimeFailed(failure) => {
                                 tracing::warn!(
                                     target: "script_kit::tab_ai",
                                     event = "warm_prepare_slot_runtime_failed",
                                     generation,
                                     key = %spec.key,
-                                    error = %error,
+                                    failure_code = ?failure.failure.code,
+                                    diagnostic_fingerprint = ?failure.failure.diagnostic.as_ref().map(|d| &d.fingerprint.0),
                                 );
-                                (AgentChatWarmSessionState::Failed, Some(error))
+                                (
+                                    AgentChatWarmSessionState::Failed,
+                                    Some(failure.primary_message().to_string()),
+                                )
                             }
                             PrepareReadyOutcome::Timeout => {
                                 tracing::warn!(
@@ -844,7 +859,7 @@ impl AgentChatWarmSessionManager {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PrepareReadyOutcome {
     Ready,
-    RuntimeFailed(String),
+    RuntimeFailed(crate::ai::reliability::AppFailureRecord),
     Timeout,
     Closed,
 }
@@ -855,8 +870,8 @@ fn wait_for_prepare_ready(events: AgentChatEventRx, timeout: Duration) -> Prepar
     loop {
         match events.try_recv() {
             Ok(AgentChatEvent::ModelsAvailable { .. }) => return PrepareReadyOutcome::Ready,
-            Ok(AgentChatEvent::Failed { error }) => {
-                return PrepareReadyOutcome::RuntimeFailed(error);
+            Ok(AgentChatEvent::TurnFailed { failure }) => {
+                return PrepareReadyOutcome::RuntimeFailed(failure);
             }
             Ok(AgentChatEvent::SetupRequired {
                 reason,
@@ -870,7 +885,12 @@ fn wait_for_prepare_ready(events: AgentChatEventRx, timeout: Duration) -> Prepar
                         auth_methods.join(", ")
                     )
                 };
-                return PrepareReadyOutcome::RuntimeFailed(detail);
+                return PrepareReadyOutcome::RuntimeFailed(
+                    crate::ai::reliability::provider_failure(
+                        sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                        detail,
+                    ),
+                );
             }
             Ok(_) => continue,
             Err(async_channel::TryRecvError::Empty) => {
@@ -922,26 +942,36 @@ mod tests {
     }
 
     impl AgentChatConnection for RecordingConnection {
-        fn start_turn(&self, _request: AgentChatTurnRequest) -> Result<AgentChatEventRx> {
+        fn start_turn(
+            &self,
+            _request: AgentChatTurnRequest,
+        ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
             let (_tx, rx) = async_channel::bounded(1);
             Ok(rx)
         }
 
-        fn cancel_turn(&self, ui_thread_id: String) -> Result<()> {
+        fn cancel_turn(&self, ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
             self.cancel_calls.lock().push(ui_thread_id);
             Ok(())
         }
 
-        fn prepare_session(&self, ui_thread_id: String, cwd: PathBuf) -> Result<AgentChatEventRx> {
-            self.prepare_calls.lock().push((ui_thread_id, cwd));
-            if self.fail_prepare {
-                anyhow::bail!("prepare failed");
-            }
-            let (tx, rx) = async_channel::bounded(1);
-            if let Some(event) = self.prepare_event.clone() {
-                tx.send_blocking(event)?;
-            }
-            Ok(rx)
+        fn prepare_session(
+            &self,
+            ui_thread_id: String,
+            cwd: PathBuf,
+        ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
+            (|| -> Result<AgentChatEventRx> {
+                self.prepare_calls.lock().push((ui_thread_id, cwd));
+                if self.fail_prepare {
+                    anyhow::bail!("prepare failed");
+                }
+                let (tx, rx) = async_channel::bounded(1);
+                if let Some(event) = self.prepare_event.clone() {
+                    tx.send_blocking(event)?;
+                }
+                Ok(rx)
+            })()
+            .map_err(Into::into)
         }
     }
 
@@ -1060,12 +1090,18 @@ mod tests {
     }
 
     impl AgentChatConnection for GatedPrepareConnection {
-        fn start_turn(&self, _request: AgentChatTurnRequest) -> Result<AgentChatEventRx> {
+        fn start_turn(
+            &self,
+            _request: AgentChatTurnRequest,
+        ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
             let (_tx, rx) = async_channel::bounded(1);
             Ok(rx)
         }
 
-        fn cancel_turn(&self, _ui_thread_id: String) -> Result<()> {
+        fn cancel_turn(
+            &self,
+            _ui_thread_id: String,
+        ) -> crate::ai::reliability::AiAdapterResult<()> {
             Ok(())
         }
 
@@ -1073,7 +1109,7 @@ mod tests {
             &self,
             _ui_thread_id: String,
             _cwd: PathBuf,
-        ) -> Result<AgentChatEventRx> {
+        ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
             if let Some(tx) = self.started_tx.lock().take() {
                 let _ = tx.send(());
             }
@@ -1081,10 +1117,10 @@ mod tests {
                 let _ = rx.recv();
             }
             let (tx, rx) = async_channel::bounded(1);
-            tx.send_blocking(AgentChatEvent::ModelsAvailable {
+            let _ = tx.send_blocking(AgentChatEvent::ModelsAvailable {
                 current_model_id: None,
                 models: Vec::new(),
-            })?;
+            });
             Ok(rx)
         }
     }
@@ -1614,9 +1650,7 @@ mod tests {
     fn prepare_warm_requires_models_available_readiness_event() {
         let manager = manager();
         let factory = Arc::new(RecordingFactory::default());
-        factory.set_next_prepare_event(Some(AgentChatEvent::TurnFinished {
-            stop_reason: "ignored".to_string(),
-        }));
+        factory.set_next_prepare_event(Some(AgentChatEvent::completed("ignored")));
 
         let snapshot = manager.prepare_warm(spec(factory.clone())).unwrap();
 

@@ -47,7 +47,7 @@ pub struct FlowRun {
     pub phase: RunPhase,
     pub engagement: EngagementMode,
     pub exit_code: Option<i64>,
-    pub error_message: Option<String>,
+    pub failure: Option<crate::ai::reliability::AppFailureRecord>,
     /// PGID of the app-spawned `md` process (group leader via
     /// `process_group(0)`). Immutable once set — cancellation signals THIS.
     pub pid: Option<u32>,
@@ -81,9 +81,9 @@ pub struct FlowRun {
 impl FlowRun {
     pub fn display_status(&self) -> String {
         match self.phase {
-            RunPhase::Failed => match (self.exit_code, &self.error_message) {
+            RunPhase::Failed => match (self.exit_code, &self.failure) {
                 (Some(code), _) => format!("Failed (exit {code})"),
-                (None, Some(message)) => format!("Failed: {message}"),
+                (None, Some(failure)) => format!("Failed: {}", failure.primary_message()),
                 (None, None) => "Failed".to_string(),
             },
             phase => phase.label().to_string(),
@@ -179,7 +179,7 @@ impl FlowRunRegistry {
             phase: RunPhase::Starting,
             engagement,
             exit_code: None,
-            error_message: None,
+            failure: None,
             pid: None,
             engine_pid: None,
             override_names: Vec::new(),
@@ -349,7 +349,10 @@ impl FlowRunRegistry {
                     run.phase = RunPhase::Cancelled;
                 } else if !run.phase.is_terminal() {
                     run.phase = RunPhase::Failed;
-                    run.error_message = Some(message.clone());
+                    run.failure = Some(crate::ai::reliability::provider_failure(
+                        sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                        message,
+                    ));
                 }
                 run.exit_code = *exit_code;
                 run.duration_ms = *duration_ms;
@@ -367,12 +370,12 @@ impl FlowRunRegistry {
 
     /// Runner-thread fallback when the process dies without a terminal event
     /// (spawn failure, protocol violation, SIGKILL escalation).
-    pub fn mark_failed(&self, local_id: u64, message: &str) {
+    pub fn mark_failed(&self, local_id: u64, failure: crate::ai::reliability::AppFailureRecord) {
         let mut state = self.state.lock();
         if let Some(run) = state.runs.get_mut(&local_id) {
             if !run.phase.is_terminal() {
                 run.phase = RunPhase::Failed;
-                run.error_message = Some(message.to_string());
+                run.failure = Some(failure);
                 run.duration_ms = Some(run.launched_at.elapsed().as_millis() as u64);
             }
         }
@@ -620,6 +623,13 @@ mod tests {
         )
     }
 
+    fn failure(raw: &str) -> crate::ai::reliability::AppFailureRecord {
+        crate::ai::reliability::provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            raw,
+        )
+    }
+
     #[test]
     fn starting_run_is_acknowledged_before_spawn() {
         let registry = fresh();
@@ -686,7 +696,10 @@ mod tests {
         );
         let run2 = registry.get(id2).unwrap();
         assert_eq!(run2.phase, RunPhase::Failed);
-        assert_eq!(run2.error_message.as_deref(), Some("boom"));
+        assert_eq!(
+            run2.failure.as_ref().map(|failure| failure.failure.code),
+            Some(sk_protocol::ai_reliability::AiFailureCode::Unknown)
+        );
     }
 
     #[test]
@@ -721,7 +734,7 @@ mod tests {
             )
             .unwrap(),
         );
-        registry.mark_failed(id, "reader thread exit");
+        registry.mark_failed(id, failure("reader thread exit"));
         assert_eq!(registry.get(id).unwrap().phase, RunPhase::Succeeded);
     }
 
@@ -1017,8 +1030,8 @@ mod tests {
         let bare = insert(&registry);
         let convo = insert(&registry);
         registry.enable_conversation_capture(convo);
-        registry.mark_failed(bare, "boom");
-        registry.mark_failed(convo, "boom");
+        registry.mark_failed(bare, failure("boom"));
+        registry.mark_failed(convo, failure("boom"));
 
         let first = registry.take_unnotified_terminal();
         assert_eq!(first.len(), 1, "conversation runs settle in-transcript");

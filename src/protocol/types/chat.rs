@@ -71,6 +71,10 @@ pub struct ChatPromptMessage {
     /// Error message if generation failed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Typed terminal failure. `error` remains a temporary SDK compatibility
+    /// projection and must contain only safe primary copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<sk_protocol::ai_reliability::AiFailure>,
     /// Creation timestamp (ISO 8601)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
@@ -93,6 +97,7 @@ impl ChatPromptMessage {
             model: None,
             streaming: false,
             error: None,
+            failure: None,
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             image: None,
         }
@@ -111,6 +116,7 @@ impl ChatPromptMessage {
             model: None,
             streaming: false,
             error: None,
+            failure: None,
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             image: None,
         }
@@ -129,6 +135,7 @@ impl ChatPromptMessage {
             model: None,
             streaming: false,
             error: None,
+            failure: None,
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             image: None,
         }
@@ -147,6 +154,7 @@ impl ChatPromptMessage {
             model: None,
             streaming: true,
             error: None,
+            failure: None,
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             image: None,
         }
@@ -165,6 +173,7 @@ impl ChatPromptMessage {
             model: None,
             streaming: false,
             error: Some(error_str),
+            failure: None,
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             image: None,
         }
@@ -383,6 +392,7 @@ mod tests {
             model: None,
             streaming: true,
             error: None,
+            failure: None,
             created_at: None,
             image: None,
         };

@@ -84,262 +84,272 @@ impl Drop for CodexQuickAiExecConnection {
 }
 
 impl AgentChatConnection for CodexQuickAiExecConnection {
-    fn start_turn(&self, request: AgentChatTurnRequest) -> Result<AgentChatEventRx> {
-        // WP-B2: this cold adapter serves ONLY the web-search-only Quick AI
-        // profile. Refuse any turn whose session policy would grant broader
-        // tools — the backend allowlist is web-search-only and must never be
-        // driven by a Full-policy request reaching this path.
-        if request.tool_policy
-            != crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy::WebSearchOnly
-        {
-            bail!("quick_ai_requires_web_search_only_tool_policy")
-        }
-        let query = extract_zero_context_query(&request, &self.spec.selected_model_id)?;
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        {
-            let turns = self
-                .active_turns
-                .lock()
-                .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?;
-            if turns.contains_key(&request.ui_thread_id) {
-                bail!("quick_ai_turn_already_active")
+    fn start_turn(
+        &self,
+        request: AgentChatTurnRequest,
+    ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
+        (|| -> Result<AgentChatEventRx> {
+            // WP-B2: this cold adapter serves ONLY the web-search-only Quick AI
+            // profile. Refuse any turn whose session policy would grant broader
+            // tools — the backend allowlist is web-search-only and must never be
+            // driven by a Full-policy request reaching this path.
+            if request.tool_policy
+                != crate::ai::agent_chat::ui::capabilities::AgentChatToolPolicy::WebSearchOnly
+            {
+                bail!("quick_ai_requires_web_search_only_tool_policy")
             }
-        }
-
-        std::fs::create_dir_all(&self.spec.scratch_root).with_context(|| {
-            format!(
-                "quick_ai_scratch_root_create_failed:{}",
-                self.spec.scratch_root.display()
-            )
-        })?;
-        let run_id = format!(
-            "quick-ai-{}-{generation}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let turn_cwd = self.spec.scratch_root.join(&run_id);
-        std::fs::create_dir(&turn_cwd)
-            .with_context(|| format!("quick_ai_turn_cwd_create_failed:{}", turn_cwd.display()))?;
-
-        let mut command = build_codex_exec_command(&self.spec, &turn_cwd, &query)?;
-        let mut child = command.spawn().with_context(|| {
-            format!("quick_ai_codex_spawn_failed:{}", self.spec.binary.display())
-        })?;
-        let pid = child.id();
-        let pgid = pid as i32;
-        let registration = crate::process_manager::ChildRegistration::register(
-            pid,
-            &self.spec.binary.to_string_lossy(),
-        );
-        let stdout = child
-            .stdout
-            .take()
-            .context("quick_ai_codex_stdout_unavailable")?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("quick_ai_codex_stderr_unavailable")?;
-        let cancel_requested = Arc::new(AtomicBool::new(false));
-        let trace = TraceSink::new(self.spec.trace_path.clone(), run_id.clone());
-        trace.write(
-            "spawned",
-            json!({
-                "backend": "codex-exec",
-                "profileId": "quick-ai",
-                "model": self.spec.model,
-                "selectedModelId": self.spec.selected_model_id,
-                "promptSha256": sha256_hex(&self.spec.developer_instructions),
-                "allowedTools": ["web_search"],
-                "nativeSearchEnabled": true,
-                "sandbox": "read-only",
-                "ephemeral": true,
-                "ignoreUserConfig": true,
-                "ignoreRules": true,
-                "stdinNull": true,
-                "inputBlockCount": 1,
-                "textBlockCount": 1,
-                "imageBlockCount": 0,
-                "querySha256": sha256_hex(&query),
-                "queryChars": query.chars().count(),
-                "pid": pid,
-                "pgid": pgid,
-            }),
-        );
-
-        let (line_tx, line_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(128);
-        std::thread::Builder::new()
-            .name(format!("quick-ai-jsonl-{generation}"))
-            .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let value = line.map_err(|error| error.to_string());
-                    if line_tx.send(value).is_err() {
-                        break;
-                    }
+            let query = extract_zero_context_query(&request, &self.spec.selected_model_id)?;
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+            {
+                let turns = self
+                    .active_turns
+                    .lock()
+                    .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?;
+                if turns.contains_key(&request.ui_thread_id) {
+                    bail!("quick_ai_turn_already_active")
                 }
-            })
-            .context("quick_ai_stdout_reader_spawn_failed")?;
-        let stderr_thread = std::thread::Builder::new()
-            .name(format!("quick-ai-stderr-{generation}"))
-            .spawn(move || {
-                let mut text = String::new();
-                let _ = BufReader::new(stderr)
-                    .take(64 * 1024)
-                    .read_to_string(&mut text);
-                text
-            })
-            .context("quick_ai_stderr_reader_spawn_failed")?;
+            }
 
-        let (event_tx, event_rx) = async_channel::bounded(EVENT_CHANNEL_CAPACITY);
-        let active_turns = Arc::clone(&self.active_turns);
-        let ui_thread_id = request.ui_thread_id;
-        let scratch = turn_cwd;
-        self.active_turns
-            .lock()
-            .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?
-            .insert(
-                ui_thread_id.clone(),
-                ActiveExecTurn {
-                    generation,
-                    pid,
-                    pgid,
-                    cancel_requested: cancel_requested.clone(),
-                },
+            std::fs::create_dir_all(&self.spec.scratch_root).with_context(|| {
+                format!(
+                    "quick_ai_scratch_root_create_failed:{}",
+                    self.spec.scratch_root.display()
+                )
+            })?;
+            let run_id = format!(
+                "quick-ai-{}-{generation}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
             );
-        std::thread::Builder::new()
-            .name(format!("quick-ai-turn-{generation}"))
-            .spawn(move || {
-                let _registration = registration;
-                let mut accumulator = CodexExecTurnAccumulator::new(run_id.clone());
-                let mut failure: Option<CodexTurnFailure> = None;
-                let mut cancelled = false;
-                loop {
-                    if cancel_requested.load(Ordering::Acquire) || event_tx.is_closed() {
-                        cancelled = true;
-                        break;
+            let turn_cwd = self.spec.scratch_root.join(&run_id);
+            std::fs::create_dir(&turn_cwd).with_context(|| {
+                format!("quick_ai_turn_cwd_create_failed:{}", turn_cwd.display())
+            })?;
+
+            let mut command = build_codex_exec_command(&self.spec, &turn_cwd, &query)?;
+            let mut child = command.spawn().with_context(|| {
+                format!("quick_ai_codex_spawn_failed:{}", self.spec.binary.display())
+            })?;
+            let pid = child.id();
+            let pgid = pid as i32;
+            let registration = crate::process_manager::ChildRegistration::register(
+                pid,
+                &self.spec.binary.to_string_lossy(),
+            );
+            let stdout = child
+                .stdout
+                .take()
+                .context("quick_ai_codex_stdout_unavailable")?;
+            let stderr = child
+                .stderr
+                .take()
+                .context("quick_ai_codex_stderr_unavailable")?;
+            let cancel_requested = Arc::new(AtomicBool::new(false));
+            let trace = TraceSink::new(self.spec.trace_path.clone(), run_id.clone());
+            trace.write(
+                "spawned",
+                json!({
+                    "backend": "codex-exec",
+                    "profileId": "quick-ai",
+                    "model": self.spec.model,
+                    "selectedModelId": self.spec.selected_model_id,
+                    "promptSha256": sha256_hex(&self.spec.developer_instructions),
+                    "allowedTools": ["web_search"],
+                    "nativeSearchEnabled": true,
+                    "sandbox": "read-only",
+                    "ephemeral": true,
+                    "ignoreUserConfig": true,
+                    "ignoreRules": true,
+                    "stdinNull": true,
+                    "inputBlockCount": 1,
+                    "textBlockCount": 1,
+                    "imageBlockCount": 0,
+                    "querySha256": sha256_hex(&query),
+                    "queryChars": query.chars().count(),
+                    "pid": pid,
+                    "pgid": pgid,
+                }),
+            );
+
+            let (line_tx, line_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(128);
+            std::thread::Builder::new()
+                .name(format!("quick-ai-jsonl-{generation}"))
+                .spawn(move || {
+                    for line in BufReader::new(stdout).lines() {
+                        let value = line.map_err(|error| error.to_string());
+                        if line_tx.send(value).is_err() {
+                            break;
+                        }
                     }
-                    match line_rx.recv_timeout(CANCEL_POLL) {
-                        Ok(Ok(line)) => {
-                            if line.trim().is_empty() {
-                                failure = Some(CodexTurnFailure::protocol(
-                                    "quick_ai_codex_empty_jsonl_line",
-                                ));
-                                break;
-                            }
-                            let event = match parse_codex_exec_line(&line) {
-                                Ok(event) => event,
-                                Err(error) => {
-                                    failure = Some(CodexTurnFailure::protocol(error.to_string()));
+                })
+                .context("quick_ai_stdout_reader_spawn_failed")?;
+            let stderr_thread = std::thread::Builder::new()
+                .name(format!("quick-ai-stderr-{generation}"))
+                .spawn(move || {
+                    let mut text = String::new();
+                    let _ = BufReader::new(stderr)
+                        .take(64 * 1024)
+                        .read_to_string(&mut text);
+                    text
+                })
+                .context("quick_ai_stderr_reader_spawn_failed")?;
+
+            let (event_tx, event_rx) = async_channel::bounded(EVENT_CHANNEL_CAPACITY);
+            let active_turns = Arc::clone(&self.active_turns);
+            let ui_thread_id = request.ui_thread_id;
+            let scratch = turn_cwd;
+            self.active_turns
+                .lock()
+                .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?
+                .insert(
+                    ui_thread_id.clone(),
+                    ActiveExecTurn {
+                        generation,
+                        pid,
+                        pgid,
+                        cancel_requested: cancel_requested.clone(),
+                    },
+                );
+            std::thread::Builder::new()
+                .name(format!("quick-ai-turn-{generation}"))
+                .spawn(move || {
+                    let _registration = registration;
+                    let mut accumulator = CodexExecTurnAccumulator::new(run_id.clone());
+                    let mut failure: Option<CodexTurnFailure> = None;
+                    let mut cancelled = false;
+                    loop {
+                        if cancel_requested.load(Ordering::Acquire) || event_tx.is_closed() {
+                            cancelled = true;
+                            break;
+                        }
+                        match line_rx.recv_timeout(CANCEL_POLL) {
+                            Ok(Ok(line)) => {
+                                if line.trim().is_empty() {
+                                    failure = Some(CodexTurnFailure::protocol(
+                                        "quick_ai_codex_empty_jsonl_line",
+                                    ));
                                     break;
                                 }
-                            };
-                            trace_event_for_protocol(&trace, &event);
-                            match apply_codex_exec_event(&mut accumulator, event) {
-                                Ok(events) => {
-                                    for event in events {
-                                        match event_tx.try_send(event) {
-                                            Ok(()) => {}
-                                            Err(async_channel::TrySendError::Closed(_)) => {
-                                                cancelled = true;
-                                                break;
-                                            }
-                                            Err(async_channel::TrySendError::Full(_)) => {
-                                                failure = Some(CodexTurnFailure::protocol(
-                                                    "quick_ai_event_channel_backpressure",
-                                                ));
-                                                break;
+                                let event = match parse_codex_exec_line(&line) {
+                                    Ok(event) => event,
+                                    Err(error) => {
+                                        failure =
+                                            Some(CodexTurnFailure::protocol(error.to_string()));
+                                        break;
+                                    }
+                                };
+                                trace_event_for_protocol(&trace, &event);
+                                match apply_codex_exec_event(&mut accumulator, event) {
+                                    Ok(events) => {
+                                        for event in events {
+                                            match event_tx.try_send(event) {
+                                                Ok(()) => {}
+                                                Err(async_channel::TrySendError::Closed(_)) => {
+                                                    cancelled = true;
+                                                    break;
+                                                }
+                                                Err(async_channel::TrySendError::Full(_)) => {
+                                                    failure = Some(CodexTurnFailure::protocol(
+                                                        "quick_ai_event_channel_backpressure",
+                                                    ));
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
+                                    Err(error) => {
+                                        failure = Some(error);
+                                        break;
+                                    }
                                 }
-                                Err(error) => {
-                                    failure = Some(error);
+                                if cancelled || failure.is_some() {
                                     break;
                                 }
                             }
-                            if cancelled || failure.is_some() {
+                            Ok(Err(error)) => {
+                                failure = Some(CodexTurnFailure::protocol(format!(
+                                    "quick_ai_codex_stdout_read_failed:{error}"
+                                )));
                                 break;
                             }
-                        }
-                        Ok(Err(error)) => {
-                            failure = Some(CodexTurnFailure::protocol(format!(
-                                "quick_ai_codex_stdout_read_failed:{error}"
-                            )));
-                            break;
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            if let Ok(Some(status)) = child.try_wait() {
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                if let Ok(Some(status)) = child.try_wait() {
+                                    if !accumulator.terminal_seen {
+                                        failure = Some(CodexTurnFailure::protocol(format!(
+                                            "quick_ai_codex_eof_without_terminal:{}",
+                                            status.code().unwrap_or(-1)
+                                        )));
+                                    }
+                                    break;
+                                }
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                 if !accumulator.terminal_seen {
-                                    failure = Some(CodexTurnFailure::protocol(format!(
-                                        "quick_ai_codex_eof_without_terminal:{}",
-                                        status.code().unwrap_or(-1)
-                                    )));
+                                    failure = Some(CodexTurnFailure::protocol(
+                                        "quick_ai_codex_eof_without_terminal",
+                                    ));
                                 }
                                 break;
                             }
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                            if !accumulator.terminal_seen {
-                                failure = Some(CodexTurnFailure::protocol(
-                                    "quick_ai_codex_eof_without_terminal",
-                                ));
-                            }
-                            break;
+                    }
+
+                    let teardown = terminate_and_reap_process_group(&mut child, pgid, CANCEL_GRACE)
+                        .unwrap_or_else(|error| ProcessTeardownReport::failed(error.to_string()));
+                    let stderr_text = stderr_thread.join().unwrap_or_default();
+                    trace.write(
+                        "teardown",
+                        serde_json::to_value(&teardown).unwrap_or(Value::Null),
+                    );
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    if let Ok(mut turns) = active_turns.lock() {
+                        if turns
+                            .get(&ui_thread_id)
+                            .is_some_and(|turn| turn.generation == generation)
+                        {
+                            turns.remove(&ui_thread_id);
                         }
                     }
-                }
 
-                let teardown = terminate_and_reap_process_group(&mut child, pgid, CANCEL_GRACE)
-                    .unwrap_or_else(|error| ProcessTeardownReport::failed(error.to_string()));
-                let stderr_text = stderr_thread.join().unwrap_or_default();
-                trace.write(
-                    "teardown",
-                    serde_json::to_value(&teardown).unwrap_or(Value::Null),
-                );
-                let _ = std::fs::remove_dir_all(&scratch);
-                if let Ok(mut turns) = active_turns.lock() {
-                    if turns
-                        .get(&ui_thread_id)
-                        .is_some_and(|turn| turn.generation == generation)
-                    {
-                        turns.remove(&ui_thread_id);
+                    if cancelled {
+                        emit_running_search_failures(&event_tx, &accumulator, "Cancelled", false);
+                        trace.write("terminal", json!({"kind": "cancelled"}));
+                        let _ = event_tx.send_blocking(AgentChatEvent::TurnCompleted {
+                            outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
+                                kind: sk_protocol::ai_reliability::CancellationKind::UserCancelled,
+                                partial: sk_protocol::ai_reliability::PartialOutputState::None,
+                            },
+                        });
+                        return;
                     }
-                }
 
-                if cancelled {
-                    emit_running_search_failures(&event_tx, &accumulator, "Cancelled", false);
-                    trace.write("terminal", json!({"kind": "cancelled"}));
-                    let _ = event_tx.send_blocking(AgentChatEvent::TurnFinished {
-                        stop_reason: "cancelled".to_string(),
-                    });
-                    return;
-                }
-
-                if failure.is_none() {
-                    if !teardown.child_reaped || teardown.process_group_alive {
-                        failure = Some(CodexTurnFailure::protocol(
-                            "quick_ai_codex_process_teardown_incomplete",
-                        ));
-                    } else if teardown.exit_code != Some(0) || teardown.exit_signal.is_some() {
-                        failure = Some(CodexTurnFailure::protocol(format!(
-                            "quick_ai_codex_nonzero_exit:code={:?}:signal={:?}",
-                            teardown.exit_code, teardown.exit_signal
-                        )));
-                    } else if !accumulator.turn_completed_seen {
-                        failure = Some(CodexTurnFailure::protocol(
-                            "quick_ai_codex_eof_without_terminal",
-                        ));
+                    if failure.is_none() {
+                        if !teardown.child_reaped || teardown.process_group_alive {
+                            failure = Some(CodexTurnFailure::protocol(
+                                "quick_ai_codex_process_teardown_incomplete",
+                            ));
+                        } else if teardown.exit_code != Some(0) || teardown.exit_signal.is_some() {
+                            failure = Some(CodexTurnFailure::protocol(format!(
+                                "quick_ai_codex_nonzero_exit:code={:?}:signal={:?}",
+                                teardown.exit_code, teardown.exit_signal
+                            )));
+                        } else if !accumulator.turn_completed_seen {
+                            failure = Some(CodexTurnFailure::protocol(
+                                "quick_ai_codex_eof_without_terminal",
+                            ));
+                        }
                     }
-                }
-                let final_events = failure
-                    .map(Err)
-                    .unwrap_or_else(|| finalize_successful_turn(&accumulator));
-                match final_events {
-                    Ok(events) => {
-                        if let Some(AgentChatEvent::AgentMessageDelta(answer)) = events.first() {
-                            trace.write(
+                    let final_events = failure
+                        .map(Err)
+                        .unwrap_or_else(|| finalize_successful_turn(&accumulator));
+                    match final_events {
+                        Ok(events) => {
+                            if let Some(AgentChatEvent::AgentMessageDelta(answer)) = events.first()
+                            {
+                                trace.write(
                                 "final_answer_selected",
                                 json!({
                                     "answerSha256": sha256_hex(answer),
@@ -352,48 +362,89 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                                     },
                                 }),
                             );
+                            }
+                            trace.write("terminal", json!({"kind": "completed"}));
+                            for event in events {
+                                let _ = event_tx.send_blocking(event);
+                            }
                         }
-                        trace.write("terminal", json!({"kind": "completed"}));
-                        for event in events {
-                            let _ = event_tx.send_blocking(event);
-                        }
-                    }
-                    Err(error) => {
-                        let mut message = error.message;
-                        if !stderr_text.trim().is_empty() {
+                        Err(error) => {
+                            let mut message = error.message;
+                            if message.is_empty() {
+                                message = "quick_ai_codex_turn_failed".to_string();
+                            }
+                            let raw_failure = if stderr_text.trim().is_empty() {
+                                message
+                            } else {
+                                format!("{message}\n{}", stderr_text.trim())
+                            };
+                            let failure = crate::ai::reliability::provider_failure(
+                                sk_protocol::ai_reliability::ProtocolComponent::Codex,
+                                raw_failure,
+                            );
+                            let fingerprint = failure
+                                .failure
+                                .diagnostic
+                                .as_ref()
+                                .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+                                .unwrap_or("unavailable");
                             tracing::warn!(
                                 target: "script_kit::quick_ai",
-                                event = "codex_quick_ai_stderr",
-                                stderr = %stderr_text.trim(),
+                                event = "codex_quick_ai_failed",
+                                failure_code = ?failure.failure.code,
+                                diagnostic_fingerprint = fingerprint,
                             );
+                            trace.write(
+                                "protocol_failure",
+                                json!({
+                                    "failureCode": format!("{:?}", failure.failure.code),
+                                    "diagnosticFingerprint": fingerprint,
+                                }),
+                            );
+                            emit_running_search_failures(
+                                &event_tx,
+                                &accumulator,
+                                failure.primary_message(),
+                                true,
+                            );
+                            trace.write(
+                                "terminal",
+                                json!({
+                                    "kind": "failed",
+                                    "failureCode": format!("{:?}", failure.failure.code),
+                                    "diagnosticFingerprint": fingerprint,
+                                }),
+                            );
+                            let _ = event_tx.send_blocking(AgentChatEvent::TurnFailed { failure });
                         }
-                        if message.is_empty() {
-                            message = "quick_ai_codex_turn_failed".to_string();
-                        }
-                        trace.write("protocol_failure", json!({"error": message}));
-                        emit_running_search_failures(&event_tx, &accumulator, &message, true);
-                        trace.write("terminal", json!({"kind": "failed", "error": message}));
-                        let _ = event_tx.send_blocking(AgentChatEvent::Failed { error: message });
                     }
-                }
-            })
-            .context("quick_ai_worker_spawn_failed")?;
-        Ok(event_rx)
+                })
+                .context("quick_ai_worker_spawn_failed")?;
+            Ok(event_rx)
+        })()
+        .map_err(Into::into)
     }
 
-    fn cancel_turn(&self, ui_thread_id: String) -> Result<()> {
-        if let Some(turn) = self
-            .active_turns
-            .lock()
-            .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?
-            .get(&ui_thread_id)
-        {
-            turn.cancel_requested.store(true, Ordering::Release);
-        }
-        Ok(())
+    fn cancel_turn(&self, ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
+        (|| -> Result<()> {
+            if let Some(turn) = self
+                .active_turns
+                .lock()
+                .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?
+                .get(&ui_thread_id)
+            {
+                turn.cancel_requested.store(true, Ordering::Release);
+            }
+            Ok(())
+        })()
+        .map_err(Into::into)
     }
 
-    fn prepare_session(&self, _ui_thread_id: String, _cwd: PathBuf) -> Result<AgentChatEventRx> {
+    fn prepare_session(
+        &self,
+        _ui_thread_id: String,
+        _cwd: PathBuf,
+    ) -> crate::ai::reliability::AiAdapterResult<AgentChatEventRx> {
         let (tx, rx) = async_channel::bounded(1);
         let _ = tx.try_send(AgentChatEvent::ModelsAvailable {
             current_model_id: Some(self.spec.selected_model_id.clone()),
@@ -1023,9 +1074,7 @@ fn finalize_successful_turn(
     }
     Ok(vec![
         AgentChatEvent::AgentMessageDelta(answer),
-        AgentChatEvent::TurnFinished {
-            stop_reason: "stop".to_string(),
-        },
+        AgentChatEvent::completed("stop"),
     ])
 }
 
@@ -1606,7 +1655,7 @@ sleep 1
         let mut finished = false;
         while let Ok(event) = rx.recv_blocking() {
             answer |= matches!(event, AgentChatEvent::AgentMessageDelta(_));
-            finished |= matches!(event, AgentChatEvent::TurnFinished { .. });
+            finished |= matches!(event, AgentChatEvent::TurnCompleted { .. });
         }
         assert!(answer && finished);
         assert!(connection.active_turns.lock().unwrap().is_empty());
@@ -1654,7 +1703,12 @@ while :; do sleep 60; done
             .unwrap();
         let mut cancelled = false;
         while let Ok(event) = rx.recv_blocking() {
-            cancelled |= matches!(event, AgentChatEvent::TurnFinished { ref stop_reason } if stop_reason == "cancelled");
+            cancelled |= matches!(
+                event,
+                AgentChatEvent::TurnCompleted {
+                    outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled { .. }
+                }
+            );
         }
         assert!(cancelled);
         assert!(!process_group_alive(pgid));

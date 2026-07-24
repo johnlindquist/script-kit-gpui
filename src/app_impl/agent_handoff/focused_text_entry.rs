@@ -6,22 +6,21 @@ impl crate::ai::agent_chat::runtime::AgentChatConnection for FocusedTextFixtureC
     fn start_turn(
         &self,
         _request: crate::ai::agent_chat::runtime::AgentChatTurnRequest,
-    ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
+    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+    {
         let (tx, rx) = async_channel::bounded(2);
         let _ = tx.try_send(
             crate::ai::agent_chat::events::AgentChatEvent::AgentMessageDelta(
                 "Fixture focused text output.".to_string(),
             ),
         );
-        let _ = tx.try_send(
-            crate::ai::agent_chat::events::AgentChatEvent::TurnFinished {
-                stop_reason: "fixture".to_string(),
-            },
-        );
+        let _ = tx.try_send(crate::ai::agent_chat::events::AgentChatEvent::completed(
+            "fixture",
+        ));
         Ok(rx)
     }
 
-    fn cancel_turn(&self, _ui_thread_id: String) -> anyhow::Result<()> {
+    fn cancel_turn(&self, _ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
         Ok(())
     }
 
@@ -29,7 +28,8 @@ impl crate::ai::agent_chat::runtime::AgentChatConnection for FocusedTextFixtureC
         &self,
         _ui_thread_id: String,
         _cwd: std::path::PathBuf,
-    ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
+    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+    {
         let (_tx, rx) = async_channel::bounded(1);
         Ok(rx)
     }

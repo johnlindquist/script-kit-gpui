@@ -67,7 +67,10 @@ pub fn flow_ux_state(inputs: FlowUxSnapshotInputs<'_>) -> Value {
                 "engagement": run.engagement.label(),
                 "selected": Some(run.local_id) == selected,
                 "exitCode": run.exit_code,
-                "errorMessage": run.error_message,
+                "errorMessage": run
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.primary_message()),
                 // pgid of the app-spawned `md` (killpg target) + the
                 // engine pid mdflow reported — receipts verify OS-level
                 // process-group death, not just registry phase.

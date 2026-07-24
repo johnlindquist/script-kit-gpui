@@ -9,6 +9,7 @@ mod capability_cache;
 mod classify;
 mod devtools;
 mod diagnostics;
+mod runtime_boundary;
 mod selection;
 
 #[cfg(test)]
@@ -24,12 +25,16 @@ pub use capability_cache::{
 };
 pub use classify::{
     classify_process_failure, classify_protocol_failure, classify_provider_failure,
-    AppFailureRecord, FailureContext, FailurePresentationInput, ProcessFailureFacts,
-    ProtocolFailureFacts,
+    primary_message_for_failure, AppFailureRecord, FailureContext, FailurePresentationInput,
+    ProcessFailureFacts, ProtocolFailureFacts,
 };
 pub(crate) use devtools::{
     ai_reliability_fixture_snapshot, ai_reliability_snapshot_for_target, redacted_fingerprint,
     set_ai_reliability_fixture,
 };
 pub use diagnostics::{redact_diagnostic, DiagnosticVault, RedactedDiagnostic};
+pub(crate) use runtime_boundary::{
+    process_failure, protocol_failure, provider_failure, AiAdapterError, AiAdapterResult,
+    AiTurnRuntimeOutcome,
+};
 pub use selection::{acknowledge_selection, decide_selection_change, SelectionDecision};

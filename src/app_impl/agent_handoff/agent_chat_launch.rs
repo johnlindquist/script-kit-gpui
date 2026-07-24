@@ -61,22 +61,21 @@ impl crate::ai::agent_chat::runtime::AgentChatConnection
     fn start_turn(
         &self,
         _request: crate::ai::agent_chat::runtime::AgentChatTurnRequest,
-    ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
+    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+    {
         let (tx, rx) = async_channel::bounded(2);
         let _ = tx.try_send(
             crate::ai::agent_chat::events::AgentChatEvent::AgentMessageDelta(
                 "Fixture Agent Chat response.".to_string(),
             ),
         );
-        let _ = tx.try_send(
-            crate::ai::agent_chat::events::AgentChatEvent::TurnFinished {
-                stop_reason: "fixture".to_string(),
-            },
-        );
+        let _ = tx.try_send(crate::ai::agent_chat::events::AgentChatEvent::completed(
+            "fixture",
+        ));
         Ok(rx)
     }
 
-    fn cancel_turn(&self, _ui_thread_id: String) -> anyhow::Result<()> {
+    fn cancel_turn(&self, _ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
         Ok(())
     }
 
@@ -84,7 +83,8 @@ impl crate::ai::agent_chat::runtime::AgentChatConnection
         &self,
         _ui_thread_id: String,
         _cwd: std::path::PathBuf,
-    ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
+    ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+    {
         let (_tx, rx) = async_channel::bounded(1);
         Ok(rx)
     }
@@ -223,13 +223,15 @@ impl ScriptListApp {
             }),
             cx,
         )?;
-        Ok(crate::ai::agent_chat::ui::chat_window::set_chat_window_fixture_bounds(
-            gpui::Bounds {
-                origin: gpui::point(gpui::px(585.0), gpui::px(177.0)),
-                size: gpui::size(gpui::px(640.0), gpui::px(520.0)),
-            },
-            cx,
-        ))
+        Ok(
+            crate::ai::agent_chat::ui::chat_window::set_chat_window_fixture_bounds(
+                gpui::Bounds {
+                    origin: gpui::point(gpui::px(585.0), gpui::px(177.0)),
+                    size: gpui::size(gpui::px(640.0), gpui::px(520.0)),
+                },
+                cx,
+            ),
+        )
     }
 
     /// **Contract:** `AppView::AgentChatView` and `cx.notify()` happen
@@ -899,33 +901,33 @@ impl ScriptListApp {
                 dismiss_text: "Back".into(),
                 ..Default::default()
             },
-                {
-                    let app = app.clone();
-                    move |_window, cx| {
-                        if let Some(app) = app.upgrade() {
-                            let launch = retry_launch.clone();
-                            let snapshot = retry_snapshot.clone();
-                            app.update(cx, |this, cx| {
-                                this.begin_agent_chat_warm_retry(launch, snapshot, attempts, cx);
-                            });
-                        }
+            {
+                let app = app.clone();
+                move |_window, cx| {
+                    if let Some(app) = app.upgrade() {
+                        let launch = retry_launch.clone();
+                        let snapshot = retry_snapshot.clone();
+                        app.update(cx, |this, cx| {
+                            this.begin_agent_chat_warm_retry(launch, snapshot, attempts, cx);
+                        });
                     }
-                },
-                {
-                    let app = app.clone();
-                    move |_window, cx| {
-                        if let Some(app) = app.upgrade() {
-                            let launch = details_launch.clone();
-                            let snapshot = details_snapshot.clone();
-                            let detail = detail.clone();
-                            app.update(cx, |this, cx| {
-                                this.show_agent_chat_warm_recovery_details(
-                                    launch, snapshot, attempts, detail, cx,
-                                );
-                            });
-                        }
+                }
+            },
+            {
+                let app = app.clone();
+                move |_window, cx| {
+                    if let Some(app) = app.upgrade() {
+                        let launch = details_launch.clone();
+                        let snapshot = details_snapshot.clone();
+                        let detail = detail.clone();
+                        app.update(cx, |this, cx| {
+                            this.show_agent_chat_warm_recovery_details(
+                                launch, snapshot, attempts, detail, cx,
+                            );
+                        });
                     }
-                },
+                }
+            },
             |_window, _cx| {},
         );
     }
@@ -957,16 +959,16 @@ impl ScriptListApp {
                 dismiss_text: "Back".into(),
                 ..Default::default()
             },
-                move |_window, cx| {
-                    if let Some(app) = app_retry.upgrade() {
-                        let launch = retry_launch.clone();
-                        let snapshot = retry_snapshot.clone();
-                        app.update(cx, |this, cx| {
-                            this.begin_agent_chat_warm_retry(launch, snapshot, attempts, cx);
-                        });
-                    }
-                },
-                |_window, _cx| {},
+            move |_window, cx| {
+                if let Some(app) = app_retry.upgrade() {
+                    let launch = retry_launch.clone();
+                    let snapshot = retry_snapshot.clone();
+                    app.update(cx, |this, cx| {
+                        this.begin_agent_chat_warm_retry(launch, snapshot, attempts, cx);
+                    });
+                }
+            },
+            |_window, _cx| {},
             move |_window, cx| {
                 if let Some(app) = app_back.upgrade() {
                     let launch = back_launch.clone();

@@ -41,6 +41,71 @@ pub struct AppFailureRecord {
     pub presentation: FailurePresentationInput,
 }
 
+impl AppFailureRecord {
+    pub fn primary_message(&self) -> &'static str {
+        primary_message_for_failure(&self.failure)
+    }
+}
+
+pub fn primary_message_for_failure(failure: &AiFailure) -> &'static str {
+    match failure.code {
+        AiFailureCode::ClientTooOld => {
+            "This AI client needs an update before it can use the selected model."
+        }
+        AiFailureCode::ModelUnavailable | AiFailureCode::NoCompatibleModel => {
+            "The selected model is not available. Choose a compatible model to continue."
+        }
+        AiFailureCode::ProfileUnavailable => {
+            "The selected AI profile is no longer available. Choose another profile."
+        }
+        AiFailureCode::QuickAiSearchBudgetExceeded => {
+            "Quick AI reached its search limit. Your question and current results are saved."
+        }
+        AiFailureCode::AuthenticationMissing | AiFailureCode::AuthenticationExpired => {
+            "Sign in to continue with this AI provider."
+        }
+        AiFailureCode::UsageExhausted => "This account has reached its current usage limit.",
+        AiFailureCode::ProviderNotConfigured
+        | AiFailureCode::NoModelsAvailable
+        | AiFailureCode::SidecarMissing
+        | AiFailureCode::MdflowMissing
+        | AiFailureCode::InvalidConfiguration => {
+            "This AI integration needs setup before it can continue."
+        }
+        AiFailureCode::Offline
+        | AiFailureCode::Timeout
+        | AiFailureCode::RateLimited
+        | AiFailureCode::ProviderTemporarilyUnavailable => {
+            "The AI service is temporarily unavailable. Your work is saved."
+        }
+        AiFailureCode::ProviderServerRejected => {
+            "The AI service could not accept this request. Your work is saved."
+        }
+        AiFailureCode::SpawnFailed
+        | AiFailureCode::RuntimeClosed
+        | AiFailureCode::ChildExited
+        | AiFailureCode::SessionLost => {
+            "The AI connection stopped. Your work is saved and can be recovered."
+        }
+        AiFailureCode::ProtocolVersionMismatch
+        | AiFailureCode::ProtocolSequenceViolation
+        | AiFailureCode::ProtocolOrderViolation
+        | AiFailureCode::ProtocolMalformedResponse
+        | AiFailureCode::ProtocolMissingTerminal => {
+            "This AI component is incompatible or returned an invalid response."
+        }
+        AiFailureCode::PermissionDenied
+        | AiFailureCode::UserDeniedTool
+        | AiFailureCode::ToolDenied => "This AI action needs permission before it can continue.",
+        AiFailureCode::MessageTooLarge | AiFailureCode::ContextLimitExceeded => {
+            "This request is too large. Shorten it or remove some context."
+        }
+        AiFailureCode::Unknown => {
+            "The AI request did not finish. Your work is saved; try again or view details."
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessFailureFacts {
     SpawnFailed,
@@ -129,6 +194,7 @@ pub fn classify_provider_failure(
                 "unauthorized",
                 "invalid api key",
                 "missing api key",
+                "no api key",
             ],
         )
     {

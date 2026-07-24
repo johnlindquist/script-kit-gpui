@@ -37,7 +37,7 @@ use std::sync::{Mutex, OnceLock};
 
 /// Events surfaced to the flow tick, keyed by app session id.
 #[derive(Debug, Clone)]
-pub enum FlowThreadEvent {
+pub(crate) enum FlowThreadEvent {
     /// `thread/start` answered; the session is linked to a protocol thread.
     ThreadStarted { session_id: u64, model: String },
     /// A turn is running on the server (honest "working" edge).
@@ -56,15 +56,29 @@ pub enum FlowThreadEvent {
         item_id: String,
         text: String,
     },
-    /// The turn settled. `status` is `completed|interrupted|failed`.
+    /// The turn settled without a failure.
     TurnCompleted {
         session_id: u64,
-        status: String,
-        error: Option<String>,
+        outcome: crate::ai::reliability::AiTurnRuntimeOutcome,
     },
-    /// RPC-level failure attributable to one session (thread/turn start
+    /// Turn-level failure from a classified runtime/provider/protocol path.
+    TurnFailed {
+        session_id: u64,
+        failure: crate::ai::reliability::AppFailureRecord,
+    },
+    /// RPC-level failure attributable to one session (thread start
     /// rejected, server died mid-turn, spawn failure).
-    SessionFailed { session_id: u64, error: String },
+    SessionFailed {
+        session_id: u64,
+        failure: crate::ai::reliability::AppFailureRecord,
+    },
+}
+
+fn flow_failure(raw: impl AsRef<str>) -> crate::ai::reliability::AppFailureRecord {
+    crate::ai::reliability::provider_failure(
+        sk_protocol::ai_reliability::ProtocolComponent::Codex,
+        raw,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +151,7 @@ impl CodexAppServer {
         if let Err(err) = ensure_child(&mut shared) {
             shared.events.push(FlowThreadEvent::SessionFailed {
                 session_id,
-                error: err,
+                failure: flow_failure(err),
             });
             return;
         }
@@ -182,7 +196,7 @@ impl CodexAppServer {
         if let Err(err) = ensure_child(&mut shared) {
             shared.events.push(FlowThreadEvent::SessionFailed {
                 session_id,
-                error: err,
+                failure: flow_failure(err),
             });
             return;
         }
@@ -233,7 +247,7 @@ impl CodexAppServer {
     }
 
     /// Drain queued events (called from the flow tick).
-    pub fn drain_events(&self) -> Vec<FlowThreadEvent> {
+    pub(crate) fn drain_events(&self) -> Vec<FlowThreadEvent> {
         let mut shared = self.shared.lock().unwrap();
         std::mem::take(&mut shared.events)
     }
@@ -425,7 +439,7 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
     for session_id in session_ids {
         shared.events.push(FlowThreadEvent::SessionFailed {
             session_id,
-            error: "codex app-server exited — send again to reconnect".to_string(),
+            failure: flow_failure("codex app-server exited — send again to reconnect"),
         });
         if let Some(link) = shared.sessions.get_mut(&session_id) {
             link.thread_id = None;
@@ -541,11 +555,25 @@ fn handle_message(shared: &mut Shared, msg: &serde_json::Value) {
                     .and_then(|e| e.get("message"))
                     .and_then(|m| m.as_str())
                     .map(str::to_string);
-                shared.events.push(FlowThreadEvent::TurnCompleted {
-                    session_id,
-                    status,
-                    error,
-                });
+                match status.as_str() {
+                    "completed" => shared.events.push(FlowThreadEvent::TurnCompleted {
+                        session_id,
+                        outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Completed {
+                            stop_reason: Some(status),
+                        },
+                    }),
+                    "interrupted" => shared.events.push(FlowThreadEvent::TurnCompleted {
+                        session_id,
+                        outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
+                            kind: sk_protocol::ai_reliability::CancellationKind::UserStopped,
+                            partial: sk_protocol::ai_reliability::PartialOutputState::None,
+                        },
+                    }),
+                    _ => shared.events.push(FlowThreadEvent::TurnFailed {
+                        session_id,
+                        failure: flow_failure(error.unwrap_or_else(|| "Turn failed".to_string())),
+                    }),
+                }
             }
         }
         "error" => {
@@ -563,10 +591,9 @@ fn handle_message(shared: &mut Shared, msg: &serde_json::Value) {
                         .and_then(|m| m.as_str())
                         .unwrap_or("codex reported an error")
                         .to_string();
-                    shared.events.push(FlowThreadEvent::TurnCompleted {
+                    shared.events.push(FlowThreadEvent::TurnFailed {
                         session_id,
-                        status: "failed".to_string(),
-                        error: Some(message),
+                        failure: flow_failure(message),
                     });
                 }
             }
@@ -580,10 +607,18 @@ fn handle_message(shared: &mut Shared, msg: &serde_json::Value) {
 fn handle_rpc_error(shared: &mut Shared, kind: PendingKind, message: String) {
     match kind {
         PendingKind::Initialize => {
+            let failure = flow_failure(format!("codex initialize failed: {message}"));
+            let fingerprint = failure
+                .failure
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+                .unwrap_or("unavailable");
             tracing::warn!(
                 target: "script_kit::flows",
                 event = "codex_initialize_failed",
-                error = %message,
+                failure_code = ?failure.failure.code,
+                diagnostic_fingerprint = fingerprint,
                 "codex app-server initialize failed"
             );
             // Every session that queued work against this child fails.
@@ -591,7 +626,7 @@ fn handle_rpc_error(shared: &mut Shared, kind: PendingKind, message: String) {
             for session_id in session_ids {
                 shared.events.push(FlowThreadEvent::SessionFailed {
                     session_id,
-                    error: format!("codex initialize failed: {message}"),
+                    failure: failure.clone(),
                 });
             }
         }
@@ -602,14 +637,13 @@ fn handle_rpc_error(shared: &mut Shared, kind: PendingKind, message: String) {
             }
             shared.events.push(FlowThreadEvent::SessionFailed {
                 session_id,
-                error: format!("thread/start failed: {message}"),
+                failure: flow_failure(format!("thread/start failed: {message}")),
             });
         }
         PendingKind::TurnStart { session_id } => {
-            shared.events.push(FlowThreadEvent::TurnCompleted {
+            shared.events.push(FlowThreadEvent::TurnFailed {
                 session_id,
-                status: "failed".to_string(),
-                error: Some(format!("turn/start failed: {message}")),
+                failure: flow_failure(format!("turn/start failed: {message}")),
             });
         }
         PendingKind::TurnInterrupt => {}
@@ -651,7 +685,7 @@ fn handle_response(shared: &mut Shared, kind: PendingKind, result: &serde_json::
             let Some(thread_id) = thread_id else {
                 shared.events.push(FlowThreadEvent::SessionFailed {
                     session_id,
-                    error: "thread/start response missing thread.id".to_string(),
+                    failure: flow_failure("thread/start response missing thread.id"),
                 });
                 return;
             };
@@ -718,7 +752,12 @@ mod tests {
         ));
         assert!(matches!(
             &shared.events[1],
-            FlowThreadEvent::TurnCompleted { session_id: 7, status, error: None } if status == "completed"
+            FlowThreadEvent::TurnCompleted {
+                session_id: 7,
+                outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Completed {
+                    stop_reason: Some(status)
+                }
+            } if status == "completed"
         ));
     }
 
@@ -782,8 +821,8 @@ mod tests {
         );
         assert!(matches!(
             &shared.events[0],
-            FlowThreadEvent::TurnCompleted { session_id: 5, status, error: Some(msg) }
-                if status == "failed" && msg == "boom"
+            FlowThreadEvent::TurnFailed { session_id: 5, failure }
+                if failure.failure.code == sk_protocol::ai_reliability::AiFailureCode::Unknown
         ));
     }
 

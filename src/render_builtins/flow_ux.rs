@@ -701,7 +701,7 @@ impl ScriptListApp {
             self.open_flow_session(session_id, cx);
             if let Some(message) = initial_message {
                 let result = self.submit_flow_chat_message(session_id, message.clone(), cx);
-            self.stage_unconsumed_flow_message(message, result, cx);
+                self.stage_unconsumed_flow_message(message, result, cx);
             }
             return;
         }
@@ -740,8 +740,7 @@ impl ScriptListApp {
                     cx,
                 );
                 let display = flow_turn_display_assistant(turn);
-                let failed =
-                    turn.outcome == crate::flows::session::PersistedTurnOutcome::Failed;
+                let failed = turn.outcome == crate::flows::session::PersistedTurnOutcome::Failed;
                 if !display.is_empty() || failed {
                     let message_id = format!("flow-{session_id}-restored-turn-{turn_index}");
                     chat.add_message(
@@ -1127,8 +1126,7 @@ impl ScriptListApp {
             result = ?result,
             "Initial flow message could not submit — staged as composer draft"
         );
-        self.filter_text =
-            crate::components::text_input::normalize_single_line_text(message);
+        self.filter_text = crate::components::text_input::normalize_single_line_text(message);
         self.pending_filter_sync = true;
         cx.notify();
     }
@@ -1208,8 +1206,7 @@ impl ScriptListApp {
         // Build the finalized turn ONCE: raw assistant + structured outcome
         // for persistence/rollup, plus the exact display suffix for the live
         // row. Both sides come from the same projection (WP-A3).
-        let FinalizedFlowTurn { turn, live_suffix } =
-            finalize_flow_session_turn(active, outcome);
+        let FinalizedFlowTurn { turn, live_suffix } = finalize_flow_session_turn(active, outcome);
         let error = turn.error.clone();
         let had_error = error.is_some();
         // WP-B3: the finalized display suffix is a visible commit too — count it
@@ -1321,20 +1318,33 @@ impl ScriptListApp {
             }
             FlowThreadEvent::TurnCompleted {
                 session_id,
-                status,
-                error,
+                outcome,
             } => {
-                let (state, outcome) = match status.as_str() {
-                    "completed" => (SessionState::NeedsYou, FlowTurnOutcome::Ok),
-                    "interrupted" => (SessionState::NeedsYou, FlowTurnOutcome::Stopped),
-                    _ => (
-                        SessionState::Done(None),
-                        FlowTurnOutcome::Failed(error.unwrap_or_else(|| "Turn failed".to_string())),
-                    ),
+                let (state, outcome) = match outcome {
+                    crate::ai::reliability::AiTurnRuntimeOutcome::Completed { .. } => {
+                        (SessionState::NeedsYou, FlowTurnOutcome::Ok)
+                    }
+                    crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled { .. } => {
+                        (SessionState::NeedsYou, FlowTurnOutcome::Stopped)
+                    }
                 };
                 self.finish_flow_turn(session_id, state, outcome, cx);
             }
-            FlowThreadEvent::SessionFailed { session_id, error } => {
+            FlowThreadEvent::TurnFailed {
+                session_id,
+                failure,
+            } => {
+                self.finish_flow_turn(
+                    session_id,
+                    SessionState::Done(None),
+                    FlowTurnOutcome::Failed(failure.primary_message().to_string()),
+                    cx,
+                );
+            }
+            FlowThreadEvent::SessionFailed {
+                session_id,
+                failure,
+            } => {
                 let Some(index) = self.flow_session_index(session_id) else {
                     return;
                 };
@@ -1348,7 +1358,7 @@ impl ScriptListApp {
                     self.finish_flow_turn(
                         session_id,
                         crate::flows::session::SessionState::Done(None),
-                        FlowTurnOutcome::Failed(error),
+                        FlowTurnOutcome::Failed(failure.primary_message().to_string()),
                         cx,
                     );
                 } else {
@@ -1422,8 +1432,9 @@ impl ScriptListApp {
                     _ => (
                         SessionState::Done(run.exit_code.map(|code| code as i32)),
                         FlowTurnOutcome::Failed(
-                            run.error_message
-                                .clone()
+                            run.failure
+                                .as_ref()
+                                .map(|failure| failure.primary_message().to_string())
                                 .unwrap_or_else(|| run.display_status()),
                         ),
                     ),
@@ -1949,7 +1960,7 @@ impl ScriptListApp {
                                         .description_opt(Some(description))
                                         .icon(icon)
                                         .selected(is_selected)
-                                        .hovered(is_hovered)
+                                        .hovered(is_hovered),
                                 )
                         })
                         .collect()
@@ -2297,15 +2308,17 @@ impl ScriptListApp {
                 engine: meta.engine.clone(),
             })
             .collect();
-        let mut snapshot = crate::flows::automation::flow_ux_state(crate::flows::automation::FlowUxSnapshotInputs {
-            active_variant: desk_active.then_some(crate::flows::model::FlowUxVariant::Flash),
-            selected_flow_id: selected_flow_id.as_deref(),
-            roster: Some((&roster_entry, cwd.as_str())),
-            preview: None,
-            manager_visible: false,
-            manager_focused_run_id: None,
-            sessions,
-        });
+        let mut snapshot = crate::flows::automation::flow_ux_state(
+            crate::flows::automation::FlowUxSnapshotInputs {
+                active_variant: desk_active.then_some(crate::flows::model::FlowUxVariant::Flash),
+                selected_flow_id: selected_flow_id.as_deref(),
+                roster: Some((&roster_entry, cwd.as_str())),
+                preview: None,
+                manager_visible: false,
+                manager_focused_run_id: None,
+                sessions,
+            },
+        );
         let active_transcript = match &self.current_view {
             AppView::FlowSessionView { session_id } => self
                 .flow_sessions
@@ -2649,8 +2662,9 @@ mod flow_session_footer_and_finalize {
             outcome: PersistedTurnOutcome::Stopped,
             error: None,
         };
-        assert!(flow_turn_display_assistant(&natural)
-            .ends_with(&format!("\n\n{FLOW_STOPPED_CAPTION}")));
+        assert!(
+            flow_turn_display_assistant(&natural).ends_with(&format!("\n\n{FLOW_STOPPED_CAPTION}"))
+        );
 
         let ok = SessionTurn {
             user: "u".into(),
@@ -2685,8 +2699,7 @@ mod flow_session_footer_and_finalize {
     /// no display suffix; unicode stays prefix-safe.
     #[test]
     fn finalize_ok_turn_is_verbatim() {
-        let finalized =
-            finalize_flow_session_turn(active_turn("done ✅"), FlowTurnOutcome::Ok);
+        let finalized = finalize_flow_session_turn(active_turn("done ✅"), FlowTurnOutcome::Ok);
         assert_eq!(finalized.turn.assistant, "done ✅");
         assert_eq!(finalized.turn.outcome, PersistedTurnOutcome::Ok);
         assert_eq!(finalized.turn.error, None);
