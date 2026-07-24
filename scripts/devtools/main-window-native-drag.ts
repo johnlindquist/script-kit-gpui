@@ -1138,6 +1138,7 @@ export function analyzeStationaryFidelity(
   const leftCapsule = byId.get("script-kit-footer-left-info-capsule");
   const primaryLeftHitTarget = byId.get("script-kit-footer-left-info-hit-target");
   const cwdLeftHitTarget = byId.get("script-kit-footer-cwd-chip-hit");
+  const leftHitTarget = primaryLeftHitTarget ?? cwdLeftHitTarget;
   const leftKeycap = byId.get("script-kit-footer-left-info-keycap")
     ?? byId.get("script-kit-footer-cwd-chip-keycap");
   const leftKeycapGlyph = byId.get("script-kit-footer-left-info-keycap-glyph")
@@ -2601,6 +2602,10 @@ async function cli() {
         "diagnostic-only: macOS AX descendant frames update in coarse steps during native window drag",
       analysis: result.analysis,
     }));
+  } catch (error) {
+    receipt.error = String(error);
+    receipt.valid = false;
+    receipt.pass = false;
   } finally {
     try {
       driver.send({ type: "hide" });

@@ -693,7 +693,9 @@ async function main() {
   const observedChildScenarios = [
     mainReceipt?.scenario,
     ...(lockedTreatment?.cells ?? []).map((cell: any) =>
-      JSON.parse(readFileSync(cell.mainReceiptPath, "utf8"))?.scenario
+      existsSync(cell.mainReceiptPath)
+        ? JSON.parse(readFileSync(cell.mainReceiptPath, "utf8"))?.scenario
+        : null
     ),
     ...(rapidToggle == null ? [] : [rapidToggle.receipt?.scenario]),
     ...(notesFallback == null ? [] : [notesFallback.receipt?.scenario]),
