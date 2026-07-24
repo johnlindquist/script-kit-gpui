@@ -189,6 +189,7 @@ function startFilmstrip(
     pid?: number;
     title?: string;
     displayStream?: boolean;
+    bounds?: { x: number; y: number; width: number; height: number };
   },
   durationMs: number,
 ) {
@@ -205,7 +206,16 @@ function startFilmstrip(
         String(selector.pid),
         ...(selector.title ? ["--title", selector.title] : []),
       ]),
-    ...(selector.displayStream ? ["--display-stream"] : []),
+    ...(selector.displayStream !== false ? ["--display-stream"] : []),
+    ...(selector.bounds
+      ? [
+        "--bounds",
+        String(selector.bounds.x),
+        String(selector.bounds.y),
+        String(selector.bounds.width),
+        String(selector.bounds.height),
+      ]
+      : []),
     "--out",
     directory,
     "--ready",
@@ -286,13 +296,28 @@ try {
   const mainNative = await nativeWindowIds(pid);
   const mainWindowID = mainNative.ids[0];
   if (!mainWindowID) throw new Error(`main native window missing: ${mainNative.error}`);
+  const mainBounds = mainNative.windows.find(
+    (window: Json) => Number(window.windowId) === mainWindowID,
+  )?.bounds;
+  if (
+    !mainBounds
+    || !["x", "y", "width", "height"].every(
+      (key) => Number.isFinite(Number(mainBounds[key])),
+    )
+  ) {
+    throw new Error(`main native window ${mainWindowID} bounds are missing`);
+  }
   receipt.initialCompleteNativeInventory = mainNative;
 
   await announceTestStatus(
     "Lifecycle filmstrip · Main exit",
     "Exact CGWindowID capture while the main surface and detached capsules fade together",
   );
-  const mainExit = startFilmstrip("main-exit", { windowID: mainWindowID }, 650);
+  const mainExit = startFilmstrip(
+    "main-exit",
+    { windowID: mainWindowID, bounds: mainBounds },
+    650,
+  );
   await waitForFile(mainExit.readyPath);
   await Bun.sleep(80);
   driver.send({ type: "hide", requestId: "glass-life-main-hide" });
@@ -310,10 +335,11 @@ try {
   );
   const mainEntry = startFilmstrip(
     "main-entry",
-    { windowID: mainWindowID, displayStream: true },
+    { windowID: mainWindowID, displayStream: true, bounds: mainBounds },
     700,
   );
   const mainEntryReady = await waitForFile(mainEntry.readyPath);
+  await Bun.sleep(40);
   const showRequestedAt = new Date().toISOString();
   driver.send({ type: "show", requestId: "glass-life-main-show" });
   await driver.waitForState({ windowVisible: true }, { timeoutMs: 3_000 });

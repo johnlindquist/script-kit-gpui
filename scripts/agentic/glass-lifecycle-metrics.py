@@ -8,7 +8,7 @@ import json
 import math
 from pathlib import Path
 
-from PIL import Image, ImageFilter, ImageStat
+from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 
 def alpha_profile(image: Image.Image) -> list[float]:
@@ -28,50 +28,124 @@ def center_edge_energy(image: Image.Image) -> float:
     return float(ImageStat.Stat(edges).mean[0])
 
 
-def monotonic(values: list[float], direction: str, tolerance: float = 0.025) -> bool:
-    if len(values) < 2:
-        return False
-    if direction == "down":
-        return all(right <= left + tolerance for left, right in zip(values, values[1:]))
-    return all(right + tolerance >= left for left, right in zip(values, values[1:]))
+def changed_row_occupancies(
+    image: Image.Image, reference: Image.Image, channel_tolerance: int = 1
+) -> list[float]:
+    """Fraction of pixels changed from the hidden-background reference per row."""
+    difference = ImageChops.difference(image.convert("RGB"), reference.convert("RGB"))
+    red, green, blue = difference.split()
+    maximum = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+    changed = maximum.point(
+        lambda value: 255 if value > channel_tolerance else 0,
+        mode="L",
+    )
+    row_means = changed.resize((1, changed.height), Image.Resampling.BOX)
+    return [value / 255.0 for value in row_means.getdata()]
+
+
+def contiguous_runs(indices: list[int]) -> list[tuple[int, int]]:
+    if not indices:
+        return []
+    runs: list[tuple[int, int]] = []
+    start = previous = indices[0]
+    for index in indices[1:]:
+        if index == previous + 1:
+            previous = index
+            continue
+        runs.append((start, previous))
+        start = previous = index
+    runs.append((start, previous))
+    return runs
+
+
+def classify_main_frame(
+    image: Image.Image,
+    reference: Image.Image,
+    *,
+    changed_threshold: float = 0.01,
+    component_threshold: float = 0.08,
+    adjacency_rows: int = 12,
+) -> dict:
+    """Find the full-width transparent run separating stage and footer.
+
+    The window scales during entry, so a fixed y-coordinate is not evidence.
+    Instead, compare every captured row with a hidden-background reference and
+    require a transparent run with substantial changed pixels immediately
+    above *and* below it. This fails closed when the footer disappears while
+    the main stage is still visible.
+    """
+    occupancies = changed_row_occupancies(image, reference)
+    height = len(occupancies)
+    lower_start = round(height * 0.50)
+    transparent_rows = [
+        index
+        for index in range(lower_start, height)
+        if occupancies[index] <= changed_threshold
+    ]
+    candidates: list[dict] = []
+    for start, end in contiguous_runs(transparent_rows):
+        above = occupancies[max(0, start - adjacency_rows) : start]
+        below = occupancies[end + 1 : min(height, end + 1 + adjacency_rows)]
+        above_max = max(above, default=0.0)
+        below_max = max(below, default=0.0)
+        if above_max >= component_threshold and below_max >= component_threshold:
+            candidates.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "height": end - start + 1,
+                    "maximumChangedFraction": max(
+                        occupancies[start : end + 1], default=0.0
+                    ),
+                    "aboveChangedFraction": above_max,
+                    "belowChangedFraction": below_max,
+                }
+            )
+    gutter = max(candidates, key=lambda candidate: candidate["height"], default=None)
+    stage_region = occupancies[: round(height * 0.88)]
+    stage_occupancy = max(stage_region, default=0.0)
+    stage_visible = stage_occupancy >= component_threshold
+    footer_region = occupancies[round(height * 0.72) :]
+    footer_occupancy = max(footer_region, default=0.0)
+    footer_visible = footer_occupancy >= component_threshold
+    disconnected = gutter is not None
+    broad_bridge_pass = not stage_visible or disconnected
+    return {
+        "changedRowOccupancies": occupancies,
+        "maximumChangedFraction": max(occupancies, default=0.0),
+        "stageChangedFraction": stage_occupancy,
+        "footerChangedFraction": footer_occupancy,
+        "stageVisible": stage_visible,
+        "footerVisible": footer_visible,
+        "gutterRun": gutter,
+        "stageFooterDisconnected": disconnected,
+        "broadBridgePass": broad_bridge_pass,
+        "footerMissingWhileStageVisible": stage_visible and not disconnected,
+    }
 
 
 def analyze(receipt: dict, scenario: str) -> dict:
     errors: list[str] = []
     rows = []
+    loaded_frames: list[tuple[dict, Image.Image]] = []
     for frame in receipt.get("frames", []):
         path = Path(frame.get("path", ""))
         if not path.exists():
             errors.append(f"missing frame {path}")
             continue
         image = Image.open(path).convert("RGBA")
+        loaded_frames.append((frame, image))
         profile = alpha_profile(image)
-        gray = image.convert("L")
         lower_start = round(image.height * 0.62)
-        dark_row_fractions = [
-            sum(value <= 16 for value in gray.crop((0, y, gray.width, y + 1)).getdata())
-            / gray.width
-            for y in range(gray.height)
-        ]
-        gutter_rows = [
-            index
-            for index, dark_fraction in enumerate(
-                dark_row_fractions[lower_start:], lower_start
-            )
-            if dark_fraction >= 0.90
-        ]
         rows.append(
             {
                 "sequence": frame.get("sequence"),
                 "displayTimeNs": frame.get("displayTimeNs"),
                 "windowBounds": frame.get("windowBounds"),
                 "windowAlpha": frame.get("windowAlpha"),
+                "windowOnscreen": frame.get("windowOnscreen"),
                 "meanAlpha": sum(profile) / len(profile),
-                "gutterRowCount": len(gutter_rows),
                 "minimumLowerAlphaOccupancy": min(profile[lower_start:], default=1),
-                "maximumLowerDarkFraction": max(
-                    dark_row_fractions[lower_start:], default=0
-                ),
                 "centerEdgeEnergy": center_edge_energy(image),
             }
         )
@@ -83,10 +157,48 @@ def analyze(receipt: dict, scenario: str) -> dict:
         if row["windowBounds"] is not None
     ]
     geometry_stable = len(set(bounds)) <= 1 and len(bounds) == len(rows)
-    visible_rows = [row for row in rows if row["meanAlpha"] >= 0.10]
-    gutter_pass = bool(visible_rows) and all(row["gutterRowCount"] >= 1 for row in visible_rows)
+    frame_classifications: list[dict] = []
+    gutter_pass = True
+    if scenario.startswith("main-") and loaded_frames:
+        reference_image = (
+            loaded_frames[0][1]
+            if scenario == "main-entry"
+            else loaded_frames[-1][1]
+        ).convert("RGB")
+        for index, ((_, image), row) in enumerate(zip(loaded_frames, rows)):
+            classification = classify_main_frame(image, reference_image)
+            classification["sequence"] = row["sequence"]
+            classification["referenceFrame"] = (
+                0 if scenario == "main-entry" else len(loaded_frames) - 1
+            )
+            frame_classifications.append(classification)
+            rows[index].update(
+                {
+                    key: value
+                    for key, value in classification.items()
+                    if key != "changedRowOccupancies"
+                }
+            )
+        gated = [
+            classification
+            for classification in frame_classifications
+            if classification["stageVisible"]
+        ]
+        gutter_pass = bool(gated) and all(
+            classification["stageFooterDisconnected"]
+            and classification["broadBridgePass"]
+            for classification in gated
+        )
     if scenario.startswith("main-") and not gutter_pass:
-        errors.append("transparent footer gutter was not preserved in every visible frame")
+        failing_sequences = [
+            str(classification["sequence"])
+            for classification in frame_classifications
+            if classification["footerMissingWhileStageVisible"]
+        ]
+        errors.append(
+            "transparent footer gutter was not preserved while the main stage "
+            f"was visible (frames {', '.join(failing_sequences) or 'none classified'})"
+        )
     distinct_visual_states = len({
         str(frame.get("sha256", ""))
         for frame in receipt.get("frames", [])
@@ -108,6 +220,37 @@ def analyze(receipt: dict, scenario: str) -> dict:
         "geometryStable": geometry_stable,
         "geometryStateCount": len(set(bounds)),
         "gutterPass": gutter_pass,
+        "gutterReference": {
+            "method":
+                "display-stream per-row comparison against the hidden background; "
+                "a <=1% changed run must be bounded by >=8% changed stage/footer rows",
+            "referenceFrame": "first" if scenario == "main-entry" else "last",
+            "channelTolerance": 1,
+            "changedRowThreshold": 0.01,
+            "componentThreshold": 0.08,
+            "adjacencyRows": 12,
+            "stageVisibleFrameCount": sum(
+                classification["stageVisible"]
+                for classification in frame_classifications
+            ),
+            "minimumBoundedGapHeightPixels": min(
+                (
+                    classification["gutterRun"]["height"]
+                    for classification in frame_classifications
+                    if classification["stageVisible"]
+                    and classification["gutterRun"] is not None
+                ),
+                default=None,
+            ),
+            "footerMissingWhileStageVisible": any(
+                classification["footerMissingWhileStageVisible"]
+                for classification in frame_classifications
+            ),
+            "stageFooterDisconnected": gutter_pass,
+            "broadBridgePass": gutter_pass,
+        }
+        if scenario.startswith("main-")
+        else None,
         "alphaProgressionPass": alpha_progression_pass,
         "distinctVisualStates": distinct_visual_states,
         "bodyPixelTransition": body_pixel_transition,

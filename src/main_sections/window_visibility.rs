@@ -708,7 +708,6 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
         view.was_window_focused = false;
     });
     sync_main_automation_window(current_main_automation_bounds(), false, false);
-    crate::footer_popup::close_main_footer_popup(cx);
 
     // 3. Check secondary windows BEFORE the update closure
     let notes_open = notes::is_notes_window_open();
@@ -781,6 +780,11 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
                     );
                     return;
                 }
+                // Keep the native footer host installed for the entire window
+                // fade. Removing it at hide-request time leaves one captured
+                // frame where the stage is still visible but its detached
+                // capsules have already vanished.
+                crate::footer_popup::close_main_footer_popup(cx);
                 if trace {
                     platform::defer_hide_main_window_with_geometry_trace(cx, geometry_cycle_id);
                 } else {
@@ -790,8 +794,10 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
         })
         .detach();
     } else if platform::main_window_geometry_trace_enabled() {
+        crate::footer_popup::close_main_footer_popup(cx);
         platform::defer_hide_main_window_with_geometry_trace(cx, geometry_cycle_id);
     } else {
+        crate::footer_popup::close_main_footer_popup(cx);
         platform::defer_hide_main_window(cx);
     }
     app_entity.update(cx, |view, ctx| {

@@ -244,7 +244,6 @@ impl ScriptListApp {
         crate::hotkeys::reset_main_gesture_classifier();
         self.was_window_focused = false;
         crate::windows::set_automation_visibility("main", false);
-        crate::footer_popup::close_main_footer_popup(&mut *cx);
         logging::log("VISIBILITY", "WINDOW_VISIBLE set to: false");
 
         // If in a prompt, cancel execution without resetting the visible route.
@@ -314,11 +313,16 @@ impl ScriptListApp {
                         );
                         return;
                     }
+                    // Preserve the installed native footer through the whole
+                    // common-ancestor fade, then remove it while the window
+                    // is visually transparent.
+                    crate::footer_popup::close_main_footer_popup(cx);
                     platform::defer_hide_main_window(cx);
                 });
             })
             .detach();
         } else {
+            crate::footer_popup::close_main_footer_popup(&mut *cx);
             platform::defer_hide_main_window(cx);
         }
         self.defer_reset_to_script_list_after_main_window_hidden(
@@ -347,6 +351,7 @@ impl ScriptListApp {
         ) else {
             return;
         };
+        crate::footer_popup::close_main_footer_popup(&mut *cx);
         let app_entity = cx.entity().downgrade();
         platform::defer_hide_main_window_with_completion(
             cx,

@@ -15,6 +15,7 @@ private struct Arguments {
     var durationMs = 250
     var frameRate = 120
     var displayStream = false
+    var pinnedBounds: CGRect?
 }
 
 private func parseArguments() -> Arguments {
@@ -60,6 +61,20 @@ private func parseArguments() -> Arguments {
             }
         case "--display-stream":
             result.displayStream = true
+        case "--bounds":
+            if index + 4 < values.count,
+               let x = Double(values[index + 1]),
+               let y = Double(values[index + 2]),
+               let width = Double(values[index + 3]),
+               let height = Double(values[index + 4]) {
+                result.pinnedBounds = CGRect(
+                    x: x,
+                    y: y,
+                    width: width,
+                    height: height
+                )
+                index += 4
+            }
         default:
             break
         }
@@ -268,25 +283,27 @@ private enum Main {
             let captureFrame: CGRect
             let captureMode: String
             if arguments.displayStream {
-                guard let pinnedWindowID = arguments.windowID else {
-                    throw NSError(
-                        domain: "macos-native-window-filmstrip",
-                        code: 2,
-                        userInfo: [
-                            NSLocalizedDescriptionKey:
-                                "--display-stream requires an exact --window-id"
-                        ]
-                    )
-                }
-                guard let pinnedBounds = windowState(pinnedWindowID).bounds else {
-                    throw NSError(
-                        domain: "macos-native-window-filmstrip",
-                        code: 3,
-                        userInfo: [
-                            NSLocalizedDescriptionKey:
-                                "hidden pinned window \(pinnedWindowID) has no retained bounds"
-                        ]
-                    )
+                let pinnedWindowID: CGWindowID
+                let pinnedBounds: CGRect
+                if let requestedWindowID = arguments.windowID {
+                    guard let retainedBounds =
+                        windowState(requestedWindowID).bounds ?? arguments.pinnedBounds
+                    else {
+                        throw NSError(
+                            domain: "macos-native-window-filmstrip",
+                            code: 3,
+                            userInfo: [
+                                NSLocalizedDescriptionKey:
+                                    "pinned window \(requestedWindowID) has no retained bounds"
+                            ]
+                        )
+                    }
+                    pinnedWindowID = requestedWindowID
+                    pinnedBounds = retainedBounds
+                } else {
+                    let resolvedWindow = try await resolveWindow(arguments)
+                    pinnedWindowID = resolvedWindow.windowID
+                    pinnedBounds = resolvedWindow.frame
                 }
                 let content = try await SCShareableContent.excludingDesktopWindows(
                     false,
