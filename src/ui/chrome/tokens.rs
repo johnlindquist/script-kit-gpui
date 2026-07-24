@@ -19,7 +19,7 @@ pub const LIQUID_GLASS_STABILITY_TINT_ALPHA_FLOOR: f32 = 0.55;
 /// Small matched-color veil inside each discrete capsule. It damps local
 /// desktop hue sampling without replacing the native material or filling the
 /// transparent gaps between capsules.
-pub const LIQUID_GLASS_CAPSULE_VEIL_ALPHA: f32 = 0.80;
+pub const LIQUID_GLASS_CAPSULE_VEIL_ALPHA: f32 = 0.94;
 pub const LIQUID_GLASS_CAPSULE_RIM_WIDTH_PX: f32 = 1.0;
 pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_DARK: f32 = 0.24;
 pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_LIGHT: f32 = 0.18;

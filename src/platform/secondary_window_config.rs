@@ -3329,10 +3329,10 @@ mod secondary_window_config_tests {
         assert_eq!(backdrop.veil_alpha, 0.0);
         assert_eq!(backdrop.rim_width, 0.0);
         assert_eq!(backdrop.signature.rim_rgba, 0xFFFF_FF00);
-        assert_eq!(capsule.veil_alpha, 0.80);
+        assert_eq!(capsule.veil_alpha, 0.94);
         assert_eq!(capsule.rim_width, 1.0);
         assert_eq!(capsule.signature.rim_rgba, 0xFFFF_FF3D);
-        assert_eq!(light_capsule.veil_alpha, 0.80);
+        assert_eq!(light_capsule.veil_alpha, 0.94);
         assert_eq!(light_capsule.rim_width, 1.0);
         assert_eq!(light_capsule.signature.rim_rgba, 0x0000_002E);
         assert_ne!(backdrop.signature, explicit.signature);

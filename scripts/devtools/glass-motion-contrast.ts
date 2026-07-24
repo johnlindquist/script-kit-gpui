@@ -271,9 +271,9 @@ async function runLockedTreatmentCell(options: {
         && motionMetrics?.motionFrameCount >= 15
         && motionMetrics?.settledFrameCount >= 3
         && motionMetrics?.summary?.boundaryPassEveryFrame === true
-        && motionMetrics?.summary?.maximumNeighboringSettledRelationDeltaE00 <= 6
+        && motionMetrics?.summary?.maximumNeighboringSettledMaterialDeltaE00 <= 6
         && Object.values(
-          motionMetrics?.summary?.adaptiveCapsules ?? {},
+          motionMetrics?.summary?.materialStabilityCapsules ?? {},
         ).every((capsule: any) => capsule?.pass === true));
     const entryMotionColorPass = !motionRequired
       || (saturatedLifecycle?.exitCode === 0
@@ -285,10 +285,10 @@ async function runLockedTreatmentCell(options: {
         && saturatedLifecycle?.entryMotionMetrics?.summary
           ?.boundaryPassEverySettledFrame === true
         && saturatedLifecycle?.entryMotionMetrics?.summary
-          ?.maximumNeighboringSettledRelationDeltaE00 <= 6
+          ?.maximumNeighboringSettledMaterialDeltaE00 <= 6
         && Object.values(
           saturatedLifecycle?.entryMotionMetrics?.summary
-            ?.adaptiveCapsules ?? {},
+            ?.materialStabilityCapsules ?? {},
         ).every((capsule: any) => capsule?.pass === true));
     return {
       slug,
@@ -365,10 +365,10 @@ async function main() {
     : requestedOutput;
   const mode = has("--all") ? "all" : value("--mode", "red")!;
   const policyTintFloor = Number(value("--policy-tint-floor", "0.55"));
-  const policyVeilAlpha = Number(value("--policy-veil-alpha", "0.80"));
+  const policyVeilAlpha = Number(value("--policy-veil-alpha", "0.94"));
   const policyId = value(
     "--policy-id",
-    `T${Math.round(policyTintFloor * 100)}-R`,
+    `T${Math.round(policyTintFloor * 100)}-V${Math.round(policyVeilAlpha * 100)}-R`,
   )!;
   if (
     !Number.isFinite(policyTintFloor)
