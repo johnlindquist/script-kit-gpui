@@ -108,7 +108,23 @@ asking" escape hatch for all three surfaces.
 ## 3. Click-away → auto-background
 
 **No dialog on blur.** The user did not ask a question by clicking away; asking
-one back is rude. Clicking away always backgrounds.
+one back is rude.
+
+**"Clicking away" is three different events, not one** (ruled 2026-07-25,
+submission `98cab5e5-…641` + Oracle `floating-capsule-entry-material`):
+
+1. **Modal backdrop click** — dismisses that modal ONLY. The topmost modal
+   owns the click, consumes it, and restores parent focus. It never
+   backgrounds the underlying session. This is already the shipped behavior
+   (`src/render_prompts/arg/helpers.rs` closes the actions popup on backdrop
+   click) and the user confirmed it as the general rule.
+2. **In-app click outside a non-modal surface** — follows that surface's
+   existing routing. Clicking empty chrome does not auto-background.
+3. **Actual window focus loss with no modal or transient owner** — the only
+   backgrounding candidate. One physical click must never both dismiss a
+   modal AND background a session; when step 4 lands, a modal-dismissal epoch
+   guard must prevent the parent window's delayed key restoration from being
+   misread as a background-worthy blur.
 
 ### Where
 
@@ -235,10 +251,17 @@ what a surface *is*, rather than how it is dismissed.
 - **G2 — no persisted session identity.** `PersistedFlowConversation` is
   transcript-only, one snapshot per flow, with no session id. A backgrounded
   session's identity dies at app exit today.
-- **G3 — `DismissTrigger::BackdropClick` is dead** (`#[allow(dead_code)]`, zero
-  consumers). "Clicking away" is only window-level blur, and it is frame-polled.
-  If in-window backdrop clicks should also background, that trigger has to be
-  brought to life first.
+- **G3 — RESOLVED 2026-07-25, and the original wording was wrong.** Backdrop
+  clicks are NOT missing: `src/render_prompts/arg/helpers.rs:103–134` builds a
+  real full-bleed backdrop behind the actions dialog and dismisses it on
+  click. What is unreachable is only the *policy lookup* — the
+  `DismissTrigger::BackdropClick` variant (`app_view_state.rs:694`, `:807`)
+  is never constructed, while the behavior lives in a hardcoded handler that
+  bypasses the policy table. Ruling (user, submission `98cab5e5-…641`):
+  a backdrop click dismisses the modal only and is consumed; it never
+  backgrounds a session. Do not revive the generic trigger as "background";
+  either route the existing handler through a modal-scoped policy or leave
+  the variant unused.
 - **G4 — three parallel keyboard paths.** Per `flows/escape.md`: capture
   interceptors in `startup.rs`, per-surface bubble handlers, and the automation
   mirror in `simulate_key_dispatch.rs`. Automation probes only exercise the
