@@ -805,6 +805,8 @@ impl ScriptListApp {
             flow_ux_scroll_handle: UniformListScrollHandle::new(),
             flow_ux_seen_generation: 0,
             flow_ux_tick_running: false,
+            flow_session_prompt_history_index: None,
+            flow_session_prompt_draft: None,
             flow_sessions: Vec::new(),
             flow_session_counter: 0,
             flow_session_return_to_desk: false,

@@ -260,6 +260,26 @@ Agent Chat recalls previous prompts (`view.rs:15112`). The arrow interceptor has
 an arm for `FlowUxView` but none for `FlowSessionView`, so it falls to the
 catch-all. **Size:** small.
 
+**Landed.** Up/Down now walks a flow session's prompt history, on shell rules:
+Up from the draft recalls the newest prompt, Up clamps at the oldest rather
+than wrapping, and Down past the newest restores the draft the user was
+typing — so recall is always reversible without retyping.
+
+Two decisions worth keeping:
+
+- **The history is the session's own turns.** Recall reads `turn.user`; the
+  app stores only a cursor into it. A second copy would disagree with the
+  transcript after a rethread or a failed turn.
+- **The handler sits BEFORE the big `match &mut this.current_view`**, not in an
+  arm of it. That match holds a mutable borrow of the whole app for its
+  duration, so an arm cannot call `set_filter_text_immediate`; deferring the
+  composer write instead would let it land after the next keystroke.
+
+Semantics are locked by four tests in `flow_ux.rs`, including one that sweeps
+every (history length, cursor, direction) combination to prove no recalled
+index can ever be out of range — an off-by-one there would panic on subscript
+or silently recall the wrong prompt.
+
 ### 8. Sending while busy: queued vs error toast
 
 Agent Chat queues the message and shows a queue strip (`view.rs:11664`). Flow

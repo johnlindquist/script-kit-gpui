@@ -316,3 +316,55 @@ about mdflow. Lesson, and it is the same one this whole workstream is about:
 an error message was read as evidence for a system it never described. The
 one-command check that settles it costs nothing; the inference cost a wrong
 line in a commit message (`3ccdfc5d9`).
+
+## Everyday parity pass (flows disabled, worked in-session)
+
+Four commits, each with its own falsifiable check. The through-line: every
+defect here was **silent** — the surface kept working and looked right, so
+nothing prompted the user to doubt it.
+
+| # | What | Proof | Commit |
+|---|---|---|---|
+| 22 | Pasted newlines deleted, welding words | probe red → green at runtime | `32aac4798` |
+| 17 | `⌘.` Stop precedence was statement-order luck | `agent_chat_cmd_period_stops_streaming_before_reopening_a_mention` | `32aac4798` |
+| 18 | Footers advertised different Stop chords | `agent_chat_and_flow_advertise_the_same_stop_chord` | `9028268cf` |
+| 23a | Flow had no Copy Last Response | `flow_sessions_copy_the_last_response_the_same_way_agent_chat_does` | `9028268cf` |
+| 22b | Same newline defect on the set-text path | `single_line_normalization_tests` 5/5 | `b2fc53747` |
+| 23b | Up-arrow prompt history dead in Flow | 4 tests incl. an all-combinations range sweep | pending |
+
+### What the runtime receipt actually bought
+
+The paste corruption was already proven in source at three layers. The probe
+still earned its keep twice:
+
+1. It made the claim falsifiable in both directions — it records the exact
+   composer string and classifies it, rather than asserting an outcome.
+2. Re-running it after the fix caught that the *fix itself* changed what
+   "correct" looks like. The probe would have reported red on a working build
+   because `"Fix the bug in auth.rs"` matched neither the pasted text nor the
+   known-corrupt form. A probe that only knows one failure mode reports the
+   repair as a new bug.
+
+### The defect class, stated once
+
+Three separate bugs this pass reduce to the same shape: **a value is degraded,
+the degraded value still looks plausible, and the code that would have warned
+never runs.** Newlines deleted before the app's newline guard could see them.
+A Stop chord whose winner depended on which `if` came first. A footer honestly
+describing a surface, teaching a rule that broke on the next one.
+
+None of these fail loudly. All of them need either an invariant that cannot be
+satisfied by accident, or a probe that reads the value back.
+
+### Boundaries
+
+- Escape still means Stop in Agent Chat and Background in Flow. Deliberate —
+  that belongs to the Escape modal design, not to a footer-label change.
+- Flow still cannot hold a multi-line message or honor Shift+Enter. The
+  corruption is fixed; line *structure* needs a dedicated Flow composer, since
+  the shared input is also ScriptList's, where Enter must keep meaning
+  "select". The probe reports this as `structureLossStillOpen` so a flattened
+  run cannot read as complete.
+- Still open: shared `ConversationStyle` (two different markdown engines) and
+  the composer unification. Both large, both need a design decision rather
+  than a patch.

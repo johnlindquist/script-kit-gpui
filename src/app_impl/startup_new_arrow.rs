@@ -69,6 +69,74 @@
                                 return;
                             }
 
+                            // Up/Down in a live flow session walks the prompt
+                            // history, matching Agent Chat. Flow had no recall
+                            // at all: the match below has an arm for the desk
+                            // but none for a session, so arrows fell through
+                            // and tweaking one word of a long prompt meant
+                            // retyping the whole thing.
+                            //
+                            // This sits BEFORE the match on purpose. That match
+                            // holds `&mut this.current_view` for the whole
+                            // block, so an arm cannot call a `&mut self` method
+                            // like `set_filter_text_immediate` — and putting
+                            // the composer write behind a deferred call instead
+                            // would let it land after the next keystroke.
+                            // `is_up || is_down` is load-bearing: the guard
+                            // above also admits Left/Right, and branching on
+                            // `is_up` alone would make Left behave as Down and
+                            // steal caret movement inside the composer.
+                            if (is_up || is_down)
+                                && let AppView::FlowSessionView { session_id } = this.current_view
+                            {
+                                // The history IS the session's turns; there is
+                                // no second copy to drift out of step.
+                                let history: Vec<String> = this
+                                    .flow_sessions
+                                    .iter()
+                                    .find(|(meta, _)| meta.id == session_id)
+                                    .map(|(meta, _)| {
+                                        meta.turns
+                                            .iter()
+                                            .map(|turn| turn.user.clone())
+                                            .filter(|prompt| !prompt.trim().is_empty())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+
+                                match crate::flow_prompt_history_move(
+                                    history.len(),
+                                    this.flow_session_prompt_history_index,
+                                    is_up,
+                                ) {
+                                    crate::FlowPromptHistoryMove::Ignore => {}
+                                    crate::FlowPromptHistoryMove::Recall(index) => {
+                                        if let Some(prompt) = history.get(index).cloned() {
+                                            // Park the live draft on the way in
+                                            // so arrowing back down restores
+                                            // what was typed instead of an
+                                            // empty composer.
+                                            if this.flow_session_prompt_history_index.is_none() {
+                                                this.flow_session_prompt_draft =
+                                                    Some(this.filter_text.clone());
+                                            }
+                                            this.flow_session_prompt_history_index = Some(index);
+                                            this.set_filter_text_immediate(prompt, window, cx);
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                    }
+                                    crate::FlowPromptHistoryMove::RestoreDraft => {
+                                        let draft =
+                                            this.flow_session_prompt_draft.take().unwrap_or_default();
+                                        this.flow_session_prompt_history_index = None;
+                                        this.set_filter_text_immediate(draft, window, cx);
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                }
+                            }
+
                             // Only intercept in views that use Input + list navigation
                             match &mut this.current_view {
                                 AppView::FileSearchView {

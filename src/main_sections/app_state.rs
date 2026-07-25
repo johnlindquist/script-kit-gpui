@@ -1034,6 +1034,19 @@ pub(crate) struct ScriptListApp {
     flow_ux_seen_generation: u64,
     // Guards the single Flow UX repaint tick task (spawned on first open).
     flow_ux_tick_running: bool,
+    // Where Up/Down currently sits in a flow session's prompt history, or
+    // None while the user is on their own live draft.
+    //
+    // The history itself is NOT stored here: a session's turns already hold
+    // every prompt the user sent, so recall reads `turn.user` and this is only
+    // the cursor into it. Keeping a second copy would let the two disagree
+    // after a rethread or a failed turn.
+    //
+    // `flow_session_prompt_draft` parks the in-progress draft on the first
+    // recall so arrowing back down returns the user to exactly what they were
+    // typing rather than to an empty composer.
+    flow_session_prompt_history_index: Option<usize>,
+    flow_session_prompt_draft: Option<String>,
     // Live conversational flow sessions (Enter = converse). Each pairs
     // metadata with its Threadline ChatPrompt entity; backgrounding keeps
     // the entity (and any in-flight turn) alive, re-entering an Active row

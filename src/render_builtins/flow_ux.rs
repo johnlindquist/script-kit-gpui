@@ -200,6 +200,63 @@ fn resolve_flow_session_key_action(
     FlowSessionKeyAction::Ignore
 }
 
+/// What Up/Down should do to a flow session's composer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlowPromptHistoryMove {
+    /// Leave the composer alone and let the key fall through — there is no
+    /// history, or the user is already on their live draft and pressed Down.
+    Ignore,
+    /// Put history entry `index` in the composer.
+    Recall(usize),
+    /// Arrowed back past the newest entry: restore the draft the user was
+    /// typing before recall started.
+    RestoreDraft,
+}
+
+/// Where Up/Down moves through a flow session's prompt history.
+///
+/// Agent Chat has recalled previous prompts for a long time; Flow never did,
+/// because the arrow interceptor has an arm for `FlowUxView` but none for
+/// `FlowSessionView`, so arrows fell through to the catch-all. Retyping a long
+/// prompt to tweak one word is the everyday cost of that gap.
+///
+/// `history` is ordered oldest → newest, matching a session's turns.
+///
+/// The rules follow shell history, which is what a user's fingers already
+/// expect:
+///
+/// - Up from the live draft recalls the NEWEST entry, not the oldest.
+/// - Up at the oldest entry stays there rather than wrapping — wrapping makes
+///   a long history feel like it lost your place.
+/// - Down past the newest entry restores the draft, so recall is always
+///   reversible without retyping.
+/// - Down while already on the draft does nothing.
+pub(crate) fn flow_prompt_history_move(
+    history_len: usize,
+    current: Option<usize>,
+    is_up: bool,
+) -> FlowPromptHistoryMove {
+    if history_len == 0 {
+        return FlowPromptHistoryMove::Ignore;
+    }
+
+    match (current, is_up) {
+        // Entering history from the draft: newest first.
+        (None, true) => FlowPromptHistoryMove::Recall(history_len - 1),
+        (None, false) => FlowPromptHistoryMove::Ignore,
+        // Older, clamped at the oldest entry.
+        (Some(index), true) => FlowPromptHistoryMove::Recall(index.saturating_sub(1)),
+        // Newer, then back out to the draft.
+        (Some(index), false) => {
+            if index + 1 < history_len {
+                FlowPromptHistoryMove::Recall(index + 1)
+            } else {
+                FlowPromptHistoryMove::RestoreDraft
+            }
+        }
+    }
+}
+
 /// Outcome of `submit_flow_chat_message`, so the caller can decide whether to
 /// clear the composer. Callers must only clear the draft when
 /// `consumes_draft()` — clearing before submit destroys the user's message
@@ -1190,6 +1247,12 @@ impl ScriptListApp {
         let draft = self.filter_text.clone();
         let result = self.submit_flow_chat_message(session_id, draft, cx);
         if result.consumes_draft() {
+            // A sent prompt starts recall over. Leaving the cursor parked
+            // would make the next Up jump to the second-newest prompt and
+            // silently skip the one just sent, and a stale parked draft would
+            // reappear later over text the user had moved on from.
+            self.flow_session_prompt_history_index = None;
+            self.flow_session_prompt_draft = None;
             self.set_filter_text_immediate(String::new(), window, cx);
         }
         result
@@ -3017,6 +3080,76 @@ mod flow_session_footer_and_finalize {
             FlowSessionKeyAction::Background,
             "the footer promises Escape leaves the session"
         );
+    }
+
+    /// Up/Down must feel like shell history, because that is what a user's
+    /// fingers already expect. Flow had no recall at all: the arrow
+    /// interceptor had an arm for the desk but none for a live session, so
+    /// tweaking one word of a long prompt meant retyping the whole thing.
+    #[test]
+    fn prompt_history_recalls_newest_first_and_clamps_at_the_oldest() {
+        use crate::FlowPromptHistoryMove::*;
+
+        // From the live draft, Up goes to the NEWEST entry (index 2 of 3),
+        // not the oldest.
+        assert_eq!(crate::flow_prompt_history_move(3, None, true), Recall(2));
+        // Then older, one at a time.
+        assert_eq!(crate::flow_prompt_history_move(3, Some(2), true), Recall(1));
+        assert_eq!(crate::flow_prompt_history_move(3, Some(1), true), Recall(0));
+        // At the oldest, Up stays put rather than wrapping to the newest —
+        // wrapping makes a long history feel like it lost your place.
+        assert_eq!(crate::flow_prompt_history_move(3, Some(0), true), Recall(0));
+    }
+
+    #[test]
+    fn arrowing_back_down_returns_to_the_draft_that_was_being_typed() {
+        use crate::FlowPromptHistoryMove::*;
+
+        assert_eq!(crate::flow_prompt_history_move(3, Some(0), false), Recall(1));
+        assert_eq!(crate::flow_prompt_history_move(3, Some(1), false), Recall(2));
+        // Past the newest entry is the user's own unsent draft, not an empty
+        // composer — recall has to be reversible without retyping.
+        assert_eq!(crate::flow_prompt_history_move(3, Some(2), false), RestoreDraft);
+        // Already on the draft: nothing newer to go to.
+        assert_eq!(crate::flow_prompt_history_move(3, None, false), Ignore);
+    }
+
+    /// A brand-new session has nothing to recall, so arrows must fall through
+    /// untouched rather than being swallowed by a handler with no history.
+    #[test]
+    fn an_empty_history_never_claims_the_arrow_keys() {
+        assert_eq!(
+            crate::flow_prompt_history_move(0, None, true),
+            crate::FlowPromptHistoryMove::Ignore
+        );
+        assert_eq!(
+            crate::flow_prompt_history_move(0, None, false),
+            crate::FlowPromptHistoryMove::Ignore
+        );
+        assert_eq!(
+            crate::flow_prompt_history_move(0, Some(4), true),
+            crate::FlowPromptHistoryMove::Ignore
+        );
+    }
+
+    /// Every index this returns is used to subscript the history, so an
+    /// out-of-range answer would panic or recall the wrong prompt.
+    #[test]
+    fn every_recalled_index_is_in_range() {
+        for len in 1..6usize {
+            for current in std::iter::once(None).chain((0..len).map(Some)) {
+                for is_up in [true, false] {
+                    if let crate::FlowPromptHistoryMove::Recall(index) =
+                        crate::flow_prompt_history_move(len, current, is_up)
+                    {
+                        assert!(
+                            index < len,
+                            "len={len} current={current:?} is_up={is_up} recalled {index}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// WP-B3: a streamed flow turn (many deltas accumulated into
