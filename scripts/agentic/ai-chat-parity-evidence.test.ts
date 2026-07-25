@@ -11,12 +11,12 @@ import {
 } from "./ai-chat-parity-evidence";
 
 const flowNode = (selectable: unknown) => ({
-  id: "chat-prompt/flow-7/turn/u:msg-1/assistant",
+  id: "chat-prompt/flow-7/turn/u:msg-1/assistant/document",
   metadata: { selectable },
 });
 
 const agentChatNode = (selectable: unknown) => ({
-  id: "agent-chat-transcript-row-assistant-2/text",
+  id: "agent-chat-transcript-row-assistant-2/text/document",
   metadata: { selectable },
 });
 
@@ -24,7 +24,7 @@ describe("selectable evidence", () => {
   test("a selectable answer region passes", () => {
     expect(
       evaluateSelectable([flowNode(true)], FLOW_ANSWER_SCOPE_PREFIX, FLOW_ANSWER_SCOPE_SUFFIX),
-    ).toEqual({ kind: "selectable", scopeId: "chat-prompt/flow-7/turn/u:msg-1/assistant" });
+    ).toEqual({ kind: "selectable", scopeId: "chat-prompt/flow-7/turn/u:msg-1/assistant/document" });
   });
 
   test("selectable:false is a product regression, not missing evidence", () => {
@@ -39,7 +39,7 @@ describe("selectable evidence", () => {
   test("an un-annotated scope reports missing metadata, not not-selectable", () => {
     expect(
       evaluateSelectable(
-        [{ id: "chat-prompt/flow-7/turn/u:msg-1/assistant" }],
+        [{ id: "chat-prompt/flow-7/turn/u:msg-1/assistant/document" }],
         FLOW_ANSWER_SCOPE_PREFIX,
         FLOW_ANSWER_SCOPE_SUFFIX,
       ).kind,
@@ -63,7 +63,7 @@ describe("selectable evidence", () => {
     const verdict = evaluateSelectable(
       [
         flowNode(true),
-        { id: "chat-prompt/flow-7/turn/u:msg-2/assistant", metadata: { selectable: false } },
+        { id: "chat-prompt/flow-7/turn/u:msg-2/assistant/document", metadata: { selectable: false } },
       ],
       FLOW_ANSWER_SCOPE_PREFIX,
       FLOW_ANSWER_SCOPE_SUFFIX,

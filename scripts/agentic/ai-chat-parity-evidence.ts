@@ -34,12 +34,20 @@ export type SelectableVerdict =
  * Must stay in sync with `ChatPrompt::render_answer_region`, which builds
  * `chat-prompt/{prompt_id}/turn/{render_key}/assistant`.
  */
-export const FLOW_ANSWER_SCOPE_SUFFIX = "/assistant";
 export const FLOW_ANSWER_SCOPE_PREFIX = "chat-prompt/";
+/**
+ * The vendored `TextView` appends `/document` to whatever `fidelity_scope` it
+ * was given, so the painted id is
+ * `chat-prompt/{prompt}/turn/{key}/assistant/document` — NOT the
+ * `.../assistant` string the renderer passes in. Matching the renderer's
+ * string instead of the painted one yields `absent` for a perfectly healthy
+ * surface, which reads exactly like the regression this probe hunts.
+ */
+export const FLOW_ANSWER_SCOPE_SUFFIX = "/assistant/document";
 
-/** Scope id of an Agent Chat assistant answer region. */
-export const AGENT_CHAT_ANSWER_SCOPE_SUFFIX = "/text";
+/** Scope id of an Agent Chat assistant answer region. Same `/document` rule. */
 export const AGENT_CHAT_ANSWER_SCOPE_PREFIX = "agent-chat-transcript-row-assistant";
+export const AGENT_CHAT_ANSWER_SCOPE_SUFFIX = "/text/document";
 
 export function findScopes(
   nodes: FidelityNode[] | null | undefined,

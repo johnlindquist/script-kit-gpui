@@ -9,32 +9,40 @@
  * annotates its paint scope with `{"selectable": bool}`, and that annotation
  * is the only machine-readable channel that distinguishes them.
  *
- * This probe drives both surfaces and reads that annotation back, plus the
- * three ported affordances. Every judgement is delegated to
- * `ai-chat-parity-evidence.ts`, which is unit-tested without an app, so a run
- * that drove nothing reports `absent` rather than "no failures".
+ * Every judgement is delegated to `ai-chat-parity-evidence.ts`, which is
+ * unit-tested without an app, so a run that drove nothing reports `absent`
+ * rather than "no failures".
  *
  * Usage:
  *   SCRIPT_KIT_AGENT_ARTIFACT_NAME=ai-chat-parity \
  *     ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
  *   bun scripts/agentic/ai-chat-parity-probe.ts
  *
+ * Negative control — confirm the probe can actually fail before trusting it:
+ *   SCRIPT_KIT_AGENT_CHAT_MARKDOWN_SELECTABLE=0 \
+ *     bun scripts/agentic/ai-chat-parity-probe.ts
+ *   # => flowSession.answer-text-is-selectable FAILS with `notSelectable`
+ *
  * Exits non-zero on any failed assertion. Run on a quiet machine: this drives
  * real windows, and a contended machine produces interference receipts that
  * must NOT be read as product failures.
+ *
+ * SCOPE: this covers the FLOW half — the half this batch changed. Agent Chat's
+ * ported affordances (per-turn copy, jump-to-latest) are NOT driven here
+ * because `openAgentChatKitchenSinkFixture`, the entry point every existing
+ * Agent Chat probe uses to open that surface, was deleted in 401936c41; those
+ * probes are stale. Reviving it is its own task. Claiming coverage without
+ * driving it would be worse than naming the gap.
  */
 import { join, resolve } from "node:path";
 
 import { Driver, type Json } from "../devtools/driver";
 import {
-  AGENT_CHAT_ANSWER_SCOPE_PREFIX,
-  AGENT_CHAT_ANSWER_SCOPE_SUFFIX,
   FLOW_ANSWER_SCOPE_PREFIX,
   FLOW_ANSWER_SCOPE_SUFFIX,
   componentPresent,
   evaluateSelectable,
-  jumpPillBehaviour,
-  selectionParity,
+  verdictPasses,
   type FidelityNode,
   type LayoutComponent,
 } from "./ai-chat-parity-evidence";
@@ -44,8 +52,6 @@ const flowFixture = join(import.meta.dir, "fixtures/flow-ux-project");
 const packageFixture = join(import.meta.dir, "fixtures/flow-desk-package");
 const binary =
   process.env.SCRIPT_KIT_GPUI_BINARY ?? "target-agent/artifacts/ai-chat-parity/script-kit-gpui";
-
-const JUMP_PILL_ID = "agent-chat-jump-to-latest";
 
 const receipt: Json = {
   schemaVersion: 1,
@@ -82,6 +88,21 @@ const driver = await Driver.launch({
   readyTimeoutMs: 30_000,
   defaultTimeoutMs: 12_000,
   env: {
+    // Fidelity paint scopes — and therefore the `selectable` annotation this
+    // probe exists to read — are only captured when this is set. Without it
+    // `getLayoutInfo().fidelity` is `None` and every scope reads `absent`,
+    // which looks exactly like a product regression.
+    SCRIPT_KIT_FIDELITY_CAPTURE: "agent-chat",
+    // Negative control for CI/manual use: setting this to "0" must flip
+    // `flowSession.answer-text-is-selectable` to a FAILING `notSelectable`
+    // verdict. A probe nobody has watched fail is a probe nobody should trust.
+    ...(process.env.SCRIPT_KIT_AGENT_CHAT_MARKDOWN_SELECTABLE
+      ? {
+          SCRIPT_KIT_AGENT_CHAT_MARKDOWN_SELECTABLE:
+            process.env.SCRIPT_KIT_AGENT_CHAT_MARKDOWN_SELECTABLE,
+        }
+      : {}),
+    SCRIPT_KIT_TEST_STATUS: "1",
     SCRIPT_KIT_FLOW_UX_CWD: flowFixture,
     SCRIPT_KIT_FLOWS_PACKAGE_DIR: packageFixture,
     SCRIPT_KIT_FLOWS_BIN_DIR: join(packageFixture, "bin"),
@@ -104,76 +125,41 @@ async function press(key: string, modifiers: string[] = []) {
   await Bun.sleep(140);
 }
 
-async function settledTranscript(assistantText: string) {
-  await driver.request(
-    {
-      type: "setAgentChatTestFixture",
-      phase: "completed",
-      userText: "Explain the difference between the two renderers.",
-      assistantText,
-    },
-    { expect: "externalCommandResult", timeoutMs: 12_000 },
-  );
-  await Bun.sleep(200);
-  return driver.getLayoutInfo({}, { timeoutMs: 12_000 });
+/**
+ * Submit one real turn to the open Flow session and wait for it to settle.
+ *
+ * Polls the FLOW ANSWER SCOPE rather than a timer: an answer region only
+ * appears once the renderer painted one, so this cannot report success against
+ * a transcript that never arrived. Returns the layout that carried it, or the
+ * last layout seen if it never did — the caller's `evaluateSelectable` then
+ * reports `absent`, which is never a pass.
+ */
+async function submitTurnAndSettle(message: string): Promise<Json> {
+  await driver.setFilterAndWait(message);
+  await Bun.sleep(120);
+  await press("enter");
+  let layout = await driver.getLayoutInfo({}, { timeoutMs: 12_000 });
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const answers = fidelityNodes(layout).filter((node) =>
+      String(node?.id ?? "").startsWith(FLOW_ANSWER_SCOPE_PREFIX),
+    );
+    // Wait past the `_Thinking…_` placeholder for real answer text.
+    if (answers.length > 0 && !String(JSON.stringify(layout)).includes("Thinking")) break;
+    await Bun.sleep(250);
+    layout = await driver.getLayoutInfo({}, { timeoutMs: 12_000 });
+  }
+  return layout;
 }
 
 try {
   driver.send({ type: "show" });
   await driver.waitForSettle();
 
-  // ── Agent Chat ────────────────────────────────────────────────────
-  await driver.request(
-    { type: "openAgentChatKitchenSinkFixture" },
-    { expect: "externalCommandResult", timeoutMs: 12_000 },
-  );
-  await Bun.sleep(250);
-
-  const agentChatLayout = await settledTranscript(
-    "A settled answer with `code` and a [link](https://example.com).",
-  );
-  const agentChatSelectable = evaluateSelectable(
-    fidelityNodes(agentChatLayout),
-    AGENT_CHAT_ANSWER_SCOPE_PREFIX,
-    AGENT_CHAT_ANSWER_SCOPE_SUFFIX,
-  );
-  (receipt.evidence as Json).agentChatSelectable = agentChatSelectable as unknown as Json;
-
-  // Per-turn copy: ported FROM Flow, so a settled assistant row must carry it.
-  const copyPresent = components(agentChatLayout).some((component) =>
-    String(component?.name ?? "").startsWith("agent-chat-copy-turn-"),
-  );
-  expect("agentChat.turn-copy-present-on-settled-answer", copyPresent, {
-    componentNames: components(agentChatLayout)
-      .map((component) => component?.name)
-      .filter((name) => String(name ?? "").includes("copy")),
-  });
-
-  // Jump to latest: absent at the tail, present after scrolling up. The
-  // always-visible failure is the likelier one, so both halves are asserted.
-  const followingTail = components(agentChatLayout);
-  await driver.request(
-    { type: "setAgentChatTranscriptScroll", itemIx: 0, offsetPx: 24 },
-    { expect: "externalCommandResult", timeoutMs: 12_000 },
-  );
-  await Bun.sleep(220);
-  const scrolledLayout = await driver.getLayoutInfo({}, { timeoutMs: 12_000 });
-  const pill = jumpPillBehaviour(followingTail, components(scrolledLayout), JUMP_PILL_ID);
-  (receipt.evidence as Json).jumpPill = pill as unknown as Json;
-  expect("agentChat.jump-to-latest-follows-tail-state", pill.pass, {
-    whileFollowing: pill.whileFollowing,
-    afterScroll: pill.afterScroll,
-  });
-
-  await driver.request(
-    { type: "agentChatEscape" },
-    { expect: "externalCommandResult", timeoutMs: 12_000 },
-  );
-  await Bun.sleep(180);
-
-  // ── Flow session ──────────────────────────────────────────────────
-  driver.send({ type: "show" });
-  await driver.waitForSettle();
+  // ── Flow session, driven by a REAL turn ───────────────────────────
+  // Deliberately not seeded through a test fixture. The claim under proof is
+  // about what the renderer paints for an ordinary answer, and the
+  // `fake-codex` fixture binary is deterministic, so an actual submit is both
+  // available and stronger evidence than an injected transcript.
   await driver.setFilterAndWait("Flows");
   await press("enter");
   await driver.setFilterAndWait("hello-codex");
@@ -188,23 +174,28 @@ try {
     promptType: flowState.promptType,
   });
 
-  const flowLayout = await settledTranscript(
-    "A settled Flow answer with `code` and a [link](https://example.com).",
-  );
+  const flowLayout = await submitTurnAndSettle("Say something quotable.");
   const flowSelectable = evaluateSelectable(
     fidelityNodes(flowLayout),
     FLOW_ANSWER_SCOPE_PREFIX,
     FLOW_ANSWER_SCOPE_SUFFIX,
   );
   (receipt.evidence as Json).flowSelectable = flowSelectable as unknown as Json;
+  // Every scope the flow surface painted, so an `absent` verdict names what
+  // WAS there instead of only what was missing.
+  (receipt.evidence as Json).flowScopeIds = fidelityNodes(flowLayout)
+    .map((node) => node?.id)
+    .filter((id) => String(id ?? "").includes("chat")) as unknown as Json;
 
-  // THE headline claim.
-  const parity = selectionParity(flowSelectable, agentChatSelectable);
-  expect("parity.both-surfaces-render-selectable-answers", parity.pass, {
-    reason: parity.reason,
-    flow: flowSelectable as unknown as Json,
-    agentChat: agentChatSelectable as unknown as Json,
-  });
+  // THE headline claim of the whole batch: a Flow answer is selectable text.
+  // Before this work, Flow's answers rendered through an engine with no
+  // concept of selection, so this scope would report `absent` (no shared
+  // scope was emitted at all) rather than `notSelectable`.
+  expect(
+    "flowSession.answer-text-is-selectable",
+    verdictPasses(flowSelectable),
+    { verdict: flowSelectable as unknown as Json },
+  );
 
   // ── ⌘L starts a new conversation ──────────────────────────────────
   const beforeReset = fidelityNodes(flowLayout).filter((node) =>
@@ -232,11 +223,15 @@ try {
   );
   // Exact equality covers both halves at once: the draft survived AND ⌘L was
   // consumed rather than typed (an unconsumed ⌘L would append an "l").
+  // `inputValue`, not `filterText` — that is the key `getState` actually
+  // exposes the composer under. Reading a key that does not exist yields
+  // `undefined`, which fails against every expected string and reads exactly
+  // like a product bug.
   const afterResetState = await driver.getState();
   expect(
     "flowSession.reset-keeps-the-unsent-draft-and-consumes-the-chord",
-    afterResetState.filterText === draft,
-    { expected: draft, actual: afterResetState.filterText },
+    afterResetState.inputValue === draft,
+    { expected: draft, actual: afterResetState.inputValue ?? null },
   );
   expect(
     "flowSession.still-open-after-reset",
@@ -246,13 +241,16 @@ try {
   // The transcript viewport must still be mounted: a reset that left the
   // surface without a place to render the next answer would pass every count
   // check above while being unusable.
+  //
+  // Checked against `FlowSessionContent`, NOT `chat-transcript-viewport`: an
+  // empty conversation legitimately paints the starter state instead of a
+  // transcript viewport, so asserting the viewport here would fail on correct
+  // behavior — which is how a probe teaches you to weaken it.
   expect(
-    "flowSession.transcript-viewport-survives-the-reset",
-    componentPresent(components(afterResetLayout), "chat-transcript-viewport"),
+    "flowSession.body-survives-the-reset",
+    componentPresent(components(afterResetLayout), "FlowSessionContent"),
     {
-      componentNames: components(afterResetLayout)
-        .map((component) => component?.name)
-        .filter((name) => String(name ?? "").startsWith("chat-transcript")),
+      componentNames: components(afterResetLayout).map((component) => component?.name),
     },
   );
 
@@ -266,6 +264,13 @@ try {
   expect("cleanup.final-window-hidden", finalState.windowVisible === false, {
     windowVisible: finalState.windowVisible,
     promptType: finalState.promptType,
+  });
+} catch (error) {
+  // A thrown driver error must become a NAMED failure with a receipt, not a
+  // stack trace and no output. A probe that dies before printing is
+  // indistinguishable from a probe that was never run.
+  expect("probe.completed-without-driver-error", false, {
+    error: String((error as Error)?.message ?? error),
   });
 } finally {
   await driver.close();
