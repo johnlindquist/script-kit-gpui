@@ -190,9 +190,19 @@ distinct clusters:
   the selectable and copy assertions cascade.
 
 Both are timing, not product defects: the same binary passed 8/8 on an
-immediate rerun, and the deterministic Rust tests never wavered. **Run the
-probe when the machine is quiet.** If it fails, re-run once before believing
-it.
+immediate rerun, and the deterministic Rust tests never wavered.
+
+**Confirmed before wind-down.** Once the neighbouring lane finished and load
+dropped to ~5, the same binary passed **2 of 2 runs, 8/8 each**. So the rule is
+measured, not guessed:
+
+| Load average | Result |
+| --- | --- |
+| ~13.9 (both lanes building) | 3 of 5 runs failed |
+| ~5 (quiet) | 2 of 2 runs passed, 8/8 |
+
+**Run the probe when the machine is quiet.** If it fails, check `uptime` before
+believing it.
 
 One real weakness surfaced from this: `flowSession.cmd-l-clears-the-transcript`
 **passes vacuously when the session closes entirely** — zero answer regions is
