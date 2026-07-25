@@ -51,13 +51,33 @@ Receipt: `fixtures/ai-phase-trace-receipt.ndjson` (30 turns, 0 corrupt lines).
 | quick-ai | codex-exec | 8 | 8 | 143 ms | 3121 ms | 3121 ms | **feels-slow** |
 | agent-chat | pi-rpc | 6 | 6 | 4356 ms | 4356 ms | 4598 ms | **feels-slow** |
 | text | pi-rpc | 6 | 6 | 3680 ms | 3680 ms | 3905 ms | **feels-slow** |
-| mini | pi-rpc | 12 | 5 | 3980 ms | 3980 ms | 4067 ms | **feels-slow** |
+| mini | pi-rpc | 12 | 5 | (3980 ms) | (3980 ms) | (4067 ms) | **unreliable — do not cite** |
 | flow | codex-app-server | 0 | 0 | — | — | — | unmeasured |
 
-**No surface is actually slow. All four measured surfaces feel slow.** Every
-median turn is under the 5 s bar; every one of them shows the user nothing for
-94–100% of that turn. The shared symptom is dead air, not duration — so the
-shared repair is earlier feedback, not more speed.
+**No surface is actually slow. All three reliably measured surfaces feel
+slow.** Every median turn is under the 5 s bar; every one of them shows the user
+nothing for 94–100% of that turn. The shared symptom is dead air, not duration
+— so the shared repair is earlier feedback, not more speed.
+
+### Mini's numbers are not trustworthy yet
+
+The report prints a Mini row, and it should not be believed. `runId` is not
+unique per turn on the Pi transport: every Mini turn is recorded under the
+constant `"pi-isolated"`, and Mini is the one surface that fans out into
+**concurrent** turns — one rewrite submit fires several variation turns at once.
+
+Measured from the receipt: Mini reaches **3 concurrent open turns** under that
+single id and leaves **2 turns unterminated**, against 12 `turn_start`s and only
+10 `terminal`s. The analyzer separates turns by `turn_start` ordering, which is
+correct only while turns are sequential. Quick AI, Agent Chat, and Text are all
+strictly sequential (max concurrent 1, 0 unterminated), so their numbers stand;
+Mini's phases interleave between turns and its median is meaningless.
+
+The fix is a per-turn `runId` on the Pi transport rather than a per-session
+constant. Until then Mini is unmeasured, and the honest scoreboard is **3/5**,
+not the `MEASURED_SURFACES=4/5` the report currently prints — the report cannot
+detect this, which is itself the lesson: an instrument that cannot tell
+concurrent turns apart reports confident nonsense rather than an error.
 
 But the dead air has **two different causes**, and they need different fixes:
 
