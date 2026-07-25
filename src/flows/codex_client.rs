@@ -35,6 +35,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
+use crate::ai::phase_trace::{AiSurface, AiTransport, PhaseTrace, TurnOutcome};
+
 /// Events surfaced to the flow tick, keyed by app session id.
 #[derive(Debug, Clone)]
 pub(crate) enum FlowThreadEvent {
@@ -116,6 +118,74 @@ struct Shared {
     threads: HashMap<String, u64>,
     sessions: HashMap<u64, SessionLink>,
     events: Vec<FlowThreadEvent>,
+    /// Per-session phase traces, keyed the same way `sessions` is.
+    ///
+    /// Flows differs from the other two transports: one long-lived
+    /// `codex app-server` process multiplexes every flow session, so there is
+    /// no per-turn scope to hang a trace on. Keying by session id is what makes
+    /// concurrent flows separable in the trace.
+    traces: HashMap<u64, PhaseTrace>,
+}
+
+impl Shared {
+    /// Queue an event AND record its phase.
+    ///
+    /// The single emission choke point for this transport. Before it existed,
+    /// 13 sites across 7 functions pushed onto `events` directly and there was
+    /// no `emit` helper at all, so any instrumentation would have had to be
+    /// copied 13 times and would have been forgotten by the 14th site. Every
+    /// `FlowThreadEvent` variant carries `session_id`, which is what makes one
+    /// choke point sufficient.
+    fn emit(&mut self, event: FlowThreadEvent) {
+        self.trace_event(&event);
+        self.events.push(event);
+    }
+
+    fn trace_event(&mut self, event: &FlowThreadEvent) {
+        let session_id = match event {
+            FlowThreadEvent::ThreadStarted { session_id, .. }
+            | FlowThreadEvent::TurnStarted { session_id }
+            | FlowThreadEvent::AgentDelta { session_id, .. }
+            | FlowThreadEvent::AgentMessageFinal { session_id, .. }
+            | FlowThreadEvent::TurnCompleted { session_id, .. }
+            | FlowThreadEvent::TurnFailed { session_id, .. }
+            | FlowThreadEvent::SessionFailed { session_id, .. } => *session_id,
+        };
+        let Some(trace) = self.traces.get(&session_id) else {
+            return;
+        };
+        trace.observe_provider_event();
+        match event {
+            FlowThreadEvent::AgentDelta { delta, .. } => trace.observe_visible_output(delta),
+            FlowThreadEvent::AgentMessageFinal { text, .. } => trace.observe_visible_output(text),
+            FlowThreadEvent::TurnCompleted { outcome, .. } => {
+                // A user Stop arrives here as a Cancelled outcome, not as a
+                // failure. Folding it into `completed` would let an abandoned
+                // turn count as an impossibly fast success in the medians.
+                let turn_outcome = match outcome {
+                    crate::ai::reliability::AiTurnRuntimeOutcome::Completed { .. } => {
+                        TurnOutcome::Completed
+                    }
+                    crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled { .. } => {
+                        TurnOutcome::Cancelled
+                    }
+                };
+                trace.terminal(turn_outcome, None);
+                trace.teardown();
+            }
+            FlowThreadEvent::TurnFailed { failure, .. }
+            | FlowThreadEvent::SessionFailed { failure, .. } => {
+                // Carry the code the runtime already classified; never
+                // re-derive one from prose (rules/AI_RELIABILITY.md).
+                let code = serde_json::to_value(failure.failure.code)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string));
+                trace.terminal(TurnOutcome::Failed, code.as_deref());
+                trace.teardown();
+            }
+            _ => {}
+        }
+    }
 }
 
 pub struct CodexAppServer {
@@ -148,8 +218,34 @@ impl CodexAppServer {
         prompt: String,
     ) {
         let mut shared = self.shared.lock().unwrap();
+
+        // Open the trace at the top of `converse`, BEFORE ensure_child and
+        // before any thread/start round trip.
+        //
+        // This is the honest user-perceived start: the moment the turn was
+        // submitted. A cold flow pays for spawning `codex app-server` AND for
+        // `thread/start` before its first token; a warm one pays for neither.
+        // Starting the clock after that setup would erase exactly the
+        // difference this instrument exists to measure. Replacing a previous
+        // trace for the session is intended — a new turn is a new measurement.
+        let trace = PhaseTrace::begin(
+            AiSurface::Flow,
+            AiTransport::CodexAppServer,
+            format!("flow-{session_id}"),
+        );
+        let warm_thread = shared
+            .sessions
+            .get(&session_id)
+            .is_some_and(|link| link.thread_id.is_some());
+        trace.turn_start(serde_json::json!({
+            "promptChars": prompt.chars().count(),
+            "warmThread": warm_thread,
+            "childAlreadyRunning": shared.child.is_some(),
+        }));
+        shared.traces.insert(session_id, trace);
+
         if let Err(failure) = ensure_child(&mut shared) {
-            shared.events.push(FlowThreadEvent::SessionFailed {
+            shared.emit(FlowThreadEvent::SessionFailed {
                 session_id,
                 failure,
             });
@@ -194,7 +290,7 @@ impl CodexAppServer {
     ) {
         let mut shared = self.shared.lock().unwrap();
         if let Err(failure) = ensure_child(&mut shared) {
-            shared.events.push(FlowThreadEvent::SessionFailed {
+            shared.emit(FlowThreadEvent::SessionFailed {
                 session_id,
                 failure,
             });
@@ -481,7 +577,7 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
     );
     let session_ids: Vec<u64> = shared.sessions.keys().copied().collect();
     for session_id in session_ids {
-        shared.events.push(FlowThreadEvent::SessionFailed {
+        shared.emit(FlowThreadEvent::SessionFailed {
             session_id,
             failure: death.clone(),
         });
@@ -551,7 +647,7 @@ fn handle_message(shared: &mut Shared, msg: &serde_json::Value) {
                         .and_then(|id| id.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    shared.events.push(FlowThreadEvent::AgentDelta {
+                    shared.emit(FlowThreadEvent::AgentDelta {
                         session_id,
                         item_id,
                         delta: delta.to_string(),
@@ -578,7 +674,7 @@ fn handle_message(shared: &mut Shared, msg: &serde_json::Value) {
                         .and_then(|id| id.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    shared.events.push(FlowThreadEvent::AgentMessageFinal {
+                    shared.emit(FlowThreadEvent::AgentMessageFinal {
                         session_id,
                         item_id,
                         text,
@@ -600,20 +696,20 @@ fn handle_message(shared: &mut Shared, msg: &serde_json::Value) {
                     .and_then(|m| m.as_str())
                     .map(str::to_string);
                 match status.as_str() {
-                    "completed" => shared.events.push(FlowThreadEvent::TurnCompleted {
+                    "completed" => shared.emit(FlowThreadEvent::TurnCompleted {
                         session_id,
                         outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Completed {
                             stop_reason: Some(status),
                         },
                     }),
-                    "interrupted" => shared.events.push(FlowThreadEvent::TurnCompleted {
+                    "interrupted" => shared.emit(FlowThreadEvent::TurnCompleted {
                         session_id,
                         outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
                             kind: sk_protocol::ai_reliability::CancellationKind::UserStopped,
                             partial: sk_protocol::ai_reliability::PartialOutputState::None,
                         },
                     }),
-                    _ => shared.events.push(FlowThreadEvent::TurnFailed {
+                    _ => shared.emit(FlowThreadEvent::TurnFailed {
                         session_id,
                         failure: flow_failure(error.unwrap_or_else(|| "Turn failed".to_string())),
                     }),
@@ -635,7 +731,7 @@ fn handle_message(shared: &mut Shared, msg: &serde_json::Value) {
                         .and_then(|m| m.as_str())
                         .unwrap_or("codex reported an error")
                         .to_string();
-                    shared.events.push(FlowThreadEvent::TurnFailed {
+                    shared.emit(FlowThreadEvent::TurnFailed {
                         session_id,
                         failure: flow_failure(message),
                     });
@@ -668,7 +764,7 @@ fn handle_rpc_error(shared: &mut Shared, kind: PendingKind, message: String) {
             // Every session that queued work against this child fails.
             let session_ids: Vec<u64> = shared.sessions.keys().copied().collect();
             for session_id in session_ids {
-                shared.events.push(FlowThreadEvent::SessionFailed {
+                shared.emit(FlowThreadEvent::SessionFailed {
                     session_id,
                     failure: failure.clone(),
                 });
@@ -679,13 +775,13 @@ fn handle_rpc_error(shared: &mut Shared, kind: PendingKind, message: String) {
                 link.thread_starting = false;
                 link.queued_prompts.clear();
             }
-            shared.events.push(FlowThreadEvent::SessionFailed {
+            shared.emit(FlowThreadEvent::SessionFailed {
                 session_id,
                 failure: flow_failure(format!("thread/start failed: {message}")),
             });
         }
         PendingKind::TurnStart { session_id } => {
-            shared.events.push(FlowThreadEvent::TurnFailed {
+            shared.emit(FlowThreadEvent::TurnFailed {
                 session_id,
                 failure: flow_failure(format!("turn/start failed: {message}")),
             });
@@ -727,7 +823,7 @@ fn handle_response(shared: &mut Shared, kind: PendingKind, result: &serde_json::
                 .unwrap_or_default()
                 .to_string();
             let Some(thread_id) = thread_id else {
-                shared.events.push(FlowThreadEvent::SessionFailed {
+                shared.emit(FlowThreadEvent::SessionFailed {
                     session_id,
                     failure: flow_failure("thread/start response missing thread.id"),
                 });
@@ -803,6 +899,140 @@ mod tests {
                 }
             } if status == "completed"
         ));
+    }
+
+    /// The Flows transport must produce a usable phase trace for a real turn.
+    ///
+    /// This drives the actual `handle_message` notification path rather than
+    /// pushing events directly, so it fails if a future edit routes an event
+    /// around `Shared::emit`. An unrouted event produces an EMPTY trace, which
+    /// is indistinguishable from a fast surface — the exact way this
+    /// instrument could silently lie.
+    #[test]
+    fn flow_transport_emits_the_phase_trace_for_a_turn() {
+        let path = std::env::temp_dir().join(format!(
+            "sk-flow-phase-trace-{}-{:?}.ndjson",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut shared = Shared::default();
+        shared.threads.insert("t-1".to_string(), 7);
+        let trace = PhaseTrace::begin_at(
+            path.clone(),
+            AiSurface::Flow,
+            AiTransport::CodexAppServer,
+            "flow-7",
+        );
+        trace.turn_start(serde_json::json!({}));
+        shared.traces.insert(7, trace);
+
+        handle_message(
+            &mut shared,
+            &serde_json::json!({
+                "method": "item/agentMessage/delta",
+                "params": { "threadId": "t-1", "turnId": "x", "itemId": "i", "delta": "Bonjour" }
+            }),
+        );
+        handle_message(
+            &mut shared,
+            &serde_json::json!({
+                "method": "item/agentMessage/delta",
+                "params": { "threadId": "t-1", "turnId": "x", "itemId": "i", "delta": " monde" }
+            }),
+        );
+        handle_message(
+            &mut shared,
+            &serde_json::json!({
+                "method": "turn/completed",
+                "params": { "threadId": "t-1", "turn": { "id": "x", "status": "completed" } }
+            }),
+        );
+
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .expect("the flow trace file must exist")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("every record parses as JSON"))
+            .collect();
+        let names: Vec<&str> = records
+            .iter()
+            .map(|record| record["event"].as_str().unwrap())
+            .collect();
+
+        for required in [
+            crate::ai::phase_trace::events::TURN_START,
+            crate::ai::phase_trace::events::FIRST_PROVIDER_EVENT,
+            crate::ai::phase_trace::events::FIRST_VISIBLE_OUTPUT,
+            crate::ai::phase_trace::events::TERMINAL,
+            crate::ai::phase_trace::events::TEARDOWN,
+        ] {
+            assert!(
+                names.contains(&required),
+                "flow turn trace is missing {required}; got {names:?}"
+            );
+        }
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == crate::ai::phase_trace::events::FIRST_VISIBLE_OUTPUT)
+                .count(),
+            1,
+            "two deltas arrived but only the first may be recorded"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|r| r["event"] == crate::ai::phase_trace::events::TERMINAL)
+                .map(|r| r["outcome"].clone()),
+            Some(serde_json::json!("completed")),
+        );
+        for record in &records {
+            assert_eq!(record["surface"], "flow");
+            assert_eq!(record["transport"], "codex-app-server");
+        }
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("Bonjour"), "flow trace leaked answer text");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A user Stop must be recorded as cancelled, never as a completed turn:
+    /// an abandoned turn would otherwise look like an impossibly fast success
+    /// and drag every median down.
+    #[test]
+    fn flow_cancelled_turn_is_not_recorded_as_completed() {
+        let path = std::env::temp_dir().join(format!(
+            "sk-flow-cancel-trace-{}-{:?}.ndjson",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut shared = Shared::default();
+        let trace = PhaseTrace::begin_at(
+            path.clone(),
+            AiSurface::Flow,
+            AiTransport::CodexAppServer,
+            "flow-4",
+        );
+        shared.traces.insert(4, trace);
+        shared.emit(FlowThreadEvent::TurnCompleted {
+            session_id: 4,
+            outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
+                kind: sk_protocol::ai_reliability::CancellationKind::UserStopped,
+                partial: sk_protocol::ai_reliability::PartialOutputState::None,
+            },
+        });
+
+        let raw = std::fs::read_to_string(&path).expect("trace file must exist");
+        assert!(raw.contains("\"outcome\":\"cancelled\""), "got: {raw}");
+        assert!(
+            raw.contains("\"isLatencySample\":false"),
+            "a cancelled turn must not be a latency sample; got: {raw}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// thread/start response links the thread, flushes queued prompts as
