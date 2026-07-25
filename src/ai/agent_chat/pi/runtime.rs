@@ -749,6 +749,45 @@ fn pi_rpc_process_exit_error(
     format!("{prefix}: {hint}")
 }
 
+/// How long to let the stderr reader catch up after stdout closes.
+///
+/// stdout EOF and the stderr line that explains it are produced by two
+/// independent readers. When pi prints "No API key found for provider
+/// anthropic" and exits, whichever reader is scheduled first wins the race —
+/// and if stdout wins, the hint is still `None` at the moment we classify.
+///
+/// That race used to be harmless because a hintless exit and a hinted exit
+/// both ended up as `Unknown`; only the wording differed. It stopped being
+/// harmless when the hintless case started classifying as `RuntimeClosed`,
+/// because the two now offer DIFFERENT actions: losing the race turns a
+/// "Sign in" card into a "Reconnect" card, and reconnecting never fixes a
+/// missing API key.
+const PI_STDERR_HINT_GRACE_MS: u64 = 250;
+const PI_STDERR_HINT_POLL_MS: u64 = 10;
+
+/// Wait, briefly and boundedly, for the stderr reader to record why the child
+/// died. Returns whether evidence arrived.
+///
+/// Only waits when there is a hint slot to fill and it is still empty, so a
+/// caller with no stderr channel (and every unit test) pays nothing.
+async fn await_stderr_hint(stderr_failure_hint: Option<&StderrFailureHint>) -> bool {
+    let Some(hint) = stderr_failure_hint else {
+        return false;
+    };
+    if hint.lock().is_some() {
+        return true;
+    }
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(PI_STDERR_HINT_GRACE_MS);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(PI_STDERR_HINT_POLL_MS)).await;
+        if hint.lock().is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 async fn read_stdout<R>(
     stdout: R,
     pending: PendingResponses,
@@ -826,10 +865,7 @@ async fn read_stdout<R>(
         event = "pi_rpc_stdout_closed",
         "Pi RPC stdout closed before all pending responses completed"
     );
-    let had_stderr_hint = stderr_failure_hint
-        .as_ref()
-        .and_then(|hint| hint.lock().clone())
-        .is_some();
+    let had_stderr_hint = await_stderr_hint(stderr_failure_hint.as_ref()).await;
     let error = pi_rpc_process_exit_error(
         "Pi RPC process exited before responding",
         stderr_failure_hint.as_ref(),
@@ -1203,6 +1239,51 @@ mod tests {
                     if failure.failure.code
                         == sk_protocol::ai_reliability::AiFailureCode::AuthenticationMissing
             ));
+        });
+    }
+
+    /// The stderr reader is a separate task, so a pi child that prints its
+    /// reason and dies can close stdout FIRST. Classifying at that instant saw
+    /// no evidence and produced `RuntimeClosed` — a "Reconnect" card for a
+    /// missing API key, which reconnecting cannot fix. Losing this race must
+    /// not change what the user is offered.
+    #[test]
+    fn read_stdout_waits_for_late_stderr_evidence_before_calling_it_a_dead_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+            let active_turn: ActiveTurn = Arc::new(Mutex::new(None));
+            let (event_tx, event_rx) = async_channel::bounded(1);
+            active_turn.lock().replace(ActiveTurnState {
+                ui_thread_id: "thread-race".to_string(),
+                prompt_id: "prompt-race".to_string(),
+                event_tx,
+            });
+            // Empty: the hint has NOT arrived when stdout closes.
+            let stderr_hint: StderrFailureHint = Arc::new(Mutex::new(None));
+            let late = stderr_hint.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                late.lock()
+                    .replace("No API key found for provider anthropic. Set env var.".to_string());
+            });
+
+            read_stdout(tokio::io::empty(), pending, active_turn, Some(stderr_hint)).await;
+
+            let event = event_rx.recv().await.unwrap();
+            assert!(
+                matches!(
+                    event,
+                    AgentChatEvent::TurnFailed { failure }
+                        if failure.failure.code
+                            == sk_protocol::ai_reliability::AiFailureCode::AuthenticationMissing
+                ),
+                "stderr evidence that arrives just after stdout EOF must still decide the failure"
+            );
         });
     }
 
