@@ -150,9 +150,24 @@ fn enter_key_dispatches_paste_not_copy_in_emoji_picker() {
 fn emoji_picker_footer_primary_action_is_paste() {
     let source = read_source("src/render_builtins/emoji_picker.rs");
 
+    // The invariant is that the footer comes from the SHARED universal-prompt
+    // hints, so the paste verb stays consistent across surfaces — not which
+    // variant of that helper is called.
+    //
+    // This required the literal `universal_prompt_hints()`. The emoji picker
+    // now calls `universal_prompt_hints_with_primary_label("Paste")`, which is
+    // the same shared family and strictly more correct: its own test module
+    // pins that spelling precisely because "a footer hint may never advertise
+    // a verb Enter doesn't do". So the audit was red for the surface having
+    // moved to the BETTER shared helper.
     assert!(
-        source.contains("render_simple_hint_strip(") && source.contains("universal_prompt_hints()"),
-        "emoji picker footer should use the shared universal prompt hints"
+        source.contains("render_simple_hint_strip("),
+        "emoji picker footer should be built with the shared render_simple_hint_strip"
+    );
+    assert!(
+        source.contains("universal_prompt_hints"),
+        "emoji picker footer should draw its hints from the shared \
+         universal_prompt_hints family, so the paste verb matches other surfaces"
     );
     assert!(
         !source.contains("\"↵ Copy\"") && !source.contains("\"Esc Back\""),

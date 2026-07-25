@@ -121,8 +121,19 @@ fn test_render_emoji_picker_uses_row_height_and_lighter_cell_chrome() {
         "header and cell rows should be fixed-height rows"
     );
     assert!(
-        source.contains(".gap(px(tile_gap))") && source.contains(".text_size(px(28.0))"),
-        "emoji rows should use tile_gap spacing and compact glyph size"
+        source.contains(".gap(px(tile_gap))"),
+        "emoji rows should use shared tile_gap spacing"
+    );
+    // This used to demand the literal `.text_size(px(28.0))`. The glyph size is
+    // now derived — `tile_size * crate::emoji::GRID_GLYPH_SCALE` — so the audit
+    // went red for the code adopting a shared token, which is the exact
+    // opposite of what this file exists to enforce. Pin the derivation instead
+    // of the magic number: a hardcoded size would now fail, and correctly so.
+    assert!(
+        source.contains(".text_size(px(glyph_size))")
+            && source.contains("crate::emoji::GRID_GLYPH_SCALE"),
+        "emoji glyph size must be derived from the shared GRID_GLYPH_SCALE token, \
+         not hardcoded"
     );
     assert!(
         source.contains("let tile_size = crate::emoji::GRID_TILE_SIZE;")
