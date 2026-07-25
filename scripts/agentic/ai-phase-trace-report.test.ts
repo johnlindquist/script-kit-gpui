@@ -288,8 +288,14 @@ describe("overlapping turns under one runId", () => {
     // would erase every good number in the file.
     const text = [
       overlapping,
-      ...Array.from({ length: MIN_SAMPLES }, () =>
-        turnLines({ runId: "pi-1", surface: "text", ttt: 4000, ttfvo: 3800 }).join("\n"),
+      // Unique id per turn, which is what the transport mints now.
+      ...Array.from({ length: MIN_SAMPLES }, (_unused, index) =>
+        turnLines({
+          runId: `pi-1#${index}`,
+          surface: "text",
+          ttt: 4000,
+          ttfvo: 3800,
+        }).join("\n"),
       ),
     ].join("\n");
     const { surfaces } = buildReport(text);
@@ -297,14 +303,31 @@ describe("overlapping turns under one runId", () => {
     expect(surfaces.find((s) => s.surface === "text")?.verdict).toBe("feels-slow");
   });
 
-  test("an unterminated turn also makes the surface ambiguous", () => {
-    // A turn that never terminates leaves its phases attributable to the next
-    // turn under the same id, which is the same lie in a slower form.
+  test("a lone unterminated turn is NOT ambiguous", () => {
+    // Regression: the first version of this guard flagged any unterminated
+    // turn, which meant every trace whose last turn was still in flight when
+    // the app closed got its whole surface withheld. A single turn under its
+    // own id is perfectly attributable — it is just an incomplete sample, and
+    // isLatencySample already excludes it from the medians.
     const text = [
-      record({ runId: "pi-1", surface: "text", event: "turn_start", elapsedMs: 0 }),
-      record({ runId: "pi-1", surface: "text", event: "first_visible_output", elapsedMs: 50 }),
+      record({ runId: "pi-1#1", surface: "text", event: "turn_start", elapsedMs: 0 }),
+      record({ runId: "pi-1#1", surface: "text", event: "first_visible_output", elapsedMs: 50 }),
     ].join("\n");
     const { ambiguousSurfaces } = parseTrace(text);
-    expect(ambiguousSurfaces.has("text")).toBe(true);
+    expect(ambiguousSurfaces.has("text")).toBe(false);
+  });
+
+  test("a reused id with SEQUENTIAL turns is not ambiguous", () => {
+    // Regression: an over-strict version flagged any reused id, which withheld
+    // Text's perfectly good numbers. Sequential turns are resolved by ordering
+    // — that is precisely what splitting at turn_start does. Only overlap is
+    // unattributable.
+    const text = [
+      ...turnLines({ runId: "pi-1", surface: "text", ttt: 1000 }),
+      ...turnLines({ runId: "pi-1", surface: "text", ttt: 1200 }),
+    ].join("\n");
+    const { ambiguousSurfaces, turns } = parseTrace(text);
+    expect(ambiguousSurfaces.has("text")).toBe(false);
+    expect(turns).toHaveLength(2);
   });
 });

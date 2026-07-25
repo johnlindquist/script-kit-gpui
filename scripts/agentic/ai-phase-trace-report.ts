@@ -134,9 +134,20 @@ export function parseTrace(text: string): {
     //
     // This silently produced a full Mini row in a committed receipt, so the
     // analyzer now refuses that surface instead of averaging the wreckage.
+    // Ambiguity is specifically OVERLAP: a turn_start arriving before the
+    // previous turn under this id terminated. Only then can a record belong to
+    // more than one turn.
+    //
+    // Two things that look similar are deliberately NOT ambiguous:
+    //   - a reused id whose turns are strictly SEQUENTIAL. Ordering resolves
+    //     those, which is exactly what splitting at turn_start does.
+    //   - a lone turn that never terminated. It is attributable, merely
+    //     incomplete, and isLatencySample already keeps it out of the medians.
+    // Both were flagged by earlier versions of this check, which withheld good
+    // numbers from Text and from any trace whose last turn was still in flight
+    // when the app closed.
     let open = 0;
     let overlapped = false;
-    let unterminated = 0;
     for (const record of all) {
       if (record.event === "turn_start") {
         open += 1;
@@ -144,8 +155,7 @@ export function parseTrace(text: string): {
       }
       if (record.event === "terminal") open -= 1;
     }
-    unterminated = Math.max(0, open);
-    if (overlapped || unterminated > 0) {
+    if (overlapped) {
       const surface = all[0]?.surface ?? "unknown";
       ambiguousSurfaces.add(surface);
     }

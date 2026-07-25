@@ -29,6 +29,7 @@ hashing.
 | `fixtures/ai-phase-trace-receipt.ndjson` | The committed measured run |
 | `fixtures/ai-phase-trace-mini-per-turn-runid.ndjson` | Mini attributable after the run-id fix |
 | `fixtures/ai-phase-trace-prewarm-on.ndjson` | The disproved prewarm variant |
+| `fixtures/ai-phase-trace-flow.ndjson` | Flows measured over `codex app-server` |
 
 ## The verdict rule
 
@@ -46,7 +47,10 @@ that exclusion a broken surface ranks fastest in the table.
 
 ## Measured, 2026-07-25 (four surfaces, real turns)
 
-Receipt: `fixtures/ai-phase-trace-receipt.ndjson` (30 turns, 0 corrupt lines).
+Receipts: `fixtures/ai-phase-trace-receipt.ndjson` (Quick AI, Agent Chat,
+Text), `fixtures/ai-phase-trace-mini-per-turn-runid.ndjson` (Mini, post-fix),
+`fixtures/ai-phase-trace-flow.ndjson` (Flows). They are separate files because
+no single app session can drive all five surfaces.
 
 | Surface | Transport | n | valid | first event | first visible | total | Verdict |
 |---|---|---|---|---|---|---|---|
@@ -54,12 +58,13 @@ Receipt: `fixtures/ai-phase-trace-receipt.ndjson` (30 turns, 0 corrupt lines).
 | agent-chat | pi-rpc | 6 | 6 | 4356 ms | 4356 ms | 4598 ms | **feels-slow** |
 | text | pi-rpc | 6 | 6 | 3680 ms | 3680 ms | 3905 ms | **feels-slow** |
 | mini | pi-rpc | 12 | 5 | — | — | — | **ambiguous-trace (defect since fixed)** |
-| flow | codex-app-server | 0 | 0 | — | — | — | unmeasured |
+| flow | codex-app-server | 11 | 10 | 1951 ms | 1951 ms | 2035 ms | **feels-slow** |
 
-**No surface is actually slow. All three reliably measured surfaces feel
-slow.** Every median turn is under the 5 s bar; every one of them shows the user
-nothing for 94–100% of that turn. The shared symptom is dead air, not duration
-— so the shared repair is earlier feedback, not more speed.
+**All five surfaces are now measured, and not one of them is actually slow.
+Every single one feels slow.** Every median turn is under the 5 s bar; every one
+shows the user nothing for 94–100% of that turn. The shared symptom is dead air,
+not duration — so the shared repair is earlier feedback, not more speed. Flows
+is the fastest surface at 2.0 s and still fails the same way.
 
 But the dead air has **two different causes**, and they need different fixes:
 
@@ -135,14 +140,22 @@ Honest limit: this is n=5 vs n=6 in one sitting, not the paired 15-trial design
 in `quick-ai-latency-bench.ts`. The direction is large (+48%) and mechanistically
 explained, but treat the exact delta as indicative, not settled.
 
-## Why Flows is still unmeasured
+## Flows: measured 2026-07-25, and the fastest surface
 
-Flows is wired, unit-proven, and emitting, but has no live entry path in the
-probe: driving it needs a real flow plus a `codex app-server` session that this
-probe does not yet open. It reports `insufficient-data` rather than inventing a
-number. On the committed receipt the scoreboard reads
-`MEASURED_SURFACES=3/5` — Mini is withheld there because that receipt predates
-the run-id fix, and Flows has never been driven.
+Flows is now driven live. It is the **quickest** of the five — 1951 ms to first
+visible output, 2035 ms total — but it lands on the same verdict as every other
+surface, because 96% of that turn is still dead air.
+
+Driving it needs one thing that is easy to get wrong. The app resolves its flow
+roster by running `md roster --json` in **the Spine cwd**, which defaults to
+`$HOME/.scriptkit` — *not* the process working directory. Setting the app's cwd
+does nothing; the probe seeds a fixture flow into the sandbox's
+`~/.scriptkit/flows/` instead.
+
+That fixture is deliberately a throwaway `ping.md` that replies with one word
+and is told to touch nothing. **Never point this probe at the repo's own
+`flows/**`.** Those are real delegation briefs; "measuring" one would set a
+Codex agent loose on this checkout rather than time a turn.
 
 ## Resolved: the model-switch signal was benign
 

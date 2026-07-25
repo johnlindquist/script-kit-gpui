@@ -25,6 +25,7 @@ interface Args {
   binary?: string;
   model?: string;
   prewarm?: boolean;
+  flowName?: string;
 }
 
 function parseArgs(): Args {
@@ -51,6 +52,7 @@ function parseArgs(): Args {
     // Pi sidecars are prewarmed. Measuring with prewarm forced off is how we
     // separate per-turn cost from one-time process spawn cost.
     prewarm: prewarmFlag === undefined ? undefined : prewarmFlag !== "off",
+    flowName: value("--flow-name"),
   };
 }
 
@@ -148,6 +150,34 @@ async function main() {
     writeFileSync(
       join(driver.sessionDir, "home", ".scriptkit", "config.ts"),
       `export default ${JSON.stringify({ ai: { selectedModelId: args.model } }, null, 2)}\n`,
+    );
+  }
+
+  // Flows are discovered by `md roster --json` run in the app's cwd, and that
+  // cwd is the Spine default `$HOME/.scriptkit` — NOT the process working
+  // directory. So the fixture flow is seeded into the sandbox, where the app
+  // actually looks.
+  //
+  // It must be a fixture, never one of the repo's own flows/**: those are real
+  // delegation briefs, and "measuring" one would set an agent loose on this
+  // checkout. This one is explicitly read-only.
+  if (args.surfaces.includes("flow")) {
+    const flowsDir = join(driver.sessionDir, "home", ".scriptkit", "flows");
+    mkdirSync(flowsDir, { recursive: true });
+    writeFileSync(
+      join(flowsDir, "ping.md"),
+      [
+        "---",
+        "name: ping",
+        "description: Minimal read-only flow used to measure flow turn latency.",
+        "engine: codex",
+        "---",
+        "",
+        "Reply with exactly the word: pong",
+        "",
+        "Do not read, create, modify, or delete any files. Do not run commands.",
+        "",
+      ].join("\n"),
     );
   }
 
@@ -288,6 +318,57 @@ async function main() {
         } catch (error) {
           attempts.push({
             surface: "text",
+            trial,
+            ok: false,
+            detail: `driver error: ${(error as Error).message}`,
+            wallMs: Math.round(performance.now() - started),
+          });
+        }
+      }
+    }
+    // ---- Flow: launch a flow from the launcher, then converse. Enter on a
+    // flow row opens the conversation (SessionTransport::CodexThread), which
+    // is the `codex app-server` path the trace instruments; the MAIN input
+    // then acts as the composer, so the second Enter submits a turn.
+    //
+    // The flow driven here is the seeded read-only fixture, never one of the
+    // repo's own flows/**: those are real delegation briefs, and "measuring"
+    // one would set an agent loose on this checkout.
+    if (args.surfaces.includes("flow")) {
+      for (let trial = 1; trial <= args.trials; trial += 1) {
+        const before = readTrace(tracePath).filter(
+          (record) => record.surface === "flow" && record.event === "terminal",
+        ).length;
+        const started = performance.now();
+        try {
+          driver.simulateKey("escape");
+          driver.send({ type: "show" });
+          await driver.waitForState({ windowVisible: true }, { timeoutMs: 10_000 });
+          await driver.waitForSettle();
+          await driver.setFilterAndWait(args.flowName ?? "ping", { timeoutMs: 15_000 });
+          await driver.simulateGpuiEvent(
+            { type: "keyDown", key: "enter" },
+            { target: { type: "kind", kind: "main" }, timeoutMs: 15_000 },
+          );
+          await driver.waitForSettle();
+          await driver.setFilterAndWait("Reply with exactly: pong", { timeoutMs: 15_000 });
+          await driver.simulateGpuiEvent(
+            { type: "keyDown", key: "enter" },
+            { target: { type: "kind", kind: "main" }, timeoutMs: 15_000 },
+          );
+          const terminal = await waitForTerminal(tracePath, "flow", before, 180_000);
+          attempts.push({
+            surface: "flow",
+            trial,
+            ok: terminal?.outcome === "completed",
+            detail: terminal
+              ? `outcome=${terminal.outcome} elapsedMs=${terminal.elapsedMs}`
+              : "no terminal record within 180s",
+            wallMs: Math.round(performance.now() - started),
+          });
+        } catch (error) {
+          attempts.push({
+            surface: "flow",
             trial,
             ok: false,
             detail: `driver error: ${(error as Error).message}`,
