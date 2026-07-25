@@ -11587,6 +11587,18 @@ impl AgentChatView {
         }
     }
 
+    /// S12: the recovery card the LIVE thread would render right now.
+    ///
+    /// The element collector needs the same projection the renderer uses, so
+    /// a probe can prove the card is on screen instead of asserting against a
+    /// hand-written surface model that never had a node for it.
+    pub(crate) fn active_recovery_card_spec(
+        &self,
+        cx: &App,
+    ) -> Option<crate::ai::reliability::AiRecoveryCardSpec> {
+        self.live_thread().read(cx).recovery_card_spec()
+    }
+
     fn render_ai_recovery(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let spec = {
             let thread = self.live_thread().read(cx);

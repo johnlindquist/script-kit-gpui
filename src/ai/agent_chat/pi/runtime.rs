@@ -191,6 +191,22 @@ fn pi_failure(raw: impl AsRef<str>) -> AgentChatEvent {
     AgentChatEvent::failed(sk_protocol::ai_reliability::ProtocolComponent::Pi, raw)
 }
 
+/// S12: an IO/RPC failure against the pi child is a RUNTIME CLOSED fact.
+///
+/// `error.to_string()` for a child that has exited is "Broken pipe (os error
+/// 32)" or a closed-channel message. Neither is classifiable English, so these
+/// used to reach the user as `Unknown` — "The AI request did not finish" with
+/// no reconnect path, for the one failure reconnecting fixes. The cause still
+/// goes to the diagnostic vault behind Copy Details.
+fn pi_transport_failure(cause: impl std::fmt::Display) -> AgentChatEvent {
+    AgentChatEvent::TurnFailed {
+        failure: crate::ai::reliability::runtime_closed_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            &cause.to_string(),
+        ),
+    }
+}
+
 fn cancelled_outcome() -> AgentChatEvent {
     AgentChatEvent::TurnCompleted {
         outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Cancelled {
@@ -296,7 +312,7 @@ async fn run_pi_rpc_event_loop(
                             }
                             Err(error) => {
                                 applied_model = None;
-                                let _ = event_tx.send(pi_failure(error.to_string())).await;
+                                let _ = event_tx.send(pi_transport_failure(error)).await;
                                 continue;
                             }
                         }
@@ -491,7 +507,7 @@ async fn run_pi_rpc_single_turn(
         )
         .await
         {
-            let _ = event_tx.send(pi_failure(error.to_string())).await;
+            let _ = event_tx.send(pi_transport_failure(error)).await;
             let _ = child.kill().await;
             return Ok(());
         }
@@ -524,7 +540,7 @@ async fn run_pi_rpc_single_turn(
     });
 
     if let Err(error) = write_json(&mut stdin, &build_prompt_command(prompt_id, payload)).await {
-        let _ = event_tx.send(pi_failure(error.to_string())).await;
+        let _ = event_tx.send(pi_transport_failure(&error)).await;
         let _ = child.kill().await;
         return Err(error);
     }
@@ -810,14 +826,43 @@ async fn read_stdout<R>(
         event = "pi_rpc_stdout_closed",
         "Pi RPC stdout closed before all pending responses completed"
     );
+    let had_stderr_hint = stderr_failure_hint
+        .as_ref()
+        .and_then(|hint| hint.lock().clone())
+        .is_some();
     let error = pi_rpc_process_exit_error(
         "Pi RPC process exited before responding",
         stderr_failure_hint.as_ref(),
     );
+    // S12: a pi binary that exits on launch takes this path. With no stderr
+    // evidence the free-text classifier matched nothing, so Agent Chat showed
+    // the generic `Unknown` card with no reconnect path — for the one failure
+    // reconnecting fixes. The exit is a fact, so classify it as RuntimeClosed.
+    //
+    // When stderr DID say why (for example "No API key found for provider"),
+    // that is real evidence about the cause and must still win: an auth
+    // failure has to keep its Sign In action.
+    let failure = if had_stderr_hint {
+        crate::ai::reliability::provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            &error,
+        )
+    } else {
+        crate::ai::reliability::runtime_closed_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            &error,
+        )
+    };
     // A turn that was mid-stream when the process died lives in `active_turn`,
     // not `pending` — without a terminal event its receiver waits forever.
-    send_to_active(&active_turn, pi_failure(error.clone())).await;
-    fail_pending_responses(&pending, &error).await;
+    send_to_active(
+        &active_turn,
+        AgentChatEvent::TurnFailed {
+            failure: failure.clone(),
+        },
+    )
+    .await;
+    fail_pending_responses(&pending, &failure, &error).await;
 }
 
 async fn send_events(event_tx: &AgentChatEventTx, events: Vec<AgentChatEvent>) {
@@ -858,13 +903,21 @@ async fn send_to_active(active_turn: &ActiveTurn, event: AgentChatEvent) {
     active_turn.lock().take();
 }
 
-async fn fail_pending_responses(pending: &PendingResponses, error: &str) {
+async fn fail_pending_responses(
+    pending: &PendingResponses,
+    failure: &crate::ai::reliability::AppFailureRecord,
+    error: &str,
+) {
     let pending_responses = pending.lock().drain().collect::<Vec<_>>();
 
     for (id, pending_response) in pending_responses {
         match pending_response {
             PendingResponse::Events(event_tx) => {
-                let _ = event_tx.send(pi_failure(error.to_string())).await;
+                let _ = event_tx
+                    .send(AgentChatEvent::TurnFailed {
+                        failure: failure.clone(),
+                    })
+                    .await;
             }
             PendingResponse::Rpc(response_tx) => {
                 let _ = response_tx.send(PiRpcResponse {
@@ -1176,9 +1229,12 @@ mod tests {
             assert!(
                 matches!(
                     event,
+                    // S12: a pi child that exited is RuntimeClosed. This
+                    // assertion used to demand `Unknown`, locking in the
+                    // generic "did not finish" card with no reconnect path.
                     AgentChatEvent::TurnFailed { failure }
                         if failure.failure.code
-                            == sk_protocol::ai_reliability::AiFailureCode::Unknown
+                            == sk_protocol::ai_reliability::AiFailureCode::RuntimeClosed
                 ),
                 "active streaming turn must receive a terminal Failed event when Pi dies"
             );

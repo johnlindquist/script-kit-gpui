@@ -55,6 +55,22 @@ pub(crate) fn spawn_failure(component: ProtocolComponent, cause: &str) -> AppFai
     )
 }
 
+/// Typed classification for an IO failure against a runtime child that has
+/// gone away. See [`super::classify_runtime_closed`].
+pub(crate) fn runtime_closed_failure(
+    component: ProtocolComponent,
+    cause: &str,
+) -> AppFailureRecord {
+    super::classify_runtime_closed(
+        &FailureContext {
+            component,
+            ..FailureContext::default()
+        },
+        cause,
+        runtime_vault(),
+    )
+}
+
 /// Typed classification for the runtime's `SetupRequired` event.
 ///
 /// See [`super::classify_setup_required`]: the event is a fact, so it must not

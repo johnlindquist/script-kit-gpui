@@ -3358,8 +3358,14 @@ impl AgentChatThread {
                 ) {
                     let _ = self.begin_reliability_turn(CapabilityDecision::Compatible, cx);
                 }
-                let failure =
-                    provider_failure(ProtocolComponent::Pi, format!("setup required: {reason}"));
+                // S11/S12: `SetupRequired` is a typed fact. The prose form
+                // matched no auth wording, so this classified to `Unknown` and
+                // the card lost its Sign In action.
+                let failure = crate::ai::reliability::setup_required_failure(
+                    ProtocolComponent::Pi,
+                    &reason,
+                    &auth_methods,
+                );
                 let _ = self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx);
                 changed = true;
             }
@@ -5415,8 +5421,14 @@ impl AgentChatThread {
                         CapabilityDecision::Compatible,
                     ));
                 }
-                let failure =
-                    provider_failure(ProtocolComponent::Pi, format!("setup required: {reason}"));
+                // S11/S12: `SetupRequired` is a typed fact. The prose form
+                // matched no auth wording, so this classified to `Unknown` and
+                // the card lost its Sign In action.
+                let failure = crate::ai::reliability::setup_required_failure(
+                    ProtocolComponent::Pi,
+                    &reason,
+                    &auth_methods,
+                );
                 self.transition_reliability_test(AiOperationEvent::Failed(failure.failure));
             }
             super::AgentChatEvent::TurnFailed { failure } => {

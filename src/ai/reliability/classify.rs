@@ -381,6 +381,27 @@ pub fn classify_spawn_failure(
     )
 }
 
+/// Classify an IO failure talking to an agent runtime child, keeping its
+/// cause (S12).
+///
+/// A child that died mid-conversation makes the next write fail with
+/// "Broken pipe (os error 32)" or a closed-channel message. Neither is
+/// classifiable English, so these used to land in `AiFailureKind::Unknown` and
+/// the user got "The AI request did not finish" with no reconnect path — for a
+/// failure whose only fix IS reconnecting.
+pub fn classify_runtime_closed(
+    context: &FailureContext,
+    cause: &str,
+    diagnostics: &DiagnosticVault,
+) -> AppFailureRecord {
+    record(
+        context,
+        cause,
+        diagnostics,
+        AiFailureKind::Runtime(RuntimeFailure::RuntimeClosed),
+    )
+}
+
 /// Classify the runtime's own `SetupRequired` event (S11).
 ///
 /// This event is a FACT the agent runtime states directly: the user is not

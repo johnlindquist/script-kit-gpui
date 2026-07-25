@@ -94,7 +94,7 @@ try {
     ),
     rawJsonHidden: !strings.some((value) => value.includes("plan_type")),
     note:
-      "Agent Chat child controls are not currently enumerated by getElements; the screenshot is the visual receipt.",
+      "Agent Chat child controls other than the shared ai-recovery-* card are not enumerated by getElements; the screenshot is the visual receipt for the rest.",
   };
 
   const agentState = await driver.request(

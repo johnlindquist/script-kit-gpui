@@ -195,7 +195,7 @@ impl ScriptListApp {
                     )
                 } else {
                     let state = entity.read(cx).collect_agent_chat_state_snapshot(cx);
-                    let elements = vec![
+                    let mut elements = vec![
                         protocol::ElementInfo::panel("agent_chat-chat"),
                         protocol::ElementInfo::input(
                             "agent_chat-composer",
@@ -204,6 +204,12 @@ impl ScriptListApp {
                         ),
                         protocol::ElementInfo::list("agent_chat-messages", state.message_count),
                     ];
+                    // S12: the SHARED recovery card, reported with the same
+                    // `ai-recovery-*` ids the flow session surface reports, so
+                    // one probe can compare the two surfaces directly.
+                    if let Some(spec) = entity.read(cx).active_recovery_card_spec(cx) {
+                        elements.extend(Self::ai_recovery_elements(&spec));
+                    }
                     let total_count = elements.len();
                     ElementCollectionOutcome::new(
                         elements.into_iter().take(limit).collect(),

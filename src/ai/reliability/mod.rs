@@ -28,10 +28,10 @@ pub use capability_cache::{
 };
 pub use classify::{
     classify_process_failure, classify_protocol_failure, classify_provider_failure,
-    classify_setup_required, classify_spawn_failure, primary_message_for_failure,
-    quick_ai_deadline_failure, quick_ai_search_budget_failure, quick_ai_turn_failure,
-    AppFailureRecord, FailureContext, FailurePresentationInput, ProcessFailureFacts,
-    ProtocolFailureFacts,
+    classify_runtime_closed, classify_setup_required, classify_spawn_failure,
+    primary_message_for_failure, quick_ai_deadline_failure, quick_ai_search_budget_failure,
+    quick_ai_turn_failure, AppFailureRecord, FailureContext, FailurePresentationInput,
+    ProcessFailureFacts, ProtocolFailureFacts,
 };
 pub(crate) use devtools::{
     ai_operation_state_snapshot, ai_reliability_fixture_for_target,
@@ -46,7 +46,7 @@ pub use presentation::{
     AI_RECOVERY_PROGRESS_ID, AI_RECOVERY_TITLE_ID,
 };
 pub(crate) use runtime_boundary::{
-    process_failure, protocol_failure, provider_failure, quick_ai_failure, setup_required_failure,
-    spawn_failure, AiAdapterError, AiAdapterResult, AiTurnRuntimeOutcome,
+    process_failure, protocol_failure, provider_failure, quick_ai_failure, runtime_closed_failure,
+    setup_required_failure, spawn_failure, AiAdapterError, AiAdapterResult, AiTurnRuntimeOutcome,
 };
 pub use selection::{acknowledge_selection, decide_selection_change, SelectionDecision};
