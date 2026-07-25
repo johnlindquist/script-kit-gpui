@@ -8,9 +8,12 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
+use serde_json::json;
+
 use crate::ai::agent_chat::events::{AgentChatEvent, AgentChatEventRx};
 use crate::ai::agent_chat::runtime::{AgentChatConnection, AgentChatTurnRequest};
 use crate::ai::agent_chat::ui::events::AgentChatEventTx;
+use crate::ai::phase_trace::{AiSurface, AiTransport, PhaseTrace, TurnOutcome};
 
 use super::events::map_rpc_line_to_events;
 use super::protocol::{
@@ -36,6 +39,15 @@ struct ActiveTurnState {
     ui_thread_id: String,
     prompt_id: String,
     event_tx: AgentChatEventTx,
+    /// Phase trace for this turn.
+    ///
+    /// It lives on the active-turn record rather than being threaded as a
+    /// parameter because `read_stdout` is a single long-lived task that serves
+    /// every turn on the connection: it has no per-turn scope of its own, but it
+    /// already reaches the active turn to find the event sender. Cloning is one
+    /// `Arc` bump, and [`PhaseTrace::disabled`] makes the field free when
+    /// tracing is off.
+    trace: PhaseTrace,
 }
 
 pub(crate) enum PiRpcRuntimeCommand {
@@ -293,13 +305,31 @@ async fn run_pi_rpc_event_loop(
                 write_json(&mut stdin, &build_get_available_models_command(id)).await?;
             }
             PiRpcRuntimeCommand::StartTurn { request, event_tx } => {
+                // Open the trace before ANY work, including the set_model round
+                // trip. set_model is serialized ahead of the prompt and blocks
+                // it, so a turn that pays for a model switch is genuinely slower
+                // — starting the clock after it would hide that cost entirely.
+                let trace =
+                    PhaseTrace::begin(spec.surface, AiTransport::PiRpc, format!("pi-{counter}"));
+                trace.turn_start(json!({
+                    "modelSwitchPending": request.model_id.as_deref().is_some_and(|model_id| {
+                        PiRpcModelSelection::parse(model_id)
+                            .ok()
+                            .is_some_and(|selection| applied_model.as_ref() != Some(&selection))
+                    }),
+                    "blockCount": request.blocks.len(),
+                }));
+
                 if let Some(model_id) = request.model_id.as_deref() {
                     let selection = match PiRpcModelSelection::parse(model_id) {
                         Ok(selection) => selection,
                         Err(error) => {
-                            let _ = event_tx
-                                .send(pi_failure(format!("Invalid Pi model selection: {error}")))
-                                .await;
+                            send_event_traced(
+                                &event_tx,
+                                &trace,
+                                pi_failure(format!("Invalid Pi model selection: {error}")),
+                            )
+                            .await;
                             continue;
                         }
                     };
@@ -312,7 +342,8 @@ async fn run_pi_rpc_event_loop(
                             }
                             Err(error) => {
                                 applied_model = None;
-                                let _ = event_tx.send(pi_transport_failure(error)).await;
+                                send_event_traced(&event_tx, &trace, pi_transport_failure(error))
+                                    .await;
                                 continue;
                             }
                         }
@@ -336,11 +367,12 @@ async fn run_pi_rpc_event_loop(
                             ui_thread_id: request.ui_thread_id,
                             prompt_id: prompt_id.clone(),
                             event_tx,
+                            trace,
                         });
                         write_json(&mut stdin, &build_prompt_command(prompt_id, payload)).await?;
                     }
                     Err(error) => {
-                        let _ = event_tx.send(pi_failure(error.to_string())).await;
+                        send_event_traced(&event_tx, &trace, pi_failure(error.to_string())).await;
                     }
                 }
             }
@@ -367,6 +399,12 @@ async fn run_pi_rpc_event_loop(
                 let active = active_turn.lock().clone();
                 if let Some(active) = active.filter(|active| active.ui_thread_id == ui_thread_id) {
                     let id = format!("abort-{counter}");
+                    // A user Stop is cancellation, not an error. Recording it as
+                    // the terminal state here (rather than letting whatever
+                    // event the abort produces classify it) keeps cancelled
+                    // turns out of the latency medians, where they would
+                    // otherwise look like impossibly fast successes.
+                    active.trace.terminal(TurnOutcome::Cancelled, None);
                     write_json(&mut stdin, &build_abort_command(id)).await?;
                     tracing::debug!(
                         target: "script_kit::tab_ai",
@@ -469,6 +507,17 @@ async fn run_pi_rpc_single_turn(
     let stderr_failure_hint: StderrFailureHint = Arc::new(Mutex::new(None));
     let (done_tx, done_rx) = async_channel::bounded::<()>(1);
 
+    // Isolated turns are the focused-text variation path, which is the Mini
+    // surface: same Pi protocol, but its own cold process. Label it explicitly
+    // rather than inheriting the connection's surface, because a cold spawn per
+    // turn is a completely different latency profile from Agent Chat's warm
+    // sidecar and must not be pooled with it.
+    let trace = PhaseTrace::begin(AiSurface::Mini, AiTransport::PiRpc, "pi-isolated");
+    trace.turn_start(json!({
+        "blockCount": request.blocks.len(),
+        "isolatedProcess": true,
+    }));
+
     tokio::spawn(read_single_turn_stdout(
         stdout,
         pending.clone(),
@@ -491,9 +540,12 @@ async fn run_pi_rpc_single_turn(
         let selection = match PiRpcModelSelection::parse(model_id) {
             Ok(selection) => selection,
             Err(error) => {
-                let _ = event_tx
-                    .send(pi_failure(format!("Invalid Pi model selection: {error}")))
-                    .await;
+                send_event_traced(
+                    &event_tx,
+                    &trace,
+                    pi_failure(format!("Invalid Pi model selection: {error}")),
+                )
+                .await;
                 let _ = child.kill().await;
                 return Ok(());
             }
@@ -507,7 +559,7 @@ async fn run_pi_rpc_single_turn(
         )
         .await
         {
-            let _ = event_tx.send(pi_transport_failure(error)).await;
+            send_event_traced(&event_tx, &trace, pi_transport_failure(error)).await;
             let _ = child.kill().await;
             return Ok(());
         }
@@ -527,7 +579,7 @@ async fn run_pi_rpc_single_turn(
     let payload = match build_prompt_payload(&request.blocks) {
         Ok(payload) => payload,
         Err(error) => {
-            let _ = event_tx.send(pi_failure(error.to_string())).await;
+            send_event_traced(&event_tx, &trace, pi_failure(error.to_string())).await;
             let _ = child.kill().await;
             return Ok(());
         }
@@ -537,10 +589,11 @@ async fn run_pi_rpc_single_turn(
         ui_thread_id: request.ui_thread_id.clone(),
         prompt_id: prompt_id.clone(),
         event_tx: event_tx.clone(),
+        trace: trace.clone(),
     });
 
     if let Err(error) = write_json(&mut stdin, &build_prompt_command(prompt_id, payload)).await {
-        let _ = event_tx.send(pi_transport_failure(&error)).await;
+        send_event_traced(&event_tx, &trace, pi_transport_failure(&error)).await;
         let _ = child.kill().await;
         return Err(error);
     }
@@ -638,12 +691,14 @@ async fn read_single_turn_stdout<R>(
                 AgentChatEvent::TurnCompleted { .. } | AgentChatEvent::TurnFailed { .. }
             )
         });
-        let event_tx = active_turn
-            .lock()
-            .as_ref()
-            .map(|active| active.event_tx.clone());
-        if let Some(event_tx) = event_tx {
-            send_events(&event_tx, events).await;
+        // Clone the whole active-turn record, not just the sender: the trace
+        // lives beside it and the streaming milestones are recorded here.
+        let active = active_turn.lock().as_ref().cloned();
+        if let Some(active) = active {
+            send_events_traced(&active.event_tx, &active.trace, events).await;
+            if closes_turn {
+                active.trace.teardown();
+            }
         }
         if closes_turn {
             active_turn.lock().take();
@@ -848,12 +903,14 @@ async fn read_stdout<R>(
                 AgentChatEvent::TurnCompleted { .. } | AgentChatEvent::TurnFailed { .. }
             )
         });
-        let event_tx = active_turn
-            .lock()
-            .as_ref()
-            .map(|active| active.event_tx.clone());
-        if let Some(event_tx) = event_tx {
-            send_events(&event_tx, events).await;
+        // Clone the whole active-turn record, not just the sender: the trace
+        // lives beside it and the streaming milestones are recorded here.
+        let active = active_turn.lock().as_ref().cloned();
+        if let Some(active) = active {
+            send_events_traced(&active.event_tx, &active.trace, events).await;
+            if closes_turn {
+                active.trace.teardown();
+            }
         }
         if closes_turn {
             active_turn.lock().take();
@@ -901,7 +958,63 @@ async fn read_stdout<R>(
     fail_pending_responses(&pending, &failure, &error).await;
 }
 
+/// Map one outbound Agent Chat event onto the shared phase vocabulary.
+///
+/// This is the single classification point for the Pi transport. Before it
+/// existed, event emission was scattered across 21 sites in this file (8 raw
+/// `event_tx.send`, 4 through `send_events`, and the `send_to_active` /
+/// `fail_pending_responses` terminal paths), and `AgentChatEventTx` is a bare
+/// type alias rather than a newtype, so there was nothing to wrap. Rather than
+/// sprinkle 21 trace calls that the next edit to this file would forget to
+/// extend, every send now funnels through here.
+///
+/// Only *first* occurrences of the streaming milestones are recorded; the
+/// `PhaseTrace` latches make the 2nd..Nth delta a single relaxed atomic load,
+/// which matters because a long answer is thousands of deltas.
+fn trace_agent_chat_event(trace: &PhaseTrace, event: &AgentChatEvent) {
+    // Any inbound event proves the provider responded at all.
+    trace.observe_provider_event();
+    match event {
+        // The first readable token. This is the perceived-responsiveness
+        // number, and it is deliberately NOT the same as a thought delta:
+        // reasoning text is feedback, but it is not the answer.
+        AgentChatEvent::AgentMessageDelta(text) => trace.observe_visible_output(text),
+        AgentChatEvent::AgentThoughtDelta(text) => trace.observe_thought(text),
+        AgentChatEvent::ToolCallStarted { .. } => trace.observe_tool_call(),
+        AgentChatEvent::TurnCompleted { .. } => trace.terminal(TurnOutcome::Completed, None),
+        AgentChatEvent::TurnFailed { failure } => {
+            // Carry the AppFailureRecord's ALREADY-classified code. Per
+            // rules/AI_RELIABILITY.md the code must never be re-derived from
+            // prose, and the raw provider text never enters the trace. The
+            // serde representation is the declared wire label for the enum, so
+            // it is stable in a way `Debug` output is not.
+            let code = serde_json::to_value(failure.failure.code)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string));
+            trace.terminal(TurnOutcome::Failed, code.as_deref());
+        }
+        _ => {}
+    }
+}
+
+/// Send one event through the trace classifier.
+///
+/// Used by the setup/failure paths that hold a bare sender and would otherwise
+/// bypass instrumentation entirely.
+async fn send_event_traced(event_tx: &AgentChatEventTx, trace: &PhaseTrace, event: AgentChatEvent) {
+    trace_agent_chat_event(trace, &event);
+    let _ = event_tx.send(event).await;
+}
+
 async fn send_events(event_tx: &AgentChatEventTx, events: Vec<AgentChatEvent>) {
+    send_events_traced(event_tx, &PhaseTrace::disabled(), events).await;
+}
+
+async fn send_events_traced(
+    event_tx: &AgentChatEventTx,
+    trace: &PhaseTrace,
+    events: Vec<AgentChatEvent>,
+) {
     let reveal_count = events
         .iter()
         .filter(|event| {
@@ -921,6 +1034,7 @@ async fn send_events(event_tx: &AgentChatEventTx, events: Vec<AgentChatEvent>) {
             reveal_index += 1;
             reveal_index < reveal_count
         };
+        trace_agent_chat_event(trace, &event);
         let _ = event_tx.send(event).await;
         if sleep_after {
             tokio::time::sleep(std::time::Duration::from_millis(PI_REVEAL_CHUNK_DELAY_MS)).await;
@@ -928,13 +1042,18 @@ async fn send_events(event_tx: &AgentChatEventTx, events: Vec<AgentChatEvent>) {
     }
 }
 
+/// Deliver a terminal event to whichever turn is currently live.
+///
+/// Every caller of this is a terminal path — a parse failure, a failed prompt
+/// response, or the process exiting mid-stream — so the trace is read from the
+/// active turn here rather than passed in. `teardown` fires because reaching
+/// this function means the turn's transport resources are being released.
 async fn send_to_active(active_turn: &ActiveTurn, event: AgentChatEvent) {
-    let event_tx = active_turn
-        .lock()
-        .as_ref()
-        .map(|active| active.event_tx.clone());
-    if let Some(event_tx) = event_tx {
-        let _ = event_tx.send(event).await;
+    let active = active_turn.lock().as_ref().cloned();
+    if let Some(active) = active {
+        trace_agent_chat_event(&active.trace, &event);
+        let _ = active.event_tx.send(event).await;
+        active.trace.teardown();
     }
     active_turn.lock().take();
 }
@@ -1262,6 +1381,7 @@ mod tests {
                 ui_thread_id: "thread-race".to_string(),
                 prompt_id: "prompt-race".to_string(),
                 event_tx,
+                trace: PhaseTrace::disabled(),
             });
             // Empty: the hint has NOT arrived when stdout closes.
             let stderr_hint: StderrFailureHint = Arc::new(Mutex::new(None));
@@ -1287,6 +1407,141 @@ mod tests {
         });
     }
 
+    /// The Pi transport must produce a usable phase trace for a real streamed
+    /// turn, not merely compile against `PhaseTrace`.
+    ///
+    /// This drives `read_stdout` with the actual Pi wire shapes and asserts the
+    /// milestones the premise requires, in order, with monotonic `elapsedMs`.
+    /// Without it, a future edit could route a send around
+    /// `send_events_traced` and silently produce empty traces — which look
+    /// exactly like a fast surface.
+    #[test]
+    fn pi_transport_emits_the_phase_trace_for_a_streamed_turn() {
+        let path = std::env::temp_dir().join(format!(
+            "sk-pi-phase-trace-{}-{:?}.ndjson",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+            let active_turn: ActiveTurn = Arc::new(Mutex::new(None));
+            // Bound generously: the reveal path sends every delta before the
+            // reader finishes, and a full channel would deadlock the test.
+            let (event_tx, _event_rx) = async_channel::bounded(64);
+            let trace = PhaseTrace::begin_at(
+                path.clone(),
+                AiSurface::Text,
+                AiTransport::PiRpc,
+                "pi-trace-test",
+            );
+            trace.turn_start(serde_json::json!({}));
+            active_turn.lock().replace(ActiveTurnState {
+                ui_thread_id: "thread-trace".to_string(),
+                prompt_id: "prompt-trace".to_string(),
+                event_tx,
+                trace,
+            });
+
+            let stdout = concat!(
+                r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"pondering"}}"#,
+                "\n",
+                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello"}}"#,
+                "\n",
+                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":" world"}}"#,
+                "\n",
+                r#"{"type":"agent_end"}"#,
+                "\n",
+            );
+            read_stdout(stdout.as_bytes(), pending, active_turn, None).await;
+        });
+
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .expect("the trace file must exist")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("every record parses as JSON"))
+            .collect();
+        let names: Vec<&str> = records
+            .iter()
+            .map(|record| record["event"].as_str().unwrap())
+            .collect();
+
+        for required in [
+            crate::ai::phase_trace::events::TURN_START,
+            crate::ai::phase_trace::events::FIRST_PROVIDER_EVENT,
+            crate::ai::phase_trace::events::FIRST_VISIBLE_OUTPUT,
+            crate::ai::phase_trace::events::TERMINAL,
+            crate::ai::phase_trace::events::TEARDOWN,
+        ] {
+            assert!(
+                names.contains(&required),
+                "Pi turn trace is missing {required}; got {names:?}"
+            );
+        }
+
+        // Two text deltas arrived but only the FIRST may be recorded, or a long
+        // answer would write thousands of records and leak the answer text.
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == crate::ai::phase_trace::events::FIRST_VISIBLE_OUTPUT)
+                .count(),
+            1,
+            "first_visible_output must latch"
+        );
+
+        // Reasoning must not be mistaken for the answer: a surface that streams
+        // thoughts early would otherwise score a misleadingly fast
+        // time-to-first-visible-output.
+        let thought_seq = records
+            .iter()
+            .position(|r| r["event"] == crate::ai::phase_trace::events::FIRST_THOUGHT)
+            .expect("a reasoning delta must record first_thought");
+        let visible_seq = records
+            .iter()
+            .position(|r| r["event"] == crate::ai::phase_trace::events::FIRST_VISIBLE_OUTPUT)
+            .unwrap();
+        assert!(
+            thought_seq < visible_seq,
+            "the thought delta arrived first and must be recorded separately"
+        );
+
+        assert_eq!(
+            records
+                .iter()
+                .find(|r| r["event"] == crate::ai::phase_trace::events::TERMINAL)
+                .map(|r| r["outcome"].clone()),
+            Some(serde_json::json!("completed")),
+            "agent_end is a completed turn and therefore a valid latency sample"
+        );
+
+        for record in &records {
+            assert_eq!(record["surface"], "text", "surface label must survive");
+            assert_eq!(record["transport"], "pi-rpc");
+        }
+        let elapsed: Vec<u64> = records
+            .iter()
+            .map(|r| r["elapsedMs"].as_u64().unwrap())
+            .collect();
+        assert!(
+            elapsed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "elapsedMs must be non-decreasing: {elapsed:?}"
+        );
+
+        // The answer text must never appear, only its digest.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("Hello"), "trace leaked answer text");
+        assert!(!raw.contains("pondering"), "trace leaked reasoning text");
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn read_stdout_fails_active_turn_when_pi_exits_mid_stream() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1302,6 +1557,7 @@ mod tests {
                 ui_thread_id: "thread-test".to_string(),
                 prompt_id: "prompt-test".to_string(),
                 event_tx,
+                trace: PhaseTrace::disabled(),
             });
 
             read_stdout(tokio::io::empty(), pending, active_turn.clone(), None).await;

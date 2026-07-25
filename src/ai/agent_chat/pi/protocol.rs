@@ -11,12 +11,24 @@ pub(crate) struct PiRpcLaunchSpec {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub cwd: PathBuf,
+    /// Which AI surface this connection serves, for the phase trace.
+    ///
+    /// Three surfaces (Agent Chat, Text, Mini) share this one transport, so a
+    /// trace record without a surface label would pool three different
+    /// user experiences into one median. The label rides on the launch spec
+    /// rather than on `AgentChatTurnRequest` because the runtime is already
+    /// created per resolved profile in `agent_chat/launch.rs`, which is the
+    /// layer that knows the profile id. Carrying it per-turn instead would
+    /// mean threading a field through the UI thread for a value that cannot
+    /// change between turns on the same connection.
+    pub surface: crate::ai::phase_trace::AiSurface,
 }
 
 impl PiRpcLaunchSpec {
     pub(crate) fn new(command: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
         Self {
             command: command.into(),
+            surface: crate::ai::phase_trace::AiSurface::AgentChat,
             args: Vec::new(),
             env: HashMap::new(),
             cwd: cwd.into(),
@@ -36,6 +48,12 @@ impl PiRpcLaunchSpec {
             .into_iter()
             .map(|(key, value)| (key.into(), value.into()))
             .collect();
+        self
+    }
+
+    /// Label the AI surface this connection serves for the phase trace.
+    pub(crate) fn with_surface(mut self, surface: crate::ai::phase_trace::AiSurface) -> Self {
+        self.surface = surface;
         self
     }
 }

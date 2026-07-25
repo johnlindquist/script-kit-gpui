@@ -133,8 +133,16 @@ impl PiAgentChatLaunch {
             warm_key = %warm_key,
             argv_flags = ?argv_flags,
         );
+        // Label the connection's surface here, at the one layer that knows the
+        // resolved profile id. Agent Chat, Text, and Mini all ride the same Pi
+        // transport, so without this every phase-trace record from those three
+        // surfaces would collapse into a single indistinguishable median.
         let rpc_spec = PiRpcLaunchSpec::new(launch_spec.pi_binary.clone(), cwd.clone())
-            .with_args(launch_spec.argv());
+            .with_args(launch_spec.argv())
+            .with_surface(crate::ai::phase_trace::AiSurface::from_profile(
+                &profile.id,
+                false,
+            ));
         let selected_model_id = pi_model_selection_id(&profile);
         let available_models = selected_model_id
             .as_ref()
