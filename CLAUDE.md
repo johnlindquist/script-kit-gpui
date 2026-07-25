@@ -246,6 +246,28 @@ Use `SCRIPT_KIT_CARGO_TARGET_POOL=<name>` for an intentional shared pool, and se
 
 Disk policy: the wrapper enforces a total `target-agent` budget at lock acquisition (`SCRIPT_KIT_AGENT_TARGET_BUDGET_GB`, default 40) plus a free-disk floor (`SCRIPT_KIT_AGENT_MIN_FREE_GB`, default 25), evicting least-recently-used unlocked pools before building. Extra pools are therefore ephemeral by design — do NOT mint a pool per parallel task. When a task needs a stable binary path, export an APFS clone instead: `SCRIPT_KIT_AGENT_ARTIFACT_NAME=<task> ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui` produces `target-agent/artifacts/<task>/script-kit-gpui` (~0 bytes, replaced atomically on rebuild). Dev builds use `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and non-default pools disable incremental; both respect pre-set env overrides.
 
+# AI Reliability Rules
+
+Any work on an AI failure, recovery card, or engine transport (Quick AI, Flow
+chat, Agent Chat) must follow `rules/AI_RELIABILITY.md`. The short version:
+
+- Classify from the FACT the runtime stated, never from prose you formatted
+  yourself. `classify_provider_failure` pattern-matches English and returns
+  `Unknown` for anything it does not recognise.
+- Carry the `AppFailureRecord`. Reducing it to its safe copy and re-classifying
+  that copy later always downgrades to `Unknown`.
+- Raw provider text, stderr, OS errors, and adapter internals stop at the
+  diagnostic vault. Screens get `primary_message()`; logs get the code plus the
+  diagnostic fingerprint.
+- A recovery action a surface cannot perform is never rendered enabled — and a
+  surface that forgets to install its recovery callback silently hides every
+  useful button.
+- A user Stop is cancellation, not an error.
+- If `getElements` cannot see it, it is not proven. Project new shared AI
+  elements into the element collector from the same source the renderer uses.
+
+Focused checks are listed at the bottom of that file.
+
 # Source Audit Test Policy
 
 Source-audit tests (tests that `read_to_string`/`include_str!` app source and assert on its text) are decision locks, not behavior coverage. They are a scarce resource — do NOT mint one per feature pass.

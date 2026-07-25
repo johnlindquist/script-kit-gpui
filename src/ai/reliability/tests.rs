@@ -198,3 +198,112 @@ fn primary_record_has_no_raw_payload_field_or_debug_leak() {
     let descriptor = record.failure.diagnostic.expect("diagnostic reference");
     assert!(vault.get(&descriptor.id).is_some());
 }
+
+/// Focused check for `rules/AI_RELIABILITY.md` Rules 1-3 (S13).
+///
+/// Every typed classifier takes a FACT the runtime stated, so none of them may
+/// return `Unknown` — and the copy each one produces must be safe copy that,
+/// fed back through the free-text classifier, does NOT reproduce the original
+/// classification. That second half is the whole point: it is what makes a
+/// string round-trip a silent downgrade rather than a harmless detour.
+///
+/// A failure here means someone routed a fact through prose again. Read the
+/// rules file before changing the expectations.
+#[test]
+fn typed_classifiers_never_return_unknown_and_their_copy_is_not_evidence() {
+    let vault = DiagnosticVault::default();
+    let component = ProtocolComponent::Pi;
+    let cases: Vec<(&str, AppFailureRecord, AiFailureCode)> = vec![
+        (
+            "SetupRequired",
+            classify_setup_required(
+                &FailureContext {
+                    component,
+                    ..FailureContext::default()
+                },
+                "login required",
+                &["browser".to_string()],
+                &vault,
+            ),
+            AiFailureCode::AuthenticationMissing,
+        ),
+        (
+            "spawn failed",
+            classify_spawn_failure(
+                &FailureContext {
+                    component,
+                    ..FailureContext::default()
+                },
+                "No such file or directory (os error 2)",
+                &vault,
+            ),
+            AiFailureCode::SpawnFailed,
+        ),
+        (
+            "runtime closed",
+            classify_runtime_closed(
+                &FailureContext {
+                    component,
+                    ..FailureContext::default()
+                },
+                "Broken pipe (os error 32)",
+                &vault,
+            ),
+            AiFailureCode::RuntimeClosed,
+        ),
+        (
+            "child exited",
+            classify_process_failure(
+                &FailureContext {
+                    component,
+                    ..FailureContext::default()
+                },
+                ProcessFailureFacts::ChildExited {
+                    exit_code: Some(3),
+                    signal: None,
+                },
+                &vault,
+            ),
+            AiFailureCode::ChildExited,
+        ),
+    ];
+
+    for (label, record, expected) in cases {
+        assert_eq!(
+            record.failure.code, expected,
+            "{label}: a stated fact must classify to its own code"
+        );
+
+        // Rule 3: the cause survives, but only behind the vault.
+        let descriptor = record
+            .failure
+            .diagnostic
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label}: the cause must reach the diagnostic vault"));
+        assert!(
+            vault.get(&descriptor.id).is_some(),
+            "{label}: the vault must be able to produce the cause for Copy Details"
+        );
+        let debug = format!("{record:?}");
+        assert!(
+            !debug.contains("os error") && !debug.contains("login required"),
+            "{label}: the raw cause must not survive in the record itself"
+        );
+
+        // Rule 2: round-tripping the safe copy loses the classification. This
+        // is why the record must be carried, never re-derived.
+        let round_tripped = classify_provider_failure(
+            &FailureContext {
+                component,
+                ..FailureContext::default()
+            },
+            record.primary_message(),
+            &vault,
+        );
+        assert_eq!(
+            round_tripped.failure.code,
+            AiFailureCode::Unknown,
+            "{label}: safe copy is not classifiable evidence — carry the record instead"
+        );
+    }
+}
