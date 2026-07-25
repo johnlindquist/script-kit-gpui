@@ -121,6 +121,44 @@ the action a dead flow engine needs.
 
 ---
 
+## Rule 4a — A recovery action lives in a footer, a menu, or a modal
+
+**Rule.** This app has exactly two sanctioned homes for a button:
+
+1. a **modal**, for a decision the user must make before continuing;
+2. a **floating footer** or the **actions menu**, for everything else.
+
+A recovery card is a *message* — what broke, and what was preserved. It renders
+no buttons. `render_ai_recovery_card` does not even take an action handler, and
+`src/components/ai_recovery.rs` no longer imports `Button`, so the compiler
+rejects the regression before any test runs.
+
+Placement is decided by one pure function,
+`src/ai/reliability/placement.rs::plan_recovery_presentation`:
+
+| Role / layout | Home |
+| --- | --- |
+| Primary | Footer — the `↵` affordance |
+| Secondary, Diagnostic | Actions menu |
+| Any role on `BlockingPanel` | Modal (a blocking panel already IS a must-decide) |
+
+**Corollary — never trade a visible action for a dead promise.** Moving an
+affordance is allowed; leaving the user with a promise nothing keeps is not.
+Two failure modes, both shipped here and both caught:
+
+- advertising `⌘K Options` when no actions dialog is wired to it;
+- letting Secondary/Diagnostic actions vanish because the card stopped drawing
+  them and the menu never started.
+
+`render_ai_recovery_footer` therefore branches on whether a menu is actually
+reachable, and falls back to listing the actions in the rail. Prefer an
+affordance that is slightly wrong in *placement* over one that is silently
+*missing*. Locked by
+`no_action_becomes_unreachable_when_the_surface_has_no_actions_dialog` and
+`tests/source_audits/ai_recovery_button_placement.rs`.
+
+---
+
 ## Rule 5 — A user Stop is not an error
 
 **Rule.** Cancellation is a truthful outcome, not a failure. It gets quiet
