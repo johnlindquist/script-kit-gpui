@@ -238,18 +238,31 @@ impl PhaseTrace {
 
     /// Begin a turn writing to an explicit path. Tests use this so they never
     /// mutate process-wide environment state.
+    ///
+    /// The caller's `run_id` is a *label*, not an identity: it is suffixed with
+    /// a process-global turn ordinal so every turn is distinguishable. This is
+    /// deliberately enforced here rather than at the call sites, because the
+    /// call sites already got it wrong once. The Pi transport labelled every
+    /// isolated turn `"pi-isolated"` and every session turn `"pi-{session}"`,
+    /// so concurrent turns — the focused-text variation fan-out runs up to
+    /// three at once — shared one id. Any analyzer that groups by run id then
+    /// interleaves their phases and reports a confident median for a turn that
+    /// never happened. Minting the ordinal in the constructor makes that
+    /// unrepresentable instead of merely discouraged.
     pub(crate) fn begin_at(
         path: PathBuf,
         surface: AiSurface,
         transport: AiTransport,
         run_id: impl Into<String>,
     ) -> Self {
+        static TURN_ORDINAL: AtomicU64 = AtomicU64::new(1);
+        let ordinal = TURN_ORDINAL.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Some(Arc::new(Inner {
                 path,
                 surface,
                 transport,
-                run_id: run_id.into(),
+                run_id: format!("{}#{ordinal}", run_id.into()),
                 seq: AtomicU64::new(1),
                 started: Instant::now(),
                 first_provider_event: AtomicBool::new(false),
@@ -480,10 +493,23 @@ mod phase_trace_tests {
         assert_eq!(records.len(), 5, "one record per phase");
         let seqs: Vec<u64> = records.iter().map(|r| r["seq"].as_u64().unwrap()).collect();
         assert_eq!(seqs, vec![1, 2, 3, 4, 5], "seq is monotonic");
+        // The load-bearing property is that every record of ONE turn carries
+        // ONE id, so an analyzer can group by it. The id is the caller's label
+        // plus a process-global ordinal (see `begin_at`), so this asserts the
+        // label is preserved and the id is stable — not its exact text, which
+        // would just re-break the moment the ordinal changes.
+        let run_id = records[0]["runId"].as_str().unwrap().to_string();
+        assert!(
+            run_id.starts_with("run-1#"),
+            "caller label is preserved as a prefix, got {run_id}"
+        );
         for record in &records {
             assert_eq!(record["surface"], "agent-chat");
             assert_eq!(record["transport"], "pi-rpc");
-            assert_eq!(record["runId"], "run-1");
+            assert_eq!(
+                record["runId"], run_id,
+                "all records of one turn share one run id"
+            );
             assert_eq!(record["schemaVersion"], AI_TRACE_SCHEMA_VERSION);
             assert!(record["elapsedMs"].is_u64(), "every record is timestamped");
         }
@@ -656,6 +682,70 @@ mod phase_trace_tests {
         seqs.sort_unstable();
         seqs.dedup();
         assert_eq!(seqs.len(), 200, "no two records shared a sequence number");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two turns opened with the SAME caller label must still be distinguishable.
+    ///
+    /// This is the defect that made the Mini latency numbers unusable: the
+    /// focused-text variation fan-out opens several isolated turns at once, all
+    /// labelled `"pi-isolated"`, so an analyzer grouping by run id blended
+    /// their phases and emitted a median for a turn nobody ran. Overlapping
+    /// lifetimes are the point of the test — sequential turns collided far less
+    /// obviously, which is why this survived a whole measured run.
+    #[test]
+    fn concurrent_turns_sharing_a_label_get_distinct_run_ids() {
+        let path = temp_path("run-id-overlap");
+        let _ = std::fs::remove_file(&path);
+
+        let first = PhaseTrace::begin_at(
+            path.clone(),
+            AiSurface::Mini,
+            AiTransport::PiRpc,
+            "pi-isolated",
+        );
+        // Opened BEFORE the first turn terminates: the real fan-out overlaps.
+        let second = PhaseTrace::begin_at(
+            path.clone(),
+            AiSurface::Mini,
+            AiTransport::PiRpc,
+            "pi-isolated",
+        );
+        first.turn_start(json!({}));
+        second.turn_start(json!({}));
+        first.terminal(TurnOutcome::Completed, None);
+        second.terminal(TurnOutcome::Completed, None);
+
+        let records = read_records(&path);
+        let run_ids: Vec<&str> = records
+            .iter()
+            .map(|record| record["runId"].as_str().unwrap())
+            .collect();
+        let distinct: std::collections::HashSet<&&str> = run_ids.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            2,
+            "two overlapping turns must not share a run id, got {run_ids:?}"
+        );
+
+        // Each turn's own records must stay internally consistent: exactly one
+        // turn_start and one terminal per id, or the grouping is still ambiguous.
+        for id in distinct {
+            let mine: Vec<_> = records
+                .iter()
+                .filter(|record| record["runId"].as_str() == Some(*id))
+                .collect();
+            assert_eq!(
+                mine.iter().filter(|r| r["event"] == "turn_start").count(),
+                1,
+                "run {id} must own exactly one turn_start"
+            );
+            assert_eq!(
+                mine.iter().filter(|r| r["event"] == "terminal").count(),
+                1,
+                "run {id} must own exactly one terminal"
+            );
+        }
         let _ = std::fs::remove_file(&path);
     }
 }

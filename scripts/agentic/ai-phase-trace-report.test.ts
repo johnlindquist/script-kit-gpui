@@ -215,3 +215,96 @@ describe("buildReport", () => {
     expect(surfaces.every((surface) => surface.verdict === "insufficient-data")).toBe(true);
   });
 });
+
+describe("overlapping turns under one runId", () => {
+  /**
+   * The defect that made a committed Mini row unusable.
+   *
+   * Splitting at `turn_start` is only valid while a run's turns are sequential.
+   * The focused-text variation fan-out opens several Mini turns at once under
+   * the constant id `"pi-isolated"`, so their phases interleave and every
+   * median built from them describes a turn nobody ran.
+   */
+  const overlapping = [
+    record({ runId: "pi-isolated", surface: "mini", event: "turn_start", elapsedMs: 0 }),
+    // Second turn opens BEFORE the first terminates — the whole problem.
+    record({ runId: "pi-isolated", surface: "mini", event: "turn_start", elapsedMs: 10 }),
+    record({
+      runId: "pi-isolated",
+      surface: "mini",
+      event: "first_visible_output",
+      elapsedMs: 900,
+    }),
+    record({
+      runId: "pi-isolated",
+      surface: "mini",
+      event: "terminal",
+      elapsedMs: 1000,
+      outcome: "completed",
+      isLatencySample: true,
+      toolCalls: 0,
+    }),
+    record({
+      runId: "pi-isolated",
+      surface: "mini",
+      event: "terminal",
+      elapsedMs: 1100,
+      outcome: "completed",
+      isLatencySample: true,
+      toolCalls: 0,
+    }),
+  ].join("\n");
+
+  test("are flagged as ambiguous rather than averaged", () => {
+    const { ambiguousSurfaces } = parseTrace(overlapping);
+    expect(ambiguousSurfaces.has("mini")).toBe(true);
+  });
+
+  test("produce an ambiguous-trace verdict that withholds the median", () => {
+    const { surfaces } = buildReport(overlapping);
+    const mini = surfaces.find((surface) => surface.surface === "mini");
+    expect(mini?.verdict).toBe("ambiguous-trace");
+    expect(mini?.evidence).toContain("overlapped");
+  });
+
+  test("ambiguity outranks a would-be verdict, so a bad median never escapes", () => {
+    // Enough samples that classify() would happily return a real verdict.
+    const many = Array.from({ length: MIN_SAMPLES + 2 }, () =>
+      turnLines({ runId: "shared", surface: "mini", ttt: 1000, ttfvo: 900 }),
+    ).flat();
+    // One overlap anywhere in the surface is enough to distrust its numbers.
+    many.splice(
+      1,
+      0,
+      record({ runId: "shared", surface: "mini", event: "turn_start", elapsedMs: 5 }),
+    );
+    const { surfaces } = buildReport(many.join("\n"));
+    const mini = surfaces.find((surface) => surface.surface === "mini");
+    expect(mini?.verdict).toBe("ambiguous-trace");
+  });
+
+  test("a sequential surface in the same trace keeps its real verdict", () => {
+    // The refusal must be scoped to the broken surface, or one bad surface
+    // would erase every good number in the file.
+    const text = [
+      overlapping,
+      ...Array.from({ length: MIN_SAMPLES }, () =>
+        turnLines({ runId: "pi-1", surface: "text", ttt: 4000, ttfvo: 3800 }).join("\n"),
+      ),
+    ].join("\n");
+    const { surfaces } = buildReport(text);
+    expect(surfaces.find((s) => s.surface === "mini")?.verdict).toBe("ambiguous-trace");
+    expect(surfaces.find((s) => s.surface === "text")?.verdict).toBe("feels-slow");
+  });
+
+  test("an unterminated turn also makes the surface ambiguous", () => {
+    // A turn that never terminates leaves its phases attributable to the next
+    // turn under the same id, which is the same lie in a slower form.
+    const text = [
+      record({ runId: "pi-1", surface: "text", event: "turn_start", elapsedMs: 0 }),
+      record({ runId: "pi-1", surface: "text", event: "first_visible_output", elapsedMs: 50 }),
+    ].join("\n");
+    const { ambiguousSurfaces } = parseTrace(text);
+    expect(ambiguousSurfaces.has("text")).toBe(true);
+  });
+});

@@ -27,6 +27,8 @@ hashing.
 | `ai-phase-trace-report.ts` | Trace → per-surface numbers and verdict |
 | `ai-phase-trace-probe.ts` | Drives real turns through the real app |
 | `fixtures/ai-phase-trace-receipt.ndjson` | The committed measured run |
+| `fixtures/ai-phase-trace-mini-per-turn-runid.ndjson` | Mini attributable after the run-id fix |
+| `fixtures/ai-phase-trace-prewarm-on.ndjson` | The disproved prewarm variant |
 
 ## The verdict rule
 
@@ -51,33 +53,13 @@ Receipt: `fixtures/ai-phase-trace-receipt.ndjson` (30 turns, 0 corrupt lines).
 | quick-ai | codex-exec | 8 | 8 | 143 ms | 3121 ms | 3121 ms | **feels-slow** |
 | agent-chat | pi-rpc | 6 | 6 | 4356 ms | 4356 ms | 4598 ms | **feels-slow** |
 | text | pi-rpc | 6 | 6 | 3680 ms | 3680 ms | 3905 ms | **feels-slow** |
-| mini | pi-rpc | 12 | 5 | (3980 ms) | (3980 ms) | (4067 ms) | **unreliable — do not cite** |
+| mini | pi-rpc | 12 | 5 | — | — | — | **ambiguous-trace (defect since fixed)** |
 | flow | codex-app-server | 0 | 0 | — | — | — | unmeasured |
 
 **No surface is actually slow. All three reliably measured surfaces feel
 slow.** Every median turn is under the 5 s bar; every one of them shows the user
 nothing for 94–100% of that turn. The shared symptom is dead air, not duration
 — so the shared repair is earlier feedback, not more speed.
-
-### Mini's numbers are not trustworthy yet
-
-The report prints a Mini row, and it should not be believed. `runId` is not
-unique per turn on the Pi transport: every Mini turn is recorded under the
-constant `"pi-isolated"`, and Mini is the one surface that fans out into
-**concurrent** turns — one rewrite submit fires several variation turns at once.
-
-Measured from the receipt: Mini reaches **3 concurrent open turns** under that
-single id and leaves **2 turns unterminated**, against 12 `turn_start`s and only
-10 `terminal`s. The analyzer separates turns by `turn_start` ordering, which is
-correct only while turns are sequential. Quick AI, Agent Chat, and Text are all
-strictly sequential (max concurrent 1, 0 unterminated), so their numbers stand;
-Mini's phases interleave between turns and its median is meaningless.
-
-The fix is a per-turn `runId` on the Pi transport rather than a per-session
-constant. Until then Mini is unmeasured, and the honest scoreboard is **3/5**,
-not the `MEASURED_SURFACES=4/5` the report currently prints — the report cannot
-detect this, which is itself the lesson: an instrument that cannot tell
-concurrent turns apart reports confident nonsense rather than an error.
 
 But the dead air has **two different causes**, and they need different fixes:
 
@@ -93,6 +75,45 @@ But the dead air has **two different causes**, and they need different fixes:
   which accounts for nearly the whole number. `agent_chat_hot_prewarm_enabled`
   is **off by default** (`reason = "disabled_by_default"`), so each surface
   pays a cold sidecar spawn.
+
+### Mini was unmeasurable, and now is not — fixed 2026-07-25
+
+The receipt above still carries the defect, on purpose, as the regression
+witness. `runId` was not unique per turn on the Pi transport: every Mini turn
+was recorded under the constant `"pi-isolated"`, and Mini is the one surface
+that fans out into **concurrent** turns — one rewrite submit fires several
+variation turns at once. Measured from that receipt, Mini reached **3 concurrent
+open turns** under a single id and left **2 unterminated**, against 12
+`turn_start`s and only 10 `terminal`s.
+
+Both halves are now repaired:
+
+1. **The transport cannot produce the collision.** `PhaseTrace::begin_at`
+   suffixes the caller's label with a process-global turn ordinal, so the id is
+   minted at construction rather than trusted to each call site. The label
+   survives as a prefix (`pi-isolated#2`), so the transport is still readable.
+   Enforcing it at the constructor is the point: the call sites already got
+   this wrong once.
+2. **The analyzer refuses instead of averaging.** It now checks for overlapping
+   turn lifetimes *before* splitting at `turn_start`, and any surface with
+   overlap or an unterminated turn gets the `ambiguous-trace` verdict — medians
+   withheld from the table, and excluded from `MEASURED_SURFACES`. The refusal
+   is scoped to the offending surface so one bad surface cannot erase good
+   numbers beside it.
+
+Proof, live, same probe: Mini went from **12 turns / 5 valid /
+`ambiguous-trace`** to **12 turns / 12 valid / `feels-slow`**, with 12 unique
+run ids for 12 turn starts. Receipt:
+`fixtures/ai-phase-trace-mini-per-turn-runid.ndjson`.
+
+The lesson worth keeping: the old analyzer could not detect this and so
+published a confident median for a turn nobody ran. An instrument that cannot
+tell concurrent turns apart must say so, not average the wreckage.
+
+Post-fix Mini reads **4867 ms first visible / 4960 ms total — feels-slow**, in
+line with Text on the same transport. Do not compare those absolutes against
+the table above; they are a different run on a differently loaded machine. The
+result being claimed here is the attribution fix, not a latency change.
 
 ## Prewarming does not fix the Pi surfaces — it makes them worse
 
@@ -119,7 +140,9 @@ explained, but treat the exact delta as indicative, not settled.
 Flows is wired, unit-proven, and emitting, but has no live entry path in the
 probe: driving it needs a real flow plus a `codex app-server` session that this
 probe does not yet open. It reports `insufficient-data` rather than inventing a
-number. `MEASURED_SURFACES=4/5` is the honest scoreboard.
+number. On the committed receipt the scoreboard reads
+`MEASURED_SURFACES=3/5` — Mini is withheld there because that receipt predates
+the run-id fix, and Flows has never been driven.
 
 ## Resolved: the model-switch signal was benign
 

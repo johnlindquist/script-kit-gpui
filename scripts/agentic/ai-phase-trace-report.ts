@@ -89,7 +89,16 @@ export interface Turn {
  * a corrupt interior line, which would indicate the atomic-append contract in
  * `src/ai/phase_trace.rs` has regressed and every number is suspect.
  */
-export function parseTrace(text: string): { turns: Turn[]; corruptLines: number } {
+export function parseTrace(text: string): {
+  turns: Turn[];
+  corruptLines: number;
+  /**
+   * Surfaces whose turns overlapped under one run id, so their phase records
+   * cannot be attributed to individual turns. Their numbers are refused rather
+   * than reported.
+   */
+  ambiguousSurfaces: Set<string>;
+} {
   const lines = text.split("\n").filter((line) => line.trim().length > 0);
   const records: TraceRecord[] = [];
   let corruptLines = 0;
@@ -113,7 +122,34 @@ export function parseTrace(text: string): { turns: Turn[]; corruptLines: number 
   }
 
   const turns: Turn[] = [];
+  const ambiguousSurfaces = new Set<string>();
   for (const [runId, all] of byRun) {
+    // Overlap check BEFORE splitting, because splitting is what hides the
+    // problem. Grouping by runId and cutting at turn_start is only valid while
+    // a run's turns are sequential. When they are not — the focused-text
+    // variation fan-out runs up to three Mini turns at once — a second
+    // turn_start arrives before the first terminal, and every later record is
+    // filed under whichever group happens to be open. The medians that come
+    // out are confident and meaningless.
+    //
+    // This silently produced a full Mini row in a committed receipt, so the
+    // analyzer now refuses that surface instead of averaging the wreckage.
+    let open = 0;
+    let overlapped = false;
+    let unterminated = 0;
+    for (const record of all) {
+      if (record.event === "turn_start") {
+        open += 1;
+        if (open > 1) overlapped = true;
+      }
+      if (record.event === "terminal") open -= 1;
+    }
+    unterminated = Math.max(0, open);
+    if (overlapped || unterminated > 0) {
+      const surface = all[0]?.surface ?? "unknown";
+      ambiguousSurfaces.add(surface);
+    }
+
     // Split into turns at each turn_start.
     const groups: TraceRecord[][] = [];
     for (const record of all) {
@@ -141,7 +177,7 @@ export function parseTrace(text: string): { turns: Turn[]; corruptLines: number 
       });
     }
   }
-  return { turns, corruptLines };
+  return { turns, corruptLines, ambiguousSurfaces };
 }
 
 export function median(values: number[]): number | null {
@@ -164,7 +200,8 @@ export type Verdict =
   | "feels-slow"
   | "actually-and-feels-slow"
   | "fast"
-  | "insufficient-data";
+  | "insufficient-data"
+  | "ambiguous-trace";
 
 export interface SurfaceReport {
   surface: string;
@@ -204,7 +241,11 @@ export function classify(medianTtt: number | null, medianTtfvo: number | null, v
   return "fast";
 }
 
-export function reportForSurface(surface: string, turns: Turn[]): SurfaceReport {
+export function reportForSurface(
+  surface: string,
+  turns: Turn[],
+  ambiguousSurfaces: ReadonlySet<string> = new Set(),
+): SurfaceReport {
   const mine = turns.filter((turn) => turn.surface === surface);
   const valid = mine.filter((turn) => turn.isLatencySample);
   const ttts = valid.map((turn) => turn.ttt).filter((value): value is number => value !== null);
@@ -221,12 +262,23 @@ export function reportForSurface(surface: string, turns: Turn[]): SurfaceReport 
 
   const medianTtt = median(ttts);
   const medianTtfvo = median(ttfvos);
-  const verdict = classify(medianTtt, medianTtfvo, valid.length);
+  // An ambiguous trace outranks every other verdict, including
+  // insufficient-data: the samples exist, they are simply not attributable to
+  // individual turns, so reporting their median would be worse than reporting
+  // nothing. Refusing is the whole point — the previous version happily
+  // published a Mini median built from three interleaved turns.
+  const ambiguous = ambiguousSurfaces.has(surface);
+  const verdict: Verdict = ambiguous
+    ? "ambiguous-trace"
+    : classify(medianTtt, medianTtfvo, valid.length);
   const deadAirRatio =
     medianTtt !== null && medianTtfvo !== null && medianTtt > 0 ? medianTtfvo / medianTtt : null;
 
   let evidence: string;
   switch (verdict) {
+    case "ambiguous-trace":
+      evidence = `turns overlapped under a shared runId, so phases cannot be attributed to individual turns. ${mine.length} turn(s) seen; numbers withheld. Fix the transport to mint a per-turn runId (src/ai/phase_trace.rs begin_at), then re-measure.`;
+      break;
     case "insufficient-data":
       evidence = `only ${valid.length} valid sample(s); ${MIN_SAMPLES} required. ${mine.length} turn(s) seen, ${mine.length - valid.length} not usable as latency samples.`;
       break;
@@ -265,9 +317,11 @@ export function reportForSurface(surface: string, turns: Turn[]): SurfaceReport 
 export const KNOWN_SURFACES = ["quick-ai", "agent-chat", "text", "mini", "flow"] as const;
 
 export function buildReport(text: string) {
-  const { turns, corruptLines } = parseTrace(text);
-  const surfaces = KNOWN_SURFACES.map((surface) => reportForSurface(surface, turns));
-  return { turns, corruptLines, surfaces };
+  const { turns, corruptLines, ambiguousSurfaces } = parseTrace(text);
+  const surfaces = KNOWN_SURFACES.map((surface) =>
+    reportForSurface(surface, turns, ambiguousSurfaces),
+  );
+  return { turns, corruptLines, surfaces, ambiguousSurfaces };
 }
 
 function formatMs(value: number | null): string {
@@ -301,15 +355,20 @@ function main() {
   console.log("surface     transport          n  valid  ttfpe  ttfvo    ttt  verdict");
   console.log("---------------------------------------------------------------------------");
   for (const report of surfaces) {
+    // Withheld means withheld. Printing the medians beside "ambiguous-trace"
+    // would leave them on screen to be copied into a summary, which is exactly
+    // how the bad Mini row travelled in the first place.
+    const withheld = report.verdict === "ambiguous-trace";
+    const cell = (value: number | null) => (withheld ? "     —" : formatMs(value));
     console.log(
       [
         report.surface.padEnd(11),
         report.transport.padEnd(17),
         String(report.totalTurns).padStart(2),
         String(report.validSamples).padStart(6),
-        formatMs(report.medianTtfpe),
-        formatMs(report.medianTtfvo),
-        formatMs(report.medianTtt),
+        cell(report.medianTtfpe),
+        cell(report.medianTtfvo),
+        cell(report.medianTtt),
         ` ${report.verdict}`,
       ].join(" "),
     );
@@ -329,7 +388,12 @@ function main() {
     `Thresholds: actually-slow when median turn >= ${SLOW_TURN_MS}ms; feels-slow when median time-to-first-visible-output >= ${FEELS_SLOW_MS}ms; both need n >= ${MIN_SAMPLES}.`,
   );
 
-  const measured = surfaces.filter((report) => report.verdict !== "insufficient-data");
+  // An ambiguous surface is NOT measured. Counting it was how the scoreboard
+  // read 4/5 while one of those four was unusable.
+  const measured = surfaces.filter(
+    (report) =>
+      report.verdict !== "insufficient-data" && report.verdict !== "ambiguous-trace",
+  );
   console.log(`\nMEASURED_SURFACES=${measured.length}/${surfaces.length}`);
 }
 
