@@ -583,9 +583,23 @@ mod tests {
             "Passive native footer overlays need a pass-through view class"
         );
 
-        let ensure_pos = content
-            .find("unsafe fn ensure_main_footer_host")
-            .expect("ensure_main_footer_host must exist");
+        // Scope to the function that actually allocates `left_info_view`.
+        //
+        // This audit spent time red and, worse, unenforcing: it searched for
+        // `unsafe fn ensure_main_footer_host`, which a rename turned into
+        // `ensure_main_window_footer_host` before the allocation itself moved
+        // out into `install_footer_host_view`. A source audit that cannot find
+        // its anchor does not fail safe — it panics on the `expect` and stops
+        // checking the invariant it exists to protect, which here is that a
+        // passive footer overlay cannot steal AppKit hit tests from the hint
+        // strip.
+        //
+        // If this `expect` fires again, repoint it at whichever function owns
+        // the `left_info_view` allocation rather than deleting the assertion.
+        let ensure_pos = content.find("unsafe fn install_footer_host_view").expect(
+            "install_footer_host_view must exist — if it was renamed, repoint this audit at \
+                 the function that allocates left_info_view",
+        );
         let ensure_section = &content[ensure_pos..content.len().min(ensure_pos + 5000)];
         assert!(
             ensure_section.contains("msg_send![footer_passthrough_view_class(), alloc]"),
