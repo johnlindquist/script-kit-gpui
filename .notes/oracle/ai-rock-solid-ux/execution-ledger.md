@@ -7,6 +7,8 @@
 - plan: `.notes/oracle/ai-rock-solid-ux/plan.md`
 - plan steps: 15 execute, 0 think (`S00`–`S14`)
 - current status: active; whole premise not yet proven
+- ledger last reconciled: 2026-07-24 (had gone stale at 05:06, missing the S08
+  commit and all S09/S10 work; user scope decisions added below)
 
 ## Consult ledger
 
@@ -34,6 +36,35 @@
 - Cargo policy: all Cargo commands use `./scripts/agentic/agent-cargo.sh`.
 - Lifecycle: commits are scoped per green Oracle step; no push, release, or deployment is authorized.
 
+## User scope decisions (2026-07-24, supersede plan defaults)
+
+Collected via `web-choices`, submissions `11274034-dafe-4537-b8be-493e9fa76776`
+and `492fd4f8-9af8-4146-a7d0-60e810f702b7`. These are the user's own answers and
+outrank the plan's implied scope.
+
+| Decision | Answer |
+|---|---|
+| Flow ↔ Agent Chat parity | **100 — "one conversation experience"** (user overrode the recommended 60; distinctions live in what each surface can DO, not how it behaves) |
+| Runtime proof depth | **100 — "film every surface"** (user overrode the recommended 50) |
+| S08 disposition | Blocker. Fix all three defects, then pass **several batches in a row**. One green run is not acceptable evidence. |
+| S09 scope | **70** — make what exists work AND survive app restart. Excludes run-level recovery. |
+| S10 scope | **60** — connect the recovery buttons. Excludes the full ~14-case test matrix. |
+| S11 scope | **50** — remove only leftovers that can still reach the screen. |
+| S12 scope | **100** — film every surface. |
+| S13 scope | **60** — write the rules plus focused checks, not the full suite. |
+| S14 scope | **40** — outside review of the risky parts only. |
+| Order | **Errors first**, then the everyday consistency pass. They touch the same chat files, so running both at once would conflict. |
+| Plan disposition | Keep it, then add the missing half — the plan only covers how surfaces FAIL, not how they behave when they work. |
+
+Two behaviors the user designed directly, rejecting all offered options:
+
+- **Escape**: every AI experience shows a modal offering **Background** or **Close**.
+  This also removes the lying `"Esc Desk"` footer, since the modal names the destination.
+- **Click-away**: all experiences **auto-background**, and a backgrounded session
+  becomes the **first option in the main menu**. This is a feature, not a dismissal
+  setting — it is what gives the Escape modal's Background option a visible place to
+  land. User chose to **design it fully before building**.
+
 ## Step status
 
 | Step | Tag | Status | Commit | Verification receipt |
@@ -46,13 +77,52 @@
 | S05 Typed runtime boundaries | execute | complete | `acdce5f6d` | check green; runtime seam 7/7; Codex 19/19; Pi 51/51; Flow model 16/16; runner 4/4; ChatPrompt 55/55 |
 | S06 Shared recovery projection/component | execute | complete | `3be4baf2a` | projector 6/6; component 3/3; public integration 2/2; check green |
 | S07 Agent Chat/setup recovery migration | execute | complete | `96e7efa95` | protocol 12/12; reliability 16/16; warm 2/2; thread 86/86; view 70/70; auth + retry runtime probes green |
-| S08 Quick AI search-budget prevention/recovery | think (escalated after two red attempts) | blocked by post-escalation hard gate | — | deterministic budget/deadline recovery green; real batch A PASS, independent batch B FAIL |
-| S09 Flow conversation/run recovery | execute | pending | — | — |
-| S10 Legacy ChatPrompt migration | execute | pending | — | — |
+| S08 Quick AI search-budget prevention/recovery | think (escalated after two red attempts) | complete | `52e66fb88`, `fc32a72d2`, `0f42c5930` | see "S08 closure" below: 16/16 answered, 0 recovery cards, 0 protocol failures across 6 queries x 3 reps of real streams |
+| S09 Flow conversation/run recovery | execute | in progress, uncommitted | — | conversation recovery implemented; run-level recovery, Reattach routing and relaunch persistence NOT done |
+| S10 Legacy ChatPrompt migration | execute | in progress, uncommitted | — | shared card renders; recovery callback has zero callers so its actions are unreachable; `streaming.rs` still emits stringly errors |
 | S11 Remaining AI integrations/stringly cleanup | execute | pending | — | — |
 | S12 Green runtime/semantic/layout/screenshot receipts | execute | pending | — | — |
 | S13 Contract docs and repository-wide gates | execute | pending | — | — |
 | S14 Whole-premise Oracle audit + identical-state local proof | execute | pending | — | — |
+
+## S08 closure (2026-07-24)
+
+The earlier red gate was measured against hand-written events and a synthetic
+query. Re-running it against REAL `codex exec --json` streams found six defects
+that the synthetic harness could not see, and the gate is green once they are
+fixed. Harness: `scripts/agentic/quick-ai-codex-stream-corpus.ts`, which reads
+the model, prompt, schema and the literal `.arg(...)` sequence out of
+`build_codex_exec_command` so it cannot drift from production.
+
+Fixed in `fc32a72d2` and `0f42c5930`:
+
+1. Quick AI could not answer a question that needed no web search — the
+   provenance gate required `search_completed` before any answer passed.
+2. The fast path (`CompleteEarly`) skipped every source check.
+3. Source verification was unreachable: a `search` action carries no result
+   URLs, so `structured_urls` is always empty and the host check never ran.
+4. Codex still offered a shell tool and used it — a captured stream shows
+   `/bin/zsh -lc 'recall context'` reading the user's shared agent memory
+   during a Quick AI turn.
+5. Provider stderr, not our own code, decided the failure kind, so a blocked
+   shell command told the user to sign in.
+6. A red prompt test had been hidden since `52e66fb88` because the S08 gate
+   filter (`codex_quick_ai`) does not match its path.
+
+Measured after the fixes — 6 queries x 3 reps, real streams:
+
+| Question | Answer |
+| --- | --- |
+| Did the one-search policy hold? | Yes. 17/17 runs: at most one `web_search` item, zero page visits. The production system prompt is what enforces it; without the prompt the model searches AND opens pages, and 6/6 web-requiring queries ended in a recovery card. |
+| Are the batches green? | 16/16 answered, 0 recovery cards, 0 protocol failures. Re-score saved streams with `--classify-only`. |
+| Is the 11,650ms deadline right? | Yes. 1/17 runs exceeded it (33.7s, a stalled search); the rest finished at 2.3-9.1s. That tail already degrades gracefully — `codex_quick_ai_deadline_preserves_partial_and_reaps_process` keeps the partial answer and reaps the process. No change made. |
+
+Residual limitation, stated rather than hidden: 10/16 answers cite a host no
+page visit backs. Snippets-only searching makes real verification impossible
+without a page fetch, and a fetch does not fit the latency budget. The code no
+longer claims otherwise — the trace label is now
+`unvisited-validated-schema-source`, and the enforced guarantee is that every
+URL shown passed schema validation and followed a completed search.
 
 ## S00 working receipt
 
