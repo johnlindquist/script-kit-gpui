@@ -412,6 +412,8 @@ section 2 predicted, because the predictions were partly wrong.
 | The selectable `TextView` seam | `src/components/conversation_text.rs` — `conversation_markdown_view()` |
 | Per-turn copy control | `src/components/conversation_actions.rs` |
 | Jump-to-latest pill | `src/components/list_scroll_affordance.rs` |
+| Flow session key chords (`⎋`, `⇧⌘⎋`, `⌘.`, `⌘K`, `⌘L`, `⇧⌘C`) | `render_builtins/flow_ux.rs` — `resolve_flow_session_key_action`. Exhaustive **except** `⌘⇧D` Background, which the window-level interceptor in `app_impl/startup.rs` answers first. |
+| "What counts as the last response" | `flows::session::resolve_last_copyable_response`, called only through `copy_flow_session_last_response` — the one transaction behind both the ⌘K item and the `⇧⌘C` chord |
 
 `src/ai/agent_chat/ui/style_contract.rs` is now a façade: type aliases and
 `use` re-exports, zero production values. Flow's answer regions call
@@ -449,6 +451,26 @@ section 2 predicted, because the predictions were partly wrong.
    skipped still rendered, through the OLD unselectable path. A just-submitted
    turn (streaming, no response yet) hit exactly that case.
 
+3. **A shortcut badge is a promise, and one test reads both halves.**
+   `flow_desk_session_copy_last_response` shipped advertising `⇧⌘C` while
+   `resolve_flow_session_key_action` had no arm for it. Clicking worked, so
+   every test was green and the chord was silently dead. Nothing anywhere
+   related the printed badge to the binding, and "the single exhaustive key
+   owner" is precisely the kind of claim nobody re-checks.
+   `every_advertised_session_shortcut_has_a_declared_owner` (in
+   `render_builtins/actions.rs`) now sweeps every shortcut-bearing flow-session
+   action, requires each to name an owner, and actually presses the
+   resolver-owned ones. Writing it surfaced that `⌘⇧D` Background is answered
+   by the window-level interceptor in `app_impl/startup.rs`, not the session
+   resolver — so the owner enum carries `HostInterceptor` instead of assuming
+   one owner covers everything.
+
+   Related invariant, same defect class: writing `""` to the clipboard
+   SUCCEEDS. The in-flight turn sits in `turns` with an empty `assistant`, so
+   `turns.last()` yields a copy that reports success and pastes nothing.
+   `flows::session::resolve_last_copyable_response` returns `Option` to force
+   every caller to distinguish "no answer yet" from "an answer".
+
 ### Proof
 
 Behavior is covered by unit tests in each owning module. Selection itself is
@@ -466,11 +488,16 @@ Its judgements live in `scripts/agentic/ai-chat-parity-evidence.ts` and are
 unit-tested without an app, so a run that drove nothing reports `absent`
 rather than "no failures".
 
+The `⇧⌘C` leg crosses the real integration boundary rather than reading back
+app state the app itself reported: it plants a sentinel on the system
+pasteboard with `pbcopy`, presses the chord, and reads back with `pbpaste`.
+The sentinel is what makes it falsifiable — "the clipboard has text in it"
+passes for a clipboard nobody touched, which is exactly what an unbound chord
+leaves behind. A binary built without the resolver arm flips that one
+assertion to `unchanged` and leaves the other seven green.
+
 ### Still open
 
-- Flow's `⇧⌘C` (Copy Last Response) is advertised in its ⌘K list but has no
-  key binding — `resolve_flow_session_key_action` has no arm for it. The
-  action works by clicking; the chord does nothing.
 - Flow's jump pill still reads `user_has_scrolled_up` (above).
 - Divergence 10's attachment half, and the composer split (divergence 20 /
   "Also true"), are untouched.
