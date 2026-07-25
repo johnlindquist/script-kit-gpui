@@ -49,20 +49,61 @@ fn agent_chat_ui_boundary_exists() {
     );
 
     let ui = read("src/ai/agent_chat/ui/mod.rs");
-    for alias in [
-        "AgentChatView as AgentChatView",
-        "AgentChatThread as AgentChatThread",
-        "AgentChatEvent as AgentChatEvent",
-        "AgentChatSession as AgentChatSession",
-        "AgentChatInlineSetupState as AgentChatInlineSetupState",
-        "AgentChatRetryRequest as AgentChatRetryRequest",
-        "AgentChatPermissionBroker as AgentChatPermissionBroker",
+    let reexports = reexported_names(&ui);
+    for name in [
+        "AgentChatView",
+        "AgentChatThread",
+        "AgentChatEvent",
+        "AgentChatSession",
+        "AgentChatInlineSetupState",
+        "AgentChatRetryRequest",
+        "AgentChatPermissionBroker",
     ] {
         assert!(
-            ui.contains(alias),
-            "agent_chat::ui must re-export `{alias}` as part of the canonical boundary"
+            reexports.iter().any(|item| item == name),
+            "agent_chat::ui must re-export `{name}` as part of the canonical boundary"
         );
     }
+}
+
+/// Names re-exported by a module's `pub(crate) use ...;` statements.
+///
+/// This used to be asserted as the literal text `"AgentChatView as AgentChatView"`.
+/// That spelling is a redundant self-alias, so a routine cleanup deleted the
+/// `as` halves and every one of these assertions went red while the boundary
+/// itself was untouched — all seven types are still re-exported. The invariant
+/// worth keeping is "the facade re-exports this type", not "the facade spells
+/// it in the one style it happened to use in 2026".
+///
+/// Parsing the use statements also makes the check STRICTER than the old
+/// substring test: a type merely mentioned in a doc comment or a function body
+/// no longer counts, because only text inside `pub(crate) use ... ;` is
+/// considered.
+fn reexported_names(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("pub(crate) use ") {
+        let after = &rest[start + "pub(crate) use ".len()..];
+        let Some(end) = after.find(';') else { break };
+        let statement = &after[..end];
+        // Keep only the leaf identifiers: drop path prefixes and braces, and
+        // resolve `foo as bar` to the exported name `bar`.
+        for piece in statement.split([',', '{', '}']) {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                continue;
+            }
+            let exported = match piece.rsplit_once(" as ") {
+                Some((_, alias)) => alias.trim(),
+                None => piece.rsplit("::").next().unwrap_or(piece).trim(),
+            };
+            if !exported.is_empty() && exported.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                names.push(exported.to_string());
+            }
+        }
+        rest = &after[end..];
+    }
+    names
 }
 
 #[test]

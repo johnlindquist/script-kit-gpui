@@ -8,10 +8,8 @@ use super::read_source as read;
 fn scroll_to_selected_if_needed_logs_reason_on_skip() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("fn scroll_to_selected_if_needed(")
+    let fn_body = super::function_body(&content, "scroll_to_selected_if_needed")
         .expect("Expected scroll_to_selected_if_needed function");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 600)];
 
     assert!(
         fn_body.contains("target: \"SCROLL_STATE\""),
@@ -31,10 +29,8 @@ fn scroll_to_selected_if_needed_logs_reason_on_skip() {
 fn scroll_to_selected_if_needed_logs_reason_on_reveal() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("fn scroll_to_selected_if_needed(")
+    let fn_body = super::function_body(&content, "scroll_to_selected_if_needed")
         .expect("Expected scroll_to_selected_if_needed function");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 1800)];
 
     assert!(
         fn_body.contains("before_top"),
@@ -59,10 +55,8 @@ fn scroll_to_selected_if_needed_logs_reason_on_reveal() {
 fn scroll_to_selected_if_needed_accepts_reason_not_underscore() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("fn scroll_to_selected_if_needed(")
+    let signature = super::function_body(&content, "scroll_to_selected_if_needed")
         .expect("Expected scroll_to_selected_if_needed function");
-    let signature = &content[fn_start..content.len().min(fn_start + 120)];
 
     assert!(
         !signature.contains("_reason"),
@@ -74,10 +68,8 @@ fn scroll_to_selected_if_needed_accepts_reason_not_underscore() {
 fn sync_list_state_resets_reveal_cache_and_logs() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("fn sync_list_state(")
+    let fn_body = super::function_body(&content, "sync_list_state")
         .expect("Expected sync_list_state function");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 1000)];
 
     assert!(
         fn_body.contains("self.last_scrolled_index = None"),
@@ -105,10 +97,8 @@ fn sync_list_state_resets_reveal_cache_and_logs() {
 fn sync_list_state_re_reveals_after_reset() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("fn sync_list_state(")
+    let fn_body = super::function_body(&content, "sync_list_state")
         .expect("Expected sync_list_state function");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 1000)];
 
     // After resetting reveal cache, must scroll to reveal the current selection
     assert!(
@@ -121,10 +111,8 @@ fn sync_list_state_re_reveals_after_reset() {
 fn main_list_scroll_receipt_exposes_footer_safe_selected_row_geometry() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("pub(crate) fn main_list_scroll_receipt(")
+    let fn_body = super::function_body(&content, "main_list_scroll_receipt")
         .expect("main_list_scroll_receipt function not found");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 4200)];
 
     for required in [
         "\"scrollTop\"",
@@ -153,10 +141,8 @@ fn main_list_footer_reveal_clearance_comes_from_theme_tokens() {
     let list_item = read("src/list_item/mod.rs");
     let theme = read("src/designs/core/main_menu_theme.rs");
 
-    let fn_start = content
-        .find("fn main_list_footer_reveal_clearance_height()")
+    let fn_body = super::function_body(&content, "main_list_footer_reveal_clearance_height")
         .expect("main_list_footer_reveal_clearance_height function not found");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 260)];
 
     assert!(
         fn_body.contains("effective_footer_reveal_clearance_height()"),
@@ -197,13 +183,8 @@ fn main_list_render_uses_pure_selection_snapshot() {
 fn filter_replacement_sync_replaces_list_state_even_when_count_unchanged() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("pub fn sync_list_state_for_filter_replacement(&mut self)")
+    let sync_fn = super::function_body(&content, "sync_list_state_for_filter_replacement")
         .expect("sync_list_state_for_filter_replacement function not found");
-    let fn_end_marker = content[fn_start..]
-        .find("pub fn validate_selection_bounds")
-        .expect("validate_selection_bounds not found after filter replacement sync");
-    let sync_fn = &content[fn_start..fn_start + fn_end_marker];
 
     assert!(
         sync_fn.contains("self.main_list_state = ListState::new(")
@@ -241,10 +222,8 @@ fn filter_replacement_sync_replaces_list_state_even_when_count_unchanged() {
 fn filter_change_reconciliation_uses_filter_replacement_list_sync() {
     let content = read("src/app_impl/filter_input_updates.rs");
 
-    let fn_start = content
-        .find("fn reconcile_script_list_after_filter_change(")
+    let fn_body = super::function_body(&content, "reconcile_script_list_after_filter_change")
         .expect("reconcile_script_list_after_filter_change function not found");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 900)];
 
     assert!(
         fn_body.contains("self.sync_list_state_for_filter_replacement();"),
@@ -264,13 +243,8 @@ fn filter_change_reconciliation_uses_filter_replacement_list_sync() {
 fn sync_list_state_regression_invalidates_reveal_even_when_count_unchanged() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("pub fn sync_list_state(&mut self)")
+    let sync_fn = super::function_body(&content, "sync_list_state")
         .expect("sync_list_state function not found");
-    let fn_end_marker = content[fn_start..]
-        .find("pub fn validate_selection_bounds")
-        .expect("validate_selection_bounds not found after sync_list_state");
-    let sync_fn = &content[fn_start..fn_start + fn_end_marker];
 
     // The splice is conditional on count change...
     let splice_pos = sync_fn
@@ -309,10 +283,8 @@ fn sync_list_state_regression_invalidates_reveal_even_when_count_unchanged() {
 fn footer_safe_scroll_offset_uses_footer_reduced_viewport_for_trailing_scroll_budget() {
     let content = read("src/app_navigation/impl_scroll.rs");
 
-    let fn_start = content
-        .find("fn footer_safe_scroll_offset_for_item(")
+    let fn_body = super::function_body(&content, "footer_safe_scroll_offset_for_item")
         .expect("footer_safe_scroll_offset_for_item function not found");
-    let fn_body = &content[fn_start..content.len().min(fn_start + 1200)];
 
     assert!(
         fn_body.contains("let safe_viewport_height = viewport_height - footer_overlay_height;"),

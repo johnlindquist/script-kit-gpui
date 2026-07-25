@@ -8,6 +8,59 @@ pub use script_kit_gpui::test_utils::{
     count_occurrences, read_all_handle_action_sources, read_source, LIVE_HANDLE_ACTION_FILES,
 };
 
+/// The body of `fn <name>`, found by brace matching.
+///
+/// Source audits in this tree kept scoping a function by slicing a FIXED byte
+/// window after its signature (`&content[start..start + 1800]`). That is wrong
+/// in both directions and fails silently either way: when the function grows,
+/// the window truncates it and a still-present invariant reads as deleted; when
+/// the function shrinks, the window spills into the next function and a
+/// neighbour's code can satisfy the assertion.
+///
+/// Matching by NAME rather than by full signature is deliberate too. An audit
+/// that searched for the exact text `(&mut self)` went red the day the function
+/// gained a parameter, which is a change the audit was never meant to police.
+///
+/// Returns `None` when no such function exists, so a caller can tell "the
+/// invariant moved" apart from "the invariant is gone".
+pub fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("fn {name}");
+    let mut from = 0usize;
+    while let Some(hit) = source[from..].find(&needle) {
+        let at = from + hit;
+        let after = at + needle.len();
+        // Require a real boundary so `fn sync_list_state` does not match
+        // `fn sync_list_state_for_filter_replacement`.
+        let boundary = source[after..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        if !boundary {
+            from = after;
+            continue;
+        }
+        let Some(open_rel) = source[after..].find('{') else {
+            return None;
+        };
+        let open = after + open_rel;
+        let mut depth = 0i32;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[open..open + offset + 1]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    None
+}
+
 #[path = "source_audits/builtin_confirmation.rs"]
 mod builtin_confirmation;
 
