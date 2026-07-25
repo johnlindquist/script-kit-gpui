@@ -270,13 +270,28 @@ pub fn render_ai_recovery_card(spec: AiRecoveryCardSpec, theme: &Theme) -> AnyEl
 /// with no explanation for why recovery is stuck. It renders unclickable —
 /// `rules/AI_RELIABILITY.md`: an action a surface cannot perform is never
 /// rendered enabled.
-pub fn ai_recovery_footer_hint_labels(plan: &RecoveryPresentationPlan) -> Vec<String> {
+pub fn ai_recovery_footer_hint_labels(
+    plan: &RecoveryPresentationPlan,
+    menu_is_reachable: bool,
+) -> Vec<String> {
     let mut hints = Vec::new();
     if let Some(primary) = plan.footer.as_ref() {
         hints.push(format!("↵ {}", primary.label));
     }
     if !plan.menu.is_empty() {
-        hints.push("⌘K Options".to_string());
+        if menu_is_reachable {
+            hints.push("⌘K Options".to_string());
+        } else {
+            // The surface has no actions dialog wired for recovery yet. Falling
+            // back to the rail keeps every action reachable; advertising
+            // "⌘K Options" here would print a chord bound to nothing, which is
+            // the precise bug this codebase has already shipped twice.
+            hints.extend(
+                plan.menu
+                    .iter()
+                    .map(|placed| placed.label.as_ref().to_string()),
+            );
+        }
     }
     if plan.dismissible {
         hints.push("esc Dismiss".to_string());
@@ -315,14 +330,36 @@ pub fn render_ai_recovery_footer(
     }
 
     if !plan.menu.is_empty() {
-        let handler: Option<FooterHintClickHandler> = on_open_menu.map(|open| {
-            Box::new(
-                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-                    open(window, cx);
-                },
-            ) as FooterHintClickHandler
-        });
-        hints.push(("⌘K Options".into(), handler));
+        match on_open_menu {
+            // The surface has an actions dialog for recovery: advertise the
+            // chord, and let the dialog carry the secondary actions.
+            Some(open) => {
+                let handler: Option<FooterHintClickHandler> = Some(Box::new(
+                    move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                        open(window, cx);
+                    },
+                ));
+                hints.push(("⌘K Options".into(), handler));
+            }
+            // No dialog wired yet. Put the actions in the rail rather than
+            // advertising a chord that does nothing — and rather than letting
+            // them vanish, which would make Copy details unreachable while the
+            // error card still looked perfectly correct.
+            None => {
+                for placed in &plan.menu {
+                    let handler: Option<FooterHintClickHandler> = if placed.enabled {
+                        let action = placed.action.clone();
+                        let on_action = handlers.on_action.clone();
+                        Some(Box::new(move |_, window, cx| {
+                            on_action(action.clone(), window, cx);
+                        }))
+                    } else {
+                        None
+                    };
+                    hints.push((placed.label.clone(), handler));
+                }
+            }
+        }
     }
 
     if plan.dismissible {

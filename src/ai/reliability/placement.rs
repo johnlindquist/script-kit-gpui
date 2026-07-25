@@ -327,6 +327,41 @@ mod tests {
     }
 
     #[test]
+    fn no_action_becomes_unreachable_when_the_surface_has_no_actions_dialog() {
+        // The regression this change nearly shipped. Moving actions out of the
+        // card is only safe if something still shows them. A surface with no
+        // recovery actions dialog must fall back to listing them in the rail —
+        // and must NOT advertise a chord bound to nothing.
+        use crate::components::ai_recovery_footer_hint_labels;
+
+        let plan = plan_recovery_presentation(&spec(
+            AiRecoveryLayout::ComposerInline,
+            vec![
+                action("ai-recovery-retry", RecoveryRole::Primary, true),
+                action("ai-recovery-copy-details", RecoveryRole::Diagnostic, true),
+            ],
+        ));
+
+        let without_dialog = ai_recovery_footer_hint_labels(&plan, false);
+        assert!(
+            without_dialog
+                .iter()
+                .any(|hint| hint.contains("ai-recovery-copy-details")),
+            "a surface with no dialog must still show every action: {without_dialog:?}"
+        );
+        assert!(
+            !without_dialog.iter().any(|hint| hint.contains("⌘K")),
+            "a chord must never be advertised when nothing is wired to it: {without_dialog:?}"
+        );
+
+        let with_dialog = ai_recovery_footer_hint_labels(&plan, true);
+        assert!(
+            with_dialog.iter().any(|hint| hint.contains("⌘K Options")),
+            "a surface with a dialog should point at it: {with_dialog:?}"
+        );
+    }
+
+    #[test]
     fn an_empty_spec_places_nothing_anywhere() {
         let plan = plan_recovery_presentation(&spec(AiRecoveryLayout::ComposerInline, vec![]));
         assert!(plan.is_empty());
