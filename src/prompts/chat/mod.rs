@@ -10,9 +10,9 @@
 use crate::components::TextInputState;
 use crate::designs::icon_variations::IconName;
 use gpui::{
-    div, img, list, prelude::*, px, rgb, rgba, svg, Animation, AnimationExt, AnyElement, App,
-    Context, ExternalPaths, FocusHandle, Focusable, Hsla, KeyDownEvent, ListAlignment,
-    ListSizingBehavior, ListState, Render, RenderImage, ScrollWheelEvent, Window,
+    div, img, list, prelude::*, px, rgb, rgba, svg, AnyElement, App, Context, ExternalPaths,
+    FocusHandle, Focusable, Hsla, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState,
+    Render, RenderImage, ScrollWheelEvent, Window,
 };
 use gpui_component::scroll::ScrollableElement;
 use std::collections::HashMap;

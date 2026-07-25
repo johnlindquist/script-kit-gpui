@@ -110,7 +110,6 @@ impl ChatPrompt {
         } else {
             theme::hover_overlay_bg(&self.theme, 0x08) // ~3% black overlay for light mode
         };
-        let copy_hover_bg = theme::hover_overlay_bg(&self.theme, 0x28); // ~16% for hover
         let error_color = theme_colors.ui.error;
         let user_fidelity_id = format!("chat-transcript-user-turn-{turn_index}");
         let response_fidelity_id = format!("chat-transcript-response-turn-{turn_index}");
