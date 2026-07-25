@@ -38,6 +38,13 @@ pub struct SessionSnapshot {
     pub transport: &'static str,
     /// Engine label as shown in the session chip (e.g. `codex · gpt-5.6-luna`).
     pub engine: String,
+    /// Reducer-owned reliability phase tag (S09), camelCase — e.g. `ready`,
+    /// `running`, `awaitingRecovery`.
+    pub reliability_phase: String,
+    /// Stable failure code when the session awaits recovery.
+    pub failure_code: Option<String>,
+    /// Safe persisted failure summary of the most recent failed turn.
+    pub last_failure_summary: Option<String>,
 }
 
 pub struct PreviewSnapshot<'a> {
@@ -133,6 +140,9 @@ pub fn flow_ux_state(inputs: FlowUxSnapshotInputs<'_>) -> Value {
                     "turnInFlight": s.turn_in_flight,
                     "transport": s.transport,
                     "engine": s.engine,
+                    "reliabilityPhase": s.reliability_phase,
+                    "failureCode": s.failure_code,
+                    "lastFailureSummary": s.last_failure_summary,
                 })
             })
             .collect::<Vec<_>>(),
@@ -181,6 +191,9 @@ mod tests {
                 turn_in_flight: true,
                 transport: "codexThread",
                 engine: "codex · gpt-5.6-luna".into(),
+                reliability_phase: "running".into(),
+                failure_code: None,
+                last_failure_summary: None,
             }],
         });
         assert_eq!(value["activeVariant"], "lens");

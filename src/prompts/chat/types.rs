@@ -190,6 +190,12 @@ pub type ChatContinueCallback = Arc<dyn Fn(String) + Send + Sync>;
 /// Callback type for retry: (prompt_id, message_id)
 pub type ChatRetryCallback = Arc<dyn Fn(String, String) + Send + Sync>;
 
+/// Host callback for shared recovery-card actions the prompt cannot perform
+/// itself: (message_id, action). Availability of the corresponding card
+/// buttons is derived from this callback's presence (S10).
+pub type ChatRecoveryCallback =
+    Arc<dyn Fn(String, sk_protocol::ai_reliability::AiRecoveryAction) + Send + Sync>;
+
 /// Callback type for "Configure API" action: () -> triggers API key setup
 pub type ChatConfigureCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -617,120 +623,11 @@ pub(super) fn next_reveal_boundary(text: &str, offset: usize) -> Option<usize> {
     }
 }
 
-/// Error types for chat operations
-#[derive(Clone, Debug, PartialEq)]
-pub enum ChatErrorType {
-    NoApiKey,
-    NetworkError,
-    StreamInterrupted,
-    RateLimited,
-    InvalidModel,
-    TokenLimit,
-    ClaudeCodeNested,
-    ClaudeCodeNotFound,
-    ProviderError,
-    ServerError,
-    Unknown,
-}
-
-impl ChatErrorType {
-    pub fn from_error_string(s: &str) -> Self {
-        let s_lower = s.to_lowercase();
-        if s_lower.contains("api key")
-            || s_lower.contains("unauthorized")
-            || s_lower.contains("401")
-        {
-            ChatErrorType::NoApiKey
-        } else if s_lower.contains("cannot be launched inside another claude code session")
-            || s_lower.contains("nested sessions")
-        {
-            ChatErrorType::ClaudeCodeNested
-        } else if s_lower.contains("claude")
-            && (s_lower.contains("not found")
-                || s_lower.contains("no such file")
-                || s_lower.contains("command not found"))
-        {
-            ChatErrorType::ClaudeCodeNotFound
-        } else if s_lower.contains("network")
-            || s_lower.contains("connection")
-            || s_lower.contains("timeout")
-        {
-            ChatErrorType::NetworkError
-        } else if s_lower.contains("interrupt") || s_lower.contains("abort") {
-            ChatErrorType::StreamInterrupted
-        } else if s_lower.contains("rate limit") || s_lower.contains("429") {
-            ChatErrorType::RateLimited
-        } else if s_lower.contains("model")
-            && (s_lower.contains("invalid")
-                || s_lower.contains("not found")
-                || s_lower.contains("unavailable")
-                || s_lower.contains("does not exist")
-                || s_lower.contains("not supported"))
-        {
-            ChatErrorType::InvalidModel
-        } else if s_lower.contains("token")
-            || s_lower.contains("too long")
-            || s_lower.contains("length")
-        {
-            ChatErrorType::TokenLimit
-        } else if s_lower.contains("500")
-            || s_lower.contains("502")
-            || s_lower.contains("503")
-            || s_lower.contains("server error")
-            || s_lower.contains("internal server error")
-        {
-            ChatErrorType::ServerError
-        } else if s_lower.contains("cli exited with status") || s_lower.contains("returned error") {
-            ChatErrorType::ProviderError
-        } else {
-            ChatErrorType::Unknown
-        }
-    }
-
-    pub fn display_message(&self) -> &'static str {
-        match self {
-            ChatErrorType::NoApiKey => {
-                "\u{26a0} API key not configured. Set up your API key to continue."
-            }
-            ChatErrorType::NetworkError => {
-                "\u{26a0} Network error. Check your connection and try again."
-            }
-            ChatErrorType::StreamInterrupted => {
-                "\u{26a0} Response interrupted. Click retry to continue."
-            }
-            ChatErrorType::RateLimited => {
-                "\u{26a0} Rate limited. Please wait a moment and try again."
-            }
-            ChatErrorType::InvalidModel => "\u{26a0} Model unavailable. Using default model.",
-            ChatErrorType::TokenLimit => "\u{26a0} Message too long. Try a shorter prompt.",
-            ChatErrorType::ClaudeCodeNested => {
-                "\u{26a0} Cannot run Claude Code inside an existing Claude Code session. \
-                 Close the outer session first."
-            }
-            ChatErrorType::ClaudeCodeNotFound => {
-                "\u{26a0} Claude Code CLI not found. \
-                 Install it from https://docs.anthropic.com/en/docs/claude-code"
-            }
-            ChatErrorType::ProviderError => "\u{26a0} AI provider error. Check the details below.",
-            ChatErrorType::ServerError => {
-                "\u{26a0} Server error. The AI provider may be experiencing issues."
-            }
-            ChatErrorType::Unknown => "\u{26a0} Something went wrong. Please try again.",
-        }
-    }
-
-    pub fn can_retry(&self) -> bool {
-        matches!(
-            self,
-            ChatErrorType::NetworkError
-                | ChatErrorType::StreamInterrupted
-                | ChatErrorType::RateLimited
-                | ChatErrorType::ProviderError
-                | ChatErrorType::ServerError
-                | ChatErrorType::Unknown
-        )
-    }
-}
+// The string-sniffing `ChatErrorType` taxonomy (and its false
+// "Model unavailable. Using default model." copy) was removed in S10/S11 of
+// the ai-rock-solid-ux plan. Failure classification is owned by the shared
+// `crate::ai::reliability` boundary; presentation is owned by the shared
+// recovery projector and card.
 
 #[cfg(test)]
 mod tests {

@@ -443,7 +443,7 @@ mod root_search_store_tests {
     fn inbox_item(id: i64, title: &str) -> crate::brain::InboxItem {
         crate::brain::InboxItem {
             id,
-            kind: crate::brain::InboxKind::Question,
+            kind: crate::brain::inbox::InboxKind::Question,
             title: title.to_string(),
             detail: String::new(),
             source: "note".to_string(),

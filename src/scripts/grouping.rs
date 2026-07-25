@@ -6607,6 +6607,11 @@ mod active_flow_session_section_tests {
             active_turn: None,
             thread_ready: true,
             needs_rethread: false,
+            reliability: crate::flows::session::FlowReliability::new(
+                "project:test",
+                "/tmp/flow-test.md",
+                "codex",
+            ),
         }
     }
 

@@ -135,6 +135,50 @@ const ALL_RECOVERY_ACTION_KINDS: [RecoveryActionKind; 17] = [
     RecoveryActionKind::CopyDetails,
 ];
 
+/// Project one settled failure into the shared recovery card WITHOUT a
+/// surface-owned operation state (S10: legacy ChatPrompt renders one card
+/// per failed transcript turn). The synthetic state is `AwaitingRecovery`
+/// with the same pure plan the reducer would build, so copy, action set,
+/// ordering, and semantic ids stay identical to reducer-driven surfaces.
+pub fn standalone_failure_recovery_spec(
+    identity: AiSurfaceIdentity,
+    failure: &AiFailure,
+    work: sk_protocol::ai_reliability::AiWorkSnapshot,
+    surface_capabilities: &SurfaceRecoveryCapabilities,
+) -> Option<AiRecoveryCardSpec> {
+    use sk_protocol::ai_reliability::{
+        recovery_plan_for, AiOperationState, AiPhase, ProgressSnapshot, RetryPolicy, TurnRisk,
+    };
+    let mut state = AiOperationState::ready(
+        identity,
+        AiSelectionState {
+            requested: None,
+            effective: None,
+            origin: SelectionOrigin::BuiltInDefault,
+            acknowledged_change: None,
+        },
+        work,
+        RetryPolicy {
+            automatic_max: 0,
+            manual_max: 2,
+        },
+    );
+    let plan = recovery_plan_for(
+        &state.identity,
+        failure,
+        state.retry,
+        TurnRisk::MayMutate,
+        &ProgressSnapshot::none(),
+    );
+    state.diagnostic = failure.diagnostic.clone();
+    state.phase = AiPhase::AwaitingRecovery {
+        failure: failure.clone(),
+        plan,
+    };
+    let identity = state.identity.clone();
+    project_recovery(&identity, &state, surface_capabilities)
+}
+
 pub fn project_recovery(
     identity: &AiSurfaceIdentity,
     state: &AiOperationState,

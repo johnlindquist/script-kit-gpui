@@ -65,7 +65,286 @@ pub struct SessionTurn {
     pub user: String,
     pub assistant: String,
     pub outcome: PersistedTurnOutcome,
-    pub error: Option<String>,
+    /// Typed failure metadata for `Failed` turns (S09). `Ok`/`Stopped`
+    /// turns never carry one. The safe summary is the ONLY failure text
+    /// that may reach the transcript or persistence — raw provider/stderr
+    /// payloads stop at the diagnostic vault.
+    pub failure: Option<PersistedAiFailure>,
+}
+
+/// Stable persisted projection of one typed AI failure.
+///
+/// Slim by design: enough to render truthful recovery copy and route
+/// recovery actions after an app restart, without persisting raw provider
+/// payloads, stderr, or diagnostics (those stop at the redacting vault).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedAiFailure {
+    pub code: sk_protocol::ai_reliability::AiFailureCode,
+    pub category: PersistedAiFailureCategory,
+    pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_fingerprint: Option<String>,
+}
+
+/// Coarse failure family, persisted alongside the exact code so snapshots
+/// stay meaningful even if a future reader no longer knows the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PersistedAiFailureCategory {
+    Capability,
+    Policy,
+    Authentication,
+    Configuration,
+    Connectivity,
+    Provider,
+    Runtime,
+    Protocol,
+    Permission,
+    Input,
+    Unknown,
+}
+
+impl PersistedAiFailure {
+    pub fn from_failure(
+        failure: &sk_protocol::ai_reliability::AiFailure,
+        safe_summary: &str,
+    ) -> Self {
+        use sk_protocol::ai_reliability::AiFailureKind;
+        let category = match &failure.kind {
+            AiFailureKind::Capability(_) => PersistedAiFailureCategory::Capability,
+            AiFailureKind::Policy(_) => PersistedAiFailureCategory::Policy,
+            AiFailureKind::Authentication(_) => PersistedAiFailureCategory::Authentication,
+            AiFailureKind::Configuration(_) => PersistedAiFailureCategory::Configuration,
+            AiFailureKind::Connectivity(_) => PersistedAiFailureCategory::Connectivity,
+            AiFailureKind::Provider(_) => PersistedAiFailureCategory::Provider,
+            AiFailureKind::Runtime(_) => PersistedAiFailureCategory::Runtime,
+            AiFailureKind::Protocol(_) => PersistedAiFailureCategory::Protocol,
+            AiFailureKind::Permission(_) => PersistedAiFailureCategory::Permission,
+            AiFailureKind::Input(_) => PersistedAiFailureCategory::Input,
+            AiFailureKind::Unknown => PersistedAiFailureCategory::Unknown,
+        };
+        Self {
+            code: failure.code,
+            category,
+            safe_summary: bounded_safe_summary(safe_summary),
+            diagnostic_fingerprint: failure
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.fingerprint.0.clone()),
+        }
+    }
+
+    /// Classify one legacy (v0–v2 snapshot) failure caption while loading.
+    /// Legacy captions were already user-visible safe copy, so the text is
+    /// kept as the summary; the code is recovered from the small closed set
+    /// of strings those versions could write, defaulting to `Unknown`.
+    pub fn from_legacy_error(error: &str) -> Self {
+        use sk_protocol::ai_reliability::AiFailureCode;
+        let trimmed = error.trim();
+        let (code, category) = if trimmed.contains("mdflow CLI not found") {
+            (
+                AiFailureCode::MdflowMissing,
+                PersistedAiFailureCategory::Configuration,
+            )
+        } else if trimmed.contains("protocol violation") {
+            (
+                AiFailureCode::ProtocolMalformedResponse,
+                PersistedAiFailureCategory::Protocol,
+            )
+        } else if trimmed.contains("failed to spawn") {
+            (
+                AiFailureCode::SpawnFailed,
+                PersistedAiFailureCategory::Runtime,
+            )
+        } else if trimmed.contains("Flow definition unreadable") {
+            (
+                AiFailureCode::InvalidConfiguration,
+                PersistedAiFailureCategory::Configuration,
+            )
+        } else if trimmed.contains("exited") || trimmed.contains("wait failed") {
+            (
+                AiFailureCode::ChildExited,
+                PersistedAiFailureCategory::Runtime,
+            )
+        } else {
+            (AiFailureCode::Unknown, PersistedAiFailureCategory::Unknown)
+        };
+        Self {
+            code,
+            category,
+            safe_summary: bounded_safe_summary(if trimmed.is_empty() {
+                FLOW_TURN_FAILED_SUMMARY
+            } else {
+                trimmed
+            }),
+            diagnostic_fingerprint: None,
+        }
+    }
+
+    pub fn unknown_default() -> Self {
+        Self {
+            code: sk_protocol::ai_reliability::AiFailureCode::Unknown,
+            category: PersistedAiFailureCategory::Unknown,
+            safe_summary: FLOW_TURN_FAILED_SUMMARY.to_string(),
+            diagnostic_fingerprint: None,
+        }
+    }
+
+    pub fn from_record(record: &crate::ai::reliability::AppFailureRecord) -> Self {
+        Self::from_failure(&record.failure, record.primary_message())
+    }
+
+    /// Reconstruct a best-effort typed failure from the persisted slim
+    /// projection (restore path). Detail payloads are gone by design; the
+    /// code maps back to its canonical kind so recovery planning and copy
+    /// stay code-accurate after an app restart.
+    pub fn to_failure(&self) -> sk_protocol::ai_reliability::AiFailure {
+        use sk_protocol::ai_reliability::{
+            AiFailure, AiFailureCode, AiFailureKind, AuthenticationFailure, CapabilityFailure,
+            ClientKind, ConfigurationFailure, ConnectivityFailure, InputFailure,
+            ModelAvailabilityReason, ModelId, PermissionFailure, PolicyFailure, ProtocolComponent,
+            ProtocolFailure, ProviderFailure, ReattachAvailability, RetrySafety, RuntimeFailure,
+        };
+        let kind = match self.code {
+            AiFailureCode::ClientTooOld => {
+                AiFailureKind::Capability(CapabilityFailure::ClientTooOld {
+                    client: ClientKind::Other,
+                    model: None,
+                })
+            }
+            AiFailureCode::ModelUnavailable => {
+                AiFailureKind::Capability(CapabilityFailure::ModelUnavailable {
+                    model: ModelId("unknown".to_string()),
+                    reason: ModelAvailabilityReason::NotAdvertised,
+                })
+            }
+            AiFailureCode::NoCompatibleModel => {
+                AiFailureKind::Capability(CapabilityFailure::NoCompatibleModel)
+            }
+            AiFailureCode::ProfileUnavailable => {
+                AiFailureKind::Capability(CapabilityFailure::ProfileUnavailable {
+                    profile: sk_protocol::ai_reliability::ProfileId("unknown".to_string()),
+                })
+            }
+            AiFailureCode::QuickAiSearchBudgetExceeded => {
+                AiFailureKind::Policy(PolicyFailure::QuickAiSearchBudgetExceeded {
+                    completed_searches: 0,
+                    budget: 0,
+                    partial_answer_available: false,
+                    source_count: 0,
+                })
+            }
+            AiFailureCode::QuickAiDeadlineExceeded => {
+                AiFailureKind::Policy(PolicyFailure::QuickAiDeadlineExceeded {
+                    deadline_ms: 0,
+                    completed_searches: 0,
+                    partial_answer_available: false,
+                    source_count: 0,
+                })
+            }
+            AiFailureCode::ToolDenied => {
+                AiFailureKind::Policy(PolicyFailure::ToolDenied { tool: None })
+            }
+            AiFailureCode::AuthenticationMissing => {
+                AiFailureKind::Authentication(AuthenticationFailure::Missing)
+            }
+            AiFailureCode::AuthenticationExpired => {
+                AiFailureKind::Authentication(AuthenticationFailure::Expired)
+            }
+            AiFailureCode::UsageExhausted => {
+                AiFailureKind::Authentication(AuthenticationFailure::UsageExhausted)
+            }
+            AiFailureCode::ProviderNotConfigured => {
+                AiFailureKind::Configuration(ConfigurationFailure::ProviderNotConfigured)
+            }
+            AiFailureCode::NoModelsAvailable => {
+                AiFailureKind::Configuration(ConfigurationFailure::NoModelsAvailable)
+            }
+            AiFailureCode::SidecarMissing => {
+                AiFailureKind::Configuration(ConfigurationFailure::SidecarMissing)
+            }
+            AiFailureCode::MdflowMissing => {
+                AiFailureKind::Configuration(ConfigurationFailure::MdflowMissing)
+            }
+            AiFailureCode::InvalidConfiguration => {
+                AiFailureKind::Configuration(ConfigurationFailure::InvalidConfiguration)
+            }
+            AiFailureCode::Offline => AiFailureKind::Connectivity(ConnectivityFailure::Offline),
+            AiFailureCode::Timeout => AiFailureKind::Connectivity(ConnectivityFailure::Timeout),
+            AiFailureCode::RateLimited => {
+                AiFailureKind::Connectivity(ConnectivityFailure::RateLimited {
+                    retry_after_ms: None,
+                })
+            }
+            AiFailureCode::ProviderTemporarilyUnavailable => {
+                AiFailureKind::Provider(ProviderFailure::TemporarilyUnavailable)
+            }
+            AiFailureCode::ProviderServerRejected => {
+                AiFailureKind::Provider(ProviderFailure::ServerRejected)
+            }
+            AiFailureCode::SpawnFailed => AiFailureKind::Runtime(RuntimeFailure::SpawnFailed),
+            AiFailureCode::RuntimeClosed => AiFailureKind::Runtime(RuntimeFailure::RuntimeClosed),
+            AiFailureCode::ChildExited => AiFailureKind::Runtime(RuntimeFailure::ChildExited {
+                exit_code: None,
+                signal: None,
+            }),
+            AiFailureCode::SessionLost => AiFailureKind::Runtime(RuntimeFailure::SessionLost {
+                reattach: ReattachAvailability::Unavailable,
+            }),
+            AiFailureCode::ProtocolVersionMismatch => {
+                AiFailureKind::Protocol(ProtocolFailure::VersionMismatch {
+                    component: ProtocolComponent::Mdflow,
+                    expected: "supported".to_string(),
+                    actual: None,
+                })
+            }
+            AiFailureCode::ProtocolSequenceViolation => {
+                AiFailureKind::Protocol(ProtocolFailure::SequenceViolation {
+                    component: ProtocolComponent::Mdflow,
+                })
+            }
+            AiFailureCode::ProtocolOrderViolation => {
+                AiFailureKind::Protocol(ProtocolFailure::OrderViolation {
+                    component: ProtocolComponent::Mdflow,
+                })
+            }
+            AiFailureCode::ProtocolMalformedResponse => {
+                AiFailureKind::Protocol(ProtocolFailure::MalformedResponse {
+                    component: ProtocolComponent::Mdflow,
+                })
+            }
+            AiFailureCode::ProtocolMissingTerminal => {
+                AiFailureKind::Protocol(ProtocolFailure::MissingTerminal {
+                    component: ProtocolComponent::Mdflow,
+                })
+            }
+            AiFailureCode::PermissionDenied => {
+                AiFailureKind::Permission(PermissionFailure::PermissionDenied)
+            }
+            AiFailureCode::UserDeniedTool => {
+                AiFailureKind::Permission(PermissionFailure::UserDeniedTool)
+            }
+            AiFailureCode::MessageTooLarge => AiFailureKind::Input(InputFailure::MessageTooLarge),
+            AiFailureCode::ContextLimitExceeded => {
+                AiFailureKind::Input(InputFailure::ContextLimitExceeded)
+            }
+            AiFailureCode::Unknown => AiFailureKind::Unknown,
+        };
+        AiFailure::new(kind, RetrySafety::SameSelectionReadOnly)
+    }
+}
+
+/// Fallback safe summary when a failed turn has no usable caption.
+pub const FLOW_TURN_FAILED_SUMMARY: &str = "Flow turn failed";
+
+/// Char-boundary-safe cap on persisted failure summaries: a summary is
+/// display copy, never a payload dump.
+fn bounded_safe_summary(summary: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    if summary.chars().count() <= MAX_CHARS {
+        return summary.to_string();
+    }
+    let truncated: String = summary.chars().take(MAX_CHARS - 1).collect();
+    format!("{truncated}…")
 }
 
 /// The display caption for a user-stopped turn. Owned by the domain layer so
@@ -101,8 +380,24 @@ impl SessionTransport {
 /// ingresses pending a callback-free transcript-only constructor.
 #[derive(Debug, Clone)]
 pub enum FlowChatRequest {
-    Submit { session_id: u64, text: String },
-    ShowActions { session_id: u64 },
+    Submit {
+        session_id: u64,
+        text: String,
+    },
+    ShowActions {
+        session_id: u64,
+    },
+    /// S10: a recovery-card action chosen on a failed TURN inside the hosted
+    /// transcript. The prompt cannot perform these itself — rethreading,
+    /// repairing mdflow and retrying all belong to the session owner — so it
+    /// posts here and the render pass, which has the window, applies them.
+    /// Without this the card's non-retry buttons never even render, because
+    /// their availability is derived from the callback's presence.
+    Recovery {
+        session_id: u64,
+        message_id: String,
+        action: sk_protocol::ai_reliability::AiRecoveryAction,
+    },
 }
 
 /// Metadata for one conversation, independent of the GPUI entity.
@@ -137,7 +432,304 @@ pub struct FlowSessionMeta {
     /// a FRESH protocol thread. The submit path must re-resolve the flow
     /// contract and carry the transcript rollup so the flow's identity and
     /// conversation survive — never continue as a generic new thread.
+    /// This boolean is transport bookkeeping only; user-facing recovery
+    /// actions are owned by [`FlowSessionMeta::reliability`] (S09).
     pub needs_rethread: bool,
+    /// Reducer-driven reliability/recovery state for this conversation.
+    pub reliability: FlowReliability,
+}
+
+/// Reducer-driven reliability state for ONE flow conversation (S09).
+///
+/// A thin app-boundary driver over the pure `sk_protocol::ai_reliability`
+/// state machine: turns, cancellations, failures, and recovery selections
+/// flow through `transition`, so typed recovery state — not ad-hoc booleans —
+/// owns which user actions the Flow surface offers. GPUI-free by design so
+/// it unit-tests under `flows::session`.
+#[derive(Debug, Clone)]
+pub struct FlowReliability {
+    state: sk_protocol::ai_reliability::AiOperationState,
+}
+
+impl FlowReliability {
+    pub fn new(flow_id: &str, flow_path: &str, engine: &str) -> Self {
+        use sk_protocol::ai_reliability::{
+            AiOperationState, AiSelectionState, AiSurfaceIdentity, EngineId, Fingerprint, FlowId,
+            RetryPolicy, SelectionOrigin,
+        };
+        let identity = AiSurfaceIdentity::FlowConversation {
+            flow_id: FlowId::from(flow_id),
+            definition_fingerprint: Fingerprint(crate::ai::reliability::redacted_fingerprint(
+                flow_path,
+            )),
+            engine_id: EngineId::from(engine),
+            provider_id: None,
+            model_id: None,
+        };
+        let selection = AiSelectionState {
+            requested: None,
+            effective: None,
+            origin: SelectionOrigin::BuiltInDefault,
+            acknowledged_change: None,
+        };
+        let state = AiOperationState::ready(
+            identity,
+            selection,
+            Self::work_snapshot(flow_id, flow_path, 0, false),
+            RetryPolicy {
+                automatic_max: 0,
+                manual_max: 2,
+            },
+        );
+        Self { state }
+    }
+
+    fn work_snapshot(
+        flow_id: &str,
+        flow_path: &str,
+        turns: usize,
+        partial_output: bool,
+    ) -> sk_protocol::ai_reliability::AiWorkSnapshot {
+        use sk_protocol::ai_reliability::{
+            AiWorkSnapshot, Fingerprint, PreservationReceipt, WorkKey,
+        };
+        let fingerprint =
+            |value: &str| Fingerprint(crate::ai::reliability::redacted_fingerprint(value));
+        AiWorkSnapshot {
+            key: WorkKey::from(format!("flow:{flow_id}:{flow_path}")),
+            transcript: if turns == 0 {
+                PreservationReceipt::NotApplicable
+            } else {
+                PreservationReceipt::Preserved {
+                    fingerprint: fingerprint(&format!("turns:{turns}")),
+                }
+            },
+            draft: PreservationReceipt::NotApplicable,
+            attachments: PreservationReceipt::NotApplicable,
+            partial_output: if partial_output {
+                PreservationReceipt::Preserved {
+                    fingerprint: fingerprint("partial"),
+                }
+            } else {
+                PreservationReceipt::NotApplicable
+            },
+        }
+    }
+
+    pub fn state(&self) -> &sk_protocol::ai_reliability::AiOperationState {
+        &self.state
+    }
+
+    pub fn awaiting_recovery(&self) -> bool {
+        matches!(
+            self.state.phase,
+            sk_protocol::ai_reliability::AiPhase::AwaitingRecovery { .. }
+        )
+    }
+
+    fn apply(
+        &mut self,
+        event: sk_protocol::ai_reliability::AiOperationEvent,
+    ) -> Option<Vec<sk_protocol::ai_reliability::AiCommand>> {
+        match sk_protocol::ai_reliability::transition(self.state.clone(), event) {
+            Ok(next) => {
+                self.state = next.next;
+                Some(next.commands)
+            }
+            Err(invalid) => {
+                tracing::warn!(
+                    target: "script_kit::flows",
+                    event = "flow_reliability_invalid_transition",
+                    phase = ?invalid.phase,
+                    rejected = ?invalid.event,
+                    reason = ?invalid.reason,
+                    "Flow reliability transition rejected"
+                );
+                None
+            }
+        }
+    }
+
+    fn reset_for_next_turn(&mut self) {
+        use sk_protocol::ai_reliability::{AiOperationEvent, AiPhaseTag};
+        match self.state.phase.tag() {
+            AiPhaseTag::Ready => {}
+            AiPhaseTag::AwaitingRecovery => {
+                self.apply(AiOperationEvent::DismissRequested);
+                self.apply(AiOperationEvent::ResetForNextTurn);
+            }
+            AiPhaseTag::Recovered
+            | AiPhaseTag::Succeeded
+            | AiPhaseTag::Cancelled
+            | AiPhaseTag::Dismissed => {
+                self.apply(AiOperationEvent::ResetForNextTurn);
+            }
+            AiPhaseTag::Preflighting
+            | AiPhaseTag::Running
+            | AiPhaseTag::Cancelling
+            | AiPhaseTag::Recovering => {}
+        }
+    }
+
+    /// Drive one submitted turn to `Running`.
+    pub fn begin_turn(&mut self, flow_id: &str, flow_path: &str, turn_ordinal: usize) {
+        use sk_protocol::ai_reliability::{
+            AiCommand, AiOperationEvent, CapabilityDecision, TurnRef, TurnRequestRef, TurnRisk,
+        };
+        self.reset_for_next_turn();
+        let work = Self::work_snapshot(flow_id, flow_path, turn_ordinal, false);
+        let selection = self.state.selection.clone();
+        if self
+            .apply(AiOperationEvent::SubmitRequested {
+                request: TurnRequestRef::from(format!("flow:{flow_id}:{turn_ordinal}")),
+                work,
+                selection,
+                risk: TurnRisk::MayMutate,
+            })
+            .is_none()
+        {
+            return;
+        }
+        let Some(commands) = self.apply(AiOperationEvent::CapabilityResolved(
+            CapabilityDecision::Compatible,
+        )) else {
+            return;
+        };
+        let start = commands.iter().find_map(|command| match command {
+            AiCommand::StartTurn(command) => Some(command.command_id),
+            _ => None,
+        });
+        if let Some(command_id) = start {
+            self.apply(AiOperationEvent::RuntimeStarted {
+                command_id,
+                turn: TurnRef::from(format!("flow:{flow_id}:{turn_ordinal}")),
+            });
+        }
+    }
+
+    pub fn complete_turn(&mut self) {
+        use sk_protocol::ai_reliability::{AiOperationEvent, CompletionKind};
+        self.apply(AiOperationEvent::Completed(CompletionKind::Complete));
+    }
+
+    /// A user stop is truthful cancellation — quiet stopped copy, never the
+    /// shared error treatment.
+    pub fn cancel_turn(&mut self, partial_output: bool) {
+        use sk_protocol::ai_reliability::{AiOperationEvent, Fingerprint, PartialOutputState};
+        self.apply(AiOperationEvent::CancelRequested);
+        self.apply(AiOperationEvent::RuntimeCancelled {
+            partial: if partial_output {
+                PartialOutputState::Preserved {
+                    fingerprint: Fingerprint(crate::ai::reliability::redacted_fingerprint(
+                        "partial",
+                    )),
+                }
+            } else {
+                PartialOutputState::None
+            },
+        });
+    }
+
+    /// A turn-level failure. Falls back to the outside-turn projection when
+    /// no turn is in flight (defensive: transport events can race a settle).
+    pub fn fail_turn(&mut self, failure: sk_protocol::ai_reliability::AiFailure) {
+        use sk_protocol::ai_reliability::{AiOperationEvent, AiPhaseTag};
+        if matches!(
+            self.state.phase.tag(),
+            AiPhaseTag::Preflighting | AiPhaseTag::Running
+        ) && self
+            .apply(AiOperationEvent::Failed(failure.clone()))
+            .is_some()
+        {
+            return;
+        }
+        self.fail_outside_turn(failure);
+    }
+
+    /// A session-level failure with no turn in flight (engine death while
+    /// idle). The pure reducer has no event for this shape, so the
+    /// actionable recovery phase is projected directly from the same pure
+    /// plan builder the reducer uses.
+    pub fn fail_outside_turn(&mut self, failure: sk_protocol::ai_reliability::AiFailure) {
+        use sk_protocol::ai_reliability::{recovery_plan_for, AiPhase, ProgressSnapshot, TurnRisk};
+        let plan = recovery_plan_for(
+            &self.state.identity,
+            &failure,
+            self.state.retry,
+            TurnRisk::MayMutate,
+            &ProgressSnapshot::none(),
+        );
+        self.state.diagnostic = failure.diagnostic.clone();
+        self.state.phase = AiPhase::AwaitingRecovery { failure, plan };
+    }
+
+    pub fn select_recovery(
+        &mut self,
+        action: sk_protocol::ai_reliability::AiRecoveryAction,
+    ) -> Vec<sk_protocol::ai_reliability::AiCommand> {
+        use sk_protocol::ai_reliability::AiOperationEvent;
+        self.apply(AiOperationEvent::RecoverySelected(action))
+            .unwrap_or_default()
+    }
+
+    /// Drive a manual Retry through backoff → preflight → running.
+    /// Returns false when the reducer refused (e.g. retry budget exhausted).
+    pub fn retry_turn(&mut self, flow_id: &str, turn_ordinal: usize) -> bool {
+        use sk_protocol::ai_reliability::{
+            AiCommand, AiOperationEvent, AiPhaseTag, AiRecoveryAction, CapabilityDecision, TurnRef,
+        };
+        let commands = self.select_recovery(AiRecoveryAction::Retry);
+        let Some(backoff_id) = commands.iter().find_map(|command| match command {
+            AiCommand::ScheduleBackoff { command_id, .. } => Some(*command_id),
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.apply(AiOperationEvent::BackoffElapsed {
+            command_id: backoff_id,
+        });
+        let Some(commands) = self.apply(AiOperationEvent::CapabilityResolved(
+            CapabilityDecision::Compatible,
+        )) else {
+            return false;
+        };
+        let Some(start) = commands.iter().find_map(|command| match command {
+            AiCommand::StartTurn(command) => Some(command.command_id),
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.apply(AiOperationEvent::RuntimeStarted {
+            command_id: start,
+            turn: TurnRef::from(format!("flow:{flow_id}:retry:{turn_ordinal}")),
+        });
+        matches!(self.state.phase.tag(), AiPhaseTag::Running)
+    }
+
+    /// Select Rethread and acknowledge the effect once the host performed it.
+    /// Returns false when the reducer refused the action.
+    pub fn select_rethread(&mut self) -> bool {
+        use sk_protocol::ai_reliability::{
+            AiCommand, AiOperationEvent, AiRecoveryAction, RecoveryEffectResult,
+        };
+        let commands = self.select_recovery(AiRecoveryAction::RethreadFlow);
+        let Some(command_id) = commands.iter().find_map(|command| match command {
+            AiCommand::RethreadFlow(command) => Some(command.command_id),
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.apply(AiOperationEvent::RecoveryCommandSucceeded {
+            command_id,
+            result: RecoveryEffectResult::FlowRethreaded,
+        });
+        true
+    }
+
+    pub fn dismiss(&mut self) {
+        use sk_protocol::ai_reliability::AiOperationEvent;
+        self.apply(AiOperationEvent::DismissRequested);
+    }
 }
 
 /// Bookkeeping for the in-flight turn.
@@ -448,33 +1040,43 @@ pub struct PersistedFlowConversation {
     pub saved_at: String,
     /// Snapshot format version. 0 (absent) = legacy: either two-field turns
     /// or transitional records whose Stopped assistants carry the UI caption
-    /// baked into the text. `SNAPSHOT_VERSION` = raw assistant text with the
-    /// caption derived from `outcome` at display time.
+    /// baked into the text. 2 = raw assistant text with the caption derived
+    /// from `outcome` at display time, failures as raw caption strings.
+    /// `SNAPSHOT_VERSION` (3) = failures persisted as typed
+    /// [`PersistedAiFailure`] records; the legacy `error` field is never
+    /// written and is classified into a typed record while loading.
     #[serde(default)]
     pub version: u32,
     pub turns: Vec<PersistedFlowTurn>,
 }
 
-/// Current snapshot format: raw assistant text + structured outcome.
-pub const SNAPSHOT_VERSION: u32 = 2;
+/// Current snapshot format: raw assistant text + structured outcome +
+/// typed persisted failures.
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 /// Convert a persisted snapshot into the ONE canonical in-memory turn vector
 /// (Oracle 2026-07-21, WP-A4): restore must render and store from this same
 /// vector, never from the raw persisted fields.
 ///
 /// Normalization invariants:
-/// - `Ok`/`Stopped` ⇒ `error = None`.
-/// - `Failed` ⇒ `error = Some(nonblank)` (blank/absent → "Flow turn failed").
-/// - Pre-`SNAPSHOT_VERSION` Stopped records may carry the UI caption baked
-///   into the assistant text; strip exactly one canonical caption suffix so
+/// - `Ok`/`Stopped` ⇒ `failure = None` (stopped turns never carry a failure).
+/// - `Failed` ⇒ `failure = Some(typed)`: the typed record when the snapshot
+///   has one, otherwise the legacy v0–v2 `error` caption classified while
+///   loading (blank/absent → the `Unknown` default).
+/// - Pre-version-2 Stopped records may carry the UI caption baked into the
+///   assistant text; strip exactly one canonical caption suffix so
 ///   `assistant` is raw engine output.
 pub fn canonical_session_turns(snapshot: &PersistedFlowConversation) -> Vec<SessionTurn> {
+    /// Caption stripping applies to snapshots written before version 2
+    /// introduced outcome-derived display captions.
+    const CAPTION_DERIVED_VERSION: u32 = 2;
     snapshot
         .turns
         .iter()
         .map(|turn| {
             let mut assistant = turn.assistant.clone();
-            if snapshot.version < SNAPSHOT_VERSION && turn.outcome == PersistedTurnOutcome::Stopped
+            if snapshot.version < CAPTION_DERIVED_VERSION
+                && turn.outcome == PersistedTurnOutcome::Stopped
             {
                 if assistant == FLOW_STOPPED_CAPTION {
                     assistant.clear();
@@ -484,22 +1086,24 @@ pub fn canonical_session_turns(snapshot: &PersistedFlowConversation) -> Vec<Sess
                     assistant = stripped.to_string();
                 }
             }
-            let error = match turn.outcome {
+            let failure = match turn.outcome {
                 PersistedTurnOutcome::Ok | PersistedTurnOutcome::Stopped => None,
-                PersistedTurnOutcome::Failed => Some(
-                    turn.error
+                PersistedTurnOutcome::Failed => Some(match &turn.failure {
+                    Some(failure) => failure.clone(),
+                    None => turn
+                        .error
                         .as_deref()
                         .map(str::trim)
-                        .filter(|e| !e.is_empty())
-                        .unwrap_or("Flow turn failed")
-                        .to_string(),
-                ),
+                        .filter(|error| !error.is_empty())
+                        .map(PersistedAiFailure::from_legacy_error)
+                        .unwrap_or_else(PersistedAiFailure::unknown_default),
+                }),
             };
             SessionTurn {
                 user: turn.user.clone(),
                 assistant,
                 outcome: turn.outcome,
-                error,
+                failure,
             }
         })
         .collect()
@@ -511,8 +1115,13 @@ pub struct PersistedFlowTurn {
     pub assistant: String,
     #[serde(default)]
     pub outcome: PersistedTurnOutcome,
-    #[serde(default)]
+    /// Legacy (v0–v2) raw failure caption. Read-only: version-3 snapshots
+    /// never write it; loading classifies it into `failure`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Typed persisted failure (version 3+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<PersistedAiFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -582,7 +1191,9 @@ pub fn persist_conversation_to(
             user: turn.user.clone(),
             assistant: turn.assistant.clone(),
             outcome: turn.outcome,
-            error: turn.error.clone(),
+            // v3 never writes the legacy raw caption field.
+            error: None,
+            failure: turn.failure.clone(),
         })
         .collect();
     let snapshot = PersistedFlowConversation {
@@ -620,16 +1231,9 @@ pub fn load_persisted_conversation_from(
     if snapshot.turns.is_empty() {
         return None;
     }
-    let turns: Vec<SessionTurn> = snapshot
-        .turns
-        .iter()
-        .map(|turn| SessionTurn {
-            user: turn.user.clone(),
-            assistant: turn.assistant.clone(),
-            outcome: turn.outcome,
-            error: turn.error.clone(),
-        })
-        .collect();
+    // Adopt through the ONE canonical conversion so the re-persisted file
+    // is a fully migrated current-version snapshot (typed failures included).
+    let turns: Vec<SessionTurn> = canonical_session_turns(&snapshot);
     if persist_conversation_to(dir, flow_id, flow_path, &turns).is_ok() {
         let _ = std::fs::remove_file(&legacy);
     }
@@ -991,7 +1595,7 @@ mod tests {
                 user: format!("question {i}"),
                 assistant: format!("answer {i}"),
                 outcome: PersistedTurnOutcome::Ok,
-                error: None,
+                failure: None,
             })
             .collect();
         persist_conversation_to(dir.path(), "package:flow-gog-gmail", GMAIL_PATH, &turns)
@@ -1016,12 +1620,23 @@ mod tests {
                 assistant: "partial\n\n*Stopped.*".into(),
                 outcome: PersistedTurnOutcome::Stopped,
                 error: None,
+                failure: None,
             },
             PersistedFlowTurn {
                 user: "fail".into(),
                 assistant: "partial".into(),
                 outcome: PersistedTurnOutcome::Failed,
                 error: Some("transport failed".into()),
+                failure: None,
+            },
+            PersistedFlowTurn {
+                user: "typed fail".into(),
+                assistant: "partial".into(),
+                outcome: PersistedTurnOutcome::Failed,
+                error: None,
+                failure: Some(PersistedAiFailure::from_legacy_error(
+                    "protocol violation: x",
+                )),
             },
         ] {
             let json = serde_json::to_string(&turn).expect("serialize persisted turn");
@@ -1029,6 +1644,7 @@ mod tests {
                 serde_json::from_str(&json).expect("deserialize persisted turn");
             assert_eq!(restored.outcome, turn.outcome);
             assert_eq!(restored.error, turn.error);
+            assert_eq!(restored.failure, turn.failure);
             assert_eq!(restored.assistant, turn.assistant);
         }
 
@@ -1037,6 +1653,84 @@ mod tests {
                 .expect("legacy two-field turn must deserialize");
         assert_eq!(legacy.outcome, PersistedTurnOutcome::Ok);
         assert_eq!(legacy.error, None);
+        assert_eq!(legacy.failure, None);
+    }
+
+    /// S09: a v3 snapshot persists ONLY the typed failure — the legacy raw
+    /// caption field is never written again.
+    #[test]
+    fn v3_snapshots_never_write_the_legacy_error_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let turns = vec![SessionTurn {
+            user: "q".into(),
+            assistant: "partial".into(),
+            outcome: PersistedTurnOutcome::Failed,
+            failure: Some(PersistedAiFailure::unknown_default()),
+        }];
+        persist_conversation_to(dir.path(), "project:t", "/w/flows/t.md", &turns).expect("persist");
+        let raw = std::fs::read_to_string(
+            dir.path()
+                .join(conversation_file_name("project:t", "/w/flows/t.md")),
+        )
+        .expect("snapshot file");
+        assert!(
+            !raw.contains("\"error\""),
+            "v3 must not write the legacy raw error field: {raw}"
+        );
+        assert!(raw.contains("\"failure\""), "typed failure must persist");
+        let snapshot: PersistedFlowConversation = serde_json::from_str(&raw).expect("parse");
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+    }
+
+    /// S09 migration: v2 failed turns carry only the raw caption; loading
+    /// classifies it into a typed record from the closed legacy string set.
+    #[test]
+    fn v2_legacy_errors_are_classified_while_loading() {
+        use sk_protocol::ai_reliability::AiFailureCode;
+        let cases = [
+            (
+                "mdflow CLI not found on PATH (npm i -g mdflow)",
+                AiFailureCode::MdflowMissing,
+                PersistedAiFailureCategory::Configuration,
+            ),
+            (
+                "protocol violation: unknown event",
+                AiFailureCode::ProtocolMalformedResponse,
+                PersistedAiFailureCategory::Protocol,
+            ),
+            (
+                "failed to spawn md: no such file",
+                AiFailureCode::SpawnFailed,
+                PersistedAiFailureCategory::Runtime,
+            ),
+            (
+                "Flow definition unreadable: /w/flows/x.md (gone)",
+                AiFailureCode::InvalidConfiguration,
+                PersistedAiFailureCategory::Configuration,
+            ),
+            (
+                "totally novel failure text",
+                AiFailureCode::Unknown,
+                PersistedAiFailureCategory::Unknown,
+            ),
+        ];
+        for (legacy, code, category) in cases {
+            let snapshot = snapshot_with(
+                2,
+                vec![PersistedFlowTurn {
+                    user: "q".into(),
+                    assistant: "partial".into(),
+                    outcome: PersistedTurnOutcome::Failed,
+                    error: Some(legacy.into()),
+                    failure: None,
+                }],
+            );
+            let turns = canonical_session_turns(&snapshot);
+            let failure = turns[0].failure.as_ref().expect("failed turn is typed");
+            assert_eq!(failure.code, code, "{legacy}");
+            assert_eq!(failure.category, category, "{legacy}");
+            assert_eq!(failure.safe_summary, legacy);
+        }
     }
 
     fn snapshot_with(version: u32, turns: Vec<PersistedFlowTurn>) -> PersistedFlowConversation {
@@ -1062,6 +1756,7 @@ mod tests {
                     assistant: format!("partial\n\n{FLOW_STOPPED_CAPTION}"),
                     outcome: PersistedTurnOutcome::Stopped,
                     error: None,
+                    failure: None,
                 },
                 // Caption-only stopped record (empty raw output).
                 PersistedFlowTurn {
@@ -1069,13 +1764,15 @@ mod tests {
                     assistant: FLOW_STOPPED_CAPTION.into(),
                     outcome: PersistedTurnOutcome::Stopped,
                     error: None,
+                    failure: None,
                 },
-                // Failed with blank error → nonblank fallback.
+                // Failed with blank error → nonblank typed fallback.
                 PersistedFlowTurn {
                     user: "fail".into(),
                     assistant: "partial".into(),
                     outcome: PersistedTurnOutcome::Failed,
                     error: Some("   ".into()),
+                    failure: None,
                 },
                 // Stopped with an impossible error → dropped.
                 PersistedFlowTurn {
@@ -1083,6 +1780,7 @@ mod tests {
                     assistant: "text".into(),
                     outcome: PersistedTurnOutcome::Stopped,
                     error: Some("junk".into()),
+                    failure: None,
                 },
             ],
         );
@@ -1090,8 +1788,11 @@ mod tests {
         assert_eq!(turns[0].assistant, "partial");
         assert_eq!(turns[0].outcome, PersistedTurnOutcome::Stopped);
         assert_eq!(turns[1].assistant, "");
-        assert_eq!(turns[2].error.as_deref(), Some("Flow turn failed"));
-        assert_eq!(turns[3].error, None, "Stopped never carries an error");
+        assert_eq!(
+            turns[2].failure.as_ref().map(|f| f.safe_summary.as_str()),
+            Some(FLOW_TURN_FAILED_SUMMARY)
+        );
+        assert_eq!(turns[3].failure, None, "Stopped never carries a failure");
     }
 
     /// Current-version snapshots are NOT caption-stripped: raw text that
@@ -1106,6 +1807,7 @@ mod tests {
                 assistant: raw.clone(),
                 outcome: PersistedTurnOutcome::Stopped,
                 error: None,
+                failure: None,
             }],
         );
         assert_eq!(canonical_session_turns(&snapshot)[0].assistant, raw);
@@ -1116,7 +1818,7 @@ mod tests {
             user: user.into(),
             assistant: assistant.into(),
             outcome: PersistedTurnOutcome::Ok,
-            error: None,
+            failure: None,
         }
     }
 
@@ -1171,19 +1873,19 @@ mod tests {
                 user: "q1".into(),
                 assistant: "full answer".into(),
                 outcome: PersistedTurnOutcome::Ok,
-                error: None,
+                failure: None,
             },
             SessionTurn {
                 user: "q2".into(),
                 assistant: "cut short".into(),
                 outcome: PersistedTurnOutcome::Stopped,
-                error: None,
+                failure: None,
             },
             SessionTurn {
                 user: "q3".into(),
                 assistant: "broke".into(),
                 outcome: PersistedTurnOutcome::Failed,
-                error: Some("transport exploded".into()),
+                failure: Some(PersistedAiFailure::from_legacy_error("transport exploded")),
             },
         ];
         let task = build_turn_task(&turns, "next question");
@@ -1227,7 +1929,7 @@ mod tests {
                 user: text.to_string(),
                 assistant: format!("re: {text}"),
                 outcome: PersistedTurnOutcome::Ok,
-                error: None,
+                failure: None,
             }]
         };
         persist_conversation_to(
@@ -1280,6 +1982,7 @@ mod tests {
                 assistant: "old answer".into(),
                 outcome: PersistedTurnOutcome::Ok,
                 error: None,
+                failure: None,
             }],
         };
         std::fs::write(&legacy, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
@@ -1313,7 +2016,7 @@ mod tests {
             user: "q".into(),
             assistant: "a".into(),
             outcome: PersistedTurnOutcome::Ok,
-            error: None,
+            failure: None,
         }];
         persist_conversation_to(dir.path(), "project:review", "/w/flows/review.md", &turns)
             .expect("persist");
@@ -1322,7 +2025,8 @@ mod tests {
             .join(legacy_conversation_file_name("project:review"));
         std::fs::write(&legacy, b"{}").unwrap();
 
-        delete_persisted_conversation_from(dir.path(), "project:review", "/w/flows/review.md");
+        let _ =
+            delete_persisted_conversation_from(dir.path(), "project:review", "/w/flows/review.md");
         assert!(load_persisted_conversation_from(
             dir.path(),
             "project:review",
@@ -1338,7 +2042,7 @@ mod tests {
             user: "find bun shell examples".into(),
             assistant: "Here are three repos …".into(),
             outcome: PersistedTurnOutcome::Ok,
-            error: None,
+            failure: None,
         }];
         let task = build_turn_task(&turns, "show me the second one");
         assert!(task.starts_with("Conversation so far"));
@@ -1355,13 +2059,13 @@ mod tests {
                 user: "oldest".into(),
                 assistant: big.clone(),
                 outcome: PersistedTurnOutcome::Ok,
-                error: None,
+                failure: None,
             },
             SessionTurn {
                 user: "newest".into(),
                 assistant: big,
                 outcome: PersistedTurnOutcome::Ok,
-                error: None,
+                failure: None,
             },
         ];
         let task = build_turn_task(&turns, "next");
@@ -1422,7 +2126,7 @@ mod tests {
             user: "find bun shell examples".into(),
             assistant: "Here are three repos …".into(),
             outcome: PersistedTurnOutcome::Ok,
-            error: None,
+            failure: None,
         }];
         let rollup = build_turn_task(&turns, "show me the second one");
 
@@ -1482,6 +2186,69 @@ mod tests {
         let mut turn = active_turn("First item.\n\n");
         turn.current_item_id = Some("item-1".into());
         assert!(!turn.enter_item("item-2"));
+    }
+
+    /// S09: the reducer-driven session reliability state makes a failed turn
+    /// actionable (AwaitingRecovery with a Retry path), keeps a user Stop
+    /// quiet (no recovery card), and makes an idle engine death actionable
+    /// through the outside-turn projection.
+    #[test]
+    fn flow_reliability_failure_is_actionable_and_stop_stays_quiet() {
+        use sk_protocol::ai_reliability::{
+            AiFailure, AiFailureKind, AiPhaseTag, RetrySafety, RuntimeFailure,
+        };
+        let failure = || {
+            AiFailure::new(
+                AiFailureKind::Runtime(RuntimeFailure::RuntimeClosed),
+                RetrySafety::SameSelectionReadOnly,
+            )
+        };
+
+        // Failed turn → actionable recovery → manual Retry reaches Running.
+        let mut failed = FlowReliability::new("project:test", "/w/flows/test.md", "codex");
+        failed.begin_turn("project:test", "/w/flows/test.md", 0);
+        assert_eq!(failed.state().phase.tag(), AiPhaseTag::Running);
+        failed.fail_turn(failure());
+        assert!(failed.awaiting_recovery(), "failure must become actionable");
+        assert!(
+            failed.retry_turn("project:test", 0),
+            "manual retry must be accepted"
+        );
+        assert_eq!(failed.state().phase.tag(), AiPhaseTag::Running);
+
+        // User stop → truthful cancellation, never the recovery treatment.
+        let mut stopped = FlowReliability::new("project:test", "/w/flows/test.md", "codex");
+        stopped.begin_turn("project:test", "/w/flows/test.md", 0);
+        stopped.cancel_turn(true);
+        assert_eq!(stopped.state().phase.tag(), AiPhaseTag::Cancelled);
+        assert!(!stopped.awaiting_recovery(), "stop must stay quiet");
+
+        // Engine death while idle → actionable without fabricating a turn.
+        let mut idle = FlowReliability::new("project:test", "/w/flows/test.md", "codex");
+        idle.fail_outside_turn(failure());
+        assert!(idle.awaiting_recovery());
+
+        // Rethread selection acknowledges through the reducer.
+        assert!(idle.select_rethread(), "rethread must be selectable");
+    }
+
+    /// S09: persisted failures round-trip codes through `to_failure`, so
+    /// restore-time recovery planning stays code-accurate.
+    #[test]
+    fn persisted_failure_round_trips_code_through_to_failure() {
+        use sk_protocol::ai_reliability::AiFailureCode;
+        for legacy in [
+            "mdflow CLI not found on PATH (npm i -g mdflow)",
+            "protocol violation: junk",
+            "totally novel",
+        ] {
+            let persisted = PersistedAiFailure::from_legacy_error(legacy);
+            assert_eq!(persisted.to_failure().code, persisted.code, "{legacy}");
+        }
+        assert_eq!(
+            PersistedAiFailure::unknown_default().to_failure().code,
+            AiFailureCode::Unknown
+        );
     }
 
     #[test]

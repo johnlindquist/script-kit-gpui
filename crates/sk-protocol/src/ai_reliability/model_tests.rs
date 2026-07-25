@@ -272,6 +272,82 @@ fn quick_ai_deadline_escalates_without_retry() {
     }
 }
 
+/// The safest retry category must never be harder to retry than the one that
+/// means "ask the user first".
+///
+/// `manual_retry_option` used to gate `SameSelectionReadOnly` behind
+/// `ProgressSnapshot::permits_automatic_replay`, which requires
+/// `TurnRisk::ReadOnly`. Every Flow turn is `MayMutate`, so a flow failure
+/// carrying the SAFEST category produced a recovery card whose primary Retry
+/// button was disabled, while the same card for an `ExplicitUserConfirmation`
+/// failure offered Retry. Automatic replay is decided separately by
+/// `automatic_retry_allowed`, which applies that predicate itself; a manual
+/// press is the explicit confirmation.
+#[test]
+fn manual_retry_never_penalizes_the_safest_retry_category() {
+    let mutating = ProgressSnapshot {
+        partial_output_available: true,
+        mutating_effect_started: true,
+        externally_visible_effect_started: false,
+    };
+    let plan_for = |safety| {
+        recovery_plan_for(
+            &identity(),
+            &AiFailure::new(
+                AiFailureKind::Runtime(RuntimeFailure::RuntimeClosed),
+                safety,
+            ),
+            ready().retry,
+            TurnRisk::MayMutate,
+            &mutating,
+        )
+    };
+    for safety in [
+        RetrySafety::SameSelectionReadOnly,
+        RetrySafety::ExplicitUserConfirmation,
+    ] {
+        assert!(
+            plan_for(safety)
+                .option(RecoveryActionKind::Retry)
+                .is_some_and(|option| option.enabled),
+            "{safety:?} must offer a pressable manual Retry"
+        );
+    }
+    for safety in [RetrySafety::ReconnectOnly, RetrySafety::Never] {
+        assert!(
+            plan_for(safety)
+                .option(RecoveryActionKind::Retry)
+                .is_some_and(|option| !option.enabled),
+            "{safety:?} must NOT offer a pressable manual Retry"
+        );
+    }
+
+    // Budget exhaustion still wins over category.
+    let exhausted = recovery_plan_for(
+        &identity(),
+        &AiFailure::new(
+            AiFailureKind::Runtime(RuntimeFailure::RuntimeClosed),
+            RetrySafety::SameSelectionReadOnly,
+        ),
+        RetryLedger {
+            policy: RetryPolicy {
+                automatic_max: 0,
+                manual_max: 0,
+            },
+            automatic_used: 0,
+            manual_used: 0,
+        },
+        TurnRisk::ReadOnly,
+        &ProgressSnapshot::none(),
+    );
+    assert!(
+        exhausted
+            .option(RecoveryActionKind::Retry)
+            .is_some_and(|option| !option.enabled),
+        "an exhausted manual budget must still disable Retry"
+    );
+}
+
 #[test]
 fn external_auth_launch_returns_to_actionable_recovery_until_health_is_observed() {
     let failure = AiFailure::new(

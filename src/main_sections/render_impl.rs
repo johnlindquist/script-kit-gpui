@@ -103,6 +103,21 @@ impl Render for ScriptListApp {
                     let result = self.submit_flow_chat_message(session_id, text.clone(), cx);
                     self.stage_unconsumed_flow_message(text, result, cx);
                 }
+                crate::flows::session::FlowChatRequest::Recovery {
+                    session_id,
+                    message_id,
+                    action,
+                } => {
+                    tracing::info!(
+                        target: "script_kit::flows",
+                        event = "flow_turn_recovery_action",
+                        session_id,
+                        message_id = %message_id,
+                        action = ?action,
+                        "Recovery action chosen on a failed transcript turn"
+                    );
+                    self.dispatch_flow_recovery_action(session_id, action, window, cx);
+                }
                 crate::flows::session::FlowChatRequest::ShowActions { session_id } => {
                     let in_session = matches!(
                         self.current_view,

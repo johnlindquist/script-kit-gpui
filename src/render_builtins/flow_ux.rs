@@ -38,12 +38,13 @@ pub(crate) enum FlowDeskRow {
 }
 
 /// How a settled turn presents in the transcript: normal completion, a quiet
-/// user-initiated stop (never the red error treatment), or a real failure.
+/// user-initiated stop (never the red error treatment), or a real typed
+/// failure (S09 — the classified record survives to persistence/recovery).
 #[derive(Clone)]
 pub(crate) enum FlowTurnOutcome {
     Ok,
     Stopped,
-    Failed(String),
+    Failed(crate::ai::reliability::AppFailureRecord),
 }
 
 use crate::flows::session::FLOW_STOPPED_CAPTION;
@@ -88,24 +89,21 @@ fn finalize_flow_session_turn(
 ) -> FinalizedFlowTurn {
     use crate::flows::session::PersistedTurnOutcome;
 
-    let (outcome, error) = match outcome {
+    let (outcome, failure) = match outcome {
         FlowTurnOutcome::Ok => (PersistedTurnOutcome::Ok, None),
         FlowTurnOutcome::Stopped => (PersistedTurnOutcome::Stopped, None),
-        FlowTurnOutcome::Failed(error) => {
-            let error = error.trim();
-            let error = if error.is_empty() {
-                "Flow turn failed".to_string()
-            } else {
-                error.to_string()
-            };
-            (PersistedTurnOutcome::Failed, Some(error))
-        }
+        FlowTurnOutcome::Failed(record) => (
+            PersistedTurnOutcome::Failed,
+            Some(crate::flows::session::PersistedAiFailure::from_record(
+                &record,
+            )),
+        ),
     };
     let turn = crate::flows::session::SessionTurn {
         user: active.user_text,
         assistant: active.assistant_acc,
         outcome,
-        error,
+        failure,
     };
     let display = flow_turn_display_assistant(&turn);
     let live_suffix = display[turn.assistant.len()..].to_string();
@@ -280,6 +278,48 @@ fn shell_escape_path(path: &str) -> String {
         path.to_string()
     } else {
         format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
+
+/// Recovery actions the Flow session surface can actually dispatch (S09).
+/// The shared reducer plans the options; this filter keeps the card honest —
+/// an action the surface cannot perform is never rendered enabled.
+fn flow_session_recovery_capabilities() -> crate::ai::reliability::SurfaceRecoveryCapabilities {
+    use sk_protocol::ai_reliability::RecoveryActionKind;
+    crate::ai::reliability::SurfaceRecoveryCapabilities::only([
+        RecoveryActionKind::Retry,
+        RecoveryActionKind::RethreadFlow,
+        RecoveryActionKind::RepairComponent,
+        RecoveryActionKind::CopyDetails,
+    ])
+    .layout(crate::ai::reliability::AiRecoveryLayout::TranscriptCard)
+}
+
+/// Safe, redacted diagnostic text for the CopyDetails action: stable code +
+/// category + fingerprint only — never raw provider payloads or stderr.
+fn flow_recovery_copy_details(meta: &crate::flows::session::FlowSessionMeta) -> String {
+    let failure = meta
+        .turns
+        .iter()
+        .rev()
+        .find_map(|turn| turn.failure.as_ref());
+    match failure {
+        Some(failure) => format!(
+            "Flow: {}\nEngine: {}\nFailure code: {:?}\nCategory: {:?}\nSummary: {}\nDiagnostic fingerprint: {}",
+            meta.flow_id,
+            meta.engine,
+            failure.code,
+            failure.category,
+            failure.safe_summary,
+            failure
+                .diagnostic_fingerprint
+                .as_deref()
+                .unwrap_or("unavailable"),
+        ),
+        None => format!(
+            "Flow: {}\nEngine: {}\nNo settled failure recorded for this session.",
+            meta.flow_id, meta.engine
+        ),
     }
 }
 
@@ -749,11 +789,14 @@ impl ScriptListApp {
                         cx,
                     );
                     if failed {
-                        chat.set_message_error(
+                        let restored = turn
+                            .failure
+                            .clone()
+                            .unwrap_or_else(crate::flows::session::PersistedAiFailure::unknown_default);
+                        chat.set_message_failure(
                             &message_id,
-                            turn.error
-                                .clone()
-                                .unwrap_or_else(|| "Flow turn failed".to_string()),
+                            restored.to_failure(),
+                            restored.safe_summary,
                             cx,
                         );
                     }
@@ -856,6 +899,23 @@ impl ScriptListApp {
             let _ = actions_sender
                 .try_send(crate::flows::session::FlowChatRequest::ShowActions { session_id });
         }));
+        // S10: without a recovery callback the per-turn card renders only
+        // CopyDetails — every action that could actually fix the failure is
+        // hidden, because `turn_recovery_capabilities` derives availability
+        // from `on_recovery.is_some()`. The session owner can perform them,
+        // so route them back to it.
+        let recovery_sender = self.flow_chat_sender.clone();
+        let chat = chat.with_recovery_callback(std::sync::Arc::new(
+            move |message_id: String, action: sk_protocol::ai_reliability::AiRecoveryAction| {
+                let _ = recovery_sender.try_send(
+                    crate::flows::session::FlowChatRequest::Recovery {
+                        session_id,
+                        message_id,
+                        action,
+                    },
+                );
+            },
+        ));
         let entity = cx.new(|_| chat);
 
         let meta = crate::flows::session::FlowSessionMeta {
@@ -878,6 +938,11 @@ impl ScriptListApp {
                 crate::flows::session::SessionTransport::CodexThread
             ),
             needs_rethread: false,
+            reliability: crate::flows::session::FlowReliability::new(
+                &flow.id,
+                &flow.path,
+                &flow.engine,
+            ),
         };
         // Codex transport: warm the protocol thread while the user types
         // their first message. File read + server spawn + thread/start all
@@ -1014,10 +1079,21 @@ impl ScriptListApp {
                 item_acc: String::new(),
                 user_text: text,
             });
+            let turn_ordinal = meta.turns.len();
+            let (flow_id, flow_path) = (meta.flow_id.clone(), meta.flow_path.clone());
+            meta.reliability
+                .begin_turn(&flow_id, &flow_path, turn_ordinal);
+            // Classified as invalid configuration: the definition itself —
+            // not the provider — is what blocks the turn. The raw path/io
+            // detail stops at the diagnostic vault.
+            let failure = crate::ai::reliability::provider_failure(
+                sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                format!("invalid configuration: {error}"),
+            );
             self.finish_flow_turn(
                 session_id,
                 crate::flows::session::SessionState::Done(None),
-                FlowTurnOutcome::Failed(error),
+                FlowTurnOutcome::Failed(failure),
                 cx,
             );
             cx.notify();
@@ -1050,6 +1126,10 @@ impl ScriptListApp {
         });
         meta.needs_rethread = false;
         meta.state = crate::flows::session::SessionState::Working;
+        let turn_ordinal = meta.turns.len();
+        let (flow_id, flow_path) = (meta.flow_id.clone(), meta.flow_path.clone());
+        meta.reliability
+            .begin_turn(&flow_id, &flow_path, turn_ordinal);
 
         match transport {
             crate::flows::session::SessionTransport::CodexThread => {
@@ -1203,12 +1283,40 @@ impl ScriptListApp {
         };
         let entity = self.flow_sessions[index].1.clone();
         let message_id = active.message_id.clone();
+        // Drive the reducer-owned reliability state BEFORE projecting the
+        // transcript so recovery actions are already truthful when the card
+        // renders in the same pass (S09).
+        let had_partial_output = !active.assistant_acc.is_empty();
+        match &outcome {
+            FlowTurnOutcome::Ok => {
+                self.flow_sessions[index].0.reliability.complete_turn();
+            }
+            FlowTurnOutcome::Stopped => {
+                self.flow_sessions[index]
+                    .0
+                    .reliability
+                    .cancel_turn(had_partial_output);
+            }
+            FlowTurnOutcome::Failed(record) => {
+                self.flow_sessions[index]
+                    .0
+                    .reliability
+                    .fail_turn(record.failure.clone());
+            }
+        }
+        let failure_for_row = match &outcome {
+            FlowTurnOutcome::Failed(record) => Some(record.failure.clone()),
+            FlowTurnOutcome::Ok | FlowTurnOutcome::Stopped => None,
+        };
         // Build the finalized turn ONCE: raw assistant + structured outcome
         // for persistence/rollup, plus the exact display suffix for the live
         // row. Both sides come from the same projection (WP-A3).
         let FinalizedFlowTurn { turn, live_suffix } = finalize_flow_session_turn(active, outcome);
-        let error = turn.error.clone();
-        let had_error = error.is_some();
+        let failure_note = turn
+            .failure
+            .as_ref()
+            .map(|failure| failure.safe_summary.clone());
+        let had_error = failure_note.is_some();
         // WP-B3: the finalized display suffix is a visible commit too — count it
         // through the same child-commit helper semantics as streamed deltas.
         if !live_suffix.is_empty() {
@@ -1221,8 +1329,8 @@ impl ScriptListApp {
                 chat.append_chunk(&message_id, &live_suffix, cx);
             }
             chat.complete_streaming(&message_id, cx);
-            if let Some(note) = error {
-                chat.set_message_error(&message_id, note, cx);
+            if let (Some(failure), Some(note)) = (failure_for_row, failure_note) {
+                chat.set_message_failure(&message_id, failure, note, cx);
             }
         });
         let meta = &mut self.flow_sessions[index].0;
@@ -1337,7 +1445,7 @@ impl ScriptListApp {
                 self.finish_flow_turn(
                     session_id,
                     SessionState::Done(None),
-                    FlowTurnOutcome::Failed(failure.primary_message().to_string()),
+                    FlowTurnOutcome::Failed(failure),
                     cx,
                 );
             }
@@ -1358,12 +1466,19 @@ impl ScriptListApp {
                     self.finish_flow_turn(
                         session_id,
                         crate::flows::session::SessionState::Done(None),
-                        FlowTurnOutcome::Failed(failure.primary_message().to_string()),
+                        FlowTurnOutcome::Failed(failure),
                         cx,
                     );
                 } else {
+                    // Engine death while idle: no turn to settle, but the
+                    // typed recovery state must still become actionable.
+                    self.flow_sessions[index]
+                        .0
+                        .reliability
+                        .fail_outside_turn(failure.failure.clone());
                     self.flow_sessions[index].0.state =
                         crate::flows::session::SessionState::Done(None);
+                    cx.notify();
                 }
             }
         }
@@ -1391,7 +1506,10 @@ impl ScriptListApp {
                 self.finish_flow_turn(
                     session_id,
                     crate::flows::session::SessionState::Done(None),
-                    FlowTurnOutcome::Failed("run disappeared from the registry".to_string()),
+                    FlowTurnOutcome::Failed(crate::ai::reliability::process_failure(
+                        sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                        crate::ai::reliability::ProcessFailureFacts::SessionLost { session: None },
+                    )),
                     cx,
                 );
                 dirty = true;
@@ -1431,12 +1549,15 @@ impl ScriptListApp {
                     RunPhase::Cancelled => (SessionState::NeedsYou, FlowTurnOutcome::Stopped),
                     _ => (
                         SessionState::Done(run.exit_code.map(|code| code as i32)),
-                        FlowTurnOutcome::Failed(
-                            run.failure
-                                .as_ref()
-                                .map(|failure| failure.primary_message().to_string())
-                                .unwrap_or_else(|| run.display_status()),
-                        ),
+                        FlowTurnOutcome::Failed(run.failure.clone().unwrap_or_else(|| {
+                            crate::ai::reliability::process_failure(
+                                sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                                crate::ai::reliability::ProcessFailureFacts::ChildExited {
+                                    exit_code: run.exit_code.map(|code| code as i32),
+                                    signal: None,
+                                },
+                            )
+                        })),
                     ),
                 };
                 self.finish_flow_turn(session_id, state, outcome, cx);
@@ -2239,18 +2360,286 @@ impl ScriptListApp {
                     height: shell.divider_height,
                     visible: shell.divider_height > 0.0,
                 },
-                main: div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .w_full()
-                    .child(entity)
-                    .into_any_element(),
+                main: {
+                    // S09: the shared AI recovery card (same anatomy and
+                    // `ai-recovery-*` semantic ids as Agent Chat/Quick AI)
+                    // projects from the reducer-owned session state. It
+                    // renders below the transcript in the TranscriptCard
+                    // layout; a settled Ok/Stopped turn projects nothing.
+                    let recovery_card = crate::ai::reliability::project_recovery(
+                        &meta.reliability.state().identity,
+                        meta.reliability.state(),
+                        &flow_session_recovery_capabilities(),
+                    );
+                    let mut main = div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .w_full()
+                        .child(entity);
+                    if let Some(spec) = recovery_card {
+                        let weak = cx.entity().downgrade();
+                        let action_weak = weak.clone();
+                        let dismiss_weak = weak;
+                        let handlers = crate::components::AiRecoveryCardHandlers {
+                            on_action: std::rc::Rc::new(move |action, window, cx| {
+                                if let Some(entity) = action_weak.upgrade() {
+                                    entity.update(cx, |this: &mut Self, cx| {
+                                        this.dispatch_flow_recovery_action(
+                                            session_id, action, window, cx,
+                                        );
+                                    });
+                                }
+                            }),
+                            on_dismiss: Some(std::rc::Rc::new(move |_window, cx| {
+                                if let Some(entity) = dismiss_weak.upgrade() {
+                                    entity.update(cx, |this: &mut Self, cx| {
+                                        this.dismiss_flow_recovery(session_id, cx);
+                                    });
+                                }
+                            })),
+                        };
+                        main = main.child(
+                            div()
+                                .id("flow-session-recovery-stack")
+                                .w_full()
+                                .px(px(12.0))
+                                .pb(px(6.0))
+                                .child(crate::components::render_ai_recovery_card(
+                                    spec,
+                                    &self.theme,
+                                    handlers,
+                                )),
+                        );
+                    }
+                    main.into_any_element()
+                },
                 footer,
                 overlays: Vec::new(),
             },
         )
+    }
+
+    /// Route one shared-card recovery action back into the owning Flow
+    /// session (S10 contract: ChatPrompt never invents Flow retry behavior —
+    /// the Flow surface owns dispatch).
+    pub(crate) fn dispatch_flow_recovery_action(
+        &mut self,
+        session_id: u64,
+        action: sk_protocol::ai_reliability::AiRecoveryAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use sk_protocol::ai_reliability::AiRecoveryAction;
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        tracing::info!(
+            target: "script_kit::flows",
+            event = "flow_recovery_action",
+            session_id,
+            action = ?action,
+            "Flow recovery action selected"
+        );
+        match action {
+            AiRecoveryAction::Retry => {
+                self.retry_flow_turn(session_id, cx);
+            }
+            AiRecoveryAction::RethreadFlow => {
+                let meta = &mut self.flow_sessions[index].0;
+                if !meta.reliability.select_rethread() {
+                    return;
+                }
+                // A rethread lands the next submit on a FRESH protocol
+                // thread carrying the flow contract + transcript rollup.
+                meta.thread_ready = false;
+                meta.needs_rethread = true;
+                self.retry_flow_turn(session_id, cx);
+            }
+            AiRecoveryAction::RepairComponent { .. } => {
+                // mdflow missing/broken: the desk's install affordance is
+                // the one repair path (quick terminal `npm i -g mdflow`).
+                self.flow_sessions[index]
+                    .0
+                    .reliability
+                    .select_recovery(AiRecoveryAction::RepairComponent {
+                        component: sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                    });
+                let _ = window;
+                self.open_quick_terminal_with_command(None, "npm i -g mdflow".to_string(), cx);
+            }
+            AiRecoveryAction::CopyDetails => {
+                let meta = &self.flow_sessions[index].0;
+                let details = flow_recovery_copy_details(meta);
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(details));
+                self.toast_manager.push(
+                    crate::components::toast::Toast::success(
+                        "Safe diagnostic details copied".to_string(),
+                        &self.theme,
+                    )
+                    .duration_ms(Some(2000)),
+                );
+                cx.notify();
+            }
+            _ => {
+                tracing::warn!(
+                    target: "script_kit::flows",
+                    event = "flow_recovery_action_unsupported",
+                    session_id,
+                    action = ?action,
+                    "Flow surface does not dispatch this recovery action"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn dismiss_flow_recovery(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        self.flow_sessions[index].0.reliability.dismiss();
+        cx.notify();
+    }
+
+    /// Retry the failed turn WITHOUT duplicating its user row: the failed
+    /// turn stays in the transcript (typed error row), a fresh streaming
+    /// bubble carries the retried attempt of the same user text.
+    fn retry_flow_turn(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        if self.flow_sessions[index].0.active_turn.is_some() {
+            return;
+        }
+        let Some(user_text) = self.flow_sessions[index]
+            .0
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| {
+                turn.outcome == crate::flows::session::PersistedTurnOutcome::Failed
+            })
+            .map(|turn| turn.user.clone())
+        else {
+            return;
+        };
+        let turn_ordinal = self.flow_sessions[index].0.turns.len();
+        let flow_id = self.flow_sessions[index].0.flow_id.clone();
+        if !self.flow_sessions[index]
+            .0
+            .reliability
+            .retry_turn(&flow_id, turn_ordinal)
+        {
+            self.toast_manager.push(
+                crate::components::toast::Toast::error(
+                    "Retry limit reached — start a new thread from ⌘K".to_string(),
+                    &self.theme,
+                )
+                .duration_ms(Some(2500)),
+            );
+            cx.notify();
+            return;
+        }
+        self.dispatch_flow_turn_without_user_echo(session_id, user_text, cx);
+    }
+
+    /// Dispatch one turn on the session's transport with the streaming
+    /// bubble only (no user-row echo — used by Retry, where the user text is
+    /// already in the transcript on the failed turn).
+    fn dispatch_flow_turn_without_user_echo(
+        &mut self,
+        session_id: u64,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        let mut thread_profile: Option<crate::flows::session::FlowThreadProfile> = None;
+        let (transport, prompt) = {
+            let meta = &self.flow_sessions[index].0;
+            let prompt = match meta.transport {
+                crate::flows::session::SessionTransport::CodexThread => {
+                    if meta.turns.is_empty() || meta.needs_rethread {
+                        match std::fs::read_to_string(&meta.flow_path) {
+                            Ok(markdown) => {
+                                let task = if meta.turns.is_empty() {
+                                    text.clone()
+                                } else {
+                                    crate::flows::session::build_turn_task(&meta.turns, &text)
+                                };
+                                let contract = crate::flows::session::resolve_flow_thread_contract(
+                                    &markdown, &task,
+                                );
+                                thread_profile = Some(contract.profile);
+                                contract.first_prompt
+                            }
+                            Err(_) => text.clone(),
+                        }
+                    } else {
+                        text.clone()
+                    }
+                }
+                crate::flows::session::SessionTransport::MdflowTurns => {
+                    crate::flows::session::build_turn_task(&meta.turns, &text)
+                }
+            };
+            (meta.transport, prompt)
+        };
+        let turn_index = self.flow_sessions[index].0.turns.len();
+        let message_id = format!("flow-{session_id}-retry-{turn_index}");
+        let entity = self.flow_sessions[index].1.clone();
+        entity.update(cx, |chat, cx| {
+            chat.start_streaming(
+                message_id.clone(),
+                crate::protocol::ChatMessagePosition::Left,
+                cx,
+            );
+        });
+        let meta = &mut self.flow_sessions[index].0;
+        meta.active_turn = Some(crate::flows::session::ActiveTurn {
+            run_id: None,
+            message_id,
+            assistant_acc: String::new(),
+            current_item_id: None,
+            item_acc: String::new(),
+            user_text: text,
+        });
+        meta.needs_rethread = false;
+        meta.state = crate::flows::session::SessionState::Working;
+        match transport {
+            crate::flows::session::SessionTransport::CodexThread => {
+                let meta = &self.flow_sessions[index].0;
+                crate::flows::codex_client::codex_app_server().converse(
+                    session_id,
+                    &meta.cwd,
+                    thread_profile.take(),
+                    prompt,
+                );
+            }
+            crate::flows::session::SessionTransport::MdflowTurns => {
+                let run_id = {
+                    let meta = &self.flow_sessions[index].0;
+                    crate::flows::runner::launch_flow(
+                        &meta.flow_id,
+                        &meta.flow_name,
+                        &meta.flow_path,
+                        &meta.cwd,
+                        crate::flows::model::FlowUxVariant::Flash,
+                        crate::flows::model::EngagementMode::Background,
+                        vec![("task".to_string(), prompt)],
+                        std::time::Instant::now(),
+                        true,
+                    )
+                };
+                if let Some(active) = self.flow_sessions[index].0.active_turn.as_mut() {
+                    active.run_id = Some(run_id);
+                }
+            }
+        }
+        self.start_flow_ux_tick(cx);
+        cx.notify();
     }
 
     /// `flowUx` automation snapshot for getState (protocol §6).
@@ -2306,6 +2695,22 @@ impl ScriptListApp {
                     crate::flows::session::SessionTransport::MdflowTurns => "mdflowTurns",
                 },
                 engine: meta.engine.clone(),
+                reliability_phase: crate::ai::reliability::phase_name(
+                    &meta.reliability.state().phase,
+                )
+                .to_string(),
+                failure_code: match &meta.reliability.state().phase {
+                    sk_protocol::ai_reliability::AiPhase::AwaitingRecovery { failure, .. } => {
+                        Some(format!("{:?}", failure.code))
+                    }
+                    _ => None,
+                },
+                last_failure_summary: meta
+                    .turns
+                    .iter()
+                    .rev()
+                    .find_map(|turn| turn.failure.as_ref())
+                    .map(|failure| failure.safe_summary.clone()),
             })
             .collect();
         let mut snapshot = crate::flows::automation::flow_ux_state(
@@ -2398,6 +2803,11 @@ mod flow_session_escape_origin {
             }),
             thread_ready: true,
             needs_rethread: false,
+            reliability: crate::flows::session::FlowReliability::new(
+                "project:test",
+                "/tmp/flow-test.md",
+                "codex",
+            ),
         };
         let mut sessions = vec![(meta, ())];
         let removed = remove_flow_session(&mut sessions, 7).expect("live session removed");
@@ -2618,7 +3028,7 @@ mod flow_session_footer_and_finalize {
             finalize_flow_session_turn(active_turn("partial answer"), FlowTurnOutcome::Stopped);
         assert_eq!(finalized.turn.assistant, "partial answer");
         assert_eq!(finalized.turn.outcome, PersistedTurnOutcome::Stopped);
-        assert_eq!(finalized.turn.error, None);
+        assert_eq!(finalized.turn.failure, None);
         assert_eq!(finalized.live_suffix, format!("\n\n{FLOW_STOPPED_CAPTION}"));
 
         let empty = finalize_flow_session_turn(active_turn(""), FlowTurnOutcome::Stopped);
@@ -2634,7 +3044,7 @@ mod flow_session_footer_and_finalize {
             user: "u".into(),
             assistant: raw.into(),
             outcome: PersistedTurnOutcome::Stopped,
-            error: None,
+            failure: None,
         };
         assert_eq!(
             flow_turn_display_assistant(&turn("body\n\n")),
@@ -2660,7 +3070,7 @@ mod flow_session_footer_and_finalize {
             user: "u".into(),
             assistant: format!("The literal marker is {FLOW_STOPPED_CAPTION}"),
             outcome: PersistedTurnOutcome::Stopped,
-            error: None,
+            failure: None,
         };
         assert!(
             flow_turn_display_assistant(&natural).ends_with(&format!("\n\n{FLOW_STOPPED_CAPTION}"))
@@ -2670,29 +3080,36 @@ mod flow_session_footer_and_finalize {
             user: "u".into(),
             assistant: "done".into(),
             outcome: PersistedTurnOutcome::Ok,
-            error: None,
+            failure: None,
         };
         assert_eq!(flow_turn_display_assistant(&ok), "done");
     }
 
-    /// WP-A3: a Failed turn persists a normalized nonblank error and no
-    /// caption; unicode raw text round-trips through the projection safely.
+    /// S09: a Failed turn persists the TYPED failure projection — safe
+    /// summary copy plus stable code/category — and never the raw transport
+    /// string; unicode raw text round-trips through the projection safely.
     #[test]
-    fn finalize_failed_turn_normalizes_error() {
-        let finalized = finalize_flow_session_turn(
-            active_turn("partial 🚀"),
-            FlowTurnOutcome::Failed("boom".into()),
+    fn finalize_failed_turn_persists_typed_failure() {
+        let record = crate::ai::reliability::provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            "raw transport stderr that must never persist",
         );
+        let expected_summary = record.primary_message().to_string();
+        let finalized =
+            finalize_flow_session_turn(active_turn("partial 🚀"), FlowTurnOutcome::Failed(record));
         assert_eq!(finalized.turn.assistant, "partial 🚀");
         assert_eq!(finalized.turn.outcome, PersistedTurnOutcome::Failed);
-        assert_eq!(finalized.turn.error.as_deref(), Some("boom"));
         assert_eq!(finalized.live_suffix, "");
-
-        let blank = finalize_flow_session_turn(
-            active_turn("partial"),
-            FlowTurnOutcome::Failed("   ".into()),
+        let failure = finalized.turn.failure.as_ref().expect("typed failure");
+        assert_eq!(failure.safe_summary, expected_summary);
+        assert!(
+            !failure.safe_summary.contains("raw transport stderr"),
+            "raw transport text must never enter persistence"
         );
-        assert_eq!(blank.turn.error.as_deref(), Some("Flow turn failed"));
+        assert!(
+            failure.diagnostic_fingerprint.is_some(),
+            "redacted diagnostic fingerprint must survive for CopyDetails"
+        );
     }
 
     /// WP-A3: an ordinary completion persists the accumulator verbatim with
@@ -2702,7 +3119,7 @@ mod flow_session_footer_and_finalize {
         let finalized = finalize_flow_session_turn(active_turn("done ✅"), FlowTurnOutcome::Ok);
         assert_eq!(finalized.turn.assistant, "done ✅");
         assert_eq!(finalized.turn.outcome, PersistedTurnOutcome::Ok);
-        assert_eq!(finalized.turn.error, None);
+        assert_eq!(finalized.turn.failure, None);
         assert_eq!(finalized.live_suffix, "");
 
         let stopped_unicode =

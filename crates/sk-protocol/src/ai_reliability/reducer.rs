@@ -72,12 +72,21 @@ fn session_replaced(
     Ok(no_commands(state))
 }
 
+/// Plan the options a person may choose from after a failure.
+///
+/// `risk` and `progress` describe how far the failed turn got. They are
+/// deliberately NOT consulted here: every option in this plan is chosen by a
+/// person, and `automatic_retry_allowed` is where unattended replay is judged
+/// against exactly those two values. They stay in the signature because a
+/// caller holding them is the caller that has enough context to plan at all,
+/// and because a future progress-sensitive option (for example "resume from
+/// partial output") belongs in this function rather than at each call site.
 pub fn recovery_plan_for(
     identity: &AiSurfaceIdentity,
     failure: &AiFailure,
     retry: RetryLedger,
-    risk: TurnRisk,
-    progress: &ProgressSnapshot,
+    _risk: TurnRisk,
+    _progress: &ProgressSnapshot,
 ) -> RecoveryPlan {
     let mut options = match &failure.kind {
         AiFailureKind::Capability(capability) => match capability {
@@ -164,25 +173,21 @@ pub fn recovery_plan_for(
             ],
             ConfigurationFailure::SidecarMissing | ConfigurationFailure::MdflowMissing => vec![
                 enabled(RecoveryActionKind::RepairComponent, RecoveryRole::Primary),
-                manual_retry_option(failure, retry, risk, progress, RecoveryRole::Secondary),
+                manual_retry_option(failure, retry, RecoveryRole::Secondary),
             ],
         },
         AiFailureKind::Connectivity(connectivity) => match connectivity {
             ConnectivityFailure::Offline | ConnectivityFailure::Timeout => vec![
-                manual_retry_option(failure, retry, risk, progress, RecoveryRole::Primary),
+                manual_retry_option(failure, retry, RecoveryRole::Primary),
                 enabled(RecoveryActionKind::CheckAgain, RecoveryRole::Secondary),
             ],
-            ConnectivityFailure::RateLimited { .. } => vec![manual_retry_option(
-                failure,
-                retry,
-                risk,
-                progress,
-                RecoveryRole::Primary,
-            )],
+            ConnectivityFailure::RateLimited { .. } => {
+                vec![manual_retry_option(failure, retry, RecoveryRole::Primary)]
+            }
         },
         AiFailureKind::Provider(provider) => match provider {
             ProviderFailure::TemporarilyUnavailable | ProviderFailure::ServerRejected => vec![
-                manual_retry_option(failure, retry, risk, progress, RecoveryRole::Primary),
+                manual_retry_option(failure, retry, RecoveryRole::Primary),
                 enabled(RecoveryActionKind::ChooseProvider, RecoveryRole::Secondary),
             ],
         },
@@ -190,27 +195,34 @@ pub fn recovery_plan_for(
             RuntimeFailure::SpawnFailed
             | RuntimeFailure::RuntimeClosed
             | RuntimeFailure::ChildExited { .. } => {
-                if matches!(identity, AiSurfaceIdentity::FlowRun { .. }) {
-                    vec![
+                match identity {
+                    AiSurfaceIdentity::FlowRun { .. } => vec![
                         enabled(RecoveryActionKind::RestartFlowRun, RecoveryRole::Primary),
                         enabled(RecoveryActionKind::RepairComponent, RecoveryRole::Secondary),
-                    ]
-                } else {
-                    vec![
-                        manual_retry_option(failure, retry, risk, progress, RecoveryRole::Primary),
+                    ],
+                    // A flow conversation whose engine died has a repair the
+                    // other surfaces do not: start a fresh thread against the
+                    // same flow. Without it, an engine death while idle left
+                    // Retry as the only move, and retrying a turn on a dead
+                    // engine is not what the user needs.
+                    AiSurfaceIdentity::FlowConversation { .. } => vec![
+                        manual_retry_option(failure, retry, RecoveryRole::Primary),
+                        enabled(RecoveryActionKind::RethreadFlow, RecoveryRole::Secondary),
                         enabled(RecoveryActionKind::RepairComponent, RecoveryRole::Secondary),
-                    ]
+                    ],
+                    _ => vec![
+                        manual_retry_option(failure, retry, RecoveryRole::Primary),
+                        enabled(RecoveryActionKind::RepairComponent, RecoveryRole::Secondary),
+                    ],
                 }
             }
             RuntimeFailure::SessionLost { reattach } => match reattach {
                 ReattachAvailability::Available { .. } => vec![
                     enabled(RecoveryActionKind::Reattach, RecoveryRole::Primary),
-                    flow_rethread_or_retry(identity, failure, retry, risk, progress),
+                    flow_rethread_or_retry(identity, failure, retry),
                 ],
                 ReattachAvailability::Unavailable => {
-                    vec![flow_rethread_or_retry(
-                        identity, failure, retry, risk, progress,
-                    )]
+                    vec![flow_rethread_or_retry(identity, failure, retry)]
                 }
             },
         },
@@ -224,7 +236,7 @@ pub fn recovery_plan_for(
                 if matches!(identity, AiSurfaceIdentity::FlowConversation { .. }) {
                     enabled(RecoveryActionKind::RethreadFlow, RecoveryRole::Secondary)
                 } else {
-                    manual_retry_option(failure, retry, risk, progress, RecoveryRole::Secondary)
+                    manual_retry_option(failure, retry, RecoveryRole::Secondary)
                 },
             ],
         },
@@ -246,13 +258,7 @@ pub fn recovery_plan_for(
                 ),
             ],
         },
-        AiFailureKind::Unknown => vec![manual_retry_option(
-            failure,
-            retry,
-            risk,
-            progress,
-            RecoveryRole::Primary,
-        )],
+        AiFailureKind::Unknown => vec![manual_retry_option(failure, retry, RecoveryRole::Primary)],
     };
 
     if failure.diagnostic.is_some() {
@@ -286,11 +292,24 @@ fn disabled(
     }
 }
 
+/// Plan the MANUAL Retry option — the button a person presses.
+///
+/// Automatic replay is decided separately by `automatic_retry_allowed`, which
+/// applies `ProgressSnapshot::permits_automatic_replay` itself. Applying that
+/// same predicate here too made the ordering nonsensical:
+/// `SameSelectionReadOnly` — the safest category, meaning "replaying with the
+/// same selection is read-only" — came out LESS retryable than
+/// `ExplicitUserConfirmation`, whose whole meaning is "ask the user first".
+/// On any `TurnRisk::MayMutate` surface (every Flow turn) that disabled the
+/// primary button on the recovery card and left the user with nothing to press.
+///
+/// A manual press IS the explicit confirmation. So manual Retry is offered
+/// whenever the failure category permits replay at all, and refused only for
+/// the categories that mean "replay cannot work" (`ReconnectOnly`) or "replay
+/// must never happen" (`Never`).
 fn manual_retry_option(
     failure: &AiFailure,
     retry: RetryLedger,
-    risk: TurnRisk,
-    progress: &ProgressSnapshot,
     role: RecoveryRole,
 ) -> RecoveryOption {
     if !retry.manual_available() {
@@ -301,10 +320,8 @@ fn manual_retry_option(
         );
     }
     let safe = match failure.retry_safety {
-        RetrySafety::SameSelectionReadOnly => progress.permits_automatic_replay(risk),
-        RetrySafety::ReconnectOnly => false,
-        RetrySafety::ExplicitUserConfirmation => true,
-        RetrySafety::Never => false,
+        RetrySafety::SameSelectionReadOnly | RetrySafety::ExplicitUserConfirmation => true,
+        RetrySafety::ReconnectOnly | RetrySafety::Never => false,
     };
     if safe {
         enabled(RecoveryActionKind::Retry, role)
@@ -321,8 +338,6 @@ fn flow_rethread_or_retry(
     identity: &AiSurfaceIdentity,
     failure: &AiFailure,
     retry: RetryLedger,
-    risk: TurnRisk,
-    progress: &ProgressSnapshot,
 ) -> RecoveryOption {
     match identity {
         AiSurfaceIdentity::FlowConversation { .. } => {
@@ -336,7 +351,7 @@ fn flow_rethread_or_retry(
         | AiSurfaceIdentity::LegacyChatPrompt { .. }
         | AiSurfaceIdentity::FocusedText { .. }
         | AiSurfaceIdentity::Other { .. } => {
-            manual_retry_option(failure, retry, risk, progress, RecoveryRole::Secondary)
+            manual_retry_option(failure, retry, RecoveryRole::Secondary)
         }
     }
 }

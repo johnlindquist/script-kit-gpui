@@ -777,6 +777,199 @@ mod chat_prompt_host_mode_lifecycle {
             .expect("flow-restore chat window updates");
     }
 
+    /// S10: `set_message_error` is a classifying boundary — the raw provider
+    /// payload is captured behind the redacting vault, and the message keeps
+    /// only the typed failure plus safe display copy.
+    #[gpui::test]
+    fn set_message_error_classifies_and_never_stores_raw(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.update(|cx| {
+            cx.open_window(window_options(), |_, cx| {
+                let focus_handle = cx.focus_handle();
+                cx.new(|_| {
+                    ChatPrompt::new(
+                        "typed-failure".to_string(),
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        focus_handle,
+                        Arc::new(|_, _| {}) as ChatSubmitCallback,
+                        Arc::new(theme::Theme::default()),
+                    )
+                    // TranscriptOnly, like every real host of this prompt.
+                    // A Standalone ChatPrompt draws chrome that asks the
+                    // platform window for a raw handle, which gpui's test
+                    // window does not have — the panic is a harness limit,
+                    // not a product failure, and host mode does not affect
+                    // the classification under test.
+                    .with_host_mode(TRANSCRIPT_ONLY)
+                })
+            })
+            .expect("chat window opens")
+        });
+        cx.run_until_parked();
+
+        let raw = "usage_limit_reached: raw provider payload {json:secret}";
+        window
+            .update(cx, |prompt, _window, cx| {
+                prompt.add_message(ChatPromptMessage::user("ask"), cx);
+                prompt.start_streaming(
+                    "turn-1".to_string(),
+                    crate::protocol::ChatMessagePosition::Left,
+                    cx,
+                );
+                prompt.set_message_error("turn-1", raw.to_string(), cx);
+                let message = prompt
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.id.as_deref() == Some("turn-1"))
+                    .expect("failed message present");
+                let failure = message.failure.as_ref().expect("typed failure recorded");
+                assert_eq!(
+                    failure.code,
+                    sk_protocol::ai_reliability::AiFailureCode::UsageExhausted,
+                    "raw usage-limit payload classifies to the typed code"
+                );
+                let shown = message.error.as_deref().expect("safe copy present");
+                assert!(
+                    !shown.contains("secret") && !shown.contains("usage_limit_reached"),
+                    "displayed copy must never contain the raw payload: {shown}"
+                );
+                assert!(!message.streaming, "failure settles the streaming row");
+            })
+            .expect("chat window updates");
+    }
+
+    /// S10: the recovery card's buttons are reachable, not decorative.
+    ///
+    /// `turn_recovery_capabilities` derives which actions render from which
+    /// callbacks the host installed, so a host that forgets
+    /// `with_recovery_callback` silently ships a card whose only button is
+    /// "Copy details" — every action that could FIX the failure is hidden.
+    /// `with_recovery_callback` had zero callers until the flow session was
+    /// wired to it, which is what made this worth locking down.
+    #[gpui::test]
+    fn recovery_actions_appear_only_when_the_host_can_perform_them(cx: &mut gpui::TestAppContext) {
+        use sk_protocol::ai_reliability::RecoveryActionKind;
+        cx.update(gpui_component::init);
+        let build = |with_callbacks: bool, cx: &mut gpui::App| {
+            let focus_handle = cx.focus_handle();
+            let prompt = ChatPrompt::new(
+                "recovery-capabilities".to_string(),
+                None,
+                Vec::new(),
+                None,
+                None,
+                focus_handle,
+                Arc::new(|_, _| {}) as ChatSubmitCallback,
+                Arc::new(theme::Theme::default()),
+            )
+            .with_host_mode(TRANSCRIPT_ONLY);
+            if with_callbacks {
+                prompt
+                    .with_retry_callback(Arc::new(|_, _| {}))
+                    .with_recovery_callback(Arc::new(|_, _| {}))
+            } else {
+                prompt
+            }
+        };
+
+        cx.update(|cx| {
+            let bare = build(false, cx).turn_recovery_capabilities();
+            assert!(
+                bare.supports(RecoveryActionKind::CopyDetails),
+                "copying safe details never needs a host"
+            );
+            for unreachable in [
+                RecoveryActionKind::Retry,
+                RecoveryActionKind::SignIn,
+                RecoveryActionKind::RethreadFlow,
+            ] {
+                assert!(
+                    !bare.supports(unreachable),
+                    "{unreachable:?} must stay hidden when no host can perform it"
+                );
+            }
+
+            let hosted = build(true, cx).turn_recovery_capabilities();
+            for reachable in [
+                RecoveryActionKind::Retry,
+                RecoveryActionKind::SignIn,
+                RecoveryActionKind::SwitchAccount,
+                RecoveryActionKind::RepairComponent,
+                // The repair for a dead flow engine. Absent before S10 wiring,
+                // so the button never appeared on the failure it fixes.
+                RecoveryActionKind::RethreadFlow,
+            ] {
+                assert!(
+                    hosted.supports(reachable),
+                    "{reachable:?} must be offered once the host installed its callbacks"
+                );
+            }
+        });
+    }
+
+    /// S10: a message arriving from the SDK wire with a raw error string is
+    /// classified at ingestion — no render path ever sees the raw string.
+    #[gpui::test]
+    fn raw_sdk_error_strings_classify_at_ingestion(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.update(|cx| {
+            cx.open_window(window_options(), |_, cx| {
+                let focus_handle = cx.focus_handle();
+                cx.new(|_| {
+                    ChatPrompt::new(
+                        "sdk-ingest".to_string(),
+                        None,
+                        Vec::new(),
+                        None,
+                        None,
+                        focus_handle,
+                        Arc::new(|_, _| {}) as ChatSubmitCallback,
+                        Arc::new(theme::Theme::default()),
+                    )
+                    // TranscriptOnly, like every real host of this prompt.
+                    // A Standalone ChatPrompt draws chrome that asks the
+                    // platform window for a raw handle, which gpui's test
+                    // window does not have — the panic is a harness limit,
+                    // not a product failure, and host mode does not affect
+                    // the classification under test.
+                    .with_host_mode(TRANSCRIPT_ONLY)
+                })
+            })
+            .expect("chat window opens")
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |prompt, _window, cx| {
+                let mut failed = ChatPromptMessage::assistant("partial").with_id("sdk-1");
+                failed.error = Some("model gpt-x does not exist (raw sdk detail)".to_string());
+                prompt.add_message(failed, cx);
+                let message = prompt
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.id.as_deref() == Some("sdk-1"))
+                    .expect("ingested message present");
+                assert!(
+                    message.failure.is_some(),
+                    "raw SDK error must classify into a typed failure at ingestion"
+                );
+                assert!(
+                    !message
+                        .error
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("raw sdk detail"),
+                    "stored copy must be the safe classification, not the raw string"
+                );
+            })
+            .expect("chat window updates");
+    }
+
     /// A transcript-only host with a pending submit and non-empty input must NOT
     /// fire the submit callback, must NOT start a cursor blink, and must NOT
     /// focus its internal input across a real render pass.

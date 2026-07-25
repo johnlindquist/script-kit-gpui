@@ -14,6 +14,7 @@ pub struct ChatPrompt {
     pub on_escape: Option<ChatEscapeCallback>,
     pub on_continue: Option<ChatContinueCallback>,
     pub on_retry: Option<ChatRetryCallback>,
+    pub on_recovery: Option<ChatRecoveryCallback>,
     pub theme: Arc<theme::Theme>,
     pub turns_list_state: ListState,
     pub(super) prompt_colors: theme::PromptColors,
@@ -108,6 +109,15 @@ impl ChatPrompt {
         let models = default_models();
         let default_model = models.first().map(|m| m.name.clone());
 
+        // S10: raw SDK error strings are classified at the door.
+        let messages = messages
+            .into_iter()
+            .map(|mut message| {
+                Self::normalize_message_failure(&mut message);
+                message
+            })
+            .collect();
+
         Self {
             id,
             messages,
@@ -123,6 +133,7 @@ impl ChatPrompt {
             on_escape: None,
             on_continue: None,
             on_retry: None,
+            on_recovery: None,
             theme,
             turns_list_state: {
                 // WP-B3: chat prompt (Quick AI / Flow chat) transcript list —
@@ -398,6 +409,14 @@ impl ChatPrompt {
     /// Set the retry callback
     pub fn with_retry_callback(mut self, callback: ChatRetryCallback) -> Self {
         self.on_retry = Some(callback);
+        self
+    }
+
+    /// Set the host recovery-action callback (S10): enables the recovery
+    /// card's non-retry actions (model/provider/auth/config) for hosts that
+    /// can actually perform them.
+    pub fn with_recovery_callback(mut self, callback: ChatRecoveryCallback) -> Self {
+        self.on_recovery = Some(callback);
         self
     }
 

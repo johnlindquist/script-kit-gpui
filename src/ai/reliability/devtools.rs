@@ -106,7 +106,7 @@ pub(crate) fn ai_operation_state_snapshot(
     }
 }
 
-fn phase_name(phase: &AiPhase) -> &'static str {
+pub(crate) fn phase_name(phase: &AiPhase) -> &'static str {
     match phase {
         AiPhase::Ready => "ready",
         AiPhase::Preflighting { .. } => "preflighting",

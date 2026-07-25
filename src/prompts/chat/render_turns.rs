@@ -4,12 +4,6 @@ use super::types::conversation_turn_streaming_copy_available;
 use super::*;
 use std::borrow::Cow;
 
-fn truncate_str_chars(s: &str, max_chars: usize) -> &str {
-    s.char_indices()
-        .nth(max_chars)
-        .map_or(s, |(index, _)| &s[..index])
-}
-
 fn assistant_response_region_source<'a>(
     script_generation_mode: bool,
     response: &'a str,
@@ -43,9 +37,6 @@ impl ChatPrompt {
         };
         let copy_hover_bg = theme::hover_overlay_bg(&self.theme, 0x28); // ~16% for hover
         let error_color = theme_colors.ui.error;
-        let error_bg = rgba((error_color << 8) | 0x40); // Theme error with transparency
-        let retry_hover_bg = rgba((theme_colors.accent.selected << 8) | 0x40);
-        let has_retry_callback = self.on_retry.is_some();
         let user_fidelity_id = format!("chat-transcript-user-turn-{turn_index}");
         let response_fidelity_id = format!("chat-transcript-response-turn-{turn_index}");
         let pending_fidelity_id = format!("chat-transcript-pending-turn-{turn_index}");
@@ -79,78 +70,66 @@ impl ChatPrompt {
             );
         }
 
-        // Error state - show error message with optional retry button
+        // Failure state (S10): safe partial response + the SHARED recovery
+        // card. No raw detail is ever rendered inline — diagnostics stay
+        // behind the redacted CopyDetails action.
         if turn.failure.is_some() || turn.error.is_some() {
-            let typed_message = turn
-                .failure
-                .as_ref()
-                .map(|failure| crate::ai::reliability::primary_message_for_failure(failure));
-            let error_str = typed_message
-                .or(turn.error.as_deref())
-                .unwrap_or("The AI request did not finish.");
-            let error_type = ChatErrorType::from_error_string(error_str);
-            let error_message = typed_message.unwrap_or_else(|| error_type.display_message());
-            let can_retry = error_type.can_retry() && has_retry_callback;
-
-            let error_fidelity_id = response_fidelity_id.clone();
-            let mut error_row = div()
-                .debug_selector(move || error_fidelity_id)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(error_color))
-                        .child(error_message.to_string()),
-                );
-
-            // Add retry button if applicable
-            if can_retry {
-                let message_id = turn.message_id.clone();
-                error_row = error_row.child(
-                    div()
-                        .id(format!("retry-turn-{}", turn_index))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .bg(error_bg)
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(retry_hover_bg))
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgb(theme_colors.text.primary))
-                        .child("Retry")
-                        .on_click(cx.listener(move |this, _, _window, _cx| {
-                            if let Some(msg_id) = &message_id {
-                                this.handle_retry(msg_id.clone());
-                            }
-                        })),
-                );
+            // Any safe partial assistant response stays visible above the card.
+            if let Some(response) = turn.assistant_response.as_deref() {
+                if !response.trim().is_empty() {
+                    let markdown_response = super::types::assistant_response_markdown_source(
+                        self.script_generation_mode,
+                        response,
+                    );
+                    content = content.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .overflow_x_hidden()
+                            .child(render_markdown(markdown_response.as_ref(), colors)),
+                    );
+                }
             }
-
-            content = content.child(error_row);
-
-            // Show raw error detail so the actual cause is visible
-            let detail = error_str.trim();
-            if typed_message.is_none() && !detail.is_empty() && detail != error_message {
-                // Unknown errors: full opacity + more chars since raw message is the only info
-                let is_unknown = error_type == ChatErrorType::Unknown;
-                let max_chars = if is_unknown { 400 } else { 200 };
-                let truncated = if detail.chars().count() > max_chars {
-                    format!("{}…", truncate_str_chars(detail, max_chars))
-                } else {
-                    detail.to_string()
-                };
-                let detail_opacity = if is_unknown { 1.0 } else { 0.5 };
-                content = content.child(
-                    div()
-                        .text_xs()
-                        .opacity(detail_opacity)
-                        .text_color(rgb(error_color))
-                        .child(truncated),
-                );
+            match turn.failure.as_ref() {
+                Some(failure) if !self.host_mode.is_transcript_only() => {
+                    content = content.child(self.render_turn_recovery_card(
+                        failure,
+                        turn.message_id.clone(),
+                        turn_index,
+                        cx,
+                    ));
+                }
+                Some(failure) => {
+                    // TranscriptOnly hosting (a flow session): the HOST owns
+                    // the actionable recovery card; the transcript row keeps
+                    // only the safe failure copy. Intentional divergence per
+                    // the S10 contract — ChatPrompt must not invent Flow
+                    // retry behavior.
+                    let error_fidelity_id = response_fidelity_id.clone();
+                    content = content.child(
+                        div()
+                            .debug_selector(move || error_fidelity_id)
+                            .text_sm()
+                            .text_color(rgb(error_color))
+                            .child(
+                                crate::ai::reliability::primary_message_for_failure(failure)
+                                    .to_string(),
+                            ),
+                    );
+                }
+                None => {
+                    // Defensive: every ingestion path classifies raw error
+                    // strings, so an untyped error should not exist. Render
+                    // stable safe copy — never the raw string.
+                    let error_fidelity_id = response_fidelity_id.clone();
+                    content = content.child(
+                        div()
+                            .debug_selector(move || error_fidelity_id)
+                            .text_sm()
+                            .text_color(rgb(error_color))
+                            .child("The AI request did not finish. Your work is saved."),
+                    );
+                }
             }
         }
         // AI response (only show if no error, or show partial if stream interrupted)
@@ -234,6 +213,162 @@ impl ChatPrompt {
             .child(trailing_control)
     }
 
+    /// Recovery actions this ChatPrompt host can actually perform (S10):
+    /// Retry needs the host retry callback; model/provider/auth/config
+    /// actions need the host recovery callback; CopyDetails is always safe.
+    pub(crate) fn turn_recovery_capabilities(
+        &self,
+    ) -> crate::ai::reliability::SurfaceRecoveryCapabilities {
+        use sk_protocol::ai_reliability::RecoveryActionKind;
+        let mut kinds = vec![RecoveryActionKind::CopyDetails];
+        if self.on_retry.is_some() {
+            kinds.push(RecoveryActionKind::Retry);
+        }
+        if self.on_recovery.is_some() {
+            kinds.extend([
+                RecoveryActionKind::ChooseCompatibleModel,
+                RecoveryActionKind::ChooseProvider,
+                RecoveryActionKind::UpdateClient,
+                RecoveryActionKind::CheckAgain,
+                RecoveryActionKind::SignIn,
+                RecoveryActionKind::SwitchAccount,
+                RecoveryActionKind::ConfigureProvider,
+                RecoveryActionKind::RepairComponent,
+                RecoveryActionKind::TrimContext,
+                // A flow conversation's engine death is repaired by starting
+                // a fresh thread. The flow session host performs it in
+                // `dispatch_flow_recovery_action`; omitting it here hid the
+                // button on exactly the failure it fixes.
+                RecoveryActionKind::RethreadFlow,
+            ]);
+        }
+        crate::ai::reliability::SurfaceRecoveryCapabilities::only(kinds)
+            .layout(crate::ai::reliability::AiRecoveryLayout::TranscriptCard)
+    }
+
+    /// One shared recovery card for a failed transcript turn (S10). Same
+    /// anatomy, copy, and `ai-recovery-*` semantic ids as Agent Chat,
+    /// Quick AI, and Flow sessions.
+    fn render_turn_recovery_card(
+        &self,
+        failure: &sk_protocol::ai_reliability::AiFailure,
+        message_id: Option<String>,
+        turn_index: usize,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        use sk_protocol::ai_reliability::{
+            AiSurfaceIdentity, AiWorkSnapshot, Fingerprint, ModelId, PreservationReceipt, PromptId,
+            WorkKey,
+        };
+        let identity = AiSurfaceIdentity::LegacyChatPrompt {
+            prompt_id: PromptId::from(self.id.as_str()),
+            provider_id: None,
+            model_id: self.model.as_deref().map(ModelId::from),
+        };
+        let work =
+            AiWorkSnapshot {
+                key: WorkKey::from(format!("chat-prompt:{}", self.id)),
+                transcript: PreservationReceipt::Preserved {
+                    fingerprint: Fingerprint(crate::ai::reliability::redacted_fingerprint(
+                        &format!("{}:{}", self.id, self.messages.len()),
+                    )),
+                },
+                draft: PreservationReceipt::NotApplicable,
+                attachments: PreservationReceipt::NotApplicable,
+                partial_output: PreservationReceipt::NotApplicable,
+            };
+        let capabilities = self.turn_recovery_capabilities();
+        let Some(spec) = crate::ai::reliability::standalone_failure_recovery_spec(
+            identity,
+            failure,
+            work,
+            &capabilities,
+        ) else {
+            return div().into_any_element();
+        };
+        let action_weak = cx.entity().downgrade();
+        let dismiss_weak = cx.entity().downgrade();
+        let action_message_id = message_id.clone();
+        let handlers = crate::components::AiRecoveryCardHandlers {
+            on_action: std::rc::Rc::new(move |action, _window, cx| {
+                if let Some(entity) = action_weak.upgrade() {
+                    let message_id = action_message_id.clone();
+                    entity.update(cx, |this, cx| {
+                        this.dispatch_turn_recovery_action(message_id, action, cx);
+                    });
+                }
+            }),
+            on_dismiss: Some(std::rc::Rc::new(move |_window, cx| {
+                if let Some(entity) = dismiss_weak.upgrade() {
+                    let message_id = message_id.clone();
+                    entity.update(cx, |this, cx| {
+                        if let Some(message_id) = message_id {
+                            this.clear_message_error(&message_id, cx);
+                        }
+                    });
+                }
+            })),
+        };
+        div()
+            .id(("chat-turn-recovery", turn_index))
+            .w_full()
+            .child(crate::components::render_ai_recovery_card(
+                spec,
+                &self.theme,
+                handlers,
+            ))
+            .into_any_element()
+    }
+
+    /// Route one recovery-card action: Retry and CopyDetails are handled
+    /// here; everything else goes to the host recovery callback.
+    fn dispatch_turn_recovery_action(
+        &mut self,
+        message_id: Option<String>,
+        action: sk_protocol::ai_reliability::AiRecoveryAction,
+        cx: &mut Context<Self>,
+    ) {
+        use sk_protocol::ai_reliability::AiRecoveryAction;
+        match action {
+            AiRecoveryAction::Retry => {
+                if let Some(message_id) = message_id {
+                    self.handle_retry(message_id);
+                }
+            }
+            AiRecoveryAction::CopyDetails => {
+                let failure = message_id
+                    .as_deref()
+                    .and_then(|id| {
+                        self.messages
+                            .iter()
+                            .rev()
+                            .find(|message| message.id.as_deref() == Some(id))
+                    })
+                    .and_then(|message| message.failure.as_ref());
+                let details = match failure {
+                    Some(failure) => format!(
+                        "Failure code: {:?}\nSummary: {}\nDiagnostic fingerprint: {}",
+                        failure.code,
+                        crate::ai::reliability::primary_message_for_failure(failure),
+                        failure
+                            .diagnostic
+                            .as_ref()
+                            .map(|diagnostic| diagnostic.fingerprint.0.clone())
+                            .unwrap_or_else(|| "unavailable".to_string()),
+                    ),
+                    None => "No failure details recorded for this turn.".to_string(),
+                };
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(details));
+            }
+            other => {
+                if let (Some(message_id), Some(callback)) = (message_id, self.on_recovery.as_ref())
+                {
+                    callback(message_id, other);
+                }
+            }
+        }
+    }
+
     /// Handle retry for a failed message
     pub(super) fn handle_retry(&self, message_id: String) {
         logging::log(
@@ -281,19 +416,45 @@ impl ChatPrompt {
 mod tests {
     use super::{
         assistant_response_region_source, conversation_turn_pending_indicator_visible,
-        conversation_turn_streaming_copy_available, truncate_str_chars, ConversationTurn,
+        conversation_turn_streaming_copy_available, ConversationTurn,
     };
     const CHAT_RENDER_TURNS_SOURCE: &str = include_str!("render_turns.rs");
 
-    #[test]
-    fn test_truncate_str_chars_returns_original_when_detail_within_limit() {
-        assert_eq!(truncate_str_chars("error", 200), "error");
+    /// Only the PRODUCTION half of this file.
+    ///
+    /// A whole-file audit matches the assertion's own string literals, so an
+    /// absence check written that way can never pass. Split at the LAST
+    /// `#[cfg(test)]` attribute: this file opens with one on line 2 (a
+    /// test-only import), so splitting at the first would return an empty
+    /// production half and silently pass every absence check.
+    fn production_source() -> &'static str {
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        CHAT_RENDER_TURNS_SOURCE
+            .split_once(marker)
+            .map(|(production, _)| production)
+            .expect("this file ends with a `mod tests` block")
     }
 
+    /// S10 contract: the failed-turn renderer draws the SHARED recovery card,
+    /// never an always-visible raw error detail.
+    ///
+    /// This stays a source audit only for the POSITIVE half — that the shared
+    /// card is what gets rendered — because no cheaper rung can express "this
+    /// renderer calls the shared component" without standing up a GPUI window.
+    /// The negative half is deliberately NOT asserted here: the string-sniffing
+    /// `ChatErrorType::from_error_string` classifier is deleted, so the
+    /// compiler already refuses any call to it. See `types.rs` for why it went.
     #[test]
-    fn test_truncate_str_chars_truncates_detail_without_breaking_utf8_chars() {
-        let input = "🙂🙂🙂abc";
-        assert_eq!(truncate_str_chars(input, 2), "🙂🙂");
+    fn failed_turn_renders_shared_recovery_card() {
+        let source = production_source();
+        assert!(
+            source.contains("render_ai_recovery_card"),
+            "failed turns must render the shared recovery card"
+        );
+        assert!(
+            !source.contains("Model unavailable. Using default model"),
+            "the false model-fallback copy must stay deleted"
+        );
     }
 
     #[test]

@@ -8326,11 +8326,14 @@ impl ScriptListApp {
                 message_id,
                 error,
             } => {
+                // The raw SDK error string is classified at the prompt
+                // boundary (`set_message_error`); log only its size so raw
+                // provider payloads never reach the log stream.
                 tracing::info!(
                     category = "CHAT",
                     id = %id,
                     message_id = %message_id,
-                    error = %error,
+                    error_len = error.len(),
                     "ChatSetError"
                 );
                 if let AppView::ChatPrompt {

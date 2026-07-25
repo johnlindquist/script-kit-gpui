@@ -80,7 +80,7 @@ impl ChatPrompt {
         };
 
         if let Some((content, error)) = assistant {
-            messages.push(ChatPromptMessage {
+            let mut message = ChatPromptMessage {
                 id: Some("geometry-fixture-assistant".to_string()),
                 role: Some(ChatMessageRole::Assistant),
                 content: Some(content),
@@ -93,7 +93,11 @@ impl ChatPrompt {
                 failure: None,
                 created_at: None,
                 image: None,
-            });
+            };
+            // Fixture errors go through the same classify-at-the-door path
+            // as real ingestion (S10).
+            Self::normalize_message_failure(&mut message);
+            messages.push(message);
         }
 
         self.messages = messages;
@@ -337,11 +341,29 @@ impl ChatPrompt {
         self.turns_list_state.set_follow_tail(item_count > 0);
     }
 
-    pub fn add_message(&mut self, message: ChatPromptMessage, cx: &mut Context<Self>) {
+    /// Classify a raw SDK/protocol error string the moment the message
+    /// enters the prompt (S10): rendering never reads the raw string.
+    pub(super) fn normalize_message_failure(message: &mut ChatPromptMessage) {
+        if message.failure.is_some() {
+            return;
+        }
+        let Some(raw) = message.error.take() else {
+            return;
+        };
+        let record = crate::ai::reliability::provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Provider,
+            raw,
+        );
+        message.error = Some(record.primary_message().to_string());
+        message.failure = Some(record.failure);
+    }
+
+    pub fn add_message(&mut self, mut message: ChatPromptMessage, cx: &mut Context<Self>) {
         logging::log(
             "CHAT",
             &format!("Adding message: {:?}", message.get_position()),
         );
+        Self::normalize_message_failure(&mut message);
         self.messages.push(message);
         self.mark_conversation_turns_dirty();
         self.force_scroll_turns_to_bottom();
@@ -359,7 +381,11 @@ impl ChatPrompt {
         cx: &mut Context<Self>,
     ) {
         let before = self.messages.len();
-        self.messages.extend(messages);
+        self.messages
+            .extend(messages.into_iter().map(|mut message| {
+                Self::normalize_message_failure(&mut message);
+                message
+            }));
         if self.messages.len() == before {
             return;
         }
@@ -654,20 +680,25 @@ impl ChatPrompt {
             .into_any_element()
     }
 
-    /// Set an error on a message (typically on streaming failure)
-    pub fn set_message_error(&mut self, message_id: &str, error: String, cx: &mut Context<Self>) {
-        let failure = crate::ai::reliability::provider_failure(
-            sk_protocol::ai_reliability::ProtocolComponent::Provider,
-            error,
-        );
+    /// Set a typed failure on a message (S10: the ONE failure-ingestion API).
+    /// `safe_summary` is the already-classified display copy — callers pass
+    /// the record's primary message (or a persisted safe summary), never a
+    /// raw provider payload.
+    pub fn set_message_failure(
+        &mut self,
+        message_id: &str,
+        failure: sk_protocol::ai_reliability::AiFailure,
+        safe_summary: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(msg) = self
             .messages
             .iter_mut()
             .rev()
             .find(|m| m.id.as_deref() == Some(message_id))
         {
-            msg.error = Some(failure.primary_message().to_string());
-            msg.failure = Some(failure.failure);
+            msg.error = Some(safe_summary.into());
+            msg.failure = Some(failure);
             msg.streaming = false; // Stop streaming indicator
         }
         if self.streaming_message_id.as_deref() == Some(message_id) {
@@ -676,6 +707,19 @@ impl ChatPrompt {
         self.mark_conversation_turns_dirty();
         self.ensure_conversation_turns_cache();
         cx.notify();
+    }
+
+    /// String-boundary adapter over [`Self::set_message_failure`]: the raw
+    /// string is classified immediately and never rendered. Remaining
+    /// callers are SDK/protocol paths whose wire format still carries an
+    /// error string.
+    pub fn set_message_error(&mut self, message_id: &str, error: String, cx: &mut Context<Self>) {
+        let record = crate::ai::reliability::provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Provider,
+            error,
+        );
+        let summary = record.primary_message().to_string();
+        self.set_message_failure(message_id, record.failure, summary, cx);
     }
 
     /// Clear error from a message (before retry)

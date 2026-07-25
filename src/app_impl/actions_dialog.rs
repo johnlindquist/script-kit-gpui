@@ -2036,11 +2036,17 @@ mod agent_chat_spine_dispatch_tests {
         fn start_turn(
             &self,
             _request: crate::ai::agent_chat::runtime::AgentChatTurnRequest,
-        ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
-            anyhow::bail!("OF-35b dispatch test must not submit")
+        ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+        {
+            Err(crate::ai::reliability::AiAdapterError::from_record(
+                crate::ai::reliability::provider_failure(
+                    sk_protocol::ai_reliability::ProtocolComponent::Provider,
+                    "OF-35b dispatch test must not submit",
+                ),
+            ))
         }
 
-        fn cancel_turn(&self, _ui_thread_id: String) -> anyhow::Result<()> {
+        fn cancel_turn(&self, _ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
             Ok(())
         }
 
@@ -2048,7 +2054,8 @@ mod agent_chat_spine_dispatch_tests {
             &self,
             _ui_thread_id: String,
             _cwd: std::path::PathBuf,
-        ) -> anyhow::Result<crate::ai::agent_chat::events::AgentChatEventRx> {
+        ) -> crate::ai::reliability::AiAdapterResult<crate::ai::agent_chat::events::AgentChatEventRx>
+        {
             let (_tx, rx) = async_channel::bounded(1);
             Ok(rx)
         }
