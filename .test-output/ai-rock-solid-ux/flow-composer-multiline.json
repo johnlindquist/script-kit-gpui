@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "verifier": "flow-composer-multiline-probe",
+  "status": "green",
+  "observed": {
+    "promptType": "flowSession",
+    "pasted": "Fix the bug\nin auth.rs",
+    "composerAfterPaste": "Fix the bug in auth.rs",
+    "composerHasNewline": false,
+    "matchesDeletedNewline": false,
+    "matchesPastedExactly": false,
+    "matchesFlattenedToSpaces": true,
+    "verdict": "flattened-words-preserved",
+    "structureLossStillOpen": true,
+    "composerAfterShiftEnter": "line one",
+    "shiftEnterInsertedNewline": false,
+    "promptTypeAfterShiftEnter": "flowSession"
+  },
+  "failures": []
+}

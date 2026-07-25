@@ -381,6 +381,38 @@ pub struct InputState {
 
 impl EventEmitter<InputEvent> for InputState {}
 
+/// Flatten line breaks so a single-line input can hold pasted multi-line text
+/// without corrupting it.
+///
+/// A single-line input structurally cannot store a newline, but *deleting* the
+/// newline welds the surrounding words together: pasting `"Fix the bug\nin
+/// auth.rs"` used to produce `"Fix the bugin auth.rs"`, silently inventing the
+/// word `bugin`. That is data corruption, not truncation, and nothing warns
+/// about it — an app-side newline guard never fires because the newline is
+/// already gone by the time the change is observed.
+///
+/// Collapsing each run of line breaks to one space keeps every word and every
+/// word boundary. Leading and trailing breaks contribute nothing, so a line
+/// copied from a terminal does not gain stray padding.
+pub(super) fn flatten_line_breaks_for_single_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_break = false;
+    for ch in text.chars() {
+        if ch == '\n' || ch == '\r' {
+            pending_break = true;
+            continue;
+        }
+        if pending_break {
+            pending_break = false;
+            if !out.is_empty() {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
 impl InputState {
     /// Runtime scroll metrics for automation/devtools receipts.
     ///
@@ -1777,7 +1809,7 @@ impl InputState {
         if let Some(clipboard) = cx.read_from_clipboard() {
             let mut new_text = clipboard.text().unwrap_or_default();
             if !self.mode.is_multi_line() {
-                new_text = new_text.replace('\n', "");
+                new_text = flatten_line_breaks_for_single_line(&new_text);
             }
 
             self.replace_text_in_range_silent(None, &new_text, window, cx);
@@ -2514,5 +2546,55 @@ impl Render for InputState {
             .children(self.diagnostic_popover.clone())
             .children(self.context_menu.as_ref().map(|menu| menu.render()))
             .children(self.hover_popover.clone())
+    }
+}
+
+#[cfg(test)]
+mod single_line_paste_tests {
+    use super::flatten_line_breaks_for_single_line;
+
+    /// Regression: pasting a two-line message into a single-line input used to
+    /// delete the newline, welding the last word of line one to the first word
+    /// of line two. Confirmed at runtime by
+    /// `scripts/agentic/flow-composer-multiline-probe.ts`, which observed the
+    /// Flow composer holding "Fix the bugin auth.rs".
+    #[test]
+    fn pasting_two_lines_keeps_the_word_boundary_instead_of_welding_words() {
+        assert_eq!(
+            flatten_line_breaks_for_single_line("Fix the bug\nin auth.rs"),
+            "Fix the bug in auth.rs"
+        );
+    }
+
+    #[test]
+    fn windows_and_blank_line_breaks_collapse_to_exactly_one_space() {
+        assert_eq!(flatten_line_breaks_for_single_line("a\r\nb"), "a b");
+        assert_eq!(flatten_line_breaks_for_single_line("a\n\n\nb"), "a b");
+        assert_eq!(flatten_line_breaks_for_single_line("a\r\r\nb"), "a b");
+    }
+
+    /// A line copied from a terminal carries a trailing newline; it must not
+    /// turn into trailing whitespace the user then has to delete.
+    #[test]
+    fn edge_line_breaks_add_no_padding() {
+        assert_eq!(
+            flatten_line_breaks_for_single_line("trailing\n"),
+            "trailing"
+        );
+        assert_eq!(flatten_line_breaks_for_single_line("\nleading"), "leading");
+        assert_eq!(flatten_line_breaks_for_single_line("\n\nboth\n\n"), "both");
+        assert_eq!(flatten_line_breaks_for_single_line("\n"), "");
+        assert_eq!(flatten_line_breaks_for_single_line(""), "");
+    }
+
+    /// Text without line breaks must survive byte-for-byte, including the
+    /// interior whitespace the user deliberately typed.
+    #[test]
+    fn text_without_line_breaks_is_untouched() {
+        assert_eq!(
+            flatten_line_breaks_for_single_line("  spaced   out  "),
+            "  spaced   out  "
+        );
+        assert_eq!(flatten_line_breaks_for_single_line("héllo 🌍"), "héllo 🌍");
     }
 }

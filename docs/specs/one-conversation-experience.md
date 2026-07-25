@@ -122,24 +122,66 @@ Shift+Enter is swallowed for the same reason; Agent Chat honors it
 **Converge on** Agent Chat's composer behavior.
 **Size:** large — both layers must change together. Removing only the app guard
 still loses newlines to the vendor strip.
-**Status:** verified in source at all three points. **Not yet verified at
-runtime** — worth a probe that pastes multi-line text into a flow session and
-reads the composer back.
+
+#### Runtime receipt, then the fix
+
+`scripts/agentic/flow-composer-multiline-probe.ts` pasted the message into a
+real flow session and read the composer back. It confirmed the source reading
+exactly:
+
+```json
+{ "pasted": "Fix the bug\nin auth.rs",
+  "composerAfterPaste": "Fix the bugin auth.rs",
+  "verdict": "corrupted-newline-deleted" }
+```
+
+The corruption is now fixed at the vendor layer. `paste()` calls
+`flatten_line_breaks_for_single_line`, which collapses each **run** of line
+breaks to a single space and contributes nothing at the edges, so a line copied
+from a terminal gains no trailing padding. Every word and every word boundary
+survives; no word is invented.
+
+That is the right behavior for *every* single-line input in the app, not just
+Flow — deleting a newline is never what a user meant, and welding two words is
+strictly worse than flattening. Locked by four unit tests in
+`single_line_paste_tests` (`state.rs`).
+
+**Status: data loss closed.** Line *structure* is still lost, because Flow
+still composes in the shared single-line input. Shift+Enter likewise inserts
+nothing (`shiftEnterInsertedNewline: false` in the receipt). Both need a
+dedicated Flow composer and belong to §2 item "unify the AI composer" — a much
+larger change, since the shared input is also ScriptList's, where Enter must
+keep meaning *select*. The probe reports that residual gap as
+`structureLossStillOpen: true` rather than letting a flattened run read as
+complete.
 
 ### 2. Escape means opposite things while streaming
+
+**Corrected 2026-07-25.** The first pass of this document said the two keys
+were *swapped* between surfaces. They are not. `⌘.` already means Stop on both.
+
+In `handle_key_down` (`view.rs:14658`), the `⌘.` cancel-streaming branch sits at
+`:14975` and the reopen-focused-mention branch at `:15231` — same function, no
+boundary between them, so **stop wins whenever a turn is streaming**. Reopen is
+additionally gated on `open_focused_mention_portal(cx)` returning true, so it
+only fires when not streaming *and* a mention is focused.
+
+What actually differs is Escape alone:
 
 | | Agent Chat | Flow |
 |---|---|---|
 | `Esc` mid-stream | **stops the model** (`view.rs:15457`) | **abandons the surface; the model keeps running** (`flow_ux.rs:167`) |
-| `⌘.` | stop (`view.rs:14974`) — *and* reopen-focused-mention (`view.rs:12544`) | stop (`flow_ux.rs:170`), the only stop key |
+| `⌘.` mid-stream | stops (`view.rs:14975`) | stops (`flow_ux.rs:170`) — **already agree** |
 
 Flow's stop was also undiscoverable until this pass: it appeared nowhere but
 inside `⌘K` (`actions.rs:1053`).
 
 **Converge on** the Agent Chat ladder — Esc #1 stops, Esc #2 leaves — keeping
-background as rung two. **Size:** small.
-**Partly addressed:** the flow footer now advertises `⌘. Stop` while working.
-The keys themselves still disagree.
+background as rung two. **Size:** small, and smaller than first thought: only
+Escape moves, `⌘.` is already consistent.
+**Addressed:** the flow footer now advertises `⌘. Stop` while working, and
+`agent_chat_cmd_period_stops_streaming_before_reopening_a_mention` locks the
+precedence that makes `⌘.` trustworthy on both surfaces.
 
 ### 3. Flow's ⌘K is missing nearly every everyday action
 

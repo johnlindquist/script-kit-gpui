@@ -456,6 +456,54 @@ fn reopen_focused_mention_shortcut_accepts_cmd_period_and_cmd_shift_o() {
     ));
 }
 
+/// `⌘.` means Stop on every AI surface. Agent Chat binds that chord twice —
+/// cancel-streaming and reopen-focused-mention — and for a long time the winner
+/// was decided only by which `if` block appeared first in `handle_key_down`.
+/// This locks the rule itself, so reordering or splitting that method cannot
+/// quietly hand a mid-stream `⌘.` to the mention portal and leave the turn
+/// running.
+#[test]
+fn agent_chat_cmd_period_stops_streaming_before_reopening_a_mention() {
+    // Streaming: ⌘. belongs to Stop, so the reopen branch must stand down.
+    assert!(AgentChatView::streaming_turn_owns_cmd_period(
+        ".",
+        &cmd_modifiers(),
+        true,
+    ));
+    assert!(AgentChatView::streaming_turn_owns_cmd_period(
+        "period",
+        &cmd_modifiers(),
+        true,
+    ));
+
+    // Idle: nothing to stop, so ⌘. is free to reopen the focused mention.
+    assert!(!AgentChatView::streaming_turn_owns_cmd_period(
+        ".",
+        &cmd_modifiers(),
+        false,
+    ));
+
+    // ⌘⇧O is the portal's unambiguous spelling and never contends with Stop,
+    // so it keeps working mid-stream.
+    assert!(!AgentChatView::streaming_turn_owns_cmd_period(
+        "o",
+        &cmd_shift_modifiers(),
+        true,
+    ));
+    assert!(AgentChatView::is_reopen_focused_mention_shortcut(
+        "o",
+        &cmd_shift_modifiers(),
+    ));
+
+    // A bare "." is ordinary typing even mid-stream — Stop requires the
+    // platform modifier.
+    assert!(!AgentChatView::streaming_turn_owns_cmd_period(
+        ".",
+        &gpui::Modifiers::default(),
+        true,
+    ));
+}
+
 #[test]
 fn portal_target_from_inline_token_supports_dictation_portal_tokens() {
     use crate::ai::context_selector::types::ContextPortalKind;

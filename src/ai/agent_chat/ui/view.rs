@@ -12548,6 +12548,26 @@ impl AgentChatView {
         is_cmd_period || is_cmd_shift_o
     }
 
+    /// `⌘.` is Stop on every AI surface, so a streaming turn owns that chord
+    /// outright.
+    ///
+    /// Agent Chat binds `⌘.` twice: cancel-streaming and reopen-focused-mention.
+    /// Today the cancel branch happens to run first in `handle_key_down`, which
+    /// makes the guarantee an artifact of statement order — moving either block,
+    /// or splitting the method, would silently hand a mid-stream `⌘.` to the
+    /// mention portal and leave the turn running. Ask this function instead of
+    /// relying on where the branches sit.
+    ///
+    /// `⌘⇧O` is the mention portal's unambiguous spelling and keeps working
+    /// mid-stream, because reopening a portal does not contend with Stop.
+    pub(crate) fn streaming_turn_owns_cmd_period(
+        key: &str,
+        modifiers: &gpui::Modifiers,
+        is_streaming: bool,
+    ) -> bool {
+        is_streaming && modifiers.platform && !modifiers.shift && (key == "." || key == "period")
+    }
+
     /// Re-derive the composer session from current input state.
     ///
     /// Called after every input mutation and cursor movement.
@@ -14977,7 +14997,7 @@ impl AgentChatView {
                 self.live_thread().read(cx).status,
                 AgentChatThreadStatus::Streaming
             );
-            if is_streaming {
+            if Self::streaming_turn_owns_cmd_period(key, modifiers, is_streaming) {
                 self.live_thread()
                     .update(cx, |thread, cx| thread.cancel_streaming(cx));
                 cx.stop_propagation();
@@ -15228,7 +15248,17 @@ impl AgentChatView {
         }
 
         // ── Cmd+. / Cmd+Shift+O → reopen focused mention in its portal ───
+        // Stop outranks reopen: a streaming turn owns ⌘. no matter where this
+        // block sits relative to the cancel branch above.
         if Self::is_reopen_focused_mention_shortcut(key, modifiers)
+            && !Self::streaming_turn_owns_cmd_period(
+                key,
+                modifiers,
+                matches!(
+                    self.live_thread().read(cx).status,
+                    AgentChatThreadStatus::Streaming
+                ),
+            )
             && self.open_focused_mention_portal(cx)
         {
             cx.stop_propagation();
