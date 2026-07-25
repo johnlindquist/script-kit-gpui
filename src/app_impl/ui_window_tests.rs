@@ -50,10 +50,15 @@ fn paste_into_frontmost_app_label_falls_back_to_active_app() {
 }
 
 /// Flow session native footer grammar (Oracle 2026-07-21 adjudication):
-/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working = `⌘K Actions · Esc Desk`.
+/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working =
+/// `⌘. Stop · ⌘K Actions · Esc Desk`.
 /// No permanent Terminate (destructive expert command → ⌘K Actions, shortcut
 /// ⇧⌘⎋ still handled) and no disabled "Working…" pseudo-button (the leading
 /// status text carries Working/Connecting).
+///
+/// Stop replaces Send while working. The working row used to omit it entirely,
+/// so `⌘.` — the one key that cancels a runaway turn — was the only live flow
+/// session binding the footer never named.
 #[test]
 fn flow_session_native_footer_matches_idle_and_working_contract() {
     use crate::footer_popup::FooterAction;
@@ -82,10 +87,46 @@ fn flow_session_native_footer_matches_idle_and_working_contract() {
     assert_eq!(
         working_shape,
         vec![
+            (FooterAction::Stop, "⌘.", "Stop"),
             (FooterAction::Actions, "⌘K", "Actions"),
             (FooterAction::Close, "Esc", "Desk"),
         ],
-        "working flow footer must be exactly Actions · Desk — no Send, no Terminate"
+        "working flow footer must be exactly Stop · Actions · Desk — no Send, no Terminate"
+    );
+    assert!(
+        working.iter().all(|b| b.enabled),
+        "a Stop button the user cannot press is worse than no Stop button"
+    );
+}
+
+/// The hint-strip footer and the native footer are two renderings of ONE
+/// grammar. They are built by different functions in different modules, so
+/// nothing but this test stops them from drifting apart — and a user who sees
+/// `⌘. Stop` in one rendering and not the other cannot tell which is true.
+#[test]
+fn flow_session_native_footer_and_hint_strip_agree_on_the_same_grammar() {
+    let native_labels = |working: bool| -> Vec<String> {
+        flow_session_footer_buttons(working, true, false)
+            .iter()
+            .map(|b| format!("{} {}", b.key, b.label))
+            .collect()
+    };
+
+    assert_eq!(
+        native_labels(false),
+        crate::flow_session_footer_hints_for_tests(false)
+            .iter()
+            .map(|hint| hint.to_string())
+            .collect::<Vec<_>>(),
+        "idle grammar must match between the native footer and the hint strip"
+    );
+    assert_eq!(
+        native_labels(true),
+        crate::flow_session_footer_hints_for_tests(true)
+            .iter()
+            .map(|hint| hint.to_string())
+            .collect::<Vec<_>>(),
+        "working grammar must match between the native footer and the hint strip"
     );
 }
 

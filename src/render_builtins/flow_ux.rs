@@ -111,13 +111,30 @@ fn finalize_flow_session_turn(
 }
 
 /// Footer grammar for a flow session (Oracle audit 2026-07-21, Footer-A):
-/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working = `⌘K Actions · Esc Desk`.
-/// No permanent Terminate — it is a destructive expert command that lives in
-/// the ⌘K Actions menu (with its ⇧⌘⎋ shortcut still handled); the leading
-/// status text already communicates Working/Connecting.
+/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working = `⌘. Stop · ⌘K Actions ·
+/// Esc Desk`. No permanent Terminate — it is a destructive expert command that
+/// lives in the ⌘K Actions menu (with its ⇧⌘⎋ shortcut still handled).
+///
+/// The working row shows Stop because the status text says only THAT the
+/// session is busy, never how to make it stop. `⌘.` is already bound
+/// ([`FlowSessionKeyAction::Stop`]) and cancels the in-flight turn while the
+/// conversation survives — but it was the one live binding the footer never
+/// named, so a user watching a runaway turn had `Esc Desk` (leave it running)
+/// or nothing. Agent Chat has always shown its stop affordance (`Esc Stop`);
+/// this closes half of that gap. The two surfaces still stop on DIFFERENT
+/// keys — see `docs/specs/one-conversation-experience.md` §2.1.
+/// Test-only view of [`flow_session_footer_hints`] so the native footer test
+/// can assert the two renderings of this grammar have not drifted apart.
+#[cfg(test)]
+pub(crate) fn flow_session_footer_hints_for_tests(working: bool) -> Vec<gpui::SharedString> {
+    flow_session_footer_hints(working)
+}
+
 fn flow_session_footer_hints(working: bool) -> Vec<gpui::SharedString> {
     let mut hints = Vec::with_capacity(3);
-    if !working {
+    if working {
+        hints.push(gpui::SharedString::from("⌘. Stop"));
+    } else {
         hints.push(gpui::SharedString::from("↵ Send"));
     }
     hints.push(gpui::SharedString::from("⌘K Actions"));
@@ -2941,7 +2958,8 @@ mod flow_session_key_owner {
 mod flow_session_footer_and_finalize {
     use super::{
         finalize_flow_session_turn, flow_session_footer_hints, flow_turn_display_assistant,
-        FlowTurnOutcome, FLOW_STOPPED_CAPTION,
+        resolve_flow_session_key_action, FlowSessionKeyAction, FlowTurnOutcome,
+        FLOW_STOPPED_CAPTION,
     };
     use crate::flows::session::{ActiveTurn, PersistedTurnOutcome, SessionTurn};
 
@@ -2958,7 +2976,11 @@ mod flow_session_footer_and_finalize {
 
     /// Footer grammar (Oracle 2026-07-21 adjudication): idle is exactly
     /// `↵ Send · ⌘K Actions · Esc Desk`; working is exactly
-    /// `⌘K Actions · Esc Desk` — no Send while busy, no permanent Terminate.
+    /// `⌘. Stop · ⌘K Actions · Esc Desk` — no Send while busy, no permanent
+    /// Terminate.
+    ///
+    /// The working row used to omit Stop entirely, so the one key that cancels
+    /// a runaway turn was the only live binding the footer never named.
     #[test]
     fn flow_session_footer_matches_idle_and_working_grammar() {
         let idle = flow_session_footer_hints(false);
@@ -2967,7 +2989,30 @@ mod flow_session_footer_and_finalize {
 
         let working = flow_session_footer_hints(true);
         let working: Vec<&str> = working.iter().map(|h| h.as_ref()).collect();
-        assert_eq!(working, vec!["⌘K Actions", "Esc Desk"]);
+        assert_eq!(working, vec!["⌘. Stop", "⌘K Actions", "Esc Desk"]);
+    }
+
+    /// Every hint the working footer shows must name a key the flow session
+    /// actually resolves. A hint whose key resolves to nothing (or to a
+    /// different action than its label claims) is a lie the user only
+    /// discovers mid-runaway-turn.
+    #[test]
+    fn every_working_footer_hint_names_a_key_the_session_really_binds() {
+        assert_eq!(
+            resolve_flow_session_key_action(".", true, false, true, false),
+            FlowSessionKeyAction::Stop,
+            "the footer promises ⌘. Stop while working"
+        );
+        assert_eq!(
+            resolve_flow_session_key_action("k", true, false, true, false),
+            FlowSessionKeyAction::ToggleActions,
+            "the footer promises ⌘K Actions"
+        );
+        assert_eq!(
+            resolve_flow_session_key_action("escape", false, false, true, false),
+            FlowSessionKeyAction::Background,
+            "the footer promises Escape leaves the session"
+        );
     }
 
     /// WP-B3: a streamed flow turn (many deltas accumulated into

@@ -116,13 +116,20 @@ pub(crate) fn flow_session_footer_buttons(
     use crate::footer_popup::{FooterAction, FooterButtonConfig};
 
     // Footer grammar (Oracle 2026-07-21, Footer-A): idle = Send · Actions ·
-    // Desk; working = Actions · Desk. No permanent Terminate — it is a
+    // Desk; working = Stop · Actions · Desk. No permanent Terminate — it is a
     // destructive expert command that lives in ⌘K Actions (the ⇧⌘⎋ shortcut
     // still works; macOS eats plain ⌘⎋ at the window server, verified
     // 2026-07-11). No disabled "Working…" pseudo-button either: the leading
     // status text already says Working/Connecting.
+    //
+    // Stop replaces Send while a turn is in flight. `⌘.` was already bound and
+    // already cancelled the turn, but the footer never named it, so the status
+    // text said the session was busy without saying how to stop it — leaving
+    // `Esc Desk` (walk away, it keeps running) as the only visible exit.
     let mut buttons = Vec::with_capacity(3);
-    if !working {
+    if working {
+        buttons.push(FooterButtonConfig::new(FooterAction::Stop, "⌘.", "Stop").enabled(enabled));
+    } else {
         buttons.push(FooterButtonConfig::new(FooterAction::Run, "↵", "Send").enabled(enabled));
     }
     buttons.push(
@@ -639,6 +646,12 @@ impl ScriptListApp {
                     entity.update(cx, |chat, cx| {
                         let _ = chat.cancel_streaming_from_escape(cx);
                     });
+                } else if let AppView::FlowSessionView { session_id } = self.current_view {
+                    // The flow session footer shows `⌘. Stop` while a turn is in
+                    // flight, so the button must reach the same cancellation the
+                    // key press does. Without this arm the button rendered and
+                    // did nothing but log.
+                    self.stop_flow_session(session_id, cx);
                 } else {
                     tracing::info!(
                         target: "script_kit::footer_popup",
