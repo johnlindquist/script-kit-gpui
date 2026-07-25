@@ -14,11 +14,41 @@ pub struct TextSelection {
 const TEXT_INPUT_UNDO_STACK_LIMIT: usize = 100;
 
 /// Normalize arbitrary text before it reaches a GPUI single-line layout.
+///
+/// GPUI's text shaper panics on newlines (`vendor/gpui/src/text_system.rs:414`),
+/// so they genuinely cannot survive here. They must not simply be *dropped*,
+/// though: deleting the break welds the words on either side into one, so
+/// `"Fix the bug\nin auth.rs"` became `"Fix the bugin auth.rs"` — a word the
+/// user never wrote, with nothing logged, because the text still arrives and
+/// looks plausible.
+///
+/// Each run of line breaks therefore collapses to a single space, and runs at
+/// the edges contribute nothing, so text copied from a terminal gains no
+/// padding.
+///
+/// This must stay in step with `flatten_line_breaks_for_single_line` in
+/// `vendor/gpui-component/crates/ui/src/input/state.rs`, which applies the same
+/// rule on the paste path. The two are separate because a vendored crate must
+/// not depend on app code; the shared expectations are pinned by tests on both
+/// sides.
 pub(crate) fn normalize_single_line_text(text: impl Into<String>) -> String {
-    text.into()
-        .chars()
-        .filter(|character| !matches!(character, '\n' | '\r'))
-        .collect()
+    let text = text.into();
+    let mut out = String::with_capacity(text.len());
+    let mut pending_break = false;
+    for character in text.chars() {
+        if matches!(character, '\n' | '\r') {
+            pending_break = true;
+            continue;
+        }
+        if pending_break {
+            pending_break = false;
+            if !out.is_empty() {
+                out.push(' ');
+            }
+        }
+        out.push(character);
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -635,5 +665,66 @@ impl TextInputState {
             stack.pop_front();
         }
         stack.push_back(snapshot);
+    }
+}
+
+#[cfg(test)]
+mod single_line_normalization_tests {
+    use super::normalize_single_line_text;
+
+    /// Mirrors `single_line_paste_tests` in
+    /// `vendor/gpui-component/crates/ui/src/input/state.rs`. The two
+    /// implementations are separate — a vendored crate must not depend on app
+    /// code — so these expectations are what keep them in step. If one side
+    /// changes its rule, the other side's copy of these cases fails.
+    ///
+    /// Regression: newlines used to be filtered out entirely, welding the
+    /// words on either side into one that the user never typed.
+    #[test]
+    fn a_line_break_becomes_a_space_instead_of_welding_words() {
+        assert_eq!(
+            normalize_single_line_text("Fix the bug\nin auth.rs"),
+            "Fix the bug in auth.rs"
+        );
+    }
+
+    #[test]
+    fn windows_and_blank_line_breaks_collapse_to_exactly_one_space() {
+        assert_eq!(normalize_single_line_text("a\r\nb"), "a b");
+        assert_eq!(normalize_single_line_text("a\n\n\nb"), "a b");
+        assert_eq!(normalize_single_line_text("a\r\r\nb"), "a b");
+    }
+
+    #[test]
+    fn edge_line_breaks_add_no_padding() {
+        assert_eq!(normalize_single_line_text("trailing\n"), "trailing");
+        assert_eq!(normalize_single_line_text("\nleading"), "leading");
+        assert_eq!(normalize_single_line_text("\n\nboth\n\n"), "both");
+        assert_eq!(normalize_single_line_text("\n"), "");
+        assert_eq!(normalize_single_line_text(""), "");
+    }
+
+    /// No line breaks means no rewriting at all, including whitespace the
+    /// user deliberately typed.
+    #[test]
+    fn text_without_line_breaks_is_untouched() {
+        assert_eq!(
+            normalize_single_line_text("  spaced   out  "),
+            "  spaced   out  "
+        );
+        assert_eq!(normalize_single_line_text("héllo 🌍"), "héllo 🌍");
+    }
+
+    /// The invariant the GPUI shaper actually requires: whatever the rule,
+    /// nothing that reaches a single-line layout may contain a break.
+    #[test]
+    fn output_never_contains_a_line_break() {
+        for input in ["a\nb", "\r\n", "x\r\n\r\ny", "no breaks"] {
+            let normalized = normalize_single_line_text(input);
+            assert!(
+                !normalized.contains('\n') && !normalized.contains('\r'),
+                "normalized {input:?} still carries a break: {normalized:?}"
+            );
+        }
     }
 }
