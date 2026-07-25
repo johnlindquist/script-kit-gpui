@@ -217,49 +217,45 @@ impl ChatPrompt {
             );
         }
 
+        // The per-turn copy control is the SHARED one Agent Chat uses. Flow
+        // used to paint its own visually-identical copy of it, which is the
+        // quiet kind of drift: the two agreed today and nothing forced them to
+        // keep agreeing tomorrow.
+        //
+        // Flow's eligibility is deliberately NOT the assistant-body rule Agent
+        // Chat uses. Flow's `copy_turn_response` falls back to the user prompt
+        // when there is no assistant response yet, so a Flow row genuinely has
+        // something to copy earlier than an Agent Chat row does. Converging the
+        // *anatomy* is the goal; converging the eligibility would delete a
+        // working affordance.
         let show_streaming_indicator = conversation_turn_pending_indicator_visible(turn);
-        let trailing_control = div()
-            .id(format!("copy-turn-{}", turn_index))
-            .debug_selector(move || copy_fidelity_id)
-            .relative()
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(24.0))
-            .h(px(24.0))
-            .rounded(px(4.0))
-            .cursor_pointer()
-            .opacity(0.7)
-            .hover(|s| s.opacity(1.0).bg(copy_hover_bg))
-            .child(
-                svg()
-                    .path(IconName::Copy.asset_path())
-                    .size(px(16.))
-                    .text_color(rgb(theme_colors.text.secondary)),
-            )
-            .when(show_streaming_indicator, |slot| {
-                slot.child(
-                    div()
-                        .debug_selector(move || pending_fidelity_id)
-                        .absolute()
-                        .right(px(1.0))
-                        .bottom(px(1.0))
-                        .size(px(7.0))
-                        .rounded(px(999.0))
-                        .bg(rgb(theme_colors.accent.selected))
-                        .with_animation(
-                            ("chat-turn-streaming-dot-pulse", turn_index),
-                            Animation::new(std::time::Duration::from_millis(1200)).repeat(),
-                            |style, delta| {
-                                let sine = (delta * std::f32::consts::PI * 2.0).sin();
-                                style.opacity(0.65 + (0.35 * ((sine + 1.0) / 2.0)))
-                            },
-                        ),
-                )
-            })
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                this.copy_turn_response(turn_index, cx);
-            }));
+        let has_anything_to_copy = turn
+            .assistant_response
+            .as_deref()
+            .is_some_and(|response| !response.trim().is_empty())
+            || !turn.user_prompt.trim().is_empty();
+        let eligibility = if !has_anything_to_copy {
+            crate::components::conversation_actions::TurnCopyEligibility::Absent
+        } else if show_streaming_indicator {
+            crate::components::conversation_actions::TurnCopyEligibility::EnabledStreaming
+        } else {
+            crate::components::conversation_actions::TurnCopyEligibility::Enabled
+        };
+        let trailing_control =
+            crate::components::conversation_actions::render_conversation_copy_button(
+                crate::components::conversation_actions::ConversationCopyButtonSpec {
+                    id: format!("copy-turn-{}", turn_index).into(),
+                    fidelity_id: copy_fidelity_id.into(),
+                    activity_fidelity_id: pending_fidelity_id.into(),
+                    eligibility,
+                    animation_index: turn_index,
+                },
+                &crate::components::conversation_style::production_conversation_style(),
+                &self.theme,
+                cx.listener(move |this, _, _window, cx| {
+                    this.copy_turn_response(turn_index, cx);
+                }),
+            );
 
         // The full-width container with copy button
         div()
@@ -273,7 +269,10 @@ impl ChatPrompt {
             .items_start()
             .gap(px(8.0))
             .child(content.flex_1())
-            .child(trailing_control)
+            // `render_conversation_copy_button` returns None for a row with
+            // nothing to copy, so an ineligible row draws no control at all
+            // rather than a dead-looking one.
+            .children(trailing_control)
     }
 
     /// Recovery actions this ChatPrompt host can actually perform (S10):
