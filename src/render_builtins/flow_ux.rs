@@ -133,7 +133,11 @@ pub(crate) fn flow_session_footer_hints_for_tests(working: bool) -> Vec<gpui::Sh
 fn flow_session_footer_hints(working: bool) -> Vec<gpui::SharedString> {
     let mut hints = Vec::with_capacity(3);
     if working {
-        hints.push(gpui::SharedString::from("⌘. Stop"));
+        hints.push(gpui::SharedString::from(format!(
+            "{} {}",
+            crate::components::footer_chrome::FOOTER_AI_STOP_KEY,
+            crate::components::footer_chrome::FOOTER_AI_STOP_LABEL
+        )));
     } else {
         hints.push(gpui::SharedString::from("↵ Send"));
     }

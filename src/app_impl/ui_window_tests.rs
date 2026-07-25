@@ -263,3 +263,47 @@ fn main_window_footer_contract_agent_chat_error_keeps_chrome() {
     );
     assert!(main_window_footer_chrome_should_render(false, None));
 }
+
+/// Agent Chat and Flow must name the SAME chord for Stop.
+///
+/// They did not. Agent Chat's footer said `Esc Stop`; Flow's said `⌘. Stop`.
+/// Each was honest about its own surface — but Escape *backgrounds* a Flow
+/// session rather than stopping it, so a user who learned "Esc stops the
+/// model" in Agent Chat and applied it in Flow left the turn running. `⌘.`
+/// is the one chord that already stops a turn on both, so both footers now
+/// advertise it.
+///
+/// This test crosses the surface boundary deliberately: it renders Agent
+/// Chat's Stop hint through Agent Chat's own label mapper and compares it to
+/// the string Flow actually shows. Re-inlining a literal on either side fails
+/// here rather than shipping as a quiet split.
+#[test]
+fn agent_chat_and_flow_advertise_the_same_stop_chord() {
+    use crate::ai::agent_chat::ui::view::{AgentChatFooterButtonSpec, AgentChatView};
+    use crate::components::footer_chrome::{FOOTER_AI_STOP_KEY, FOOTER_AI_STOP_LABEL};
+
+    let agent_chat_stop = AgentChatFooterButtonSpec {
+        action: crate::footer_popup::FooterAction::Stop,
+        key: FOOTER_AI_STOP_KEY,
+        label: FOOTER_AI_STOP_LABEL,
+        selected: false,
+        enabled: true,
+        disabled_reason: None,
+    };
+
+    let flow_stop_hint = crate::flow_session_footer_hints_for_tests(true)
+        .first()
+        .expect("the working flow footer leads with Stop")
+        .to_string();
+
+    assert_eq!(
+        AgentChatView::footer_hint_label(&agent_chat_stop),
+        flow_stop_hint,
+        "both AI surfaces must advertise one Stop chord"
+    );
+    assert_eq!(
+        flow_stop_hint, "⌘. Stop",
+        "the shared Stop chord is ⌘.; changing it must be a deliberate edit \
+         that fails here first"
+    );
+}

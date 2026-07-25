@@ -183,6 +183,25 @@ Escape moves, `⌘.` is already consistent.
 `agent_chat_cmd_period_stops_streaming_before_reopening_a_mention` locks the
 precedence that makes `⌘.` trustworthy on both surfaces.
 
+**Footer grammar converged.** Agent Chat's footer used to advertise `Esc Stop`
+while Flow's said `⌘. Stop`. Each was honest about its own surface, which is
+what made the split dangerous: a user who learned "Esc stops the model" in
+Agent Chat and applied it in Flow *backgrounded the session and left the turn
+running*. Both footers now name `⌘.`, the one chord that already stops on
+both, via `FOOTER_AI_STOP_KEY`/`FOOTER_AI_STOP_LABEL` in
+`components/footer_chrome.rs`.
+
+Escape's *behavior* is deliberately untouched here — it still stops in Agent
+Chat and backgrounds in Flow. That divergence is the Escape modal's to
+resolve (`docs/specs/backgrounded-ai-sessions.md`), and naming `⌘.` in the
+footer is forward-compatible with it: once Escape means "Background or Close"
+everywhere, `⌘.` is already established as the unambiguous Stop.
+
+Locked by `agent_chat_and_flow_advertise_the_same_stop_chord`, which renders
+Agent Chat's Stop hint through Agent Chat's own label mapper and compares it
+to the string Flow actually shows, so re-inlining a literal on either side
+fails rather than shipping as a quiet split.
+
 ### 3. Flow's ⌘K is missing nearly every everyday action
 
 Agent Chat offers ~20 (`script_context.rs:974`); Flow offers **six**
@@ -193,6 +212,22 @@ Flow has none of: Copy Last Response, Copy as Markdown, Copy All Code Blocks,
 Save as Note, Retry, Scroll to Latest.
 **Converge on** the Agent Chat vocabulary, keeping Background/Terminate/Rethread
 as a Flow-only section. **Size:** medium.
+
+**First verb landed: Copy Last Response.** It is the most common thing a user
+does with a finished turn, and Flow's only copy was "Copy Transcript" — paste
+everything, then hand-delete back to the one answer you wanted. Flow now
+mirrors Agent Chat exactly: same title, same `⇧⌘C`, same `Response` section
+(which also adopts Copy Transcript, so both copy verbs are found together).
+
+The handler deliberately walks turns in reverse for the newest **non-empty**
+assistant text rather than taking `turns.last()`. The in-flight turn carries an
+empty `assistant` until the engine replies, so the naive version would copy an
+empty string mid-stream and report success — the same "looks handled, is not"
+shape as the paste bug above. With no answer yet it says so instead.
+
+Locked by `flow_sessions_copy_the_last_response_the_same_way_agent_chat_does`.
+Remaining from this item: Copy as Markdown, Copy All Code Blocks, Save as Note,
+Retry, Scroll to Latest.
 
 ### 4. Assistant text is selectable in Agent Chat, not in Flow
 

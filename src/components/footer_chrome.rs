@@ -57,6 +57,22 @@ pub(crate) const FOOTER_PASTE_RESPONSE_SLOT_WIDTH_PX: f32 = 140.0;
 pub(crate) const FOOTER_SHORTCUT_LAYOUT_MEASUREMENT_SOURCE: &str =
     "runtime.footerChrome.shortcutKeycapLayoutModel";
 
+/// The Stop chord every AI surface advertises while a turn is in flight.
+///
+/// `⌘.` is the macOS-standard cancel, and it is the one chord that already
+/// stops a turn on *both* Agent Chat and Flow. Escape used to be advertised as
+/// Stop in Agent Chat, but Escape backgrounds the session in Flow — so the
+/// footer was teaching a rule that held on only one surface, which is exactly
+/// the kind of split this grammar exists to prevent.
+///
+/// Escape's own behavior is untouched by this constant; only the advertised
+/// chord converges. Surfaces name the chord here rather than inlining the
+/// glyphs, so the two footers cannot drift apart again one literal at a time.
+pub(crate) const FOOTER_AI_STOP_KEY: &str = "⌘.";
+
+/// Label paired with [`FOOTER_AI_STOP_KEY`].
+pub(crate) const FOOTER_AI_STOP_LABEL: &str = "Stop";
+
 /// The default radius for every shared native glass capsule opt-in.
 pub(crate) fn default_glass_capsule_radius_px() -> f32 {
     FOOTER_ACTION_BUTTON_RADIUS_PX

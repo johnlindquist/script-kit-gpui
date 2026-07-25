@@ -2423,8 +2423,8 @@ impl AgentChatView {
             AgentChatThreadStatus::Streaming => {
                 buttons.push(AgentChatFooterButtonSpec {
                     action: FooterAction::Stop,
-                    key: "Esc",
-                    label: "Stop",
+                    key: crate::components::footer_chrome::FOOTER_AI_STOP_KEY,
+                    label: crate::components::footer_chrome::FOOTER_AI_STOP_LABEL,
                     selected: false,
                     enabled: true,
                     disabled_reason: None,
@@ -2548,8 +2548,8 @@ impl AgentChatView {
         let leading = match thread.status {
             AgentChatThreadStatus::Streaming => AgentChatFooterButtonSpec {
                 action: FooterAction::Stop,
-                key: "Esc",
-                label: "Stop",
+                key: crate::components::footer_chrome::FOOTER_AI_STOP_KEY,
+                label: crate::components::footer_chrome::FOOTER_AI_STOP_LABEL,
                 selected: false,
                 enabled: true,
                 disabled_reason: None,
@@ -4094,14 +4094,14 @@ impl AgentChatView {
             .filter(|text| !text.trim().is_empty())
     }
 
-    fn footer_hint_label(button: &AgentChatFooterButtonSpec) -> &'static str {
+    pub(crate) fn footer_hint_label(button: &AgentChatFooterButtonSpec) -> &'static str {
         use crate::footer_popup::FooterAction;
 
         match button.action {
             FooterAction::Run if button.label == "Attach" => "↵ Attach",
             FooterAction::Run => "↵ Send",
             FooterAction::PasteResponse => "↵ Paste Response",
-            FooterAction::Stop => "Esc Stop",
+            FooterAction::Stop => "⌘. Stop",
             FooterAction::Actions => "⌘K Actions",
             FooterAction::Ai => "⌘↵ Agent Chat",
             FooterAction::Apply => "⌘↩ Apply",

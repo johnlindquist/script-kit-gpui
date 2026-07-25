@@ -128,7 +128,14 @@ pub(crate) fn flow_session_footer_buttons(
     // `Esc Desk` (walk away, it keeps running) as the only visible exit.
     let mut buttons = Vec::with_capacity(3);
     if working {
-        buttons.push(FooterButtonConfig::new(FooterAction::Stop, "⌘.", "Stop").enabled(enabled));
+        buttons.push(
+            FooterButtonConfig::new(
+                FooterAction::Stop,
+                crate::components::footer_chrome::FOOTER_AI_STOP_KEY,
+                crate::components::footer_chrome::FOOTER_AI_STOP_LABEL,
+            )
+            .enabled(enabled),
+        );
     } else {
         buttons.push(FooterButtonConfig::new(FooterAction::Run, "↵", "Send").enabled(enabled));
     }

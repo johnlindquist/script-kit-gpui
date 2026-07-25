@@ -1034,13 +1034,27 @@ impl ScriptListApp {
                 .with_shortcut("⌘⇧D")
                 .with_section("Session")
                 .with_icon(IconName::ArrowDown),
+                // Response section mirrors Agent Chat exactly — same title,
+                // same ⇧⌘C, same section name. Copying the last answer is the
+                // single most common thing a user does with a finished turn,
+                // and Flow forced them to copy the whole transcript and edit
+                // it down by hand.
+                Action::new(
+                    "flow_desk_session_copy_last_response",
+                    "Copy Last Response",
+                    Some("Copy the most recent assistant response".to_string()),
+                    ActionCategory::ScriptContext,
+                )
+                .with_shortcut("\u{21e7}\u{2318}C")
+                .with_section("Response")
+                .with_icon(IconName::Copy),
                 Action::new(
                     "flow_desk_session_copy_transcript",
                     "Copy Transcript",
                     Some("All turns as Markdown".to_string()),
                     ActionCategory::ScriptContext,
                 )
-                .with_section("Session")
+                .with_section("Response")
                 .with_icon(IconName::Copy),
                 Action::new(
                     "flow_desk_create",
@@ -1259,6 +1273,40 @@ impl ScriptListApp {
             }
             ("flow_desk_session_background", _) => {
                 self.background_flow_session(window, cx);
+            }
+            ("flow_desk_session_copy_last_response", Some(FlowDeskSubject::Session(id))) => {
+                // Copy the newest turn that actually produced an answer. The
+                // in-flight turn has an empty `assistant` until the engine
+                // replies, so taking `turns.last()` unconditionally would
+                // silently copy an empty string mid-stream and read as a
+                // successful copy.
+                let response = self
+                    .flow_sessions
+                    .iter()
+                    .find(|(meta, _)| meta.id == id)
+                    .and_then(|(meta, _)| {
+                        meta.turns
+                            .iter()
+                            .rev()
+                            .map(|turn| turn.assistant.trim())
+                            .find(|assistant| !assistant.is_empty())
+                            .map(|assistant| assistant.to_string())
+                    });
+
+                match response {
+                    Some(response) => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(response));
+                    }
+                    None => {
+                        self.toast_manager.push(
+                            crate::components::toast::Toast::success(
+                                "No response to copy yet".to_string(),
+                                &self.theme,
+                            )
+                            .duration_ms(Some(1500)),
+                        );
+                    }
+                }
             }
             ("flow_desk_session_copy_transcript", Some(FlowDeskSubject::Session(id))) => {
                 if let Some((meta, _)) = self.flow_sessions.iter().find(|(meta, _)| meta.id == id) {
@@ -1498,6 +1546,37 @@ mod flow_desk_create_discoverability_tests {
                 .iter()
                 .all(|action| action.section.as_deref() == Some("Danger")),
             "Danger must remain the trailing section — new verbs go before it"
+        );
+    }
+
+    /// Copying the last answer is the most common thing a user does with a
+    /// finished turn, and Flow had no way to do it — only "Copy Transcript",
+    /// which forced the user to paste everything and hand-delete the rest.
+    ///
+    /// Flow now mirrors Agent Chat exactly: same title, same shortcut, same
+    /// section. Asserting the literals here is the point — a differently
+    /// named or differently bound twin is precisely the drift this workstream
+    /// exists to stop.
+    #[test]
+    fn flow_sessions_copy_the_last_response_the_same_way_agent_chat_does() {
+        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session(7));
+        let copy = actions
+            .iter()
+            .find(|action| action.id == "flow_desk_session_copy_last_response")
+            .expect("a flow session must offer Copy Last Response");
+
+        assert_eq!(copy.title, "Copy Last Response");
+        assert_eq!(copy.shortcut.as_deref(), Some("\u{21e7}\u{2318}C"));
+        assert_eq!(copy.section.as_deref(), Some("Response"));
+
+        let transcript = actions
+            .iter()
+            .find(|action| action.id == "flow_desk_session_copy_transcript")
+            .expect("Copy Transcript must survive alongside it");
+        assert_eq!(
+            transcript.section.as_deref(),
+            Some("Response"),
+            "both copy verbs belong to one section, so they are found together"
         );
     }
 }
