@@ -103,7 +103,7 @@ rather than pretending one owner covers everything.
 
 ## Where w6W:p6's work sits
 
-Four commits, interleaved by time with this lane's, **zero file overlap**:
+Five commits, interleaved by time with this lane's, **zero file overlap**:
 
 | Commit | What |
 | --- | --- |
@@ -111,20 +111,15 @@ Four commits, interleaved by time with this lane's, **zero file overlap**:
 | `b721e50bb` | The shared phase trace itself (`src/ai/phase_trace.rs`) |
 | `2bd87134e` | Pi turn phases for Agent Chat, Text, and Mini (`src/ai/agent_chat/pi/**`, `launch.rs`) |
 | `ee4ce3874` | Flow turn phases through one event choke point (`src/flows/codex_client.rs`) |
+| `edeea97d7` | Quick AI mirrored onto the shared trace, plus the trace probe/report/check tooling (`src/ai/agent_chat/codex_exec.rs`, `scripts/agentic/ai-phase-trace-*`) |
 
 Both lanes touch `src/ai/agent_chat/` but **different subtrees** — this lane
-owns `ui/`, w6W:p6 owns `pi/` and the transports. Nothing was coordinated by
-editing across that line.
+owns `ui/`, w6W:p6 owns `pi/`, `codex_exec.rs`, and the transports. Nothing was
+coordinated by editing across that line.
 
-That lane still has **uncommitted work in progress** as of 04:15:
-
-- `src/ai/agent_chat/codex_exec.rs` (~60 lines, mirrors Quick AI's own trace
-  onto the shared one)
-- four untracked `scripts/agentic/ai-phase-trace-*` files
-
-**Do not `git checkout` or stash those** — they are live work, not leftovers.
-This lane never staged them and verified they are real feature work rather
-than stray formatter churn.
+As of 04:20 **that lane's work is fully committed** and the tree is clean. The
+only untracked path left is `.hitl-align/`, which holds the alignment page and
+your submission — deliberately untracked, not leftovers.
 
 ### Earlier tonight, before either lane
 
