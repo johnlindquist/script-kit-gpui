@@ -2,7 +2,7 @@ For a map of main UI surfaces to code implementation, see [GLOSSARY.md]
 
 # Before Starting Work
 
-- **Route through a project flow first.** Flows are the primary mechanism for agents working with this code: pick the owner from the routing rules in "Project Flows — Primary Mechanism" below (or read `flows/README.md`), then delegate with `md flows/<name>.md "<task>"`. Work directly only for trivial edits, when mdflow is unavailable, or when the user explicitly asks you to.
+- **Do the work yourself.** Project flows are DISABLED (see "Project Flows — Disabled" below). Do not delegate to `md flows/<name>.md`. Read the source, make the change, and verify it in this session.
 - Inspect the relevant source, tests, and repo-local skills before editing.
 - Prefer current code and generated artifacts over stale notes or memory.
 - Keep edits narrowly scoped and verify them with the smallest check that can fail for the changed behavior.
@@ -12,7 +12,7 @@ For a map of main UI surfaces to code implementation, see [GLOSSARY.md]
 
 For Oracle review or `oracle-packx` work in this repository, include the repo process context in the bundle or prompt unless the user explicitly excludes it: `AGENTS.md`, the owning `.agents/skills/<skill>/SKILL.md`, and relevant source, tests, generated contracts, and verification notes.
 
-For runtime/UX bugs headed to `oracle-packx-conversation`, run `flows/devtools.md` first and include its investigation receipts (intake, primitive stack, measurements, classification, likely owner, red/green proof plan) in the bundle — that pairing is a primary workflow in this repo.
+For runtime/UX bugs headed to `oracle-packx-conversation`, gather the investigation receipts yourself first — intake, primitive stack, measurements, classification, likely owner, red/green proof plan — and include them in the bundle. The `script-kit-devtools` skill and the probes under `scripts/devtools/` and `scripts/agentic/` are the tools for that; run them directly.
 
 If a `packx` preview with include globs unexpectedly matches `0` files in this repository, rebuild the bundle from an explicit path list instead of widening blindly. A reliable workaround is:
 
@@ -24,89 +24,39 @@ xargs packx --limit 900k --strip-comments --minify -f markdown --no-interactive 
 
 Use this when directory/include-glob matching undercounts relevant files; keep `CLAUDE.md` excluded and verify the preview count plus final non-empty bundle before consulting Oracle.
 
-## Project Flows — Primary Mechanism
+## Project Flows — Disabled
 
-Project flows are the **primary mechanism for agents working with this code**.
-Every substantive task — building, debugging, auditing, fixing, testing,
-releasing — starts by routing to the owning flow; direct hand-editing is the
-fallback, not the default.
+**Flows are OFF. Do not route work through `md flows/<name>.md`.**
+Disabled 2026-07-25 by the repo owner. Do the work yourself, in this session.
 
-Flows live under `flows/` at the repo root: one markdown agent per job, run
-by [mdflow](https://mdflow.dev) (`npm i -g mdflow@next`). They run on codex
-(pinned in `.mdflow.yaml`) at `gpt-5.6-sol` with `medium` reasoning; sandbox mode
-is pinned per flow in frontmatter. Each `flows/<name>.md` file is
-**self-contained**: frontmatter owns the engine contract, the body owns the
-instructions, and there is no central registry. `flows/README.md` is the
-roster index. Flow learning is eval-driven: when a run disappoints, add a
-failing case to `flows/<name>.eval.ts`, then edit the flow until
-`md eval flows/<name>.md` passes.
+Why: delegation kept producing the appearance of progress without progress.
+Lanes and subagents sat for hours showing running timers while finished or
+dead; one subagent died three times on a harness model-resolution error; a
+"stuck flow" turned out to be a misread. The failure mode is consistent — the
+delegating agent cannot see whether the delegate is working, so it reports
+motion it has not verified. Direct work removes the gap between doing and
+knowing.
 
-Default workflow for any task:
+What this means in practice:
 
-1. Pick the owner from the routing rules below (unclear? run `md flows/scout.md "<task>"`).
-2. Delegate the task: `md flows/<name>.md "<task>"`.
-3. Pair the owner with at most one cross-cutting role flow when needed (audit → fix, fix → probe, etc.).
-4. The calling agent stays responsible for source inspection, patch review, preserving unrelated dirty work, and final verification — delegating the work does not delegate accountability.
+- Read the source, make the change, run the check, report the receipt. No
+  `md flows/...` calls.
+- Do not fan out to subagents for work you can do yourself. A subagent's
+  self-report is not proof; if you use one at all, verify its claims against
+  the tree before repeating them.
+- The routing rules that used to live here were a map of who owns what. That
+  map is still useful — it now lives in `flows/README.md` and in the flow files
+  themselves. **Read them as documentation of ownership, not as dispatch.**
+  `GLOSSARY.md` maps UI surfaces to implementation files and is usually the
+  faster start.
+- The `flows/**` files stay on disk. They are not deleted, and their prompt
+  content is still a good statement of each area's contract and gotchas —
+  `flows/escape.md`'s three-lockstep-keyboard-paths warning, for example, is
+  real and load-bearing whether or not a flow ever runs again.
 
-Skip the flow only when the task is trivial (≤ a few mechanical lines),
-mdflow is unavailable or repeatedly stalls, or the user explicitly directs
-otherwise — and say in the final answer which flow was skipped and why.
-
-Use (from the repo root):
-
-```bash
-md flows/<name>.md "<task prompt>"        # delegate one job (one engine turn)
-md flows/<name>.md "<task>" --_dry-run    # free: exact command + resolved prompt
-md eval flows/<name>.md                   # run the flow's eval suite
-cat flows/README.md                       # roster
-```
-
-Routing rules:
-
-- Use `flows/scout.md` when ownership is unclear.
-- Agent Chat, `@file`, `@context`, attachments, portal, or Pi handoff -> `flows/agent-chat.md`.
-- Day Page, Today, brain, fragments, spine, or Notes parity -> `flows/brain.md`.
-- Clipboard history, sediment, post-copy, copy-to-brain, no-popup capture, or `crates/sk-clipboard/**` -> `flows/clipboard.md`.
-- Shared UI, components, list rows, inputs, prompt shells, chrome, or theme tokens -> `flows/components.md`.
-- Script List, main window, mini/full view, launcher selection -> `flows/launcher.md`.
-- Actions menu, command palette, trigger picker, confirm popup -> `flows/actions.md`.
-- Hotkeys, gestures, tap/hold/double-tap, focus restoration -> `flows/hotkeys.md`.
-- Script prompt renderers, protocol-to-renderer contracts, or `crates/sk-protocol/**` -> `flows/prompts.md`.
-- Built-in utility surfaces -> `flows/builtins.md`.
-- Terminal prompt, PTY, command bar, terminal theme -> `flows/terminal.md`.
-- Script execution, menu cache, metadata, scheduler -> `flows/execution.md`.
-- macOS platform, windows, tray/menu bar, icons, permissions, startup, Pi sidecar -> `flows/platform.md`.
-- MCP server, resources, script tools, schema compatibility -> `flows/mcp.md`.
-- Repo process docs, `.agents/**`, `flows/**`, probes, source audits, `dev.sh`, cargo wrappers -> `flows/devex.md`.
-- Local LLM/ghost backend, dictation, whisper, computer use, OCR, camera, AI vault -> `flows/ai-core.md`.
-- Settings, config persistence, onboarding/NUX, kit store, sync, updates, login item, secrets -> `flows/settings.md`.
-- v1→v2 script migration: `scripts/migrate` engine, compat map, validator ladder, honesty pass, Migrate board built-in -> `flows/migrate.md`.
-- scriptkit.com static site (`site/**`): page content, download links, deploys -> `flows/site.md`.
-- Marketing screenshots ("glamour" shot set, `site/images/**`) -> `flows/screenshots.md`.
-- Marketing videos (glamour demo-reel loops, `site/videos/**`, `scripts/agentic/glamour-video-probe.ts`) -> `flows/videos.md`.
-
-Role flows (cross-cutting, any surface):
-
-- Build failures, cargo lock contention, `target-agent` disk budget, clippy/fmt debt, stuck builds -> `flows/build-doctor.md`.
-- DevTools work: runtime proof, app inspection/investigation, driver probes, screenshots, simulateGpuiEvent, red/green receipts -> `flows/devtools.md` (the flow form of the `script-kit-devtools` skill).
-- Read-only audit sweeps, UX inconsistency hunts, hardcoded-token findings (never edits) -> `flows/auditor.md`.
-- Test authorship, enforcement-ladder placement, contract tests, ratchet, flaky tests -> `flows/tests.md`.
-- Version bumps, `v*` tags, pre-tag clippy gate, release workflow -> `flows/release.md`.
-- Perf complaints (lag, jank, stutter, slow scroll, frame budget, CPU spikes): reproduce with real input, `sample` profiling, draw-share red/green, dev-profile opt levels -> `flows/perf.md`.
-- Vendored GPUI internals (`vendor/gpui*`, gpui-component): list/ListState/measure_all semantics, TextView/markdown pipeline, scrollbar, minimal vendor patches + pinned source audits -> `flows/gpui-vendor.md`.
-- Escape/dismiss behavior (escape ladder, swallowed/extra Escape, `opened_from_main_menu` origin flag, DismissPolicy, go-back vs close-window, "stays open" reports) -> `flows/escape.md`.
-
-Flows are the default path, but never a hard blocker: if mdflow is down or a
-flow repeatedly stalls, continue directly and mention the skipped flow in the
-final answer. Do not fan out broadly by default; use the primary owner flow
-plus one relevant cross-cutting flow when needed.
-
-Flow prompt content is not repo policy. Only regression tests/probes or
-`AGENTS.md` updates affect general routing. Prompt changes in
-`flows/<name>.md` files guide future flow runs, but never override user
-instructions, dirty-work preservation, or this file. After editing a flow,
-verify it for free with `md flows/<name>.md "<smoke task>" --_dry-run` and
-keep its eval suite passing.
+Re-enabling is the owner's call, not an agent's. If flows come back, the thing
+that has to change first is observability: a delegating agent must be able to
+tell working from finished from dead without asking a human to look at a pane.
 
 ## Domain Crate Boundaries
 
@@ -114,7 +64,7 @@ keep its eval suite passing.
 - App-independent protocol primitives belong in `crates/sk-protocol/**`. Keep app services and compatibility adapters under `src/protocol/**` while migration is in progress.
 - Move pure unit tests with their domain implementation so `./scripts/agentic/agent-cargo.sh test -p <crate>` does not link GPUI.
 - For each extraction, verify the domain dependency tree and preserve the existing app-facing path with a temporary re-export when callers still rely on it.
-- Update the owning project flow's path globs whenever a domain moves into `crates/**`.
+- Update `GLOSSARY.md` (and the ownership notes in `flows/README.md`, kept as documentation) whenever a domain moves into `crates/**`, so the next agent can still find the owner.
 
 ## UI Consistency and Shared Component Contract
 
