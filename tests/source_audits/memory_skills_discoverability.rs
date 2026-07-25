@@ -23,13 +23,30 @@ fn context_subsearch_keeps_files_and_skills_in_main_input_path() {
         );
     }
 
-    assert!(
-        subsearch.contains(r#""file" => Some(Self::File)"#)
-            && subsearch.contains(r#""skills" => Some(Self::Skills)"#)
-            && subsearch.contains(r#"Self::File => "file""#)
-            && subsearch.contains(r#"Self::Skills => "skills""#),
-        "context subsearch prefixes must route file and skills through the same main-input mechanism"
-    );
+    // Both directions must exist: token -> source, and source -> prefix.
+    //
+    // The token -> source half used to be asserted as match arms
+    // (`"file" => Some(Self::File)`). It is now the SUBSEARCH_TRIGGERS table,
+    // which is a better mechanism than the arms it replaced — one ordered
+    // table, matched case-insensitively, and able to carry aliases such as
+    // `files` -> File that the match arms could not express without
+    // duplication. Asserting the arm spelling made this audit red for the
+    // upgrade.
+    for entry in [
+        r#"("file", ContextSubsearchSource::File)"#,
+        r#"("skills", ContextSubsearchSource::Skills)"#,
+    ] {
+        assert!(
+            subsearch.contains(entry),
+            "context subsearch must route {entry} through the shared trigger table"
+        );
+    }
+    for prefix in [r#"Self::File => "file""#, r#"Self::Skills => "skills""#] {
+        assert!(
+            subsearch.contains(prefix),
+            "context subsearch must map {prefix} back to its main-input prefix"
+        );
+    }
 }
 
 #[test]

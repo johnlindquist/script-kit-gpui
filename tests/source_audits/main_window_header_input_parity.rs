@@ -256,9 +256,15 @@ fn every_app_view_is_classified_for_main_window_header_input_policy() {
 fn searchable_main_window_surfaces_route_through_shared_input_chrome() {
     for (surface, path, required) in canonical_input_renderers() {
         let source = read_source(path);
+        // Matched by MODULE, not by an enumerated list of entry points. The
+        // list used to name four exact helpers; ScriptList moved to
+        // `render_main_view_chrome_header_overlay_footer_flush(`, a fifth
+        // variant in the very same shared module, and this went red for a
+        // surface that routes through shared chrome more thoroughly than most.
+        // Enumerating spellings means the audit fails every time the shared
+        // component grows a variant — the opposite of encouraging its use.
         assert!(
-            source.contains("render_main_view_chrome_footer_flush(")
-                || source.contains("render_main_view_chrome(")
+            source.contains("main_view_chrome::render_")
                 || source.contains("render_builtin_main_input_surface(")
                 || source.contains("render_generic_filterable_search_surface("),
             "{surface} must route its outer shell through shared main-view chrome"
