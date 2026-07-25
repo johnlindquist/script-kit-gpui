@@ -45,13 +45,30 @@ fn transcript_list_state_starts_with_existing_messages() {
         body.contains("let total = messages.len() + 1;"),
         "AgentChatTranscript::new must size the virtual list from existing messages plus its permanent tail row"
     );
+    // The invariant is the ROW COUNT: the list must be built from `total`, so a
+    // thread that already has messages never mounts empty.
+    //
+    // This used to assert `ListState::new(total, ListAlignment::Bottom` — the
+    // count AND a hardcoded alignment, in one string. When the transcript
+    // learned to anchor Top as well as Bottom, alignment moved behind
+    // `Self::list_alignment_for(anchor)` and this went red, reporting
+    // "mounted with a zero-row list" about a change that never touched the row
+    // count. The assertion's own message had always described rows while its
+    // code checked alignment; they are separated here.
     assert!(
-        body.contains("ListState::new(total, ListAlignment::Bottom"),
+        body.contains("ListState::new(total,"),
         "AgentChatTranscript::new must not mount an already-populated thread with a zero-row list"
     );
     assert!(
-        !body.contains("ListState::new(0, ListAlignment::Bottom"),
+        !body.contains("ListState::new(0,"),
         "zero-row transcript list initialization hides pre-existing Agent Chat messages"
+    );
+
+    // Alignment is still pinned, just to the resolver rather than to one
+    // literal — otherwise "anchor" could silently stop reaching the list.
+    assert!(
+        body.contains("Self::list_alignment_for(anchor)"),
+        "transcript alignment must be resolved from the layout anchor"
     );
 }
 
