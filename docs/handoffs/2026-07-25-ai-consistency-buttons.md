@@ -117,3 +117,31 @@ from `oracle_doctor.sh`; that was disputed and is **probably wrong** — my own
 doctor output showed two healthy slots and two in cooldown, consistent with
 dead pool slots rather than a broken client. I never ran `deploy-proof-now.sh`.
 Corrected in full at `.notes/oracle/ai-consistency-buttons/premise.md`.
+
+---
+
+## Evening arc: color consistency + Escape steps 1–3 (added 17:40)
+
+A second alignment page was answered (`98cab5e5-…641.json`) and ONE Oracle
+consult ran (slug `floating-capsule-entry-material`, gpt-5-pro, 20m). Its full
+9-step plan is at `.notes/oracle/color-consistency-escape/oracle-output.log`
+(gitignored — this machine only), with `premise.md` and `ledger.md` beside it.
+
+Key rulings: entry start alpha 0.0 → **0.85** (authorized unlock; backing
+window and content-layer fade are provably wrong — everything in the NSWindow
+multiplies by alphaValue). The colour metric must grade RAW displayed pixels;
+today it excludes every frame below alpha 0.85, which is why the defect reads
+as fixed. Veil 0.80 and rim are intentional; only alpha changes.
+
+Landed tonight: `d699abd0f` (Flow sessions ordered by semantic last_activity,
+4/4 tests + negative control) and `a3121adb7` (spec §3 three-way click ruling
++ G3 corrected — backdrop clicks were never dead, only the policy variant is
+unconstructed).
+
+Remaining, in the plan's own order: steps 0–4 (baseline capture → metric
+rewrite → material lock → alpha 0.85 → paired ABBA measurement at load ≤ 6.0,
+needs a QUIET machine and two preserved builds) and steps 6–7 (one
+BackgroundedSessionStore, then the merged Conversations section), then 9
+(audit). Step 8's policy test lands with step 6 — its verification needs the
+store. The user's bar governs all of it: **if it ain't measured, it ain't
+done.**
