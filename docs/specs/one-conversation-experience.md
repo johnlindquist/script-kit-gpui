@@ -397,3 +397,80 @@ hunk list should be short enough to read.
 - **The Escape design is coupled**: `docs/specs/backgrounded-ai-sessions.md`
   puts a Background/Close modal on the last Escape rung. Step 1 here decides
   what the earlier rungs mean. Land them in that order.
+
+## 5. Landed — the shared conversation renderer batch (2026-07-25)
+
+Divergences **4, 5, 6, and the New Conversation half of 10** are closed. What
+follows is what actually shipped, including where it diverges from what
+section 2 predicted, because the predictions were partly wrong.
+
+### What the two surfaces now share
+
+| Concern | Owner |
+| --- | --- |
+| Paint values (typography, spacing, code, actions) | `src/components/conversation_style.rs` — `production_conversation_style()` |
+| The selectable `TextView` seam | `src/components/conversation_text.rs` — `conversation_markdown_view()` |
+| Per-turn copy control | `src/components/conversation_actions.rs` |
+| Jump-to-latest pill | `src/components/list_scroll_affordance.rs` |
+
+`src/ai/agent_chat/ui/style_contract.rs` is now a façade: type aliases and
+`use` re-exports, zero production values. Flow's answer regions call
+`conversation_markdown_view` through `ChatPrompt::render_answer_region`.
+
+### Corrections to section 2's findings
+
+- **Code-block copy was NOT missing on either side.** Section 5 above says
+  Flow's is a "differently-styled hover reveal" and implies Agent Chat needs
+  nothing. Re-checked: both surfaces already have it (`code_table.rs` and
+  `.code_block_copy_button(true)`). It is now one implementation because Flow
+  renders through the vendored `TextView`, not because anything was ported.
+- **`⌘N` and `⌘L` were not equivalent gaps.** Agent Chat binds them to
+  DIFFERENT verbs — `⌘N` starts a new *thread* (the current one keeps
+  streaming), `⌘L` clears the messages and keeps the session. Flow took `⌘L`
+  only. Binding both would have invented a third meaning.
+- **Flow's jump pill is driven by a shadow flag.** `render_core.rs` computes
+  `self.user_has_scrolled_up && !self.turns_list_is_at_bottom()`. Agent Chat's
+  new pill reads `ListState::is_following_tail()` — the single authority — so
+  the *ported* control is more truthful than the one it was ported from.
+  Converging Flow onto it is an open follow-up.
+
+### Two invariants worth not re-deriving
+
+1. **A turn's render identity is not its `message_id`.**
+   `build_conversation_turns` reassigns `message_id` from the user's id to the
+   assistant's id the moment a reply lands. Any per-turn view state keyed by it
+   is dropped and re-parsed on the first streamed token.
+   `ConversationTurnRenderKey` is resolved once from the ORIGINATING message.
+
+2. **One function decides whether a turn draws an answer region.**
+   `render_turns::assistant_answer_region_source` is called by both the
+   renderer and `reconcile_assistant_text_views`. When they decided
+   separately, the mismatch was silent and asymmetric: a region the reconciler
+   skipped still rendered, through the OLD unselectable path. A just-submitted
+   turn (streaming, no response yet) hit exactly that case.
+
+### Proof
+
+Behavior is covered by unit tests in each owning module. Selection itself is
+not reachable from a Rust test — the two renderers produce visually similar
+output, so only what was painted distinguishes them. The vendored `TextView`
+annotates its scope with `{"selectable": bool}`; the probe reads it back:
+
+```bash
+SCRIPT_KIT_AGENT_ARTIFACT_NAME=ai-chat-parity \
+  ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
+bun scripts/agentic/ai-chat-parity-probe.ts
+```
+
+Its judgements live in `scripts/agentic/ai-chat-parity-evidence.ts` and are
+unit-tested without an app, so a run that drove nothing reports `absent`
+rather than "no failures".
+
+### Still open
+
+- Flow's `⇧⌘C` (Copy Last Response) is advertised in its ⌘K list but has no
+  key binding — `resolve_flow_session_key_action` has no arm for it. The
+  action works by clicking; the chord does nothing.
+- Flow's jump pill still reads `user_has_scrolled_up` (above).
+- Divergence 10's attachment half, and the composer split (divergence 20 /
+  "Also true"), are untouched.
