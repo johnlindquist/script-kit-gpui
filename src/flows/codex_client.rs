@@ -148,10 +148,10 @@ impl CodexAppServer {
         prompt: String,
     ) {
         let mut shared = self.shared.lock().unwrap();
-        if let Err(err) = ensure_child(&mut shared) {
+        if let Err(failure) = ensure_child(&mut shared) {
             shared.events.push(FlowThreadEvent::SessionFailed {
                 session_id,
-                failure: flow_failure(err),
+                failure,
             });
             return;
         }
@@ -193,10 +193,10 @@ impl CodexAppServer {
         profile: super::session::FlowThreadProfile,
     ) {
         let mut shared = self.shared.lock().unwrap();
-        if let Err(err) = ensure_child(&mut shared) {
+        if let Err(failure) = ensure_child(&mut shared) {
             shared.events.push(FlowThreadEvent::SessionFailed {
                 session_id,
-                failure: flow_failure(err),
+                failure,
             });
             return;
         }
@@ -261,13 +261,27 @@ impl CodexAppServer {
 
 /// Spawn `codex app-server` and pipeline the handshake. Ordered transport
 /// means `thread/start` written right after is processed after `initialize`.
-fn ensure_child(shared: &mut Shared) -> Result<(), String> {
+/// S12: failures here are classified where the fact is known — a spawn that
+/// failed is `SpawnFailed`, a missing pipe is `RuntimeClosed` — instead of
+/// returning prose for the free-text classifier to guess at (which produced
+/// `Unknown`, and with it a recovery card that offered nothing useful).
+fn ensure_child(shared: &mut Shared) -> Result<(), crate::ai::reliability::AppFailureRecord> {
     let alive = shared
         .child
         .as_mut()
         .map(|child| child.try_wait().map(|status| status.is_none()))
         .transpose()
-        .map_err(|err| format!("codex app-server wait failed: {err}"))?
+        .map_err(|err| {
+            tracing::warn!(
+                target: "script_kit::flows",
+                event = "codex_app_server_wait_failed",
+                %err,
+            );
+            crate::ai::reliability::process_failure(
+                sk_protocol::ai_reliability::ProtocolComponent::Codex,
+                crate::ai::reliability::ProcessFailureFacts::RuntimeClosed,
+            )
+        })?
         .unwrap_or(false);
     if alive && shared.stdin.is_some() {
         return Ok(());
@@ -299,18 +313,25 @@ fn ensure_child(shared: &mut Shared) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn {binary} app-server: {err}"))?;
+    let mut child = command.spawn().map_err(|err| {
+        crate::ai::reliability::spawn_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Codex,
+            &format!("{binary} app-server: {err}"),
+        )
+    })?;
     let registration = crate::process_manager::ChildRegistration::register(child.id(), &binary);
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "codex app-server stdin unavailable".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "codex app-server stdout unavailable".to_string())?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        crate::ai::reliability::process_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Codex,
+            crate::ai::reliability::ProcessFailureFacts::RuntimeClosed,
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        crate::ai::reliability::process_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Codex,
+            crate::ai::reliability::ProcessFailureFacts::RuntimeClosed,
+        )
+    })?;
 
     shared.child_generation += 1;
     let generation = shared.child_generation;
@@ -343,7 +364,12 @@ fn ensure_child(shared: &mut Shared) -> Result<(), String> {
     std::thread::Builder::new()
         .name(format!("codex-app-server-reader-{generation}"))
         .spawn(move || reader_loop(stdout, generation))
-        .map_err(|err| format!("failed to spawn reader thread: {err}"))?;
+        .map_err(|err| {
+            crate::ai::reliability::spawn_failure(
+                sk_protocol::ai_reliability::ProtocolComponent::Codex,
+                &format!("codex reader thread: {err}"),
+            )
+        })?;
     Ok(())
 }
 
@@ -432,14 +458,32 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
         "codex app-server exited"
     );
     shared.stdin = None;
+    // S12: the child's exit status is a FACT. This used to be the free-text
+    // string "codex app-server exited — send again to reconnect", which the
+    // provider classifier could not match, so a codex binary that died on
+    // launch produced `AiFailureCode::Unknown` and the generic "did not
+    // finish" card instead of a runtime-closed one with Reconnect.
+    let mut exit_code = None;
+    let mut signal = None;
     if let Some(mut child) = shared.child.take() {
-        let _ = child.try_wait();
+        if let Ok(Some(status)) = child.try_wait() {
+            exit_code = status.code();
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt as _;
+                signal = status.signal();
+            }
+        }
     }
+    let death = crate::ai::reliability::process_failure(
+        sk_protocol::ai_reliability::ProtocolComponent::Codex,
+        crate::ai::reliability::ProcessFailureFacts::ChildExited { exit_code, signal },
+    );
     let session_ids: Vec<u64> = shared.sessions.keys().copied().collect();
     for session_id in session_ids {
         shared.events.push(FlowThreadEvent::SessionFailed {
             session_id,
-            failure: flow_failure("codex app-server exited — send again to reconnect"),
+            failure: death.clone(),
         });
         if let Some(link) = shared.sessions.get_mut(&session_id) {
             link.thread_id = None;

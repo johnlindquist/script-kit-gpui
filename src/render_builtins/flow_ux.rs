@@ -281,19 +281,6 @@ fn shell_escape_path(path: &str) -> String {
     }
 }
 
-/// Recovery actions the Flow session surface can actually dispatch (S09).
-/// The shared reducer plans the options; this filter keeps the card honest —
-/// an action the surface cannot perform is never rendered enabled.
-fn flow_session_recovery_capabilities() -> crate::ai::reliability::SurfaceRecoveryCapabilities {
-    use sk_protocol::ai_reliability::RecoveryActionKind;
-    crate::ai::reliability::SurfaceRecoveryCapabilities::only([
-        RecoveryActionKind::Retry,
-        RecoveryActionKind::RethreadFlow,
-        RecoveryActionKind::RepairComponent,
-        RecoveryActionKind::CopyDetails,
-    ])
-    .layout(crate::ai::reliability::AiRecoveryLayout::TranscriptCard)
-}
 
 /// Safe, redacted diagnostic text for the CopyDetails action: stable code +
 /// category + fingerprint only — never raw provider payloads or stderr.
@@ -2369,7 +2356,7 @@ impl ScriptListApp {
                     let recovery_card = crate::ai::reliability::project_recovery(
                         &meta.reliability.state().identity,
                         meta.reliability.state(),
-                        &flow_session_recovery_capabilities(),
+                        &crate::ai::reliability::flow_session_recovery_capabilities(),
                     );
                     let mut main = div()
                         .flex()

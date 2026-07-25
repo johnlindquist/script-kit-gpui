@@ -84,23 +84,47 @@ async function waitForSessionPhase(
 }
 
 try {
+	await run();
+} catch (error) {
+	// A thrown step used to skip the receipt write entirely, so a failed run
+	// left the PREVIOUS run's receipt on disk and read as fresh evidence.
+	failures.push(`probe threw: ${(error as Error)?.message ?? String(error)}`);
+} finally {
+	await d.close();
+}
+
+async function run() {
 	await d.request({ type: "show" });
 	await d.waitForSettle();
 
 	// Open a codex-engine flow session from the launcher roster.
-	await d.setFilterAndWait("scout");
-	let seen = false;
-	for (let i = 0; i < 40 && !seen; i++) {
-		const st = await d.getState();
-		seen =
-			typeof st?.selectedValue === "string" &&
-			st.selectedValue.toLowerCase().includes("scout");
-		if (!seen) await sleep(250);
+	//
+	// The roster is populated asynchronously, so BOTH the selection and the
+	// resulting view have to be polled. An earlier fixed sleep here made the
+	// probe flaky: on a slow launch, Enter fired against whatever row happened
+	// to be selected and the run ended up in file search instead.
+	let opened: any = null;
+	for (let attempt = 0; attempt < 3 && !opened; attempt++) {
+		await d.setFilterAndWait("scout");
+		let seen = false;
+		for (let i = 0; i < 60 && !seen; i++) {
+			const st = await d.getState();
+			seen =
+				typeof st?.selectedValue === "string" &&
+				st.selectedValue.toLowerCase().includes("scout");
+			if (!seen) await sleep(250);
+		}
+		if (!seen) continue;
+		await pressKey("enter");
+		for (let i = 0; i < 40; i++) {
+			const st = await d.getState();
+			if (st?.promptType === "flowSession") {
+				opened = st;
+				break;
+			}
+			await sleep(250);
+		}
 	}
-	expect(seen, "flow row for 'scout' never became the launcher selection");
-	await pressKey("enter");
-	await sleep(400);
-	const opened = await d.getState();
 	expect(
 		opened?.promptType === "flowSession",
 		`expected flowSession, got ${opened?.promptType}`,
@@ -117,6 +141,13 @@ try {
 			failedSession.failureCode.length > 0,
 		"awaitingRecovery session must expose a stable failure code",
 	);
+	// A codex binary that exits on launch is a CHILD EXIT, not a mystery. The
+	// generic `Unknown` code produces the "did not finish" card with no
+	// reconnect path, which is what this probe caught the first time it ran.
+	expect(
+		failedSession?.failureCode !== "Unknown",
+		`a dead codex child must classify to a runtime code, got ${failedSession?.failureCode}`,
+	);
 	expect(
 		failedSession?.turns >= 1,
 		"the failed turn must stay committed (transcript preserved)",
@@ -132,6 +163,8 @@ try {
 	const ids: string[] = (elements?.elements ?? [])
 		.map((element: any) => element?.id ?? element?.semanticId ?? "")
 		.filter(Boolean);
+	receipt.promptType = (elements?.promptType ?? opened?.promptType ?? null) as Json;
+	receipt.allElementIds = ids as unknown as Json;
 	receipt.recoveryElementIds = ids.filter(
 		(id) => id.includes("ai-recovery") || id.includes("flow-session-recovery"),
 	) as unknown as Json;
@@ -151,8 +184,6 @@ try {
 	// Contrast case: a fresh session with a user Stop shows NO card.
 	await pressKey("escape");
 	await d.waitForSettle();
-} finally {
-	await d.close();
 }
 
 receipt.status = failures.length === 0 ? "green" : "red";

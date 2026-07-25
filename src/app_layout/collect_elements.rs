@@ -94,6 +94,72 @@ impl ScriptListApp {
         }
     }
 
+    /// S12: project the SHARED AI recovery card into driver-visible elements.
+    ///
+    /// `collect_visible_elements` is a hand-written model of each surface, not
+    /// a walk of the real GPUI tree. The recovery card had no node here, so
+    /// `getElements` never reported it — and every probe assertion of the form
+    /// "the recovery card is on screen" was unfalsifiable: it failed whether
+    /// the card rendered or not. This projects the same
+    /// [`crate::components::recovery_semantic_tree`] the renderer consumes, so
+    /// runtime proof and render come from ONE source and cannot drift.
+    fn ai_recovery_elements(
+        spec: &crate::ai::reliability::AiRecoveryCardSpec,
+    ) -> Vec<protocol::ElementInfo> {
+        crate::components::recovery_semantic_tree(spec)
+            .into_iter()
+            .map(|node| {
+                let is_action = node.role.ends_with("-action");
+                let mut element = protocol::ElementInfo {
+                    semantic_id: node.semantic_id.to_string(),
+                    element_type: if is_action {
+                        protocol::ElementType::Button
+                    } else {
+                        protocol::ElementType::Panel
+                    },
+                    text: None,
+                    value: None,
+                    selected: None,
+                    focused: None,
+                    index: None,
+                    role: Some(node.role.to_string()),
+                    kind: None,
+                    source: Some("AiRecoveryCard".to_string()),
+                    source_name: None,
+                    selectable: Some(node.enabled),
+                    status_kind: None,
+                    action_disabled: node
+                        .disabled_reason
+                        .as_ref()
+                        .map(|reason| format!("{reason:?}")),
+                    style: None,
+                };
+                match node.semantic_id {
+                    crate::ai::reliability::AI_RECOVERY_TITLE_ID => {
+                        element.text = Some(spec.title.to_string())
+                    }
+                    crate::ai::reliability::AI_RECOVERY_BODY_ID => {
+                        element.text = Some(spec.body.to_string())
+                    }
+                    crate::ai::reliability::AI_RECOVERY_PROGRESS_ID => {
+                        element.text = spec
+                            .progress
+                            .as_ref()
+                            .map(|progress| progress.label.to_string())
+                    }
+                    _ => {
+                        element.text = spec
+                            .actions
+                            .iter()
+                            .find(|action| action.semantic_id == node.semantic_id)
+                            .map(|action| action.label.to_string())
+                    }
+                }
+                element
+            })
+            .collect()
+    }
+
     pub(crate) fn collect_visible_elements(
         &self,
         limit: usize,
@@ -1654,6 +1720,24 @@ impl ScriptListApp {
                         ),
                     );
                     total_count += 1;
+                    // S12: the shared recovery card, from the same projection
+                    // the flow session renderer uses.
+                    if let Some(meta) = self
+                        .flow_sessions
+                        .iter()
+                        .map(|(meta, _)| meta)
+                        .find(|meta| meta.id == *session_id)
+                    {
+                        if let Some(spec) = crate::ai::reliability::project_recovery(
+                            &meta.reliability.state().identity,
+                            meta.reliability.state(),
+                            &crate::ai::reliability::flow_session_recovery_capabilities(),
+                        ) {
+                            let recovery = Self::ai_recovery_elements(&spec);
+                            total_count += recovery.len();
+                            elements.extend(recovery);
+                        }
+                    }
                     Self::finalize_surface_outcome(
                         "flow-session",
                         "flow-session",

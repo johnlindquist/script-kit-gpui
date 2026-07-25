@@ -179,6 +179,21 @@ pub fn standalone_failure_recovery_spec(
     project_recovery(&identity, &state, surface_capabilities)
 }
 
+/// Recovery actions the Flow session surface can actually dispatch.
+///
+/// Lives here, not in the bin-only flow renderer, because BOTH the renderer
+/// and the lib-side element collector must project the same card — otherwise
+/// runtime proof and render can disagree about which actions exist.
+pub fn flow_session_recovery_capabilities() -> SurfaceRecoveryCapabilities {
+    SurfaceRecoveryCapabilities::only([
+        RecoveryActionKind::Retry,
+        RecoveryActionKind::RethreadFlow,
+        RecoveryActionKind::RepairComponent,
+        RecoveryActionKind::CopyDetails,
+    ])
+    .layout(AiRecoveryLayout::TranscriptCard)
+}
+
 pub fn project_recovery(
     identity: &AiSurfaceIdentity,
     state: &AiOperationState,

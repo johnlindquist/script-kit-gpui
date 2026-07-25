@@ -40,10 +40,10 @@ pub(crate) use devtools::{
 };
 pub use diagnostics::{redact_diagnostic, DiagnosticVault, RedactedDiagnostic};
 pub use presentation::{
-    project_recovery, standalone_failure_recovery_spec, AiRecoveryActionSpec, AiRecoveryCardSpec,
-    AiRecoveryLayout, AiRecoveryProgress, AiRecoveryTone, SurfaceRecoveryCapabilities,
-    AI_RECOVERY_BODY_ID, AI_RECOVERY_CARD_ID, AI_RECOVERY_DISMISS_ID, AI_RECOVERY_PROGRESS_ID,
-    AI_RECOVERY_TITLE_ID,
+    flow_session_recovery_capabilities, project_recovery, standalone_failure_recovery_spec,
+    AiRecoveryActionSpec, AiRecoveryCardSpec, AiRecoveryLayout, AiRecoveryProgress, AiRecoveryTone,
+    SurfaceRecoveryCapabilities, AI_RECOVERY_BODY_ID, AI_RECOVERY_CARD_ID, AI_RECOVERY_DISMISS_ID,
+    AI_RECOVERY_PROGRESS_ID, AI_RECOVERY_TITLE_ID,
 };
 pub(crate) use runtime_boundary::{
     process_failure, protocol_failure, provider_failure, quick_ai_failure, setup_required_failure,
