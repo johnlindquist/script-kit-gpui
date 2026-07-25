@@ -305,5 +305,14 @@ Correction (same day): the delegated reviewer did not "return nothing" — the
 `s14-review` subagent failed three times with *"There's an issue with the
 selected model (gpt-5.6-sol). It may not exist or you may not have access to
 it."* That is a configuration failure, not a silent one, and it is worth
-recording because the same pinned model backs `.mdflow.yaml`: any flow routed
-through it would fail the same way.
+recording because 29 of 29 flow files pin that model.
+
+RETRACTED same day: the inference above was WRONG. A direct check —
+`codex exec --model gpt-5.6-sol "reply with exactly: MODEL_OK"` — returns
+`MODEL_OK`. The model is available to codex and every flow is fine. The failure
+was Claude Code's own subagent model resolution ("Run /model to pick a
+different model" is Claude Code's string, not codex's), so it says nothing
+about mdflow. Lesson, and it is the same one this whole workstream is about:
+an error message was read as evidence for a system it never described. The
+one-command check that settles it costs nothing; the inference cost a wrong
+line in a commit message (`3ccdfc5d9`).
