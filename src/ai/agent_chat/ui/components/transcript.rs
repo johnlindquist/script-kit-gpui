@@ -937,6 +937,7 @@ impl AgentChatTranscript {
                 presentation,
                 style_def,
                 show_pending_activity,
+                thread_status,
             ),
             AgentChatThreadMessageRole::Thought => Self::render_collapsible_block(
                 msg,
@@ -1173,6 +1174,7 @@ impl AgentChatTranscript {
         presentation: AgentChatTranscriptPresentation,
         style_def: &AgentChatStyleDef,
         show_pending_activity: bool,
+        thread_status: AgentChatThreadStatus,
     ) -> gpui::AnyElement {
         let content = if show_pending_activity {
             Self::render_pending_activity(_theme, style_def)
@@ -1189,7 +1191,91 @@ impl AgentChatTranscript {
             .into_any_element()
         };
 
-        Self::render_assistant_message_shell(content, _colors, _theme, presentation, style_def)
+        let shell =
+            Self::render_assistant_message_shell(content, _colors, _theme, presentation, style_def);
+
+        Self::with_turn_copy_affordance(shell, ui_variant, msg, _theme, style_def, thread_status)
+    }
+
+    /// Semantic id for an assistant row's per-turn copy control.
+    pub(crate) fn turn_copy_fidelity_id(message_id: u64) -> String {
+        format!("agent-chat-copy-turn-{message_id}")
+    }
+
+    /// Wrap an assistant row so it carries the SHARED per-turn copy control.
+    ///
+    /// The payload is `msg.body` — the original Markdown bytes — not the
+    /// rendered text and not a heavy-preview truncation. Copying what was
+    /// displayed rather than what was received is the failure this guards:
+    /// a long answer renders as a shortened preview, and a copy button reading
+    /// from the preview would silently put the truncation on the pasteboard.
+    fn with_turn_copy_affordance(
+        shell: gpui::AnyElement,
+        ui_variant: AgentChatUiVariant,
+        msg: &AgentChatThreadMessage,
+        theme: &crate::theme::Theme,
+        style_def: &AgentChatStyleDef,
+        thread_status: AgentChatThreadStatus,
+    ) -> gpui::AnyElement {
+        use crate::components::conversation_actions::{
+            render_conversation_copy_button, turn_copy_eligibility, ConversationCopyButtonSpec,
+            TurnCopyRole,
+        };
+
+        if !ui_variant.config().show_turn_copy {
+            return shell;
+        }
+
+        let eligibility = turn_copy_eligibility(
+            TurnCopyRole::Assistant,
+            msg.body.trim().is_empty(),
+            matches!(thread_status, AgentChatThreadStatus::Streaming),
+        );
+        let fidelity_id = Self::turn_copy_fidelity_id(msg.id);
+        let payload = msg.body.to_string();
+
+        let Some(button) = render_conversation_copy_button(
+            ConversationCopyButtonSpec {
+                id: SharedString::from(format!("agent-chat-copy-turn-{}", msg.id)),
+                fidelity_id: SharedString::from(fidelity_id),
+                activity_fidelity_id: SharedString::from(format!(
+                    "agent-chat-copy-turn-{}-streaming",
+                    msg.id
+                )),
+                eligibility,
+                animation_index: msg.id as usize,
+            },
+            style_def,
+            theme,
+            move |_event, _window, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(payload.clone()));
+            },
+        ) else {
+            return shell;
+        };
+
+        let group_name: SharedString =
+            SharedString::from(format!("agent-chat-assistant-row-{}", msg.id));
+
+        div()
+            .relative()
+            .w_full()
+            .group(group_name.clone())
+            .child(shell)
+            .child(
+                // Parked in its own corner box so it never overlaps the
+                // selectable TextView bounds — an action sitting on top of the
+                // text would swallow drag-selection, which is the whole point
+                // of the shared renderer.
+                div()
+                    .absolute()
+                    .top(px(style_def.transcript.row_padding_bottom))
+                    .right(px(style_def.assistant_message.padding_x))
+                    .opacity(0.0)
+                    .group_hover(group_name, |d| d.opacity(1.0))
+                    .child(button),
+            )
+            .into_any_element()
     }
 
     fn render_assistant_message_shell(
@@ -1673,6 +1759,9 @@ impl Render for AgentChatTranscript {
         let theme = theme::get_cached_theme();
         let colors = PromptColors::from_theme(&theme);
         let style_def = super::super::style_contract::production_agent_chat_style();
+        // `theme` is moved into the row-rendering closure below; the
+        // jump-to-latest pill is built after that, so it needs its own handle.
+        let pill_theme = theme.clone();
 
         let focused_text_preview = matches!(
             self.ui_variant.config().transcript,
@@ -1909,6 +1998,18 @@ impl Render for AgentChatTranscript {
             );
         }
 
+        // Jump-to-latest is derived from the LIVE ListState, never a shadow
+        // flag: `scroll_metrics()` reads `is_following_tail()` directly, so a
+        // list that resumes tail-following on its own (new content, resize,
+        // programmatic scroll) hides the pill without anything to notify.
+        let metrics = self.scroll_metrics();
+        let show_jump_to_latest = self.ui_variant.config().show_jump_to_latest
+            && !focused_text_preview
+            && crate::components::list_scroll_affordance::should_show_jump_to_latest(
+                metrics.can_scroll_y,
+                metrics.follow_tail,
+            );
+
         div()
             .debug_selector(|| AGENT_CHAT_TRANSCRIPT_VIEWPORT_FIDELITY_ID.to_string())
             .relative()
@@ -1916,6 +2017,24 @@ impl Render for AgentChatTranscript {
             .min_h(px(0.))
             .overflow_hidden()
             .child(transcript_content)
+            .when(show_jump_to_latest, |el| {
+                el.child(
+                    crate::components::list_scroll_affordance::render_jump_to_latest_pill(
+                        crate::components::list_scroll_affordance::AGENT_CHAT_JUMP_TO_LATEST_ID,
+                        "Jump to latest",
+                        &pill_theme,
+                        cx.listener(|this, _event, _window, cx| {
+                            // Route through the SINGLE follow-tail authority.
+                            // `scroll_to_end()` calls `set_follow_tail(true)`,
+                            // which both snaps to the end and restores
+                            // following, so the pill hides on the next paint
+                            // because its own predicate turns false.
+                            this.scroll_to_end();
+                            cx.notify();
+                        }),
+                    ),
+                )
+            })
             .vertical_scrollbar_with_fidelity_scope(
                 &self.list_state,
                 "agent-chat-transcript-scrollbar",

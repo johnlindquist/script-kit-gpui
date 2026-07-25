@@ -41,6 +41,33 @@ pub struct ConversationStyleDef {
     pub collapsible: ConversationCollapsibleStyle,
     pub error: ConversationErrorStyle,
     pub system: ConversationSystemStyle,
+    pub actions: ConversationActionStyle,
+}
+
+/// Per-turn action affordance metrics (the response copy button and its
+/// streaming activity dot).
+///
+/// These values are lifted verbatim from Flow's existing copy control in
+/// `src/prompts/chat/render_turns.rs`, which was the only implementation of
+/// this affordance. They live here so Agent Chat's port reuses the exact same
+/// hit target and hover treatment instead of re-authoring approximations in a
+/// second renderer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConversationActionStyle {
+    /// Square hit target for the trailing action control.
+    pub button_size: f32,
+    pub button_radius: f32,
+    /// Resting opacity; the control lifts to `button_hover_opacity` on hover.
+    pub button_opacity: f32,
+    pub button_hover_opacity: f32,
+    /// Hover surface tint alpha over `text.primary`.
+    pub button_hover_bg_alpha: f32,
+    pub icon_size: f32,
+    /// Streaming activity dot painted at the control's bottom-right corner.
+    pub activity_dot_size: f32,
+    pub activity_dot_inset: f32,
+    /// Pulse period for that dot, in milliseconds.
+    pub activity_pulse_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,6 +224,20 @@ pub fn production_conversation_style() -> ConversationStyleDef {
             padding_y: 4.0,
             opacity: 0.60,
             border_alpha: 0x30 as f32,
+        },
+        actions: ConversationActionStyle {
+            button_size: 24.0,
+            button_radius: 4.0,
+            button_opacity: 0.7,
+            button_hover_opacity: 1.0,
+            // Flow resolved its hover surface through
+            // `theme::hover_overlay_bg(&theme, 0x28)`; the alpha is carried
+            // here so both surfaces tint identically.
+            button_hover_bg_alpha: 0x28 as f32,
+            icon_size: 16.0,
+            activity_dot_size: 7.0,
+            activity_dot_inset: 1.0,
+            activity_pulse_ms: 1200,
         },
     }
 }

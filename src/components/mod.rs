@@ -31,6 +31,8 @@ pub(crate) mod braille_loading;
 pub(crate) mod builtin_leading_separator;
 pub mod button;
 pub(crate) mod confirm_modal_shell;
+/// Shared per-turn conversation action affordances (response copy control).
+pub(crate) mod conversation_actions;
 /// Shared typed owner of conversation paint values for Agent Chat AND Flow.
 /// `src/ai/agent_chat/ui/style_contract.rs` is a compatibility façade over it.
 pub mod conversation_style;

@@ -138,6 +138,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Default,
                 show_sidecar: false,
                 show_variant_badge: false,
+                show_turn_copy: true,
+                show_jump_to_latest: true,
             },
             Self::UserBold => AgentChatUiConfig {
                 transcript: AgentChatTranscriptPresentation::UserBold,
@@ -145,6 +147,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Default,
                 show_sidecar: false,
                 show_variant_badge: true,
+                show_turn_copy: true,
+                show_jump_to_latest: true,
             },
             Self::RoleSplit => AgentChatUiConfig {
                 transcript: AgentChatTranscriptPresentation::RoleSplit,
@@ -152,6 +156,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Default,
                 show_sidecar: false,
                 show_variant_badge: true,
+                show_turn_copy: true,
+                show_jump_to_latest: true,
             },
             Self::BottomDock => AgentChatUiConfig {
                 transcript: AgentChatTranscriptPresentation::Standard,
@@ -159,6 +165,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Compact,
                 show_sidecar: false,
                 show_variant_badge: true,
+                show_turn_copy: true,
+                show_jump_to_latest: true,
             },
             Self::DenseLog => AgentChatUiConfig {
                 transcript: AgentChatTranscriptPresentation::DenseLog,
@@ -166,6 +174,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Compact,
                 show_sidecar: false,
                 show_variant_badge: true,
+                show_turn_copy: true,
+                show_jump_to_latest: true,
             },
             Self::Sidecar => AgentChatUiConfig {
                 transcript: AgentChatTranscriptPresentation::RoleSplit,
@@ -173,6 +183,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Default,
                 show_sidecar: true,
                 show_variant_badge: true,
+                show_turn_copy: true,
+                show_jump_to_latest: true,
             },
             Self::FocusedTextMini => AgentChatUiConfig {
                 transcript: AgentChatTranscriptPresentation::FocusedTextPreview,
@@ -180,6 +192,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Mini,
                 show_sidecar: false,
                 show_variant_badge: false,
+                show_turn_copy: false,
+                show_jump_to_latest: false,
             },
             Self::QuickAi => AgentChatUiConfig {
                 transcript: AgentChatTranscriptPresentation::Standard,
@@ -187,6 +201,8 @@ impl AgentChatUiVariant {
                 chrome: AgentChatChromeDensity::Compact,
                 show_sidecar: false,
                 show_variant_badge: false,
+                show_turn_copy: false,
+                show_jump_to_latest: false,
             },
         }
     }
@@ -199,6 +215,14 @@ pub(crate) struct AgentChatUiConfig {
     pub(crate) chrome: AgentChatChromeDensity,
     pub(crate) show_sidecar: bool,
     pub(crate) show_variant_badge: bool,
+    /// Per-turn response copy control on assistant rows.
+    ///
+    /// Gated here rather than by `if variant == QuickAi` checks inside the
+    /// renderer so the answer for a NEW variant is a compile-time decision in
+    /// one table instead of a grep across render functions.
+    pub(crate) show_turn_copy: bool,
+    /// "Jump to latest" affordance when the transcript is scrolled off tail.
+    pub(crate) show_jump_to_latest: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,5 +263,98 @@ impl AgentChatChromeDensity {
             Self::Default => chrome_tokens::LIQUID_GLASS_PANEL_PADDING_PX,
             Self::Compact | Self::Mini => chrome_tokens::LIQUID_GLASS_DENSE_GAP_PX,
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_chat_ui_variant_affordance_tests {
+    use super::*;
+
+    /// Every variant, so a newly added one cannot quietly default into or out
+    /// of the full-Agent affordances. `EXPERIMENTS` is only six of the eight —
+    /// it omits `Standard` and `QuickAi` — so it is the wrong list to iterate
+    /// for a capability check.
+    const ALL_VARIANTS: [AgentChatUiVariant; 8] = [
+        AgentChatUiVariant::Standard,
+        AgentChatUiVariant::UserBold,
+        AgentChatUiVariant::RoleSplit,
+        AgentChatUiVariant::BottomDock,
+        AgentChatUiVariant::DenseLog,
+        AgentChatUiVariant::Sidecar,
+        AgentChatUiVariant::FocusedTextMini,
+        AgentChatUiVariant::QuickAi,
+    ];
+
+    /// Quick AI is a zero-context instant-answer surface, deliberately out of
+    /// scope for the per-turn affordances in this batch. Locked here, at the
+    /// one config table, rather than by `if variant == QuickAi` scattered
+    /// through render functions where a new call site could miss it.
+    #[test]
+    fn quick_ai_does_not_gain_full_agent_turn_affordances() {
+        let config = AgentChatUiVariant::QuickAi.config();
+        assert!(
+            !config.show_turn_copy,
+            "Quick AI must not gain the per-turn copy control in this batch"
+        );
+        assert!(
+            !config.show_jump_to_latest,
+            "Quick AI must not gain the jump-to-latest affordance in this batch"
+        );
+    }
+
+    /// The focused-text mini surface is a compact editing affordance, not a
+    /// scrollable conversation, so neither affordance applies.
+    #[test]
+    fn focused_text_mini_does_not_gain_full_agent_turn_affordances() {
+        let config = AgentChatUiVariant::FocusedTextMini.config();
+        assert!(!config.show_turn_copy);
+        assert!(!config.show_jump_to_latest);
+    }
+
+    #[test]
+    fn every_full_agent_chat_variant_has_both_affordances() {
+        for variant in [
+            AgentChatUiVariant::Standard,
+            AgentChatUiVariant::UserBold,
+            AgentChatUiVariant::RoleSplit,
+            AgentChatUiVariant::BottomDock,
+            AgentChatUiVariant::DenseLog,
+            AgentChatUiVariant::Sidecar,
+        ] {
+            let config = variant.config();
+            assert!(
+                config.show_turn_copy,
+                "{} must expose per-turn copy",
+                variant.state_id()
+            );
+            assert!(
+                config.show_jump_to_latest,
+                "{} must expose jump-to-latest",
+                variant.state_id()
+            );
+        }
+    }
+
+    /// Exactly six of eight variants carry the affordances. A count guards
+    /// against a new variant being added to `ALL_VARIANTS` without a
+    /// deliberate decision about these two flags.
+    #[test]
+    fn exactly_the_six_full_agent_variants_carry_the_affordances() {
+        let with_copy = ALL_VARIANTS
+            .iter()
+            .filter(|v| v.config().show_turn_copy)
+            .count();
+        let with_jump = ALL_VARIANTS
+            .iter()
+            .filter(|v| v.config().show_jump_to_latest)
+            .count();
+        assert_eq!(
+            with_copy, 6,
+            "six full Agent Chat variants expose turn copy"
+        );
+        assert_eq!(
+            with_jump, 6,
+            "six full Agent Chat variants expose jump-to-latest"
+        );
     }
 }
