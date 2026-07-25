@@ -907,7 +907,10 @@ impl ScriptListApp {
     /// no stale copy is captured while the popup is open.
     fn flow_desk_actions_subject(&self) -> Option<FlowDeskSubject> {
         match &self.current_view {
-            AppView::FlowSessionView { session_id } => Some(FlowDeskSubject::Session(*session_id)),
+            AppView::FlowSessionView { session_id } => Some(FlowDeskSubject::Session {
+                id: *session_id,
+                working: self.flow_session_has_active_turn(*session_id),
+            }),
             AppView::FlowUxView {
                 filter,
                 selected_index,
@@ -915,7 +918,10 @@ impl ScriptListApp {
             } => {
                 let rows = self.flow_desk_rows(filter);
                 match rows.get(*selected_index)? {
-                    FlowDeskRow::Session(id) => Some(FlowDeskSubject::Session(*id)),
+                    FlowDeskRow::Session(id) => Some(FlowDeskSubject::Session {
+                        id: *id,
+                        working: self.flow_session_has_active_turn(*id),
+                    }),
                     FlowDeskRow::Run(id) => Some(FlowDeskSubject::Run(*id)),
                     FlowDeskRow::Flow(flow) => Some(FlowDeskSubject::Flow(flow.clone())),
                     // Setup affordance rows carry exactly one verb — Enter
@@ -1015,8 +1021,8 @@ impl ScriptListApp {
                 );
                 actions
             }
-            FlowDeskSubject::Session(_) => vec![
-                Action::new(
+            FlowDeskSubject::Session { working, .. } => {
+                let mut actions = vec![Action::new(
                     "flow_desk_session_open",
                     "Open Conversation",
                     Some("Reattach to the same live session".to_string()),
@@ -1024,16 +1030,43 @@ impl ScriptListApp {
                 )
                 .with_shortcut("↵")
                 .with_section("Session")
-                .with_icon(IconName::Terminal),
-                Action::new(
-                    "flow_desk_session_background",
-                    "Background",
-                    Some("Leave it running and return to the desk".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_shortcut("⌘⇧D")
-                .with_section("Session")
-                .with_icon(IconName::ArrowDown),
+                .with_icon(IconName::Terminal)];
+                actions.push(
+                    Action::new(
+                        "flow_desk_session_background",
+                        "Background",
+                        Some("Leave it running and return to the desk".to_string()),
+                        ActionCategory::ScriptContext,
+                    )
+                    .with_shortcut("⌘⇧D")
+                    .with_section("Session")
+                    .with_icon(IconName::ArrowDown),
+                );
+                // Mirrors Agent Chat's `agent_chat_new_conversation` exactly:
+                // same title, same ⌘L, same icon, same Session section, so a
+                // user who learned it on one surface finds it on the other.
+                //
+                // OMITTED while a turn is in flight rather than shown greyed:
+                // this action list has no disabled state, and the AI
+                // reliability rule is that an action a surface cannot perform
+                // is never rendered as though it can. The ⌘L key path stays
+                // live and answers with a neutral toast, so the affordance is
+                // still discoverable — it just cannot be clicked into a
+                // no-op.
+                if !working {
+                    actions.push(
+                        Action::new(
+                            "flow_desk_session_new_conversation",
+                            "New Conversation",
+                            Some("Clear this conversation and start a fresh thread".to_string()),
+                            ActionCategory::ScriptContext,
+                        )
+                        .with_shortcut("\u{2318}L")
+                        .with_section("Session")
+                        .with_icon(IconName::Plus),
+                    );
+                }
+                actions.extend([
                 // Response section mirrors Agent Chat exactly — same title,
                 // same ⇧⌘C, same section name. Copying the last answer is the
                 // single most common thing a user does with a finished turn,
@@ -1083,7 +1116,9 @@ impl ScriptListApp {
                 .with_shortcut("⇧⌘⎋")
                 .with_section("Danger")
                 .with_icon(IconName::Trash),
-            ],
+                ]);
+                actions
+            }
             FlowDeskSubject::Run(id) => {
                 let run = crate::flows::run_registry::flow_run_registry().get(*id);
                 let mut actions = Vec::new();
@@ -1157,7 +1192,7 @@ impl ScriptListApp {
         let actions = Self::flow_desk_actions_for_dialog(&subject);
         let placeholder = match &subject {
             FlowDeskSubject::Flow(flow) => flow.friendly_name(),
-            FlowDeskSubject::Session(_) => "Session actions".to_string(),
+            FlowDeskSubject::Session { .. } => "Session actions".to_string(),
             FlowDeskSubject::Run(id) => crate::flows::run_registry::flow_run_registry()
                 .get(*id)
                 .map(|run| {
@@ -1268,13 +1303,27 @@ impl ScriptListApp {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(wrapper));
                 }
             }
-            ("flow_desk_session_open", Some(FlowDeskSubject::Session(id))) => {
+            ("flow_desk_session_open", Some(FlowDeskSubject::Session { id, .. })) => {
                 self.open_flow_session(id, cx);
             }
             ("flow_desk_session_background", _) => {
                 self.background_flow_session(window, cx);
             }
-            ("flow_desk_session_copy_last_response", Some(FlowDeskSubject::Session(id))) => {
+            (
+                "flow_desk_session_new_conversation",
+                Some(FlowDeskSubject::Session { id, .. }),
+            ) => {
+                // Same transaction the ⌘L chord and the failure-recovery
+                // rethread use. It re-checks the active turn itself, so a
+                // turn that started between the popup opening and this
+                // firing is still refused rather than orphaned.
+                self.start_fresh_flow_conversation(
+                    id,
+                    crate::flows::session::FlowConversationResetCause::UserRequested,
+                    cx,
+                );
+            }
+            ("flow_desk_session_copy_last_response", Some(FlowDeskSubject::Session { id, .. })) => {
                 // Copy the newest turn that actually produced an answer. The
                 // in-flight turn has an empty `assistant` until the engine
                 // replies, so taking `turns.last()` unconditionally would
@@ -1308,7 +1357,7 @@ impl ScriptListApp {
                     }
                 }
             }
-            ("flow_desk_session_copy_transcript", Some(FlowDeskSubject::Session(id))) => {
+            ("flow_desk_session_copy_transcript", Some(FlowDeskSubject::Session { id, .. })) => {
                 if let Some((meta, _)) = self.flow_sessions.iter().find(|(meta, _)| meta.id == id) {
                     let transcript = meta
                         .turns
@@ -1319,10 +1368,10 @@ impl ScriptListApp {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(transcript));
                 }
             }
-            ("flow_desk_session_stop", Some(FlowDeskSubject::Session(id))) => {
+            ("flow_desk_session_stop", Some(FlowDeskSubject::Session { id, .. })) => {
                 self.stop_flow_session(id, cx);
             }
-            ("flow_desk_session_terminate", Some(FlowDeskSubject::Session(id))) => {
+            ("flow_desk_session_terminate", Some(FlowDeskSubject::Session { id, .. })) => {
                 self.terminate_flow_session(id, window, cx);
             }
             ("flow_desk_run_cancel", Some(FlowDeskSubject::Run(id))) => {
@@ -1502,7 +1551,13 @@ mod flow_desk_create_discoverability_tests {
     fn subjects() -> Vec<(&'static str, FlowDeskSubject)> {
         vec![
             ("flow", FlowDeskSubject::Flow(sample_flow())),
-            ("session", FlowDeskSubject::Session(7)),
+            (
+                "session",
+                FlowDeskSubject::Session {
+                    id: 7,
+                    working: false,
+                },
+            ),
             ("create", FlowDeskSubject::Create),
         ]
     }
@@ -1536,7 +1591,10 @@ mod flow_desk_create_discoverability_tests {
 
     #[test]
     fn danger_actions_stay_last_for_sessions() {
-        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session(7));
+        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
+            id: 7,
+            working: false,
+        });
         let first_danger = actions
             .iter()
             .position(|action| action.section.as_deref() == Some("Danger"))
@@ -1559,7 +1617,10 @@ mod flow_desk_create_discoverability_tests {
     /// exists to stop.
     #[test]
     fn flow_sessions_copy_the_last_response_the_same_way_agent_chat_does() {
-        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session(7));
+        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
+            id: 7,
+            working: false,
+        });
         let copy = actions
             .iter()
             .find(|action| action.id == "flow_desk_session_copy_last_response")
@@ -1578,5 +1639,66 @@ mod flow_desk_create_discoverability_tests {
             Some("Response"),
             "both copy verbs belong to one section, so they are found together"
         );
+    }
+
+    /// Agent Chat has had "New Conversation" on ⌘L; Flow's only way to start
+    /// over was Terminate, which permanently destroys the conversation. A user
+    /// who wanted a clean slate had to pick the destructive verb.
+    ///
+    /// The literals are asserted deliberately: this action exists to be the
+    /// SAME action on both surfaces, so a renamed or rebound twin is exactly
+    /// the drift being prevented. The expected values are read from Agent
+    /// Chat's own builder rather than typed twice, so a change on that side
+    /// fails here instead of quietly splitting the two again.
+    #[test]
+    fn flow_sessions_start_a_new_conversation_the_same_way_agent_chat_does() {
+        let agent_chat = crate::actions::get_agent_chat_actions();
+        let reference = agent_chat
+            .iter()
+            .find(|action| action.id == "agent_chat_new_conversation")
+            .expect("Agent Chat owns the reference New Conversation action");
+
+        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
+            id: 7,
+            working: false,
+        });
+        let flow = actions
+            .iter()
+            .find(|action| action.id == "flow_desk_session_new_conversation")
+            .expect("an idle flow session must offer New Conversation");
+
+        assert_eq!(flow.title, reference.title);
+        assert_eq!(flow.shortcut, reference.shortcut);
+        assert_eq!(flow.section, reference.section);
+        assert_eq!(flow.icon, reference.icon);
+    }
+
+    /// The list has no disabled state, so an action that cannot run must not
+    /// be listed. Offering "New Conversation" mid-turn would either orphan a
+    /// running turn or click into a no-op — both worse than not showing it.
+    #[test]
+    fn new_conversation_is_withheld_while_a_turn_is_running() {
+        let working = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
+            id: 7,
+            working: true,
+        });
+        assert!(
+            !working
+                .iter()
+                .any(|action| action.id == "flow_desk_session_new_conversation"),
+            "a working session must not offer a reset it would have to refuse"
+        );
+        // Everything else stays put — withholding one verb must not quietly
+        // strip the session's other affordances.
+        for expected in [
+            "flow_desk_session_open",
+            "flow_desk_session_stop",
+            "flow_desk_session_terminate",
+        ] {
+            assert!(
+                working.iter().any(|action| action.id == expected),
+                "{expected} must survive while the session is working"
+            );
+        }
     }
 }

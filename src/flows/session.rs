@@ -400,6 +400,62 @@ pub enum FlowChatRequest {
     },
 }
 
+/// Why a flow conversation is being re-threaded.
+///
+/// Both entry points put the session on a FRESH protocol thread. They differ
+/// on exactly one thing — whether the existing transcript survives — and that
+/// difference is the whole user-visible contract, so it is a type rather than
+/// a bare `bool` at two call sites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowConversationResetCause {
+    /// A failure recovery ("Start a new thread"). The engine died; the
+    /// CONVERSATION did not. The transcript survives and is rolled up into the
+    /// new thread's first prompt.
+    Recovery,
+    /// The user asked for a new conversation. The transcript is discarded and
+    /// the next turn starts from an empty history.
+    UserRequested,
+}
+
+impl FlowConversationResetCause {
+    /// Whether the existing transcript survives into the new thread.
+    ///
+    /// This one predicate drives every downstream difference: clearing the
+    /// rendered turns, clearing `meta.turns` (which is also what makes the
+    /// submit path treat the next turn as a first turn rather than a rollup),
+    /// and replacing the persisted snapshot.
+    pub fn preserves_transcript(self) -> bool {
+        matches!(self, Self::Recovery)
+    }
+}
+
+/// Whether a fresh-conversation request may proceed right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowConversationResetGuard {
+    Allowed,
+    /// A turn is in flight. Resetting would orphan a running engine turn that
+    /// keeps spending, and the user would have no way back to it.
+    BlockedByActiveTurn,
+}
+
+/// Decide whether a conversation reset may run.
+///
+/// Pure so both the ⌘K path and the ⌘L path can be held to the same rule
+/// without an app. Recovery is included deliberately: a recovery selection is
+/// only reachable from a settled failure, so if one ever arrives with a turn
+/// in flight that is a bug, and silently rethreading underneath it would hide
+/// the bug behind a lost turn.
+pub fn resolve_flow_conversation_reset_guard(
+    _cause: FlowConversationResetCause,
+    has_active_turn: bool,
+) -> FlowConversationResetGuard {
+    if has_active_turn {
+        FlowConversationResetGuard::BlockedByActiveTurn
+    } else {
+        FlowConversationResetGuard::Allowed
+    }
+}
+
 /// Metadata for one conversation, independent of the GPUI entity.
 #[derive(Debug, Clone)]
 pub struct FlowSessionMeta {
@@ -1441,6 +1497,83 @@ pub fn flow_definition_mtime_ms(path: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cause is the whole difference between the two rethread entry
+    /// points, so it is asserted exhaustively rather than at one call site.
+    #[test]
+    fn only_a_user_requested_reset_discards_the_transcript() {
+        assert!(
+            FlowConversationResetCause::Recovery.preserves_transcript(),
+            "the engine died, the conversation did not — recovery rolls the \
+             transcript into the new thread"
+        );
+        assert!(
+            !FlowConversationResetCause::UserRequested.preserves_transcript(),
+            "'New Conversation' that kept the old turns would not be a new \
+             conversation"
+        );
+    }
+
+    /// A reset while a turn is in flight would orphan a running engine turn:
+    /// it keeps spending, and the user has no route back to it.
+    #[test]
+    fn a_reset_is_refused_while_a_turn_is_in_flight() {
+        for cause in [
+            FlowConversationResetCause::Recovery,
+            FlowConversationResetCause::UserRequested,
+        ] {
+            assert_eq!(
+                resolve_flow_conversation_reset_guard(cause, true),
+                FlowConversationResetGuard::BlockedByActiveTurn,
+                "{cause:?} must not reset over a live turn"
+            );
+            assert_eq!(
+                resolve_flow_conversation_reset_guard(cause, false),
+                FlowConversationResetGuard::Allowed,
+                "{cause:?} is allowed on an idle session"
+            );
+        }
+    }
+
+    /// The reset writes an EMPTY snapshot rather than deleting the file. That
+    /// only works as a replacement if an empty snapshot reads back as "no
+    /// conversation" — otherwise a restart would reattach a zero-turn session
+    /// and the replaced transcript's fate would depend on load order.
+    #[test]
+    fn an_empty_persisted_snapshot_does_not_reattach() {
+        let dir = std::env::temp_dir().join(format!(
+            "sk-flow-empty-snapshot-{}",
+            std::process::id() as u64
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let flow_id = "project:reset-probe";
+        let flow_path = "/tmp/reset-probe.md";
+
+        persist_conversation_to(
+            &dir,
+            flow_id,
+            flow_path,
+            &[SessionTurn {
+                user: "first question".into(),
+                assistant: "first answer".into(),
+                outcome: PersistedTurnOutcome::Ok,
+                failure: None,
+            }],
+        )
+        .expect("seed snapshot");
+        assert!(
+            load_persisted_conversation_from(&dir, flow_id, flow_path).is_some(),
+            "a real transcript must load, or this test proves nothing"
+        );
+
+        persist_conversation_to(&dir, flow_id, flow_path, &[]).expect("replacement snapshot");
+        assert!(
+            load_persisted_conversation_from(&dir, flow_id, flow_path).is_none(),
+            "the replaced transcript must not reattach after a new conversation"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn mission_resolution_strips_frontmatter_and_substitutes_task() {

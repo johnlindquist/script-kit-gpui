@@ -157,6 +157,10 @@ pub(crate) enum FlowSessionKeyAction {
     Stop,
     /// ⌘K — open/close the session actions menu.
     ToggleActions,
+    /// ⌘L — start a new conversation with this flow, same chord Agent Chat
+    /// uses. Resolved even while a turn is in flight: the handler owns the
+    /// refusal so the "is this allowed" rule lives in ONE place.
+    NewConversation,
     /// Plain, unmodified ↵ — send the composer draft as the next turn.
     Submit,
     /// No shell-level action; the key falls through to the composer input.
@@ -193,6 +197,11 @@ fn resolve_flow_session_key_action(
     }
     if platform && key.eq_ignore_ascii_case("k") {
         return FlowSessionKeyAction::ToggleActions;
+    }
+    // ⌘L, matching Agent Chat. Suppressed while the actions popup is open for
+    // the same reason ⎋ is: the popup owns the keyboard while it is up.
+    if platform && !shift && key.eq_ignore_ascii_case("l") && !actions_open {
+        return FlowSessionKeyAction::NewConversation;
     }
     if is_key_enter(key) && !platform && !shift {
         return FlowSessionKeyAction::Submit;
@@ -291,8 +300,14 @@ impl FlowChatSubmitResult {
 pub(crate) enum FlowDeskSubject {
     /// A flow identity row (or the desk's flow list generally).
     Flow(crate::flows::model::FlowDescriptor),
-    /// A conversation session by id — selected row or the open session view.
-    Session(u64),
+    /// A conversation session — selected row or the open session view.
+    ///
+    /// Carries `working` because the verb list is a pure function of the
+    /// subject, and at least one verb (New Conversation) must not be offered
+    /// while a turn is in flight. Threading it through the subject keeps that
+    /// rule inside the pure builder where the discoverability tests can reach
+    /// it, instead of an `if` in the dialog code.
+    Session { id: u64, working: bool },
     /// A background registry run by local id.
     Run(u64),
     /// The Create Flow affordance.
@@ -627,6 +642,15 @@ impl ScriptListApp {
         self.flow_sessions
             .iter()
             .position(|(meta, _)| meta.id == session_id)
+    }
+
+    /// Whether a turn is in flight on this session.
+    ///
+    /// A session that no longer exists reads as NOT working, so a stale id
+    /// never suppresses an affordance on a live conversation.
+    pub(crate) fn flow_session_has_active_turn(&self, session_id: u64) -> bool {
+        self.flow_session_index(session_id)
+            .is_some_and(|index| self.flow_sessions[index].0.active_turn.is_some())
     }
 
     /// Activate the desk's selected row — Enter (`run_once: false`) and ⇧↵
@@ -1714,6 +1738,118 @@ impl ScriptListApp {
 
     /// Explicit stop (⌘K verb): cancel the in-flight turn only. The
     /// conversation survives and the composer stays usable.
+    /// Put a flow session on a FRESH protocol thread.
+    ///
+    /// The one owner of both re-thread entry points: the failure-recovery
+    /// "Start a new thread" action and the user's "New Conversation". They
+    /// share the transport bookkeeping and differ only on whether the
+    /// transcript survives — expressed as
+    /// [`FlowConversationResetCause::preserves_transcript`], not as duplicated
+    /// branches at two call sites.
+    ///
+    /// Returns `false` when the reset was refused, so a caller can decline to
+    /// clear a composer or close a popup for a reset that did not happen.
+    ///
+    /// Transaction order matters. The only step that can refuse is the active
+    /// turn guard, so it runs FIRST, before any mutation. Everything after it
+    /// succeeds unconditionally, which is what makes "the old conversation is
+    /// intact if this returns false" true rather than aspirational.
+    pub(crate) fn start_fresh_flow_conversation(
+        &mut self,
+        session_id: u64,
+        cause: crate::flows::session::FlowConversationResetCause,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::flows::session::{
+            resolve_flow_conversation_reset_guard, FlowConversationResetGuard,
+        };
+
+        let Some(index) = self.flow_session_index(session_id) else {
+            return false;
+        };
+
+        let has_active_turn = self.flow_sessions[index].0.active_turn.is_some();
+        if matches!(
+            resolve_flow_conversation_reset_guard(cause, has_active_turn),
+            FlowConversationResetGuard::BlockedByActiveTurn
+        ) {
+            // Neutral and informational. A running turn is not an error, and
+            // this must never read as though something was cancelled — the
+            // point of refusing is that nothing was.
+            self.toast_manager.push(
+                crate::components::toast::Toast::info(
+                    "Stop the current turn before starting a new conversation".to_string(),
+                    &self.theme,
+                )
+                .duration_ms(Some(2500)),
+            );
+            cx.notify();
+            tracing::info!(
+                target: "script_kit::flows",
+                event = "flow_conversation_reset_refused",
+                session_id,
+                cause = ?cause,
+                reason = "active_turn",
+                "Flow conversation reset refused"
+            );
+            return false;
+        }
+
+        // Shared transport bookkeeping: the next submit re-resolves the flow
+        // contract and lands on a fresh thread.
+        {
+            let meta = &mut self.flow_sessions[index].0;
+            meta.thread_ready = false;
+            meta.needs_rethread = true;
+        }
+
+        if !cause.preserves_transcript() {
+            let entity = self.flow_sessions[index].1.clone();
+            // Drop the engine-side thread as well. Without this the fresh
+            // thread would be started against a server session that still
+            // holds the old conversation, and "new conversation" would be a
+            // UI-only illusion.
+            crate::flows::codex_client::codex_app_server().forget_session(session_id);
+            entity.update(cx, |chat, cx| {
+                chat.clear_messages(cx);
+            });
+            let (flow_id, flow_path, engine) = {
+                let meta = &mut self.flow_sessions[index].0;
+                meta.turns.clear();
+                meta.state = crate::flows::session::SessionState::NeedsYou;
+                (
+                    meta.flow_id.clone(),
+                    meta.flow_path.clone(),
+                    meta.engine.clone(),
+                )
+            };
+            // Recovery state is per-conversation. Carrying the old failure
+            // forward would leave a recovery card offering to repair a
+            // conversation that no longer exists.
+            self.flow_sessions[index].0.reliability =
+                crate::flows::session::FlowReliability::new(&flow_id, &flow_path, &engine);
+            // Replace the persisted snapshot with an empty one. Ordered
+            // through the same FIFO store as every other write, so a
+            // straggling persist of the OLD transcript can never land after
+            // this and resurrect it on the next launch. An empty snapshot
+            // reads back as "no conversation" (`load_persisted_conversation`
+            // rejects empty turns), so the replaced transcript cannot
+            // reattach.
+            crate::flows::session::conversation_store().persist(&flow_id, &flow_path, Vec::new());
+        }
+
+        tracing::info!(
+            target: "script_kit::flows",
+            event = "flow_conversation_reset",
+            session_id,
+            cause = ?cause,
+            preserved_transcript = cause.preserves_transcript(),
+            "Flow conversation re-threaded"
+        );
+        cx.notify();
+        true
+    }
+
     pub(crate) fn stop_flow_session(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
@@ -2378,6 +2514,18 @@ impl ScriptListApp {
                         );
                         cx.stop_propagation();
                     }
+                    FlowSessionKeyAction::NewConversation => {
+                        // Refusal while working is the handler's job and it
+                        // toasts for itself, so the key is consumed either
+                        // way — ⌘L must never fall through and type an "l"
+                        // into the composer.
+                        this.start_fresh_flow_conversation(
+                            session_id,
+                            crate::flows::session::FlowConversationResetCause::UserRequested,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
                     FlowSessionKeyAction::Submit => {
                         // One shared draft transaction: clears the composer ONLY
                         // when the submit consumed the draft (WP1 P0: clearing
@@ -2518,14 +2666,20 @@ impl ScriptListApp {
                 self.retry_flow_turn(session_id, cx);
             }
             AiRecoveryAction::RethreadFlow => {
-                let meta = &mut self.flow_sessions[index].0;
-                if !meta.reliability.select_rethread() {
+                if !self.flow_sessions[index].0.reliability.select_rethread() {
                     return;
                 }
                 // A rethread lands the next submit on a FRESH protocol
-                // thread carrying the flow contract + transcript rollup.
-                meta.thread_ready = false;
-                meta.needs_rethread = true;
+                // thread carrying the flow contract + transcript rollup —
+                // the SAME transaction "New Conversation" uses, with the
+                // cause that preserves the transcript.
+                if !self.start_fresh_flow_conversation(
+                    session_id,
+                    crate::flows::session::FlowConversationResetCause::Recovery,
+                    cx,
+                ) {
+                    return;
+                }
                 self.retry_flow_turn(session_id, cx);
             }
             AiRecoveryAction::RepairComponent { .. } => {
@@ -2961,6 +3115,45 @@ mod flow_session_key_owner {
         // Bare `.` (no Cmd) is composer input.
         assert_eq!(
             action(".", false, false, true, false),
+            FlowSessionKeyAction::Ignore
+        );
+    }
+
+    /// ⌘L is Agent Chat's new-conversation chord. Flow now answers it too.
+    ///
+    /// It resolves REGARDLESS of `turn_active` on purpose: the "is this
+    /// allowed right now" rule lives in `start_fresh_flow_conversation`, which
+    /// both the chord and the ⌘K action call. Duplicating the guard here would
+    /// give the two entry points two chances to disagree — and the key must be
+    /// consumed either way, or a refused ⌘L types an "l" into the composer.
+    #[test]
+    fn cmd_l_starts_a_new_conversation_whether_or_not_a_turn_is_running() {
+        assert_eq!(
+            action("l", true, false, false, false),
+            FlowSessionKeyAction::NewConversation
+        );
+        assert_eq!(
+            action("L", true, false, true, false),
+            FlowSessionKeyAction::NewConversation
+        );
+    }
+
+    #[test]
+    fn cmd_l_is_not_a_new_conversation_when_shifted_or_bare_or_popup_open() {
+        // ⇧⌘L belongs to other surfaces (Notes uses it); do not claim it.
+        assert_eq!(
+            action("l", true, true, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        // Bare `l` is composer input — the everyday case, and the one a
+        // greedy binding would break on every word containing an l.
+        assert_eq!(
+            action("l", false, false, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        // The popup owns the keyboard while it is up.
+        assert_eq!(
+            action("l", true, false, false, true),
             FlowSessionKeyAction::Ignore
         );
     }
