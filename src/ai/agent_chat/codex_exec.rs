@@ -1753,17 +1753,72 @@ struct TraceSink {
     started: Instant,
     first_protocol_event_seen: Arc<AtomicBool>,
     web_action_ordinals: Arc<Mutex<HashMap<String, u8>>>,
+    /// Mirror of the milestones onto the shared cross-surface trace.
+    ///
+    /// Quick AI keeps its own rich, Quick-AI-specific vocabulary (search
+    /// permits, web action classes, answer provenance) because that detail is
+    /// what made its own latency work possible and no other surface has an
+    /// equivalent. But without ALSO emitting the five common milestones, Quick
+    /// AI would be the one surface missing from the cross-surface report — the
+    /// exact inversion of the problem this work exists to fix.
+    ///
+    /// Mirroring happens inside `write` rather than at the ~20 call sites so
+    /// that adding a Quick AI trace event can never silently skip the shared
+    /// trace, and so this change threads no new parameter through the many
+    /// free functions that already take a `&TraceSink`.
+    shared: crate::ai::phase_trace::PhaseTrace,
 }
 
 impl TraceSink {
     fn new(path: Option<PathBuf>, run_id: String, started: Instant) -> Self {
         Self {
             path,
-            run_id,
+            run_id: run_id.clone(),
             seq: Arc::new(AtomicU64::new(1)),
             started,
             first_protocol_event_seen: Arc::new(AtomicBool::new(false)),
             web_action_ordinals: Arc::new(Mutex::new(HashMap::new())),
+            shared: crate::ai::phase_trace::PhaseTrace::begin(
+                crate::ai::phase_trace::AiSurface::QuickAi,
+                crate::ai::phase_trace::AiTransport::CodexExec,
+                run_id,
+            ),
+        }
+    }
+
+    /// Map one Quick AI event onto the shared vocabulary.
+    ///
+    /// Quick AI is NOT a streaming surface from the user's point of view: it
+    /// buffers and then shows a finished answer. So its first visible output is
+    /// the moment the answer is selected, not the moment tokens started
+    /// arriving. Recording it any earlier would flatter Quick AI against the
+    /// surfaces that genuinely stream.
+    fn mirror_to_shared(&self, event: &str, details: &Value) {
+        use crate::ai::phase_trace::TurnOutcome;
+        match event {
+            "start_turn_entered" => self.shared.turn_start(details.clone()),
+            "first_protocol_event" => self.shared.observe_provider_event(),
+            "native_web_action" => self.shared.observe_tool_call(),
+            "final_answer_selected" | "early_finalization_selected" => {
+                // The digest of the answer is recorded by the shared trace; the
+                // answer text itself never leaves this process.
+                self.shared.observe_visible_output(
+                    details
+                        .get("answerSha256")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+            }
+            "terminal" => {
+                let outcome = match details.get("kind").and_then(Value::as_str) {
+                    Some("cancelled") => TurnOutcome::Cancelled,
+                    Some("completed") => TurnOutcome::Completed,
+                    _ => TurnOutcome::Failed,
+                };
+                self.shared.terminal(outcome, None);
+            }
+            "teardown" => self.shared.teardown(),
+            _ => {}
         }
     }
 
@@ -1786,6 +1841,10 @@ impl TraceSink {
     }
 
     fn write(&self, event: &str, details: Value) {
+        // Mirror BEFORE the early return below. The two traces are gated on
+        // different environment variables, so a run that enables only the
+        // shared cross-surface trace must still record Quick AI's milestones.
+        self.mirror_to_shared(event, &details);
         let Some(path) = &self.path else { return };
         let mut record = json!({
             "schemaVersion": 1,
