@@ -408,8 +408,19 @@ impl Render for ChatPrompt {
             let entity = cx.entity();
             // KNOWN: Vec clone needed to move turns snapshot into list closure; Arc-backed snapshots would avoid per-render cloning.
             let turns_snapshot = self.conversation_turns_cache.clone();
+            // ONE follow-tail authority, shared with Agent Chat. This used to
+            // read `user_has_scrolled_up`, a shadow flag Flow maintained
+            // alongside the list's own state — two sources of truth for one
+            // question, which agree right up until they don't.
+            //
+            // `set_follow_tail(has_turns && !user_has_scrolled_up)` below keeps
+            // the ListState in sync with the flag, so this is the same answer
+            // asked of the component that actually owns it.
             let show_scroll_to_latest =
-                self.user_has_scrolled_up && !self.turns_list_is_at_bottom();
+                crate::components::list_scroll_affordance::should_show_jump_to_latest(
+                    has_turns,
+                    self.turns_list_state.is_following_tail(),
+                );
             let turns_list = list(self.turns_list_state.clone(), move |ix, _window, cx| {
                 entity.update(cx, |this, cx| {
                     if let Some(turn) = turns_snapshot.get(ix) {
