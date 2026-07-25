@@ -1039,6 +1039,7 @@ impl ScriptListApp {
             transport,
             state: crate::flows::session::SessionState::NeedsYou,
             started_at: std::time::Instant::now(),
+            last_activity: std::time::SystemTime::now(),
             turns: Vec::new(),
             active_turn: None,
             thread_ready: !matches!(
@@ -1179,6 +1180,8 @@ impl ScriptListApp {
                 "Flow definition unreadable — failing the turn closed"
             );
             let meta = &mut self.flow_sessions[index].0;
+            // Turn submit is semantic activity (Oracle step 5): recency ordering.
+            meta.touch_now();
             meta.active_turn = Some(crate::flows::session::ActiveTurn {
                 run_id: None,
                 message_id,
@@ -1224,6 +1227,8 @@ impl ScriptListApp {
         // (Oracle audit 2026-07-21). The mdflow run id is filled in after
         // launch, before returning to the event loop.
         let meta = &mut self.flow_sessions[index].0;
+        // Turn submit is semantic activity (Oracle step 5): recency ordering.
+        meta.touch_now();
         meta.active_turn = Some(crate::flows::session::ActiveTurn {
             run_id: None,
             message_id,
@@ -1395,6 +1400,10 @@ impl ScriptListApp {
         let Some(active) = self.flow_sessions[index].0.active_turn.take() else {
             return;
         };
+        // A turn reaching a terminal state is semantic activity (Oracle step
+        // 5). Streamed tokens deliberately never touch: per-token updates
+        // would reorder the list continuously mid-answer.
+        self.flow_sessions[index].0.touch_now();
         let entity = self.flow_sessions[index].1.clone();
         let message_id = active.message_id.clone();
         // Drive the reducer-owned reliability state BEFORE projecting the
@@ -1687,6 +1696,9 @@ impl ScriptListApp {
             return;
         };
         let friendly = self.flow_sessions[index].0.friendly_name.clone();
+        // Explicit open/resume is semantic activity (Oracle step 5): returning
+        // to an older session moves it back to the top of Active Flows.
+        self.flow_sessions[index].0.touch_now();
         self.flow_session_return_to_desk =
             flow_session_returns_to_desk(&self.current_view, self.flow_session_return_to_desk);
         self.current_view = AppView::FlowSessionView { session_id };
@@ -2906,6 +2918,8 @@ impl ScriptListApp {
             );
         });
         let meta = &mut self.flow_sessions[index].0;
+        // Turn submit is semantic activity (Oracle step 5): recency ordering.
+        meta.touch_now();
         meta.active_turn = Some(crate::flows::session::ActiveTurn {
             run_id: None,
             message_id,
@@ -3100,6 +3114,7 @@ mod flow_session_escape_origin {
             transport: SessionTransport::CodexThread,
             state: SessionState::Working,
             started_at: std::time::Instant::now(),
+            last_activity: std::time::SystemTime::now(),
             turns: vec![],
             active_turn: Some(ActiveTurn {
                 run_id: None,

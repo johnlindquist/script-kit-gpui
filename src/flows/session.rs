@@ -496,6 +496,14 @@ pub struct FlowSessionMeta {
     pub transport: SessionTransport,
     pub state: SessionState,
     pub started_at: std::time::Instant,
+    /// Last SEMANTIC user-relevant activity: creation, explicit resume/open,
+    /// turn submit, or a turn reaching a terminal state. Deliberately NOT
+    /// updated per streamed token — token-driven updates would reorder the
+    /// Active Flows list continuously and make keyboard selection unstable.
+    ///
+    /// `SystemTime`, not `Instant`, so a future persisted-session identity
+    /// (spec G2) can serialize it and agree with Agent Chat's `updated_at`.
+    pub last_activity: std::time::SystemTime,
     /// Committed turns (user + final assistant text) for context rollup.
     pub turns: Vec<SessionTurn>,
     /// Active turn: transport bookkeeping + ChatPrompt streaming message id.
@@ -844,6 +852,18 @@ impl ActiveTurn {
 }
 
 impl FlowSessionMeta {
+    /// Record semantic activity at an explicit time. Tests call this with a
+    /// controlled clock so ordering is provable without sleeping.
+    pub fn touch_at(&mut self, at: std::time::SystemTime) {
+        self.last_activity = at;
+    }
+
+    /// Record semantic activity now. Production call sites: session creation,
+    /// explicit open/resume, turn submit, terminal turn transition.
+    pub fn touch_now(&mut self) {
+        self.touch_at(std::time::SystemTime::now());
+    }
+
     pub fn elapsed_label(&self) -> String {
         let secs = self.started_at.elapsed().as_secs();
         if secs < 60 {

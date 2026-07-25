@@ -347,7 +347,11 @@ pub(crate) fn prepend_root_flow_sessions_section(
                 || meta.state.label().contains(&query)
         })
         .collect();
-    live.sort_by(|a, b| b.id.cmp(&a.id));
+    // Semantic recency, not creation order: returning to an older session
+    // moves it back to the top. Stable id descending breaks timestamp ties so
+    // equal clocks cannot reorder rows frame-to-frame (keyboard selection
+    // must never watch two rows swap under it).
+    live.sort_by(|a, b| b.last_activity.cmp(&a.last_activity).then(b.id.cmp(&a.id)));
 
     let rows: Vec<SearchResult> = live
         .into_iter()
@@ -6603,6 +6607,7 @@ mod active_flow_session_section_tests {
             transport: SessionTransport::CodexThread,
             state: SessionState::NeedsYou,
             started_at: std::time::Instant::now(),
+            last_activity: std::time::SystemTime::now(),
             turns: vec![],
             active_turn: None,
             thread_ready: true,
@@ -6652,6 +6657,67 @@ mod active_flow_session_section_tests {
             "terminated sessions add no launcher row"
         );
         assert!(after_flat.is_empty());
+    }
+
+    /// Oracle step 5 (submission 98cab5e5): the section orders by SEMANTIC
+    /// recency, not creation order. These use `touch_at` with a controlled
+    /// clock so ordering is provable without sleeping.
+    #[test]
+    fn returning_to_an_older_session_moves_it_back_to_the_top() {
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        let at = |secs: u64| epoch + std::time::Duration::from_secs(secs);
+
+        let mut older = session();
+        older.id = 1;
+        older.touch_at(at(100));
+        let mut newer = session();
+        newer.id = 2;
+        newer.touch_at(at(200));
+
+        // Creation order alone: newer (id 2) first.
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_flow_sessions_section(
+            &mut grouped,
+            &mut flat,
+            "",
+            &[older.clone(), newer.clone()],
+            &[flow()],
+        );
+        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(2)));
+
+        // The user returns to the OLDER session: it must move to the top even
+        // though its id is smaller. This is the observable behavior the spec's
+        // build order names as step 1's proof.
+        older.touch_at(at(300));
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_flow_sessions_section(&mut grouped, &mut flat, "", &[older, newer], &[flow()]);
+        assert!(
+            matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(1)),
+            "resumed session must outrank a newer-created but untouched one"
+        );
+    }
+
+    #[test]
+    fn equal_activity_falls_back_to_stable_id_order() {
+        // Equal timestamps must produce deterministic order (id descending),
+        // or keyboard selection could watch two rows swap frame-to-frame.
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        let same = epoch + std::time::Duration::from_secs(500);
+
+        let mut a = session();
+        a.id = 1;
+        a.touch_at(same);
+        let mut b = session();
+        b.id = 2;
+        b.touch_at(same);
+
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_flow_sessions_section(&mut grouped, &mut flat, "", &[a, b], &[flow()]);
+        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(2)));
+        assert!(matches!(&flat[1], SearchResult::Flow(row) if row.session_id == Some(1)));
     }
 
     #[test]
