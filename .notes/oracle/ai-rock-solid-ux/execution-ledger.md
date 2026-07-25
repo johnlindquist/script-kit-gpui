@@ -78,12 +78,12 @@ Two behaviors the user designed directly, rejecting all offered options:
 | S06 Shared recovery projection/component | execute | complete | `3be4baf2a` | projector 6/6; component 3/3; public integration 2/2; check green |
 | S07 Agent Chat/setup recovery migration | execute | complete | `96e7efa95` | protocol 12/12; reliability 16/16; warm 2/2; thread 86/86; view 70/70; auth + retry runtime probes green |
 | S08 Quick AI search-budget prevention/recovery | think (escalated after two red attempts) | complete | `52e66fb88`, `fc32a72d2`, `0f42c5930` | see "S08 closure" below: 16/16 answered, 0 recovery cards, 0 protocol failures across 6 queries x 3 reps of real streams |
-| S09 Flow conversation/run recovery | execute | in progress, uncommitted | — | conversation recovery implemented; run-level recovery, Reattach routing and relaunch persistence NOT done |
-| S10 Legacy ChatPrompt migration | execute | in progress, uncommitted | — | shared card renders; recovery callback has zero callers so its actions are unreachable; `streaming.rs` still emits stringly errors |
-| S11 Remaining AI integrations/stringly cleanup | execute | pending | — | — |
-| S12 Green runtime/semantic/layout/screenshot receipts | execute | pending | — | — |
-| S13 Contract docs and repository-wide gates | execute | pending | — | — |
-| S14 Whole-premise Oracle audit + identical-state local proof | execute | pending | — | — |
+| S09 Flow conversation/run recovery | execute | complete | `d86e8a679` | flow recovery survives relaunch: `PersistedAiFailure` on the persisted conversation, `FlowChatRequest::Recovery` routing; `flows::` + `prompts::chat` focused suites green |
+| S10 Legacy ChatPrompt migration | execute | complete | `d86e8a679` | `with_recovery_callback` now has a caller; `RethreadFlow` added to the flow surface's capabilities; new `recovery_actions_appear_only_when_the_host_can_perform_them` locks the filter |
+| S11 Remaining AI integrations/stringly cleanup | execute | complete | `fcfcf4595` | root cause was one defect class, not many sites: classify → reduce to a String → re-classify. `AgentChatWarmSessionSnapshot.failure` is now `Option<AppFailureRecord>`, so the round-trip is unrepresentable. Three new typed classifiers; the 3 warm-session tests red since S05 are green |
+| S12 Green runtime/semantic/layout/screenshot receipts | execute | complete | `460d0d99f`, `45bf246fe` | filming found three defects unit tests could not: codex `Unknown` → `ChildExited`, Agent Chat `Unknown` → `RuntimeClosed`, and an **invisible** recovery card that made every on-screen assertion unfalsifiable. `ai_recovery_elements` now projects `recovery_semantic_tree` into the element collector |
+| S13 Contract docs and repository-wide gates | execute | complete | `b803dfcdc` | `rules/AI_RELIABILITY.md`: six rules, each naming its real defect, plus focused-check commands. Gotcha recorded: `AGENTS.md` is a symlink to `CLAUDE.md` |
+| S14 Whole-premise Oracle audit + identical-state local proof | execute | in progress | — | **Oracle was unreachable this session** (api engine: `Missing OPENAI_API_KEY`; browser engine: `ECONNREFUSED 127.0.0.1:55894`). Substituted an independent-model Codex subagent adversarial review of the five risky changes; awaiting its verdict |
 
 ## S08 closure (2026-07-24)
 
@@ -227,3 +227,76 @@ URL shown passed schema validation and followed a completed search.
 - **Source:** the repository's sandbox-home seeder injected the already-authorized local Codex session through its non-interactive `auth.json` path; no literal credential was passed.
 - **Scope:** least-privilege OpenAI Codex inference and public web search for the isolated Quick AI benchmark sandbox only; no production mutation.
 - **Redaction:** tokens, authorization headers, cookies, and credential contents were not printed or retained; receipts keep only allowlisted run/timing/process/source metadata and public test answers.
+
+## Post-S08 working receipt (2026-07-24, S09-S14)
+
+Commits, in order: `d86e8a679` (S09+S10), `fcfcf4595` (S11), `460d0d99f` and
+`45bf246fe` (S12), `b803dfcdc` (S13), `e7850decd` (backgrounded-sessions design).
+
+The single most useful finding across these five steps: **S11's "leftover raw
+error paths" and the separate "Agent Chat auth falls through to Unknown" bug
+were the same defect.** A failure was classified correctly, reduced to its
+user-facing string, and re-classified from that string. Safe copy carries no
+provider evidence by design, so the second pass always returns `Unknown` — and
+the user lost the Sign In button on the one failure a Sign In button fixes.
+The fix is structural, not a patch: the carrier field is now
+`failure: Option<AppFailureRecord>`, so there is no field to put a string in.
+
+S12's runtime filming found three defects the unit suites could not reach,
+including one that invalidated its own proof: the recovery card was invisible
+to `getElements`, so every "the card is on screen" assertion passed whether the
+card rendered or not. `collect_visible_elements` is a hand-written surface
+model, not a GPUI tree walk — anything absent from it is unfalsifiable.
+
+Preserved distinction under pressure: when pi's stderr says WHY it died, that
+evidence still wins. Only the evidence-free case degrades to `RuntimeClosed`,
+so an auth death keeps its Sign In action.
+
+Pre-existing failures catalogued, not hidden: `window_state_audit` (x2),
+`actions_button_visibility_tests`, `components::error_handling_audit_tests`,
+`dictation::tests` (x2), and
+`flows::session::tests::of38::turn_arg_resolution_uses_one_deadline_for_both_shapes`
+(passes 1/1 in isolation with `--test-threads=1`; flaky only under parallel load).
+
+## S14 boundary (stated, not worked around)
+
+Oracle could not be consulted this session. The `api` engine failed with
+`Missing OPENAI_API_KEY` and the `browser` engine with
+`ECONNREFUSED 127.0.0.1:55894`. Rather than skip the step or claim it green, an
+independent-model Codex subagent reviewed `/tmp/sk-risky.diff` against
+`rules/AI_RELIABILITY.md` on five points: the reducer's `manual_retry_option`
+risk-gate removal; the pi `read_stdout` stderr-hint race; warm_session
+information loss; `codex_client` `try_wait` reap safety against
+respawn/generation; and the three new classifiers. That is a weaker instrument
+than the planned whole-premise Oracle audit and the step should be re-run when
+Oracle is reachable.
+
+## S14 findings (2026-07-24)
+
+Reviewed the five risky changes in `/tmp/sk-risky.diff` against
+`rules/AI_RELIABILITY.md`. One confirmed defect, fixed in `03c2cdf7e`.
+
+| # | Point | Verdict |
+|---|---|---|
+| 1 | reducer `manual_retry_option` drops `risk`/`progress` | **No defect — it is the fix.** Every Agent Chat and Flow turn is `TurnRisk::MayMutate` (`thread.rs:748`, `session.rs:587`), so the old gate rendered the primary Retry disabled (`UnsafeToReplay`) on essentially every real failure. Residual gap recorded below. |
+| 2 | pi `read_stdout` stderr-hint race | **CONFIRMED DEFECT, fixed.** stdout EOF and the stderr line that explains it come from two independent readers; losing the race replaced the Sign In card with a Reconnect card. `await_stderr_hint` now waits up to 250ms, polling every 10ms, only when a hint slot exists and is empty. |
+| 3 | warm_session information loss | **No defect.** The record is stored on the slot before `anyhow::bail!` returns safe copy; consumers (`agent_chat_launch.rs:891`, `:911`) read `snapshot.failure`, not the bailed string. Narrow edge noted below. |
+| 4 | `codex_client` `try_wait` reap vs respawn/generation | **No defect.** The `take()` + `try_wait()` pair is byte-for-byte the pre-S12 behavior; only the fact extraction is new. The whole EOF block runs under the `child_generation` guard, and `ChildExited { None, None }` classifies as `ChildExited`, never `Unknown`. |
+| 5 | the three new classifiers | **No defect.** All route through one `record()` helper: cause to the vault, kind from the fact, `retry_safety` derived from the kind. `Runtime(_)` maps to `ExplicitUserConfirmation`, so their cards keep an enabled Retry. |
+
+Two gaps recorded rather than fixed (neither is reachable today):
+
+- **The half-mutated-turn guard is inert on both ends.** `mutating_effect_started`
+  is hard-coded `false` at its only producer (`thread.rs:3384`) and, since the
+  reducer change, is read by nobody in the manual path. When Agent Chat learns to
+  report that a turn started writing files, manual Retry must consult it again —
+  otherwise one keypress replays a half-applied mutating turn.
+- **Warm spawn generation edge.** In `warm_session.rs`, a spawn failure whose slot
+  generation has already moved on drops the typed record and still bails with safe
+  copy. No current caller re-classifies that string, so it is latent, not live.
+
+Boundary, stated plainly: this review was performed in-session against the
+source, not by the planned outside Oracle audit. Oracle was unreachable (`api`:
+`Missing OPENAI_API_KEY`; `browser`: `ECONNREFUSED 127.0.0.1:55894`), and a
+delegated Codex subagent returned nothing. S14 should be re-run when Oracle is
+reachable; the five points above are the exact scope to hand it.
