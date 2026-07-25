@@ -161,6 +161,9 @@ pub(crate) enum FlowSessionKeyAction {
     /// uses. Resolved even while a turn is in flight: the handler owns the
     /// refusal so the "is this allowed" rule lives in ONE place.
     NewConversation,
+    /// ⇧⌘C — copy the newest assistant answer, the same chord Agent Chat uses
+    /// and the same chord this session's ⌘K menu already advertises.
+    CopyLastResponse,
     /// Plain, unmodified ↵ — send the composer draft as the next turn.
     Submit,
     /// No shell-level action; the key falls through to the composer input.
@@ -179,6 +182,10 @@ pub(crate) enum FlowSessionKeyAction {
 /// Precedence: while the actions popup is open, ⎋/⇧⌘⎋ belong to the popup, so
 /// Terminate and Background require `!actions_open`. ⌘. Stop only fires while a
 /// turn is in flight; ⌘K always toggles; only a bare Enter submits.
+/// Held against the ⌘K action list by
+/// `flow_desk_create_discoverability_tests::every_advertised_session_shortcut_has_a_declared_owner`.
+/// A shortcut badge is a promise, and the only thing keeping the badge and the
+/// binding from drifting apart is that one test reads both.
 fn resolve_flow_session_key_action(
     key: &str,
     platform: bool,
@@ -202,6 +209,18 @@ fn resolve_flow_session_key_action(
     // the same reason ⎋ is: the popup owns the keyboard while it is up.
     if platform && !shift && key.eq_ignore_ascii_case("l") && !actions_open {
         return FlowSessionKeyAction::NewConversation;
+    }
+    // ⇧⌘C, matching Agent Chat and matching the shortcut badge this session's
+    // own ⌘K menu prints next to "Copy Last Response". The badge shipped
+    // without this arm, so the chord did nothing while the menu claimed it
+    // worked — a shortcut that is advertised and unbound is worse than one
+    // that is absent, because the user stops looking for the menu item.
+    // Unshifted ⌘C is deliberately NOT claimed: that is the platform's
+    // copy-the-selection, and now that flow answers render selectable
+    // (`render_answer_region`) stealing it would break selecting one paragraph
+    // out of an answer.
+    if platform && shift && key.eq_ignore_ascii_case("c") && !actions_open {
+        return FlowSessionKeyAction::CopyLastResponse;
     }
     if is_key_enter(key) && !platform && !shift {
         return FlowSessionKeyAction::Submit;
@@ -1850,6 +1869,56 @@ impl ScriptListApp {
         true
     }
 
+    /// Copy the newest assistant answer in a flow session to the clipboard.
+    ///
+    /// The single owner for BOTH the ⌘K `Copy Last Response` action and the
+    /// ⇧⌘C chord it advertises. Agent Chat's equivalent lives at
+    /// `ai/agent_chat/ui/view.rs` (`Cmd+Shift+C`); the two surfaces must feel
+    /// identical, and identical here means one rule about what counts as an
+    /// answer — [`resolve_last_copyable_response`] — not two lookups that
+    /// happen to agree today.
+    ///
+    /// Returns `true` when something reached the clipboard, so a caller can
+    /// tell a real copy from the empty-transcript case.
+    pub(crate) fn copy_flow_session_last_response(
+        &mut self,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let response = self
+            .flow_sessions
+            .iter()
+            .find(|(meta, _)| meta.id == session_id)
+            .and_then(|(meta, _)| {
+                crate::flows::session::resolve_last_copyable_response(
+                    meta.turns.iter().map(|turn| turn.assistant.as_str()),
+                )
+                .map(|assistant| assistant.to_string())
+            });
+
+        match response {
+            Some(response) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(response));
+                true
+            }
+            None => {
+                // Neutral, not an error: an unanswered conversation is a normal
+                // state. What must NOT happen is silence — a chord that writes
+                // nothing and says nothing is indistinguishable from a chord
+                // that is not bound at all, which is the exact bug that left
+                // ⇧⌘C advertised-but-dead in this surface for a release.
+                self.toast_manager.push(
+                    crate::components::toast::Toast::info(
+                        "No response to copy yet".to_string(),
+                        &self.theme,
+                    )
+                    .duration_ms(Some(1500)),
+                );
+                false
+            }
+        }
+    }
+
     pub(crate) fn stop_flow_session(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
@@ -2526,6 +2595,14 @@ impl ScriptListApp {
                         );
                         cx.stop_propagation();
                     }
+                    FlowSessionKeyAction::CopyLastResponse => {
+                        // Consumed either way. The empty-transcript case toasts
+                        // for itself inside the shared transaction, so falling
+                        // through here would type a "C" into the composer on
+                        // top of an already-answered chord.
+                        this.copy_flow_session_last_response(session_id, cx);
+                        cx.stop_propagation();
+                    }
                     FlowSessionKeyAction::Submit => {
                         // One shared draft transaction: clears the composer ONLY
                         // when the submit consumed the draft (WP1 P0: clearing
@@ -3154,6 +3231,58 @@ mod flow_session_key_owner {
         // The popup owns the keyboard while it is up.
         assert_eq!(
             action("l", true, false, false, true),
+            FlowSessionKeyAction::Ignore
+        );
+    }
+
+    /// The regression this arm was added for: `flow_desk_session_copy_last_response`
+    /// shipped with a `⇧⌘C` badge in the ⌘K list and no arm here, so the badge
+    /// was decorative — the action worked by clicking and the chord did
+    /// nothing. `resolve_flow_session_key_action` is documented as "the single
+    /// exhaustive key owner", which is exactly why an advertised-but-unowned
+    /// chord is invisible: nothing else is looking.
+    #[test]
+    fn shift_cmd_c_copies_the_last_response_like_agent_chat() {
+        assert_eq!(
+            action("c", true, true, false, false),
+            FlowSessionKeyAction::CopyLastResponse
+        );
+        // Case-insensitive: a shifted `c` may arrive as "C".
+        assert_eq!(
+            action("C", true, true, false, false),
+            FlowSessionKeyAction::CopyLastResponse
+        );
+        // Resolves mid-turn too. There is always something to copy from an
+        // earlier turn, and the handler owns the empty case.
+        assert_eq!(
+            action("c", true, true, true, false),
+            FlowSessionKeyAction::CopyLastResponse
+        );
+    }
+
+    /// Unshifted ⌘C must stay the platform's copy-the-selection. Flow answers
+    /// render through the shared selectable `TextView` now, so claiming plain
+    /// ⌘C would silently replace "copy the paragraph I highlighted" with "copy
+    /// the whole answer" — the user's selection would be ignored, not honored.
+    #[test]
+    fn plain_cmd_c_is_left_to_the_text_selection() {
+        assert_eq!(
+            action("c", true, false, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        // Bare `c` is composer input.
+        assert_eq!(
+            action("c", false, false, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        // ⇧C without Cmd is a capital C the user is typing.
+        assert_eq!(
+            action("c", false, true, false, false),
+            FlowSessionKeyAction::Ignore
+        );
+        // The popup owns the keyboard while it is up, same as ⌘L and ⎋.
+        assert_eq!(
+            action("c", true, true, false, true),
             FlowSessionKeyAction::Ignore
         );
     }

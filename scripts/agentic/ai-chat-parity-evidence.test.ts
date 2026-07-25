@@ -5,6 +5,8 @@ import {
   AGENT_CHAT_ANSWER_SCOPE_SUFFIX,
   FLOW_ANSWER_SCOPE_PREFIX,
   FLOW_ANSWER_SCOPE_SUFFIX,
+  clipboardCopyPasses,
+  evaluateClipboardCopy,
   evaluateSelectable,
   jumpPillBehaviour,
   selectionParity,
@@ -113,6 +115,45 @@ describe("selection parity", () => {
         { kind: "notSelectable", scopeId: "agent" },
       ).pass,
     ).toBe(false);
+  });
+});
+
+describe("clipboard copy evidence", () => {
+  const SENTINEL = "sentinel-before-the-chord";
+
+  test("a real answer on the clipboard passes", () => {
+    const verdict = evaluateClipboardCopy(SENTINEL, "Here is the answer.", []);
+    expect(verdict).toEqual({ kind: "copied", text: "Here is the answer." });
+    expect(clipboardCopyPasses(verdict)).toBe(true);
+  });
+
+  // The exact shape of an unbound chord: nothing happened, and without the
+  // sentinel "the clipboard has text in it" would have passed anyway.
+  test("an untouched clipboard is unchanged, not a pass", () => {
+    const verdict = evaluateClipboardCopy(SENTINEL, SENTINEL, []);
+    expect(verdict.kind).toBe("unchanged");
+    expect(clipboardCopyPasses(verdict)).toBe(false);
+  });
+
+  // Writing "" to the clipboard SUCCEEDS, which is why the empty in-flight
+  // turn was dangerous in the first place.
+  test("a successful copy of nothing is not a pass", () => {
+    expect(clipboardCopyPasses(evaluateClipboardCopy(SENTINEL, "", []))).toBe(false);
+    expect(clipboardCopyPasses(evaluateClipboardCopy(SENTINEL, "   \n ", []))).toBe(false);
+  });
+
+  test("copying the user's own message is a distinct failure from copying nothing", () => {
+    const verdict = evaluateClipboardCopy(SENTINEL, "Say something quotable.", [
+      "Say something quotable.",
+    ]);
+    expect(verdict.kind).toBe("wrongText");
+    expect(clipboardCopyPasses(verdict)).toBe(false);
+  });
+
+  test("forbidden matching ignores surrounding whitespace", () => {
+    expect(
+      evaluateClipboardCopy(SENTINEL, "  the draft  ", ["the draft"]).kind,
+    ).toBe("wrongText");
   });
 });
 

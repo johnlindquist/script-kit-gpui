@@ -1324,38 +1324,11 @@ impl ScriptListApp {
                 );
             }
             ("flow_desk_session_copy_last_response", Some(FlowDeskSubject::Session { id, .. })) => {
-                // Copy the newest turn that actually produced an answer. The
-                // in-flight turn has an empty `assistant` until the engine
-                // replies, so taking `turns.last()` unconditionally would
-                // silently copy an empty string mid-stream and read as a
-                // successful copy.
-                let response = self
-                    .flow_sessions
-                    .iter()
-                    .find(|(meta, _)| meta.id == id)
-                    .and_then(|(meta, _)| {
-                        meta.turns
-                            .iter()
-                            .rev()
-                            .map(|turn| turn.assistant.trim())
-                            .find(|assistant| !assistant.is_empty())
-                            .map(|assistant| assistant.to_string())
-                    });
-
-                match response {
-                    Some(response) => {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(response));
-                    }
-                    None => {
-                        self.toast_manager.push(
-                            crate::components::toast::Toast::success(
-                                "No response to copy yet".to_string(),
-                                &self.theme,
-                            )
-                            .duration_ms(Some(1500)),
-                        );
-                    }
-                }
+                // Same transaction the ⇧⌘C chord runs. Menu and chord are the
+                // same promise to the user, so they must not be able to
+                // disagree about what "the last response" is — this arm used
+                // to own a second copy of that lookup.
+                self.copy_flow_session_last_response(id, cx);
             }
             ("flow_desk_session_copy_transcript", Some(FlowDeskSubject::Session { id, .. })) => {
                 if let Some((meta, _)) = self.flow_sessions.iter().find(|(meta, _)| meta.id == id) {
@@ -1605,6 +1578,134 @@ mod flow_desk_create_discoverability_tests {
                 .all(|action| action.section.as_deref() == Some("Danger")),
             "Danger must remain the trailing section — new verbs go before it"
         );
+    }
+
+    /// Who is supposed to honor a shortcut badge printed in the session ⌘K
+    /// menu.
+    enum ChordOwner {
+        /// `resolve_flow_session_key_action` answers it. Checkable right here.
+        SessionKeyResolver(super::FlowSessionKeyAction),
+        /// A window-level interceptor answers it BEFORE the session resolver
+        /// ever runs, so the resolver correctly returns `Ignore`. Named, not
+        /// checked — the point is that a human declared where it lives.
+        HostInterceptor(&'static str),
+    }
+
+    /// Parse a menu badge (`⇧⌘C`) into the key + modifiers a keystroke
+    /// delivers. Deliberately strict: an unknown glyph panics rather than
+    /// being skipped, because silently ignoring a modifier would let this
+    /// whole test pass a chord it never really checked.
+    fn parse_chord(badge: &str) -> (String, bool, bool) {
+        let (mut platform, mut shift) = (false, false);
+        let mut key = String::new();
+        for ch in badge.chars() {
+            match ch {
+                '\u{2318}' => platform = true,
+                '\u{21e7}' => shift = true,
+                '\u{2325}' | '\u{2303}' => panic!("{badge}: option/control chords are unmodelled"),
+                '\u{238b}' => key.push_str("escape"),
+                '\u{21b5}' => key.push_str("enter"),
+                other => key.push(other.to_ascii_lowercase()),
+            }
+        }
+        assert!(!key.is_empty(), "{badge} has modifiers but no key");
+        (key, platform, shift)
+    }
+
+    /// The regression lock for the 2026-07-25 finding.
+    ///
+    /// `flow_desk_session_copy_last_response` shipped advertising `⇧⌘C` while
+    /// `resolve_flow_session_key_action` — documented as the single exhaustive
+    /// key owner — had no arm for it. The action worked when clicked, so every
+    /// test passed; the chord did nothing, and nothing anywhere related the
+    /// badge to the binding. A user who reads a shortcut once and then uses it
+    /// forever gets silence, and concludes the feature is broken.
+    ///
+    /// This test is the missing relation. Every shortcut-bearing session
+    /// action must name an owner, and the resolver-owned ones are actually
+    /// pressed. Adding a badge without declaring an owner fails here, which
+    /// is exactly the step that got skipped.
+    #[test]
+    fn every_advertised_session_shortcut_has_a_declared_owner() {
+        use super::{
+            resolve_flow_session_key_action, FlowSessionKeyAction,
+        };
+
+        let owners: &[(&str, ChordOwner)] = &[
+            (
+                "flow_desk_session_open",
+                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::Submit),
+            ),
+            (
+                "flow_desk_session_background",
+                // ⌘⇧D is intercepted at the window level so the agent TUI
+                // never sees it; the session resolver returning Ignore for it
+                // is correct, not a gap.
+                ChordOwner::HostInterceptor("src/app_impl/startup.rs (⌘⇧D flow-session chord)"),
+            ),
+            (
+                "flow_desk_session_new_conversation",
+                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::NewConversation),
+            ),
+            (
+                "flow_desk_session_copy_last_response",
+                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::CopyLastResponse),
+            ),
+            (
+                "flow_desk_session_terminate",
+                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::Terminate),
+            ),
+        ];
+
+        // `working: false` and `working: true` expose different action sets,
+        // so both are swept — a badge that only appears mid-turn is exactly
+        // the one nobody presses by hand.
+        for working in [false, true] {
+            let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
+                id: 7,
+                working,
+            });
+
+            for action in actions.iter() {
+                let Some(badge) = action.shortcut.as_deref() else {
+                    continue;
+                };
+                let owner = owners
+                    .iter()
+                    .find(|(id, _)| *id == action.id)
+                    .map(|(_, owner)| owner)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} advertises the shortcut {badge:?} but no owner is declared. \
+                             Add an arm to resolve_flow_session_key_action (and list it here), \
+                             or name the window-level interceptor that answers it. An \
+                             advertised chord nobody honors is worse than no chord: the user \
+                             stops looking for the menu item.",
+                            action.id
+                        )
+                    });
+
+                let (key, platform, shift) = parse_chord(badge);
+                let resolved = resolve_flow_session_key_action(&key, platform, shift, working, false);
+
+                match owner {
+                    ChordOwner::SessionKeyResolver(expected) => assert_eq!(
+                        resolved, *expected,
+                        "{} advertises {badge:?}; pressing it (working={working}) must resolve \
+                         to {expected:?}, not {resolved:?}",
+                        action.id
+                    ),
+                    ChordOwner::HostInterceptor(where_) => assert_eq!(
+                        resolved,
+                        FlowSessionKeyAction::Ignore,
+                        "{} declares {where_} as the owner of {badge:?}, so the session \
+                         resolver must leave it alone — two owners for one chord is a race, \
+                         not redundancy",
+                        action.id
+                    ),
+                }
+            }
+        }
     }
 
     /// Copying the last answer is the most common thing a user does with a

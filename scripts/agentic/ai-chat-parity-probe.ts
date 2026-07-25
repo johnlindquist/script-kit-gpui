@@ -40,7 +40,9 @@ import { Driver, type Json } from "../devtools/driver";
 import {
   FLOW_ANSWER_SCOPE_PREFIX,
   FLOW_ANSWER_SCOPE_SUFFIX,
+  clipboardCopyPasses,
   componentPresent,
+  evaluateClipboardCopy,
   evaluateSelectable,
   verdictPasses,
   type FidelityNode,
@@ -126,6 +128,27 @@ async function press(key: string, modifiers: string[] = []) {
 }
 
 /**
+ * Plant a known value on the real system pasteboard.
+ *
+ * `pbcopy`/`pbpaste` deliberately, not an app-provided read-back: the point of
+ * this leg is to leave the app's own reporting and check the boundary the user
+ * actually experiences when they hit ⌘V somewhere else.
+ */
+async function setClipboard(value: string): Promise<void> {
+  const proc = Bun.spawn(["pbcopy"], { stdin: "pipe" });
+  proc.stdin.write(value);
+  await proc.stdin.end();
+  await proc.exited;
+}
+
+async function readClipboard(): Promise<string> {
+  const proc = Bun.spawn(["pbpaste"], { stdout: "pipe" });
+  const text = await new Response(proc.stdout).text();
+  await proc.exited;
+  return text;
+}
+
+/**
  * Submit one real turn to the open Flow session and wait for it to settle.
  *
  * Polls the FLOW ANSWER SCOPE rather than a timer: an answer region only
@@ -174,7 +197,8 @@ try {
     promptType: flowState.promptType,
   });
 
-  const flowLayout = await submitTurnAndSettle("Say something quotable.");
+  const beforeTurnMessage = "Say something quotable.";
+  const flowLayout = await submitTurnAndSettle(beforeTurnMessage);
   const flowSelectable = evaluateSelectable(
     fidelityNodes(flowLayout),
     FLOW_ANSWER_SCOPE_PREFIX,
@@ -196,6 +220,31 @@ try {
     verdictPasses(flowSelectable),
     { verdict: flowSelectable as unknown as Json },
   );
+
+  // ── ⇧⌘C copies the last response ──────────────────────────────────
+  // Runs BEFORE the ⌘L leg on purpose: ⌘L discards the transcript, and a copy
+  // chord tested against an empty conversation proves nothing.
+  //
+  // The clipboard is the real system pasteboard, so this crosses an actual
+  // integration boundary rather than reading back app state the app itself
+  // reported. A sentinel is planted first — without it, "the clipboard has
+  // text" passes for a clipboard nobody touched, which is precisely what an
+  // unbound chord leaves behind. That was the defect: the ⌘K menu printed a
+  // ⇧⌘C badge and no code answered it.
+  const sentinel = `sentinel-${beforeTurnMessage.length}-not-a-response`;
+  await setClipboard(sentinel);
+  await press("c", ["cmd", "shift"]);
+  await Bun.sleep(320);
+  const clipboardAfterCopy = await readClipboard();
+  const copyVerdict = evaluateClipboardCopy(sentinel, clipboardAfterCopy, [
+    // Copying the user's own turn instead of the assistant's would otherwise
+    // read as a healthy copy: the clipboard changed, and it holds real text.
+    beforeTurnMessage,
+  ]);
+  (receipt.evidence as Json).copyLastResponse = copyVerdict as unknown as Json;
+  expect("flowSession.shift-cmd-c-copies-the-last-response", clipboardCopyPasses(copyVerdict), {
+    verdict: copyVerdict as unknown as Json,
+  });
 
   // ── ⌘L starts a new conversation ──────────────────────────────────
   const beforeReset = fidelityNodes(flowLayout).filter((node) =>

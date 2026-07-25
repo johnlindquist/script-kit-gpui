@@ -122,6 +122,45 @@ export function selectionParity(
   };
 }
 
+/** What a `⇧⌘C` press did to the real system clipboard. */
+export type ClipboardCopyVerdict =
+  /** Something new and plausible landed. */
+  | { kind: "copied"; text: string }
+  /** The clipboard still holds the sentinel — the chord did nothing at all. */
+  | { kind: "unchanged"; sentinel: string }
+  /** The app wrote, but wrote blank. A successful copy of nothing. */
+  | { kind: "empty" }
+  /** The app copied the wrong side of the turn (or the composer draft). */
+  | { kind: "wrongText"; text: string; matched: string };
+
+/**
+ * Judge a clipboard copy against a sentinel planted before the keypress.
+ *
+ * The sentinel is what makes this falsifiable. Without it, "the clipboard
+ * contains text" passes for a clipboard nobody touched — which is exactly the
+ * state an unbound chord leaves behind, and exactly the bug this probe exists
+ * to catch.
+ *
+ * `forbidden` carries strings that would mean the RIGHT chord copied the WRONG
+ * thing — the user's own message, or an unsent draft. Those must not read as a
+ * pass just because the clipboard changed.
+ */
+export function evaluateClipboardCopy(
+  sentinel: string,
+  after: string,
+  forbidden: string[] = [],
+): ClipboardCopyVerdict {
+  if (after === sentinel) return { kind: "unchanged", sentinel };
+  if (after.trim() === "") return { kind: "empty" };
+  const matched = forbidden.find((candidate) => candidate.trim() === after.trim());
+  if (matched !== undefined) return { kind: "wrongText", text: after, matched };
+  return { kind: "copied", text: after };
+}
+
+export function clipboardCopyPasses(verdict: ClipboardCopyVerdict): boolean {
+  return verdict.kind === "copied";
+}
+
 export function componentPresent(
   components: LayoutComponent[] | null | undefined,
   name: string,

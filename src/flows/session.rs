@@ -456,6 +456,25 @@ pub fn resolve_flow_conversation_reset_guard(
     }
 }
 
+/// Pick the text a "Copy Last Response" invocation should put on the clipboard.
+///
+/// Newest-first, skipping blanks. The in-flight turn is appended to the
+/// transcript with an empty `assistant` the moment it is submitted, so
+/// `turns.last()` would hand back `""` mid-stream — and a clipboard write of
+/// `""` succeeds, so the user gets a silent success and pastes nothing. Every
+/// caller must therefore distinguish "no answer yet" from "an answer", which is
+/// what returning `None` forces.
+///
+/// Trimming is deliberate: a turn holding only whitespace is not an answer.
+pub fn resolve_last_copyable_response<'a>(
+    assistant_texts: impl DoubleEndedIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    assistant_texts
+        .rev()
+        .map(|assistant| assistant.trim())
+        .find(|assistant| !assistant.is_empty())
+}
+
 /// Metadata for one conversation, independent of the GPUI entity.
 #[derive(Debug, Clone)]
 pub struct FlowSessionMeta {
@@ -1511,6 +1530,49 @@ mod tests {
             !FlowConversationResetCause::UserRequested.preserves_transcript(),
             "'New Conversation' that kept the old turns would not be a new \
              conversation"
+        );
+    }
+
+    /// The defect this helper exists to prevent: the in-flight turn is already
+    /// in `turns` with an empty `assistant`, so the obvious `turns.last()`
+    /// copies `""` — and writing `""` to the clipboard SUCCEEDS. The user sees
+    /// a copy that worked and pastes nothing.
+    #[test]
+    fn copying_mid_stream_reaches_past_the_empty_in_flight_turn() {
+        let turns = ["first answer", "second answer", ""];
+        assert_eq!(
+            resolve_last_copyable_response(turns.iter().copied()),
+            Some("second answer"),
+            "the newest turn with an actual answer wins, not the newest turn"
+        );
+    }
+
+    #[test]
+    fn a_whitespace_only_turn_is_not_an_answer() {
+        let turns = ["real answer", "   \n\t "];
+        assert_eq!(
+            resolve_last_copyable_response(turns.iter().copied()),
+            Some("real answer")
+        );
+    }
+
+    /// `None` and `Some("")` must not be confusable — only `None` may reach the
+    /// "nothing to copy" toast, and only a non-empty string may reach the
+    /// clipboard.
+    #[test]
+    fn a_conversation_with_no_answer_yet_copies_nothing() {
+        assert_eq!(resolve_last_copyable_response([].iter().copied()), None);
+        assert_eq!(
+            resolve_last_copyable_response(["", "  "].iter().copied()),
+            None
+        );
+    }
+
+    #[test]
+    fn the_copied_answer_is_trimmed() {
+        assert_eq!(
+            resolve_last_copyable_response(["\n  answer body  \n"].iter().copied()),
+            Some("answer body")
         );
     }
 
