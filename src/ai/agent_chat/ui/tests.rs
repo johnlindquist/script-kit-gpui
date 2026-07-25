@@ -2575,29 +2575,34 @@ fn agent_chat_transient_trigger_exit_on_empty_composer() {
     );
 }
 
+/// Guards the VENDORED `TextView` plumbing that selectable conversation
+/// markdown depends on. Nothing here reads app renderer source.
+///
+/// History: this test used to also assert the literal strings
+/// `.selectable(crate::logging::agent_chat_markdown_selectable_enabled())`,
+/// `.text_size(px(style_def.markdown.body_font_size))`, and the whole
+/// `transcript_text_style` builder body out of `AGENT_CHAT_TRANSCRIPT_SOURCE`.
+/// Those assertions were deleted, not relocated, when the style contract and
+/// the `TextView` construction moved to `src/components/conversation_style.rs`
+/// and `src/components/conversation_text.rs` so Flow could share them.
+///
+/// Two reasons they are gone rather than repointed, per the repo's Source
+/// Audit Test Policy (source reads are rung 5 of 5, a last resort):
+///
+/// 1. They asserted the *presence of formatted source text* in one surface —
+///    exactly the shape that breaks on legitimate refactors. This move was the
+///    refactor that broke them.
+/// 2. Their real invariant is now enforced higher on the ladder: the style
+///    values and cache behavior are covered by behavior tests in
+///    `conversation_style.rs` / `conversation_text.rs`, and "the text is
+///    actually selectable on screen" is covered by a runtime probe — which is
+///    the only thing that could ever have proven it. A substring check could
+///    confirm the call was written; it could never confirm selection worked.
+///
+/// The assertions below survive because they concern vendor internals that
+/// the move did not touch, and no behavior test covers them.
 #[test]
-fn agent_chat_transcript_keeps_selectable_markdown_with_chat_scaled_typography() {
-    assert!(
-        AGENT_CHAT_TRANSCRIPT_SOURCE.contains("fn selectable_markdown_view(")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE
-                .contains(".selectable(crate::logging::agent_chat_markdown_selectable_enabled())")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE
-                .contains(".text_size(px(style_def.markdown.body_font_size))"),
-        "Agent Chat transcript messages must stay selectable (the selectable flag defaults on) without reverting to oversized document typography"
-    );
-
-    assert!(
-        AGENT_CHAT_TRANSCRIPT_SOURCE.contains("fn transcript_text_style(")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE
-                .contains(".paragraph_gap(rems(style_def.markdown.paragraph_gap))")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE.contains("1 => px(heading_1_font_size)")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE.contains("StyleRefinement::default()")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE.contains(".code_block(")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE.contains(".blockquote(")
-            && AGENT_CHAT_TRANSCRIPT_SOURCE.contains("build_markdown_highlight_theme"),
-        "Agent Chat transcript must apply compact assistant-chat markdown styling for headings, code blocks, and blockquotes"
-    );
-
+fn vendored_text_view_persists_style_into_parsed_nodes_for_selectable_markdown() {
     assert!(
         TEXT_VIEW_SOURCE.contains("state.set_text_view_style(self.text_view_style.clone(), cx);")
             && TEXT_VIEW_STATE_SOURCE.contains("text_view_style: self.text_view_style.clone()")

@@ -755,111 +755,22 @@ impl AgentChatTranscript {
 
     /// Build (or reuse) the markdown `TextViewStyle` for transcript rows.
     ///
-    /// This runs once per visible row per frame during scrolling, and building
-    /// a `HighlightTheme` clones a full syntax style table. Memoize on the
-    /// exact inputs so repeated frames return the same `Arc`ed theme, which
-    /// also lets `TextViewStyle::eq` inside `TextView` hit its pointer
-    /// fast path instead of deep-comparing the syntax table per row per frame.
+    /// Delegates to the shared conversation owner so Agent Chat and Flow
+    /// cannot drift. The style/cache implementation (including the
+    /// policy-specific cache that preserves `TextViewStyle`'s pointer-equality
+    /// fast path) lives in `crate::components::conversation_text`.
     fn transcript_text_style(
         theme: &crate::theme::Theme,
         colors: &PromptColors,
         style_def: &AgentChatStyleDef,
+        link_label_policy: MarkdownLinkLabelPolicy,
     ) -> TextViewStyle {
-        #[derive(PartialEq)]
-        struct StyleCacheKey {
-            style_def: AgentChatStyleDef,
-            is_dark: bool,
-            accent: u32,
-            secondary: u32,
-            muted: u32,
-            code_bg: u32,
-            quote_border: u32,
-        }
-        thread_local! {
-            static STYLE_CACHE: std::cell::RefCell<Option<(StyleCacheKey, TextViewStyle)>> =
-                const { std::cell::RefCell::new(None) };
-        }
-
-        let key = StyleCacheKey {
-            style_def: *style_def,
-            is_dark: theme.is_dark_mode(),
-            accent: theme.colors.accent.selected,
-            secondary: theme.colors.text.secondary,
-            muted: theme.colors.text.muted,
-            code_bg: colors.code_bg,
-            quote_border: colors.quote_border,
-        };
-
-        if let Some(style) = STYLE_CACHE.with(|cache| {
-            cache
-                .borrow()
-                .as_ref()
-                .filter(|(cached_key, _)| *cached_key == key)
-                .map(|(_, style)| style.clone())
-        }) {
-            return style;
-        }
-
-        let style = Self::build_transcript_text_style(theme, colors, style_def);
-        STYLE_CACHE.with(|cache| {
-            *cache.borrow_mut() = Some((key, style.clone()));
-        });
-        style
-    }
-
-    fn build_transcript_text_style(
-        _theme: &crate::theme::Theme,
-        colors: &PromptColors,
-        style_def: &AgentChatStyleDef,
-    ) -> TextViewStyle {
-        // PromptColors.code_bg/quote_border are background.search_box and
-        // ui.border — the same theme authorities the shared resolver reads.
-        let _ = colors;
-        let resolved = resolved_agent_chat_transcript_colors(style_def, _theme);
-        let code_bg = rgba(resolved.code_bg_rgba);
-        let code_border = rgba(resolved.code_border_rgba);
-        let blockquote_bg = rgba(resolved.blockquote_bg_rgba);
-        let blockquote_border = rgba(resolved.blockquote_border_rgba);
-        let heading_1_font_size = style_def.markdown.heading_1_font_size;
-        let heading_2_font_size = style_def.markdown.heading_2_font_size;
-        let heading_3_font_size = style_def.markdown.heading_3_font_size;
-        let body_font_size = style_def.markdown.body_font_size;
-        let mut style = TextViewStyle::default()
-            .paragraph_gap(rems(style_def.markdown.paragraph_gap))
-            .heading_font_size(move |level, _base_size| match level {
-                1 => px(heading_1_font_size),
-                2 => px(heading_2_font_size),
-                3 => px(heading_3_font_size),
-                _ => px(body_font_size),
-            })
-            .code_block(
-                StyleRefinement::default()
-                    .bg(code_bg)
-                    .border_1()
-                    .border_color(code_border)
-                    .rounded(px(style_def.markdown.code_block_radius))
-                    .px(px(style_def.markdown.code_block_padding_x))
-                    .py(px(style_def.markdown.code_block_padding_y))
-                    .text_size(px(style_def.markdown.code_block_font_size)),
-            )
-            .code_block_copy_button(true)
-            .blockquote(
-                StyleRefinement::default()
-                    .bg(blockquote_bg)
-                    .border_color(blockquote_border)
-                    .rounded(px(style_def.markdown.blockquote_radius))
-                    .px(px(style_def.markdown.blockquote_padding_x))
-                    .py(px(style_def.markdown.blockquote_padding_y)),
-            );
-
-        style.highlight_theme = Arc::new(
-            crate::theme::gpui_integration::build_markdown_highlight_theme(
-                _theme,
-                _theme.is_dark_mode(),
-            ),
-        );
-        style.is_dark = _theme.is_dark_mode();
-        style
+        crate::components::conversation_text::conversation_text_style(
+            theme,
+            colors,
+            style_def,
+            link_label_policy,
+        )
     }
 
     fn selectable_markdown_view(
@@ -881,6 +792,10 @@ impl AgentChatTranscript {
         )
     }
 
+    /// Every Agent Chat markdown region — user, assistant, thought, tool,
+    /// error, system — builds through the SHARED conversation view. Selection
+    /// is opt-in on the vendored `TextView`, so constructing one locally here
+    /// would silently produce unselectable text.
     #[allow(clippy::too_many_arguments)]
     fn selectable_markdown_view_with_policy(
         text_view_state: &gpui::Entity<TextViewState>,
@@ -891,15 +806,15 @@ impl AgentChatTranscript {
         fidelity_scope: SharedString,
         link_label_policy: MarkdownLinkLabelPolicy,
     ) -> TextView {
-        let style = Self::transcript_text_style(theme, colors, style_def)
-            .markdown_link_label_policy(link_label_policy);
-        TextView::new(text_view_state)
-            .style(style)
-            .selectable(crate::logging::agent_chat_markdown_selectable_enabled())
-            .fidelity_scope(fidelity_scope)
-            .w_full()
-            .text_size(px(style_def.markdown.body_font_size))
-            .text_color(text_color)
+        crate::components::conversation_text::conversation_markdown_view(
+            text_view_state,
+            theme,
+            colors,
+            text_color,
+            style_def,
+            fidelity_scope,
+            link_label_policy,
+        )
     }
 
     fn message_text_fidelity_scope(msg: &AgentChatThreadMessage) -> SharedString {

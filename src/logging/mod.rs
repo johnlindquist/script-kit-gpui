@@ -88,13 +88,25 @@ pub fn agent_chat_render_trace_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("SCRIPT_KIT_AGENT_CHAT_RENDER_TRACE").is_some())
 }
 
-pub fn agent_chat_markdown_selectable_enabled() -> bool {
+/// Whether conversation Markdown (Agent Chat AND Flow) renders selectable.
+///
+/// The env var keeps its original `SCRIPT_KIT_AGENT_CHAT_MARKDOWN_SELECTABLE`
+/// name on purpose: it is an existing documented escape hatch, and minting a
+/// second flag for the same switch would let the two surfaces diverge again —
+/// the exact drift the shared conversation renderer removes.
+pub fn conversation_markdown_selectable_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("SCRIPT_KIT_AGENT_CHAT_MARKDOWN_SELECTABLE")
             .map(|value| value != "0")
             .unwrap_or(true)
     })
+}
+
+/// Back-compat name. Delegates; do NOT give this its own `OnceLock`, or the
+/// two names could resolve differently within one process.
+pub fn agent_chat_markdown_selectable_enabled() -> bool {
+    conversation_markdown_selectable_enabled()
 }
 
 pub fn preflight_deep_log_enabled() -> bool {

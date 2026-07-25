@@ -31,6 +31,13 @@ pub(crate) mod braille_loading;
 pub(crate) mod builtin_leading_separator;
 pub mod button;
 pub(crate) mod confirm_modal_shell;
+/// Shared typed owner of conversation paint values for Agent Chat AND Flow.
+/// `src/ai/agent_chat/ui/style_contract.rs` is a compatibility façade over it.
+pub mod conversation_style;
+/// Shared selectable Markdown renderer for every conversation surface.
+/// Selection is opt-in on the vendored `TextView`, so building one outside
+/// this module silently produces unselectable text.
+pub(crate) mod conversation_text;
 #[cfg(test)]
 mod error_handling_audit_tests;
 pub mod focusable_prompt_wrapper;
