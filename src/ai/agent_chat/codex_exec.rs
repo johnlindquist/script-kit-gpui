@@ -583,6 +583,41 @@ pub(crate) fn build_codex_exec_command(
         .arg("model_reasoning_effort=\"low\"")
         .arg("--config")
         .arg("tools.web_search.context_size=\"low\"")
+        // Quick AI accepts exactly one tool: web_search. Everything else is a
+        // `CodexItem::Forbidden` that kills the turn, so the tools must be
+        // taken away rather than rejected after the fact.
+        //
+        // `--sandbox read-only` is not enough: a read-only sandbox happily
+        // runs shell commands that only read. A captured production stream
+        // (`testdata/quick-ai-streams/rust-release-2.ndjson`) shows the model
+        // running `/bin/zsh -lc 'recall context'` — the user's shared agent
+        // memory — while answering a question about Rust releases.
+        //
+        // Measured with `scripts/agentic/quick-ai-shell-tool-gate-probe.ts`
+        // against a query written to provoke a shell command, 4 reps per arm:
+        //   control                 4/4 turns ran a forbidden tool, median 5.6s
+        //   + features.shell_tool   4/4 (shell gone; model switched to an
+        //                           `mcp_tool_call`), median 11.5s
+        //   + apps/MCP surfaces too 0/4, median 4.9s — and the only item type
+        //                           left in the stream is `agent_message`
+        // Gating only the shell is worse than gating nothing: the model reaches
+        // for the next forbidden tool and pays 3x the latency to do it.
+        //
+        // The MCP call is Codex's own `list_mcp_resources` over `codex_apps`
+        // connectors, so `mcp_servers={}` alone cannot remove it. Note
+        // `features.connectors=false` is deliberately absent: Codex answers it
+        // with a deprecation `error` item, which Quick AI treats as a protocol
+        // failure. `features.apps` is its replacement.
+        .arg("--config")
+        .arg("features.shell_tool=false")
+        .arg("--config")
+        .arg("mcp_servers={}")
+        .arg("--config")
+        .arg("features.enable_mcp_apps=false")
+        .arg("--config")
+        .arg("features.apps=false")
+        .arg("--config")
+        .arg("features.tool_search=false")
         .arg("--config")
         .arg(format!(
             "developer_instructions={}",
@@ -921,6 +956,10 @@ enum QuickAiTurnStop {
 struct ValidatedQuickAiAnswer {
     rendered: String,
     source_count: usize,
+    /// Canonical http(s) URLs from the schema `sources` array, already
+    /// deduped and validated. These are the ONLY URLs allowed to reach the
+    /// reader, so the provenance gate needs the list and not just its length.
+    validated_sources: Vec<String>,
 }
 
 fn apply_codex_exec_event(
@@ -976,8 +1015,18 @@ fn apply_codex_exec_event(
                             text: text.clone(),
                         });
                     if accumulator.web_budget.search_completed {
-                        if let Some(answer) = parse_structured_answer_candidate(&text)? {
-                            return Ok(CodexEventDecision::CompleteEarly(answer));
+                        if let Some(mut candidate) = parse_structured_answer_candidate(&text)? {
+                            // Early completion must clear the SAME provenance
+                            // gate as `finalize_successful_turn`. Before this,
+                            // a prompt answer skipped every source check, so
+                            // the strict rules only ever ran on the slow path.
+                            let sources = candidate.validated_sources.clone();
+                            enforce_answer_provenance(
+                                accumulator,
+                                Some(&sources),
+                                &mut candidate.rendered,
+                            )?;
+                            return Ok(CodexEventDecision::CompleteEarly(candidate));
                         }
                     }
                 }
@@ -1256,6 +1305,7 @@ fn parse_structured_answer_candidate(
     Ok(Some(ValidatedQuickAiAnswer {
         rendered: render_final_answer(raw)?,
         source_count: sources.len(),
+        validated_sources: sources,
     }))
 }
 
@@ -1301,39 +1351,46 @@ fn partial_answer(accumulator: &CodexExecTurnAccumulator) -> Option<String> {
     Some(raw.to_string())
 }
 
-fn finalize_successful_turn(
+/// The single source-provenance gate for a successful Quick AI turn.
+///
+/// Both completion paths run this. `finalize_successful_turn` handles the turn
+/// that ends at `turn.completed`; `apply_codex_exec_event` handles the common
+/// fast path where a schema-valid `agent_message` arrives right after the
+/// admitted search completed. That fast path used to return straight to the
+/// driver, so every rule below was unreachable exactly when Quick AI worked
+/// normally — an answer could cite any host it liked. Keeping one
+/// implementation makes the two paths structurally unable to drift.
+///
+/// `validated_sources` is the schema `sources` array when the answer parsed as
+/// the output schema, and `None` when it did not.
+///
+/// What can actually be proven here is limited by the wire protocol. A Codex
+/// `web_search` item with a `search` action reports the queries and NOTHING
+/// else — no result URLs (see `testdata/quick-ai-streams/*.ndjson`). Only a
+/// page visit carries a URL, and the Quick AI prompt forbids page visits to
+/// stay inside the latency budget. So `structured_urls` is empty on every
+/// ordinary turn, and host verification is reachable only on the paths where a
+/// visit really happened. Rather than pretend otherwise, the snippets-only
+/// path enforces the two things it genuinely can:
+///
+/// 1. any URL shown to the reader passed `validate_structured_answer_fields`;
+/// 2. citing anything at all required a search to have completed.
+///
+/// An answer with no sources and no URLs is allowed with or without a search:
+/// that is both the honest empty-result case and an ordinary question the
+/// model can answer from its own knowledge.
+fn enforce_answer_provenance(
     accumulator: &CodexExecTurnAccumulator,
-) -> Result<Vec<AgentChatEvent>, CodexTurnFailure> {
+    validated_sources: Option<&[String]>,
+    answer: &mut String,
+) -> Result<(), CodexTurnFailure> {
     if accumulator.non_search_tool_count != 0 {
         return Err(CodexTurnFailure::protocol(
             "quick_ai_codex_non_search_tool_observed",
         ));
     }
-    let answer = accumulator
-        .completed_agent_messages
-        .iter()
-        .rev()
-        .find(|message| !message.text.trim().is_empty())
-        .map(|message| message.text.as_str())
-        .ok_or_else(|| CodexTurnFailure::protocol("quick_ai_codex_final_answer_missing"))?;
-    let structured_candidate = parse_structured_answer_candidate(answer)?;
-    let mut answer = structured_candidate
-        .as_ref()
-        .map(|candidate| candidate.rendered.clone())
-        .unwrap_or(render_final_answer(answer)?);
-    let answer_urls = http_urls_in_text(&answer);
-    if accumulator.structured_urls.is_empty() {
-        let honest_empty_result = structured_candidate
-            .as_ref()
-            .is_some_and(|candidate| candidate.source_count == 0);
-        if !accumulator.web_budget.search_completed
-            || (answer_urls.is_empty() && !honest_empty_result)
-        {
-            return Err(CodexTurnFailure::protocol(
-                "quick_ai_structured_sources_unavailable",
-            ));
-        }
-    } else {
+    let answer_urls = http_urls_in_text(answer);
+    if !accumulator.structured_urls.is_empty() {
         let structured_hosts: HashSet<String> = accumulator
             .structured_urls
             .iter()
@@ -1351,7 +1408,51 @@ fn finalize_successful_turn(
                 "quick_ai_final_answer_url_without_structured_source_host",
             ));
         }
+        return Ok(());
     }
+
+    let sources = validated_sources.unwrap_or_default();
+    if answer_urls.is_empty() && sources.is_empty() {
+        return Ok(());
+    }
+    if !accumulator.web_budget.search_completed {
+        return Err(CodexTurnFailure::protocol(
+            "quick_ai_structured_sources_unavailable",
+        ));
+    }
+    let allowed: HashSet<&str> = sources.iter().map(String::as_str).collect();
+    if answer_urls.iter().any(|url| {
+        canonical_http_url(url).is_none_or(|canonical| !allowed.contains(canonical.as_str()))
+    }) {
+        return Err(CodexTurnFailure::protocol(
+            "quick_ai_answer_url_not_in_validated_sources",
+        ));
+    }
+    Ok(())
+}
+
+fn finalize_successful_turn(
+    accumulator: &CodexExecTurnAccumulator,
+) -> Result<Vec<AgentChatEvent>, CodexTurnFailure> {
+    let answer = accumulator
+        .completed_agent_messages
+        .iter()
+        .rev()
+        .find(|message| !message.text.trim().is_empty())
+        .map(|message| message.text.as_str())
+        .ok_or_else(|| CodexTurnFailure::protocol("quick_ai_codex_final_answer_missing"))?;
+    let structured_candidate = parse_structured_answer_candidate(answer)?;
+    let mut answer = structured_candidate
+        .as_ref()
+        .map(|candidate| candidate.rendered.clone())
+        .unwrap_or(render_final_answer(answer)?);
+    enforce_answer_provenance(
+        accumulator,
+        structured_candidate
+            .as_ref()
+            .map(|candidate| candidate.validated_sources.as_slice()),
+        &mut answer,
+    )?;
     Ok(vec![
         AgentChatEvent::AgentMessageDelta(answer),
         AgentChatEvent::completed("stop"),
@@ -1391,8 +1492,14 @@ fn emit_successful_events(
                 "answerSha256": sha256_hex(answer),
                 "answerChars": answer.chars().count(),
                 "answerUrls": http_urls_in_text(answer),
+                // `unvisited-validated-schema-source` is the ordinary case, and
+                // the name says what it is: the URL passed schema validation
+                // and followed a completed search, but nothing fetched it. The
+                // old label ("answer-url-after-native-search") described the
+                // check that had been performed rather than the confidence it
+                // bought, which made the traces read like verification.
                 "sourceProvenance": if accumulator.structured_urls.is_empty() {
-                    "answer-url-after-native-search"
+                    "unvisited-validated-schema-source"
                 } else {
                     "admitted-native-action"
                 },
@@ -1418,14 +1525,19 @@ fn emit_codex_failure(
     } else {
         error.message
     };
-    let raw_failure = if stderr_text.trim().is_empty() {
-        message
+    let detail = if stderr_text.trim().is_empty() {
+        message.clone()
     } else {
         format!("{message}\n{}", stderr_text.trim())
     };
-    let failure = crate::ai::reliability::provider_failure(
+    // Classify from OUR code, not from the code glued to provider stderr.
+    // The concatenated form let stray words in stderr pick the failure kind —
+    // "operation not permitted" from a blocked shell command read as a
+    // permission problem, "unauthorized" read as "sign in to continue".
+    let failure = crate::ai::reliability::quick_ai_failure(
         sk_protocol::ai_reliability::ProtocolComponent::Codex,
-        raw_failure,
+        &message,
+        &detail,
     );
     let fingerprint = failure
         .failure
@@ -1841,6 +1953,13 @@ mod tests {
             "skills.bundled.enabled=false",
             "model_reasoning_effort=\"low\"",
             "tools.web_search.context_size=\"low\"",
+            // Quick AI's only allowed tool is web_search; every other tool
+            // has to be removed from the turn, not rejected after it runs.
+            "features.shell_tool=false",
+            "mcp_servers={}",
+            "features.enable_mcp_apps=false",
+            "features.apps=false",
+            "features.tool_search=false",
             "--ephemeral",
             "--ignore-user-config",
             "--ignore-rules",
@@ -2024,6 +2143,130 @@ mod tests {
         assert!(answer.rendered.contains("https://blog.rust-lang.org/"));
     }
 
+    /// Replay a captured `codex exec --json` stream through the real turn
+    /// state machine and return what a user would see.
+    ///
+    /// Hand-written event lines drift from the provider. These fixtures are
+    /// verbatim streams captured from `gpt-5.3-codex-spark` with the exact
+    /// production command (see
+    /// `scripts/agentic/quick-ai-codex-stream-corpus.ts`), so a change in how
+    /// Codex reports searches shows up here as a failing test instead of as a
+    /// silent production regression.
+    fn replay_quick_ai_stream(stream: &str) -> Result<String, CodexTurnFailure> {
+        let mut acc = accumulator();
+        for line in stream.lines().filter(|line| !line.trim().is_empty()) {
+            match apply_line_decision(&mut acc, line)? {
+                CodexEventDecision::Continue(_) => {}
+                CodexEventDecision::CompleteEarly(answer) => return Ok(answer.rendered),
+                CodexEventDecision::StopForRecovery(record) => {
+                    return Err(CodexTurnFailure::protocol(format!(
+                        "policy_recovery:{:?}",
+                        record.failure.code
+                    )));
+                }
+            }
+        }
+        match finalize_successful_turn(&acc)?.first() {
+            Some(AgentChatEvent::AgentMessageDelta(answer)) => Ok(answer.clone()),
+            _ => Err(CodexTurnFailure::protocol("replay_produced_no_answer")),
+        }
+    }
+
+    const STREAM_NO_WEB: &str = include_str!("testdata/quick-ai-streams/no-web-1.ndjson");
+    const STREAM_SEARCH_SOURCES_IN_TEXT: &str =
+        include_str!("testdata/quick-ai-streams/rust-release-2.ndjson");
+    const STREAM_SEARCH_SOURCES_ONLY: &str =
+        include_str!("testdata/quick-ai-streams/weather-ish-2.ndjson");
+    const STREAM_SINGLE_SOURCE: &str =
+        include_str!("testdata/quick-ai-streams/bun-version-2.ndjson");
+
+    /// A question the model can answer from its own knowledge must succeed.
+    ///
+    /// The provenance gate used to require `search_completed` before ANY
+    /// answer was allowed through, so "What does the Rust `?` operator do?"
+    /// — answered with an empty `sources` array and no web item at all —
+    /// failed with `quick_ai_structured_sources_unavailable`. Requiring a web
+    /// search to answer a non-web question is backwards: an empty sources
+    /// array is the honest shape, not a missing citation.
+    #[test]
+    fn codex_quick_ai_answers_a_knowledge_question_without_searching() {
+        let answer = replay_quick_ai_stream(STREAM_NO_WEB)
+            .expect("a sourceless knowledge answer must not need a web search");
+        assert!(answer.contains("`?` operator"), "answer was: {answer}");
+        assert!(
+            !answer.contains("http"),
+            "a knowledge answer must not gain a citation: {answer}"
+        );
+    }
+
+    /// Schema `sources` reach the reader after one focused search.
+    #[test]
+    fn codex_quick_ai_renders_validated_sources_from_a_single_search() {
+        for stream in [STREAM_SEARCH_SOURCES_ONLY, STREAM_SINGLE_SOURCE] {
+            let answer =
+                replay_quick_ai_stream(stream).expect("one focused search must produce an answer");
+            assert!(
+                !http_urls_in_text(&answer).is_empty(),
+                "sourced answer lost its citations: {answer}"
+            );
+        }
+    }
+
+    /// Codex still hands the model a shell tool, and it uses it.
+    ///
+    /// This fixture is a verbatim production-command stream in which
+    /// `gpt-5.3-codex-spark` ran `/bin/zsh -lc 'recall context'` — reading the
+    /// user's shared agent memory — while answering "what is the latest stable
+    /// Rust release?". `--sandbox read-only` does not prevent it, because the
+    /// read IS permitted by a read-only sandbox.
+    ///
+    /// Quick AI fails closed, which is correct, but the user gets an error
+    /// instead of an answer and the private read already happened. The command
+    /// shape must remove the tool rather than reject its output; a measured A/B
+    /// (`scripts/agentic/quick-ai-shell-tool-gate-probe.ts`) shows
+    /// `features.shell_tool=false` does exactly that.
+    #[test]
+    fn codex_quick_ai_fails_closed_on_a_real_shell_command_it_should_never_have_been_offered() {
+        let error = replay_quick_ai_stream(STREAM_SEARCH_SOURCES_IN_TEXT)
+            .expect_err("a shell command in a Quick AI turn must fail closed");
+        assert_eq!(
+            error.message,
+            "quick_ai_codex_forbidden_item:command_execution:item_0"
+        );
+    }
+
+    /// The reader must never be shown a URL that skipped schema validation.
+    ///
+    /// With snippets-only searching there is no page visit to verify a host
+    /// against, so the one guarantee still available is that every URL in the
+    /// rendered answer came through `validate_structured_answer_fields`. A
+    /// URL smuggled in the prose alone bypassed that entirely.
+    #[test]
+    fn codex_quick_ai_rejects_an_answer_url_missing_from_validated_sources() {
+        let mut acc = accumulator();
+        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"one","type":"web_search","action":{"type":"search","query":"f1 winner"}}}"#).unwrap();
+        let error = apply_line_decision(&mut acc, r#"{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"{\"answer\":\"See https://totally-made-up.example/race for details.\",\"sources\":[\"https://www.formula1.com/en/latest\"]}"}}"#)
+            .expect_err("an unvalidated prose URL must not reach the reader");
+        assert_eq!(
+            error.message,
+            "quick_ai_answer_url_not_in_validated_sources"
+        );
+    }
+
+    /// Citing sources without having searched is fabrication, and stays fatal.
+    #[test]
+    fn codex_quick_ai_rejects_cited_sources_when_no_search_ran() {
+        let mut acc = accumulator();
+        // No search completed, so nothing short-circuits: the answer is
+        // buffered and the turn is judged at finalization.
+        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"{\"answer\":\"Rust 1.97.1 shipped today.\",\"sources\":[\"https://blog.rust-lang.org/releases/latest/\"]}"}}"#).unwrap();
+        apply_line(&mut acc, r#"{"type":"turn.completed","usage":{}}"#).unwrap();
+        assert_eq!(
+            finalize_successful_turn(&acc).unwrap_err().message,
+            "quick_ai_structured_sources_unavailable"
+        );
+    }
+
     #[test]
     fn codex_quick_ai_trace_redacts_provider_item_and_raw_action() {
         let dir = tempfile::tempdir().unwrap();
@@ -2060,7 +2303,8 @@ mod tests {
         for line in [
             r#"{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"preamble"}}"#,
             r#"{"type":"item.completed","item":{"id":"s","type":"web_search","action":{"type":"search","query":"example source"}}}"#,
-            r#"{"type":"item.completed","item":{"id":"m2","type":"agent_message","text":"final https://example.com/source"}}"#,
+            // No URL: this test is about which message wins, not provenance.
+            r#"{"type":"item.completed","item":{"id":"m2","type":"agent_message","text":"final answer text"}}"#,
             r#"{"type":"turn.completed","usage":{}}"#,
         ] {
             apply_line(&mut acc, line).unwrap();
@@ -2212,13 +2456,38 @@ mod tests {
     }
 
     #[test]
-    fn codex_quick_ai_answer_url_after_native_search_is_accepted() {
+    /// A bare-prose URL is no longer accepted just because a search ran.
+    ///
+    /// This test previously asserted the opposite. "A search completed, so any
+    /// URL in the reply is fine" was the entire source check on the normal
+    /// path — a search item carries no result URLs, so nothing else was ever
+    /// compared. Under `--output-schema` the model always answers as JSON, so
+    /// a URL that appears only in prose skipped
+    /// `validate_structured_answer_fields` and reached the reader unchecked.
+    #[test]
+    fn codex_quick_ai_prose_only_url_after_native_search_is_rejected() {
         let mut acc = accumulator();
         apply_line(&mut acc, r#"{"type":"item.started","item":{"id":"s","type":"web_search","action":{"type":"other"}}}"#).unwrap();
         apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"s","type":"web_search","action":{"type":"search","query":"Rust release"}}}"#).unwrap();
         apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"Rust 1.97.0: https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/"}}"#).unwrap();
         apply_line(&mut acc, r#"{"type":"turn.completed","usage":{}}"#).unwrap();
-        assert!(finalize_successful_turn(&acc).is_ok());
+        assert_eq!(
+            finalize_successful_turn(&acc).unwrap_err().message,
+            "quick_ai_answer_url_not_in_validated_sources"
+        );
+    }
+
+    /// The same URL IS accepted when it came through the validated schema.
+    #[test]
+    fn codex_quick_ai_schema_source_url_after_native_search_is_accepted() {
+        let mut acc = accumulator();
+        apply_line(&mut acc, r#"{"type":"item.started","item":{"id":"s","type":"web_search","action":{"type":"other"}}}"#).unwrap();
+        apply_line(&mut acc, r#"{"type":"item.completed","item":{"id":"s","type":"web_search","action":{"type":"search","query":"Rust release"}}}"#).unwrap();
+        let decision = apply_line_decision(&mut acc, r#"{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"{\"answer\":\"Rust 1.97.0: https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/\",\"sources\":[\"https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/\"]}"}}"#).unwrap();
+        let CodexEventDecision::CompleteEarly(answer) = decision else {
+            panic!("a validated sourced answer should complete early");
+        };
+        assert!(answer.rendered.contains("Rust-1.97.0"));
     }
 
     #[test]

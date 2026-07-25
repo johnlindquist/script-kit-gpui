@@ -423,7 +423,7 @@ export async function main(): Promise<boolean> {
 			);
 			const sourceProof =
 				(officialStructuredSource && sourceAnswerHostIntersection) ||
-				(summary.sourceProvenance === "answer-url-after-native-search" &&
+				(summary.sourceProvenance === "unvisited-validated-schema-source" &&
 					officialAnswerSource);
 			const invalidReasons = [
 				...(dispatch.success === true ? [] : ["dispatch"]),
@@ -601,9 +601,9 @@ export async function main(): Promise<boolean> {
 			structuredSourceActions: trials.filter(
 				(trial) => trial.search.sourceProvenance === "admitted-native-action",
 			).length,
-			answerUrlAfterNativeSearchFallbacks: trials.filter(
+			unvisitedValidatedSchemaSources: trials.filter(
 				(trial) =>
-					trial.search.sourceProvenance === "answer-url-after-native-search",
+					trial.search.sourceProvenance === "unvisited-validated-schema-source",
 			).length,
 			orphanFree: trials.every(
 				(trial) =>

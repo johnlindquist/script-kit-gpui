@@ -103,6 +103,69 @@ fn typed_process_and_protocol_facts_do_not_require_string_parsing() {
     assert_eq!(protocol.failure.code, AiFailureCode::ProtocolOrderViolation);
 }
 
+/// Provider stderr must not decide what Quick AI tells the user to do.
+///
+/// Quick AI used to hand `<our code>\n<raw codex stderr>` to the free-text
+/// provider classifier. That classifier pattern-matches English, so a blocked
+/// shell command whose stderr happened to contain "unauthorized" produced a
+/// "sign in to continue" card, and one containing "operation not permitted"
+/// produced a permission card — neither of which had anything to do with the
+/// actual failure. The user was sent to fix something that was not broken.
+#[test]
+fn quick_ai_codes_outrank_misleading_words_in_provider_stderr() {
+    let vault = DiagnosticVault::default();
+
+    // The exact shape captured in production: a forbidden shell command whose
+    // stderr contains words the text classifier treats as auth and permission
+    // evidence.
+    let forbidden = quick_ai_turn_failure(
+        &context(None),
+        "quick_ai_codex_forbidden_item:command_execution:item_0",
+        "quick_ai_codex_forbidden_item:command_execution:item_0\n\
+         unauthorized: operation not permitted, no api key found",
+        &vault,
+    )
+    .expect("a quick_ai_* code must classify without consulting stderr");
+    assert_eq!(forbidden.failure.code, AiFailureCode::ToolDenied);
+
+    // Same stderr, different Quick AI code: still classified from the code.
+    let schema = quick_ai_turn_failure(
+        &context(None),
+        "quick_ai_output_schema_source_invalid",
+        "quick_ai_output_schema_source_invalid\nunauthorized",
+        &vault,
+    )
+    .expect("schema violations are protocol failures");
+    assert_eq!(
+        schema.failure.code,
+        AiFailureCode::ProtocolMalformedResponse
+    );
+
+    let truncated = quick_ai_turn_failure(
+        &context(None),
+        "quick_ai_codex_eof_without_terminal:1",
+        "quick_ai_codex_eof_without_terminal:1",
+        &vault,
+    )
+    .expect("a truncated stream is a missing terminal");
+    assert_eq!(
+        truncated.failure.code,
+        AiFailureCode::ProtocolMissingTerminal
+    );
+
+    // A code we do not own still falls through to the text classifier, so real
+    // provider auth failures keep their sign-in affordance.
+    assert!(
+        quick_ai_turn_failure(&context(None), "unauthorized", "unauthorized", &vault).is_none()
+    );
+    assert_eq!(
+        classify_provider_failure(&context(None), "unauthorized", &vault)
+            .failure
+            .code,
+        AiFailureCode::AuthenticationMissing
+    );
+}
+
 #[test]
 fn redactor_allowlists_json_masks_secrets_paths_and_bounds_output() {
     let home = dirs::home_dir().expect("test requires a home directory");

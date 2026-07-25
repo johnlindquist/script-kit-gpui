@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"019f968b-932e-7532-b429-6e07c7520e40"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"web_search","id":"ws_01fe2f64ebaba843016a63fac75a1c8198877a0c087c380164","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_0","type":"web_search","id":"ws_01fe2f64ebaba843016a63fac75a1c8198877a0c087c380164","query":"Bun latest release version","action":{"type":"search","query":"Bun latest release version","queries":["Bun latest release version"]}}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"{\"answer\":\"The current Bun stable version appears to be **1.3.14** (shown as the latest version on npm’s Bun package listing).\",\"sources\":[\"https://www.npmjs.com/package/bun?activeTab=versions\"]}"}}
+{"type":"turn.completed","usage":{"input_tokens":16454,"cached_input_tokens":2176,"cache_write_input_tokens":0,"output_tokens":642,"reasoning_output_tokens":579}}

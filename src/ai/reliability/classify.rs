@@ -360,6 +360,64 @@ pub fn quick_ai_deadline_failure(
     }
 }
 
+/// Classify a Quick AI turn failure from Quick AI's OWN stable code.
+///
+/// Returns `None` when `code` is not one Quick AI produces, so the caller can
+/// fall back to the free-text provider classifier.
+///
+/// Quick AI failures arrive as structured codes such as
+/// `quick_ai_codex_forbidden_item:command_execution:item_0`. Those used to be
+/// concatenated with raw Codex stderr and handed to `classify_provider_failure`,
+/// which pattern-matches English. Unrelated words in stderr then decided what
+/// the user was told to do: a blocked shell command whose stderr contained
+/// "operation not permitted" became a permission problem, and any stderr
+/// mentioning "unauthorized" produced a "sign in to continue" card for a turn
+/// that had nothing to do with authentication.
+///
+/// A code we emit ourselves is a fact. It should never be re-derived by
+/// guessing at prose. `detail` is still captured into the diagnostic vault so
+/// Copy Details keeps the underlying stderr.
+pub fn quick_ai_turn_failure(
+    context: &FailureContext,
+    code: &str,
+    detail: &str,
+    diagnostics: &DiagnosticVault,
+) -> Option<AppFailureRecord> {
+    // Codes carry `:`-separated payloads (`...:command_execution:item_0`).
+    let head = code.split(':').next().unwrap_or(code);
+    if !head.starts_with("quick_ai_") {
+        return None;
+    }
+    let kind = match head {
+        // The provider offered a tool Quick AI does not allow, and used it.
+        // This is a policy outcome, not a user permission prompt.
+        "quick_ai_codex_forbidden_item" | "quick_ai_codex_non_search_tool_observed" => {
+            AiFailureKind::Policy(PolicyFailure::ToolDenied {
+                tool: code.split(':').nth(1).map(|tool| ToolId(tool.to_string())),
+            })
+        }
+        // The stream ended without the terminal event, or without an answer.
+        "quick_ai_codex_eof_without_terminal" | "quick_ai_codex_final_answer_missing" => {
+            AiFailureKind::Protocol(ProtocolFailure::MissingTerminal {
+                component: context.component,
+            })
+        }
+        // Bookkeeping that should be impossible if events arrive in order.
+        "quick_ai_codex_search_state_missing" => {
+            AiFailureKind::Protocol(ProtocolFailure::SequenceViolation {
+                component: context.component,
+            })
+        }
+        // Everything else Quick AI rejects is a shape the provider should not
+        // have sent: malformed JSONL, an unsupported event or web action, a
+        // schema violation, or an answer whose sources do not hold up.
+        _ => AiFailureKind::Protocol(ProtocolFailure::MalformedResponse {
+            component: context.component,
+        }),
+    };
+    Some(record(context, detail, diagnostics, kind))
+}
+
 pub fn classify_process_failure(
     context: &FailureContext,
     facts: ProcessFailureFacts,

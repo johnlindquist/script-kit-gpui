@@ -24,6 +24,24 @@ pub(crate) fn provider_failure(
     )
 }
 
+/// Typed classification for a Quick AI turn failure, falling back to the
+/// free-text provider classifier only when the code is not one we emit.
+///
+/// `detail` (our code plus any provider stderr) is captured for Copy Details
+/// but never gets to choose the failure kind.
+pub(crate) fn quick_ai_failure(
+    component: ProtocolComponent,
+    code: &str,
+    detail: &str,
+) -> AppFailureRecord {
+    let context = FailureContext {
+        component,
+        ..FailureContext::default()
+    };
+    super::quick_ai_turn_failure(&context, code, detail, runtime_vault())
+        .unwrap_or_else(|| classify_provider_failure(&context, detail, runtime_vault()))
+}
+
 pub(crate) fn process_failure(
     component: ProtocolComponent,
     facts: ProcessFailureFacts,
