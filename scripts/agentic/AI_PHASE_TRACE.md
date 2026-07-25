@@ -16,6 +16,54 @@ Enable tracing in any run with `SCRIPT_KIT_AI_TRACE_PATH=/path/trace.ndjson`.
 Unset, the trace is a single null check per event — no clock, no filesystem, no
 hashing.
 
+## Status, end of 2026-07-25
+
+All five AI surfaces are instrumented and measured. **None is actually slow.
+All five feel slow.** The instrument itself was wrong twice today and both
+corrections are recorded below rather than quietly folded in.
+
+Verify everything with one command:
+
+```bash
+bash scripts/agentic/ai-phase-trace-check.sh
+```
+
+| Commit | What landed |
+|---|---|
+| `692917789` | Quick AI, Agent Chat, Text measured live; the prewarm "fix" disproved |
+| `ff4da215c` | Mini's numbers retracted after a self-audit of the receipt |
+| `bc90ae65f` | Per-turn `runId` + the analyzer's `ambiguous-trace` refusal — **message misattributed, see below** |
+| `922433799` | Flows measured; the overlap guard narrowed to overlap only |
+
+### Unfinished, and the decisions waiting on you
+
+1. **Quick AI progressive reveal (`stream-early`).** Authorized by the
+   09:12 submission and supported by the measurement — 143 ms to first byte
+   against 3121 ms of dead air, so streaming is the entire fix. Not started: it
+   is a UX change whose result you should see. **This is the highest-value
+   remaining work.**
+2. **`DEFAULT_PI_MODEL` names a model the pinned sidecar does not have.**
+   `gpt-5.6-sol` vs `pi 0.1.16`'s 23 models — a default Agent Chat launch dies
+   under the real `HOME`, not just a sandbox. Deliberately not "fixed": whether
+   the app or the pinned sidecar is the stale side is an owner's call.
+3. **Commit `bc90ae65f` carries my phase-trace work under a source-audit
+   message.** Two lanes shared one index; a concurrent `commit -a` captured my
+   staged files. No work was lost. Left for a human — rewriting history under a
+   live sibling lane was the greater risk.
+
+### What I could not prove
+
+- **The prewarm regression is indicative, not settled.** n=5 vs n=6 in one
+  sitting, not the paired 15-trial design. Direction is large (+48%) and
+  mechanistically explained, but the exact delta is not established.
+- **Absolute latencies are not comparable across receipts.** The three
+  receipts were taken at different times on a differently loaded machine; Text
+  reads 3680 ms in one and 4845 ms in another. Verdicts are stable across both;
+  the millisecond values are not.
+- **Flows was measured with a fixture flow, not a real one.** A one-word
+  read-only `ping.md`. A heavyweight flow would spend longer in tool calls, so
+  treat 2035 ms as the transport's floor rather than a typical flow turn.
+
 ## Pieces
 
 | Path | Role |

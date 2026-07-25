@@ -69,14 +69,29 @@ if [[ $PROBE -eq 1 ]]; then
   TRACE=.notes/oracle/ai-phase-trace-all/phase-trace.ndjson
 fi
 
-echo ""
-echo "=== per-surface report ==="
-if [[ -f "$TRACE" ]]; then
-  timeout 120 bun scripts/agentic/ai-phase-trace-report.ts "$TRACE" || fails=$((fails + 1))
-else
-  echo "NO_TRACE_RECEIPT at $TRACE — run with --probe to generate one."
-  fails=$((fails + 1))
+# Every receipt, not just one. No single app session can drive all five
+# surfaces, so the measured evidence lives in three files; printing only the
+# first one made the run look like 3/5 when all five are in fact measured.
+# The first receipt intentionally still contains the pre-fix Mini collision —
+# it is the witness that keeps the analyzer's `ambiguous-trace` refusal honest.
+RECEIPTS=("$TRACE")
+if [[ $PROBE -eq 0 ]]; then
+  RECEIPTS+=(
+    scripts/agentic/fixtures/ai-phase-trace-mini-per-turn-runid.ndjson
+    scripts/agentic/fixtures/ai-phase-trace-flow.ndjson
+  )
 fi
+
+for receipt in "${RECEIPTS[@]}"; do
+  echo ""
+  echo "=== per-surface report: $(basename "$receipt") ==="
+  if [[ -f "$receipt" ]]; then
+    timeout 120 bun scripts/agentic/ai-phase-trace-report.ts "$receipt" || fails=$((fails + 1))
+  else
+    echo "NO_TRACE_RECEIPT at $receipt — run with --probe to generate one."
+    fails=$((fails + 1))
+  fi
+done
 
 echo ""
 if [[ $fails -eq 0 ]]; then
