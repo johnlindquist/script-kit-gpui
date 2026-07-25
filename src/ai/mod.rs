@@ -41,6 +41,7 @@ pub(crate) mod harness;
 pub(crate) mod local_llm;
 pub mod message_parts;
 pub(crate) mod model;
+pub(crate) mod phase_trace;
 pub mod preflight_audit;
 pub(crate) mod presets;
 pub(crate) mod providers;
