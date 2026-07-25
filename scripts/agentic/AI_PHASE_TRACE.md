@@ -42,43 +42,87 @@ surface that streams its thinking. Failed and cancelled turns are excluded from
 every median: a turn that failed in 492 ms is not a 492 ms surface, and without
 that exclusion a broken surface ranks fastest in the table.
 
-## Measured, 2026-07-25
+## Measured, 2026-07-25 (four surfaces, real turns)
 
-| Surface | n valid | first byte | first visible | total | Verdict |
-|---|---|---|---|---|---|
-| quick-ai | 9 | 84 ms | 2363 ms | 2363 ms | **feels-slow** |
-| agent-chat | 0 | — | — | — | unmeasured |
-| text / mini / flow | 0 | — | — | — | unmeasured |
+Receipt: `fixtures/ai-phase-trace-receipt.ndjson` (30 turns, 0 corrupt lines).
 
-**Quick AI is not slow. It is silent.** The provider's first byte lands at
-84 ms and the turn finishes in 2363 ms — under the slow bar — but the user sees
-nothing for the whole 2363 ms, a ~100% dead-air ratio, because the answer is
-buffered and revealed at the end. So the measured repair is *not* "make it
-faster": a 30% speedup still leaves ~1.7 s of silence, still over the
-feels-slow bar. Show something during the turn.
+| Surface | Transport | n | valid | first event | first visible | total | Verdict |
+|---|---|---|---|---|---|---|---|
+| quick-ai | codex-exec | 8 | 8 | 143 ms | 3121 ms | 3121 ms | **feels-slow** |
+| agent-chat | pi-rpc | 6 | 6 | 4356 ms | 4356 ms | 4598 ms | **feels-slow** |
+| text | pi-rpc | 6 | 6 | 3680 ms | 3680 ms | 3905 ms | **feels-slow** |
+| mini | pi-rpc | 12 | 5 | 3980 ms | 3980 ms | 4067 ms | **feels-slow** |
+| flow | codex-app-server | 0 | 0 | — | — | — | unmeasured |
 
-This also corrects an earlier characterisation of Quick AI as a ~6 s surface;
-that figure bundled web-search turns. Simple queries run at 2.4 s.
+**No surface is actually slow. All four measured surfaces feel slow.** Every
+median turn is under the 5 s bar; every one of them shows the user nothing for
+94–100% of that turn. The shared symptom is dead air, not duration — so the
+shared repair is earlier feedback, not more speed.
 
-## Why four surfaces are unmeasured
+But the dead air has **two different causes**, and they need different fixes:
 
-Agent Chat produced real traced turns — the instrument works end to end — but
-each terminated `RuntimeClosed`: the Pi sidecar exits under the probe's sandbox
-`HOME` even with `~/.pi` and `~/.codex` seeded (`pi_rpc_stdout_closed`, no
-stderr hint). That is an environment gap, not a product defect and not a
-regression. Text, Mini, and Flows are wired and unit-proven but have no live
-entry path in the probe yet.
+- **Quick AI — silent by presentation.** The first provider byte lands at
+  **143 ms**; the answer is then buffered and revealed only at the end, so
+  first-visible equals total. The transport is already fast. Making the model
+  faster cannot fix this: a 30% speedup still leaves ~2.2 s of blank screen,
+  still over the bar. The fix is to reveal progressively.
+- **Pi surfaces (Agent Chat, Text, Mini) — silent by cold start.** Here
+  first-event *equals* first-visible at 3.7–4.4 s: nothing arrives at all, so
+  there is nothing to reveal earlier. A raw `pi --mode rpc` turn outside the
+  app spends **3697 ms before its first line** and only ~1.0 s on the answer,
+  which accounts for nearly the whole number. `agent_chat_hot_prewarm_enabled`
+  is **off by default** (`reason = "disabled_by_default"`), so each surface
+  pays a cold sidecar spawn.
 
-`MEASURED_SURFACES=n/5` in the report output is the honest scoreboard.
+## Prewarming does not fix the Pi surfaces — it makes them worse
 
-## Open, explicitly unverified
+The obvious inference from "cold spawn dominates" is "prewarm the sidecar".
+Measured, that is wrong. Receipt: `fixtures/ai-phase-trace-prewarm-on.ndjson`.
 
-`modelSwitchPending: true` appeared on both traced Agent Chat turns. That is
-**not** evidence that every message pays a blocking `set_model`: the guard at
-`pi/runtime.rs:337` memoises `applied_model` and skips the round trip when the
-model is unchanged, and `:344` clears the memo only on failure — and both
-traced turns failed. A second *healthy* turn should read `false`. Unverified
-until Pi runs under the probe.
+| Text surface | first visible | total | Verdict |
+|---|---|---|---|
+| prewarm off (default) | 3680 ms | 3905 ms | feels-slow |
+| prewarm on | 5559 ms | 5636 ms | **actually-and-feels-slow** |
+
+Turning hot prewarm on made Text **~1.7 s slower** and pushed it over the
+actually-slow bar. That is consistent with why it was disabled: idle Pi workers
+"can consume multiple CPU cores and starve GPUI frame delivery"
+(`agent_chat_launch.rs`). The prewarmed sidecar wins back spawn time and then
+loses more than it won to CPU contention.
+
+Honest limit: this is n=5 vs n=6 in one sitting, not the paired 15-trial design
+in `quick-ai-latency-bench.ts`. The direction is large (+48%) and mechanistically
+explained, but treat the exact delta as indicative, not settled.
+
+## Why Flows is still unmeasured
+
+Flows is wired, unit-proven, and emitting, but has no live entry path in the
+probe: driving it needs a real flow plus a `codex app-server` session that this
+probe does not yet open. It reports `insufficient-data` rather than inventing a
+number. `MEASURED_SURFACES=4/5` is the honest scoreboard.
+
+## Resolved: the model-switch signal was benign
+
+Earlier runs showed `modelSwitchPending: true` and it was left explicitly
+unverified because every traced turn had failed. Healthy Pi turns are now
+measured, and the field behaves as the code specifies — the guard at
+`pi/runtime.rs:337` memoises `applied_model`, and `:344` clears it only on
+failure. No per-message blocking `set_model` cost exists.
+
+## Environment hazard: the pinned sidecar cannot serve the default model
+
+`DEFAULT_PI_MODEL` is `gpt-5.6-sol` (`profiles.rs:16`), but the repo-pinned
+sidecar (`pi 0.1.16`, `prepare-pi-sidecar.sh` ref `3d1a3950…`) advertises 23
+models and **none of the `gpt-5.6-*` family**. A default Agent Chat launch dies
+with `Model openai-codex/gpt-5.6-sol not found` — under the real `HOME`, not
+just a sandbox. Text and Mini are unaffected because they pin
+`gpt-5.3-codex-spark`, which the sidecar does have.
+
+The probe therefore takes `--model` and writes it to the sandbox's
+`config.ts` as `ai.selectedModelId`. That keeps the environment fact out of the
+numbers **without editing a product default**, which is deliberate: whether the
+app or the pinned sidecar is the stale side is the owner's call, not the
+measurement's.
 
 ## Adding a surface
 

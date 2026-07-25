@@ -12,7 +12,7 @@
  *   bun scripts/agentic/ai-phase-trace-probe.ts [--trials N] [--surfaces a,b]
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Driver } from "../devtools/driver.ts";
 
@@ -22,6 +22,9 @@ interface Args {
   trials: number;
   surfaces: string[];
   keep: boolean;
+  binary?: string;
+  model?: string;
+  prewarm?: boolean;
 }
 
 function parseArgs(): Args {
@@ -30,6 +33,7 @@ function parseArgs(): Args {
     const index = argv.indexOf(flag);
     return index >= 0 ? argv[index + 1] : undefined;
   };
+  const prewarmFlag = value("--prewarm");
   return {
     trials: Number(value("--trials") ?? 5),
     surfaces: (value("--surfaces") ?? "quick-ai,agent-chat").split(",").map((s) => s.trim()),
@@ -38,6 +42,15 @@ function parseArgs(): Args {
     // which is what the committed cross-surface report needs, since the
     // surfaces cannot all be driven in a single app session.
     keep: argv.includes("--keep"),
+    binary: value("--binary"),
+    // The repo-pinned Pi sidecar does not carry every model the app's static
+    // catalog names, so a run can die on "Model ... not found" before it ever
+    // reaches the code under measurement. Pinning the model here keeps that
+    // environment fact out of the numbers WITHOUT editing a product default.
+    model: value("--model"),
+    // Pi sidecars are prewarmed. Measuring with prewarm forced off is how we
+    // separate per-turn cost from one-time process spawn cost.
+    prewarm: prewarmFlag === undefined ? undefined : prewarmFlag !== "off",
   };
 }
 
@@ -91,6 +104,14 @@ const QUICK_AI_QUERIES = [
   "what is the largest moon of Saturn",
 ];
 
+const FOCUSED_TEXT_SAMPLES = [
+  "The meeting has been rescheduled to Thursday afternoon due to a conflict.",
+  "Please find attached the quarterly figures for your review and approval.",
+  "We regret to inform you that the shipment will arrive later than planned.",
+  "Thanks for reaching out — I will look into this and get back to you soon.",
+  "The build failed because a dependency was missing from the lock file.",
+];
+
 async function main() {
   const args = parseArgs();
   const outDir = join(process.cwd(), ".notes/oracle/ai-phase-trace-all");
@@ -98,21 +119,37 @@ async function main() {
   const tracePath = join(outDir, "phase-trace.ndjson");
   if (!args.keep) rmSync(tracePath, { force: true });
 
-  const binary = existsSync(ARTIFACT_BINARY) ? ARTIFACT_BINARY : undefined;
+  const binary =
+    args.binary ?? (existsSync(ARTIFACT_BINARY) ? ARTIFACT_BINARY : undefined);
   const attempts: Attempt[] = [];
+
+  const env: Record<string, string> = {
+    SCRIPT_KIT_AI_TRACE_PATH: tracePath,
+    SCRIPT_KIT_CODEX_BIN: process.env.SCRIPT_KIT_CODEX_BIN ?? "codex",
+  };
+  if (args.prewarm === false) env.SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM = "1";
+  if (args.prewarm === true) env.SCRIPT_KIT_ENABLE_AGENT_CHAT_HOT_PREWARM = "1";
 
   const driver = await Driver.launch({
     sessionName: `ai-phase-trace-${process.pid}`,
     binary,
     sandboxHome: true,
     seedAgentAuth: true,
-    env: {
-      SCRIPT_KIT_AI_TRACE_PATH: tracePath,
-      SCRIPT_KIT_CODEX_BIN: process.env.SCRIPT_KIT_CODEX_BIN ?? "codex",
-    },
+    env,
     readyTimeoutMs: 30_000,
     defaultTimeoutMs: 40_000,
   });
+
+  // The sandbox HOME only exists once the driver has built it, so the model
+  // override is written immediately after launch and before any AI surface is
+  // opened. `config.ts` did not exist at process start, so the loader has no
+  // memoised entry to serve instead — the first profile resolution reads this.
+  if (args.model) {
+    writeFileSync(
+      join(driver.sessionDir, "home", ".scriptkit", "config.ts"),
+      `export default ${JSON.stringify({ ai: { selectedModelId: args.model } }, null, 2)}\n`,
+    );
+  }
 
   try {
     await driver.waitForSettle();
@@ -207,6 +244,50 @@ async function main() {
         } catch (error) {
           attempts.push({
             surface: "agent-chat",
+            trial,
+            ok: false,
+            detail: `driver error: ${(error as Error).message}`,
+            wallMs: Math.round(performance.now() - started),
+          });
+        }
+      }
+    }
+    // ---- Text / Mini: the focused-text rewrite surface, driven against real
+    // Pi rather than the deterministic mock twin. A non-empty `instruction` is
+    // what makes the fixture actually submit (`requested_submit =
+    // instruction_length > 0`), so an empty one would open the window and
+    // measure nothing. One submit fans out into variation turns; the primary
+    // traces as `text` and the auxiliary ones as `mini`, which is why both
+    // surfaces are collected from the same drive.
+    if (args.surfaces.includes("text") || args.surfaces.includes("mini")) {
+      for (let trial = 1; trial <= args.trials; trial += 1) {
+        const beforeText = readTrace(tracePath).filter(
+          (record) => record.surface === "text" && record.event === "terminal",
+        ).length;
+        const started = performance.now();
+        try {
+          driver.simulateKey("escape");
+          driver.send({ type: "show" });
+          await driver.waitForState({ windowVisible: true }, { timeoutMs: 10_000 });
+          await driver.waitForSettle();
+          driver.send({
+            type: "openFocusedTextAgentChatWithPiData",
+            text: FOCUSED_TEXT_SAMPLES[(trial - 1) % FOCUSED_TEXT_SAMPLES.length],
+            instruction: "Rewrite this more concisely.",
+          });
+          const terminal = await waitForTerminal(tracePath, "text", beforeText, 120_000);
+          attempts.push({
+            surface: "text",
+            trial,
+            ok: terminal?.outcome === "completed",
+            detail: terminal
+              ? `outcome=${terminal.outcome} elapsedMs=${terminal.elapsedMs}`
+              : "no terminal record within 120s",
+            wallMs: Math.round(performance.now() - started),
+          });
+        } catch (error) {
+          attempts.push({
+            surface: "text",
             trial,
             ok: false,
             detail: `driver error: ${(error as Error).message}`,
