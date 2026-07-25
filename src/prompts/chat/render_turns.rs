@@ -4,7 +4,46 @@ use super::types::conversation_turn_streaming_copy_available;
 use super::*;
 use std::borrow::Cow;
 
-fn assistant_response_region_source<'a>(
+/// The SINGLE decision of whether a turn draws an assistant answer region, and
+/// what markdown that region contains.
+///
+/// Both the renderer and `reconcile_assistant_text_views` call this. They used
+/// to decide separately, which is a silent-degradation trap: the reconciler
+/// building a state for a region the renderer skips just wastes memory, but the
+/// renderer drawing a region the reconciler skipped falls back to the old
+/// unselectable path — visually almost identical, and the exact defect this
+/// work exists to remove. Returning `None` for "no region" makes the two
+/// impossible to disagree.
+pub(super) fn assistant_answer_region_source(
+    turn: &ConversationTurn,
+    script_generation_mode: bool,
+) -> Option<Cow<'_, str>> {
+    if turn.failure.is_some() || turn.error.is_some() {
+        // Failure rows show a safe partial answer ONLY when there is one; the
+        // recovery card carries the rest and is not markdown.
+        let response = turn.assistant_response.as_deref()?;
+        if response.trim().is_empty() {
+            return None;
+        }
+        Some(super::types::assistant_response_markdown_source(
+            script_generation_mode,
+            response,
+        ))
+    } else if turn.assistant_response.is_some() || turn.streaming {
+        // A freshly submitted turn is `streaming` with NO response yet. It
+        // still draws a region ("_Thinking…_"), so it still needs a state.
+        let response = turn.assistant_response.as_deref().unwrap_or("");
+        Some(assistant_response_region_source(
+            script_generation_mode,
+            response,
+            turn.streaming,
+        ))
+    } else {
+        None
+    }
+}
+
+pub(super) fn assistant_response_region_source<'a>(
     script_generation_mode: bool,
     response: &'a str,
     streaming: bool,
@@ -19,6 +58,42 @@ fn assistant_response_region_source<'a>(
 }
 
 impl ChatPrompt {
+    /// Render one assistant answer region through the SHARED conversation
+    /// renderer, so Flow answers are selectable and styled identically to
+    /// Agent Chat's.
+    ///
+    /// Falls back to the legacy bespoke renderer only when this turn has no
+    /// reconciled `TextViewState`. That should not happen —
+    /// `reconcile_assistant_text_views` mirrors the regions this function
+    /// draws — but a missing state must degrade to visible-but-unselectable
+    /// text rather than a blank answer. `expect()` here would turn a
+    /// reconciliation gap into a crash in front of the user.
+    fn render_answer_region(
+        &self,
+        turn: &ConversationTurn,
+        source: &str,
+        colors: &theme::PromptColors,
+    ) -> gpui::AnyElement {
+        match self.assistant_text_views.get(&turn.render_key) {
+            Some(state) => crate::components::conversation_text::conversation_markdown_view(
+                state,
+                &self.theme,
+                colors,
+                gpui::rgb(colors.text_primary),
+                &crate::components::conversation_style::production_conversation_style(),
+                format!(
+                    "chat-prompt/{}/turn/{}/assistant",
+                    self.id,
+                    turn.render_key.as_str()
+                )
+                .into(),
+                gpui_component::text::MarkdownLinkLabelPolicy::Preserve,
+            )
+            .into_any_element(),
+            None => render_markdown(source, colors).into_any_element(),
+        }
+    }
+
     pub(super) fn render_turn(
         &self,
         turn: &ConversationTurn,
@@ -75,20 +150,13 @@ impl ChatPrompt {
         // behind the redacted CopyDetails action.
         if turn.failure.is_some() || turn.error.is_some() {
             // Any safe partial assistant response stays visible above the card.
-            if let Some(response) = turn.assistant_response.as_deref() {
-                if !response.trim().is_empty() {
-                    let markdown_response = super::types::assistant_response_markdown_source(
-                        self.script_generation_mode,
-                        response,
-                    );
-                    content = content.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .overflow_x_hidden()
-                            .child(render_markdown(markdown_response.as_ref(), colors)),
-                    );
-                }
+            if let Some(markdown_response) =
+                assistant_answer_region_source(turn, self.script_generation_mode)
+            {
+                content =
+                    content.child(div().w_full().min_w_0().overflow_x_hidden().child(
+                        self.render_answer_region(turn, markdown_response.as_ref(), colors),
+                    ));
             }
             match turn.failure.as_ref() {
                 Some(failure) if !self.host_mode.is_transcript_only() => {
@@ -133,14 +201,9 @@ impl ChatPrompt {
             }
         }
         // AI response (only show if no error, or show partial if stream interrupted)
-        else if turn.assistant_response.is_some() || turn.streaming {
-            let response = turn.assistant_response.as_deref().unwrap_or("");
-            let markdown_response = assistant_response_region_source(
-                self.script_generation_mode,
-                response,
-                turn.streaming,
-            );
-
+        else if let Some(markdown_response) =
+            assistant_answer_region_source(turn, self.script_generation_mode)
+        {
             // Empty pending, first text, and terminal-empty responses all use
             // the same markdown response region. Streaming activity lives in
             // the card's fixed trailing slot, so it cannot add a row below it.
@@ -150,7 +213,7 @@ impl ChatPrompt {
                     .w_full()
                     .min_w_0()
                     .overflow_x_hidden()
-                    .child(render_markdown(markdown_response.as_ref(), colors)),
+                    .child(self.render_answer_region(turn, markdown_response.as_ref(), colors)),
             );
         }
 
@@ -415,8 +478,9 @@ impl ChatPrompt {
 #[cfg(test)]
 mod tests {
     use super::{
-        assistant_response_region_source, conversation_turn_pending_indicator_visible,
-        conversation_turn_streaming_copy_available, ConversationTurn,
+        assistant_answer_region_source, assistant_response_region_source,
+        conversation_turn_pending_indicator_visible, conversation_turn_streaming_copy_available,
+        ConversationTurn,
     };
     const CHAT_RENDER_TURNS_SOURCE: &str = include_str!("render_turns.rs");
 
@@ -433,6 +497,47 @@ mod tests {
             .split_once(marker)
             .map(|(production, _)| production)
             .expect("this file ends with a `mod tests` block")
+    }
+
+    /// Extract one function's body by brace matching, so an audit can be
+    /// scoped to a region instead of sniffing the whole file.
+    fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("signature `{signature}` should exist"));
+        let source = &source[start..];
+        let open = source.find('{').expect("function body should open");
+        let mut depth = 0usize;
+        for (offset, byte) in source.as_bytes()[open..].iter().copied().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("function body should close")
+    }
+
+    /// Production source MINUS the shared answer region.
+    ///
+    /// The "turn chrome uses theme colors" audit below is about chrome — the
+    /// user prompt line, error copy, the copy control. It is deliberately NOT
+    /// about the assistant answer body: that body is painted by the SHARED
+    /// `conversation_markdown_view`, and its text color must be the same value
+    /// Agent Chat passes (`rgb(colors.text_primary)`) or the two surfaces stop
+    /// matching, which is the whole point of the shared renderer.
+    ///
+    /// So the exception is ONE enumerated function, carved out structurally.
+    /// A new prompt-palette color anywhere else in this file still fails.
+    fn chrome_source() -> String {
+        let production = production_source();
+        let answer_region = function_body(production, "fn render_answer_region(");
+        production.replace(answer_region, "")
     }
 
     /// S10 contract: the failed-turn renderer draws the SHARED recovery card,
@@ -485,6 +590,7 @@ mod tests {
                 failure: None,
                 message_id: None,
                 user_image: None,
+                render_key: super::ConversationTurnRenderKey::resolve(None, None, 0),
             }
         };
 
@@ -520,12 +626,88 @@ mod tests {
             "Turn renderer should use theme color scheme entries for turn text and accents"
         );
         assert!(
-            !CHAT_RENDER_TURNS_SOURCE.contains(&legacy_text_pattern),
+            !chrome_source().contains(&legacy_text_pattern),
             "Turn renderer should avoid prompt palette text colors for turn chrome"
         );
         assert!(
             !CHAT_RENDER_TURNS_SOURCE.contains(&legacy_copy_button_margin),
             "Copy button should align without a manual margin offset wrapper"
         );
+    }
+
+    fn turn_for_region(
+        assistant_response: Option<&str>,
+        streaming: bool,
+        error: Option<&str>,
+    ) -> ConversationTurn {
+        ConversationTurn {
+            user_prompt: "user".to_string(),
+            assistant_response: assistant_response.map(str::to_string),
+            model: None,
+            streaming,
+            error: error.map(str::to_string),
+            failure: None,
+            message_id: None,
+            user_image: None,
+            render_key: super::ConversationTurnRenderKey::resolve(None, None, 0),
+        }
+    }
+
+    /// The renderer draws a region for a just-submitted turn (streaming, no
+    /// response yet) — so the reconciler must build a state for it. An earlier
+    /// draft of the reconciler skipped `assistant_response == None` entirely,
+    /// which left every turn's FIRST frame falling back to the old
+    /// unselectable renderer. Both now read this one function.
+    #[test]
+    fn a_streaming_turn_with_no_response_yet_still_gets_an_answer_region() {
+        let turn = turn_for_region(None, true, None);
+        let source = assistant_answer_region_source(&turn, false)
+            .expect("a pending streaming turn draws the thinking region");
+        assert_eq!(source, "_Thinking…_");
+    }
+
+    #[test]
+    fn a_settled_empty_response_still_gets_an_answer_region() {
+        let turn = turn_for_region(Some(""), false, None);
+        let source = assistant_answer_region_source(&turn, false)
+            .expect("a terminal empty response draws explanatory copy");
+        assert_eq!(source, "_No response returned._");
+    }
+
+    #[test]
+    fn an_untouched_turn_gets_no_answer_region() {
+        let turn = turn_for_region(None, false, None);
+        assert!(
+            assistant_answer_region_source(&turn, false).is_none(),
+            "a turn with neither a response nor a stream draws nothing to select"
+        );
+    }
+
+    /// Failure rows show a partial answer only when one exists; the recovery
+    /// card carries everything else and is not markdown.
+    #[test]
+    fn failure_rows_get_a_region_only_for_a_non_empty_partial_answer() {
+        let no_answer = turn_for_region(None, false, Some("boom"));
+        assert!(assistant_answer_region_source(&no_answer, false).is_none());
+        let blank_answer = turn_for_region(Some("   "), false, Some("boom"));
+        assert!(assistant_answer_region_source(&blank_answer, false).is_none());
+        let partial_turn = turn_for_region(Some("half an answer"), false, Some("boom"));
+        let partial = assistant_answer_region_source(&partial_turn, false)
+            .expect("a non-empty partial answer stays visible above the card");
+        assert_eq!(partial, "half an answer");
+    }
+
+    /// A failed turn must NOT get the `_Thinking…_`/`_No response returned._`
+    /// substitutions — those would read as a normal pending answer sitting
+    /// above a recovery card.
+    #[test]
+    fn failure_rows_never_substitute_pending_placeholder_copy() {
+        for streaming in [true, false] {
+            let turn = turn_for_region(None, streaming, Some("x"));
+            assert!(
+                assistant_answer_region_source(&turn, false).is_none(),
+                "failed turn (streaming={streaming}) must not borrow pending copy"
+            );
+        }
     }
 }

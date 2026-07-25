@@ -60,9 +60,9 @@ use self::types::{
     build_conversation_turns, default_conversation_starters, next_reveal_boundary,
     resolve_chat_input_key_action, resolve_chat_scroll_follow_after_scroll, resolve_setup_card_key,
     scroll_offset_is_at_bottom, should_ignore_stream_reveal_update,
-    should_show_script_generation_actions, ChatInputKeyAction, ChatScrollDirection,
-    RunScriptCallback, ScriptGenerationAction, ScriptSavedCallback, SetupCardAction,
-    CHAT_SCROLL_BOTTOM_TOLERANCE_PX,
+    should_show_script_generation_actions, AssistantTextUpdate, ChatInputKeyAction,
+    ChatScrollDirection, RunScriptCallback, ScriptGenerationAction, ScriptSavedCallback,
+    SetupCardAction, CHAT_SCROLL_BOTTOM_TOLERANCE_PX,
 };
 
 #[cfg(test)]
@@ -73,7 +73,7 @@ pub use types::{
     default_models, ChatClaudeCodeCallback, ChatConfigureCallback, ChatContinueCallback,
     ChatEscapeCallback, ChatModel, ChatPromptHostMode, ChatRecoveryCallback, ChatRetryCallback,
     ChatShowActionsCallback, ChatSubmitCallback, ChatTranscriptAlignment, ConversationStarter,
-    ConversationTurn,
+    ConversationTurn, ConversationTurnRenderKey,
 };
 
 // Internal render-plan resolution (pure logic, unit-tested).

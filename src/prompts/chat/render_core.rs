@@ -143,6 +143,12 @@ impl Render for ChatPrompt {
         }
 
         self.ensure_conversation_turns_cache();
+        // Every assistant answer region is drawn by the SHARED selectable
+        // `TextView`, which needs a persistent `TextViewState` per turn. Build
+        // and extend those states here, before the turn list closure captures
+        // `&self` — a region whose state is missing silently degrades to the
+        // old unselectable renderer.
+        self.reconcile_assistant_text_views(cx);
 
         let theme_colors = &self.theme.colors;
 

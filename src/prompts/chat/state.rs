@@ -249,6 +249,102 @@ impl ChatPrompt {
         self.sync_turns_list_state();
     }
 
+    /// Decide how an answer region's persistent text state should be updated.
+    ///
+    /// Pure so the streaming path is testable without a window. The whole
+    /// point is telling a pure APPEND (the common streaming case, where the new
+    /// source merely extends the old one) from a REWRITE, because appending is
+    /// O(chunk) while rewriting re-parses the entire answer every tick.
+    pub(super) fn resolve_assistant_text_update<'a>(
+        previous: Option<&str>,
+        next: &'a str,
+    ) -> AssistantTextUpdate<'a> {
+        match previous {
+            // First content for this turn.
+            None => AssistantTextUpdate::Create,
+            Some(prev) if prev == next => AssistantTextUpdate::Unchanged,
+            // Streaming: the new source starts with everything we already
+            // parsed, so only the tail is new.
+            Some(prev) if !prev.is_empty() && next.starts_with(prev) => {
+                AssistantTextUpdate::Append(&next[prev.len()..])
+            }
+            // Anything else changed history: a retry, a script-generation
+            // fence rewrite, or an edit. The document must be rebuilt.
+            Some(_) => AssistantTextUpdate::Replace,
+        }
+    }
+
+    /// Create/extend/drop the persistent `TextViewState` behind each answer
+    /// region so the shared `TextView` can render it.
+    ///
+    /// Runs before the turn list is built. Keyed by the STABLE render key, so
+    /// a turn keeps its parsed document when the assistant message id lands.
+    pub(super) fn reconcile_assistant_text_views(&mut self, cx: &mut Context<Self>) {
+        self.ensure_conversation_turns_cache();
+        let turns = self.conversation_turns_cache.clone();
+
+        // The renderer and this reconciler must agree exactly about which turns
+        // draw an answer region. They share ONE decision function so they
+        // cannot drift — see `assistant_answer_region_source`.
+        let active: Vec<(ConversationTurnRenderKey, String)> = turns
+            .iter()
+            .filter_map(|turn| {
+                let source = super::render_turns::assistant_answer_region_source(
+                    turn,
+                    self.script_generation_mode,
+                )?;
+                Some((turn.render_key.clone(), source.into_owned()))
+            })
+            .collect();
+
+        // Drop states for turns that no longer exist (a cleared conversation,
+        // a rethread, a fork). Without this the maps grow for the life of the
+        // prompt and hold parsed documents for content nobody can see.
+        let active_keys: std::collections::HashSet<&ConversationTurnRenderKey> =
+            active.iter().map(|(key, _)| key).collect();
+        self.assistant_text_views
+            .retain(|key, _| active_keys.contains(key));
+        self.assistant_text_sources
+            .retain(|key, _| active_keys.contains(key));
+
+        for (key, source) in active {
+            let previous = self.assistant_text_sources.get(&key).map(String::as_str);
+            match Self::resolve_assistant_text_update(previous, &source) {
+                AssistantTextUpdate::Unchanged => continue,
+                AssistantTextUpdate::Create => {
+                    let text = source.clone();
+                    let state = cx.new(|cx| {
+                        // Immediate parse for the first visible content so the
+                        // answer is not blank until a debounce expires — the
+                        // same first-token rule Agent Chat uses.
+                        let mut state =
+                            gpui_component::text::TextViewState::markdown_immediate(&text, cx);
+                        state.set_hot_metered(true);
+                        state
+                    });
+                    self.assistant_text_views.insert(key.clone(), state);
+                }
+                AssistantTextUpdate::Append(tail) => {
+                    if let Some(state) = self.assistant_text_views.get(&key) {
+                        let tail = tail.to_string();
+                        state.update(cx, |state, cx| {
+                            state.push_str(&tail, cx);
+                        });
+                    }
+                }
+                AssistantTextUpdate::Replace => {
+                    if let Some(state) = self.assistant_text_views.get(&key) {
+                        let text = source.clone();
+                        state.update(cx, |state, cx| {
+                            state.set_text(&text, cx);
+                        });
+                    }
+                }
+            }
+            self.assistant_text_sources.insert(key, source);
+        }
+    }
+
     pub(super) fn turns_list_is_at_bottom(&self) -> bool {
         let item_count = self.conversation_turns_cache.len();
         if item_count == 0 {
@@ -1013,9 +1109,71 @@ impl ChatPrompt {
 #[cfg(test)]
 mod tests {
     use super::normalize_to_png_bytes;
+    use super::{AssistantTextUpdate, ChatPrompt};
     use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 
     const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+
+    /// Streaming is the hot path: tokens arrive as a growing prefix, and the
+    /// parsed document must be EXTENDED, never rebuilt. A `Replace` here would
+    /// re-parse the whole answer on every token and drop the user's selection
+    /// mid-drag.
+    #[test]
+    fn a_growing_stream_appends_only_the_new_tail() {
+        assert_eq!(
+            ChatPrompt::resolve_assistant_text_update(Some("Hello"), "Hello, world"),
+            AssistantTextUpdate::Append(", world")
+        );
+    }
+
+    #[test]
+    fn first_content_creates_and_identical_content_is_a_no_op() {
+        assert_eq!(
+            ChatPrompt::resolve_assistant_text_update(None, "anything"),
+            AssistantTextUpdate::Create
+        );
+        assert_eq!(
+            ChatPrompt::resolve_assistant_text_update(Some("same"), "same"),
+            AssistantTextUpdate::Unchanged
+        );
+    }
+
+    /// A retry, an edit, or a script-generation fence rewrite changes history
+    /// rather than extending it. Appending there would splice the new answer
+    /// onto the stale one.
+    #[test]
+    fn rewritten_history_rebuilds_the_document() {
+        assert_eq!(
+            ChatPrompt::resolve_assistant_text_update(Some("Hello, world"), "Hello"),
+            AssistantTextUpdate::Replace
+        );
+        assert_eq!(
+            ChatPrompt::resolve_assistant_text_update(Some("first answer"), "second answer"),
+            AssistantTextUpdate::Replace
+        );
+    }
+
+    /// The placeholder-to-first-token transition. `_Thinking…_` is NOT a prefix
+    /// of the real answer, so this must rebuild — an append would leave the
+    /// placeholder permanently glued above the answer.
+    #[test]
+    fn the_thinking_placeholder_is_replaced_not_appended_to() {
+        assert_eq!(
+            ChatPrompt::resolve_assistant_text_update(Some("_Thinking…_"), "The answer is 4."),
+            AssistantTextUpdate::Replace
+        );
+    }
+
+    /// Guard for the empty-previous edge: `"".starts_with("")` is true for
+    /// every string, so an unguarded prefix check would report an append of the
+    /// entire text against an empty document instead of a create/replace.
+    #[test]
+    fn an_empty_previous_source_never_reports_a_bare_append() {
+        assert_eq!(
+            ChatPrompt::resolve_assistant_text_update(Some(""), "brand new"),
+            AssistantTextUpdate::Replace
+        );
+    }
 
     #[test]
     fn test_normalize_to_png_bytes_converts_jpeg_to_png_when_input_is_jpeg() {

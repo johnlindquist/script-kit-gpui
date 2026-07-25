@@ -456,6 +456,49 @@ pub struct ConversationTurn {
     pub failure: Option<sk_protocol::ai_reliability::AiFailure>,
     pub message_id: Option<String>,
     pub user_image: Option<Arc<RenderImage>>,
+    /// Stable identity for this turn's rendered answer region.
+    ///
+    /// Distinct from [`Self::message_id`] ON PURPOSE. `message_id` is
+    /// reassigned from the user's id to the assistant's id the moment an
+    /// assistant message arrives (see `build_conversation_turns`), which is
+    /// correct for addressing the message but WRONG as a render identity: the
+    /// key would change underneath a turn mid-stream, dropping any per-turn
+    /// view state keyed by it and forcing a full re-parse on the first token.
+    ///
+    /// This key is chosen once from the turn's ORIGINATING message and never
+    /// moves.
+    pub render_key: ConversationTurnRenderKey,
+}
+
+/// Stable per-turn render identity. See [`ConversationTurn::render_key`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConversationTurnRenderKey(pub String);
+
+impl ConversationTurnRenderKey {
+    /// Choose a turn's render identity, in priority order:
+    ///
+    /// 1. the originating USER message id — stable across the whole turn,
+    ///    including when the assistant message appears later;
+    /// 2. the assistant message id, for standalone assistant turns that never
+    ///    had a user message;
+    /// 3. a positional fallback, for messages carrying no id at all.
+    ///
+    /// Never derived from a value that changes during streaming.
+    pub fn resolve(
+        user_message_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        turn_index: usize,
+    ) -> Self {
+        match (user_message_id, assistant_message_id) {
+            (Some(id), _) if !id.is_empty() => Self(format!("u:{id}")),
+            (_, Some(id)) if !id.is_empty() => Self(format!("a:{id}")),
+            _ => Self(format!("i:{turn_index}")),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 pub(super) fn conversation_turn_pending_indicator_visible(turn: &ConversationTurn) -> bool {
@@ -523,6 +566,15 @@ pub(super) fn build_conversation_turns(
                 .id
                 .as_ref()
                 .and_then(|id| image_render_cache.get(id).cloned());
+            // Resolved from the USER message and never revisited. `message_id`
+            // below is reassigned to the assistant's id once its message
+            // arrives; the render key must not follow it or per-turn view
+            // state would be dropped on the first streamed token.
+            let render_key = ConversationTurnRenderKey::resolve(
+                msg.id.as_deref(),
+                messages.get(i + 1).and_then(|m| m.id.as_deref()),
+                turns.len(),
+            );
             let mut turn = ConversationTurn {
                 user_prompt,
                 assistant_response: None,
@@ -532,6 +584,7 @@ pub(super) fn build_conversation_turns(
                 failure: None,
                 message_id: msg.id.clone(),
                 user_image,
+                render_key,
             };
 
             // Look for the next assistant response
@@ -552,6 +605,10 @@ pub(super) fn build_conversation_turns(
         } else {
             // Standalone assistant message (no user prompt before it)
             // This happens for system-initiated messages
+            // Standalone assistant turn: no user message exists, so the
+            // assistant's own id IS the stable origin.
+            let render_key =
+                ConversationTurnRenderKey::resolve(None, msg.id.as_deref(), turns.len());
             let turn = ConversationTurn {
                 user_prompt: String::new(),
                 assistant_response: Some(msg.get_content().to_string()),
@@ -561,6 +618,7 @@ pub(super) fn build_conversation_turns(
                 failure: msg.failure.clone(),
                 message_id: msg.id.clone(),
                 user_image: None,
+                render_key,
             };
             turns.push(turn);
         }
@@ -744,4 +802,93 @@ mod tests {
             }
         );
     }
+}
+
+#[cfg(test)]
+mod conversation_turn_render_key_tests {
+    use super::*;
+
+    #[test]
+    fn user_message_id_wins_so_the_key_survives_the_assistant_arriving() {
+        let before = ConversationTurnRenderKey::resolve(Some("user-1"), None, 0);
+        let after = ConversationTurnRenderKey::resolve(Some("user-1"), Some("asst-9"), 0);
+        assert_eq!(
+            before, after,
+            "the render key must not move when the assistant message appears"
+        );
+        assert_eq!(before.as_str(), "u:user-1");
+    }
+
+    #[test]
+    fn standalone_assistant_turn_keys_off_its_own_id() {
+        let key = ConversationTurnRenderKey::resolve(None, Some("asst-9"), 3);
+        assert_eq!(key.as_str(), "a:asst-9");
+    }
+
+    #[test]
+    fn missing_ids_fall_back_to_a_stable_position() {
+        assert_eq!(
+            ConversationTurnRenderKey::resolve(None, None, 7).as_str(),
+            "i:7"
+        );
+        // Empty strings are not ids; they must not produce a colliding "u:" key
+        // that every id-less turn would share.
+        assert_eq!(
+            ConversationTurnRenderKey::resolve(Some(""), Some(""), 2).as_str(),
+            "i:2"
+        );
+    }
+
+    #[test]
+    fn user_and_assistant_namespaces_cannot_collide() {
+        // Without the prefixes, a user id "7" and an assistant id "7" would be
+        // the same key and share one text view.
+        assert_ne!(
+            ConversationTurnRenderKey::resolve(Some("7"), None, 0),
+            ConversationTurnRenderKey::resolve(None, Some("7"), 0)
+        );
+    }
+
+    /// The end-to-end version of the first test, through the real builder:
+    /// build the same conversation before and after the assistant reply lands
+    /// and require the turn's render key to be unchanged.
+    #[test]
+    fn builder_keeps_the_turn_key_stable_when_the_assistant_reply_arrives() {
+        let image_cache = HashMap::new();
+
+        let mut messages = vec![ChatPromptMessage::user("explain this").with_id("m-user")];
+        let before = build_conversation_turns(&messages, &image_cache);
+        assert_eq!(before.len(), 1);
+        let key_before = before[0].render_key.clone();
+
+        messages.push(ChatPromptMessage::assistant("here you go").with_id("m-asst"));
+        let after = build_conversation_turns(&messages, &image_cache);
+        assert_eq!(after.len(), 1, "the reply joins the existing turn");
+        assert_eq!(
+            after[0].render_key, key_before,
+            "render key must be stable across the assistant reply, even though \
+             message_id is reassigned to the assistant id"
+        );
+        // Guard that message_id really does move, so this test is proving
+        // something rather than asserting two constants are equal.
+        assert_ne!(
+            after[0].message_id, before[0].message_id,
+            "message_id is expected to move; render_key is the stable one"
+        );
+    }
+}
+
+/// How a persistent assistant `TextViewState` should be updated for new source.
+///
+/// See `ChatPrompt::resolve_assistant_text_update`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AssistantTextUpdate<'a> {
+    /// No state exists yet for this answer region.
+    Create,
+    /// Source is byte-identical to what the state already parsed.
+    Unchanged,
+    /// Source extends the previous source; only this tail is new.
+    Append(&'a str),
+    /// Source diverged from history and the document must be rebuilt.
+    Replace,
 }

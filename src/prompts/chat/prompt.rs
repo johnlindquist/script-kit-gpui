@@ -78,6 +78,19 @@ pub struct ChatPrompt {
     pub(super) pending_image: Option<String>,
     pub(super) pending_image_render: Option<Arc<RenderImage>>,
     pub(super) image_render_cache: HashMap<String, Arc<RenderImage>>,
+    /// One persistent `TextViewState` per assistant answer region, keyed by the
+    /// turn's STABLE [`ConversationTurnRenderKey`] (never `message_id`, which
+    /// moves to the assistant id when the reply lands).
+    ///
+    /// Persisting the entity is what makes streaming cheap: the vendored
+    /// `TextView` keeps its parsed document in this state, so an appended chunk
+    /// can extend it instead of re-parsing the whole answer every tick.
+    pub(super) assistant_text_views:
+        HashMap<ConversationTurnRenderKey, gpui::Entity<gpui_component::text::TextViewState>>,
+    /// The exact source last handed to each state above. Compared byte-wise to
+    /// tell a pure append (the streaming case) from a rewrite, because the two
+    /// need different update paths.
+    pub(super) assistant_text_sources: HashMap<ConversationTurnRenderKey, String>,
     pub(super) pasted_text_tokens: Vec<crate::pasted_text::PastedTextToken>,
     /// Exhaustive host mode: the prompt is either fully self-hosted
     /// (`Standalone`, owning header/input/footer/keys, optionally mini) or a
@@ -180,6 +193,8 @@ impl ChatPrompt {
             pending_image: None,
             pending_image_render: None,
             image_render_cache: HashMap::new(),
+            assistant_text_views: HashMap::new(),
+            assistant_text_sources: HashMap::new(),
             pasted_text_tokens: Vec::new(),
             host_mode: ChatPromptHostMode::Standalone { mini: false },
             empty_state_note: None,
