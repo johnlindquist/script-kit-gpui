@@ -9,6 +9,7 @@ mod capability_cache;
 mod classify;
 mod devtools;
 mod diagnostics;
+mod placement;
 mod presentation;
 #[cfg(test)]
 mod presentation_tests;
@@ -39,6 +40,10 @@ pub(crate) use devtools::{
     redacted_fingerprint, set_ai_reliability_fixture,
 };
 pub use diagnostics::{redact_diagnostic, DiagnosticVault, RedactedDiagnostic};
+pub use placement::{
+    home_for_action, plan_recovery_presentation, PlacedRecoveryAction, RecoveryActionHome,
+    RecoveryPresentationPlan,
+};
 pub use presentation::{
     flow_session_recovery_capabilities, project_recovery, standalone_failure_recovery_spec,
     AiRecoveryActionSpec, AiRecoveryCardSpec, AiRecoveryLayout, AiRecoveryProgress, AiRecoveryTone,
