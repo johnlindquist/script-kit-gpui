@@ -1,7 +1,62 @@
-# Overnight handoff — AI chat parity + Flow chords (2026-07-25)
+# Handoff — AI chat parity, Flow chords, test debt (2026-07-25)
 
-Written at 04:15 by the lane that did the chat-parity work, for you at 8am.
-Read the first two sections; the rest is reference.
+Written at 04:15 by the lane that did the chat-parity work, updated at 12:05
+after a morning of test-debt work. Read the first two sections; the rest is
+reference.
+
+---
+
+## Morning update (added 12:05) — read this before the overnight section
+
+After you answered the second page at 09:24, this lane did three things.
+
+**1. Acted on your web-choices submission.** Only one of your four selections
+was implemented: `agentchat-copy`. Agent Chat's `⇧⌘C` copied an empty string
+mid-answer, because the in-flight turn is in the list with an empty body and
+writing `""` to the clipboard SUCCEEDS. It now uses the same
+`resolve_last_copyable_response` Flow uses (`823ba3da1`).
+
+The other three were NOT started, deliberately:
+
+- **`escape-modal`** — the option you picked says the five gaps G1–G5 need your
+  answers. Selecting the path is not answering them; building it unattended
+  meant guessing five times.
+- **`own-composer`** — you edited that answer to add *"If it makes sense. Then
+  all ai chats should share Flow's new composer."* That is conditional and
+  widens the scope to every AI surface. Not an unattended call.
+- **`rebuild-fixture`** — ⚠️ **my page under-informed this choice.** Commit
+  `401936c41` removed those fixtures deliberately, as *"WP6: remove
+  production-wired kitchen-sink fixtures"*; `src/ai/agent_chat/ui/kitchen_sink_fixture.rs`
+  (383 lines) was **production** code. Restoring it re-introduces exactly what
+  that commit set out to delete. The real fork is "re-add production-wired" vs
+  "build a test-only fixture", and you approved a sentence that never showed
+  you that trade-off.
+
+**2. Paid down test debt** — the two items this doc listed as nobody's.
+
+| Target | Was | Now |
+| --- | --- | --- |
+| `tests/sdk_automation_runtime` | **could not compile** | **39 / 39** |
+| `tests/agent_chat_transcript_render_contract` | 8 / 1 | **9 / 0** |
+| `tests/source_audits` | 711 / **42 failed** | 718 / **35 failed** |
+
+Seven audits fixed, **no invariant weakened**. Every one was a false red where
+production had moved *toward* the contract and the audit failed it for that:
+two demanded a hardcoded `px(28.0)` and a generic hints helper while the code
+had adopted the shared `GRID_GLYPH_SCALE` token and the truthful
+`…_with_primary_label("Paste")`; one failed ScriptList for using a fifth
+shared-chrome variant missing from a hardcoded list of four; one required
+`match` arms that had become a better lookup table. Commits `2534164dd`,
+`62d518396`, `273eb7808`, `d0bb3a433`, `bc90ae65f`.
+
+**3. Hit a shared-worktree collision — one commit is misattributed.**
+`5ce5b3530` carries this lane's message but contains the **sibling lane's**
+phase-trace work. Two agents share one working tree and one git index; w6W:p6
+staged and committed in the window between this lane's `git add` and its
+`git commit`. Their work is intact and correct — only the message is wrong. It
+was **not** rewritten: it already had a descendant and that lane was still
+committing. Read `5ce5b3530` as "phase-trace tooling, by the sibling lane", and
+`bc90ae65f` as the audit fix its message describes.
 
 ---
 
@@ -50,6 +105,41 @@ SCRIPT_KIT_AGENT_ARTIFACT_NAME=ai-chat-parity \
 Expect **8/8**. ⚠️ **Run it on a quiet machine.** See
 [The probe is load-sensitive](#the-probe-is-load-sensitive) — this is the one
 thing in this handoff that will waste your morning if you skip it.
+
+For the morning's test-debt work, these two are deterministic and both green:
+
+```bash
+./scripts/agentic/agent-cargo.sh test --test sdk_automation_runtime          # 39/39
+./scripts/agentic/agent-cargo.sh test --test agent_chat_transcript_render_contract  # 9/9
+```
+
+---
+
+## What I could NOT prove
+
+Stated plainly, because every other number in this doc has a receipt and these
+do not.
+
+1. **The Agent Chat `⇧⌘C` fix has no runtime proof.** It compiles, and 797
+   agent_chat + 90 flow tests pass, but nothing exercised the actual chord
+   against a real window — because every Agent Chat probe still dies on the
+   fixture deleted in `401936c41`. The *rule* it now calls has four unit tests
+   including the mid-stream case; the *wiring* is unverified at the layer of
+   the claim.
+2. **The full test suite was never green in one run.** 35 source audits remain
+   red (pre-existing), so "all tests pass" is not a claim I can make. I
+   verified per-target instead, and every number here names its target.
+3. **`of38` remains wall-clock fragile.** It failed again today at load 23.4
+   and passed alone. I have never seen it fail on a quiet machine, but I also
+   cannot prove it is purely environmental.
+4. **The jump-pill convergence (F1) was not attempted.** It changes what
+   renders, and the only tool that could prove it is the load-sensitive probe,
+   on a machine at load 23 with you away. Deliberately left.
+5. **Whether the 35 remaining audits are each individually correct.** I
+   verified the causes of the ones I fixed. For the rest I confirmed the code
+   genuinely lacks what they assert, but I did not judge whether each assertion
+   is still the *right* contract — some may be stale requirements rather than
+   real regressions.
 
 ---
 
@@ -132,6 +222,20 @@ verified: `9028268cf` (one Stop chord + Copy Last Response across surfaces),
 
 ## Decisions for you
 
+**Status as of 12:05.** You answered these on the 09:24 page
+(`.hitl-choice/sk-gpui-lane-status/submissions/3f6b8c2b-…6b54.json`). Picking a
+path is recorded; three of the four still need input before anything can be
+built. The exact asks:
+
+| # | You chose | What is still needed from you |
+| --- | --- | --- |
+| 1 Composer | Give Flow its own composer | Resolve your own *"if it makes sense"*, and confirm the widened scope: should **all** AI chats share Flow's new composer, or Flow first? |
+| 2 Escape | Build the Escape modal from the spec | Answers to gaps **G1–G5** in `docs/specs/backgrounded-ai-sessions.md`. Nothing can start without them. |
+| 3 Copy | Fix reusing the Flow rule | **Done** — `823ba3da1`. No decision outstanding. |
+| 4 Coverage | Rebuild the Agent Chat fixture | Re-add it **production-wired** (undoing `401936c41`'s intent) or build a **test-only** fixture? My page never showed you this trade-off. |
+
+The original write-ups follow.
+
 **1. The composer split is still unresolved, and it blocks task #20.**
 
 Flow composes in the *shared single-line main input* that ScriptList also
@@ -169,9 +273,11 @@ way* and deliberately not started:
 | --- | --- | --- |
 | Flow's jump pill uses a shadow flag | `src/prompts/chat/render_core.rs`, `user_has_scrolled_up` (4 sites, pill decision ~L412) | Reads that flag instead of `ListState::is_following_tail()`, the single follow-tail authority Agent Chat uses. Two sources of truth for one question. |
 | **The whole Agent Chat probe family is dead** | `scripts/agentic/*agent-chat*` | Every probe calling `openAgentChatKitchenSinkFixture` fails at its first request — the fixture was deleted in `401936c41`. This lane dropped its Agent Chat half rather than fake the coverage. **This is the biggest gap in runtime coverage right now.** |
-| Stale transcript source audit | `transcript_list_state_starts_with_existing_messages` | Asserts `ListState::new(total, ListAlignment::Bottom`, but `71055d11e` changed the call to `Self::list_alignment_for(anchor)`. |
-| `of38` is wall-clock fragile | `flows::session::tests::of38` | Fails at load average ~8+, passes alone. Not caused by this work — `git diff` adds zero lines to the function it tests. |
-| 42 pre-existing `tests/source_audits` failures | — | **Present at `29dc1658a` too.** Proven, not assumed: verified by running the built test binaries against a pristine worktree of the base commit. `tests/sdk_automation_runtime` also fails to compile at base. |
+| ~~Stale transcript source audit~~ | — | **FIXED** `273eb7808`. Its message described row count while its code checked alignment; a negative control proved the old form would have passed a real zero-row regression. Now 9/9. |
+| `of38` is wall-clock fragile | `flows::session::tests::of38` | Fails at load average ~8+, passes alone. Not caused by this work — `git diff` adds zero lines to the function it tests. Failed again today at load 23.4, passed alone. |
+| ~~`sdk_automation_runtime` does not compile~~ | — | **FIXED** `2534164dd`. `Message::state_result` grew a 34th parameter; both call sites passed 33, so a String slid into an `Option<Value>` slot and rustc blamed a correct line. Now 39/39. |
+| **35 remaining `tests/source_audits` failures** | — | Down from 42. The seven fixed were false reds (see the morning update); these 35 are genuine — `footer_safe_scroll_offset_for_item` no longer exists anywhere, the `agent_chat::ui` façade re-exports non-runtime types it forbids, and 14 outer files bypass that façade. Fixing them changes **production code** and decides architecture. |
+| Shared worktree, shared git index | — | Two agents committing in one tree produced one misattributed commit (`5ce5b3530`). If lanes keep running in parallel here, they need separate worktrees — this will recur. |
 
 ---
 
