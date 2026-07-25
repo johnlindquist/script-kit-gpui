@@ -300,3 +300,10 @@ source, not by the planned outside Oracle audit. Oracle was unreachable (`api`:
 `Missing OPENAI_API_KEY`; `browser`: `ECONNREFUSED 127.0.0.1:55894`), and a
 delegated Codex subagent returned nothing. S14 should be re-run when Oracle is
 reachable; the five points above are the exact scope to hand it.
+
+Correction (same day): the delegated reviewer did not "return nothing" — the
+`s14-review` subagent failed three times with *"There's an issue with the
+selected model (gpt-5.6-sol). It may not exist or you may not have access to
+it."* That is a configuration failure, not a silent one, and it is worth
+recording because the same pinned model backs `.mdflow.yaml`: any flow routed
+through it would fail the same way.

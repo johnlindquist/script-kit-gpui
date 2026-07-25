@@ -59,136 +59,220 @@ other surface onto it. Everything in §3 is ordered around making that possible
 without a big-bang rewrite.
 
 ---
+## 1a. Correction — three surfaces are really two, plus a fourth
 
-## 2. Measured divergences, ranked by what a user actually hits
+Quick AI and Agent Chat are **the same renderer**. They differ only by
+`AgentChatCapabilities` (`ui/capabilities.rs:249`) and
+`ChromeDensity::Compact` (`ui_variant.rs:184`). Every Quick-AI-vs-Agent-Chat
+difference found traces to an explicit capability denial with a test behind it
+— deliberate, not drift.
 
-Each row was read out of the source; the anchors are exact. Rows marked
-**unverified** are named honestly rather than guessed at.
+So roughly **90% of everyday divergence is Flow vs Agent Chat.** That is where
+the work is.
 
-### 1. The same keys mean different things — the worst one
+There is also a **fourth surface** this document must not forget: standalone
+`ChatPrompt` (`AppView::ChatPrompt`, the SDK `chat()`), which renders its own
+header, composer, and footer (`render_core.rs:89`) that Flow suppresses. Any
+fix that keeps `ChatPrompt` as the transcript engine drags it along. Its footer
+still says `↵ Run` (`prompt_layout_shell.rs:815`) — the wrong verb for a chat.
 
-| Key | Flow chat | Agent Chat |
-|---|---|---|
-| `Esc` while streaming | **Background the session** (`FlowSessionKeyAction::Background`, `flow_ux.rs:167`) | **Stop the turn** — the footer literally says `Esc Stop` (`view.rs:4104`) |
-| `⌘.` | **Stop the turn** (`FlowSessionKeyAction::Stop`) | **Reopen the focused mention** (`is_reopen_focused_mention_shortcut`, `view.rs:12544`) |
-
-So the two keys are *swapped* between surfaces, and `⌘.` in Agent Chat does
-something unrelated to stopping. A user who learns "⌘. stops it" in a flow
-conversation will, in Agent Chat, open a mention popup while the model keeps
-streaming.
-
-**Converge on:** `⌘.` = Stop everywhere. Escape stays the leave/unwind ladder.
-This must be decided together with `docs/specs/backgrounded-ai-sessions.md`,
-whose Escape modal sits on the LAST rung of that ladder — it must not swallow
-"Esc Stop".
-**Size:** medium. Three parallel keyboard paths must change in lockstep
-(`flows/escape.md`: capture interceptors in `startup.rs`, per-surface bubble
-handlers, and the automation mirror in `simulate_key_dispatch.rs`) — automation
-probes only exercise the third, so a partial fix looks green.
-
-### 2. The footer describes a different app on each surface
-
-- Flow: `↵ Send · ⌘K Actions · Esc Desk` idle; `⌘K Actions · Esc Desk` while
-  working — **no Stop hint at all**, on the surface where `⌘.` is the stop key
-  (`flow_session_footer_hints`, `flow_ux.rs:118`).
-- Agent Chat: a `FooterAction` label table — `↵ Send`, `Esc Stop`, `⌘K Actions`,
-  `⌘W Close`, `📁 CWD`, `⇧⇥ Agent`, … (`footer_hint_label`, `view.rs:4097`).
-
-`Esc Desk` is also the "lying footer" already flagged in the execution ledger:
-Escape does not go to a desk, it backgrounds the session.
-
-**Converge on:** one footer grammar function that both surfaces call, taking
-capabilities and turn state, so a hint cannot exist without the binding that
-performs it.
-**Size:** small-to-medium.
-
-### 3. Two markdown pipelines render the same assistant text
-
-Agent Chat uses `TextView::markdown` with a cached `TextViewStyle` and a
-`MarkdownLinkLabelPolicy`; ChatPrompt calls a local `render_markdown` helper.
-Code blocks, link handling, paragraph spacing, and heading scale are therefore
-independently defined.
-
-**Converge on:** Agent Chat's. It is the one with a declared style contract,
-link policy, and a style cache tuned for streaming re-renders.
-**Size:** large — this is the core of the port.
-
-### 4. Two style vocabularies for the same surface
-
-`AgentChatStyleDef` is a real, testable style contract
-(`AgentChatTranscriptStyle`, `AgentChatMarkdownStyle`, `AgentChatMessageStyle`,
-`AgentChatCollapsibleStyle`, `AgentChatErrorStyle`, `AgentChatSystemStyle`).
-ChatPrompt has none: `render_turns.rs` hardcodes `px(6.0)`, `px(8.0)`,
-`px(24.0)`, `px(64.0)`, `rounded(px(8.0))` inline.
-
-Both sets of constants are registered in `src/design_contract/mod.rs`, as two
-separate vocabularies (`prompts::chat::CHAT_LAYOUT_*` at `:3897` and
-`style_contract::AGENT_CHAT_*` at `:3526`) — so the design contract currently
-*documents* the split rather than closing it.
-
-**Converge on:** extend `AgentChatStyleDef` into a surface-neutral
-`ConversationStyle` and have both renderers read it. Per the repo's UI contract,
-tokens live in the shared layer, not in surface renderers.
-**Size:** medium.
-
-### 5. The composer is a different component
-
-Flow's composer IS the main window input (`TranscriptOnly` host mode). Agent
-Chat has its own, at `AGENT_CHAT_INPUT_FONT_SIZE = 17.0` /
-`LINE_HEIGHT = 22.0` (`style_contract.rs:206`, `:210`).
-
-Placeholders diverge in wording and in kind: Flow sets
-`"Message <friendly>…"` (`flow_ux.rs:1570`), Agent Chat uses
-`"Ask anything…"` / `"Follow up…"` (`style_contract.rs:217`, `:220`).
-
-**Unverified:** whether the two render at the same visual size. The main input
-resolves its size through the chrome/typography layer, not through a literal, so
-comparing `17.0` against it needs a measurement, not a grep. Do that before
-changing any number.
-**Converge on:** one placeholder rule — name the counterpart on first message,
-"Follow up…" after — and one measured type scale.
-**Size:** small for the copy, medium for the geometry.
-
-### 6. Dimensions not yet measured
-
-Named so they are not mistaken for "no divergence found": scroll/autoscroll
-behavior and scrollbar, `⌘K` action sets per surface, message history
-(Up/Down), copy-last-message, new-conversation, and `@`-mention/attachment
-support per surface. Each needs the same treatment as rows 1–5 before it can be
-ranked.
+**Already healthy:** the header/context zone agrees between Flow and the Agent
+surfaces (`view.rs:16092`, `flow_ux.rs:2344`), and no surface bypasses shared
+`footer_chrome`/`hint_strip`.
 
 ---
 
+## 2. Measured divergences, ranked by what a user actually hits
+
+### 1. Flow silently destroys a pasted multi-line message — DATA LOSS
+
+The worst finding, and it is not a consistency issue — it is corruption.
+
+Flow composes in the shared main-window input, which is single-line at **two**
+layers:
+
+- **vendor:** `InputState::new` defaults to `InputMode::SingleLine`
+  (`vendor/gpui-component/crates/ui/src/input/state.rs:420`), and the main
+  input is built bare at `src/app_impl/startup.rs:398` — no `.multi_line(true)`
+  anywhere in `src/`;
+- **app:** `AppView::FlowSessionView` is in
+  `current_view_uses_shared_filter_input` (`filter_input_core.rs:56`), and
+  `filter_input_change.rs:168` force-reverts any change containing a newline.
+
+On paste, the vendor does this (`state.rs:1776`):
+
+```rust
+if !self.mode.is_multi_line() {
+    new_text = new_text.replace('\n', "");
+}
+```
+
+Newlines are **deleted, not replaced with a space**. Pasting
+`"Fix the bug\nin auth.rs"` into a flow conversation sends
+`"Fix the bugin auth.rs"`.
+
+**Why it is silent:** the app layer has a guard that logs
+`filter_change.newline_ignored` — so the case looks handled. But the vendor
+strips the newlines *before* any change event fires, so that guard never runs
+and nothing is logged. The user sees text arrive and has no reason to look.
+
+Shift+Enter is swallowed for the same reason; Agent Chat honors it
+(`view.rs:15376`).
+
+**Converge on** Agent Chat's composer behavior.
+**Size:** large — both layers must change together. Removing only the app guard
+still loses newlines to the vendor strip.
+**Status:** verified in source at all three points. **Not yet verified at
+runtime** — worth a probe that pastes multi-line text into a flow session and
+reads the composer back.
+
+### 2. Escape means opposite things while streaming
+
+| | Agent Chat | Flow |
+|---|---|---|
+| `Esc` mid-stream | **stops the model** (`view.rs:15457`) | **abandons the surface; the model keeps running** (`flow_ux.rs:167`) |
+| `⌘.` | stop (`view.rs:14974`) — *and* reopen-focused-mention (`view.rs:12544`) | stop (`flow_ux.rs:170`), the only stop key |
+
+Flow's stop was also undiscoverable until this pass: it appeared nowhere but
+inside `⌘K` (`actions.rs:1053`).
+
+**Converge on** the Agent Chat ladder — Esc #1 stops, Esc #2 leaves — keeping
+background as rung two. **Size:** small.
+**Partly addressed:** the flow footer now advertises `⌘. Stop` while working.
+The keys themselves still disagree.
+
+### 3. Flow's ⌘K is missing nearly every everyday action
+
+Agent Chat offers ~20 (`script_context.rs:974`); Flow offers **six**
+(`actions.rs:1018`): Open, Background, Copy Transcript, New Flow, Stop Turn,
+Terminate.
+
+Flow has none of: Copy Last Response, Copy as Markdown, Copy All Code Blocks,
+Save as Note, Retry, Scroll to Latest.
+**Converge on** the Agent Chat vocabulary, keeping Background/Terminate/Rethread
+as a Flow-only section. **Size:** medium.
+
+### 4. Assistant text is selectable in Agent Chat, not in Flow
+
+Agent Chat renders markdown through gpui-component `TextView` with
+`.selectable(true)` (`transcript.rs:898`). Flow uses a separate engine
+(`src/prompts/markdown/api.rs:7`) with **zero** `selectable` and zero `TextView`
+across all 11 of its files. You cannot select an answer to quote it.
+**Size:** large — also hits standalone `ChatPrompt`.
+
+### 5. Copy affordances are inverted
+
+Flow has a **per-turn copy button** (`render_turns.rs:158`) that Agent Chat
+lacks entirely — Agent Chat's only copy is `⌘⇧C` for the last message, and
+`transcript.rs` has exactly three `on_click` sites, none of them copy.
+Conversely Agent Chat has first-class code-block copy (`transcript.rs:845`)
+while Flow's is a differently-styled hover reveal (`code_table.rs:81`).
+
+**Neither surface is the winner. Adopt both, everywhere.** Size: medium.
+
+### 6. Jump-to-latest exists only on the weaker surface
+
+Flow has the pill (`render_core.rs:469`) plus End/`⌘↓`. Agent Chat has none —
+"Jump to latest" appears at exactly one place repo-wide. Port it to Agent Chat
+against `ListState::is_following_tail()` (`transcript.rs:719`) so it stays
+truthful. **Size:** small.
+
+### 7. Up-arrow prompt history is dead in Flow
+
+Agent Chat recalls previous prompts (`view.rs:15112`). The arrow interceptor has
+an arm for `FlowUxView` but none for `FlowSessionView`, so it falls to the
+catch-all. **Size:** small.
+
+### 8. Sending while busy: queued vs error toast
+
+Agent Chat queues the message and shows a queue strip (`view.rs:11664`). Flow
+rejects it with an **error toast** (`flow_ux.rs:978`). An error is the wrong
+register for "you typed ahead", and the footer already hides `↵ Send` while
+busy, so it is a double negative. **Size:** medium.
+
+### 9. Your own message looks completely different
+
+Agent Chat: a tinted bubble, per-message row (`transcript.rs:1209`). Flow: a
+small bold grey line inside a fused per-turn card (`render_turns.rs:45`).
+
+**Converge on the per-message row model** — it is the one that scales to the
+Thought / Tool / Error / attachment rows Flow cannot express at all.
+**Size:** large — same work as #4, do them together.
+
+### 10. Flow has no context attachment and no way to start a fresh conversation
+
+`⌘N`/`⌘L` are unbound in Flow; a fresh thread is reachable **only through a
+failure recovery card** (`RethreadFlow`, `flow_ux.rs:2436`). And the comment at
+`flow_ux.rs:2234` claiming the shared main input brings "all its
+context-attachment features" is **aspirational, not true** — the attachment
+portal is ScriptList-scoped (`attachment_portal.rs:6`).
+**Size:** small for New Conversation (reuse the `RethreadFlow` machinery);
+large for attachments.
+
+### Also true, lower impact
+
+- **Composer:** three different text-input implementations (Agent Chat's
+  app-local `TextInputState`, Flow's shared gpui-component `Input`, standalone
+  `ChatPrompt`'s own). Placeholders diverge: `"Ask anything…"`/`"Follow up…"`
+  vs `"Message {flow}…"`. Flow has no send button at all
+  (`flow_ux.rs:2241`), and its draft *is* the global filter text, cleared on
+  open and on background.
+- **Streaming indicator:** a pulsing dot and "Thinking…" row
+  (`transcript.rs:1055`) vs a markdown literal `_Thinking…_`
+  (`render_turns.rs:7`). No surface shows elapsed time or token count.
+- **Style:** `AgentChatStyleDef` is a real style contract
+  (`style_contract.rs:117`); ChatPrompt has none, only `CHAT_LAYOUT_*` consts
+  and inline `px()` literals. `CHAT_LAYOUT_CARD_PADDING_X/Y` and
+  `AGENT_CHAT_INPUT_PADDING_X/Y` are both `12.0/10.0` — the same values written
+  twice, tied by nothing. `src/design_contract/mod.rs` registers both
+  vocabularies (`:3897`, `:3526`), documenting the split rather than closing it.
+
+### Evidence standard
+
+Every negative claim above was proven by enumeration, not by a failed grep:
+the three `on_click` sites in `transcript.rs`, the single repo-wide
+"Jump to latest", zero `selectable`/`TextView` across all 11 markdown files,
+all 14 `AppView` arms in the arrow interceptor, and the single-child Flow body
+slot. All evidence is static source. Two behaviors still deserve a runtime
+probe: Shift+Enter reaching the vendored input, and the finding-#1 paste
+corruption.
+
 ## 3. Build order
 
-The rule that keeps this landable: **behavior before pixels.** Keyboard and
-footer divergences are what a user actually trips over, and they are small.
-The renderer port is large and should not block them.
+Revised after the full sweep. The rule that keeps this landable:
+**stop the bleeding, then behavior, then pixels.**
 
-1. **`⌘.` = Stop on every AI surface**, and give the flow footer its Stop hint
-   while working. *Proof:* per-surface key-ladder tests plus a probe that
-   streams a turn and presses `⌘.`, on all three keyboard paths.
-   - **Landed (second half only):** the flow footer now shows `⌘. Stop` while
-     working, in both renderings, and the native button reaches
-     `stop_flow_session`. The binding already existed — the footer simply never
-     named it. Agent Chat's `⌘.` still means "reopen focused mention"; making
-     the key itself agree is the remaining, larger half.
-2. **One footer grammar function**, taking capabilities + turn state. Retire
-   `Esc Desk`. *Proof:* a table test enumerating (surface × state) → hints, and
-   an assertion that every hint's key resolves to an installed binding.
+0. **Stop destroying pasted messages** (§2.1). This is data loss, not
+   inconsistency, and it outranks everything else here. Both layers together:
+   make the main input multi-line-capable for flow sessions, and drop the
+   app-side newline revert for `FlowSessionView`. *Proof:* a devtools probe
+   that pastes multi-line text into a flow session and reads the composer back
+   — the finding is source-verified but has no runtime receipt yet.
+1. **One meaning per key** (§2.2): Esc #1 stops, Esc #2 leaves; `⌘.` stops
+   everywhere. *Proof:* per-surface key-ladder tests plus a streaming probe, on
+   all three keyboard paths (`flows/escape.md` — automation only exercises one,
+   so a partial fix looks green).
+   - **Landed (half):** the flow footer now advertises `⌘. Stop` while working,
+     in both renderings, and the native button reaches `stop_flow_session`. The
+     binding always existed; the footer never named it.
+2. **The small, high-value ports** — each independently shippable:
+   jump-to-latest into Agent Chat (§2.6), Up-arrow history into Flow (§2.7),
+   per-turn copy into Agent Chat and code-block copy into Flow (§2.5),
+   New Conversation into Flow (§2.10, reuse the `RethreadFlow` machinery).
+3. **Queue instead of scold** (§2.8): a busy Flow send joins a queue rather
+   than raising an error toast.
+4. **One footer grammar function**, taking capabilities + turn state. Retire
+   `Esc Desk`; fix standalone `ChatPrompt`'s `↵ Run`.
    - **Started:** `flow_session_native_footer_and_hint_strip_agree_on_the_same_grammar`
-     ties the two flow renderings together. It does not yet unify Flow with
-     Agent Chat — that needs the shared builder.
-3. **`ConversationStyle`** — widen `AgentChatStyleDef`, delete the
+     ties the two flow renderings together; it does not yet unify Flow with
+     Agent Chat.
+5. **`ConversationStyle`** — widen `AgentChatStyleDef`, delete the
    `CHAT_LAYOUT_*` duplicates, collapse the two design-contract vocabularies
-   into one. *Proof:* the existing design-contract tests, now over one
-   vocabulary; a test that no conversation renderer contains a bare `px(` in a
-   spacing position.
-4. **Measure the composer**, then unify placeholder copy and type scale.
-   *Proof:* a screenshot pair at the same viewport plus the measured values.
-5. **Port ChatPrompt's transcript onto the Agent Chat markdown pipeline.** The
-   big one; do it last, behind the shared style from step 3.
-6. **Measure §2.6**, then re-rank.
+   into one.
+6. **Flow's ⌘K vocabulary** (§2.3) — cheaper once the shared actions exist.
+7. **The renderer port** (§2.4 + §2.9 together): move Flow onto the
+   `TextView` markdown pipeline and the per-message row model. Largest, last,
+   and it drags standalone `ChatPrompt` along.
 
 ## 3a. A formatting trap worth knowing about
 
