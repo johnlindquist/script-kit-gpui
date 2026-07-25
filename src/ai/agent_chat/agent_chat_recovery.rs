@@ -28,7 +28,7 @@ pub(crate) fn warm_recovery_state(
     profile_id: &str,
     model_id: Option<&str>,
     cwd: &Path,
-    detail: &str,
+    failure: Option<&crate::ai::reliability::AppFailureRecord>,
     attempts: u32,
 ) -> AiOperationState {
     let provider_id = provider_from_model(model_id);
@@ -91,7 +91,17 @@ pub(crate) fn warm_recovery_state(
     )
     .expect("warm recovery capability transition is valid")
     .next;
-    let failure = provider_failure(sk_protocol::ai_reliability::ProtocolComponent::Pi, detail);
+    // S11: the warm slot already classified this failure. Re-classifying its
+    // own safe copy through the free-text provider classifier erased the
+    // typed kind (auth/config/runtime) and produced `Unknown`, which is why a
+    // "sign in required" warm failure rendered a generic card with no Sign In
+    // action. Only synthesize a record when the slot genuinely has none.
+    let failure = failure.cloned().unwrap_or_else(|| {
+        provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            "warm prepare failed before reporting available models",
+        )
+    });
     transition(state, AiOperationEvent::Failed(failure.failure))
         .expect("preflight warm failure is valid")
         .next
@@ -112,13 +122,18 @@ mod tests {
     use super::*;
     use sk_protocol::ai_reliability::{AiPhase, RecoveryActionKind};
 
+    fn pi_failure(raw: &str) -> crate::ai::reliability::AppFailureRecord {
+        provider_failure(sk_protocol::ai_reliability::ProtocolComponent::Pi, raw)
+    }
+
     #[test]
     fn warm_failure_uses_shared_typed_recovery_and_retry_budget() {
+        let failure = pi_failure("authentication required");
         let state = warm_recovery_state(
             "general",
             Some("anthropic/claude"),
             Path::new("/tmp/project"),
-            "authentication required",
+            Some(&failure),
             0,
         );
         assert!(matches!(state.phase, AiPhase::AwaitingRecovery { .. }));
@@ -131,11 +146,12 @@ mod tests {
 
     #[test]
     fn exhausted_warm_retry_is_not_presented_as_available() {
+        let failure = pi_failure("connection timed out");
         let state = warm_recovery_state(
             "general",
             None,
             Path::new("/tmp/project"),
-            "connection timed out",
+            Some(&failure),
             2,
         );
         let spec = warm_recovery_spec(&state).expect("recovery spec");
@@ -143,5 +159,42 @@ mod tests {
             .actions
             .iter()
             .any(|action| { action.enabled && action.action.kind() == RecoveryActionKind::Retry }));
+    }
+
+    /// S11 regression lock: a warm slot that already classified its failure
+    /// must keep that classification. The launch path used to hand the
+    /// record's own safe copy back to the free-text classifier, which matched
+    /// no auth wording and produced `Unknown` — so the one failure a Sign In
+    /// button fixes rendered a card without one.
+    #[test]
+    fn warm_recovery_keeps_the_typed_failure_instead_of_reclassifying_its_own_copy() {
+        let typed = crate::ai::reliability::setup_required_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            "login required",
+            &["browser".to_string()],
+        );
+        assert_eq!(
+            typed.failure.code,
+            sk_protocol::ai_reliability::AiFailureCode::AuthenticationMissing
+        );
+
+        let state =
+            warm_recovery_state("general", None, Path::new("/tmp/project"), Some(&typed), 0);
+        let spec = warm_recovery_spec(&state).expect("recovery spec");
+        assert!(
+            spec.actions
+                .iter()
+                .any(|action| action.enabled && action.action.kind() == RecoveryActionKind::SignIn),
+            "a setup-required warm failure must offer Sign In"
+        );
+
+        // The old round-trip: classify the record's own user-facing copy.
+        let round_tripped = pi_failure(typed.primary_message());
+        assert_eq!(
+            round_tripped.failure.code,
+            sk_protocol::ai_reliability::AiFailureCode::Unknown,
+            "safe copy is not classifiable evidence — this is why the typed \
+             record must be carried, not re-derived"
+        );
     }
 }

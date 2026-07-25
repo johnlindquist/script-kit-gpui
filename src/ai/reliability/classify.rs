@@ -360,6 +360,62 @@ pub fn quick_ai_deadline_failure(
     }
 }
 
+/// Classify a runtime process that failed to spawn, keeping its cause (S11).
+///
+/// [`classify_process_failure`] with [`ProcessFailureFacts::SpawnFailed`]
+/// discards the OS/spawn cause. Warm-session spawn sites used to compensate by
+/// formatting the raw error straight into a user-visible failure message —
+/// which, once the adapters became typed, printed the internal marker
+/// `ai_adapter_error:Unknown` on screen. The kind is a fact ("spawn failed");
+/// the cause belongs in the diagnostic vault behind Copy Details.
+pub fn classify_spawn_failure(
+    context: &FailureContext,
+    cause: &str,
+    diagnostics: &DiagnosticVault,
+) -> AppFailureRecord {
+    record(
+        context,
+        cause,
+        diagnostics,
+        AiFailureKind::Runtime(RuntimeFailure::SpawnFailed),
+    )
+}
+
+/// Classify the runtime's own `SetupRequired` event (S11).
+///
+/// This event is a FACT the agent runtime states directly: the user is not
+/// signed in, and here are the auth methods it accepts. It used to be
+/// formatted into prose (`"Pi Agent Chat setup required: login required.
+/// Available methods: browser"`) and handed to `classify_provider_failure`,
+/// which matches English. None of that wording is auth wording the classifier
+/// recognises, so it fell through to `AiFailureKind::Unknown` and the user got
+/// the generic "The AI request did not finish" card — with no Sign In button,
+/// on the one failure a Sign In button actually fixes.
+///
+/// `reason` and the advertised methods are still captured into the diagnostic
+/// vault so Copy Details keeps them; they just no longer choose the kind.
+pub fn classify_setup_required(
+    context: &FailureContext,
+    reason: &str,
+    auth_methods: &[String],
+    diagnostics: &DiagnosticVault,
+) -> AppFailureRecord {
+    let detail = if auth_methods.is_empty() {
+        format!("setup_required: {reason}")
+    } else {
+        format!(
+            "setup_required: {reason} (auth methods: {})",
+            auth_methods.join(", ")
+        )
+    };
+    record(
+        context,
+        &detail,
+        diagnostics,
+        AiFailureKind::Authentication(AuthenticationFailure::Missing),
+    )
+}
+
 /// Classify a Quick AI turn failure from Quick AI's OWN stable code.
 ///
 /// Returns `None` when `code` is not one Quick AI produces, so the caller can

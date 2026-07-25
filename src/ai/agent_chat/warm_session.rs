@@ -47,7 +47,7 @@ pub(crate) struct AgentChatWarmSessionSnapshot {
     pub generation: u64,
     pub ui_thread_id: Option<String>,
     pub state: AgentChatWarmSessionState,
-    pub failure_message: Option<String>,
+    pub failure: Option<crate::ai::reliability::AppFailureRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +84,7 @@ struct WarmSlot {
     state: AgentChatWarmSessionState,
     connection: Option<Arc<dyn AgentChatConnection>>,
     acquired_at: Option<Instant>,
-    failure_message: Option<String>,
+    failure: Option<crate::ai::reliability::AppFailureRecord>,
 }
 
 impl WarmSlot {
@@ -94,7 +94,7 @@ impl WarmSlot {
             generation: self.generation,
             ui_thread_id: self.ui_thread_id.clone(),
             state: self.state,
-            failure_message: self.failure_message.clone(),
+            failure: self.failure.clone(),
         }
     }
 }
@@ -168,7 +168,7 @@ impl AgentChatWarmSessionManager {
                     state: AgentChatWarmSessionState::Preparing,
                     connection: None,
                     acquired_at: None,
-                    failure_message: None,
+                    failure: None,
                 },
             );
             (generation, ui_thread_id)
@@ -230,7 +230,7 @@ impl AgentChatWarmSessionManager {
                     state: AgentChatWarmSessionState::Preparing,
                     connection: None,
                     acquired_at: None,
-                    failure_message: None,
+                    failure: None,
                 },
             );
             (generation, ui_thread_id, previous_state)
@@ -247,12 +247,20 @@ impl AgentChatWarmSessionManager {
         let connection = match spec.factory.spawn_connection() {
             Ok(connection) => connection,
             Err(error) => {
-                let failure_message = format!("Failed to spawn Pi Agent Chat runtime: {error:#}");
+                // S11: the spawn cause goes to the diagnostic vault; the slot
+                // carries only classified safe copy. Formatting `{error:#}`
+                // here used to print the internal `ai_adapter_error:<Code>`
+                // marker straight into the Agent Chat surface.
+                let failure = crate::ai::reliability::spawn_failure(
+                    sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                    &format!("{error:#}"),
+                );
+                let failure_message = failure.primary_message();
                 let mut inner = self.inner.lock();
                 if let Some(slot) = inner.slots.get_mut(&spec.key) {
                     if slot.generation == generation {
                         slot.state = AgentChatWarmSessionState::Failed;
-                        slot.failure_message = Some(failure_message.clone());
+                        slot.failure = Some(failure);
                     }
                 }
                 anyhow::bail!(failure_message);
@@ -266,7 +274,7 @@ impl AgentChatWarmSessionManager {
                     slot.state = AgentChatWarmSessionState::Acquired;
                     slot.connection = Some(connection.clone());
                     slot.acquired_at = Some(Instant::now());
-                    slot.failure_message = None;
+                    slot.failure = None;
                 }
             }
         }
@@ -312,7 +320,7 @@ impl AgentChatWarmSessionManager {
                 state: AgentChatWarmSessionState::Preparing,
                 connection: None,
                 acquired_at: None,
-                failure_message: None,
+                failure: None,
             };
             let snapshot = slot.snapshot();
             inner.slots.insert(spec.key.clone(), slot);
@@ -348,11 +356,14 @@ impl AgentChatWarmSessionManager {
         spawn_result: std::io::Result<()>,
     ) -> Result<()> {
         if let Err(error) = spawn_result {
-            let failure = crate::ai::reliability::provider_failure(
+            // S11: a thread that would not start IS a spawn failure. Handing
+            // the prose to the free-text classifier matched nothing and
+            // produced `Unknown`.
+            let failure = crate::ai::reliability::spawn_failure(
                 sk_protocol::ai_reliability::ProtocolComponent::Pi,
-                format!("Failed to spawn Pi warm prepare worker: {error}"),
+                &format!("warm prepare worker thread: {error}"),
             );
-            let message = failure.primary_message().to_string();
+            let message = failure.primary_message();
             let fingerprint = failure
                 .failure
                 .diagnostic
@@ -367,11 +378,7 @@ impl AgentChatWarmSessionManager {
                 failure_code = ?failure.failure.code,
                 diagnostic_fingerprint = fingerprint,
             );
-            self.mark_preparing_generation_failed(
-                &snapshot.key,
-                snapshot.generation,
-                message.clone(),
-            );
+            self.mark_preparing_generation_failed(&snapshot.key, snapshot.generation, failure);
             anyhow::bail!(message);
         }
         Ok(())
@@ -406,7 +413,7 @@ impl AgentChatWarmSessionManager {
                 state: AgentChatWarmSessionState::Preparing,
                 connection: None,
                 acquired_at: None,
-                failure_message: None,
+                failure: None,
             };
             let snapshot = slot.snapshot();
             inner.slots.insert(spec.key.clone(), slot);
@@ -421,14 +428,19 @@ impl AgentChatWarmSessionManager {
                 manager.insert_prepared_slot_if_current(slot, generation);
             })
         {
-            let message = format!("Failed to spawn Pi warm retry worker: {error}");
+            // S11: raw `std::io::Error` text used to become the slot's
+            // user-visible failure copy verbatim.
+            let failure = crate::ai::reliability::spawn_failure(
+                sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                &format!("warm retry worker thread: {error}"),
+            );
             let mut inner = self.inner.lock();
             if let Some(slot) = inner.slots.get_mut(&snapshot.key) {
                 if slot.generation == generation
                     && slot.state == AgentChatWarmSessionState::Preparing
                 {
                     slot.state = AgentChatWarmSessionState::Failed;
-                    slot.failure_message = Some(message);
+                    slot.failure = Some(failure);
                 }
             }
         }
@@ -436,12 +448,17 @@ impl AgentChatWarmSessionManager {
         AgentChatWarmReprepareResult::Started(snapshot)
     }
 
-    fn mark_preparing_generation_failed(&self, key: &str, generation: u64, message: String) {
+    fn mark_preparing_generation_failed(
+        &self,
+        key: &str,
+        generation: u64,
+        failure: crate::ai::reliability::AppFailureRecord,
+    ) {
         let mut inner = self.inner.lock();
         if let Some(slot) = inner.slots.get_mut(key) {
             if slot.generation == generation && slot.state == AgentChatWarmSessionState::Preparing {
                 slot.state = AgentChatWarmSessionState::Failed;
-                slot.failure_message = Some(message);
+                slot.failure = Some(failure);
             }
         }
     }
@@ -531,7 +548,7 @@ impl AgentChatWarmSessionManager {
                     generation,
                     ui_thread_id: None,
                     state: AgentChatWarmSessionState::Empty,
-                    failure_message: None,
+                    failure: None,
                 };
             };
 
@@ -550,7 +567,7 @@ impl AgentChatWarmSessionManager {
                 state: AgentChatWarmSessionState::Preparing,
                 connection: None,
                 acquired_at: None,
-                failure_message: None,
+                failure: None,
             };
             let snapshot = replacement.snapshot();
             inner.slots.insert(key.clone(), replacement);
@@ -591,7 +608,7 @@ impl AgentChatWarmSessionManager {
                     generation: lease.generation,
                     ui_thread_id: None,
                     state: AgentChatWarmSessionState::Empty,
-                    failure_message: None,
+                    failure: None,
                 });
             };
 
@@ -733,7 +750,7 @@ impl AgentChatWarmSessionManager {
                 self.publish_preparing_connection(&spec.key, generation, &connection);
                 let prepare_events =
                     connection.prepare_session(ui_thread_id.clone(), spec.cwd.clone());
-                let (state, failure_message) = match prepare_events {
+                let (state, failure) = match prepare_events {
                     Ok(events) => {
                         tracing::info!(
                             target: "script_kit::tab_ai",
@@ -760,10 +777,7 @@ impl AgentChatWarmSessionManager {
                                     failure_code = ?failure.failure.code,
                                     diagnostic_fingerprint = ?failure.failure.diagnostic.as_ref().map(|d| &d.fingerprint.0),
                                 );
-                                (
-                                    AgentChatWarmSessionState::Failed,
-                                    Some(failure.primary_message().to_string()),
-                                )
+                                (AgentChatWarmSessionState::Failed, Some(failure))
                             }
                             PrepareReadyOutcome::Timeout => {
                                 tracing::warn!(
@@ -772,11 +786,16 @@ impl AgentChatWarmSessionManager {
                                     generation,
                                     key = %spec.key,
                                 );
+                                // S11: a warm-up that never reported models is
+                                // a connectivity timeout, not free text.
                                 (
                                     AgentChatWarmSessionState::Failed,
-                                    Some(format!(
-                                        "Pi Agent Chat model warm-up timed out after {} ms",
-                                        DEFAULT_PREPARE_READY_TIMEOUT.as_millis()
+                                    Some(crate::ai::reliability::provider_failure(
+                                        sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                                        format!(
+                                            "warm prepare timed out after {} ms",
+                                            DEFAULT_PREPARE_READY_TIMEOUT.as_millis()
+                                        ),
                                     )),
                                 )
                             }
@@ -787,12 +806,14 @@ impl AgentChatWarmSessionManager {
                                     generation,
                                     key = %spec.key,
                                 );
+                                // S11: the event stream ending early is a
+                                // runtime-closed fact.
                                 (
                                     AgentChatWarmSessionState::Failed,
-                                    Some(
-                                        "Pi Agent Chat model warm-up stream closed before reporting available models"
-                                            .to_string(),
-                                    ),
+                                    Some(crate::ai::reliability::process_failure(
+                                        sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                                        crate::ai::reliability::ProcessFailureFacts::RuntimeClosed,
+                                    )),
                                 )
                             }
                         }
@@ -805,12 +826,11 @@ impl AgentChatWarmSessionManager {
                             key = %spec.key,
                             %error,
                         );
-                        (
-                            AgentChatWarmSessionState::Failed,
-                            Some(format!(
-                                "Failed to prepare Pi Agent Chat session: {error:#}"
-                            )),
-                        )
+                        // S11: `error` is already a classified
+                        // `AiAdapterError`. Formatting it printed the internal
+                        // `ai_adapter_error:<Code>` marker on screen; carry the
+                        // record instead.
+                        (AgentChatWarmSessionState::Failed, Some(error.failure))
                     }
                 };
 
@@ -821,7 +841,7 @@ impl AgentChatWarmSessionManager {
                     state,
                     connection: (state == AgentChatWarmSessionState::Ready).then_some(connection),
                     acquired_at: None,
-                    failure_message,
+                    failure,
                 }
             }
             Err(error) => {
@@ -839,8 +859,9 @@ impl AgentChatWarmSessionManager {
                     state: AgentChatWarmSessionState::Failed,
                     connection: None,
                     acquired_at: None,
-                    failure_message: Some(format!(
-                        "Failed to spawn Pi Agent Chat runtime: {error:#}"
+                    failure: Some(crate::ai::reliability::spawn_failure(
+                        sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                        &format!("{error:#}"),
                     )),
                 }
             }
@@ -877,18 +898,16 @@ fn wait_for_prepare_ready(events: AgentChatEventRx, timeout: Duration) -> Prepar
                 reason,
                 auth_methods,
             }) => {
-                let detail = if auth_methods.is_empty() {
-                    format!("Pi Agent Chat setup required: {reason}")
-                } else {
-                    format!(
-                        "Pi Agent Chat setup required: {reason}. Available methods: {}",
-                        auth_methods.join(", ")
-                    )
-                };
+                // S11: `SetupRequired` is a typed fact from the runtime, not
+                // prose to be re-guessed. Routing it through the free-text
+                // provider classifier produced `Unknown` (no auth wording in
+                // "setup required"/"login required"), so the user got the
+                // generic "did not finish" card with no Sign In button.
                 return PrepareReadyOutcome::RuntimeFailed(
-                    crate::ai::reliability::provider_failure(
+                    crate::ai::reliability::setup_required_failure(
                         sk_protocol::ai_reliability::ProtocolComponent::Pi,
-                        detail,
+                        &reason,
+                        &auth_methods,
                     ),
                 );
             }
@@ -919,6 +938,7 @@ mod tests {
     use crate::ai::agent_chat::events::AgentChatEventRx;
     use crate::ai::agent_chat::runtime::AgentChatTurnRequest;
     use parking_lot::Mutex;
+    use sk_protocol::ai_reliability::AiFailureCode;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -1298,14 +1318,22 @@ mod tests {
             .expect_err("spawn failure must be returned");
         let failed = manager.snapshot("key-a").expect("failed slot retained");
 
-        assert!(error.to_string().contains("synthetic spawn failure"));
+        // S11: the raw OS cause is captured into the diagnostic vault, not
+        // into anything a user or log line can read. What the slot carries is
+        // the classified fact plus a fingerprint that can find the cause.
         assert_eq!(failed.generation, snapshot.generation);
         assert_eq!(failed.state, AgentChatWarmSessionState::Failed);
-        assert!(failed
-            .failure_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("synthetic spawn failure"));
+        let failure = failed.failure.as_ref().expect("classified spawn failure");
+        assert_eq!(failure.failure.code, AiFailureCode::SpawnFailed);
+        assert!(
+            failure.failure.diagnostic.is_some(),
+            "the spawn cause must still be recoverable through Copy Details"
+        );
+        assert_eq!(error.to_string(), failure.primary_message());
+        assert!(
+            !error.to_string().contains("synthetic spawn failure"),
+            "the raw OS cause must not travel in the returned error"
+        );
 
         release_tx.send(()).expect("release real worker");
     }
@@ -1499,16 +1527,15 @@ mod tests {
         };
         let snapshot = manager.snapshot("key-a").unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("Failed to spawn Pi Agent Chat runtime"));
         assert_eq!(snapshot.state, AgentChatWarmSessionState::Failed);
         assert_eq!(snapshot.generation, 1);
-        assert!(snapshot
-            .failure_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("spawn failed"));
+        let failure = snapshot.failure.as_ref().expect("classified spawn failure");
+        assert_eq!(failure.failure.code, AiFailureCode::SpawnFailed);
+        assert_eq!(error.to_string(), failure.primary_message());
+        assert!(
+            !error.to_string().contains("spawn failed"),
+            "the factory's raw cause must not reach the caller's error"
+        );
     }
 
     #[test]
@@ -1635,9 +1662,17 @@ mod tests {
 
         let failed = manager.prepare_warm(spec(factory.clone())).unwrap();
         assert_eq!(failed.state, AgentChatWarmSessionState::Failed);
-        assert_eq!(
-            failed.failure_message.as_deref(),
-            Some("Failed to prepare Pi Agent Chat session: prepare failed")
+        // S11: `prepare_session` returns an already-classified adapter error.
+        // Formatting it used to print the internal `ai_adapter_error:Unknown`
+        // marker into the Agent Chat surface.
+        let failure = failed.failure.as_ref().expect("classified prepare failure");
+        assert!(
+            !failure.primary_message().contains("ai_adapter_error"),
+            "internal adapter markers must never become user copy"
+        );
+        assert!(
+            failure.failure.diagnostic.is_some(),
+            "the adapter's cause must stay recoverable through Copy Details"
         );
 
         let retry = manager.prepare_warm(spec(factory.clone())).unwrap();
@@ -1655,10 +1690,8 @@ mod tests {
         let snapshot = manager.prepare_warm(spec(factory.clone())).unwrap();
 
         assert_eq!(snapshot.state, AgentChatWarmSessionState::Failed);
-        assert_eq!(
-            snapshot.failure_message.as_deref(),
-            Some("Pi Agent Chat model warm-up stream closed before reporting available models")
-        );
+        let failure = snapshot.failure.as_ref().expect("classified stream close");
+        assert_eq!(failure.failure.code, AiFailureCode::RuntimeClosed);
         assert!(manager.acquire_warm("key-a").is_none());
     }
 
@@ -1673,10 +1706,19 @@ mod tests {
 
         let snapshot = manager.prepare_warm(spec(factory.clone())).unwrap();
 
+        // S11: `SetupRequired` is a typed fact. Routing it through the
+        // free-text classifier produced `Unknown` and the generic
+        // "did not finish" card — with no Sign In button, on the one failure
+        // Sign In fixes.
         assert_eq!(snapshot.state, AgentChatWarmSessionState::Failed);
+        let failure = snapshot
+            .failure
+            .as_ref()
+            .expect("classified setup-required");
+        assert_eq!(failure.failure.code, AiFailureCode::AuthenticationMissing);
         assert_eq!(
-            snapshot.failure_message.as_deref(),
-            Some("Pi Agent Chat setup required: login required. Available methods: browser")
+            failure.primary_message(),
+            "Sign in to continue with this AI provider."
         );
         assert_eq!(factory.spawned().len(), 1);
     }

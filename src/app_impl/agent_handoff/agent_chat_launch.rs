@@ -696,17 +696,20 @@ impl ScriptListApp {
         if let Some(snapshot) = manager.snapshot(&pi_launch.warm_key).filter(|snapshot| {
             snapshot.state == crate::ai::agent_chat::warm_session::AgentChatWarmSessionState::Failed
         }) {
-            let error = snapshot.failure_message.clone().unwrap_or_else(|| {
-                "Pi Agent Chat model warm-up failed. Retry after fixing the provider configuration."
-                    .to_string()
-            });
+            // S11: log the classified code and diagnostic fingerprint, never
+            // a message that used to carry raw provider/spawn text.
             tracing::warn!(
                 target: "script_kit::tab_ai",
                 event = "pi_agent_chat_warm_failed_setup",
                 profile_id = %pi_launch.profile.id,
                 warm_key = %pi_launch.warm_key,
                 generation = snapshot.generation,
-                error = %error,
+                failure_code = ?snapshot.failure.as_ref().map(|failure| failure.failure.code),
+                diagnostic_fingerprint = ?snapshot
+                    .failure
+                    .as_ref()
+                    .and_then(|failure| failure.failure.diagnostic.as_ref())
+                    .map(|diagnostic| &diagnostic.fingerprint.0),
             );
             self.show_agent_chat_warm_recovery(
                 AgentChatWarmRetryLaunch {
@@ -877,14 +880,15 @@ impl ScriptListApp {
         attempts: u32,
         cx: &mut Context<Self>,
     ) {
-        let detail = snapshot.failure_message.clone().unwrap_or_else(|| {
-            "Pi Agent Chat failed before reporting available models.".to_string()
-        });
+        // S11: pass the TYPED failure through. This used to round-trip the
+        // record's own safe copy back through the free-text classifier, which
+        // re-derived `Unknown` from generic English - so a warm-session auth
+        // failure lost its Sign In action on the way to its own recovery card.
         let recovery_state = crate::ai::agent_chat::agent_chat_recovery::warm_recovery_state(
             &launch.pi_launch.profile.id,
             launch.pi_launch.selected_model_id.as_deref(),
             &launch.pi_launch.cwd,
-            &detail,
+            snapshot.failure.as_ref(),
             attempts,
         );
         let recovery =
@@ -901,6 +905,23 @@ impl ScriptListApp {
             .map(ToString::to_string)
             .unwrap_or_else(|| "Your current screen is unchanged.".to_string());
         let body = format!("{} {}", recovery.body, preservation_note);
+        // S11: Details carries the same safe shape the flow recovery card
+        // uses — stable code plus a diagnostic fingerprint — never the raw
+        // provider or spawn text that used to be pasted in here verbatim.
+        let detail = match snapshot.failure.as_ref() {
+            Some(failure) => format!(
+                "Failure code: {:?}\nSummary: {}\nDiagnostic fingerprint: {}",
+                failure.failure.code,
+                failure.primary_message(),
+                failure
+                    .failure
+                    .diagnostic
+                    .as_ref()
+                    .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+                    .unwrap_or("unavailable"),
+            ),
+            None => "No settled failure was recorded for this warm session.".to_string(),
+        };
         let app = cx.entity().downgrade();
         let retry_launch = launch.clone();
         let details_launch = launch;
@@ -1139,7 +1160,7 @@ impl ScriptListApp {
                                 warm_key = %warm_key,
                                 retry_generation,
                                 attempt = attempts.saturating_add(1),
-                                error = %snapshot.failure_message.as_deref().unwrap_or("unknown warm retry failure"),
+                                failure_code = ?snapshot.failure.as_ref().map(|failure| failure.failure.code),
                             );
                             this.show_agent_chat_warm_recovery(
                                 launch,

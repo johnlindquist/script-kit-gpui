@@ -2918,10 +2918,21 @@ impl AgentChatView {
                 variation.status = FocusedTextVariationStatus::Error;
                 variation.error = Some(failure.primary_message().to_string());
             }
-            AgentChatEvent::SetupRequired { reason, .. } => {
+            AgentChatEvent::SetupRequired {
+                reason,
+                auth_methods,
+            } => {
+                // S11: `setup_required:<reason>` was an internal marker string
+                // rendered straight into the variation card. Classify it, then
+                // show the same safe copy every other AI surface shows.
+                let failure = crate::ai::reliability::setup_required_failure(
+                    sk_protocol::ai_reliability::ProtocolComponent::Pi,
+                    &reason,
+                    &auth_methods,
+                );
                 let variation = &mut self.focused_text_variations[index];
                 variation.status = FocusedTextVariationStatus::Error;
-                variation.error = Some(format!("setup_required:{reason}"));
+                variation.error = Some(failure.primary_message().to_string());
             }
             AgentChatEvent::UserMessageDelta(_)
             | AgentChatEvent::AgentThoughtDelta(_)

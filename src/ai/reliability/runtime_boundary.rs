@@ -42,6 +42,39 @@ pub(crate) fn quick_ai_failure(
         .unwrap_or_else(|| classify_provider_failure(&context, detail, runtime_vault()))
 }
 
+/// Typed classification for a runtime that failed to spawn, keeping its cause
+/// in the diagnostic vault. See [`super::classify_spawn_failure`].
+pub(crate) fn spawn_failure(component: ProtocolComponent, cause: &str) -> AppFailureRecord {
+    super::classify_spawn_failure(
+        &FailureContext {
+            component,
+            ..FailureContext::default()
+        },
+        cause,
+        runtime_vault(),
+    )
+}
+
+/// Typed classification for the runtime's `SetupRequired` event.
+///
+/// See [`super::classify_setup_required`]: the event is a fact, so it must not
+/// be re-derived by pattern-matching the prose we would have printed.
+pub(crate) fn setup_required_failure(
+    component: ProtocolComponent,
+    reason: &str,
+    auth_methods: &[String],
+) -> AppFailureRecord {
+    super::classify_setup_required(
+        &FailureContext {
+            component,
+            ..FailureContext::default()
+        },
+        reason,
+        auth_methods,
+        runtime_vault(),
+    )
+}
+
 pub(crate) fn process_failure(
     component: ProtocolComponent,
     facts: ProcessFailureFacts,
