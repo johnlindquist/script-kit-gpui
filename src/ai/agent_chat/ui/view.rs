@@ -15194,14 +15194,32 @@ impl AgentChatView {
 
         // ── Cmd+Shift+C → copy last response to clipboard ──────
         if modifiers.platform && modifiers.shift && key.eq_ignore_ascii_case("c") {
-            let last = self
-                .live_thread()
-                .read(cx)
-                .messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, super::thread::AgentChatThreadMessageRole::Assistant))
-                .map(|m| m.body.to_string());
+            // Newest assistant turn that actually SAID something.
+            //
+            // Taking the newest assistant message unconditionally copies the
+            // in-flight turn, whose body is empty until the first token lands
+            // — and writing "" to the clipboard SUCCEEDS. The user sees a copy
+            // that worked and pastes nothing.
+            //
+            // `resolve_last_copyable_response` is the same rule Flow's ⇧⌘C
+            // uses. Sharing it is the point: two copy paths with private
+            // notions of "the last response" is how they drifted apart in the
+            // first place.
+            let last = {
+                let thread = self.live_thread().read(cx);
+                let bodies: Vec<String> = thread
+                    .messages
+                    .iter()
+                    .filter(|m| {
+                        matches!(m.role, super::thread::AgentChatThreadMessageRole::Assistant)
+                    })
+                    .map(|m| m.body.to_string())
+                    .collect();
+                crate::flows::session::resolve_last_copyable_response(
+                    bodies.iter().map(|body| body.as_str()),
+                )
+                .map(|body| body.to_string())
+            };
             if let Some(text) = last {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
