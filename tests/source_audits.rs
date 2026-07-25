@@ -61,6 +61,9 @@ pub fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+#[path = "source_audits/ai_recovery_button_placement.rs"]
+mod ai_recovery_button_placement;
+
 #[path = "source_audits/builtin_confirmation.rs"]
 mod builtin_confirmation;
 

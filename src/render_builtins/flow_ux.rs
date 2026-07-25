@@ -2696,6 +2696,12 @@ impl ScriptListApp {
                                 }
                             })),
                         };
+                        // The card is the message. Its actions live in the
+                        // shared footer rail below it, never as loose buttons
+                        // inside the session transcript.
+                        let plan = crate::ai::reliability::plan_recovery_presentation(&spec);
+                        let recovery_footer =
+                            crate::components::render_ai_recovery_footer(&plan, &handlers, None);
                         main = main.child(
                             div()
                                 .id("flow-session-recovery-stack")
@@ -2705,8 +2711,8 @@ impl ScriptListApp {
                                 .child(crate::components::render_ai_recovery_card(
                                     spec,
                                     &self.theme,
-                                    handlers,
-                                )),
+                                ))
+                                .children(recovery_footer),
                         );
                     }
                     main.into_any_element()

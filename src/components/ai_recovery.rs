@@ -6,12 +6,14 @@ use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, App, Div, FontWeight, Win
 use sk_protocol::ai_reliability::{AiRecoveryAction, DisabledReason, RecoveryRole};
 
 use crate::ai::reliability::{
-    AiRecoveryCardSpec, AiRecoveryLayout, AiRecoveryTone, AI_RECOVERY_BODY_ID,
-    AI_RECOVERY_DISMISS_ID, AI_RECOVERY_PROGRESS_ID, AI_RECOVERY_TITLE_ID,
+    AiRecoveryCardSpec, AiRecoveryLayout, AiRecoveryTone, RecoveryPresentationPlan,
+    AI_RECOVERY_BODY_ID, AI_RECOVERY_DISMISS_ID, AI_RECOVERY_PROGRESS_ID, AI_RECOVERY_TITLE_ID,
+};
+use crate::components::footer_chrome::{
+    render_clickable_footer_hint_action_rail, FooterHintClickHandler,
 };
 use crate::components::{
-    info_metrics, info_palette, Button, ButtonColors, ButtonVariant, InfoStateDensity,
-    INFO_SPACING, INFO_TYPE_SCALE,
+    info_metrics, info_palette, InfoStateDensity, INFO_SPACING, INFO_TYPE_SCALE,
 };
 use crate::theme::{AppChromeColors, SemanticChipColors, Theme};
 
@@ -153,11 +155,18 @@ pub fn decide_recovery_key(
     }
 }
 
-pub fn render_ai_recovery_card(
-    spec: AiRecoveryCardSpec,
-    theme: &Theme,
-    handlers: AiRecoveryCardHandlers,
-) -> AnyElement {
+/// Render the recovery **message**. Never its actions.
+///
+/// This function paints no `Button`. That is the invariant, not an accident of
+/// the current copy: buttons in this app live in a modal or in the footer /
+/// actions menu, and a card floating in the middle of a conversation is
+/// neither. The actions travel separately through
+/// [`crate::ai::reliability::plan_recovery_presentation`], and the surface
+/// mounts them where they belong.
+///
+/// `tests/source_audits/ai_recovery_button_placement.rs` fails if a `Button`
+/// returns to this function body.
+pub fn render_ai_recovery_card(spec: AiRecoveryCardSpec, theme: &Theme) -> AnyElement {
     let palette = info_palette(theme);
     let metrics = info_metrics(match spec.layout {
         AiRecoveryLayout::ComposerInline | AiRecoveryLayout::DeskRow => InfoStateDensity::Compact,
@@ -172,27 +181,8 @@ pub fn render_ai_recovery_card(
         AiRecoveryTone::Success => theme.colors.ui.success,
     };
     let tone_chip = AppChromeColors::from_theme(theme).semantic_chip_colors(theme, tone_color);
-    let button_colors = ButtonColors::from_theme(theme);
-    let mut action_elements = Vec::new();
-    for action in &spec.actions {
-        let recovery_action = action.action.clone();
-        let handler = handlers.on_action.clone();
-        let mut button = Button::new(action.label.clone(), button_colors)
-            .id(action.semantic_id)
-            .variant(match action.role {
-                RecoveryRole::Primary => ButtonVariant::Primary,
-                RecoveryRole::Secondary | RecoveryRole::Diagnostic => ButtonVariant::Ghost,
-            })
-            .disabled(!action.enabled);
-        if action.enabled {
-            button = button.on_click(Box::new(move |_, window, cx| {
-                handler(recovery_action.clone(), window, cx);
-            }));
-        }
-        action_elements.push(button.into_any_element());
-    }
 
-    let mut header = div()
+    let header = div()
         .w_full()
         .flex()
         .items_start()
@@ -229,18 +219,8 @@ pub fn render_ai_recovery_card(
                 ),
         );
 
-    if spec.dismissible {
-        let mut dismiss = Button::new("Dismiss", button_colors)
-            .id(AI_RECOVERY_DISMISS_ID)
-            .variant(ButtonVariant::Icon)
-            .disabled(handlers.on_dismiss.is_none());
-        if let Some(on_dismiss) = handlers.on_dismiss.clone() {
-            dismiss = dismiss.on_click(Box::new(move |_, window, cx| {
-                on_dismiss(window, cx);
-            }));
-        }
-        header = header.child(dismiss);
-    }
+    // Dismiss is Escape, offered by the surface's footer. It is not a button
+    // stapled to the card header.
 
     let mut body = div()
         .id(spec.semantic_id)
@@ -277,19 +257,94 @@ pub fn render_ai_recovery_card(
                 .child(progress.label),
         );
     }
-    if !action_elements.is_empty() {
-        body = body.child(
-            div()
-                .w_full()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(INFO_SPACING.xs))
-                .children(action_elements),
-        );
-    }
     body.into_any_element()
 }
+
+/// The footer hint labels a plan produces, as `key label` pairs.
+///
+/// Pure, so a test can assert what the footer would advertise without opening
+/// a window. The shortcut goes first because `footer_hint_button_parts` splits
+/// on the leading token.
+///
+/// A disabled action still appears, because hiding it would leave the user
+/// with no explanation for why recovery is stuck. It renders unclickable —
+/// `rules/AI_RELIABILITY.md`: an action a surface cannot perform is never
+/// rendered enabled.
+pub fn ai_recovery_footer_hint_labels(plan: &RecoveryPresentationPlan) -> Vec<String> {
+    let mut hints = Vec::new();
+    if let Some(primary) = plan.footer.as_ref() {
+        hints.push(format!("↵ {}", primary.label));
+    }
+    if !plan.menu.is_empty() {
+        hints.push("⌘K Options".to_string());
+    }
+    if plan.dismissible {
+        hints.push("esc Dismiss".to_string());
+    }
+    hints
+}
+
+/// Render the recovery actions as a footer rail, using the same shared rail
+/// the main menu window uses.
+///
+/// Returns `None` when the plan places nothing in the footer, so a surface
+/// cannot paint an empty rail that looks like a broken control strip.
+pub fn render_ai_recovery_footer(
+    plan: &RecoveryPresentationPlan,
+    handlers: &AiRecoveryCardHandlers,
+    on_open_menu: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+) -> Option<AnyElement> {
+    if plan.footer.is_none() && plan.menu.is_empty() && !plan.dismissible {
+        return None;
+    }
+
+    let mut hints: Vec<(gpui::SharedString, Option<FooterHintClickHandler>)> = Vec::new();
+
+    if let Some(primary) = plan.footer.as_ref() {
+        let label = format!("↵ {}", primary.label);
+        let handler: Option<FooterHintClickHandler> = if primary.enabled {
+            let action = primary.action.clone();
+            let on_action = handlers.on_action.clone();
+            Some(Box::new(move |_, window, cx| {
+                on_action(action.clone(), window, cx);
+            }))
+        } else {
+            None
+        };
+        hints.push((label.into(), handler));
+    }
+
+    if !plan.menu.is_empty() {
+        let handler: Option<FooterHintClickHandler> = on_open_menu.map(|open| {
+            Box::new(
+                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                    open(window, cx);
+                },
+            ) as FooterHintClickHandler
+        });
+        hints.push(("⌘K Options".into(), handler));
+    }
+
+    if plan.dismissible {
+        let handler: Option<FooterHintClickHandler> = handlers.on_dismiss.clone().map(|dismiss| {
+            Box::new(
+                move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                    dismiss(window, cx);
+                },
+            ) as FooterHintClickHandler
+        });
+        hints.push(("esc Dismiss".into(), handler));
+    }
+
+    Some(render_clickable_footer_hint_action_rail(
+        AI_RECOVERY_FOOTER_ID,
+        hints,
+    ))
+}
+
+/// Semantic id for the recovery footer rail, so `getElements` can find the
+/// actions after they left the card.
+pub const AI_RECOVERY_FOOTER_ID: &str = "ai-recovery-footer";
 
 fn recovery_tone_icon(colors: SemanticChipColors) -> Div {
     div()

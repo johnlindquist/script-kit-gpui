@@ -11626,12 +11626,17 @@ impl AgentChatView {
                 }
             })),
         };
+        // The card is the message. Its actions live in the shared footer rail
+        // below it, never as loose buttons inside the conversation.
+        let plan = crate::ai::reliability::plan_recovery_presentation(&spec);
+        let footer = crate::components::render_ai_recovery_footer(&plan, &handlers, None);
         div()
             .id("agent-chat-recovery-stack")
             .w_full()
             .px(px(12.0))
             .pb(px(6.0))
-            .child(render_ai_recovery_card(spec, &theme, handlers))
+            .child(render_ai_recovery_card(spec, &theme))
+            .children(footer)
             .into_any_element()
     }
 

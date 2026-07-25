@@ -77,9 +77,10 @@ mod unified_list_item_tests;
 
 // Re-export commonly used types
 pub use ai_recovery::{
-    decide_recovery_key, recovery_semantic_tree, render_ai_recovery_card, AiRecoveryActionHandler,
+    ai_recovery_footer_hint_labels, decide_recovery_key, recovery_semantic_tree,
+    render_ai_recovery_card, render_ai_recovery_footer, AiRecoveryActionHandler,
     AiRecoveryCardHandlers, AiRecoveryDismissHandler, AiRecoveryFocusTarget, AiRecoveryKey,
-    AiRecoveryKeyDecision, AiRecoverySemanticNode,
+    AiRecoveryKeyDecision, AiRecoverySemanticNode, AI_RECOVERY_FOOTER_ID,
 };
 #[allow(unused_imports)]
 pub use alias_input::{AliasInput, AliasInputAction, AliasInputColors};
