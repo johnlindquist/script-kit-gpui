@@ -13,7 +13,6 @@ use anyhow::{anyhow, Result};
 use gpui::{App, AsyncApp};
 
 use super::ax::{get_window_position, get_window_size};
-use super::cache::get_cached_window;
 use super::query::{get_frontmost_window_of_previous_app, has_accessibility_permission};
 use super::snap_mode::{current_snap_mode, SnapMode};
 use super::snap_runtime::{finish_snap_runtime, is_snap_runtime_active, start_snap_runtime};
@@ -51,7 +50,9 @@ fn arm_state_for_window(window: &WindowInfo) -> DragArmState {
 }
 
 fn poll_armed_window_bounds(window_id: u32) -> Option<Bounds> {
-    let window = get_cached_window(window_id)?;
+    // Poll path: registry lookup only, no refresh — this runs at 16 ms cadence.
+    let handle = super::registry::resolve_legacy_window_id(window_id).ok()?;
+    let window = super::registry::retained_window(handle).ok()?;
     let (x, y) = get_window_position(window.as_ptr()).ok()?;
     let (width, height) = get_window_size(window.as_ptr()).ok()?;
     Some(Bounds::new(x, y, width, height))

@@ -4,12 +4,31 @@ use tracing::{info, instrument};
 use super::ax::{
     get_ax_attribute, get_window_position, perform_ax_action, set_window_position, set_window_size,
 };
-use super::cache::get_cached_window;
+use super::cache::OwnedCachedWindowRef;
 use super::cf::{cf_release, try_create_cf_string};
 use super::display::get_visible_display_bounds;
 use super::ffi::{kAXErrorSuccess, AXUIElementRef, AXUIElementSetAttributeValue, CFTypeRef};
-use super::query::list_windows;
-use super::types::{Bounds, TilePosition};
+use super::types::{Bounds, TilePosition, WindowObservation};
+
+/// Resolve a legacy numeric ID to its current observation + retained AX ref.
+///
+/// On a miss, refreshes the registry once and retries. PID and all authority
+/// come from the OBSERVATION — never decoded from the numeric ID.
+pub(super) fn resolve_action_target(
+    window_id: u32,
+) -> Result<(WindowObservation, OwnedCachedWindowRef)> {
+    fn attempt(window_id: u32) -> Result<(WindowObservation, OwnedCachedWindowRef)> {
+        let handle = super::registry::resolve_legacy_window_id(window_id)?;
+        let observation = super::registry::resolve_handle(handle)?;
+        let window = super::registry::retained_window(handle)?;
+        Ok((observation, window))
+    }
+
+    attempt(window_id).or_else(|_| {
+        let _ = super::registry::refresh_window_registry();
+        attempt(window_id)
+    })
+}
 
 /// Tile a window to a predefined position on the screen.
 pub fn tile_window(window_id: u32, position: TilePosition) -> Result<()> {
@@ -37,13 +56,7 @@ pub fn move_to_previous_display(window_id: u32) -> Result<()> {
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub fn move_window(window_id: u32, x: i32, y: i32) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            // Try to refresh the cache
-            let _ = list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = resolve_action_target(window_id)?;
 
     set_window_position(window.as_ptr(), x, y)?;
     info!(window_id, x, y, "Moved window");
@@ -61,12 +74,7 @@ pub fn move_window(window_id: u32, x: i32, y: i32) -> Result<()> {
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub fn resize_window(window_id: u32, width: u32, height: u32) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = resolve_action_target(window_id)?;
 
     set_window_size(window.as_ptr(), width, height)?;
     info!(window_id, width, height, "Resized window");
@@ -83,12 +91,7 @@ pub fn resize_window(window_id: u32, width: u32, height: u32) -> Result<()> {
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub fn set_window_bounds(window_id: u32, bounds: Bounds) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = resolve_action_target(window_id)?;
 
     // Set position first, then size
     set_window_position(window.as_ptr(), bounds.x, bounds.y)?;
@@ -114,12 +117,7 @@ pub fn set_window_bounds(window_id: u32, bounds: Bounds) -> Result<()> {
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub fn minimize_window(window_id: u32) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = resolve_action_target(window_id)?;
 
     // Use AXMinimized attribute to minimize
     let minimize_attr = try_create_cf_string("AXMinimized")?;
@@ -162,12 +160,7 @@ pub fn minimize_window(window_id: u32) -> Result<()> {
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub fn maximize_window(window_id: u32) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = resolve_action_target(window_id)?;
 
     // Get current position to determine which display the window is on
     let (current_x, current_y) = get_window_position(window.as_ptr()).unwrap_or((0, 0));
@@ -195,12 +188,7 @@ pub fn maximize_window(window_id: u32) -> Result<()> {
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub fn close_window(window_id: u32) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = resolve_action_target(window_id)?;
 
     // Get the close button and press it
     if let Ok(close_button) = get_ax_attribute(window.as_ptr(), "AXCloseButton") {
@@ -223,18 +211,14 @@ pub fn close_window(window_id: u32) -> Result<()> {
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub fn focus_window(window_id: u32) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (observation, window) = resolve_action_target(window_id)?;
 
     // Raise the window
     perform_ax_action(window.as_ptr(), "AXRaise")?;
 
-    // Also activate the owning application
-    let pid = (window_id >> 16) as i32;
+    // Also activate the owning application. PID comes from the OBSERVATION,
+    // never decoded from the numeric window ID.
+    let pid = observation.handle.pid;
 
     // SAFETY: Standard objc messaging to NSWorkspace/NSRunningApplication.
     // We iterate running apps to find the one matching our PID, then activate it.

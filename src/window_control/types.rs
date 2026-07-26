@@ -1,8 +1,6 @@
 use core_graphics::display::CGRect;
 use std::path::PathBuf;
 
-use super::AXUIElementRef;
-
 /// Represents the bounds (position and size) of a window
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Bounds {
@@ -184,9 +182,9 @@ pub struct WindowInfo {
     pub is_on_current_space: bool,
     /// Precomputed native descriptor for list rows and receipts.
     pub descriptor: String,
-    /// The AXUIElement reference (internal, for operations)
+    /// The registry handle backing this row (internal, for operations).
     #[doc(hidden)]
-    ax_window: Option<usize>, // Store as usize to avoid lifetime issues
+    pub(crate) handle: WindowHandle,
 }
 
 pub(super) struct WindowInfoInit {
@@ -205,7 +203,7 @@ pub(super) struct WindowInfoInit {
     pub is_main: bool,
     pub is_minimized: bool,
     pub is_on_current_space: bool,
-    pub ax_window: Option<usize>,
+    pub handle: WindowHandle,
 }
 
 /// Provider state for root unified window search.
@@ -255,7 +253,7 @@ impl WindowInfo {
             is_minimized: init.is_minimized,
             is_on_current_space: init.is_on_current_space,
             descriptor,
-            ax_window: init.ax_window,
+            handle: init.handle,
         }
     }
 
@@ -278,7 +276,12 @@ impl WindowInfo {
             is_main: false,
             is_minimized: false,
             is_on_current_space: true,
-            ax_window: None,
+            handle: WindowHandle {
+                pid,
+                native_window_id: None,
+                registry_generation: 0,
+                nonce: 0,
+            },
         })
     }
 
@@ -287,9 +290,9 @@ impl WindowInfo {
         format!("window:{app_key}:{}:{}", self.pid, self.id)
     }
 
-    /// Get the internal window reference for operations
-    fn window_ref(&self) -> Option<AXUIElementRef> {
-        self.ax_window.map(|ptr| ptr as AXUIElementRef)
+    /// The registry handle backing this row.
+    pub(crate) fn handle(&self) -> WindowHandle {
+        self.handle
     }
 }
 

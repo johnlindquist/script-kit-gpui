@@ -14,13 +14,14 @@ use super::ax::{
     get_ax_attribute, get_window_bool_attribute, get_window_position, get_window_size,
     get_window_string_attribute,
 };
-use super::cache::{cache_window, clear_window_cache};
+use super::cache::CachedAxRef;
 use super::cf::{cf_release, cf_retain};
 use super::ffi::{
     AXUIElementCreateApplication, AXUIElementRef, CFArrayGetCount, CFArrayGetValueAtIndex,
     CFArrayRef, CFEqual,
 };
-use super::types::{Bounds, WindowInfo, WindowInfoInit};
+use super::registry::{SearchScope, StagedWindow};
+use super::types::{Bounds, NativeIdConfidence, SearchVisibility, WindowCapabilities, WindowInfo};
 
 #[derive(Clone)]
 struct RunningAppMetadata {
@@ -82,17 +83,23 @@ pub fn request_accessibility_permission() -> bool {
 ///
 #[instrument]
 pub fn list_windows() -> Result<Vec<WindowInfo>> {
-    if let Some(windows) = super::test_support::provider_window_infos()? {
-        return Ok(windows);
+    if super::test_support::is_active() {
+        super::registry::refresh_from_test_provider()?;
+    } else {
+        if !has_accessibility_permission() {
+            bail!("Accessibility permission required for window control");
+        }
+        super::registry::refresh_from_system()?;
     }
+    Ok(super::registry::window_infos(SearchScope::Ordinary))
+}
 
-    if !has_accessibility_permission() {
-        bail!("Accessibility permission required for window control");
-    }
-
-    // Clear the cache before listing
-    clear_window_cache();
-
+/// Enumerate live windows into staged registry rows.
+///
+/// Preserves the historical enumeration exactly: regular-activation apps,
+/// titled AX windows at least 50×50, `(pid << 16) | index` base IDs, then
+/// CoreGraphics-only rows for other-Space windows with synthetic base IDs.
+pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
     let mut windows = Vec::new();
     let mut running_apps_by_pid = HashMap::<i32, RunningAppMetadata>::new();
 
@@ -114,7 +121,6 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
         } else {
             msg_send![frontmost_app, processIdentifier]
         };
-        let mut global_order = 0usize;
 
         for i in 0..app_count {
             let app: *mut Object = msg_send![running_apps, objectAtIndex: i];
@@ -196,8 +202,9 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
                         continue;
                     }
 
-                    // Create a unique window ID: (pid << 16) | window_index
-                    let window_id = ((pid as u32) << 16) | (j as u32);
+                    // Historical base ID: (pid << 16) | window_index. The
+                    // registry allocates the final non-rebinding legacy ID.
+                    let base_legacy_id = ((pid as u32) << 16) | (j as u32);
                     let window_ref = ax_window as AXUIElementRef;
                     let is_focused =
                         focused_window.is_some_and(|focused| CFEqual(window_ref as _, focused));
@@ -205,14 +212,13 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
                     let is_minimized =
                         get_window_bool_attribute(window_ref, "AXMinimized").unwrap_or(false);
 
-                    // Retain the window ref before caching - CFArrayGetValueAtIndex returns
-                    // a borrowed reference, so we need to retain it to extend its lifetime
-                    // beyond when we release windows_value
-                    let retained_window = cf_retain(ax_window);
-                    cache_window(window_id, retained_window as AXUIElementRef);
+                    // CFArrayGetValueAtIndex returns a borrowed reference;
+                    // CachedAxRef::from_borrowed retains it exactly once.
+                    let Some(ax) = CachedAxRef::from_borrowed(window_ref) else {
+                        continue;
+                    };
 
-                    windows.push(WindowInfo::new(WindowInfoInit {
-                        id: window_id,
+                    windows.push(StagedWindow {
                         app: app_name_str.clone(),
                         title,
                         bounds: Bounds::new(x, y, width, height),
@@ -221,15 +227,30 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
                         app_path: app_path.clone(),
                         app_order: i,
                         window_index: j as usize,
-                        global_order,
                         is_frontmost_app,
                         is_focused,
                         is_main,
                         is_minimized,
                         is_on_current_space: true,
-                        ax_window: Some(retained_window as usize),
-                    }));
-                    global_order = global_order.wrapping_add(1);
+                        role: None,
+                        subrole: None,
+                        native_window_id: None,
+                        native_id_confidence: NativeIdConfidence::Unavailable,
+                        base_legacy_id,
+                        ax: Some(ax),
+                        capabilities: WindowCapabilities {
+                            can_move: true,
+                            can_resize: true,
+                            can_minimize: true,
+                            can_close: true,
+                            can_raise: true,
+                            can_set_fullscreen: false,
+                            actionable: true,
+                            non_actionable_reason: None,
+                        },
+                        search_visibility: SearchVisibility::Ordinary,
+                        provider_match_key: None,
+                    });
                 }
 
                 // Release windows_value - AXUIElementCopyAttributeValue returns an owned
@@ -256,14 +277,13 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
 }
 
 fn append_core_graphics_windows(
-    windows: &mut Vec<WindowInfo>,
+    windows: &mut Vec<StagedWindow>,
     running_apps_by_pid: &HashMap<i32, RunningAppMetadata>,
 ) {
     let Ok(cg_windows) = list_core_graphics_windows_all_spaces() else {
         return;
     };
 
-    let mut global_order = windows.len();
     for (index, cg_window) in cg_windows.into_iter().enumerate() {
         let Some(app) = running_apps_by_pid.get(&cg_window.pid) else {
             continue;
@@ -272,9 +292,8 @@ fn append_core_graphics_windows(
             continue;
         }
 
-        let id = synthetic_window_id_for_core_graphics_window(&cg_window, windows);
-        windows.push(WindowInfo::new(WindowInfoInit {
-            id,
+        let base_legacy_id = ((cg_window.pid as u32) << 16) | (cg_window.native_window_id & 0xffff);
+        windows.push(StagedWindow {
             app: app.app.clone(),
             title: cg_window.title,
             bounds: cg_window.bounds,
@@ -283,31 +302,26 @@ fn append_core_graphics_windows(
             app_path: app.app_path.clone(),
             app_order: app.app_order,
             window_index: index,
-            global_order,
             is_frontmost_app: app.is_frontmost_app,
             is_focused: false,
             is_main: false,
             is_minimized: false,
             is_on_current_space: cg_window.is_on_current_space,
-            ax_window: None,
-        }));
-        global_order = global_order.wrapping_add(1);
+            role: None,
+            subrole: None,
+            native_window_id: Some(cg_window.native_window_id),
+            native_id_confidence: NativeIdConfidence::UniquePublicCorrelation,
+            base_legacy_id,
+            ax: None,
+            capabilities: WindowCapabilities::non_actionable("core_graphics_only"),
+            search_visibility: SearchVisibility::Ordinary,
+            provider_match_key: None,
+        });
     }
-}
-
-fn synthetic_window_id_for_core_graphics_window(
-    cg_window: &CoreGraphicsWindowInfo,
-    existing: &[WindowInfo],
-) -> u32 {
-    let mut id = ((cg_window.pid as u32) << 16) | (cg_window.native_window_id & 0xffff);
-    while existing.iter().any(|window| window.id == id) {
-        id = id.wrapping_add(1);
-    }
-    id
 }
 
 fn window_matches_existing_ax_row(
-    windows: &[WindowInfo],
+    windows: &[StagedWindow],
     cg_window: &CoreGraphicsWindowInfo,
 ) -> bool {
     windows.iter().any(|window| {
@@ -649,7 +663,8 @@ pub fn get_frontmost_window_of_previous_app() -> Result<Option<WindowInfo>> {
         // Release ax_app - we're done with it
         cf_release(ax_app);
 
-        // If we found a target window, build WindowInfo for it
+        // If we found a target window, reconcile it with the registry so the
+        // returned WindowInfo always carries a current-generation handle.
         if let Some(window_ref) = target_window {
             let ax_window = window_ref as AXUIElementRef;
 
@@ -661,30 +676,20 @@ pub fn get_frontmost_window_of_previous_app() -> Result<Option<WindowInfo>> {
             // Get app name for logging
             let app_name = get_app_name_for_pid(target_pid);
 
-            // Create a window ID (focused window uses index 0)
-            let window_id = (target_pid as u32) << 16;
+            // The AX resolution above produced an OWNED reference (Copy API
+            // or explicit retain); transfer ownership to the registry.
+            let Some(ax) = CachedAxRef::from_owned(ax_window) else {
+                warn!(target_pid, "Previous-app window ref was null");
+                return Ok(None);
+            };
 
-            // Cache the window reference for subsequent operations
-            cache_window(window_id, ax_window);
-
-            let window_info = WindowInfo::new(WindowInfoInit {
-                id: window_id,
-                app: app_name.clone(),
-                title: title.clone(),
-                bounds: Bounds::new(x, y, width, height),
-                pid: target_pid,
-                bundle_id: None,
-                app_path: None,
-                app_order: 0,
-                window_index: 0,
-                global_order: 0,
-                is_frontmost_app: true,
-                is_focused: true,
-                is_main: true,
-                is_minimized: false,
-                is_on_current_space: true,
-                ax_window: Some(window_ref as usize),
-            });
+            let window_info = super::registry::upsert_previous_app_window(
+                target_pid,
+                app_name.clone(),
+                title.clone(),
+                Bounds::new(x, y, width, height),
+                ax,
+            );
 
             debug!(
                 window_id = window_info.id,

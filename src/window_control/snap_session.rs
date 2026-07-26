@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use super::ax::{get_window_position, get_window_size};
-use super::cache::get_cached_window;
 use super::display::{get_all_display_bounds, get_visible_display_bounds};
 use super::snap::{
     best_snap_match, build_snap_targets_for_mode, dominant_display_for_window, SnapMatch,
@@ -200,7 +199,9 @@ pub fn begin_snap_session() -> Result<SnapSession> {
 ///
 /// Returns `None` if the window is no longer accessible (e.g., closed).
 pub fn poll_window_bounds(session: &SnapSession) -> Option<Bounds> {
-    let window = get_cached_window(session.window_id)?;
+    // Poll path: registry lookup only, no refresh — this runs at 16 ms cadence.
+    let handle = super::registry::resolve_legacy_window_id(session.window_id).ok()?;
+    let window = super::registry::retained_window(handle).ok()?;
     let (x, y) = get_window_position(window.as_ptr()).ok()?;
     let (w, h) = get_window_size(window.as_ptr()).ok()?;
     Some(Bounds::new(x, y, w, h))

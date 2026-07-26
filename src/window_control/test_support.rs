@@ -358,11 +358,24 @@ pub(crate) fn provider_window_infos() -> Result<Option<Vec<WindowInfo>>> {
                 is_main: window.main,
                 is_minimized: window.minimized,
                 is_on_current_space: window.definition.current_space.unwrap_or(true),
-                ax_window: None,
+                handle: super::types::WindowHandle {
+                    pid: window.pid,
+                    native_window_id: window
+                        .definition
+                        .native_window_id
+                        .map(super::types::NativeWindowId),
+                    registry_generation: 0,
+                    nonce: 0,
+                },
             })
         })
         .collect();
     Ok(Some(infos))
+}
+
+/// Snapshot of every live provider window (registry staging input).
+pub(crate) fn provider_states() -> Result<Vec<ProviderWindowState>> {
+    with_state(|state| state.windows.clone())
 }
 
 /// Snapshot of one provider window used by observation and verification.

@@ -1,8 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::{info, instrument};
 
 use super::ax::{get_window_position, get_window_size, set_window_position, set_window_size};
-use super::cache::get_cached_window;
 use super::display::{get_all_display_bounds, get_visible_display_bounds};
 use super::types::*;
 
@@ -16,12 +15,7 @@ use super::types::*;
 /// Returns error if window not found or operation fails.
 #[instrument]
 pub(super) fn tile_window(window_id: u32, position: TilePosition) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = super::list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = super::actions::resolve_action_target(window_id)?;
 
     // Get current position to determine which display the window is on
     let (current_x, current_y) = get_window_position(window.as_ptr()).unwrap_or((0, 0));
@@ -52,12 +46,7 @@ pub(super) fn move_to_previous_display(window_id: u32) -> Result<()> {
 
 /// Internal helper to move window to adjacent display
 pub(super) fn move_to_adjacent_display(window_id: u32, next: bool) -> Result<()> {
-    let window = get_cached_window(window_id)
-        .or_else(|| {
-            let _ = super::list_windows();
-            get_cached_window(window_id)
-        })
-        .context("Window not found")?;
+    let (_observation, window) = super::actions::resolve_action_target(window_id)?;
 
     let (current_x, current_y) = get_window_position(window.as_ptr()).unwrap_or((0, 0));
     let (current_width, current_height) = get_window_size(window.as_ptr()).unwrap_or((800, 600));

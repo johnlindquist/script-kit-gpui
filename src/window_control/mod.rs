@@ -28,6 +28,7 @@ mod display;
 mod ffi;
 mod identity;
 mod query;
+mod registry;
 mod snap;
 mod snap_mode;
 mod snap_monitor;
