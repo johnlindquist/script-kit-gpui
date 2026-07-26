@@ -28,6 +28,7 @@ mod cf;
 mod diagnostics;
 mod display;
 mod display_topology;
+mod executor;
 mod ffi;
 mod geometry;
 mod identity;
@@ -46,7 +47,10 @@ mod snap_runtime;
 mod snap_session;
 mod test_support;
 mod tiling;
+mod transaction;
 mod types;
+mod undo;
+mod verification;
 
 use ffi::AXUIElementRef;
 

@@ -146,6 +146,17 @@ pub fn resolve_handle(handle: WindowHandle) -> Result<WindowObservation> {
     Ok(entry.observation.clone())
 }
 
+/// Resolve a nonce to its current-generation observation (undo targeting).
+pub(crate) fn resolve_nonce(nonce: u64) -> Result<WindowObservation> {
+    let state = REGISTRY.read();
+    state
+        .entries
+        .values()
+        .find(|entry| entry.observation.handle.nonce == nonce)
+        .map(|entry| entry.observation.clone())
+        .with_context(|| format!("no current window with nonce {nonce}"))
+}
+
 /// Independently retained AX reference for a current-generation handle.
 pub(crate) fn retained_window(handle: WindowHandle) -> Result<OwnedCachedWindowRef> {
     let state = REGISTRY.read();
