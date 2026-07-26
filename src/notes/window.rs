@@ -247,6 +247,7 @@ struct NotesEntryReveal {
     settle_duration_ms: u64,
     reveal_delay_ms: u64,
     morph_started: bool,
+    morph_start_alpha_bits: Option<u64>,
     completed_frame_count: u8,
     first_frame_at_monotonic_ns: Option<u64>,
     reveal_anchor_at_monotonic_ns: Option<u64>,
@@ -273,6 +274,7 @@ impl NotesEntryReveal {
             settle_duration_ms: 0,
             reveal_delay_ms: 0,
             morph_started: false,
+            morph_start_alpha_bits: None,
             completed_frame_count: 0,
             first_frame_at_monotonic_ns: None,
             reveal_anchor_at_monotonic_ns: None,
@@ -323,6 +325,7 @@ impl NotesEntryReveal {
         settle_duration_ms: u64,
         reveal_delay_ms: u64,
         morph_started: bool,
+        morph_start_alpha_bits: Option<u64>,
     ) {
         self.native_window_number = Some(window_number);
         self.native_configured = configured;
@@ -336,6 +339,7 @@ impl NotesEntryReveal {
         self.settle_duration_ms = settle_duration_ms;
         self.reveal_delay_ms = reveal_delay_ms;
         self.morph_started = morph_started;
+        self.morph_start_alpha_bits = morph_start_alpha_bits;
     }
 
     fn cancel(&mut self) -> u64 {

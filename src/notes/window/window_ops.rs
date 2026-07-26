@@ -88,6 +88,7 @@ struct NotesNativeEntryConfig {
     settle_duration_ms: u64,
     settled_crossing_delay_ms: u64,
     morph_started: bool,
+    morph_start_alpha_bits: Option<u64>,
 }
 
 fn notes_entry_owner_is_current(
@@ -182,6 +183,7 @@ fn schedule_notes_entry_reveal(
                 settle_duration_ms,
                 reveal_delay_ms,
                 native.morph_started,
+                native.morph_start_alpha_bits,
             );
         } else {
             app.entry_reveal.record_native_configuration(
@@ -200,6 +202,7 @@ fn schedule_notes_entry_reveal(
                 settle_duration_ms,
                 reveal_delay_ms,
                 false,
+                None,
             );
         }
         let configured = app
@@ -1879,6 +1882,7 @@ fn configure_notes_as_floating_panel(gpui_window: &gpui::Window) -> Option<Notes
             settle_duration_ms: receipt.settle_duration_ms,
             settled_crossing_delay_ms: receipt.settled_crossing_delay_ms,
             morph_started: receipt.morph_started,
+            morph_start_alpha_bits: receipt.morph_start_alpha_bits,
         })
     }
 }

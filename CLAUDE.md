@@ -127,7 +127,15 @@ the measurement page https://eager-hollow-dyyf.here.now/):
   and an Actions/popup `94% → 101.5% → 100%` path — Spotlight's measured max
   undershoot is `−1.3%` of TOTAL width; the earlier `97%`/`103%` mid-points
   had doubled the measurement via a per-side ×2 and read rubbery;
-- entry start alpha `0.0`, animated to `1.0` during phase one;
+- visible entry start alpha `0.85` (retuned from `0.0` on 2026-07-25,
+  authorized by HITL submission `98cab5e5-6f15-4311-8d49-83e31602e641` /
+  Oracle plan `floating-capsule-entry-material`: NSWindow alpha multiplies
+  every contributed pixel, so visible entry frames at low alpha displayed
+  mostly wallpaper), animated to `1.0` during phase one; truly hidden
+  parking (window ordered out) stays alpha `0.0` via
+  `GLASS_HIDDEN_PARK_ALPHA`, and zero-alpha parking of a visible window is
+  a contract violation (runtime tripwire
+  `glass_hidden_park_on_visible_window`);
 - vertical damping `0.4`, squish factor `0.25` (per side, of the inset,
   clamped `0.006–0.015`), squish hold `0.05s`, phase-one fraction `0.5`;
 - Notes body reveal is derived from the calibrated geometry: it starts at the

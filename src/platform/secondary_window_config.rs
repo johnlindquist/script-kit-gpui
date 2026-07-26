@@ -20,6 +20,9 @@ pub(crate) struct NativeGlassEntryReceipt {
     pub(crate) style_applied: bool,
     pub(crate) style_signature: NativeGlassStyleSignature,
     pub(crate) morph_started: bool,
+    /// `f64::to_bits` of the visible entry start alpha the morph launched
+    /// with (bits keep the receipt `Eq`). `None` when no morph ran.
+    pub(crate) morph_start_alpha_bits: Option<u64>,
     pub(crate) settle_duration_ms: u64,
     /// Time from native morph start until phase one first crosses the final
     /// window size. Content can begin revealing here and finish during rebound.
@@ -105,14 +108,27 @@ const GLASS_MORPH_MIN_DURATION: f64 = 0.02;
 const GLASS_MORPH_MIN_INSET: f64 = 0.005;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_DURATION: f64 = 2.0;
-/// Hide the deliberately exaggerated calibration frame until it starts moving.
+/// Visible entry start alpha for EVERY entry variant (WindowFrame,
+/// ContentLayer, FadeOnly).
 ///
-/// The main window and child popups intentionally begin on opposite sides of
-/// their final geometry. At full alpha those calibration frames read as a huge
-/// launcher and a tiny Actions menu. Fade the owning window in with phase one
-/// so the measured geometry remains unchanged without exposing either extreme.
+/// NSWindow.alphaValue multiplies every pixel the window contributes, so at
+/// 0.0 the user sees pure wallpaper where UI should be — the compositor
+/// blends `screen = a*window + (1-a)*desktop` and the early entry frames
+/// were up to 100% desktop. 0.85 is the lowest evidence-backed start that
+/// keeps every displayed entry frame within the <=5 dE00 color budget while
+/// still softening the deliberately exaggerated calibration start frame.
+///
+/// Calibration note: this is the ONE value the color-consistency premise
+/// unlocked (HITL submission 98cab5e5-6f15-4311-8d49-83e31602e641; Oracle
+/// plan `floating-capsule-entry-material` step 3). Every other Glass Motion
+/// Calibration Lock value is untouched. Do not alias this to a theme token.
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 0.0;
+const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 0.85;
+/// Alpha for TRULY HIDDEN parking only (window ordered out between shows).
+/// Zero-alpha parking of a visible window is a contract violation — the
+/// park helpers runtime-check `isVisible == false` before applying this.
+#[cfg(target_os = "macos")]
+const GLASS_HIDDEN_PARK_ALPHA: f64 = 0.0;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_INSET: f64 = 0.4;
 #[cfg(target_os = "macos")]
@@ -496,6 +512,17 @@ unsafe fn cancel_pending_glass_window_selectors(window: id) {
 
 #[cfg(target_os = "macos")]
 unsafe fn cancel_ns_window_exit_dematerialize(window: id) -> bool {
+    cancel_ns_window_exit_dematerialize_impl(window, true)
+}
+
+/// Cancel a pending exit. `restore_alpha = true` is the public
+/// cancellation/recovery contract (the window must end up presentable at
+/// full alpha). Entry animation passes `restore_alpha = false`: restoring
+/// 1.0 before the start frame is installed would flash a full-alpha extreme
+/// calibration frame — the entry path owns alpha and applies
+/// `tuning.start_alpha` BEFORE installing the start geometry.
+#[cfg(target_os = "macos")]
+unsafe fn cancel_ns_window_exit_dematerialize_impl(window: id, restore_alpha: bool) -> bool {
     if window == nil {
         return false;
     }
@@ -528,7 +555,9 @@ unsafe fn cancel_ns_window_exit_dematerialize(window: id) -> bool {
             let _: () = msg_send![layer, removeAllAnimations];
         }
     }
-    let _: () = msg_send![window, setAlphaValue: 1.0f64];
+    if restore_alpha {
+        let _: () = msg_send![window, setAlphaValue: 1.0f64];
+    }
     true
 }
 
@@ -720,6 +749,11 @@ unsafe fn configure_window_vibrancy_common(
         style_applied,
         style_signature,
         morph_started: glass_created && morph_tuning.is_some(),
+        morph_start_alpha_bits: if glass_created {
+            morph_tuning.map(|tuning| tuning.start_alpha.to_bits())
+        } else {
+            None
+        },
         settle_duration_ms: if glass_created {
             morph_tuning
                 .map(|tuning| (tuning.duration * 1000.0).round() as u64)
@@ -1804,7 +1838,19 @@ unsafe fn park_hidden_window_for_glass_morph(window: id) {
     if duration < 0.02 || inset < 0.005 {
         return; // morph disabled: leave alpha untouched
     }
-    let _: () = msg_send![window, setAlphaValue: 0.0f64];
+    // Zero-alpha parking is legal ONLY for a window that is not presented.
+    // A visible window at alpha zero is wallpaper where UI should be — the
+    // exact defect the visible-entry alpha policy forbids.
+    let is_visible: bool = msg_send![window, isVisible];
+    if is_visible {
+        tracing::error!(
+            target: "script_kit::native_glass",
+            event = "glass_hidden_park_on_visible_window",
+            "glass_hidden_park_on_visible_window"
+        );
+        return;
+    }
+    let _: () = msg_send![window, setAlphaValue: GLASS_HIDDEN_PARK_ALPHA];
 }
 
 /// True when a morph started within the last 700ms. Rapid re-shows would
@@ -1862,11 +1908,17 @@ pub fn glass_morph_remaining() -> Option<std::time::Duration> {
     None
 }
 
-/// Park a sibling GPUI window (footer overlay) at alpha 0 when a glass
-/// morph is in flight, returning how long until it should fade back in.
-/// The overlay is a separate NSWindow that tracks the main window's frame;
-/// without this it appears instantly at full alpha and visibly chases the
-/// animating frame.
+/// Park a sibling GPUI window (footer overlay) while a glass morph is in
+/// flight, returning how long until it should fade back in. The overlay is a
+/// separate NSWindow that tracks the main window's frame; without this it
+/// appears instantly at full alpha and visibly chases the animating frame.
+///
+/// Parking means NOT PRESENTED: the window is ordered out for the interval,
+/// and only then parked at the hidden alpha. Leaving a visible window on
+/// screen at alpha zero is prohibited (wallpaper where UI should be), so the
+/// old visible zero-alpha park was replaced by this orderOut-based park.
+/// [`restore_gpui_window_alpha_animated`] re-presents it and keeps the
+/// locked 0.12s fade.
 #[cfg(target_os = "macos")]
 pub fn park_gpui_window_alpha_if_morphing(window: &gpui::Window) -> Option<std::time::Duration> {
     let remaining = glass_morph_remaining()?;
@@ -1881,7 +1933,20 @@ pub fn park_gpui_window_alpha_if_morphing(window: &gpui::Window) -> Option<std::
         if ns_window.is_null() {
             return None;
         }
-        let _: () = msg_send![ns_window, setAlphaValue: 0.0f64];
+        let _: () = msg_send![ns_window, orderOut: nil];
+        let is_visible: bool = msg_send![ns_window, isVisible];
+        if is_visible {
+            // Could not take the window off screen (e.g. still attached as a
+            // child). Zero-alpha visible parking is prohibited — leave alpha
+            // alone and let the entry fade own it.
+            tracing::error!(
+                target: "script_kit::native_glass",
+                event = "glass_hidden_park_on_visible_window",
+                "glass_hidden_park_on_visible_window"
+            );
+            return Some(remaining);
+        }
+        let _: () = msg_send![ns_window, setAlphaValue: GLASS_HIDDEN_PARK_ALPHA];
     }
     Some(remaining)
 }
@@ -1891,7 +1956,9 @@ pub fn park_gpui_window_alpha_if_morphing(_window: &gpui::Window) -> Option<std:
     None
 }
 
-/// Fade a previously parked sibling window back in (short ease-out).
+/// Re-present a previously parked sibling window and fade it back in (locked
+/// 0.12s ease-out). The park orders the window out, so restore orders it back
+/// in (without activating) before the fade.
 #[cfg(target_os = "macos")]
 pub fn restore_gpui_window_alpha_animated(window: &gpui::Window) {
     let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
@@ -1907,6 +1974,7 @@ pub fn restore_gpui_window_alpha_animated(window: &gpui::Window) {
         if ns_window.is_null() {
             return;
         }
+        let _: () = msg_send![ns_window, orderFrontRegardless];
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
         let _: () = msg_send![ctx, setDuration: 0.12f64];
@@ -1930,7 +1998,9 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
         return;
     };
     let fade = (tuning.duration * GLASS_MORPH_FADE_FRACTION).max(GLASS_MORPH_MIN_FADE_DURATION);
-    let _: () = msg_send![window, setAlphaValue: 0.0f64];
+    // Same visible-entry start policy as the frame-based variants: a visible
+    // window never starts below tuning.start_alpha.
+    let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
     record_native_glass_entry_span(window, fade);
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
@@ -1950,10 +2020,11 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s start_alpha={:.2}",
             window_name,
             GlassMorphVariant::FadeOnly.log_name(),
-            fade
+            fade,
+            tuning.start_alpha
         ),
     );
 }
@@ -2085,8 +2156,10 @@ unsafe fn animate_tahoe_glass_appearance_directed(
 
     // Every show is an exit supersession boundary. Invalidate delayed removal,
     // cancel old settle/order-out callbacks, and clear common-ancestor effects
-    // before preparing the next entry frame.
-    cancel_ns_window_exit_dematerialize(window);
+    // before preparing the next entry frame. Alpha is PRESERVED here: the
+    // restoring cancel would flash a full-alpha extreme frame before the
+    // start alpha and start geometry are installed below.
+    cancel_ns_window_exit_dematerialize_impl(window, false);
 
     // The hide path parks the window at alpha 0 so no show path can flash a
     // full-alpha frame. Every early exit below must therefore restore alpha,
@@ -2149,8 +2222,10 @@ unsafe fn animate_tahoe_glass_appearance_directed(
         object: nil
     ];
 
-    let _: () = msg_send![window, setFrame: start display: true];
+    // Alpha BEFORE geometry: the extreme calibration frame must never be
+    // displayed above the visible-entry start alpha.
     let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
+    let _: () = msg_send![window, setFrame: start display: true];
     record_native_glass_entry_span(window, tuning.duration);
 
     // Record the in-flight duration so sibling windows (footer overlay) can
@@ -3472,7 +3547,11 @@ mod secondary_window_config_tests {
         let epsilon = 1e-12;
         assert!((tuning.start_scale_x - 1.06).abs() < epsilon);
         assert!((tuning.start_scale_y - 1.024).abs() < epsilon);
-        assert!((tuning.start_alpha - 0.0).abs() < epsilon);
+        // Visible entry starts at 0.85 — the ONE calibration value unlocked
+        // by the color-consistency premise (HITL submission
+        // 98cab5e5-6f15-4311-8d49-83e31602e641): at 0.0 the compositor showed
+        // pure wallpaper on visible entry frames.
+        assert!((tuning.start_alpha - 0.85).abs() < epsilon);
         assert!((tuning.squish_scale_x - 0.985).abs() < epsilon);
         assert!((tuning.squish_scale_y - 0.994).abs() < epsilon);
         assert!((tuning.phase1 - 0.14).abs() < epsilon);
@@ -3502,7 +3581,13 @@ mod secondary_window_config_tests {
         assert!(
             (inset - f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)).abs() < epsilon
         );
-        assert_eq!(super::GLASS_MORPH_ENTRY_START_ALPHA, 0.0);
+        // Entry start alpha retuned 0.0 -> 0.85 on 2026-07-25 (authorized by
+        // HITL submission 98cab5e5-6f15-4311-8d49-83e31602e641, Oracle plan
+        // floating-capsule-entry-material): visible windows must never start
+        // at alpha 0. Hidden parking keeps 0.0 via GLASS_HIDDEN_PARK_ALPHA.
+        // Every other value below is the untouched locked calibration.
+        assert_eq!(super::GLASS_MORPH_ENTRY_START_ALPHA, 0.85);
+        assert_eq!(super::GLASS_HIDDEN_PARK_ALPHA, 0.0);
         assert_eq!(super::GLASS_MORPH_VERTICAL_DAMPING, 0.4);
         assert_eq!(super::GLASS_MORPH_SQUISH_FACTOR, 0.25);
         assert_eq!(super::GLASS_MORPH_SQUISH_HOLD, 0.05);

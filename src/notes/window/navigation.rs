@@ -571,6 +571,7 @@ impl NotesApp {
                 "settleDurationMs": self.entry_reveal.settle_duration_ms,
                 "revealDelayMs": self.entry_reveal.reveal_delay_ms,
                 "morphStarted": self.entry_reveal.morph_started,
+                "morphStartAlphaBits": self.entry_reveal.morph_start_alpha_bits,
                 "completedFrameCount": self.entry_reveal.completed_frame_count,
                 "firstFrameAtMonotonicNs": self.entry_reveal.first_frame_at_monotonic_ns,
                 "revealAnchorAtMonotonicNs": self.entry_reveal.reveal_anchor_at_monotonic_ns,
