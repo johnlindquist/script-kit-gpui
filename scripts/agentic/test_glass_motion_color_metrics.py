@@ -24,31 +24,59 @@ motion = load_module("glass-motion-color-metrics.py", "glass_motion_color_metric
 contrast = load_module("glass-contrast-metrics.py", "glass_contrast_metrics")
 
 
-def frame(phase: str, material_a=(90, 100, 110), material_b=(100, 110, 120)):
+def frame(
+    phase: str,
+    material_a=(90, 100, 110),
+    material_b=(100, 110, 120),
+    *,
+    window_alpha: float = 1.0,
+    intrinsic_a=None,
+    intrinsic_b=None,
+    intrinsic_eligible: bool = True,
+    sequence=None,
+):
     capsules = [
         {
             "id": "a",
             "stageMedianRgb": (70, 80, 90),
-            "materialMedianRgb": material_a,
+            "displayedMaterialMedianRgb": material_a,
+            "intrinsicMaterialMedianRgb": (
+                intrinsic_a if intrinsic_a is not None else material_a
+            ),
         },
         {
             "id": "b",
             "stageMedianRgb": (90, 100, 110),
-            "materialMedianRgb": material_b,
+            "displayedMaterialMedianRgb": material_b,
+            "intrinsicMaterialMedianRgb": (
+                intrinsic_b if intrinsic_b is not None else material_b
+            ),
         },
     ]
     for capsule in capsules:
         capsule["stageDeltaE00"] = contrast.delta_e_2000(
-            contrast.rgb_to_lab(capsule["materialMedianRgb"]),
+            contrast.rgb_to_lab(capsule["displayedMaterialMedianRgb"]),
             contrast.rgb_to_lab(capsule["stageMedianRgb"]),
         )
     return {
         "phase": phase,
+        "sequence": sequence,
+        "windowAlpha": window_alpha,
+        "displayedColorEligible": True,
+        "intrinsicDiagnosticEligible": intrinsic_eligible,
         "capsules": capsules,
         "minimumMedianBoundaryLuminanceDifference": 0.050,
         "minimumP10BoundaryLuminanceDifference": 0.020,
         "minimumFractionAtLeast015": 0.90,
     }
+
+
+ENTRY_GATES = dict(
+    minimum_samples=motion.MIN_VISIBLE_ENTRY_MOTION_FRAMES,
+    maximum_gate=motion.MAX_DISPLAYED_ENTRY_DELTA_E00,
+    relation_drift_gate=motion.MAX_CAPSULE_STAGE_RELATION_DRIFT_DELTA_E00,
+)
+DRAG_GATES = dict(minimum_samples=1, maximum_gate=8.0, p95_gate=5.0)
 
 
 class MaterialStabilityTests(unittest.TestCase):
@@ -80,8 +108,8 @@ class MaterialStabilityTests(unittest.TestCase):
         rows = [frame("motion") for _ in range(15)] + [
             frame("settled") for _ in range(3)
         ]
-        stability, _, neighboring, errors = motion.material_stability_summary(
-            rows, ["a", "b"], contrast
+        stability, _, neighboring, _, _, errors = motion.displayed_color_summary(
+            rows, ["a", "b"], contrast, **DRAG_GATES
         )
         self.assertEqual(errors, [])
         self.assertTrue(all(result["pass"] for result in stability.values()))
@@ -92,32 +120,156 @@ class MaterialStabilityTests(unittest.TestCase):
         rows = [frame("motion") for _ in range(14)]
         rows.append(frame("motion", material_a=(255, 0, 255)))
         rows.extend(frame("settled") for _ in range(3))
-        stability, _, _, errors = motion.material_stability_summary(
-            rows, ["a", "b"], contrast
+        stability, _, _, _, _, errors = motion.displayed_color_summary(
+            rows, ["a", "b"], contrast, **DRAG_GATES
         )
         self.assertEqual(errors, [])
         self.assertFalse(stability["a"]["pass"])
         rows[0]["minimumP10BoundaryLuminanceDifference"] = 0.014
         self.assertFalse(motion.boundary_pass_every_frame(rows))
 
-    def test_entry_stability_excludes_recorded_subopaque_fade_but_not_opaque_motion(self):
-        faded = frame("motion", material_a=(255, 0, 255))
-        faded["materialStabilityEligible"] = False
-        opaque = frame("motion")
-        opaque["materialStabilityEligible"] = True
-        rows = [faded, opaque] + [frame("settled") for _ in range(3)]
-        stability, _, _, errors = motion.material_stability_summary(
-            rows, ["a", "b"], contrast
+    # ---- Negative controls for the removed alpha blind spot (Oracle step 1).
+    # The old metric excluded sub-opaque visible frames from the gating summary
+    # (materialStabilityEligible = windowAlpha >= 0.85), which certified the
+    # exact defect under measurement. These tests make that regression loud.
+
+    def test_visible_subopaque_wallpaper_shift_fails_despite_stable_intrinsic(self):
+        # Displayed pixels at alpha 0.20 are dragged toward the wallpaper even
+        # though the recovered INTRINSIC material is perfectly stable. The
+        # acceptance verdict must come from what the user saw: FAIL.
+        wallpaper_shifted = frame(
+            "motion",
+            material_a=(178, 100, 54),
+            intrinsic_a=(90, 100, 110),
+            window_alpha=0.20,
+            sequence=5,
+        )
+        rows = (
+            [frame("motion", sequence=index) for index in range(5)]
+            + [wallpaper_shifted]
+            + [frame("settled") for _ in range(3)]
+        )
+        summary, _, _, global_max, _, errors = motion.displayed_color_summary(
+            rows, ["a", "b"], contrast, **ENTRY_GATES
         )
         self.assertEqual(errors, [])
-        self.assertEqual(stability["a"]["rawMotionSampleCount"], 2)
-        self.assertEqual(stability["a"]["motionSampleCount"], 1)
-        self.assertTrue(stability["a"]["pass"])
-        opaque["capsules"][0]["materialMedianRgb"] = (255, 0, 255)
-        stability, _, _, _ = motion.material_stability_summary(
+        self.assertFalse(summary["a"]["pass"])
+        self.assertGreater(
+            summary["a"]["motionMaximumDeltaE00"],
+            motion.MAX_DISPLAYED_ENTRY_DELTA_E00,
+        )
+        # The global maximum includes the sub-opaque frame — it can never be
+        # smoothed away by the stable neighbors.
+        self.assertGreater(global_max, motion.MAX_DISPLAYED_ENTRY_DELTA_E00)
+        # The intrinsic diagnostic sees the stable internal material, and is
+        # non-gating by construction: it carries NO pass verdict at all.
+        diagnostic = motion.intrinsic_material_diagnostic(
             rows, ["a", "b"], contrast
         )
-        self.assertFalse(stability["a"]["pass"])
+        self.assertLess(diagnostic["a"]["motionMaximumDeltaE00"], 1.0)
+        self.assertNotIn("pass", diagnostic["a"])
+        self.assertNotIn("pass", diagnostic["b"])
+
+    def test_subopaque_visible_frames_count_as_displayed_samples(self):
+        # Eligibility is lifecycle visibility, never a window-alpha floor.
+        # Reintroducing `windowAlpha >= 0.85` sample eligibility drops the
+        # low-alpha sample and shrinks the maximum, failing both assertions.
+        rows = (
+            [frame("motion", sequence=index) for index in range(5)]
+            + [
+                frame(
+                    "motion",
+                    material_a=(178, 100, 54),
+                    window_alpha=0.20,
+                    sequence=5,
+                )
+            ]
+            + [frame("settled") for _ in range(3)]
+        )
+        summary, _, _, global_max, _, errors = motion.displayed_color_summary(
+            rows, ["a", "b"], contrast, **ENTRY_GATES
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(summary["a"]["motionSampleCount"], 6)
+        self.assertGreater(global_max, motion.MAX_DISPLAYED_ENTRY_DELTA_E00)
+
+    def test_relation_drift_gate_fails_a_capsule_that_melts_into_the_stage(self):
+        # Material color may match the settled reference while the capsule's
+        # relation to its LOCAL stage collapses (capsule melting into the
+        # backdrop mid-fade). The drift gate catches that independently.
+        melted = frame("motion", sequence=5)
+        for capsule in melted["capsules"]:
+            capsule["stageDeltaE00"] = capsule["stageDeltaE00"] + 9.0
+        rows = (
+            [frame("motion", sequence=index) for index in range(5)]
+            + [melted]
+            + [frame("settled") for _ in range(3)]
+        )
+        summary, _, _, _, max_drift, errors = motion.displayed_color_summary(
+            rows, ["a", "b"], contrast, **ENTRY_GATES
+        )
+        self.assertEqual(errors, [])
+        self.assertFalse(summary["a"]["pass"])
+        self.assertGreater(
+            max_drift, motion.MAX_CAPSULE_STAGE_RELATION_DRIFT_DELTA_E00
+        )
+
+    def test_classify_entry_frame_alpha_zero_semantics(self):
+        # alpha 0 + invisible: pre-contributing, not a failure, no color math.
+        self.assertEqual(motion.classify_entry_frame(0.0, False), "precontributing")
+        # alpha 0 + visible region: wallpaper where UI should be — hard fail.
+        self.assertEqual(
+            motion.classify_entry_frame(0.0, True), "visibleZeroAlpha"
+        )
+        # visible but below the floor: policy fail, still measured.
+        self.assertEqual(motion.classify_entry_frame(0.20, True), "belowFloor")
+        self.assertEqual(
+            motion.classify_entry_frame(
+                motion.MIN_VISIBLE_ENTRY_ALPHA - 0.01, True
+            ),
+            "belowFloor",
+        )
+        self.assertEqual(
+            motion.classify_entry_frame(motion.MIN_VISIBLE_ENTRY_ALPHA, True),
+            "measurable",
+        )
+        self.assertEqual(motion.classify_entry_frame(0.90, False), "precontributing")
+
+    def test_alpha_recovery_is_undefined_at_zero_alpha(self):
+        # The recovery function must reject alpha 0 outright — a zero-alpha
+        # frame has no defined intrinsic color, so nothing upstream may ever
+        # "recover" one into the diagnostic.
+        image = Image.new("RGB", (2, 1), (10, 10, 10))
+        with self.assertRaises(ValueError):
+            motion.recover_content_before_window_alpha(image, image.copy(), 0.0)
+
+    def test_alpha_policy_hard_fails_are_not_erasable(self):
+        clean = motion.alpha_policy_summary(
+            [(0, 0.85), (1, 0.90), (2, 1.0)], [], [], []
+        )
+        self.assertTrue(clean["pass"])
+        self.assertEqual(clean["firstVisibleEntryAlpha"], 0.85)
+        self.assertEqual(clean["minimumVisibleEntryAlpha"], 0.85)
+        below_floor = motion.alpha_policy_summary(
+            [(0, 0.20), (1, 1.0)], [0], [], []
+        )
+        self.assertFalse(below_floor["pass"])
+        zero_alpha = motion.alpha_policy_summary([(0, 0.0)], [], [0], [])
+        self.assertFalse(zero_alpha["pass"])
+        # A lifecycle-visible frame whose geometry could not be measured is a
+        # hard failure that survives into the receipt — it cannot disappear
+        # into a "pre-visible" bucket.
+        unmeasurable = motion.alpha_policy_summary(
+            [(0, 0.90)],
+            [],
+            [],
+            [{"sequence": 0, "reason": "unmeasurableVisibleEntryFrame: x"}],
+        )
+        self.assertFalse(unmeasurable["pass"])
+        self.assertEqual(unmeasurable["unmeasurableVisibleFrameCount"], 1)
+        self.assertEqual(
+            unmeasurable["unmeasurableVisibleFrames"][0]["sequence"], 0
+        )
 
     def test_entry_projection_reproduces_footer_autoresizing_anchors(self):
         appkit = {
@@ -250,16 +402,26 @@ class MaterialStabilityTests(unittest.TestCase):
                                         "sequence": 0,
                                         "path": str(paths[0]),
                                         "windowBounds": [[0, 0], [10, 10]],
-                                    }
+                                    },
+                                    {
+                                        "sequence": 1,
+                                        "path": str(paths[0]),
+                                        "windowBounds": [[0, 0], [10, 10]],
+                                    },
                                 ]
                             },
                             "metrics": {
                                 "frames": [
                                     {
                                         "sequence": 0,
+                                        "stageVisible": False,
+                                        "footerVisible": False,
+                                    },
+                                    {
+                                        "sequence": 1,
                                         "stageVisible": True,
                                         "footerVisible": True,
-                                    }
+                                    },
                                 ]
                             },
                         },
@@ -284,7 +446,14 @@ class MaterialStabilityTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(
                 [frame["_phase"] for frame in frames],
-                ["motion", "settled", "settled", "settled"],
+                ["motion", "motion", "settled", "settled", "settled"],
+            )
+            # Lifecycle-invisible frames are RETAINED with visibility
+            # annotations — visibility is data for the alpha policy, never a
+            # silent exclusion filter.
+            self.assertEqual(
+                [frame.get("_entryVisible") for frame in frames],
+                [False, True, None, None, None],
             )
 
 

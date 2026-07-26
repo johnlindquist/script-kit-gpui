@@ -13,8 +13,72 @@ from pathlib import Path
 
 from PIL import Image
 
-MIN_ANALYZABLE_ENTRY_ALPHA = 0.15
-MIN_ENTRY_MATERIAL_STABILITY_ALPHA = 0.85
+# The acceptance metric grades what the user SEES: raw compositor pixels on
+# every lifecycle-visible entry frame. Alpha recovery is a secondary,
+# NON-GATING diagnostic answering "was the internal material itself stable?"
+# (Oracle plan `floating-capsule-entry-material`, step 1 — the old
+# MIN_ENTRY_MATERIAL_STABILITY_ALPHA floor excluded the very frames the
+# complaint was about, certifying the defect by construction.)
+MIN_INTRINSIC_RECOVERY_ALPHA = 0.15
+MIN_VISIBLE_ENTRY_ALPHA = 0.85
+MIN_VISIBLE_ENTRY_MOTION_FRAMES = 5
+MAX_DISPLAYED_ENTRY_DELTA_E00 = 5.0
+MAX_CAPSULE_STAGE_RELATION_DRIFT_DELTA_E00 = 5.0
+
+
+def classify_entry_frame(window_alpha: float, entry_visible: bool) -> str:
+    """Alpha-zero semantics, exactly (Oracle step 1):
+
+    - ``alpha == 0`` and nothing visible: the frame exists before the window
+      contributes pixels. Not a failure; no color is calculated; the recovery
+      function is never called (division by zero has no defined color).
+    - ``alpha == 0`` with a visible region: hard failure
+      (``visibleRegionAtZeroWindowAlpha``) — the user is looking at pure
+      wallpaper where UI should be.
+    - ``0 < alpha < MIN_VISIBLE_ENTRY_ALPHA`` with a visible region: hard
+      failure of the visible-alpha policy, but the raw displayed color is
+      STILL measured — never silently excluded.
+    - otherwise: an ordinary measurable visible frame.
+    """
+    if window_alpha == 0:
+        return "precontributing" if not entry_visible else "visibleZeroAlpha"
+    if not entry_visible:
+        return "precontributing"
+    if window_alpha < MIN_VISIBLE_ENTRY_ALPHA:
+        return "belowFloor"
+    return "measurable"
+
+
+def alpha_policy_summary(
+    visible_alphas: list[tuple[int | None, float]],
+    below_floor_sequences: list[int | None],
+    zero_alpha_visible_sequences: list[int | None],
+    unmeasurable_visible_frames: list[dict],
+) -> dict:
+    """The explicit visible-entry alpha policy receipt.
+
+    ``visible_alphas`` is ``(sequence, windowAlpha)`` for every
+    lifecycle-visible motion frame in sequence order (including below-floor
+    and zero-alpha frames — nothing visible is ever dropped from the policy).
+    """
+    return {
+        "requiredMinimumVisibleEntryAlpha": MIN_VISIBLE_ENTRY_ALPHA,
+        "firstVisibleEntryAlpha": (
+            visible_alphas[0][1] if visible_alphas else None
+        ),
+        "minimumVisibleEntryAlpha": (
+            min(alpha for _, alpha in visible_alphas) if visible_alphas else None
+        ),
+        "visibleFramesBelowAlphaFloor": below_floor_sequences,
+        "visibleZeroAlphaFrames": zero_alpha_visible_sequences,
+        "unmeasurableVisibleFrames": unmeasurable_visible_frames,
+        "unmeasurableVisibleFrameCount": len(unmeasurable_visible_frames),
+        "pass": (
+            not below_floor_sequences
+            and not zero_alpha_visible_sequences
+            and not unmeasurable_visible_frames
+        ),
+    }
 
 
 def load_contrast_module():
@@ -27,30 +91,28 @@ def load_contrast_module():
     return module
 
 
-def material_stability_summary(
+def displayed_color_summary(
     frame_rows: list[dict],
     capsule_ids: list[str],
     metrics,
-) -> tuple[dict[str, dict], dict[str, float], float, list[str]]:
+    *,
+    minimum_samples: int,
+    maximum_gate: float,
+    p95_gate: float | None = None,
+    relation_drift_gate: float | None = None,
+) -> tuple[dict[str, dict], dict[str, tuple], float, float, float, list[str]]:
+    """PRIMARY, GATING summary over RAW displayed pixels.
+
+    Every motion row with ``displayedColorEligible`` participates — eligibility
+    is lifecycle visibility, NEVER a window-alpha floor. The global maximum
+    therefore includes the very first visible frame.
+    """
     errors: list[str] = []
-    stability: dict[str, dict] = {}
+    capsules_summary: dict[str, dict] = {}
     settled_reference_labs: list[tuple[float, float, float]] = []
+    global_maximum_residual = 0.0
+    global_maximum_relation_drift = 0.0
     for capsule_id in capsule_ids:
-        motion_sample_count = sum(
-            row["phase"] == "motion"
-            and row.get("materialStabilityEligible", True)
-            and any(
-                capsule["id"] == capsule_id for capsule in row["capsules"]
-            )
-            for row in frame_rows
-        )
-        raw_motion_sample_count = sum(
-            row["phase"] == "motion"
-            and any(
-                capsule["id"] == capsule_id for capsule in row["capsules"]
-            )
-            for row in frame_rows
-        )
         settled_rows = [
             next(
                 (capsule for capsule in row["capsules"] if capsule["id"] == capsule_id),
@@ -65,7 +127,7 @@ def material_stability_summary(
             settled_reference_labs.append((math.inf, math.inf, math.inf))
             continue
         settled_labs = [
-            metrics.rgb_to_lab(tuple(row["materialMedianRgb"]))
+            metrics.rgb_to_lab(tuple(row["displayedMaterialMedianRgb"]))
             for row in settled_rows
         ]
         settled_reference = tuple(
@@ -73,7 +135,11 @@ def material_stability_summary(
             for index in range(3)
         )
         settled_reference_labs.append(settled_reference)
-        residuals = []
+        settled_relation = statistics.median(
+            row["stageDeltaE00"] for row in settled_rows
+        )
+        residuals: list[float] = []
+        relation_drifts: list[float] = []
         for row in frame_rows:
             capsule = next(
                 (item for item in row["capsules"] if item["id"] == capsule_id),
@@ -81,26 +147,44 @@ def material_stability_summary(
             )
             if capsule is None:
                 continue
-            actual_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
+            actual_lab = metrics.rgb_to_lab(
+                tuple(capsule["displayedMaterialMedianRgb"])
+            )
             residual = metrics.delta_e_2000(actual_lab, settled_reference)
             capsule["settledReferenceLab"] = settled_reference
-            capsule["settledReferenceDeltaE00"] = residual
-            if (
-                row["phase"] == "motion"
-                and row.get("materialStabilityEligible", True)
-            ):
+            capsule["displayedSettledReferenceDeltaE00"] = residual
+            relation_drift = abs(capsule["stageDeltaE00"] - settled_relation)
+            capsule["stageRelationDriftDeltaE00"] = relation_drift
+            if row["phase"] == "motion" and row.get("displayedColorEligible", True):
                 residuals.append(residual)
-        stability[capsule_id] = {
+                relation_drifts.append(relation_drift)
+        maximum_residual = max(residuals, default=math.inf)
+        maximum_relation_drift = max(relation_drifts, default=math.inf)
+        if residuals:
+            global_maximum_residual = max(global_maximum_residual, maximum_residual)
+            global_maximum_relation_drift = max(
+                global_maximum_relation_drift, maximum_relation_drift
+            )
+        capsule_pass = (
+            len(residuals) >= minimum_samples
+            and maximum_residual <= maximum_gate
+        )
+        if p95_gate is not None:
+            capsule_pass = capsule_pass and (
+                metrics.percentile(residuals, 0.95) <= p95_gate
+            )
+        if relation_drift_gate is not None:
+            capsule_pass = capsule_pass and (
+                maximum_relation_drift <= relation_drift_gate
+            )
+        capsules_summary[capsule_id] = {
             "settledReferenceLab": settled_reference,
-            "rawMotionSampleCount": raw_motion_sample_count,
-            "motionSampleCount": motion_sample_count,
+            "settledStageRelationDeltaE00": settled_relation,
+            "motionSampleCount": len(residuals),
             "motionP95DeltaE00": metrics.percentile(residuals, 0.95),
-            "motionMaximumDeltaE00": max(residuals, default=math.inf),
-            "pass": (
-                motion_sample_count >= 1
-                and metrics.percentile(residuals, 0.95) <= 5.0
-                and max(residuals, default=math.inf) <= 8.0
-            ),
+            "motionMaximumDeltaE00": maximum_residual,
+            "maximumStageRelationDriftDeltaE00": maximum_relation_drift,
+            "pass": capsule_pass,
         }
     settled_references = dict(zip(capsule_ids, settled_reference_labs))
     neighboring_relation_differences = [
@@ -114,11 +198,86 @@ def material_stability_summary(
         neighboring_relation_differences, default=0
     )
     return (
-        stability,
+        capsules_summary,
         settled_references,
         maximum_neighbor_relation_difference,
+        global_maximum_residual,
+        global_maximum_relation_drift,
         errors,
     )
+
+
+def intrinsic_material_diagnostic(
+    frame_rows: list[dict],
+    capsule_ids: list[str],
+    metrics,
+) -> dict[str, dict]:
+    """Secondary, NON-GATING diagnostic on alpha-recovered internal material.
+
+    Answers "was the material itself stable behind the fade?" for frames whose
+    window alpha permits meaningful recovery (>= MIN_INTRINSIC_RECOVERY_ALPHA).
+    Deliberately carries NO ``pass`` field: acceptance is decided only by the
+    displayed-color summary. Missing recovery data is a gap in the diagnostic,
+    never an acceptance error.
+    """
+    diagnostic: dict[str, dict] = {}
+    for capsule_id in capsule_ids:
+        settled_rows = [
+            next(
+                (capsule for capsule in row["capsules"] if capsule["id"] == capsule_id),
+                None,
+            )
+            for row in frame_rows
+            if row["phase"] == "settled"
+        ]
+        settled_rows = [
+            row
+            for row in settled_rows
+            if row is not None and row.get("intrinsicMaterialMedianRgb") is not None
+        ][-3:]
+        if len(settled_rows) != 3:
+            diagnostic[capsule_id] = {
+                "settledReferenceLab": None,
+                "motionSampleCount": 0,
+                "motionP95DeltaE00": None,
+                "motionMaximumDeltaE00": None,
+                "note": "insufficient settled intrinsic samples",
+            }
+            continue
+        settled_labs = [
+            metrics.rgb_to_lab(tuple(row["intrinsicMaterialMedianRgb"]))
+            for row in settled_rows
+        ]
+        settled_reference = tuple(
+            statistics.median(item[index] for item in settled_labs)
+            for index in range(3)
+        )
+        residuals: list[float] = []
+        for row in frame_rows:
+            capsule = next(
+                (item for item in row["capsules"] if item["id"] == capsule_id),
+                None,
+            )
+            if capsule is None or capsule.get("intrinsicMaterialMedianRgb") is None:
+                continue
+            actual_lab = metrics.rgb_to_lab(
+                tuple(capsule["intrinsicMaterialMedianRgb"])
+            )
+            residual = metrics.delta_e_2000(actual_lab, settled_reference)
+            capsule["intrinsicSettledReferenceDeltaE00"] = residual
+            if row["phase"] == "motion" and row.get(
+                "intrinsicDiagnosticEligible", False
+            ):
+                residuals.append(residual)
+        diagnostic[capsule_id] = {
+            "settledReferenceLab": settled_reference,
+            "motionSampleCount": len(residuals),
+            "motionP95DeltaE00": (
+                metrics.percentile(residuals, 0.95) if residuals else None
+            ),
+            "motionMaximumDeltaE00": max(residuals, default=None),
+        }
+    return diagnostic
 
 
 def boundary_pass_every_frame(frame_rows: list[dict]) -> bool:
@@ -457,18 +616,24 @@ def lifecycle_entry_frames(
         row.get("sequence"): row
         for row in filmstrip.get("metrics", {}).get("frames", [])
     }
-    visible_frames: list[dict] = []
+    # Keep EVERY filmstrip frame. Visibility is an annotation the alpha policy
+    # and per-frame classification consume — never a silent exclusion filter.
+    motion_frames: list[dict] = []
+    visible_count = 0
     for frame in frames:
         metric = metric_rows.get(frame.get("sequence"), {})
-        if not metric.get("stageVisible") or not metric.get("footerVisible"):
-            continue
         row = dict(frame)
         row["_lifecycleMetrics"] = metric
+        row["_stageVisible"] = bool(metric.get("stageVisible"))
+        row["_footerVisible"] = bool(metric.get("footerVisible"))
+        row["_entryVisible"] = row["_stageVisible"] or row["_footerVisible"]
         row["_phase"] = "motion"
-        visible_frames.append(row)
-    if len(visible_frames) < 1:
+        if row["_entryVisible"]:
+            visible_count += 1
+        motion_frames.append(row)
+    if visible_count < 1:
         errors.append(
-            f"{scenario_name}: expected visible entry material frames, found {len(visible_frames)}"
+            f"{scenario_name}: expected visible entry material frames, found {visible_count}"
         )
     settled_frames = []
     for frame in scenario.get("settledCaptures", []):
@@ -480,7 +645,7 @@ def lifecycle_entry_frames(
             f"{scenario_name}: expected exactly three valid explicit settled captures"
         )
     return (
-        visible_frames + settled_frames,
+        motion_frames + settled_frames,
         scenario.get("settledLayout", {}).get("fidelity", {}).get("appKit", {}),
         scenario.get("captureBounds", {}),
         errors,
@@ -562,33 +727,6 @@ def main() -> int:
         capture_bounds = {}
         reference_path = None
         reference_image = None
-    motion_frames = [
-        frame
-        for frame in frames
-        if frame.get("_phase") == "motion"
-        or frame.get("phase") == "motion"
-        or (
-            frame.get("_phase") is None
-            and float(frame.get("fraction", 0)) < 1
-        )
-    ]
-    settled_frames = [
-        frame
-        for frame in frames
-        if frame.get("_phase") == "settled"
-        or frame.get("phase") == "settled"
-        or (
-            frame.get("_phase") is None
-            and float(frame.get("fraction", 0)) > 1
-        )
-    ]
-    minimum_motion_frames = 1 if entry_mode else 15
-    if len(motion_frames) < minimum_motion_frames or len(settled_frames) < 3:
-        errors.append(
-            f"expected at least {minimum_motion_frames} motion + 3 settled frames, found "
-            f"{len(motion_frames)} + {len(settled_frames)}"
-        )
-
     host_width = float(appkit.get("footerContainerFrame", {}).get("width", 0))
     backdrop = appkit.get("mainBackdropFrame")
     foreground_nodes = appkit.get("nodes", [])
@@ -600,18 +738,63 @@ def main() -> int:
         errors.append(f"expected at least two visible capsules, found {len(capsule_nodes)}")
 
     frame_rows: list[dict] = []
-    previsible_entry_frames: list[dict] = []
+    precontributing_entry_frames: list[dict] = []
+    unmeasurable_visible_frames: list[dict] = []
+    visible_alphas: list[tuple[int | None, float]] = []
+    below_floor_sequences: list[int | None] = []
+    zero_alpha_visible_sequences: list[int | None] = []
     for frame in frames:
         image_path = Path(frame.get("path", "")).resolve()
         if not image_path.exists():
             errors.append(f"filmstrip frame missing: {image_path}")
             continue
         image = Image.open(image_path).convert("RGB")
-        analysis_image = image
+        display_image = image
+        intrinsic_image: Image.Image | None = image
         frame_appkit = appkit
         frame_foreground_nodes = foreground_nodes
         frame_capsule_nodes = capsule_nodes
         frame_backdrop = backdrop
+        phase = frame.get("_phase") or (
+            "motion" if float(frame.get("fraction", 0)) < 1 else "settled"
+        )
+        window_alpha = float(
+            frame["windowAlpha"]
+            if frame.get("windowAlpha") is not None
+            else (0.0 if entry_mode and phase == "motion" else 1.0)
+        )
+        entry_visible = bool(frame.get("_entryVisible", True))
+        classification = (
+            classify_entry_frame(window_alpha, entry_visible)
+            if entry_mode and phase == "motion"
+            else "measurable"
+        )
+        if entry_mode and phase == "motion" and entry_visible:
+            visible_alphas.append((frame.get("sequence"), window_alpha))
+        if classification == "precontributing":
+            # The window does not contribute pixels yet. Not a failure; no
+            # color exists to grade, and the alpha-recovery function is never
+            # called (alpha 0 has no defined intrinsic color).
+            precontributing_entry_frames.append(
+                {
+                    "sequence": frame.get("sequence"),
+                    "path": str(image_path),
+                    "sha256": frame.get("sha256"),
+                    "windowAlpha": window_alpha,
+                    "reason": "window not yet contributing pixels",
+                }
+            )
+            continue
+        if classification == "visibleZeroAlpha":
+            # Hard policy failure: the lifecycle sees a region while the
+            # window multiplies every pixel by zero — the user is looking at
+            # wallpaper where UI should be. No window color exists to measure.
+            zero_alpha_visible_sequences.append(frame.get("sequence"))
+            continue
+        if classification == "belowFloor":
+            # Hard policy failure recorded in the alpha policy — but the raw
+            # displayed color is STILL measured below. Never silently excluded.
+            below_floor_sequences.append(frame.get("sequence"))
         if entry_mode:
             reported_bounds = window_bounds_tuple(frame.get("windowBounds"))
             if reported_bounds is None:
@@ -635,22 +818,22 @@ def main() -> int:
                     image.size,
                 )
             except ValueError as error:
-                window_alpha = float(frame.get("windowAlpha") or 0)
-                if (
-                    window_alpha <= MIN_ANALYZABLE_ENTRY_ALPHA
-                    and "rendered stage" in str(error)
-                ):
-                    previsible_entry_frames.append(
+                if phase == "motion":
+                    # A lifecycle-VISIBLE frame whose geometry cannot be
+                    # recovered is a hard failure. It must never be relabeled
+                    # as pre-visible — that relabeling was the old metric's
+                    # blind spot.
+                    unmeasurable_visible_frames.append(
                         {
                             "sequence": frame.get("sequence"),
                             "path": str(image_path),
                             "sha256": frame.get("sha256"),
                             "windowAlpha": window_alpha,
-                            "reason": str(error),
+                            "reason": f"unmeasurableVisibleEntryFrame: {error}",
                         }
                     )
-                    continue
-                errors.append(f"{image_path}: {error}")
+                else:
+                    errors.append(f"{image_path}: {error}")
                 continue
             frame_foreground_nodes = frame_appkit.get("nodes", [])
             frame_capsule_nodes = metrics.node_capsules(
@@ -660,16 +843,21 @@ def main() -> int:
             host_width = float(
                 frame_appkit.get("footerContainerFrame", {}).get("width", 0)
             )
-            window_alpha = float(frame.get("windowAlpha") or 0)
-            try:
-                analysis_image = recover_content_before_window_alpha(
-                    image,
-                    reference_image,
-                    window_alpha,
-                )
-            except ValueError as error:
-                errors.append(f"{image_path}: {error}")
-                continue
+            if window_alpha >= MIN_INTRINSIC_RECOVERY_ALPHA:
+                try:
+                    intrinsic_image = recover_content_before_window_alpha(
+                        image,
+                        reference_image,
+                        window_alpha,
+                    )
+                except ValueError as error:
+                    errors.append(f"{image_path}: {error}")
+                    continue
+            else:
+                # Below the recovery floor, division by alpha amplifies noise
+                # past usefulness. The frame still counts for the DISPLAYED
+                # acceptance metric; only the intrinsic diagnostic skips it.
+                intrinsic_image = None
         scale = image.width / host_width if host_width > 0 else 0
         if scale <= 0:
             continue
@@ -677,24 +865,52 @@ def main() -> int:
         unmeasured_capsules: list[dict] = []
         for node in frame_capsule_nodes:
             try:
-                capsules.append(
-                    metrics.capsule_metrics(
-                        analysis_image, node, scale, frame_foreground_nodes
-                    )
+                displayed_capsule = metrics.capsule_metrics(
+                    display_image, node, scale, frame_foreground_nodes
                 )
             except ValueError as error:
                 unmeasured_capsules.append(
                     {"id": node.get("id"), "reason": str(error)}
                 )
-        if unmeasured_capsules and frame.get("_phase") == "settled":
+                continue
+            displayed_capsule["displayedMaterialMedianRgb"] = (
+                displayed_capsule.pop("materialMedianRgb")
+            )
+            if intrinsic_image is not None:
+                try:
+                    intrinsic_capsule = metrics.capsule_metrics(
+                        intrinsic_image, node, scale, frame_foreground_nodes
+                    )
+                    displayed_capsule["intrinsicMaterialMedianRgb"] = (
+                        intrinsic_capsule["materialMedianRgb"]
+                    )
+                except ValueError:
+                    displayed_capsule["intrinsicMaterialMedianRgb"] = None
+            else:
+                displayed_capsule["intrinsicMaterialMedianRgb"] = None
+            capsules.append(displayed_capsule)
+        if unmeasured_capsules and phase == "settled":
             errors.append(
                 f"settled entry frame has unmeasured capsules: {unmeasured_capsules}"
+            )
+        if entry_mode and phase == "motion" and unmeasured_capsules:
+            unmeasurable_visible_frames.append(
+                {
+                    "sequence": frame.get("sequence"),
+                    "path": str(image_path),
+                    "sha256": frame.get("sha256"),
+                    "windowAlpha": window_alpha,
+                    "reason": (
+                        "unmeasurableVisibleEntryFrame: capsules "
+                        f"{unmeasured_capsules}"
+                    ),
+                }
             )
         _, stage_y, _, stage_height = metrics.frame_pixels(
             frame_backdrop, scale, image.height
         )
         stage_pixels = [
-            analysis_image.getpixel((x, y))
+            display_image.getpixel((x, y))
             for y in range(
                 stage_y + max(8, stage_height - round(40 * scale)),
                 stage_y + stage_height - 8,
@@ -711,10 +927,12 @@ def main() -> int:
         stage_rgb = metrics.median_rgb(stage_pixels)
         for capsule in capsules:
             local_rgb = metrics.local_stage_rgb(
-                analysis_image, capsule, frame_backdrop, scale
+                display_image, capsule, frame_backdrop, scale
             )
             stage_lab = metrics.rgb_to_lab(local_rgb)
-            material_lab = metrics.rgb_to_lab(tuple(capsule["materialMedianRgb"]))
+            material_lab = metrics.rgb_to_lab(
+                tuple(capsule["displayedMaterialMedianRgb"])
+            )
             capsule["stageMedianRgb"] = local_rgb
             capsule["stageDeltaE00"] = metrics.delta_e_2000(material_lab, stage_lab)
             capsule["stageAbsoluteLStarDifference"] = abs(
@@ -728,18 +946,15 @@ def main() -> int:
                 "renderedWindowBounds": (
                     rendered_bounds_evidence if entry_mode else None
                 ),
-                "windowAlpha": frame.get("windowAlpha"),
-                "windowAlphaRemovedForMaterialMetrics": entry_mode,
-                "materialStabilityEligible": (
-                    not entry_mode
-                    or float(frame.get("windowAlpha") or 0)
-                    >= MIN_ENTRY_MATERIAL_STABILITY_ALPHA
-                ),
-                "phase": frame.get("_phase")
-                or ("motion" if float(frame.get("fraction", 0)) < 1 else "settled"),
+                "windowAlpha": window_alpha,
+                "classification": classification,
+                "entryVisible": entry_visible,
+                "displayedColorEligible": True,
+                "intrinsicDiagnosticEligible": intrinsic_image is not None,
+                "phase": phase,
                 "path": str(image_path),
                 "sha256": frame.get("sha256"),
-                "stageMedianRgb": stage_rgb,
+                "displayedStageMedianRgb": stage_rgb,
                 "capsules": capsules,
                 "unmeasuredCapsules": unmeasured_capsules,
                 "maximumStageDeltaE00": max(
@@ -769,17 +984,65 @@ def main() -> int:
         )
 
     capsule_ids = [str(node.get("id")) for node in capsule_nodes]
-    (
-        material_stability,
-        settled_references,
-        maximum_neighbor_relation_difference,
-        stability_errors,
-    ) = material_stability_summary(
-        frame_rows,
-        capsule_ids,
-        metrics,
+    if entry_mode:
+        (
+            displayed_capsules_summary,
+            settled_references,
+            maximum_neighbor_relation_difference,
+            maximum_displayed_entry_delta,
+            maximum_relation_drift,
+            displayed_errors,
+        ) = displayed_color_summary(
+            frame_rows,
+            capsule_ids,
+            metrics,
+            minimum_samples=MIN_VISIBLE_ENTRY_MOTION_FRAMES,
+            maximum_gate=MAX_DISPLAYED_ENTRY_DELTA_E00,
+            relation_drift_gate=MAX_CAPSULE_STAGE_RELATION_DRIFT_DELTA_E00,
+        )
+    else:
+        (
+            displayed_capsules_summary,
+            settled_references,
+            maximum_neighbor_relation_difference,
+            maximum_displayed_entry_delta,
+            maximum_relation_drift,
+            displayed_errors,
+        ) = displayed_color_summary(
+            frame_rows,
+            capsule_ids,
+            metrics,
+            minimum_samples=1,
+            maximum_gate=8.0,
+            p95_gate=5.0,
+        )
+    errors.extend(displayed_errors)
+    intrinsic_diagnostic = intrinsic_material_diagnostic(
+        frame_rows, capsule_ids, metrics
     )
-    errors.extend(stability_errors)
+    alpha_policy = (
+        alpha_policy_summary(
+            visible_alphas,
+            below_floor_sequences,
+            zero_alpha_visible_sequences,
+            unmeasurable_visible_frames,
+        )
+        if entry_mode
+        else None
+    )
+    measured_motion_count = sum(row["phase"] == "motion" for row in frame_rows)
+    measured_settled_count = sum(row["phase"] == "settled" for row in frame_rows)
+    minimum_motion_frames = (
+        MIN_VISIBLE_ENTRY_MOTION_FRAMES if entry_mode else 15
+    )
+    if (
+        measured_motion_count < minimum_motion_frames
+        or measured_settled_count < 3
+    ):
+        errors.append(
+            f"expected at least {minimum_motion_frames} measured motion + 3 settled "
+            f"frames, found {measured_motion_count} + {measured_settled_count}"
+        )
     boundary_pass_all_frames = boundary_pass_every_frame(frame_rows)
     # A main-entry display stream intentionally includes the sub-opaque fade
     # before the controls are interactive. Absolute perimeter contrast tends
@@ -794,22 +1057,51 @@ def main() -> int:
         else frame_rows
     )
     boundary_gate_pass = boundary_pass_every_frame(boundary_gate_rows)
+    shared_pass = (
+        not errors
+        and measured_motion_count >= minimum_motion_frames
+        and measured_settled_count >= 3
+        and len(displayed_capsules_summary) == len(capsule_ids)
+        and all(row["pass"] for row in displayed_capsules_summary.values())
+        and maximum_neighbor_relation_difference <= 6.0
+        and boundary_gate_pass
+    )
+    if entry_mode:
+        overall_pass = (
+            shared_pass
+            and alpha_policy is not None
+            and alpha_policy["pass"]
+            and measured_settled_count == 3
+            and maximum_displayed_entry_delta <= MAX_DISPLAYED_ENTRY_DELTA_E00
+            and maximum_relation_drift
+            <= MAX_CAPSULE_STAGE_RELATION_DRIFT_DELTA_E00
+        )
+    else:
+        overall_pass = shared_pass
     result = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "receipt": str(receipt_path),
         "lifecycleReceipt": str(lifecycle_path) if lifecycle_path else None,
         "backgroundReference": str(reference_path) if reference_path else None,
         "trajectory": args.scenario if entry_mode else args.trajectory,
         "frameCount": len(frame_rows),
-        "motionFrameCount": sum(row["phase"] == "motion" for row in frame_rows),
-        "settledFrameCount": sum(row["phase"] == "settled" for row in frame_rows),
+        "motionFrameCount": measured_motion_count,
+        "settledFrameCount": measured_settled_count,
         "frames": frame_rows,
-        "previsibleEntryFrames": previsible_entry_frames,
+        "precontributingEntryFrames": precontributing_entry_frames,
         "summary": {
-            "materialStabilityCapsules": material_stability,
+            "materialStabilityCapsules": displayed_capsules_summary,
             "maximumNeighboringSettledMaterialDeltaE00":
                 maximum_neighbor_relation_difference,
+            "maximumDisplayedEntryDeltaE00": (
+                maximum_displayed_entry_delta if entry_mode else None
+            ),
+            "maximumCapsuleStageRelationDriftDeltaE00": (
+                maximum_relation_drift if entry_mode else None
+            ),
             "settledCapsuleMaterialLab": settled_references,
+            "intrinsicMaterialDiagnosticCapsules": intrinsic_diagnostic,
+            "alphaPolicy": alpha_policy,
             "boundaryPassEveryFrame": boundary_pass_all_frames,
             "boundaryPassEverySettledFrame": boundary_pass_every_frame(
                 [row for row in frame_rows if row["phase"] == "settled"]
@@ -820,21 +1112,13 @@ def main() -> int:
                 else "every-motion-and-settled-frame"
             ),
             "materialMetricScope": (
-                f"owning-window-alpha-normalized-at-or-above-{MIN_ENTRY_MATERIAL_STABILITY_ALPHA:.2f}"
+                "raw-displayed-pixels-every-visible-entry-frame"
                 if entry_mode
                 else "captured-motion-pixels"
             ),
         },
         "errors": errors,
-        "pass": (
-            not errors
-            and len(motion_frames) >= minimum_motion_frames
-            and len(settled_frames) >= 3
-            and len(material_stability) == len(capsule_ids)
-            and all(row["pass"] for row in material_stability.values())
-            and maximum_neighbor_relation_difference <= 6.0
-            and boundary_gate_pass
-        ),
+        "pass": overall_pass,
     }
     serialized = json.dumps(result, indent=2) + "\n"
     if args.out:

@@ -275,13 +275,23 @@ async function runLockedTreatmentCell(options: {
         && Object.values(
           motionMetrics?.summary?.materialStabilityCapsules ?? {},
         ).every((capsule: any) => capsule?.pass === true));
+    // Schema v2 (displayed-color entry metric): materialStabilityCapsules now
+    // grades RAW displayed pixels on every lifecycle-visible entry frame, and
+    // summary.alphaPolicy hard-fails visible sub-0.85-alpha, visible
+    // zero-alpha, and unmeasurable-visible frames. The intrinsic diagnostic
+    // (summary.intrinsicMaterialDiagnosticCapsules) is non-gating on purpose.
     const entryMotionColorPass = !motionRequired
       || (saturatedLifecycle?.exitCode === 0
         && saturatedLifecycle?.receipt?.pass === true
         && saturatedLifecycle?.entryMotionMetricsExitCode === 0
+        && saturatedLifecycle?.entryMotionMetrics?.schemaVersion === 2
         && saturatedLifecycle?.entryMotionMetrics?.pass === true
-        && saturatedLifecycle?.entryMotionMetrics?.motionFrameCount >= 1
+        && saturatedLifecycle?.entryMotionMetrics?.motionFrameCount >= 5
         && saturatedLifecycle?.entryMotionMetrics?.settledFrameCount >= 3
+        && saturatedLifecycle?.entryMotionMetrics?.summary
+          ?.alphaPolicy?.pass === true
+        && saturatedLifecycle?.entryMotionMetrics?.summary
+          ?.maximumDisplayedEntryDeltaE00 <= 5
         && saturatedLifecycle?.entryMotionMetrics?.summary
           ?.boundaryPassEverySettledFrame === true
         && saturatedLifecycle?.entryMotionMetrics?.summary
