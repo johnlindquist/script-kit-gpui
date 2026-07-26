@@ -625,5 +625,159 @@ class LayoutSelfContainedCliTests(unittest.TestCase):
             )
 
 
+class ExitPhaseMeasurementTests(unittest.TestCase):
+    """WP5 (glass-smoke-harness-max-info): main-exit displayed color is a
+    MEASUREMENT extracted from the existing lifecycle capture, never a gate.
+
+    The exit fade intentionally crosses every alpha below the entry floor, so
+    the entry-phase belowFloor hard failure must NOT apply to exit frames;
+    alpha-zero semantics (no contributed pixels, no color to grade) are
+    unchanged.
+    """
+
+    def test_sub_floor_exit_frames_are_measurable_not_policy_failures(
+        self,
+    ) -> None:
+        # Entry phase: alpha 0.40 on a visible frame is a belowFloor hard
+        # failure. Exit phase: the same observation is simply measurable.
+        self.assertEqual(motion.classify_entry_frame(0.40, True), "belowFloor")
+        self.assertEqual(motion.classify_exit_frame(0.40, True), "measurable")
+        # Alpha-zero semantics unchanged: no pixels are contributed, so the
+        # frame is precontributing in BOTH phases when nothing is visible —
+        # and in exit it can never escalate to the visibleZeroAlpha hard fail.
+        self.assertEqual(
+            motion.classify_exit_frame(0.0, False), "precontributing"
+        )
+        self.assertEqual(
+            motion.classify_entry_frame(0.0, True), "visibleZeroAlpha"
+        )
+        self.assertEqual(
+            motion.classify_exit_frame(0.0, True), "precontributing"
+        )
+
+    def test_exit_frames_use_main_entry_settled_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for index in range(4):
+                path = Path(directory) / f"frame-{index}.png"
+                Image.new("RGB", (20, 20), (index, index, index)).save(path)
+                paths.append(path)
+            receipt = {
+                "scenarios": [
+                    {
+                        "name": "main-exit",
+                        "filmstrip": {
+                            "receipt": {
+                                "frames": [
+                                    {
+                                        "sequence": 0,
+                                        "path": str(paths[0]),
+                                        "windowBounds": [[0, 0], [10, 10]],
+                                        "windowAlpha": 0.55,
+                                    }
+                                ]
+                            },
+                            "metrics": {
+                                "frames": [
+                                    {
+                                        "sequence": 0,
+                                        "stageVisible": True,
+                                        "footerVisible": False,
+                                    }
+                                ]
+                            },
+                        },
+                    },
+                    {
+                        "name": "main-entry",
+                        "settledCapturesPass": True,
+                        "settledCaptures": [
+                            {
+                                "sequence": f"settled-{index}",
+                                "path": str(paths[index + 1]),
+                                "windowBounds": [[0, 0], [10, 10]],
+                            }
+                            for index in range(3)
+                        ],
+                        "settledLayout": {"fidelity": {"appKit": {}}},
+                        "captureBounds": {},
+                    },
+                ]
+            }
+            frames, _, _, errors = motion.lifecycle_exit_frames(receipt)
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [frame["_phase"] for frame in frames],
+                ["motion", "settled", "settled", "settled"],
+            )
+            self.assertTrue(frames[0]["_entryVisible"])
+            # Settled references come from main-entry, not from any exit-side
+            # tail frame.
+            self.assertEqual(frames[1]["path"], str(paths[1]))
+
+    def test_exit_mode_without_main_exit_scenario_is_a_hard_error(
+        self,
+    ) -> None:
+        frames, appkit, bounds, errors = motion.lifecycle_exit_frames(
+            {"scenarios": []}
+        )
+        self.assertEqual(frames, [])
+        self.assertIn(
+            "required lifecycle scenario 'main-exit' is missing", errors
+        )
+
+    def test_exit_mode_without_entry_reference_is_a_hard_error(self) -> None:
+        receipt = {
+            "scenarios": [
+                {"name": "main-exit", "filmstrip": {"receipt": {"frames": []}}}
+            ]
+        }
+        frames, _, _, errors = motion.lifecycle_exit_frames(receipt)
+        self.assertEqual(frames, [])
+        self.assertIn(
+            "main-exit displayed color needs the main-entry settled reference scenario",
+            errors,
+        )
+
+
+class ExitPhaseCliTests(unittest.TestCase):
+    """Exit-phase CLI wiring is fail-closed like every other lifecycle path."""
+
+    # Reuse the CLI helpers without re-running the WP2 tests via inheritance.
+    _run_cli = LayoutSelfContainedCliTests._run_cli
+    _write_json = LayoutSelfContainedCliTests._write_json
+
+    def test_exit_phase_missing_main_exit_scenario_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lifecycle = self._write_json(
+                Path(tmp),
+                "lifecycle.json",
+                {"binarySha256": "aa", "scenarios": []},
+            )
+            code, result, _ = self._run_cli(
+                [
+                    "--lifecycle-receipt",
+                    str(lifecycle),
+                    "--lifecycle-phase",
+                    "exit",
+                ]
+            )
+            self.assertEqual(code, 1)
+            assert result is not None
+            self.assertFalse(result["pass"])
+            self.assertEqual(result["lifecyclePhase"], "exit")
+            self.assertEqual(result["trajectory"], "main-exit")
+            # Exit is a measurement: no alpha policy gate exists, and the
+            # displayed exit curve block is present (honestly failing).
+            self.assertIsNone(result["summary"]["alphaPolicy"])
+            exit_block = result["summary"]["displayedExitColor"]
+            self.assertIsNotNone(exit_block)
+            self.assertFalse(exit_block["summary"]["measurementPass"])
+            self.assertIn(
+                "required lifecycle scenario 'main-exit' is missing",
+                result["errors"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

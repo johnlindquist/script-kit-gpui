@@ -653,6 +653,79 @@ def lifecycle_entry_frames(
     )
 
 
+def classify_exit_frame(window_alpha: float, entry_visible: bool) -> str:
+    """Exit frames intentionally fade below the entry alpha floor, so the
+    sub-floor hard failure does NOT apply (Oracle plan
+    glass-smoke-harness-max-info, WP5 — the exit displayed-color curve is a
+    non-gating diagnostic). Alpha-zero pixel semantics are unchanged: at
+    alpha 0 the window contributes no pixels and there is no color to grade.
+    """
+    base = classify_entry_frame(window_alpha, entry_visible)
+    if base == "belowFloor":
+        return "measurable"
+    if base == "visibleZeroAlpha":
+        return "precontributing"
+    return base
+
+
+def lifecycle_exit_frames(
+    lifecycle_receipt: dict,
+) -> tuple[list[dict], dict, dict, list[str]]:
+    """Main-exit motion frames graded against the main-entry settled
+    reference (same settledLayout geometry, same explicit settled captures,
+    same hidden background reference)."""
+    errors: list[str] = []
+    scenarios = lifecycle_receipt.get("scenarios", [])
+    exit_scenario = next(
+        (row for row in scenarios if row.get("name") == "main-exit"), None
+    )
+    entry_scenario = next(
+        (row for row in scenarios if row.get("name") == "main-entry"), None
+    )
+    if exit_scenario is None:
+        return [], {}, {}, ["required lifecycle scenario 'main-exit' is missing"]
+    if entry_scenario is None:
+        return [], {}, {}, [
+            "main-exit displayed color needs the main-entry settled reference scenario"
+        ]
+    filmstrip = exit_scenario.get("filmstrip", {})
+    frames = filmstrip.get("receipt", {}).get("frames", [])
+    metric_rows = {
+        row.get("sequence"): row
+        for row in filmstrip.get("metrics", {}).get("frames", [])
+    }
+    motion_frames: list[dict] = []
+    for frame in frames:
+        metric = metric_rows.get(frame.get("sequence"), {})
+        row = dict(frame)
+        row["_lifecycleMetrics"] = metric
+        row["_stageVisible"] = bool(metric.get("stageVisible"))
+        row["_footerVisible"] = bool(metric.get("footerVisible"))
+        row["_entryVisible"] = row["_stageVisible"] or row["_footerVisible"]
+        row["_phase"] = "motion"
+        motion_frames.append(row)
+    settled_frames = []
+    for frame in entry_scenario.get("settledCaptures", []):
+        row = dict(frame)
+        row["_phase"] = "settled"
+        settled_frames.append(row)
+    if (
+        entry_scenario.get("settledCapturesPass") is not True
+        or len(settled_frames) != 3
+    ):
+        errors.append(
+            "main-exit: expected exactly three valid settled captures from main-entry"
+        )
+    return (
+        motion_frames + settled_frames,
+        entry_scenario.get("settledLayout", {})
+        .get("fidelity", {})
+        .get("appKit", {}),
+        entry_scenario.get("captureBounds", {}),
+        errors,
+    )
+
+
 def lifecycle_background_reference(
     lifecycle_receipt: dict,
 ) -> tuple[Path | None, list[str]]:
@@ -688,10 +761,14 @@ def main() -> int:
     parser.add_argument("--trajectory", default="fast-horizontal")
     parser.add_argument("--lifecycle-receipt")
     parser.add_argument("--scenario", default="main-entry")
+    parser.add_argument(
+        "--lifecycle-phase", choices=["entry", "exit"], default="entry"
+    )
     parser.add_argument("--out")
     args = parser.parse_args()
 
     entry_mode = args.lifecycle_receipt is not None
+    exit_phase = entry_mode and args.lifecycle_phase == "exit"
     if not entry_mode and not args.receipt:
         parser.error("--receipt is required outside lifecycle mode")
 
@@ -716,10 +793,17 @@ def main() -> int:
                     f"{legacy_sha} does not match lifecycle receipt "
                     f"binarySha256 {lifecycle_sha}"
                 )
-        frames, appkit, capture_bounds, lifecycle_errors = lifecycle_entry_frames(
-            lifecycle_receipt,
-            args.scenario,
-        )
+        if exit_phase:
+            frames, appkit, capture_bounds, lifecycle_errors = (
+                lifecycle_exit_frames(lifecycle_receipt)
+            )
+        else:
+            frames, appkit, capture_bounds, lifecycle_errors = (
+                lifecycle_entry_frames(
+                    lifecycle_receipt,
+                    args.scenario,
+                )
+            )
         errors.extend(lifecycle_errors)
         reference_path, reference_errors = lifecycle_background_reference(
             lifecycle_receipt
@@ -787,11 +871,14 @@ def main() -> int:
             else (0.0 if entry_mode and phase == "motion" else 1.0)
         )
         entry_visible = bool(frame.get("_entryVisible", True))
-        classification = (
-            classify_entry_frame(window_alpha, entry_visible)
-            if entry_mode and phase == "motion"
-            else "measurable"
-        )
+        if entry_mode and phase == "motion":
+            classification = (
+                classify_exit_frame(window_alpha, entry_visible)
+                if exit_phase
+                else classify_entry_frame(window_alpha, entry_visible)
+            )
+        else:
+            classification = "measurable"
         if entry_mode and phase == "motion" and entry_visible:
             visible_alphas.append((frame.get("sequence"), window_alpha))
         if classification == "precontributing":
@@ -1007,7 +1094,27 @@ def main() -> int:
         )
 
     capsule_ids = [str(node.get("id")) for node in capsule_nodes]
-    if entry_mode:
+    if exit_phase:
+        # Exit displayed color is a MEASUREMENT, not a gate (Oracle plan
+        # glass-smoke-harness-max-info WP5): the window intentionally fades
+        # through every alpha on the way out, so no residual threshold is
+        # applied. Feasibility (>= 1 measured motion frame, 3 settled
+        # references) is the only pass condition.
+        (
+            displayed_capsules_summary,
+            settled_references,
+            maximum_neighbor_relation_difference,
+            maximum_displayed_entry_delta,
+            maximum_relation_drift,
+            displayed_errors,
+        ) = displayed_color_summary(
+            frame_rows,
+            capsule_ids,
+            metrics,
+            minimum_samples=1,
+            maximum_gate=math.inf,
+        )
+    elif entry_mode:
         (
             displayed_capsules_summary,
             settled_references,
@@ -1050,13 +1157,17 @@ def main() -> int:
             zero_alpha_visible_sequences,
             unmeasurable_visible_frames,
         )
-        if entry_mode
+        if entry_mode and not exit_phase
         else None
     )
     measured_motion_count = sum(row["phase"] == "motion" for row in frame_rows)
     measured_settled_count = sum(row["phase"] == "settled" for row in frame_rows)
     minimum_motion_frames = (
-        MIN_VISIBLE_ENTRY_MOTION_FRAMES if entry_mode else 15
+        1
+        if exit_phase
+        else MIN_VISIBLE_ENTRY_MOTION_FRAMES
+        if entry_mode
+        else 15
     )
     if (
         measured_motion_count < minimum_motion_frames
@@ -1089,7 +1200,11 @@ def main() -> int:
         and maximum_neighbor_relation_difference <= 6.0
         and boundary_gate_pass
     )
-    if entry_mode:
+    if exit_phase:
+        # Exit pass = measurement feasibility only. The displayed exit curve
+        # is reported, never thresholded.
+        overall_pass = shared_pass and measured_settled_count == 3
+    elif entry_mode:
         overall_pass = (
             shared_pass
             and alpha_policy is not None
@@ -1101,11 +1216,89 @@ def main() -> int:
         )
     else:
         overall_pass = shared_pass
+    displayed_exit_color = None
+    if exit_phase:
+        motion_rows = [row for row in frame_rows if row["phase"] == "motion"]
+        settled_rows = [row for row in frame_rows if row["phase"] == "settled"]
+        # Alpha-comparable slice: exit frames at or above the entry alpha
+        # floor are directly comparable to entry-phase gated frames. Measured
+        # via a second summary pass over the REAL filtered rows — never by
+        # interpolating fabricated frames.
+        comparable_rows = settled_rows + [
+            row
+            for row in motion_rows
+            if row["windowAlpha"] is not None and row["windowAlpha"] >= 0.85
+        ]
+        (
+            _comparable_summary,
+            _comparable_references,
+            _comparable_neighbor,
+            comparable_maximum_delta,
+            comparable_maximum_drift,
+            comparable_errors,
+        ) = displayed_color_summary(
+            [dict(row, capsules=[dict(c) for c in row["capsules"]]) for row in comparable_rows],
+            capsule_ids,
+            metrics,
+            minimum_samples=1,
+            maximum_gate=math.inf,
+        )
+        boundary_values = [
+            row["minimumMedianBoundaryLuminanceDifference"]
+            for row in sorted(
+                motion_rows, key=lambda row: row["sequence"] or 0
+            )
+        ]
+        deltas = [
+            later - earlier
+            for earlier, later in zip(boundary_values, boundary_values[1:])
+        ]
+        if not deltas:
+            boundary_trend = "single-sample"
+        elif all(delta <= 0 for delta in deltas):
+            boundary_trend = "non-increasing"
+        elif all(delta >= 0 for delta in deltas):
+            boundary_trend = "non-decreasing"
+        else:
+            boundary_trend = "mixed"
+        comparable_motion_count = len(comparable_rows) - len(settled_rows)
+        displayed_exit_color = {
+            "frames": [
+                {
+                    "sequence": row["sequence"],
+                    "windowAlpha": row["windowAlpha"],
+                    "maximumStageDeltaE00": row["maximumStageDeltaE00"],
+                    "minimumMedianBoundaryLuminanceDifference": row[
+                        "minimumMedianBoundaryLuminanceDifference"
+                    ],
+                }
+                for row in motion_rows
+            ],
+            "summary": {
+                "comparableMotionFrameCount": comparable_motion_count,
+                "maximumDeltaE00AtOrAboveAlpha085": (
+                    comparable_maximum_delta
+                    if comparable_motion_count and not comparable_errors
+                    else None
+                ),
+                "maximumStageRelationDriftAtOrAboveAlpha085": (
+                    comparable_maximum_drift
+                    if comparable_motion_count and not comparable_errors
+                    else None
+                ),
+                "boundaryTrend": boundary_trend,
+                "measurementPass": (
+                    not errors
+                    and measured_motion_count >= 1
+                    and measured_settled_count == 3
+                ),
+            },
+        }
     layout_source = None
     if entry_mode:
         layout_source = {
             "kind": "lifecycle-settled-layout",
-            "scenario": args.scenario,
+            "scenario": "main-entry" if exit_phase else args.scenario,
             "lifecycleReceipt": str(lifecycle_path),
             "lifecycleReceiptSha256": hashlib.sha256(
                 lifecycle_path.read_bytes()
@@ -1116,9 +1309,18 @@ def main() -> int:
         "schemaVersion": 2,
         "receipt": str(receipt_path),
         "lifecycleReceipt": str(lifecycle_path) if lifecycle_path else None,
+        "lifecyclePhase": (
+            ("exit" if exit_phase else "entry") if entry_mode else None
+        ),
         "layoutSource": layout_source,
         "backgroundReference": str(reference_path) if reference_path else None,
-        "trajectory": args.scenario if entry_mode else args.trajectory,
+        "trajectory": (
+            "main-exit"
+            if exit_phase
+            else args.scenario
+            if entry_mode
+            else args.trajectory
+        ),
         "frameCount": len(frame_rows),
         "motionFrameCount": measured_motion_count,
         "settledFrameCount": measured_settled_count,
@@ -1137,17 +1339,22 @@ def main() -> int:
             "settledCapsuleMaterialLab": settled_references,
             "intrinsicMaterialDiagnosticCapsules": intrinsic_diagnostic,
             "alphaPolicy": alpha_policy,
+            "displayedExitColor": displayed_exit_color,
             "boundaryPassEveryFrame": boundary_pass_all_frames,
             "boundaryPassEverySettledFrame": boundary_pass_every_frame(
                 [row for row in frame_rows if row["phase"] == "settled"]
             ),
             "boundaryGateScope": (
-                "settled-opaque-entry-frames"
+                "settled-opaque-entry-reference-frames"
+                if exit_phase
+                else "settled-opaque-entry-frames"
                 if entry_mode
                 else "every-motion-and-settled-frame"
             ),
             "materialMetricScope": (
-                "raw-displayed-pixels-every-visible-entry-frame"
+                "raw-displayed-pixels-every-visible-exit-frame-nongating"
+                if exit_phase
+                else "raw-displayed-pixels-every-visible-entry-frame"
                 if entry_mode
                 else "captured-motion-pixels"
             ),
