@@ -16,9 +16,18 @@ import {
 } from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 import {
+  computeLifecycleDisposition,
   expandCaptureBounds,
+  filmstripVerdict,
+  type LifecycleScenarioName,
+  parseAnalysisMode,
+  resolveScenarioNames,
+  SCENARIO_CAPTURE_DURATIONS_MS,
+  type ScenarioProfile,
+  type ScenarioTimingInterval,
   validateDetachedExitLifecycle,
   validateFilmstripCapture,
+  validateScenarioTimingIntervals,
 } from "./glass-lifecycle-filmstrip-contract.ts";
 import { analyzeEntryMotionEnvelope } from "./glass-entry-motion-contract.ts";
 import {
@@ -162,10 +171,25 @@ const themeFixture = arg("--theme-fixture");
 const outDir = resolve(
   arg("--out", ".artifacts/glass-motion-contrast/lifecycle-filmstrips")!,
 );
+const scenarioProfile = (arg("--profile", "full") ?? "full") as ScenarioProfile;
+const resolvedScenarioNames = resolveScenarioNames(scenarioProfile);
+const analysisMode = parseAnalysisMode(arg("--analysis-mode", "inline"));
 if (!binary || !existsSync(binary)) {
   throw new Error(`binary missing: ${binary || "<unset>"}`);
 }
 mkdirSync(outDir, { recursive: true });
+const scriptStartedMs = performance.now();
+const timingMs: Record<string, number> = {
+  helperPreparation: 0,
+  driverLaunchToMainVisible: 0,
+  normalization: 0,
+  pointerPreparation: 0,
+  captureTotal: 0,
+  inlineAnalysisTotal: 0,
+  cleanup: 0,
+  total: 0,
+};
+const helperPreparationStartedMs = performance.now();
 const helper = join(outDir, "macos-native-window-filmstrip");
 const compile = await run([
   "xcrun",
@@ -193,6 +217,7 @@ if (interferenceCompile.exitCode !== 0) {
     `interference helper compile failed: ${interferenceCompile.stderr}`,
   );
 }
+timingMs.helperPreparation = performance.now() - helperPreparationStartedMs;
 let interferenceMonitor: ReturnType<typeof startInterferenceMonitor> | null = null;
 
 const receipt: Json = {
@@ -205,6 +230,9 @@ const receipt: Json = {
     binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
   }),
   scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "lifecycle",
+  scenarioProfile,
+  analysisMode,
+  requestedScenarioNames: resolvedScenarioNames,
   themeFixture: themeFixture
     ? {
       path: resolve(themeFixture),
@@ -219,6 +247,7 @@ const receipt: Json = {
 };
 const receiptRoot = receipt;
 
+const driverLaunchStartedMs = performance.now();
 const driver = await Driver.launch({
   binary,
   sandboxHome: true,
@@ -231,7 +260,7 @@ const driver = await Driver.launch({
 });
 
 function startFilmstrip(
-  name: string,
+  name: LifecycleScenarioName,
   selector: {
     windowID?: number;
     pid?: number;
@@ -239,8 +268,8 @@ function startFilmstrip(
     displayStream?: boolean;
     bounds?: { x: number; y: number; width: number; height: number };
   },
-  durationMs: number,
 ) {
+  const durationMs = SCENARIO_CAPTURE_DURATIONS_MS[name];
   const directory = join(outDir, name);
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
@@ -287,7 +316,17 @@ function startFilmstrip(
     process,
     command,
     processStartedAt: new Date().toISOString(),
+    requestedCaptureDurationMs: durationMs,
+    observerStartedMs: performance.now(),
+    readyAtMs: null as number | null,
   };
+}
+
+/** waitForFile on the observer's ready receipt, stamping observer-ready time. */
+async function awaitObserverReady(started: ReturnType<typeof startFilmstrip>) {
+  const ready = await waitForFile(started.readyPath);
+  started.readyAtMs = performance.now();
+  return ready;
 }
 
 async function finishFilmstrip(
@@ -302,13 +341,15 @@ async function finishFilmstrip(
     referenceImagePath?: string;
   },
 ) {
+  const finishCalledMs = performance.now();
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(started.process.stdout).text(),
     new Response(started.process.stderr).text(),
     started.process.exited,
   ]);
+  const observerExitedMs = performance.now();
   const metricsPath = join(started.directory, "metrics.json");
-  const metricsResult = await run([
+  const metricsCommand = [
     "python3",
     resolve(import.meta.dir, "../agentic/glass-lifecycle-metrics.py"),
     "--receipt",
@@ -350,22 +391,56 @@ async function finishFilmstrip(
     ...(metricsContext?.referenceImagePath != null
       ? ["--reference-image", metricsContext.referenceImagePath]
       : []),
-  ]);
-  const metrics = existsSync(metricsPath)
-    ? JSON.parse(readFileSync(metricsPath, "utf8"))
-    : null;
+  ];
+  // Deferred mode never invokes Python while a display scenario could still
+  // be active: the exact grader command is preserved so the offline finalizer
+  // reruns it verbatim against the same hash-bound artifacts.
+  let metricsExitCode: number | null = null;
+  let metrics: Json | null = null;
+  let analysisMs = 0;
+  if (analysisMode === "inline") {
+    const analysisStartedMs = performance.now();
+    const metricsResult = await run(metricsCommand);
+    analysisMs = performance.now() - analysisStartedMs;
+    timingMs.inlineAnalysisTotal += analysisMs;
+    metricsExitCode = metricsResult.exitCode;
+    metrics = existsSync(metricsPath)
+      ? JSON.parse(readFileSync(metricsPath, "utf8"))
+      : null;
+  }
+  const capture = analyzeFilmstrip(started.directory, expectedWindowID);
+  const verdict = filmstripVerdict({
+    captureErrorCount: capture.errors.length,
+    analysisMode,
+    metricsExitCode,
+    metricsPass: metrics?.pass === true,
+  });
+  const finishedMs = performance.now();
   return {
     command: started.command,
     exitCode,
     stderr: stderr.trim().slice(-1_000),
     stdout: stdout.trim().slice(-1_000),
     metricsPath,
-    metricsExitCode: metricsResult.exitCode,
+    metricsCommand,
+    metricsExitCode,
     metrics,
-    ...analyzeFilmstrip(started.directory, expectedWindowID),
-    pass: analyzeFilmstrip(started.directory, expectedWindowID).pass
-      && metricsResult.exitCode === 0
-      && metrics?.pass === true,
+    analysisState: verdict.analysisState,
+    ...capture,
+    capturePass: verdict.capturePass,
+    timing: {
+      observerStartToReadyMs: started.readyAtMs == null
+        ? null
+        : started.readyAtMs - started.observerStartedMs,
+      driveMs: started.readyAtMs == null
+        ? null
+        : finishCalledMs - started.readyAtMs,
+      requestedCaptureDurationMs: started.requestedCaptureDurationMs,
+      observerFinishMs: observerExitedMs - finishCalledMs,
+      analysisMs,
+      totalMs: finishedMs - started.observerStartedMs,
+    },
+    pass: verdict.pass,
   };
 }
 
@@ -387,6 +462,8 @@ try {
   driver.send({ type: "show" });
   await waitForWindowCount(driver, "main", 1, 5_000);
   await driver.waitForSettle({ timeoutMs: 5_000 });
+  timingMs.driverLaunchToMainVisible = performance.now() - driverLaunchStartedMs;
+  const normalizationStartedMs = performance.now();
   await announceTestStatus(
     "Lifecycle setup · Normalize main owner",
     "Warm one hide/show lifecycle before pinning the exact native window and bounds",
@@ -431,15 +508,19 @@ try {
       `initial complete same-PID topology invalid: ${JSON.stringify(initialTopology.errors)}`,
     );
   }
+  timingMs.normalization = performance.now() - normalizationStartedMs;
+  const pointerPreparationStartedMs = performance.now();
   const pointerPreparation = await run(["cliclick", "m:2,2"]);
   if (pointerPreparation.exitCode !== 0) {
     throw new Error(
       `failed to park pointer away from entry capsules: ${pointerPreparation.stderr}`,
     );
   }
+  timingMs.pointerPreparation = performance.now() - pointerPreparationStartedMs;
   interferenceMonitor = startInterferenceMonitor(interferenceHelper, outDir);
   receipt.interferenceReady = await waitForInterferenceReady(interferenceMonitor);
 
+  async function runMainExitScenario() {
   await announceTestStatus(
     "Lifecycle filmstrip · Main exit",
     "Exact CGWindowID capture while the main surface and detached capsules fade together",
@@ -447,9 +528,8 @@ try {
   const mainExit = startFilmstrip(
     "main-exit",
     { windowID: mainWindowID, bounds: mainCaptureBounds },
-    200,
   );
-  await waitForFile(mainExit.readyPath);
+  await awaitObserverReady(mainExit);
   await Bun.sleep(40);
   driver.send({ type: "hide", requestId: "glass-life-main-hide" });
   await driver.waitForState({ windowVisible: false }, { timeoutMs: 3_000 });
@@ -499,8 +579,12 @@ try {
     hiddenReference: mainExitReference,
     hiddenReferencePass: mainExitReferencePass,
     filmstrip: mainExitFilmstrip,
+    structuralPass: mainExitFilmstrip.capturePass && mainExitReferencePass,
     pass: mainExitFilmstrip.pass && mainExitReferencePass,
   });
+  }
+
+  async function runMainEntryScenario() {
   await announceTestStatus(
     "Lifecycle filmstrip · Main entry",
     "Observer starts while hidden; the same CGWindowID and detached gutter emerge together",
@@ -508,9 +592,8 @@ try {
   const mainEntry = startFilmstrip(
     "main-entry",
     { windowID: mainWindowID, displayStream: true, bounds: mainCaptureBounds },
-    700,
   );
-  const mainEntryReady = await waitForFile(mainEntry.readyPath);
+  const mainEntryReady = await awaitObserverReady(mainEntry);
   const mainEntryCaptureBoundsMatch = ["x", "y", "width", "height"].every(
     (key) =>
       Math.abs(
@@ -603,12 +686,18 @@ try {
     },
     settledLayout: mainEntrySettledLayout,
     filmstrip: mainEntryFilmstrip,
+    structuralPass: mainEntryFilmstrip.capturePass
+      && mainEntryCaptureBoundsMatch
+      && settledCapturesPass
+      && mainEntryMotionEnvelope.pass,
     pass: mainEntryFilmstrip.pass
       && mainEntryCaptureBoundsMatch
       && settledCapturesPass
       && mainEntryMotionEnvelope.pass,
   });
+  }
 
+  async function runNotesEntryScenario() {
   await announceTestStatus(
     "Lifecycle filmstrip · Notes entry",
     "Body remains hidden while the exact native Notes window material settles",
@@ -616,10 +705,9 @@ try {
   const notesEntry = startFilmstrip(
     "notes-entry",
     { pid, title: "Notes" },
-    800,
   );
   driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-open" });
-  const notesEntryReady = await waitForFile(notesEntry.readyPath);
+  const notesEntryReady = await awaitObserverReady(notesEntry);
   const notesEntryID = Number(notesEntryReady.windowID);
   const notesReadyState = await notesState();
   let notesEntryPrimedByCancelReopen = false;
@@ -712,8 +800,7 @@ try {
     && typeof finalReveal?.visibleAtMonotonicNs === "number"
     && frame.displayTimeNs <= finalReveal.visibleAtMonotonicNs
   ).length;
-  const notesEntryPass = notesEntryFilmstrip.pass
-    && configuredState?.nativeWindowNumber === notesEntryID
+  const notesEntryStructuralPass = configuredState?.nativeWindowNumber === notesEntryID
     && configuredState?.backdropFoundOrCreated === true
     && configuredState?.nativeSelectorsSupported === true
     && configuredState?.styleApplied === true
@@ -726,7 +813,9 @@ try {
     && revealBeganBeforeRebound
     && Number(finalReveal?.completedFrameCount ?? 0) >= 2
     && notesTimesOrdered
-    && notesVisibleWithinBounds
+    && notesVisibleWithinBounds;
+  const notesEntryPass = notesEntryFilmstrip.pass
+    && notesEntryStructuralPass
     && notesEntryFilmstrip.metrics?.bodyMaskPass === true;
   (receipt.scenarios as Json[]).push({
     name: "notes-entry",
@@ -762,11 +851,14 @@ try {
     nativeConfiguration: configuredState ?? null,
     observerPrimedByExactOwnerCancelReopen: notesEntryPrimedByCancelReopen,
     filmstrip: notesEntryFilmstrip,
+    structuralPass: notesEntryFilmstrip.capturePass && notesEntryStructuralPass,
     pass: notesEntryPass,
   });
   driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-close" });
   await waitForWindowCount(driver, "notes", 0, 3_000);
+  }
 
+  async function runNotesCloseBeforeSettleReopenScenario() {
   await announceTestStatus(
     "Lifecycle filmstrip · Notes cancel/reopen",
     "Close before settle, reopen during the fade, and reuse the same CGWindowID",
@@ -774,10 +866,9 @@ try {
   const notesReopen = startFilmstrip(
     "notes-close-before-settle-reopen",
     { pid, title: "Notes" },
-    950,
   );
   driver.send({ type: "openNotes", requestId: "glass-life-notes-reopen-open" });
-  const notesReopenReady = await waitForFile(notesReopen.readyPath);
+  const notesReopenReady = await awaitObserverReady(notesReopen);
   const notesReopenID = Number(notesReopenReady.windowID);
   await Bun.sleep(25);
   const beforeClose = await notesState();
@@ -812,8 +903,7 @@ try {
     pid,
     mainWindowID,
   );
-  const notesReopenPass = notesReopenFilmstrip.pass
-    && duringExit?.windowLifecycle?.phase === "Exiting"
+  const notesReopenStructural = duringExit?.windowLifecycle?.phase === "Exiting"
     && duringExit?.windowLifecycle?.hasExitTicket === true
     && typeof duringExit?.windowLifecycle?.exitGeneration === "number"
     && afterReopen?.windowLifecycle?.phase === "Open"
@@ -826,6 +916,7 @@ try {
     && notesTopology.pass
     && notesActiveExitErrors.length === 0
     && notesCancelledExitErrors.length === 0;
+  const notesReopenPass = notesReopenFilmstrip.pass && notesReopenStructural;
   (receipt.scenarios as Json[]).push({
     name: "notes-close-before-settle-reopen",
     exactWindowID: notesReopenID,
@@ -840,11 +931,14 @@ try {
       cancelledErrors: notesCancelledExitErrors,
     },
     filmstrip: notesReopenFilmstrip,
+    structuralPass: notesReopenFilmstrip.capturePass && notesReopenStructural,
     pass: notesReopenPass,
   });
   driver.send({ type: "openNotes", requestId: "glass-life-notes-reopen-final-close" });
   await waitForWindowCount(driver, "notes", 0, 3_000);
+  }
 
+  async function runDictationExitReopenScenario() {
   await announceTestStatus(
     "Lifecycle filmstrip · Dictation cancel/reopen",
     "Fixture-only overlay; Escape starts fade, reopen cancels its ticket without microphone capture",
@@ -852,13 +946,12 @@ try {
   const dictation = startFilmstrip(
     "dictation-exit-reopen",
     { pid, title: "Script Kit Dictation" },
-    900,
   );
   driver.send({
     type: "openDictationOverlayFixture",
     requestId: "glass-life-dictation-open",
   });
-  const dictationReady = await waitForFile(dictation.readyPath);
+  const dictationReady = await awaitObserverReady(dictation);
   const dictationID = Number(dictationReady.windowID);
   await Bun.sleep(120);
   const dictationBefore = (await driver.getState({ timeoutMs: 5_000 }))?.dictation;
@@ -904,8 +997,7 @@ try {
     pid,
     mainWindowID,
   );
-  const dictationPass = dictationFilmstrip.pass
-    && dictationDuringExit?.windowLifecycle?.phase === "Exiting"
+  const dictationStructural = dictationDuringExit?.windowLifecycle?.phase === "Exiting"
     && dictationDuringExit?.windowLifecycle?.handleRegistered === true
     && dictationDuringExit?.windowLifecycle?.automationRegistered === true
     && typeof dictationDuringExit?.windowLifecycle?.exitGeneration === "number"
@@ -918,6 +1010,7 @@ try {
     && dictationTopology.pass
     && dictationActiveExitErrors.length === 0
     && dictationCancelledExitErrors.length === 0;
+  const dictationPass = dictationFilmstrip.pass && dictationStructural;
   (receipt.scenarios as Json[]).push({
     name: "dictation-exit-reopen",
     exactWindowID: dictationID,
@@ -935,6 +1028,7 @@ try {
     },
     noMicrophoneCapture: true,
     filmstrip: dictationFilmstrip,
+    structuralPass: dictationFilmstrip.capturePass && dictationStructural,
     pass: dictationPass,
   });
   await driver.simulateGpuiKeyDown("escape", {
@@ -947,16 +1041,39 @@ try {
     timeoutMs: 5_000,
   }).catch(() => null);
   await waitForWindowCount(driver, "dictation", 0, 3_000);
+  }
 
-  receipt.requiredScenarioNames = [
-    "main-exit",
-    "main-entry",
-    "notes-entry",
-    "notes-close-before-settle-reopen",
-    "dictation-exit-reopen",
-  ];
+  // Dispatch the resolved profile in declared order. Timing intervals are
+  // recorded per scenario and validated as monotone/non-overlapping so a
+  // refactor can never silently interleave capture work.
+  const scenarioRunners: Record<LifecycleScenarioName, () => Promise<void>> = {
+    "main-exit": runMainExitScenario,
+    "main-entry": runMainEntryScenario,
+    "notes-entry": runNotesEntryScenario,
+    "notes-close-before-settle-reopen": runNotesCloseBeforeSettleReopenScenario,
+    "dictation-exit-reopen": runDictationExitReopenScenario,
+  };
+  const captureStartedMs = performance.now();
+  const scenarioIntervals: ScenarioTimingInterval[] = [];
+  for (const name of resolvedScenarioNames) {
+    const startedAtMs = performance.now();
+    await scenarioRunners[name]();
+    scenarioIntervals.push({
+      name,
+      startedAtMs,
+      finishedAtMs: performance.now(),
+    });
+  }
+  timingMs.captureTotal = performance.now() - captureStartedMs;
+  receipt.scenarioIntervalsMs = scenarioIntervals;
+  const intervalErrors = validateScenarioTimingIntervals(scenarioIntervals);
+  if (intervalErrors.length > 0) {
+    throw new Error(`scenario timing intervals invalid: ${intervalErrors}`);
+  }
+
+  receipt.requiredScenarioNames = resolvedScenarioNames;
   const scenarios = receipt.scenarios as Json[];
-  receipt.pass = scenarios.length === 5
+  receipt.pass = scenarios.length === resolvedScenarioNames.length
     && receipt.requiredScenarioNames.every((name: string) =>
       scenarios.some((scenario) => scenario?.name === name)
     )
@@ -965,6 +1082,7 @@ try {
   receipt.error = String(error);
   receipt.pass = false;
 } finally {
+  const cleanupStartedMs = performance.now();
   if (interferenceMonitor) {
     receipt.interference = await finishInterferenceMonitor(interferenceMonitor);
     receipt.pass = receipt.pass === true && receipt.interference.pass === true;
@@ -973,16 +1091,48 @@ try {
   receipt.cleanedUp = !driver.alive;
   receipt.finishedAt = new Date().toISOString();
   receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
-  receipt.disposition = receipt.interference?.disposition === "INVALID_INTERFERENCE"
-    ? "INVALID_INTERFERENCE"
-    : receipt.pass === true
-    ? "EVALUABLE_PASS"
-    : receipt.error
-    ? "INVALID_OBSERVER"
-    : "EVALUABLE_FAIL";
-  const receiptPath = join(outDir, "receipt.json");
+  if (analysisMode === "deferred") {
+    // A deferred capture is NEVER a normal passing lifecycle receipt: the
+    // Python graders have not run. The offline finalizer consumes
+    // capture-receipt.json and writes the standard receipt.json later.
+    receipt.analysisState = "pending";
+    receipt.capturePass = (receipt.scenarios as Json[]).length > 0
+      && (receipt.scenarios as Json[]).every(
+        (scenario) => scenario?.filmstrip?.capturePass === true,
+      )
+      && receipt.error == null
+      && receipt.cleanedUp === true
+      && receipt.interference?.pass === true;
+    receipt.pass = false;
+  } else {
+    receipt.analysisState = "inline";
+  }
+  receipt.disposition = computeLifecycleDisposition({
+    interferenceDisposition: receipt.interference?.disposition ?? null,
+    analysisState: receipt.analysisState,
+    pass: receipt.pass === true,
+    hasObserverError: receipt.error != null,
+  });
+  timingMs.cleanup = performance.now() - cleanupStartedMs;
+  timingMs.total = performance.now() - scriptStartedMs;
+  receipt.timingMs = timingMs;
+  const receiptPath = join(
+    outDir,
+    analysisMode === "deferred" ? "capture-receipt.json" : "receipt.json",
+  );
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
-  console.log(JSON.stringify({ receiptPath, pass: receipt.pass }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        receiptPath,
+        pass: receipt.pass,
+        disposition: receipt.disposition,
+        analysisMode,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 process.exit(receipt.pass ? 0 : 2);

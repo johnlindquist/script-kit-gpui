@@ -1,3 +1,162 @@
+// ---------------------------------------------------------------------------
+// Scenario plan, timing, and analysis-mode contracts
+// (Oracle plan glass-smoke-harness-max-info, work package 3.)
+// ---------------------------------------------------------------------------
+
+/** The exact legacy capture order. The default profile MUST preserve it. */
+export const LEGACY_FULL_SCENARIO_ORDER = [
+  "main-exit",
+  "main-entry",
+  "notes-entry",
+  "notes-close-before-settle-reopen",
+  "dictation-exit-reopen",
+] as const;
+
+export type LifecycleScenarioName = (typeof LEGACY_FULL_SCENARIO_ORDER)[number];
+
+export type ScenarioProfile = "full" | "entry-color" | "extended";
+
+/**
+ * Locked legacy capture durations (ms) per scenario. These are observation
+ * windows, not animation values, but they are still part of the calibrated
+ * capture contract: changing one changes what the filmstrips can see.
+ */
+export const SCENARIO_CAPTURE_DURATIONS_MS: Record<
+  LifecycleScenarioName,
+  number
+> = {
+  "main-exit": 200,
+  "main-entry": 700,
+  "notes-entry": 800,
+  "notes-close-before-settle-reopen": 950,
+  "dictation-exit-reopen": 900,
+};
+
+/**
+ * Resolve a capture profile to its ordered scenario list.
+ *
+ * - `full` (default) is the exact legacy five in the exact legacy order.
+ * - `entry-color` is the minimal set the displayed-color metric needs:
+ *   main-entry ALWAYS pulls in main-exit because the metric requires the
+ *   explicit post-exit hidden background reference.
+ * - `extended` is the legacy five (an optional embedded Actions scenario may
+ *   append later; it never reorders or drops the legacy prefix).
+ */
+export function resolveScenarioNames(
+  profile: ScenarioProfile,
+): LifecycleScenarioName[] {
+  switch (profile) {
+    case "full":
+    case "extended":
+      return [...LEGACY_FULL_SCENARIO_ORDER];
+    case "entry-color":
+      return ["main-exit", "main-entry"];
+    default: {
+      const exhaustive: never = profile;
+      throw new Error(`unknown scenario profile: ${String(exhaustive)}`);
+    }
+  }
+}
+
+export type AnalysisMode = "inline" | "deferred";
+
+export function parseAnalysisMode(value: string | undefined): AnalysisMode {
+  if (value == null || value === "inline") return "inline";
+  if (value === "deferred") return "deferred";
+  throw new Error(`unknown analysis mode: ${value}`);
+}
+
+export type FilmstripVerdictInput = {
+  captureErrorCount: number;
+  analysisMode: AnalysisMode;
+  metricsExitCode: number | null;
+  metricsPass: boolean | null;
+};
+
+export type FilmstripVerdict = {
+  capturePass: boolean;
+  analysisState: "inline" | "pending";
+  pass: boolean;
+};
+
+/**
+ * A filmstrip's verdict separates CAPTURE validity from METRIC analysis.
+ * In deferred mode the Python graders never run while the display scenario
+ * is active, so no filmstrip (and therefore no receipt) can pass inline —
+ * analysisState stays "pending" and pass is unconditionally false. In inline
+ * mode a missing or failed metric analysis remains red exactly as before.
+ */
+export function filmstripVerdict(
+  input: FilmstripVerdictInput,
+): FilmstripVerdict {
+  const capturePass = input.captureErrorCount === 0;
+  if (input.analysisMode === "deferred") {
+    return { capturePass, analysisState: "pending", pass: false };
+  }
+  return {
+    capturePass,
+    analysisState: "inline",
+    pass: capturePass
+      && input.metricsExitCode === 0
+      && input.metricsPass === true,
+  };
+}
+
+export type LifecycleDispositionInput = {
+  interferenceDisposition: string | null;
+  analysisState: "inline" | "pending";
+  pass: boolean;
+  hasObserverError: boolean;
+};
+
+/**
+ * Terminal disposition for a lifecycle run receipt. ANALYSIS_PENDING can
+ * never be green: it is a capture-only receipt awaiting the offline grader,
+ * which writes the final standard receipt later. Interference invalidity
+ * always dominates — an interfered capture is not evidence in any mode.
+ */
+export function computeLifecycleDisposition(
+  input: LifecycleDispositionInput,
+): string {
+  if (input.interferenceDisposition === "INVALID_INTERFERENCE") {
+    return "INVALID_INTERFERENCE";
+  }
+  if (input.analysisState === "pending") return "ANALYSIS_PENDING";
+  if (input.pass === true) return "EVALUABLE_PASS";
+  if (input.hasObserverError) return "INVALID_OBSERVER";
+  return "EVALUABLE_FAIL";
+}
+
+export type ScenarioTimingInterval = {
+  name: string;
+  startedAtMs: number;
+  finishedAtMs: number;
+};
+
+/**
+ * Scenario timing intervals must be monotone and non-overlapping: scenario
+ * N+1 may not begin before scenario N finished, and no interval may run
+ * backwards. A refactor that reorders or interleaves scenario work would
+ * surface here before it silently changed what the captures measure.
+ */
+export function validateScenarioTimingIntervals(
+  intervals: ScenarioTimingInterval[],
+): string[] {
+  const errors: string[] = [];
+  for (const [index, interval] of intervals.entries()) {
+    if (!(interval.finishedAtMs >= interval.startedAtMs)) {
+      errors.push(`${interval.name}: interval runs backwards`);
+    }
+    const previous = intervals[index - 1];
+    if (previous && interval.startedAtMs < previous.finishedAtMs) {
+      errors.push(
+        `${interval.name}: started before ${previous.name} finished`,
+      );
+    }
+  }
+  return errors;
+}
+
 export type FilmstripIdentity = {
   runId: string;
   gitCommit: string;
