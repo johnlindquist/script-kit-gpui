@@ -679,6 +679,11 @@ pub(super) fn upsert_previous_app_window(
     })
 }
 
+/// Shared lock for every test that mutates the global registry.
+#[cfg(test)]
+pub(super) static REGISTRY_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
+
 #[cfg(test)]
 pub(super) fn reset_registry_for_tests() {
     let mut state = REGISTRY.write();
@@ -693,9 +698,6 @@ pub(super) fn reset_registry_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static REGISTRY_TEST_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
-        std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
 
     fn staged(
         key: u32,
