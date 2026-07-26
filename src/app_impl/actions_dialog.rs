@@ -375,8 +375,9 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         use crate::menu_syntax::{
-            action_effects::{apply_safe_effect, ActionEffect},
-            builtin_schema, current_menu_syntax_actions, MenuSyntaxActionState,
+            MenuSyntaxActionState,
+            action_effects::{ActionEffect, apply_safe_effect},
+            builtin_schema, current_menu_syntax_actions,
         };
 
         let raw = self.filter_text().to_string();
@@ -2046,7 +2047,10 @@ mod agent_chat_spine_dispatch_tests {
             ))
         }
 
-        fn cancel_turn(&self, _ui_thread_id: String) -> crate::ai::reliability::AiAdapterResult<()> {
+        fn cancel_turn(
+            &self,
+            _ui_thread_id: String,
+        ) -> crate::ai::reliability::AiAdapterResult<()> {
             Ok(())
         }
 
@@ -2220,5 +2224,156 @@ mod agent_chat_spine_dispatch_tests {
             after.context_chip_count, before.context_chip_count,
             "profile acceptance must preserve staged context"
         );
+    }
+}
+
+#[cfg(test)]
+mod modal_backdrop_policy_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn backdrop_test_flow_meta(id: u64) -> crate::flows::session::FlowSessionMeta {
+        crate::flows::session::FlowSessionMeta {
+            id,
+            flow_id: "project:backdrop-test".into(),
+            flow_name: "flow-backdrop-test".into(),
+            friendly_name: "Backdrop Test".into(),
+            origin: "Project".into(),
+            engine: "codex".into(),
+            flow_path: "/tmp/flow-backdrop-test.md".into(),
+            flow_mtime_ms: 0,
+            cwd: "/tmp".into(),
+            transport: crate::flows::session::SessionTransport::CodexThread,
+            state: crate::flows::session::SessionState::NeedsYou,
+            started_at: std::time::Instant::now(),
+            last_activity: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_000),
+            turns: vec![],
+            active_turn: None,
+            thread_ready: true,
+            needs_rethread: false,
+            reliability: crate::flows::session::FlowReliability::new(
+                "project:backdrop-test",
+                "/tmp/flow-backdrop-test.md",
+                "codex",
+            ),
+        }
+    }
+
+    /// Oracle step 8 policy lock (deferred by the plan until the step-6
+    /// store existed): a modal-backdrop click DISMISSES THE MODAL ONLY.
+    /// The topmost modal owns and consumes the click; it must never
+    /// background, touch, remove, or otherwise mutate the underlying AI
+    /// session, and it must not change the surface underneath. Ruling:
+    /// user submission 98cab5e5-…641, confirmed verbatim by Oracle consult
+    /// `floating-capsule-entry-material`.
+    ///
+    /// This drives `close_actions_popup` — the exact method the backdrop
+    /// click handler routes to (`src/render_prompts/arg/helpers.rs`) — so
+    /// the assertion covers the real dismissal path, not a re-derived one.
+    #[gpui::test]
+    fn backdrop_dismissal_never_mutates_backgrounded_sessions(cx: &mut gpui::TestAppContext) {
+        let catalog = crate::flows::catalog::flow_catalog();
+        catalog.set_notify_hook(|| {});
+        catalog.prime_ready_for_test(&crate::flows::resolve_flow_cwd(None));
+
+        let app_slot = Arc::new(Mutex::new(None));
+        let app_slot_for_window = Arc::clone(&app_slot);
+        let window = cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.open_window(Default::default(), |window, cx| {
+                let mut config = crate::config::Config::default();
+                let mut built_ins = config.get_builtins();
+                built_ins.app_launcher = false;
+                config.built_ins = Some(built_ins);
+                let app = cx.new(|cx| ScriptListApp::new(config, false, window, cx));
+                *app_slot_for_window.lock().expect("store backdrop test app") = Some(app);
+                cx.new(|_| crate::MainMenuSelectionTestHost)
+            })
+            .expect("open backdrop policy test window")
+        });
+        let app = app_slot
+            .lock()
+            .expect("read backdrop test app")
+            .take()
+            .expect("backdrop test app initialized");
+
+        let (store_before, view_before) = cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                // One backgrounded flow session in the canonical store.
+                let focus_handle = cx.focus_handle();
+                let entity = cx.new(|_| {
+                    crate::prompts::ChatPrompt::new(
+                        "flow-session-11".to_string(),
+                        None,
+                        vec![],
+                        None,
+                        None,
+                        focus_handle,
+                        Arc::new(|_, _| {}) as crate::prompts::ChatSubmitCallback,
+                        Arc::new(crate::theme::Theme::default()),
+                    )
+                });
+                app.conversations
+                    .flow_sessions
+                    .push((backdrop_test_flow_meta(11), entity));
+
+                // Open a minimal actions dialog — the modal under test.
+                let theme_arc = Arc::clone(&app.theme);
+                let dialog = cx.new(move |cx| {
+                    let focus_handle = cx.focus_handle();
+                    ActionsDialog::with_config(
+                        focus_handle,
+                        Arc::new(|_action_id| {}),
+                        vec![],
+                        theme_arc,
+                        crate::actions::ActionsDialogConfig::default(),
+                    )
+                });
+                app.actions_dialog = Some(dialog);
+                app.mark_actions_popup_opening();
+
+                (
+                    app.conversations.snapshot(),
+                    format!("{:?}", std::mem::discriminant(&app.current_view)),
+                )
+            })
+        });
+
+        // The backdrop click: exactly what the shield's on_click listener
+        // does (arg/helpers.rs backdrop_click -> close_actions_popup).
+        cx.update(|cx| {
+            window
+                .update(cx, |_host, window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.close_actions_popup(ActionsDialogHost::MainList, window, cx);
+                    });
+                })
+                .expect("drive backdrop dismissal");
+        });
+
+        cx.update(|cx| {
+            app.update(cx, |app, _cx| {
+                // DismissModal happened…
+                assert!(
+                    app.actions_dialog.is_none(),
+                    "backdrop click must dismiss the modal"
+                );
+                // …and ONLY DismissModal: the store is byte-identical (same
+                // count, ids, liveness, turnInFlight, and last_activity —
+                // dismissal is NOT semantic session activity), and the
+                // surface underneath did not change or background.
+                assert_eq!(
+                    app.conversations.snapshot(),
+                    store_before,
+                    "modal dismissal must not mutate any backgrounded session"
+                );
+                assert_eq!(
+                    format!("{:?}", std::mem::discriminant(&app.current_view)),
+                    view_before,
+                    "modal dismissal must not change the underlying surface"
+                );
+            })
+        });
     }
 }
