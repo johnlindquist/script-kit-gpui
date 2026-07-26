@@ -72,6 +72,30 @@ var eventCounts = Dictionary(uniqueKeysWithValues: watched.map { ($0.0, 0) })
 var maximumPointerDeviation = 0.0
 var frontmostHistory: [[String: Any]] = [initialFrontmost]
 var sampleCount = 0
+// Timestamped interference events (glass-smoke-harness-max-info WP6): each
+// counter mutation site records WHEN it fired so scenario intervals can
+// attribute interference to the scenario that was capturing at that moment.
+// atUnixMs shares the probes' Date.now() clock; atUptimeNs shares the
+// lifecycle receipts' host clock. Bounded so a noisy session cannot grow the
+// receipt without bound — drops are counted, never silent.
+let maximumRecordedEvents = 2000
+var interferenceEvents: [[String: Any]] = []
+var droppedEventCount = 0
+func recordInterferenceEvent(_ kind: String, _ detail: [String: Any] = [:]) {
+    guard interferenceEvents.count < maximumRecordedEvents else {
+        droppedEventCount += 1
+        return
+    }
+    var event: [String: Any] = [
+        "kind": kind,
+        "atUnixMs": Date().timeIntervalSince1970 * 1000.0,
+        "atUptimeNs": DispatchTime.now().uptimeNanoseconds,
+        "sampleIndex": sampleCount,
+    ]
+    for (key, value) in detail { event[key] = value }
+    interferenceEvents.append(event)
+}
+var pointerDeviationEventRecorded = false
 try write([
     "schemaVersion": 1,
     "status": "ready",
@@ -90,19 +114,32 @@ while !FileManager.default.fileExists(atPath: stopPath) {
         )
         if let previous = previousAges[name], age + 0.004 < previous {
             eventCounts[name, default: 0] += 1
+            recordInterferenceEvent("untaggedInput", ["eventType": name])
         }
         previousAges[name] = age
     }
     let pointer = NSEvent.mouseLocation
-    maximumPointerDeviation = max(
-        maximumPointerDeviation,
-        hypot(pointer.x - initialPointer.x, pointer.y - initialPointer.y)
+    let pointerDeviation = hypot(
+        pointer.x - initialPointer.x,
+        pointer.y - initialPointer.y
     )
+    maximumPointerDeviation = max(maximumPointerDeviation, pointerDeviation)
+    if pointerDeviation > 1.0 && !pointerDeviationEventRecorded {
+        pointerDeviationEventRecorded = true
+        recordInterferenceEvent(
+            "pointerDeviationExceeded",
+            ["deviationPx": pointerDeviation]
+        )
+    }
     if sampleCount % 12 == 0 {
         let current = frontmost()
         let last = frontmostHistory.last
         if (last?["pid"] as? Int32) != (current["pid"] as? Int32) {
             frontmostHistory.append(current)
+            recordInterferenceEvent(
+                "frontmostAppChanged",
+                ["bundleId": current["bundleId"] ?? ""]
+            )
         }
     }
 }
@@ -110,6 +147,10 @@ while !FileManager.default.fileExists(atPath: stopPath) {
 let finalFrontmost = frontmost()
 if (frontmostHistory.last?["pid"] as? Int32) != (finalFrontmost["pid"] as? Int32) {
     frontmostHistory.append(finalFrontmost)
+    recordInterferenceEvent(
+        "frontmostAppChanged",
+        ["bundleId": finalFrontmost["bundleId"] ?? ""]
+    )
 }
 let finalPointer = NSEvent.mouseLocation
 let untaggedInputCount = eventCounts.values.reduce(0, +)
@@ -133,6 +174,9 @@ let receipt: [String: Any] = [
     "taggedInputCount": 0,
     "untaggedInputCount": untaggedInputCount,
     "eventCounts": eventCounts,
+    "events": interferenceEvents,
+    "droppedEventCount": droppedEventCount,
+    "eventTimestampsSupported": true,
     "targetMovedExternally": false,
     "pass": untaggedInputCount == 0
         && !frontmostChanged

@@ -2227,6 +2227,11 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
     let _: () = msg_send![window, setFrame: start display: true];
     record_native_glass_entry_span(window, tuning.duration);
+    // Instrumentation only (runtime-contract cross-check, no animation value
+    // is changed): the moment the enter morph is armed, on the same host
+    // clock the lifecycle receipts use.
+    let configured_at_host_time_ns = crate::platform::host_clock::host_time_ns();
+    let settle_duration_ns = (tuning.duration * 1_000_000_000.0) as u64;
 
     // Record the in-flight duration so sibling windows (footer overlay) can
     // hide until the morph settles (glass_morph_remaining).
@@ -2313,12 +2318,16 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start_alpha={:.2} frames={}x{}->{}x{}->{}x{}",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start_alpha={:.2} start_alpha_bits={:016x} settle_duration_ns={} configured_at_host_time_ns={} expected_settle_deadline_ns={} frames={}x{}->{}x{}->{}x{}",
             window_name,
             GlassMorphVariant::WindowFrame.log_name(),
             tuning.duration,
             tuning.inset_fraction,
             tuning.start_alpha,
+            tuning.start_alpha.to_bits(),
+            settle_duration_ns,
+            configured_at_host_time_ns,
+            configured_at_host_time_ns.saturating_add(settle_duration_ns),
             start.size.width as i64,
             start.size.height as i64,
             squish.size.width as i64,

@@ -37,6 +37,19 @@ import {
 } from "./glass-interference.ts";
 import { classifyNativeInventory } from "./glass-topology-contract.ts";
 import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
+import os from "node:os";
+import {
+  type BoundarySnapshot,
+  captureBoundarySnapshot,
+  captureEdgeSnapshot,
+  checkRuntimeContract,
+  interferenceStatistics,
+  parseMorphEnterLogs,
+  probeGpuTelemetry,
+  type ScenarioInterval,
+  startSampler,
+  summarizeTelemetry,
+} from "../agentic/glass-system-telemetry.ts";
 
 function arg(name: string, fallback?: string) {
   const index = process.argv.indexOf(name);
@@ -175,6 +188,13 @@ const outDir = resolve(
 const scenarioProfile = (arg("--profile", "full") ?? "full") as ScenarioProfile;
 const resolvedScenarioNames = resolveScenarioNames(scenarioProfile);
 const analysisMode = parseAnalysisMode(arg("--analysis-mode", "inline"));
+// WP6: when the caller declares the build's morph contract, the observed
+// instrumented log line must match it exactly — a mismatch is INVALID_SETUP
+// (mislabeled artifact), never a product verdict.
+const declaredStartAlphaArg = arg("--declared-start-alpha");
+const declaredDurationNs = Number(arg("--declared-duration-ns", "280000000"));
+const contractWindowName = arg("--contract-window-name", "Main window")!;
+const telemetryIntervalMs = Number(arg("--telemetry-interval-ms", "250"));
 if (!binary || !existsSync(binary)) {
   throw new Error(`binary missing: ${binary || "<unset>"}`);
 }
@@ -238,6 +258,16 @@ if (suppliedInterferenceHelper) {
 }
 timingMs.helperPreparation = performance.now() - helperPreparationStartedMs;
 let interferenceMonitor: ReturnType<typeof startInterferenceMonitor> | null = null;
+
+// WP6 system telemetry: pre-run edge snapshot + continuous low-overhead
+// sampler across the whole capture, boundary snapshots per scenario, and a
+// post-run edge snapshot in the finally block. Boundary eligibility (load
+// <= 6.0 pre/post) is computed from the same values the legacy harness used.
+const telemetryPre = await captureEdgeSnapshot("pre");
+const telemetryPreLoad1 = os.loadavg()[0];
+const telemetrySampler = startSampler(telemetryIntervalMs);
+const telemetryBoundaries: BoundarySnapshot[] = [];
+const scenarioUnixIntervals: ScenarioInterval[] = [];
 
 const receipt: Json = {
   schemaVersion: 2,
@@ -1074,14 +1104,24 @@ try {
   };
   const captureStartedMs = performance.now();
   const scenarioIntervals: ScenarioTimingInterval[] = [];
+  telemetryBoundaries.push(
+    await captureBoundarySnapshot("before-first-scenario", Number(driver.pid)),
+  );
   for (const name of resolvedScenarioNames) {
     const startedAtMs = performance.now();
+    const startUnixMs = Date.now();
     await scenarioRunners[name]();
     scenarioIntervals.push({
       name,
       startedAtMs,
       finishedAtMs: performance.now(),
     });
+    // Unix-clock twin of the interval so timestamped interference events
+    // (atUnixMs) can be attributed to the scenario that was capturing.
+    scenarioUnixIntervals.push({ name, startUnixMs, endUnixMs: Date.now() });
+    telemetryBoundaries.push(
+      await captureBoundarySnapshot(`after-${name}`, Number(driver.pid)),
+    );
   }
   timingMs.captureTotal = performance.now() - captureStartedMs;
   receipt.scenarioIntervalsMs = scenarioIntervals;
@@ -1132,6 +1172,58 @@ try {
     pass: receipt.pass === true,
     hasObserverError: receipt.error != null,
   });
+  // WP6 telemetry finalization: post edge snapshot, sampler summary, GPU
+  // capability probe (never a gate), interference statistics with scenario
+  // attribution, and — when a contract was declared — the runtime
+  // contract cross-check against the app's instrumented morph log.
+  const telemetryPost = await captureEdgeSnapshot("post");
+  const telemetryPostLoad1 = os.loadavg()[0];
+  const telemetrySamplerSummary = telemetrySampler.stop();
+  receipt.systemTelemetry = {
+    ...summarizeTelemetry({
+      pre: telemetryPre,
+      post: telemetryPost,
+      sampler: telemetrySamplerSummary,
+      boundaries: telemetryBoundaries,
+      preLoad1: telemetryPreLoad1,
+      postLoad1: telemetryPostLoad1,
+    }),
+    samplerIntervalMs: telemetryIntervalMs,
+    boundaries: telemetryBoundaries,
+    pre: telemetryPre,
+    post: telemetryPost,
+    gpu: await probeGpuTelemetry(),
+  } as Json;
+  if (receipt.interference?.receipt) {
+    receipt.interferenceStatistics = interferenceStatistics(
+      receipt.interference.receipt,
+      scenarioUnixIntervals,
+    ) as Json;
+  }
+  if (declaredStartAlphaArg !== undefined) {
+    const appLogText = existsSync(driver.logPath)
+      ? readFileSync(driver.logPath, "utf8")
+      : "";
+    receipt.runtimeContract = checkRuntimeContract(
+      {
+        declaredMorphStartAlpha: Number(declaredStartAlphaArg),
+        expectedDurationNs: declaredDurationNs,
+      },
+      parseMorphEnterLogs(appLogText),
+      contractWindowName,
+    ) as Json;
+    if (receipt.runtimeContract.pass !== true) {
+      // A mislabeled artifact invalidates the run's setup. Interference
+      // still dominates the disposition; a contract mismatch never becomes
+      // a product failure.
+      receipt.pass = false;
+      if (receipt.disposition !== "INVALID_INTERFERENCE") {
+        receipt.disposition = "INVALID_SETUP";
+      }
+    }
+  } else {
+    receipt.runtimeContract = null;
+  }
   timingMs.cleanup = performance.now() - cleanupStartedMs;
   timingMs.total = performance.now() - scriptStartedMs;
   receipt.timingMs = timingMs;
