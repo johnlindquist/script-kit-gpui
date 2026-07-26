@@ -1,0 +1,28 @@
+{
+  "acceptedRuns": 20,
+  "eligibleRuns": 20,
+  "rejectedRuns": [],
+  "discardedPairsByLoadDelta": [],
+  "before": {
+    "runs": 10,
+    "medianMaxDisplayedEntryDeltaE00": 46.0,
+    "worstMaxDisplayedEntryDeltaE00": 46.0,
+    "loadRange": [
+      2.0,
+      2.1
+    ]
+  },
+  "after": {
+    "runs": 10,
+    "medianMaxDisplayedEntryDeltaE00": 1.5,
+    "worstMaxDisplayedEntryDeltaE00": 1.5,
+    "worstRelationDrift": 1.0,
+    "loadRange": [
+      2.0,
+      2.1
+    ]
+  },
+  "candidatePass": true,
+  "baselineRedForTheRightReason": true,
+  "pass": true
+}

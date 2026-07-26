@@ -162,7 +162,10 @@ PY
 }
 
 echo "== warmups (discarded) =="
-for i in $(seq 1 "$WARMUPS"); do
+# NOTE: BSD seq counts DOWN for `seq 1 0`; guard zero warmups explicitly
+# (same defect class as the --blocks guard below; locked by
+# scripts/agentic/glass-entry-abba.test.ts).
+for i in $(test "$WARMUPS" -ge 1 && seq 1 "$WARMUPS"); do
   one_run "warmup-A-$i" A "$A_BINARY" false
   one_run "warmup-B-$i" B "$B_BINARY" false
 done
