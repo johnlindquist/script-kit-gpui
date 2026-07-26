@@ -410,15 +410,58 @@ pub(super) fn publish_staged(staged: Vec<StagedWindow>) -> RegistrySnapshot {
 /// Refresh the registry from the deterministic test provider.
 pub(super) fn refresh_from_test_provider() -> Result<RegistrySnapshot> {
     let states = super::test_support::provider_states()?;
-    let staged = states
+    let live: Vec<_> = states
         .into_iter()
         .filter(|window| !window.destroyed)
+        .collect();
+
+    // Native-tab grouping: rows declaring the same tab group AND sharing one
+    // native window id form a proven group. Primary: focused > main > lowest
+    // fixture id; non-primary members leave the ordinary listing.
+    let mut group_members: HashMap<(String, u32), Vec<u32>> = HashMap::new();
+    for window in &live {
+        if let (Some(group), Some(native)) = (
+            window.definition.native_tab_group.clone(),
+            window.definition.native_window_id,
+        ) {
+            group_members
+                .entry((group, native))
+                .or_default()
+                .push(window.id);
+        }
+    }
+    let mut tab_grouped: HashMap<u32, bool> = HashMap::new(); // id -> is_primary
+    for members in group_members.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let primary = members
+            .iter()
+            .find(|id| {
+                live.iter()
+                    .any(|window| window.id == **id && window.focused)
+            })
+            .or_else(|| {
+                members
+                    .iter()
+                    .find(|id| live.iter().any(|window| window.id == **id && window.main))
+            })
+            .copied()
+            .unwrap_or_else(|| *members.iter().min().expect("non-empty group"));
+        for id in members {
+            tab_grouped.insert(*id, *id == primary);
+        }
+    }
+
+    let staged = live
+        .into_iter()
         .map(|window| {
             let untitled_internal = window.definition.title.is_empty()
                 && matches!(
                     window.definition.role.as_deref(),
                     Some("AXDialog") | Some("AXSheet")
                 );
+            let tab_membership = tab_grouped.get(&window.id).copied();
             StagedWindow {
                 app: window.definition.app.clone(),
                 title: window.definition.title.clone(),
@@ -436,7 +479,9 @@ pub(super) fn refresh_from_test_provider() -> Result<RegistrySnapshot> {
                 role: window.definition.role.clone(),
                 subrole: window.definition.subrole.clone(),
                 native_window_id: window.definition.native_window_id,
-                native_id_confidence: if window.definition.native_window_id.is_some() {
+                native_id_confidence: if tab_membership.is_some() {
+                    NativeIdConfidence::NativeTabGroup
+                } else if window.definition.native_window_id.is_some() {
                     NativeIdConfidence::UniquePublicCorrelation
                 } else {
                     NativeIdConfidence::Unavailable
@@ -453,7 +498,7 @@ pub(super) fn refresh_from_test_provider() -> Result<RegistrySnapshot> {
                     actionable: true,
                     non_actionable_reason: None,
                 },
-                search_visibility: if untitled_internal {
+                search_visibility: if untitled_internal || tab_membership == Some(false) {
                     SearchVisibility::InternalOnly
                 } else {
                     SearchVisibility::Ordinary
@@ -829,6 +874,69 @@ mod tests {
         publish_staged(vec![staged(1, 100, "One", bounds, (100 << 16) | 0), dialog]);
         assert_eq!(window_infos(SearchScope::Ordinary).len(), 1);
         assert_eq!(window_infos(SearchScope::All).len(), 2);
+    }
+
+    #[test]
+    fn provider_tab_group_produces_one_ordinary_primary_and_internal_members() {
+        let _lock = REGISTRY_TEST_LOCK.lock();
+        let _env = super::super::test_support::test_env::EnvGuard::set(
+            r#"{"windows":[
+                {"id":107,"app":"Tabbed","title":"Tab One","pid":5003,
+                 "nativeWindowId":9107,"nativeTabGroup":"group-a","focused":true},
+                {"id":108,"app":"Tabbed","title":"Tab Two","pid":5003,
+                 "nativeWindowId":9107,"nativeTabGroup":"group-a"}
+            ]}"#,
+        );
+        reset_registry_for_tests();
+        refresh_from_test_provider().expect("refresh");
+
+        let ordinary = window_infos(SearchScope::Ordinary);
+        assert_eq!(ordinary.len(), 1, "one movable row per native-tab group");
+        assert_eq!(ordinary[0].id, 107, "focused member is the primary");
+        assert_eq!(window_infos(SearchScope::All).len(), 2);
+
+        let member_handle = resolve_legacy_window_id(108).expect("member resolves");
+        let member = resolve_handle(member_handle).expect("member observation");
+        assert_eq!(
+            member.native_id_confidence,
+            NativeIdConfidence::NativeTabGroup
+        );
+        assert_eq!(member.search_visibility, SearchVisibility::InternalOnly);
+    }
+
+    #[test]
+    fn provider_untitled_dialog_is_observable_but_not_ordinary() {
+        let _lock = REGISTRY_TEST_LOCK.lock();
+        let _env = super::super::test_support::test_env::EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Doc","pid":9},
+                {"id":2,"app":"A","title":"","pid":9,"role":"AXDialog"}
+            ]}"#,
+        );
+        reset_registry_for_tests();
+        refresh_from_test_provider().expect("refresh");
+        assert_eq!(window_infos(SearchScope::Ordinary).len(), 1);
+        assert_eq!(window_infos(SearchScope::All).len(), 2);
+        let dialog = resolve_handle(resolve_legacy_window_id(2).expect("resolve")).expect("obs");
+        assert_eq!(dialog.search_visibility, SearchVisibility::InternalOnly);
+    }
+
+    #[test]
+    fn provider_capability_flags_flow_into_observations() {
+        let _lock = REGISTRY_TEST_LOCK.lock();
+        let _env = super::super::test_support::test_env::EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Frozen","pid":9,
+                 "positionSettable":false,"sizeSettable":false}
+            ]}"#,
+        );
+        reset_registry_for_tests();
+        refresh_from_test_provider().expect("refresh");
+        let observation =
+            resolve_handle(resolve_legacy_window_id(1).expect("resolve")).expect("obs");
+        assert!(!observation.capabilities.can_move);
+        assert!(!observation.capabilities.can_resize);
+        assert!(observation.capabilities.can_minimize);
     }
 
     #[test]

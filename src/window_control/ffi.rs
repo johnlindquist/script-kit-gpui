@@ -36,6 +36,22 @@ extern "C" {
         value: CFTypeRef,
     ) -> i32;
     pub(super) fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> i32;
+    pub(super) fn AXUIElementCopyMultipleAttributeValues(
+        element: AXUIElementRef,
+        attributes: CFArrayRef,
+        options: u32,
+        values: *mut CFArrayRef,
+    ) -> i32;
+    pub(super) fn AXUIElementIsAttributeSettable(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        settable: *mut bool,
+    ) -> i32;
+    pub(super) fn AXUIElementCopyActionNames(
+        element: AXUIElementRef,
+        names: *mut CFArrayRef,
+    ) -> i32;
+    pub(super) fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
     pub(super) fn AXValueCreate(value_type: i32, value: *const c_void) -> AXValueRef;
     pub(super) fn AXValueGetValue(
         value: AXValueRef,

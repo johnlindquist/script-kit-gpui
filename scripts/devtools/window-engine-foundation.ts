@@ -256,7 +256,7 @@ export const SUITES: Record<string, SuiteRunner> = {
     }
     return { suite: "fixture", status: "pass", detail: "fixture valid with full scenario coverage" };
   },
-  identity: pendingSuite("identity", "S5"),
+  identity: (context) => cargoProviderTests(context, "window_control::observation", "identity"),
   topology: pendingSuite("topology", "S6"),
   transaction: pendingSuite("transaction", "S10"),
   "legacy-actions": pendingSuite("legacy-actions", "S12"),

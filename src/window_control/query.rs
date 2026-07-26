@@ -11,15 +11,17 @@ use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
 
 use super::ax::{
-    get_ax_attribute, get_window_bool_attribute, get_window_position, get_window_size,
-    get_window_string_attribute,
+    batch_read_window_attributes, get_ax_attribute, get_window_bool_attribute, get_window_position,
+    get_window_size, get_window_string_attribute,
 };
 use super::cache::CachedAxRef;
-use super::cf::{cf_release, cf_retain};
+use super::capabilities::collect_ax_capabilities;
+use super::cf::{cf_hash, cf_release, cf_retain};
 use super::ffi::{
     AXUIElementCreateApplication, AXUIElementRef, CFArrayGetCount, CFArrayGetValueAtIndex,
     CFArrayRef, CFEqual,
 };
+use super::observation::{correlate, AxCorrelationRow, CgCorrelationRow};
 use super::registry::{SearchScope, StagedWindow};
 use super::types::{Bounds, NativeIdConfidence, SearchVisibility, WindowCapabilities, WindowInfo};
 
@@ -101,6 +103,8 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
 /// CoreGraphics-only rows for other-Space windows with synthetic base IDs.
 pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
     let mut windows = Vec::new();
+    // Correlation facts aligned index-for-index with the AX rows in `windows`.
+    let mut ax_facts: Vec<AxCorrelationRow> = Vec::new();
     let mut running_apps_by_pid = HashMap::<i32, RunningAppMetadata>::new();
 
     // Get list of running applications using objc
@@ -182,13 +186,33 @@ pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
                     // CFArrayGetValueAtIndex returns a borrowed reference - we must retain
                     // if we want to keep it beyond the array's lifetime
                     let ax_window = CFArrayGetValueAtIndex(windows_value as CFArrayRef, j);
+                    let window_ref_for_reads = ax_window as AXUIElementRef;
 
-                    // Get window title
-                    let title = get_window_string_attribute(ax_window as AXUIElementRef, "AXTitle")
-                        .unwrap_or_default();
+                    // Batch-read title/role/subrole/minimized; fall back to
+                    // individual reads when the batch API misbehaves.
+                    let (title, role, subrole, batch_minimized) =
+                        match batch_read_window_attributes(window_ref_for_reads) {
+                            Some(batch) => (
+                                batch.title.unwrap_or_default(),
+                                batch.role,
+                                batch.subrole,
+                                batch.minimized,
+                            ),
+                            None => (
+                                get_window_string_attribute(window_ref_for_reads, "AXTitle")
+                                    .unwrap_or_default(),
+                                get_window_string_attribute(window_ref_for_reads, "AXRole"),
+                                get_window_string_attribute(window_ref_for_reads, "AXSubrole"),
+                                None,
+                            ),
+                        };
 
-                    // Skip windows without titles (often utility windows)
-                    if title.is_empty() {
+                    // Titleless windows: keep dialogs/sheets as internal-only
+                    // observations; skip other titleless utility rows (the
+                    // historical behavior for ordinary listings).
+                    let titleless_dialog_like = title.is_empty()
+                        && matches!(role.as_deref(), Some("AXDialog") | Some("AXSheet"));
+                    if title.is_empty() && !titleless_dialog_like {
                         continue;
                     }
 
@@ -197,8 +221,9 @@ pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
                     let (width, height) =
                         get_window_size(ax_window as AXUIElementRef).unwrap_or((0, 0));
 
-                    // Skip very small windows (likely invisible or popups)
-                    if width < 50 || height < 50 {
+                    // Skip very small windows (likely invisible or popups),
+                    // except internal dialog-likes which stay observable.
+                    if (width < 50 || height < 50) && !titleless_dialog_like {
                         continue;
                     }
 
@@ -209,8 +234,9 @@ pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
                     let is_focused =
                         focused_window.is_some_and(|focused| CFEqual(window_ref as _, focused));
                     let is_main = main_window.is_some_and(|main| CFEqual(window_ref as _, main));
-                    let is_minimized =
-                        get_window_bool_attribute(window_ref, "AXMinimized").unwrap_or(false);
+                    let is_minimized = batch_minimized.unwrap_or_else(|| {
+                        get_window_bool_attribute(window_ref, "AXMinimized").unwrap_or(false)
+                    });
 
                     // CFArrayGetValueAtIndex returns a borrowed reference;
                     // CachedAxRef::from_borrowed retains it exactly once.
@@ -218,10 +244,36 @@ pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
                         continue;
                     };
 
+                    let bounds = Bounds::new(x, y, width, height);
+                    let capabilities = collect_ax_capabilities(window_ref);
+                    let visibility =
+                        super::observation::classify_visibility(role.as_deref(), &title, bounds);
+
+                    // AXParent identity key for native-tab grouping proof.
+                    let parent_key = get_ax_attribute(window_ref, "AXParent")
+                        .ok()
+                        .filter(|parent| !parent.is_null())
+                        .map(|parent| {
+                            let key = cf_hash(parent);
+                            cf_release(parent);
+                            key
+                        });
+
+                    ax_facts.push(AxCorrelationRow {
+                        pid,
+                        title: title.clone(),
+                        bounds,
+                        role: role.clone(),
+                        focused: is_focused,
+                        main: is_main,
+                        parent_key,
+                        declared_tab_group: None,
+                    });
+
                     windows.push(StagedWindow {
                         app: app_name_str.clone(),
                         title,
-                        bounds: Bounds::new(x, y, width, height),
+                        bounds,
                         pid,
                         bundle_id: bundle_id.clone(),
                         app_path: app_path.clone(),
@@ -232,23 +284,14 @@ pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
                         is_main,
                         is_minimized,
                         is_on_current_space: true,
-                        role: None,
-                        subrole: None,
+                        role,
+                        subrole,
                         native_window_id: None,
                         native_id_confidence: NativeIdConfidence::Unavailable,
                         base_legacy_id,
                         ax: Some(ax),
-                        capabilities: WindowCapabilities {
-                            can_move: true,
-                            can_resize: true,
-                            can_minimize: true,
-                            can_close: true,
-                            can_raise: true,
-                            can_set_fullscreen: false,
-                            actionable: true,
-                            non_actionable_reason: None,
-                        },
-                        search_visibility: SearchVisibility::Ordinary,
+                        capabilities,
+                        search_visibility: visibility,
                         provider_match_key: None,
                     });
                 }
@@ -270,21 +313,55 @@ pub(super) fn collect_staged_system_windows() -> Result<Vec<StagedWindow>> {
         }
     }
 
-    append_core_graphics_windows(&mut windows, &running_apps_by_pid);
+    correlate_and_append_cg(&mut windows, &ax_facts, &running_apps_by_pid);
 
     info!(window_count = windows.len(), "Listed windows");
     Ok(windows)
 }
 
-fn append_core_graphics_windows(
+/// Correlate AX rows with CG rows (native ids + tab groups), then append the
+/// unmatched CG rows as CG-only observations.
+fn correlate_and_append_cg(
     windows: &mut Vec<StagedWindow>,
+    ax_facts: &[AxCorrelationRow],
     running_apps_by_pid: &HashMap<i32, RunningAppMetadata>,
 ) {
     let Ok(cg_windows) = list_core_graphics_windows_all_spaces() else {
         return;
     };
 
+    let cg_facts: Vec<CgCorrelationRow> = cg_windows
+        .iter()
+        .map(|cg| CgCorrelationRow {
+            native_window_id: cg.native_window_id,
+            pid: cg.pid,
+            title: cg.title.clone(),
+            bounds: cg.bounds,
+        })
+        .collect();
+    let correlation = correlate(ax_facts, &cg_facts);
+
+    // Apply verdicts to the staged AX rows (index-aligned prefix of `windows`).
+    for (index, verdict) in correlation.verdicts.iter().enumerate() {
+        let Some(row) = windows.get_mut(index) else {
+            break;
+        };
+        row.native_window_id = verdict.native_window_id;
+        row.native_id_confidence = verdict.confidence;
+        if verdict.internal_tab_member {
+            // Non-primary members of a proven native-tab group stay
+            // observable but leave the ordinary listing.
+            row.search_visibility = SearchVisibility::InternalOnly;
+        }
+    }
+
+    let consumed: std::collections::HashSet<usize> =
+        correlation.consumed_cg_indices.into_iter().collect();
+
     for (index, cg_window) in cg_windows.into_iter().enumerate() {
+        if consumed.contains(&index) {
+            continue;
+        }
         let Some(app) = running_apps_by_pid.get(&cg_window.pid) else {
             continue;
         };

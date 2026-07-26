@@ -521,19 +521,22 @@ pub(crate) fn reset_for_tests() {
     *PROVIDER.lock() = None;
 }
 
+/// Shared provider-env guard for every test module that mutates
+/// `SCRIPT_KIT_WINDOW_SEARCH_TEST_PROVIDER`. One process-wide lock prevents
+/// parallel test threads from interleaving env mutations.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_env {
+    use super::{reset_for_tests, ENV_VAR};
 
     static ENV_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
         std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
 
-    struct EnvGuard {
+    pub(crate) struct EnvGuard {
         _lock: parking_lot::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
-        fn set(value: &str) -> Self {
+        pub(crate) fn set(value: &str) -> Self {
             let lock = ENV_LOCK.lock();
             reset_for_tests();
             std::env::set_var(ENV_VAR, value);
@@ -547,6 +550,12 @@ mod tests {
             reset_for_tests();
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_env::EnvGuard;
+    use super::*;
 
     #[test]
     fn legacy_array_input_parses_with_historical_defaults() {

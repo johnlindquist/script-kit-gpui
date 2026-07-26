@@ -5,6 +5,19 @@ use super::ffi::{
     CFStringGetLength, CFStringRef, CFTypeRef,
 };
 
+/// Hash a CF object (equal objects hash equally per CF contract).
+pub(super) fn cf_hash(cf: CFTypeRef) -> u64 {
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFHash(cf: CFTypeRef) -> usize;
+    }
+    if cf.is_null() {
+        return 0;
+    }
+    // SAFETY: cf is a live CF object pointer null-checked above.
+    (unsafe { CFHash(cf) }) as u64
+}
+
 /// Create a CFString from a Rust string.
 pub(super) fn try_create_cf_string(s: &str) -> Result<CFStringRef> {
     let c_str = std::ffi::CString::new(s)

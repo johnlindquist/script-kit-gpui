@@ -22,11 +22,13 @@
 mod actions;
 mod ax;
 mod cache;
+mod capabilities;
 mod cf;
 mod diagnostics;
 mod display;
 mod ffi;
 mod identity;
+mod observation;
 mod query;
 mod registry;
 mod snap;
