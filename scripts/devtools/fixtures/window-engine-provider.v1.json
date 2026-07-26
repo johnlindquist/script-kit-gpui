@@ -1,0 +1,151 @@
+{
+  "windows": [
+    {
+      "id": 101,
+      "app": "Window Engine Fixture",
+      "title": "SK Window Fixture Ordinary",
+      "pid": 5001,
+      "bundleId": "dev.scriptkit.window-fixture",
+      "nativeWindowId": 9101,
+      "role": "AXWindow",
+      "subrole": "AXStandardWindow",
+      "bounds": { "x": 40, "y": 60, "width": 900, "height": 600 },
+      "displayId": 1,
+      "focused": true,
+      "main": true,
+      "frontmostApp": true
+    },
+    {
+      "id": 102,
+      "app": "Window Engine Fixture",
+      "title": "SK Window Fixture Constrained",
+      "pid": 5001,
+      "bundleId": "dev.scriptkit.window-fixture",
+      "nativeWindowId": 9102,
+      "role": "AXWindow",
+      "subrole": "AXStandardWindow",
+      "bounds": { "x": 980, "y": 60, "width": 640, "height": 480 },
+      "displayId": 1,
+      "mutation": { "minWidth": 500, "minHeight": 400 }
+    },
+    {
+      "id": 103,
+      "app": "Window Engine Fixture",
+      "title": "",
+      "pid": 5001,
+      "bundleId": "dev.scriptkit.window-fixture",
+      "role": "AXDialog",
+      "bounds": { "x": 200, "y": 200, "width": 420, "height": 260 }
+    },
+    {
+      "id": 104,
+      "app": "Window Engine Fixture",
+      "title": "",
+      "pid": 5001,
+      "bundleId": "dev.scriptkit.window-fixture",
+      "role": "AXSheet",
+      "bounds": { "x": 260, "y": 120, "width": 480, "height": 220 }
+    },
+    {
+      "id": 105,
+      "app": "Twin App",
+      "title": "Same Title Same Bounds",
+      "pid": 5002,
+      "bundleId": "dev.scriptkit.twin",
+      "nativeWindowId": 9105,
+      "role": "AXWindow",
+      "bounds": { "x": 100, "y": 700, "width": 500, "height": 300 }
+    },
+    {
+      "id": 106,
+      "app": "Twin App",
+      "title": "Same Title Same Bounds",
+      "pid": 5002,
+      "bundleId": "dev.scriptkit.twin",
+      "nativeWindowId": 9106,
+      "role": "AXWindow",
+      "bounds": { "x": 100, "y": 700, "width": 500, "height": 300 }
+    },
+    {
+      "id": 107,
+      "app": "Tabbed App",
+      "title": "Tab One",
+      "pid": 5003,
+      "bundleId": "dev.scriptkit.tabbed",
+      "nativeWindowId": 9107,
+      "role": "AXWindow",
+      "nativeTabGroup": "group-a",
+      "bounds": { "x": 700, "y": 700, "width": 800, "height": 500 },
+      "focused": true
+    },
+    {
+      "id": 108,
+      "app": "Tabbed App",
+      "title": "Tab Two",
+      "pid": 5003,
+      "bundleId": "dev.scriptkit.tabbed",
+      "nativeWindowId": 9107,
+      "role": "AXWindow",
+      "nativeTabGroup": "group-a",
+      "bounds": { "x": 700, "y": 700, "width": 800, "height": 500 }
+    },
+    {
+      "id": 109,
+      "app": "Slow App",
+      "title": "SK Window Fixture Slow",
+      "pid": 5004,
+      "bundleId": "dev.scriptkit.slow",
+      "nativeWindowId": 9109,
+      "role": "AXWindow",
+      "bounds": { "x": -1800, "y": 100, "width": 700, "height": 500 },
+      "displayId": 2,
+      "mutation": { "delayMs": 120 }
+    },
+    {
+      "id": 110,
+      "app": "Slow App",
+      "title": "SK Window Fixture Offset",
+      "pid": 5004,
+      "bundleId": "dev.scriptkit.slow",
+      "nativeWindowId": 9110,
+      "role": "AXWindow",
+      "bounds": { "x": -1000, "y": 100, "width": 600, "height": 400 },
+      "displayId": 2,
+      "mutation": { "positionDeltaX": 7, "positionDeltaY": 5 }
+    },
+    {
+      "id": 111,
+      "app": "Fragile App",
+      "title": "SK Window Fixture Disposable",
+      "pid": 5005,
+      "bundleId": "dev.scriptkit.fragile",
+      "nativeWindowId": 9111,
+      "role": "AXWindow",
+      "bounds": { "x": 1500, "y": 200, "width": 400, "height": 300 },
+      "mutation": { "destroyOnAttempt": 2 }
+    }
+  ],
+  "displays": [
+    {
+      "id": 1,
+      "uuid": "fixture-display-primary",
+      "name": "Fixture Primary",
+      "fullBounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+      "visibleBounds": { "x": 0, "y": 25, "width": 1920, "height": 1055 },
+      "scaleFactor": 2.0,
+      "isPrimary": true,
+      "legacyOrder": 0
+    },
+    {
+      "id": 2,
+      "uuid": "fixture-display-portrait",
+      "name": "Fixture Portrait",
+      "fullBounds": { "x": -1920, "y": -200, "width": 1080, "height": 1920 },
+      "visibleBounds": { "x": -1920, "y": -200, "width": 1080, "height": 1920 },
+      "scaleFactor": 1.0,
+      "isPrimary": false,
+      "legacyOrder": 1
+    }
+  ],
+  "frontmostWindowId": 101
+}

@@ -23,6 +23,7 @@ mod actions;
 mod ax;
 mod cache;
 mod cf;
+mod diagnostics;
 mod display;
 mod ffi;
 mod query;
@@ -32,6 +33,7 @@ mod snap_monitor;
 mod snap_overlay;
 mod snap_runtime;
 mod snap_session;
+mod test_support;
 mod tiling;
 mod types;
 

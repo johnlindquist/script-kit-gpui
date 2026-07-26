@@ -82,7 +82,7 @@ pub fn request_accessibility_permission() -> bool {
 ///
 #[instrument]
 pub fn list_windows() -> Result<Vec<WindowInfo>> {
-    if let Some(windows) = test_provider_windows_from_env()? {
+    if let Some(windows) = super::test_support::provider_window_infos()? {
         return Ok(windows);
     }
 
@@ -524,61 +524,6 @@ unsafe fn nsurl_to_pathbuf(url: *mut objc::runtime::Object) -> Option<PathBuf> {
     }
     let path: *mut objc::runtime::Object = msg_send![url, path];
     nsstring_to_string(path).map(PathBuf::from)
-}
-
-#[derive(Debug, Deserialize)]
-struct TestProviderBounds {
-    x: Option<i32>,
-    y: Option<i32>,
-    width: Option<u32>,
-    height: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TestProviderWindow {
-    id: Option<u32>,
-    app: String,
-    title: String,
-    pid: Option<i32>,
-    bounds: Option<TestProviderBounds>,
-}
-
-fn test_provider_windows_from_env() -> Result<Option<Vec<WindowInfo>>> {
-    let Some(raw) = std::env::var("SCRIPT_KIT_WINDOW_SEARCH_TEST_PROVIDER")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-
-    let entries: Vec<TestProviderWindow> = serde_json::from_str(&raw)
-        .context("Failed to parse SCRIPT_KIT_WINDOW_SEARCH_TEST_PROVIDER")?;
-    let windows = entries
-        .into_iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let bounds = entry.bounds.unwrap_or(TestProviderBounds {
-                x: Some(0),
-                y: Some(0),
-                width: Some(1280),
-                height: Some(720),
-            });
-            WindowInfo::for_test(
-                entry.id.unwrap_or(index as u32 + 1),
-                entry.app,
-                entry.title,
-                Bounds::new(
-                    bounds.x.unwrap_or(0),
-                    bounds.y.unwrap_or(0),
-                    bounds.width.unwrap_or(1280),
-                    bounds.height.unwrap_or(720),
-                ),
-                entry.pid.unwrap_or(0),
-            )
-        })
-        .collect();
-
-    Ok(Some(windows))
 }
 
 /// Get the PID of the application that owns the menu bar.
