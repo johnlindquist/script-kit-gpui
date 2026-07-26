@@ -53,8 +53,28 @@ therm_limited() { pmset -g therm 2>/dev/null | awk -F= '/CPU_Speed_Limit/ {gsub(
 record_env() { # $1 = file prefix
   uptime > "$1.uptime.txt"
   pmset -g therm > "$1.therm.txt" 2>&1 || true
-  ps -A -o %cpu,pid,comm | sort -nr | head -20 > "$1.top.txt"
+  # `|| true` because under pipefail, sort surfaces head's early-exit as
+  # SIGPIPE (141) and set -e would kill the whole session on a snapshot.
+  { ps -A -o %cpu,pid,comm | sort -nr | head -20 > "$1.top.txt"; } || true
 }
+
+# Deterministic backdrop fixture (same helper the canonical
+# glass-motion-contrast cells use). Without it the entry frames sit over the
+# live desktop and the background-reference envelope recovery cannot work.
+FIXTURE_HELPER="$OUT/macos-glass-background-fixture"
+if [ ! -x "$FIXTURE_HELPER" ]; then
+  xcrun swiftc -O "$REPO/scripts/agentic/macos-glass-background-fixture.swift" \
+    -o "$FIXTURE_HELPER"
+fi
+FIXTURE_RECEIPT="$OUT/fixture.json"
+"$FIXTURE_HELPER" --mode saturated-stripes --receipt "$FIXTURE_RECEIPT" &
+FIXTURE_PID=$!
+trap '[ -n "${FIXTURE_PID:-}" ] && kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
+for _ in $(seq 1 100); do
+  [ -f "$FIXTURE_RECEIPT" ] && break
+  sleep 0.1
+done
+[ -f "$FIXTURE_RECEIPT" ] || { echo "backdrop fixture failed to start" >&2; exit 2; }
 
 # Session identity, captured once.
 {
@@ -73,9 +93,14 @@ system_profiler SPDisplaysDataType -json > "$OUT/displays.json" 2>/dev/null || t
 layout_receipt() { # $1 = build tag, $2 = binary -> echoes receipt path
   local dir="$OUT/layout-$1"
   if [ ! -f "$dir/receipt.json" ]; then
+    # The probe exits nonzero in --stationary-only --widths none mode (no
+    # trials to grade); the receipt is a provenance input for the entry
+    # metric, so gate on the file, not the exit code.
     SCRIPT_KIT_TEST_STATUS=1 bun "$DRAG" --binary "$2" --out "$dir" \
-      --stationary-only --widths none >/dev/null
+      --stationary-only --widths none \
+      >"$dir.stdout.txt" 2>"$dir.stderr.txt" || true
   fi
+  [ -f "$dir/receipt.json" ] || { echo "layout receipt missing for $1" >&2; return 1; }
   echo "$dir/receipt.json"
 }
 
@@ -84,13 +109,14 @@ one_run() { # $1 = run id, $2 = build tag (A|B), $3 = binary, $4 = accepted(bool
   mkdir -p "$run_dir"
   record_env "$run_dir/pre"
   pre_load="$(load1)"; pre_limited="$(therm_limited)"
-  local layout; layout="$(layout_receipt "$2" "$3")"
-  local lifecycle_exit=0 metric_exit=0
+  local layout="" lifecycle_exit=0 metric_exit=0
+  layout="$(layout_receipt "$2" "$3")" || metric_exit=98
   SCRIPT_KIT_TEST_STATUS=1 SCRIPT_KIT_GLASS_SCENARIO=lifecycle \
     bun "$LIFECYCLE" --binary "$3" --theme-fixture "$FIXTURE" \
-    --out "$run_dir/lifecycle" >/dev/null 2>"$run_dir/lifecycle.stderr" \
+    --out "$run_dir/lifecycle" >"$run_dir/lifecycle.stdout" \
+    2>"$run_dir/lifecycle.stderr" \
     || lifecycle_exit=$?
-  if [ -f "$run_dir/lifecycle/receipt.json" ]; then
+  if [ "$metric_exit" -eq 0 ] && [ -f "$run_dir/lifecycle/receipt.json" ]; then
     python3 "$METRIC" --receipt "$layout" \
       --lifecycle-receipt "$run_dir/lifecycle/receipt.json" \
       --scenario main-entry --out "$run_dir/entry-metrics.json" \
@@ -143,7 +169,9 @@ done
 
 echo "== accepted blocks (A B B A x $BLOCKS) =="
 n=0
-for block in $(seq 1 "$BLOCKS"); do
+# NOTE: BSD seq counts DOWN for `seq 1 0`; guard zero blocks explicitly.
+[ "$BLOCKS" -ge 1 ] || BLOCKS=0
+for block in $(test "$BLOCKS" -ge 1 && seq 1 "$BLOCKS"); do
   for tag in A B B A; do
     n=$((n + 1))
     if [ "$tag" = A ]; then bin="$A_BINARY"; else bin="$B_BINARY"; fi
