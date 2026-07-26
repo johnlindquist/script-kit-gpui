@@ -259,7 +259,17 @@ export const SUITES: Record<string, SuiteRunner> = {
   identity: (context) => cargoProviderTests(context, "window_control::observation", "identity"),
   topology: (context) =>
     cargoProviderTests(context, "window_control::display_topology", "topology"),
-  transaction: pendingSuite("transaction", "S10"),
+  transaction: (context) => {
+    const executor = cargoProviderTests(context, "window_control::transaction", "transaction");
+    if (executor.status !== "pass") return executor;
+    const undo = cargoProviderTests(context, "window_control::undo", "transaction");
+    if (undo.status !== "pass") return { ...undo, suite: "transaction" };
+    return {
+      suite: "transaction",
+      status: "pass",
+      detail: `${executor.detail}; ${undo.detail}`,
+    };
+  },
   "legacy-actions": pendingSuite("legacy-actions", "S12"),
   snap: pendingSuite("snap", "S13"),
   protocol: pendingSuite("protocol", "S14"),

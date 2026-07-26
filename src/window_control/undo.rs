@@ -365,3 +365,273 @@ pub fn window_undo_depths() -> (usize, usize) {
     let state = UNDO.lock();
     (state.undo.len(), state.redo.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::diagnostics::OperationSource;
+    use super::super::registry;
+    use super::super::test_support::test_env::EnvGuard;
+    use super::super::transaction::execute_plan;
+    use super::*;
+
+    fn refreshed() {
+        registry::reset_registry_for_tests();
+        registry::refresh_from_test_provider().expect("refresh");
+    }
+
+    /// Build a strict multi-window SetBounds plan against provider windows.
+    fn multi_bounds_plan(targets: &[(u32, Bounds)]) -> WindowMutationPlan {
+        let operations = targets
+            .iter()
+            .map(|(legacy_id, bounds)| {
+                let handle = registry::resolve_legacy_window_id(*legacy_id).expect("resolve");
+                let observation = registry::resolve_handle(handle).expect("observation");
+                PlannedWindowMutation {
+                    target: handle,
+                    expected_identity: ExpectedWindowIdentity::from_observation(&observation),
+                    request: RequestedMutation::SetBounds(*bounds),
+                    semantic_target: None,
+                    destination_display: None,
+                }
+            })
+            .collect();
+        WindowMutationPlan {
+            plan_id: super::super::plan::next_plan_id(),
+            source: OperationSource::Test,
+            snapshot_generation: registry::registry_generation(),
+            topology_generation: super::super::display_topology::topology_generation(),
+            requires_topology_generation: false,
+            operations,
+            focus_policy: FocusPolicy::PreserveCurrentFocus,
+            rollback_policy: RollbackPolicy::Strict,
+            verification: VerificationPolicy::Required,
+            record_undo: true,
+        }
+    }
+
+    #[test]
+    fn strict_second_operation_failure_restores_the_first() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Good","pid":9,
+                 "bounds":{"x":0,"y":0,"width":800,"height":600}},
+                {"id":2,"app":"A","title":"Bad","pid":9,
+                 "mutation":{"positionDeltaX":50,"positionDeltaY":50}}
+            ]}"#,
+        );
+        refreshed();
+        clear_window_undo_history();
+        let plan = multi_bounds_plan(&[
+            (1, Bounds::new(100, 100, 700, 500)),
+            (2, Bounds::new(200, 200, 700, 500)),
+        ]);
+        let receipt = execute_plan(&plan).expect("execute");
+        assert_eq!(receipt.status, MutationStatus::RolledBack);
+        let rollback = receipt.rollback.expect("rollback receipt");
+        assert!(rollback.fully_restored);
+        // Window 1 is back at its original frame.
+        let state = super::super::test_support::window_state(1).expect("state");
+        assert_eq!(state.bounds, Bounds::new(0, 0, 800, 600));
+        // A fully restored strict failure records NO undo entry.
+        assert_eq!(window_undo_depths().0, 0);
+        clear_window_undo_history();
+    }
+
+    #[test]
+    fn best_effort_returns_partial_and_does_not_roll_back() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Good","pid":9},
+                {"id":2,"app":"A","title":"Bad","pid":9,
+                 "mutation":{"positionDeltaX":50}}
+            ]}"#,
+        );
+        refreshed();
+        clear_window_undo_history();
+        let mut plan = multi_bounds_plan(&[
+            (1, Bounds::new(100, 100, 700, 500)),
+            (2, Bounds::new(200, 200, 700, 500)),
+        ]);
+        plan.rollback_policy = RollbackPolicy::BestEffort;
+        let receipt = execute_plan(&plan).expect("execute");
+        assert_eq!(receipt.status, MutationStatus::Partial);
+        assert!(receipt.rollback.is_none());
+        // The successful window keeps its new frame.
+        let state = super::super::test_support::window_state(1).expect("state");
+        assert_eq!(state.bounds, Bounds::new(100, 100, 700, 500));
+        clear_window_undo_history();
+    }
+
+    #[test]
+    fn rollback_failure_reports_separately_and_leaves_a_recovery_record() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Fragile","pid":9,
+                 "bounds":{"x":0,"y":0,"width":800,"height":600},
+                 "mutation":{"destroyOnAttempt":2}},
+                {"id":2,"app":"A","title":"Bad","pid":9,
+                 "mutation":{"positionDeltaX":50}}
+            ]}"#,
+        );
+        refreshed();
+        clear_window_undo_history();
+        let plan = multi_bounds_plan(&[
+            (1, Bounds::new(100, 100, 700, 500)),
+            (2, Bounds::new(200, 200, 700, 500)),
+        ]);
+        let receipt = execute_plan(&plan).expect("execute");
+        assert_eq!(receipt.status, MutationStatus::RollbackFailed);
+        let rollback = receipt.rollback.expect("rollback receipt");
+        assert!(!rollback.fully_restored);
+        assert!(rollback
+            .operations
+            .iter()
+            .any(|operation| operation.status != MutationStatus::Succeeded));
+        // Net changes remained -> a recovery record exists.
+        assert_eq!(window_undo_depths().0, 1);
+        clear_window_undo_history();
+    }
+
+    #[test]
+    fn one_multi_window_plan_produces_one_undo_record_and_round_trips() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"One","pid":9,
+                 "bounds":{"x":0,"y":0,"width":800,"height":600}},
+                {"id":2,"app":"A","title":"Two","pid":9,
+                 "bounds":{"x":900,"y":0,"width":800,"height":600}}
+            ]}"#,
+        );
+        refreshed();
+        clear_window_undo_history();
+        let plan = multi_bounds_plan(&[
+            (1, Bounds::new(50, 50, 640, 480)),
+            (2, Bounds::new(950, 50, 640, 480)),
+        ]);
+        let receipt = execute_plan(&plan).expect("execute");
+        assert_eq!(receipt.status, MutationStatus::Succeeded);
+        assert_eq!(
+            window_undo_depths(),
+            (1, 0),
+            "one transaction = one undo record"
+        );
+
+        // Undo restores BOTH windows (transaction boundary preserved).
+        let undo_receipt = undo_last_window_transaction().expect("undo");
+        assert_eq!(undo_receipt.status, MutationStatus::Succeeded);
+        assert_eq!(
+            super::super::test_support::window_state(1).unwrap().bounds,
+            Bounds::new(0, 0, 800, 600)
+        );
+        assert_eq!(
+            super::super::test_support::window_state(2).unwrap().bounds,
+            Bounds::new(900, 0, 800, 600)
+        );
+        assert_eq!(window_undo_depths(), (0, 1));
+
+        // Redo re-applies BOTH windows.
+        let redo_receipt = redo_last_window_transaction().expect("redo");
+        assert_eq!(redo_receipt.status, MutationStatus::Succeeded);
+        assert_eq!(
+            super::super::test_support::window_state(1).unwrap().bounds,
+            Bounds::new(50, 50, 640, 480)
+        );
+        assert_eq!(window_undo_depths(), (1, 0));
+        clear_window_undo_history();
+    }
+
+    #[test]
+    fn a_new_ordinary_transaction_clears_redo() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"One","pid":9}
+            ]}"#,
+        );
+        refreshed();
+        clear_window_undo_history();
+        let plan = multi_bounds_plan(&[(1, Bounds::new(10, 10, 700, 500))]);
+        execute_plan(&plan).expect("execute");
+        undo_last_window_transaction().expect("undo");
+        assert_eq!(window_undo_depths(), (0, 1));
+
+        // A fresh ordinary transaction clears the redo stack.
+        let plan = multi_bounds_plan(&[(1, Bounds::new(30, 30, 700, 500))]);
+        execute_plan(&plan).expect("execute");
+        assert_eq!(window_undo_depths(), (1, 0));
+        clear_window_undo_history();
+    }
+
+    #[test]
+    fn undo_depth_is_exactly_fifty() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        clear_window_undo_history();
+        let entry = UndoEntry {
+            nonce: 1,
+            pid: 9,
+            before: RestorableWindowState {
+                bounds: Bounds::new(0, 0, 100, 100),
+                minimized: false,
+            },
+            after: RestorableWindowState {
+                bounds: Bounds::new(1, 1, 100, 100),
+                minimized: false,
+            },
+        };
+        {
+            let mut state = UNDO.lock();
+            for index in 0..55 {
+                push_undo_record(
+                    &mut state,
+                    UndoRecord {
+                        transaction_id: format!("t{index}"),
+                        entries: vec![entry.clone()],
+                    },
+                );
+            }
+        }
+        assert_eq!(window_undo_depths().0, UNDO_DEPTH);
+        {
+            let state = UNDO.lock();
+            assert_eq!(
+                state.undo.front().unwrap().transaction_id,
+                "t5",
+                "oldest records evict first"
+            );
+        }
+        clear_window_undo_history();
+    }
+
+    #[test]
+    fn failed_undo_remains_available() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Doomed","pid":9,
+                 "mutation":{"destroyOnAttempt":2}}
+            ]}"#,
+        );
+        refreshed();
+        clear_window_undo_history();
+        let plan = multi_bounds_plan(&[(1, Bounds::new(10, 10, 700, 500))]);
+        let receipt = execute_plan(&plan).expect("execute");
+        assert_eq!(receipt.status, MutationStatus::Succeeded);
+        assert_eq!(window_undo_depths(), (1, 0));
+
+        // Destroy the window; undo must fail but keep its record.
+        super::super::test_support::apply_mutation(1, None, |_| {}).ok();
+        registry::refresh_from_test_provider().expect("refresh");
+        let result = undo_last_window_transaction();
+        assert!(result.is_err() || result.unwrap().status != MutationStatus::Succeeded);
+        assert_eq!(
+            window_undo_depths().0,
+            1,
+            "failed undo must remain on the undo stack"
+        );
+        clear_window_undo_history();
+    }
+}
