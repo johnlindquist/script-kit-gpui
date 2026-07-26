@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import importlib.util
 import json
 import math
@@ -679,22 +680,42 @@ def lifecycle_background_reference(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--receipt", required=True)
+    # Lifecycle mode is layout-self-contained: geometry comes from the
+    # lifecycle receipt's settledLayout, so --receipt is optional there and,
+    # when supplied, is recorded as legacy provenance rather than treated as
+    # the geometry owner (Oracle plan glass-smoke-harness-max-info, WP2).
+    parser.add_argument("--receipt")
     parser.add_argument("--trajectory", default="fast-horizontal")
     parser.add_argument("--lifecycle-receipt")
     parser.add_argument("--scenario", default="main-entry")
     parser.add_argument("--out")
     args = parser.parse_args()
 
+    entry_mode = args.lifecycle_receipt is not None
+    if not entry_mode and not args.receipt:
+        parser.error("--receipt is required outside lifecycle mode")
+
     metrics = load_contrast_module()
-    receipt_path = Path(args.receipt).resolve()
-    receipt = json.loads(receipt_path.read_text())
     errors: list[str] = []
     lifecycle_path: Path | None = None
-    entry_mode = args.lifecycle_receipt is not None
+    legacy_provenance_receipt: str | None = None
     if entry_mode:
         lifecycle_path = Path(args.lifecycle_receipt).resolve()
         lifecycle_receipt = json.loads(lifecycle_path.read_text())
+        receipt_path = (
+            Path(args.receipt).resolve() if args.receipt else lifecycle_path
+        )
+        if args.receipt:
+            legacy_provenance_receipt = str(receipt_path)
+            legacy_receipt = json.loads(receipt_path.read_text())
+            legacy_sha = legacy_receipt.get("binarySha256")
+            lifecycle_sha = lifecycle_receipt.get("binarySha256")
+            if legacy_sha and lifecycle_sha and legacy_sha != lifecycle_sha:
+                errors.append(
+                    "legacy provenance receipt binarySha256 "
+                    f"{legacy_sha} does not match lifecycle receipt "
+                    f"binarySha256 {lifecycle_sha}"
+                )
         frames, appkit, capture_bounds, lifecycle_errors = lifecycle_entry_frames(
             lifecycle_receipt,
             args.scenario,
@@ -710,6 +731,8 @@ def main() -> int:
             else None
         )
     else:
+        receipt_path = Path(args.receipt).resolve()
+        receipt = json.loads(receipt_path.read_text())
         trial = next(
             (
                 row
@@ -1078,10 +1101,22 @@ def main() -> int:
         )
     else:
         overall_pass = shared_pass
+    layout_source = None
+    if entry_mode:
+        layout_source = {
+            "kind": "lifecycle-settled-layout",
+            "scenario": args.scenario,
+            "lifecycleReceipt": str(lifecycle_path),
+            "lifecycleReceiptSha256": hashlib.sha256(
+                lifecycle_path.read_bytes()
+            ).hexdigest(),
+            "legacyProvenanceReceipt": legacy_provenance_receipt,
+        }
     result = {
         "schemaVersion": 2,
         "receipt": str(receipt_path),
         "lifecycleReceipt": str(lifecycle_path) if lifecycle_path else None,
+        "layoutSource": layout_source,
         "backgroundReference": str(reference_path) if reference_path else None,
         "trajectory": args.scenario if entry_mode else args.trajectory,
         "frameCount": len(frame_rows),

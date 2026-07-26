@@ -457,5 +457,173 @@ class MaterialStabilityTests(unittest.TestCase):
             )
 
 
+class LayoutSelfContainedCliTests(unittest.TestCase):
+    """WP2 (glass-smoke-harness-max-info): lifecycle mode owns its geometry.
+
+    Negative controls: the optimization that drops the external layout launch
+    must never fall back to stale external geometry, must hard-fail on
+    provenance mismatches, and must keep legacy invocations byte-identical in
+    every gating field (proven at runtime against preserved receipts; here the
+    failure paths are locked with minimal synthetic receipts).
+    """
+
+    def _run_cli(self, args: list[str]) -> tuple[int, dict | None, str]:
+        import json as json_module
+        import subprocess
+        import sys
+
+        script = Path(__file__).resolve().parent / "glass-motion-color-metrics.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "out.json"
+            proc = subprocess.run(
+                [sys.executable, str(script), *args, "--out", str(out_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            result = (
+                json_module.loads(out_path.read_text())
+                if out_path.exists()
+                else None
+            )
+            return proc.returncode, result, proc.stderr
+
+    def _write_json(self, directory: Path, name: str, payload: dict) -> Path:
+        import json as json_module
+
+        path = directory / name
+        path.write_text(json_module.dumps(payload))
+        return path
+
+    def test_receipt_is_required_outside_lifecycle_mode(self) -> None:
+        code, result, stderr = self._run_cli(["--scenario", "main-entry"])
+        self.assertEqual(code, 2)
+        self.assertIsNone(result)
+        self.assertIn("--receipt is required outside lifecycle mode", stderr)
+
+    def test_lifecycle_mode_is_self_contained_and_records_layout_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lifecycle = self._write_json(
+                Path(tmp),
+                "lifecycle.json",
+                {"binarySha256": "aa", "scenarios": []},
+            )
+            code, result, _ = self._run_cli(
+                ["--lifecycle-receipt", str(lifecycle)]
+            )
+            self.assertEqual(code, 1)
+            assert result is not None
+            self.assertFalse(result["pass"])
+            self.assertEqual(result["receipt"], str(lifecycle.resolve()))
+            layout_source = result["layoutSource"]
+            self.assertEqual(layout_source["kind"], "lifecycle-settled-layout")
+            self.assertIsNone(layout_source["legacyProvenanceReceipt"])
+            self.assertIn(
+                "required lifecycle scenario 'main-entry' is missing",
+                result["errors"],
+            )
+
+    def test_missing_settled_layout_is_a_hard_failure_never_a_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # A main-entry scenario WITHOUT settledLayout, alongside a
+            # contradictory external layout receipt that could be (wrongly)
+            # used as a geometry fallback.
+            lifecycle = self._write_json(
+                tmp_path,
+                "lifecycle.json",
+                {
+                    "binarySha256": "aa",
+                    "scenarios": [
+                        {
+                            "name": "main-entry",
+                            "filmstrip": {"receipt": {"frames": []}},
+                            "settledCaptures": [],
+                        }
+                    ],
+                },
+            )
+            external = self._write_json(
+                tmp_path,
+                "layout.json",
+                {
+                    "binarySha256": "aa",
+                    "layout": {
+                        "fidelity": {
+                            "appKit": {
+                                "footerContainerFrame": {"width": 640},
+                                "mainBackdropFrame": {
+                                    "x": 0,
+                                    "y": 0,
+                                    "width": 640,
+                                    "height": 400,
+                                },
+                                "nodes": [],
+                            }
+                        }
+                    },
+                },
+            )
+            code, result, _ = self._run_cli(
+                [
+                    "--receipt",
+                    str(external),
+                    "--lifecycle-receipt",
+                    str(lifecycle),
+                ]
+            )
+            self.assertEqual(code, 1)
+            assert result is not None
+            self.assertFalse(result["pass"])
+            self.assertIn(
+                "exact AppKit host/backdrop geometry is missing",
+                result["errors"],
+            )
+            # The contradictory external geometry is recorded as unused legacy
+            # provenance — never adopted.
+            self.assertEqual(
+                result["layoutSource"]["legacyProvenanceReceipt"],
+                str(external.resolve()),
+            )
+
+    def test_binary_sha_mismatch_between_receipts_is_a_provenance_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            lifecycle = self._write_json(
+                tmp_path,
+                "lifecycle.json",
+                {"binarySha256": "lifecycle-sha", "scenarios": []},
+            )
+            external = self._write_json(
+                tmp_path,
+                "layout.json",
+                {"binarySha256": "other-binary-sha"},
+            )
+            code, result, _ = self._run_cli(
+                [
+                    "--receipt",
+                    str(external),
+                    "--lifecycle-receipt",
+                    str(lifecycle),
+                ]
+            )
+            self.assertEqual(code, 1)
+            assert result is not None
+            self.assertFalse(result["pass"])
+            self.assertTrue(
+                any(
+                    "does not match lifecycle receipt binarySha256" in error
+                    for error in result["errors"]
+                ),
+                result["errors"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
