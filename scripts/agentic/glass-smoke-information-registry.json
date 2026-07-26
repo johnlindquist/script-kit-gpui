@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "units": [
+    { "id": "main-entry.displayed-color", "kind": "gate" },
+    { "id": "main-entry.alpha-policy", "kind": "gate" },
+    { "id": "main-entry.stage-relation", "kind": "gate" },
+    { "id": "main-entry.geometry-envelope", "kind": "gate" },
+    { "id": "main-entry.capture-cadence", "kind": "gate" },
+    { "id": "main-entry.boundary-trend", "kind": "diagnostic" },
+    { "id": "main-exit.fixed-geometry", "kind": "gate" },
+    { "id": "main-exit.gutter-continuity", "kind": "gate" },
+    { "id": "main-exit.displayed-color-curve", "kind": "diagnostic" },
+    { "id": "main-entry-exit.alpha-matched-symmetry", "kind": "diagnostic" },
+    { "id": "notes-entry.body-reveal", "kind": "gate" },
+    { "id": "notes-entry.host-clock-timing", "kind": "gate" },
+    { "id": "notes-entry.capture-cadence", "kind": "gate" },
+    { "id": "notes-reopen.ticket-cancel-reuse", "kind": "gate" },
+    { "id": "dictation-reopen.ticket-cancel-reuse", "kind": "gate" },
+    { "id": "run.native-topology", "kind": "gate" },
+    { "id": "run.interference-classification", "kind": "gate" },
+    { "id": "run.load-thermal-memory", "kind": "diagnostic" }
+  ]
+}

@@ -304,5 +304,69 @@ class PairedBlockTests(unittest.TestCase):
             self.assertFalse(summary.terminal_failure({**base, **mutation}))
 
 
+class StudySummaryV2Tests(unittest.TestCase):
+    """WP10: the study-summary v2 envelope binds paired statistics to a
+    TERMINAL comparison ledger and a scenario pass matrix."""
+
+    LEDGER = [
+        {
+            "id": "cross-run-frame-reuse-as-replication",
+            "decision": "REJECTED",
+            "reason": "would turn one observation into false replication",
+            "evidence": [],
+        }
+    ]
+    REQUIRED = ["cross-run-frame-reuse-as-replication"]
+
+    def build(self, rows, **overrides):
+        kwargs = dict(
+            reference_build=CONTROL,
+            reference_role="negative-control",
+            study_id="test-study",
+            comparison_ledger=self.LEDGER,
+            required_ledger_ids=self.REQUIRED,
+        )
+        kwargs.update(overrides)
+        return summary.build_study_summary(rows, **kwargs)
+
+    def test_green_study_with_terminal_ledger_passes(self) -> None:
+        result = self.build(green_study())
+        self.assertEqual(result["schemaVersion"], 2)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["disposition"], "EVALUABLE_PASS")
+        self.assertEqual(result["comparisonLedgerErrors"], [])
+        matrix = result["scenarioPassMatrix"]
+        self.assertEqual(matrix["columns"], ["main-entry"])
+        self.assertEqual(len(matrix["rows"]), 20)
+
+    def test_pending_ledger_entry_fails_the_summary(self) -> None:
+        ledger = [dict(self.LEDGER[0], decision="PENDING")]
+        result = self.build(green_study(), comparison_ledger=ledger)
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["disposition"], "INVALID_SETUP")
+        self.assertTrue(
+            any(
+                "PENDING is forbidden" in error
+                for error in result["comparisonLedgerErrors"]
+            )
+        )
+
+    def test_missing_required_ledger_entry_fails_the_summary(self) -> None:
+        result = self.build(green_study(), comparison_ledger=[])
+        self.assertFalse(result["pass"])
+        self.assertTrue(
+            any(
+                "expected exactly one, observed 0" in error
+                for error in result["comparisonLedgerErrors"]
+            )
+        )
+
+    def test_incomplete_candidate_is_evaluable_fail_not_invalid(self) -> None:
+        rows = [row for row in green_study() if row["blockId"] != "block-04"]
+        result = self.build(rows)
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["disposition"], "EVALUABLE_FAIL")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -383,6 +383,276 @@ export function scheduleRetryBlock(
 }
 
 // ---------------------------------------------------------------------------
+// WP10: information units, runs.jsonl v2 rows, artifact index
+// ---------------------------------------------------------------------------
+
+export interface GradedEvidence {
+  receipt: any;
+  grades: any;
+  entryMetrics: any;
+  exitMetrics: any;
+}
+
+/**
+ * Map graded evidence onto the STABLE decision units of the information
+ * registry. A unit is captured only when its machine-readable result
+ * actually exists; promoted units are the captured units whose values this
+ * runner embeds into the run row. Adding fields without a registry unit
+ * changes nothing here — the mapping is by unit id, not field count.
+ */
+export function informationUnitsFromEvidence(evidence: GradedEvidence): {
+  captured: string[];
+  promoted: string[];
+} {
+  const captured: string[] = [];
+  const scenarios = evidence.grades?.scenarios ?? {};
+  const receiptScenarios: any[] = Array.isArray(evidence.receipt?.scenarios)
+    ? evidence.receipt.scenarios
+    : [];
+  const receiptScenario = (name: string) =>
+    receiptScenarios.find((row) => row?.name === name);
+  const entrySummary = evidence.entryMetrics?.summary;
+  const has = (unit: string, present: unknown) => {
+    if (present !== undefined && present !== null) captured.push(unit);
+  };
+  has("main-entry.displayed-color", entrySummary?.materialStabilityCapsules);
+  has("main-entry.alpha-policy", entrySummary?.alphaPolicy);
+  has(
+    "main-entry.stage-relation",
+    entrySummary?.maximumCapsuleStageRelationDriftDeltaE00,
+  );
+  has(
+    "main-entry.geometry-envelope",
+    receiptScenario("main-entry")?.motionEnvelope?.pass,
+  );
+  has(
+    "main-entry.capture-cadence",
+    scenarios["main-entry"]?.metrics?.cadence,
+  );
+  has(
+    "main-entry.boundary-trend",
+    entrySummary?.boundaryPassEverySettledFrame,
+  );
+  has(
+    "main-exit.fixed-geometry",
+    scenarios["main-exit"]?.artifactSha256?.metrics,
+  );
+  has(
+    "main-exit.gutter-continuity",
+    scenarios["main-exit"]?.artifactSha256?.metrics,
+  );
+  has(
+    "main-exit.displayed-color-curve",
+    evidence.exitMetrics?.summary?.displayedExitColor,
+  );
+  has(
+    "main-entry-exit.alpha-matched-symmetry",
+    evidence.grades?.entryExitAlphaMatchedComparison,
+  );
+  has(
+    "notes-entry.body-reveal",
+    receiptScenario("notes-entry")?.bodyOnlyReveal,
+  );
+  has(
+    "notes-entry.host-clock-timing",
+    receiptScenario("notes-entry")?.bodyOnlyReveal?.hostClockTiming,
+  );
+  has(
+    "notes-entry.capture-cadence",
+    scenarios["notes-entry"]?.metrics?.cadence,
+  );
+  has(
+    "notes-reopen.ticket-cancel-reuse",
+    scenarios["notes-close-before-settle-reopen"]?.metrics
+      ?.lifecycleEventCounts,
+  );
+  has(
+    "dictation-reopen.ticket-cancel-reuse",
+    scenarios["dictation-exit-reopen"]?.metrics?.lifecycleEventCounts,
+  );
+  has(
+    "run.native-topology",
+    receiptScenarios.some(
+      (row) => row?.completeNativeTopologyAfterReopen != null,
+    )
+      ? true
+      : null,
+  );
+  has("run.interference-classification", evidence.receipt?.interference);
+  has("run.load-thermal-memory", evidence.receipt?.systemTelemetry);
+  // Everything captured here is embedded into the v2 row below, so the
+  // promoted set equals the captured set for this runner. The distinction
+  // stays load-bearing: a unit whose artifact failed to materialize is in
+  // NEITHER list.
+  return { captured, promoted: [...captured] };
+}
+
+export function buildRunRowV2(input: {
+  studyId: string;
+  attempt: AttemptRow & Record<string, unknown>;
+  build: ResolvedBuild;
+  buildIndex: number;
+  buildCount: number;
+  evidence: GradedEvidence;
+  gradeExitCode: number | null;
+  entryMetricsExitCode: number | null;
+  resolvedManifestSha256: string;
+  captureReceiptPath: string;
+  captureReceiptSha256: string | null;
+  fixture: Record<string, unknown>;
+}): Record<string, unknown> {
+  const { attempt, evidence } = input;
+  const receipt = evidence.receipt ?? {};
+  const entry = evidence.entryMetrics;
+  const alphaPolicy = entry?.summary?.alphaPolicy ?? null;
+  const units = informationUnitsFromEvidence(evidence);
+  const scenarioRows: Record<string, unknown> = {};
+  for (const [name, row] of Object.entries(evidence.grades?.scenarios ?? {})) {
+    scenarioRows[name] = row;
+  }
+  const half =
+    attempt.blockIndex === null
+      ? null
+      : Number(attempt.slotId.match(/-s(\d+)-/)?.[1] ?? 0)
+          < input.buildCount
+        ? "forward"
+        : "reverse";
+  const hardGateFailures = Object.entries(
+    evidence.grades?.scenarios ?? {},
+  )
+    .filter(([, row]: [string, any]) => row?.hardGatePass !== true)
+    .map(([name]) => name);
+  return {
+    schemaVersion: 2,
+    studyId: input.studyId,
+    run: attempt.slotId,
+    attemptId: attempt.attemptId,
+    build: attempt.buildId,
+    buildRole: input.build.role,
+    kind: attempt.kind,
+    accepted:
+      attempt.loadEligible
+      && attempt.thermalEligible
+      && attempt.binaryHashStable
+      && attempt.evaluable,
+    acceptedForInference:
+      attempt.kind === "scheduled"
+      && attempt.loadEligible
+      && attempt.thermalEligible
+      && attempt.binaryHashStable
+      && attempt.evaluable
+      && !INVALID_ATTEMPT_DISPOSITIONS.has(String(receipt.disposition)),
+    schedule: {
+      design: "mirrored-cyclic",
+      scheduleEpoch: 0,
+      blockId:
+        attempt.blockIndex === null ? null : `block-${String(attempt.blockIndex).padStart(2, "0")}`,
+      blockIndex: attempt.blockIndex,
+      half,
+      slotIndex: Number(attempt.slotId.match(/-s(\d+)-/)?.[1] ?? null),
+      retryOfBlockId: null,
+    },
+    binary: {
+      path: input.build.binary,
+      sha256Before: attempt.binarySha256Pre,
+      sha256After: attempt.binarySha256Post,
+      gitCommit: receipt.gitCommit ?? null,
+      manifestIndex: input.buildIndex,
+    },
+    fixture: input.fixture,
+    eligibility: {
+      loadBoundaryPass: attempt.loadEligible,
+      thermalPass: attempt.thermalEligible,
+      memoryPressurePass:
+        receipt.systemTelemetry?.memory?.telemetryPass ?? null,
+      interferencePass: receipt.interference?.pass === true,
+      observerPass: receipt.error == null,
+      pairLoadPass: null,
+      reasons: [],
+    },
+    timingMs: {
+      runWall: receipt.timingMs?.total ?? null,
+      laptopOccupied: receipt.timingMs?.total ?? null,
+      displayExclusive: receipt.timingMs?.captureTotal ?? null,
+      appLaunchToMainVisible:
+        receipt.timingMs?.driverLaunchToMainVisible ?? null,
+      normalization: receipt.timingMs?.normalization ?? null,
+      captureTotal: receipt.timingMs?.captureTotal ?? null,
+      gradingTotal: null,
+      scenario: Object.fromEntries(
+        (receipt.scenarioIntervalsMs ?? []).map((interval: any) => [
+          interval.name,
+          interval.finishedAtMs - interval.startedAtMs,
+        ]),
+      ),
+    },
+    load: receipt.systemTelemetry?.load ?? {},
+    thermal: receipt.systemTelemetry?.thermal ?? {},
+    memory: receipt.systemTelemetry?.memory ?? {},
+    gpu: receipt.systemTelemetry?.gpu ?? {},
+    runtimeContract: receipt.runtimeContract ?? {},
+    scenarios: scenarioRows,
+    provenance: {
+      resolvedManifestSha256: input.resolvedManifestSha256,
+      captureReceipt: {
+        path: input.captureReceiptPath,
+        sha256: input.captureReceiptSha256,
+      },
+      lifecycleReceipt: {
+        path: input.captureReceiptPath.replace(
+          "capture-receipt.json",
+          "receipt.json",
+        ),
+        sha256: null,
+      },
+      scenarioMetrics: Object.fromEntries(
+        Object.entries(evidence.grades?.scenarios ?? {}).map(
+          ([name, row]: [string, any]) => [name, row?.artifactSha256 ?? null],
+        ),
+      ),
+      helpers: receipt.helperSha256 ? { filmstrip: receipt.helperSha256 } : {},
+      metricBundleSha256: null,
+      captureSourceBundleSha256: null,
+    },
+    informationUnits: {
+      registryVersion: 1,
+      captured: units.captured,
+      promoted: units.promoted,
+      missing: [],
+      capturedCount: units.captured.length,
+      promotedCount: units.promoted.length,
+    },
+    hardGateFailures,
+    errors: [
+      ...(Array.isArray(receipt.errors) ? receipt.errors : []),
+      ...(receipt.error ? [String(receipt.error)] : []),
+    ],
+    disposition: receipt.disposition ?? "INVALID_OBSERVER",
+    // Legacy-compatible flat fields (the summary must not RELY on these).
+    preLoad1: attempt.preLoad1 ?? null,
+    postLoad1: attempt.postLoad1 ?? null,
+    thermLimited:
+      attempt.preCpuSpeedLimit !== 100 || attempt.postCpuSpeedLimit !== 100,
+    lifecycleExit: attempt.probeExitCode ?? null,
+    metricExit: input.entryMetricsExitCode,
+    metricPass: entry?.pass === true,
+    runMaximumDisplayedEntryDeltaE00:
+      entry?.summary?.maximumDisplayedEntryDeltaE00 ?? null,
+    maximumCapsuleStageRelationDriftDeltaE00:
+      entry?.summary?.maximumCapsuleStageRelationDriftDeltaE00 ?? null,
+    firstVisibleEntryAlpha: alphaPolicy?.firstVisibleAlpha ?? null,
+    minimumVisibleEntryAlpha: alphaPolicy?.minimumVisibleAlpha ?? null,
+    visibleFramesBelowAlphaFloor:
+      alphaPolicy?.visibleFramesBelowAlphaFloor?.length ?? 0,
+    visibleZeroAlphaFrames:
+      alphaPolicy?.visibleZeroAlphaFrames?.length ?? 0,
+    unmeasurableVisibleFrameCount:
+      alphaPolicy?.unmeasurableVisibleFrames?.length ?? 0,
+    alphaPolicyPass: alphaPolicy?.pass ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // CLI orchestration
 // ---------------------------------------------------------------------------
 
@@ -740,30 +1010,161 @@ async function main(): Promise<number> {
   // is the default until the WP5 grading-placement trial authorizes
   // per-block grading on this host).
   const gradeAll = join(repoRoot, "scripts/agentic/glass-lifecycle-grade-all.py");
+  const colorMetric = join(
+    repoRoot,
+    "scripts/agentic/glass-motion-color-metrics.py",
+  );
   const gradedAttempts: Record<string, number> = {};
+  const resolvedManifestSha256 = createHash("sha256")
+    .update(readFileSync(join(outAbsolute, "resolved-manifest.json")))
+    .digest("hex");
+  const runRows: Record<string, unknown>[] = [];
+  const artifactEntries: Record<string, unknown>[] = [];
+  const readJsonIfExists = (path: string) =>
+    existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
+  const recordArtifact = (
+    role: string,
+    absolutePath: string,
+    parents: string[],
+  ) => {
+    if (!existsSync(absolutePath)) return null;
+    const sha = shaOf(absolutePath);
+    artifactEntries.push({
+      role,
+      relativePath: absolutePath.startsWith(`${outAbsolute}/`)
+        ? absolutePath.slice(outAbsolute.length + 1)
+        : absolutePath,
+      sha256: sha,
+      sizeBytes: readFileSync(absolutePath).byteLength,
+      parents,
+      producerSourceSha256: null,
+    });
+    return sha;
+  };
   for (const [slotId, rows] of attemptsBySlot) {
     for (const row of rows) {
+      const attemptDir = join(outAbsolute, String(row.attemptId));
       const captureReceipt = join(
-        outAbsolute,
-        String(row.attemptId),
+        attemptDir,
         "lifecycle",
         "capture-receipt.json",
       );
       if (!existsSync(captureReceipt)) continue;
+      const gradesDir = join(attemptDir, "grades");
       const grade = await runCommand(
-        [
-          "python3",
-          gradeAll,
-          "--receipt",
-          captureReceipt,
-          "--out",
-          join(outAbsolute, String(row.attemptId), "grades"),
-        ],
+        ["python3", gradeAll, "--receipt", captureReceipt, "--out", gradesDir],
         10 * 60_000,
       );
       gradedAttempts[`${slotId}/${row.attemptId}`] = grade.exitCode ?? -1;
+      // Displayed-color grading from the SAME capture: entry gates + exit
+      // measurement (grade many, capture once).
+      const finalReceiptPath = join(attemptDir, "lifecycle", "receipt.json");
+      const entryMetricsPath = join(gradesDir, "entry-metrics.json");
+      const exitMetricsPath = join(gradesDir, "exit-metrics.json");
+      let entryMetricsExit: number | null = null;
+      if (existsSync(finalReceiptPath)) {
+        entryMetricsExit = (
+          await runCommand(
+            [
+              "python3",
+              colorMetric,
+              "--lifecycle-receipt",
+              finalReceiptPath,
+              "--scenario",
+              "main-entry",
+              "--out",
+              entryMetricsPath,
+            ],
+            10 * 60_000,
+          )
+        ).exitCode;
+        await runCommand(
+          [
+            "python3",
+            colorMetric,
+            "--lifecycle-receipt",
+            finalReceiptPath,
+            "--lifecycle-phase",
+            "exit",
+            "--out",
+            exitMetricsPath,
+          ],
+          10 * 60_000,
+        );
+      }
+      const evidence: GradedEvidence = {
+        receipt: readJsonIfExists(finalReceiptPath)
+          ?? readJsonIfExists(captureReceipt),
+        grades: readJsonIfExists(join(gradesDir, "scenario-metrics.json")),
+        entryMetrics: readJsonIfExists(entryMetricsPath),
+        exitMetrics: readJsonIfExists(exitMetricsPath),
+      };
+      const build = buildsById.get(row.buildId)!;
+      const captureSha = recordArtifact(
+        "capture-receipt",
+        captureReceipt,
+        [],
+      );
+      const lifecycleSha = recordArtifact(
+        "lifecycle-receipt",
+        finalReceiptPath,
+        captureSha ? [captureSha] : [],
+      );
+      recordArtifact(
+        "scenario-metrics",
+        join(gradesDir, "scenario-metrics.json"),
+        lifecycleSha ? [lifecycleSha] : [],
+      );
+      recordArtifact(
+        "entry-metrics",
+        entryMetricsPath,
+        lifecycleSha ? [lifecycleSha] : [],
+      );
+      recordArtifact(
+        "exit-metrics",
+        exitMetricsPath,
+        lifecycleSha ? [lifecycleSha] : [],
+      );
+      runRows.push(
+        buildRunRowV2({
+          studyId: resolved.studyId,
+          attempt: row,
+          build,
+          buildIndex: resolved.builds.findIndex(
+            (candidate: ResolvedBuild) => candidate.id === row.buildId,
+          ),
+          buildCount: resolved.builds.length,
+          evidence,
+          gradeExitCode: grade.exitCode,
+          entryMetricsExitCode: entryMetricsExit,
+          resolvedManifestSha256,
+          captureReceiptPath: captureReceipt,
+          captureReceiptSha256: captureSha,
+          fixture: {
+            mode: session.fixtureMode,
+            pid: session.fixturePid,
+            windowNumber: session.fixtureWindowNumber,
+            displayId: session.fixtureDisplayId,
+            configurationSha256: session.fixtureConfigurationSha256,
+            visualSha256:
+              (fixtureReceipt.visualDiagnostics ?? {}).visualSha256 ?? null,
+          },
+        }),
+      );
     }
   }
+  writeFileSync(
+    join(outAbsolute, "runs.jsonl"),
+    runRows.map((row) => JSON.stringify(row)).join("\n") + "\n",
+  );
+  writeFileSync(
+    join(outAbsolute, "artifact-index.json"),
+    `${JSON.stringify(
+      { schemaVersion: 1, artifacts: artifactEntries },
+      null,
+      2,
+    )}\n`,
+  );
   writeFileSync(
     join(outAbsolute, "session.json"),
     `${JSON.stringify({ ...session, ...summary, gradedAttempts }, null, 2)}\n`,

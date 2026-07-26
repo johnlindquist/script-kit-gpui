@@ -345,6 +345,112 @@ def summarize(rows: list[dict], *, reference_build: str, reference_role: str) ->
     }
 
 
+def _load_economics_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "glass_smoke_economics",
+        Path(__file__).with_name("glass-smoke-economics.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def scenario_pass_matrix(rows: list[dict]) -> dict:
+    """One row per scheduled run, one column per scenario hard gate."""
+    columns = sorted(
+        {
+            scenario
+            for row in _inference_rows(rows)
+            for scenario in (row.get("scenarioHardGates") or {})
+        }
+    )
+    return {
+        "columns": columns,
+        "rows": [
+            {
+                "runId": row.get("runId"),
+                "buildId": row.get("buildId"),
+                "disposition": row.get("disposition"),
+                "gates": [
+                    (row.get("scenarioHardGates") or {}).get(column)
+                    for column in columns
+                ],
+            }
+            for row in _inference_rows(rows)
+        ],
+    }
+
+
+def build_study_summary(
+    rows: list[dict],
+    *,
+    reference_build: str,
+    reference_role: str,
+    study_id: str | None = None,
+    design: dict | None = None,
+    schedule: dict | None = None,
+    timing: dict | None = None,
+    interference_statistics: dict | None = None,
+    load_percentiles: dict | None = None,
+    artifact_provenance: dict | None = None,
+    information_economics: dict | None = None,
+    comparison_ledger: list[dict] | None = None,
+    required_ledger_ids: list[str] | None = None,
+) -> dict:
+    """The WP10 study-summary.json v2 envelope. The comparison ledger is
+    validated terminally — PENDING is forbidden and a missing required entry
+    fails the whole summary."""
+    core = summarize(
+        rows,
+        reference_build=reference_build,
+        reference_role=reference_role,
+    )
+    economics_module = _load_economics_module()
+    ledger = comparison_ledger or []
+    ledger_errors = economics_module.validate_comparison_ledger(
+        ledger, required_ledger_ids or []
+    )
+    verdict = core["verdict"]
+    candidates = [
+        row
+        for row in verdict["builds"].values()
+        if row.get("role") == "candidate"
+    ]
+    candidates_pass = bool(candidates) and all(
+        row["verdict"] == "PASS" for row in candidates
+    )
+    overall_pass = (
+        verdict["studyValid"] and candidates_pass and not ledger_errors
+    )
+    if not verdict["studyValid"] or ledger_errors:
+        disposition = "INVALID_SETUP"
+    elif overall_pass:
+        disposition = "EVALUABLE_PASS"
+    else:
+        disposition = "EVALUABLE_FAIL"
+    return {
+        "schemaVersion": 2,
+        "studyId": study_id,
+        "design": design or {},
+        "schedule": schedule or {},
+        "builds": core["builds"],
+        "pairedBlocks": core["pairedBlockComparisons"],
+        "scenarioPassMatrix": scenario_pass_matrix(rows),
+        "interferenceStatistics": interference_statistics or {},
+        "loadPercentiles": load_percentiles or {},
+        "timing": timing or {},
+        "artifactProvenance": artifact_provenance or {},
+        "informationEconomics": information_economics or {},
+        "comparisonLedger": ledger,
+        "comparisonLedgerErrors": ledger_errors,
+        "verdict": verdict,
+        "pass": overall_pass,
+        "disposition": disposition,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", required=True, help="runs.jsonl path")
@@ -354,6 +460,24 @@ def main() -> int:
         choices=["negative-control", "baseline"],
         default="negative-control",
     )
+    parser.add_argument("--study-id")
+    parser.add_argument("--design", help="JSON file with the study design")
+    parser.add_argument("--schedule", help="JSON file with the schedule")
+    parser.add_argument("--timing", help="JSON file with session timing")
+    parser.add_argument(
+        "--interference-statistics", help="JSON file of interference stats"
+    )
+    parser.add_argument(
+        "--artifact-index", help="artifact-index.json for provenance"
+    )
+    parser.add_argument(
+        "--economics", help="informationEconomics JSON (glass-smoke-economics.py output)"
+    )
+    parser.add_argument("--ledger", help="comparison ledger JSON array file")
+    parser.add_argument(
+        "--required-ledger-ids",
+        help="comma-separated recommendation ids that must each have one terminal entry",
+    )
     parser.add_argument("--out")
     args = parser.parse_args()
     rows = [
@@ -361,17 +485,33 @@ def main() -> int:
         for line in Path(args.runs).read_text().splitlines()
         if line.strip()
     ]
-    result = summarize(
+
+    def load_json(path: str | None):
+        return json.loads(Path(path).read_text()) if path else None
+
+    result = build_study_summary(
         rows,
         reference_build=args.reference_build,
         reference_role=args.reference_role,
+        study_id=args.study_id,
+        design=load_json(args.design),
+        schedule=load_json(args.schedule),
+        timing=load_json(args.timing),
+        interference_statistics=load_json(args.interference_statistics),
+        artifact_provenance=load_json(args.artifact_index),
+        information_economics=load_json(args.economics),
+        comparison_ledger=load_json(args.ledger),
+        required_ledger_ids=(
+            [item for item in args.required_ledger_ids.split(",") if item]
+            if args.required_ledger_ids
+            else None
+        ),
     )
     serialized = json.dumps(result, indent=2) + "\n"
     if args.out:
         Path(args.out).write_text(serialized)
     print(serialized, end="")
-    verdict = result["verdict"]
-    return 0 if verdict["studyValid"] else 1
+    return 0 if result["verdict"]["studyValid"] and not result["comparisonLedgerErrors"] else 1
 
 
 if __name__ == "__main__":
