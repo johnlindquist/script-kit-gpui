@@ -727,6 +727,22 @@ async function main(): Promise<number> {
     );
     return 2;
   }
+  // Plumbing smokes may shrink the block count to exercise the WHOLE
+  // pipeline cheaply — but a shrunk design can never reach acceptance: the
+  // session is stamped INCOMPLETE_DESIGN, not a pass (WP11 smoke 1).
+  const overrideBlocksArg = cliArg("--override-required-blocks");
+  const overriddenBlocks = overrideBlocksArg
+    ? Number(overrideBlocksArg)
+    : null;
+  if (overriddenBlocks !== null) {
+    if (!(Number.isInteger(overriddenBlocks) && overriddenBlocks >= 1)) {
+      console.error("--override-required-blocks must be an integer >= 1");
+      return 64;
+    }
+    raw.design.requiredBlocks = overriddenBlocks;
+  }
+  const designIncomplete =
+    overriddenBlocks !== null && overriddenBlocks < 5;
   const { resolved, errors: resolveErrors } = resolveManifest(raw, { repoRoot });
   if (resolveErrors.length > 0) {
     // Missing builds and duplicate SHAs fail BEFORE any fixture starts.
@@ -761,6 +777,8 @@ async function main(): Promise<number> {
       resolved.design.warmupsPerBuild,
     ),
     storage,
+    designIncomplete,
+    studyDisposition: designIncomplete ? "INCOMPLETE_DESIGN" : null,
   };
   if (dryRun) {
     console.log(JSON.stringify({ status: "DRY_RUN", ...summary }, null, 2));
@@ -1171,7 +1189,11 @@ async function main(): Promise<number> {
   );
   console.log(
     JSON.stringify(
-      { status: "CAPTURED", out: outAbsolute, ...summary },
+      {
+        status: designIncomplete ? "INCOMPLETE_DESIGN" : "CAPTURED",
+        out: outAbsolute,
+        ...summary,
+      },
       null,
       2,
     ),
