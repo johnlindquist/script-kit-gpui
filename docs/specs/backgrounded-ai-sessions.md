@@ -15,7 +15,9 @@ Every piece of this already half-exists, in three different shapes, with three
 different owners. Building it by pattern-matching would produce a fourth shape.
 
 - Flow sessions **already** background on Escape and **already** appear in a
-  main-menu section (`prepend_root_flow_sessions_section`, "Active Flows").
+  main-menu section (landed 2026-07-25: `prepend_root_conversations_section`,
+  "Conversations" — the Active Flows section was merged per §"Merge with
+  Active Flows"; rows are built from `BackgroundedSessionStore::ordered_rows()`).
 - Agent Chat **deliberately survives** click-away today and must not be
   destroyed by it — two code paths depend on that.
 - Quick AI **deliberately refuses** to resurrect a transcript, ever. That is a
@@ -182,8 +184,12 @@ insert rows at the flat front, splice a `SectionHeader` at grouped index 0.
 "Active Flows" and "Backgrounded sessions" are the same idea seen twice. Two
 adjacent sections that both mean "conversations you left running" is exactly the
 inconsistency this whole pass is meant to remove. **One section, one header**
-(proposed: **"Conversations"**), containing every live-or-backgrounded session
-across all three surfaces, ordered by `last_activity` descending.
+(**"Conversations"** — LANDED 2026-07-25), containing every live-or-backgrounded
+session across all three surfaces, ordered by `last_activity` descending with a
+tagged-stable-id tie-break. Rows come exclusively from
+`BackgroundedSessionStore::ordered_rows()`; `FlowMatch` was widened with a typed
+`ConversationRowTarget` (identity vs. tagged conversation id) instead of the old
+fake-optional `session_id`.
 
 ### Row type
 

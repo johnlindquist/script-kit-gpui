@@ -142,7 +142,7 @@ pub(super) fn build_grouped_view_results(
                 "scriptlet:{}:{}",
                 sm.scriptlet.plugin_id, sm.scriptlet.name
             )),
-            SearchResult::Flow(fm) => Some(format!("flow:{}", fm.flow.id)),
+            SearchResult::Flow(fm) => fm.flow.as_ref().map(|flow| format!("flow:{}", flow.id)),
             SearchResult::Skill(sm) => Some(format!(
                 "skill:{}:{}",
                 sm.skill.plugin_id, sm.skill.skill_id

@@ -94,7 +94,12 @@ pub fn extract_path_for_reveal(
         Some(SearchResult::SpineProjection(_)) => Err(PathExtractionError::UnsupportedType(
             SharedString::from("Spine projection row has no filesystem path"),
         )),
-        Some(SearchResult::Flow(m)) => Ok(PathBuf::from(&m.flow.path)),
+        Some(SearchResult::Flow(m)) => match m.flow.as_ref() {
+            Some(flow) => Ok(PathBuf::from(&flow.path)),
+            None => Err(PathExtractionError::UnsupportedType(SharedString::from(
+                "Conversation row has no filesystem path",
+            ))),
+        },
     }
 }
 
@@ -157,7 +162,12 @@ pub fn extract_path_for_copy(
         Some(SearchResult::SpineProjection(_)) => Err(PathExtractionError::UnsupportedType(
             SharedString::from("Spine projection row has no filesystem path"),
         )),
-        Some(SearchResult::Flow(m)) => Ok(PathBuf::from(&m.flow.path)),
+        Some(SearchResult::Flow(m)) => match m.flow.as_ref() {
+            Some(flow) => Ok(PathBuf::from(&flow.path)),
+            None => Err(PathExtractionError::UnsupportedType(SharedString::from(
+                "Conversation row has no filesystem path",
+            ))),
+        },
     }
 }
 
@@ -230,7 +240,12 @@ pub fn extract_path_for_quick_terminal(
         Some(SearchResult::SpineProjection(_)) => Err(PathExtractionError::UnsupportedType(
             SharedString::from("Spine projection row has no filesystem path"),
         )),
-        Some(SearchResult::Flow(m)) => Ok(PathBuf::from(&m.flow.path)),
+        Some(SearchResult::Flow(m)) => match m.flow.as_ref() {
+            Some(flow) => Ok(PathBuf::from(&flow.path)),
+            None => Err(PathExtractionError::UnsupportedType(SharedString::from(
+                "Conversation row has no filesystem path",
+            ))),
+        },
     }
 }
 
@@ -322,7 +337,12 @@ pub fn extract_path_for_edit(
         Some(SearchResult::SpineProjection(_)) => Err(PathExtractionError::UnsupportedType(
             SharedString::from("Spine projection row cannot be edited"),
         )),
-        Some(SearchResult::Flow(m)) => Ok(PathBuf::from(&m.flow.path)),
+        Some(SearchResult::Flow(m)) => match m.flow.as_ref() {
+            Some(flow) => Ok(PathBuf::from(&flow.path)),
+            None => Err(PathExtractionError::UnsupportedType(SharedString::from(
+                "Conversation row has no filesystem path",
+            ))),
+        },
     }
 }
 

@@ -36,7 +36,14 @@ fn flow_friendly_name_match_outranks_description_match() {
     ];
     let matches = fuzzy_search_flows(&flows, "gmail");
     assert_eq!(matches.len(), 2);
-    assert_eq!(matches[0].flow.name, "flow-gmail");
+    assert_eq!(
+        matches[0]
+            .flow
+            .as_ref()
+            .expect("identity row has descriptor")
+            .name,
+        "flow-gmail"
+    );
     assert!(matches[0].score > matches[1].score);
 }
 
@@ -120,7 +127,14 @@ fn multi_word_recall_bar_words_match_in_any_order() {
     for anchor in ["review staged", "staged review"] {
         let hits = fuzzy_search_flows(&flows, anchor);
         assert_eq!(hits.len(), 1, "anchor \"{anchor}\" must match");
-        assert_eq!(hits[0].flow.name, "flow-review-staged-changes");
+        assert_eq!(
+            hits[0]
+                .flow
+                .as_ref()
+                .expect("identity row has descriptor")
+                .name,
+            "flow-review-staged-changes"
+        );
     }
 
     // The bar: words that are NOT adjacent in the name still recall it in
@@ -134,7 +148,14 @@ fn multi_word_recall_bar_words_match_in_any_order() {
         "recall: non-adjacent out-of-order words must find the flow; \
          precision: flow-review-inbox carries only one word and must not match"
     );
-    assert_eq!(out_of_order[0].flow.name, "flow-review-staged-changes");
+    assert_eq!(
+        out_of_order[0]
+            .flow
+            .as_ref()
+            .expect("identity row has descriptor")
+            .name,
+        "flow-review-staged-changes"
+    );
 
     // Precision: a word that appears in no flow keeps the result empty even
     // when the other word is common to both flows.

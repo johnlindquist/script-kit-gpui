@@ -1691,6 +1691,47 @@ impl ScriptListApp {
     }
 
     /// Show an existing session (same ChatPrompt entity — the reattach).
+    /// Resume a backgrounded conversation from a main-menu Conversations row,
+    /// dispatched by tagged session id to the EXACT retained entity in the
+    /// [`BackgroundedSessionStore`] (spec §8 step 7).
+    ///
+    /// Dead rows are pruned, never rendered disabled: when the store no
+    /// longer holds an entity for the id (or holds a wrong-kind entity —
+    /// a store invariant violation), the record is removed with a typed
+    /// diagnostic so the next paint drops the row.
+    pub(crate) fn resume_backgrounded_conversation(
+        &mut self,
+        id: crate::ai::conversations::ConversationSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ai::conversations::{ConversationSessionId, FlowSessionId, SessionEntity};
+
+        match (&id, self.conversations.resume_entity(&id)) {
+            (
+                ConversationSessionId::Flow(FlowSessionId(session_id)),
+                Some(SessionEntity::Flow(_)),
+            ) => {
+                // `open_flow_session` owns the semantic resume touch.
+                self.open_flow_session(*session_id, cx);
+            }
+            (_, Some(SessionEntity::AgentChat(entity) | SessionEntity::QuickAi(entity))) => {
+                // Explicit resume is semantic activity.
+                self.conversations.touch(&id, std::time::SystemTime::now());
+                self.enter_embedded_agent_chat_surface(entity, cx);
+                cx.notify();
+            }
+            (_, None) | (_, Some(SessionEntity::Flow(_))) => {
+                tracing::error!(
+                    event = "conversation_row_dead_entity_pruned",
+                    conversation_id = %id.automation_id(),
+                    "Conversations row had no resumable entity; pruning the record"
+                );
+                let _ = self.conversations.remove(&id);
+                cx.notify();
+            }
+        }
+    }
+
     pub(crate) fn open_flow_session(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let Some(index) = self.flow_session_index(session_id) else {
             return;

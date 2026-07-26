@@ -407,7 +407,7 @@ impl ScriptListApp {
                     )),
                     // Same frecency key as history_result_key so ranking and
                     // input-history preference agree on the flow identity.
-                    scripts::SearchResult::Flow(fm) => Some(format!("flow:{}", fm.flow.id)),
+                    scripts::SearchResult::Flow(fm) => fm.flow.as_ref().map(|flow| format!("flow:{}", flow.id)),
                     scripts::SearchResult::Window(wm) => {
                         Some(format!("window:{}:{}", wm.window.app, wm.window.title))
                     }
@@ -589,21 +589,39 @@ impl ScriptListApp {
                         self.execute_root_browser_history_open(&browser_match.hit.url, cx);
                     }
                     scripts::SearchResult::Flow(flow_match) => {
-                        if let Some(session_id) = flow_match.session_id {
-                            self.open_flow_session(session_id, cx);
-                            return;
+                        match &flow_match.target {
+                            // Conversation rows resume the EXACT retained
+                            // entity in the BackgroundedSessionStore,
+                            // dispatched by tagged session id.
+                            scripts::ConversationRowTarget::Conversation(id) => {
+                                self.resume_backgrounded_conversation(id.clone(), cx);
+                            }
+                            // Flow identity rows resume the flow's
+                            // conversation (live session, then persisted
+                            // transcript) and only start a blank Threadline
+                            // when none exists.
+                            scripts::ConversationRowTarget::FlowIdentity { flow_id } => {
+                                let Some(flow) = flow_match.flow.as_ref() else {
+                                    // Identity rows are built from the flow
+                                    // corpus, so a missing descriptor is a
+                                    // construction bug, not a user state.
+                                    tracing::error!(
+                                        event = "flow_identity_row_missing_descriptor",
+                                        flow_id = %flow_id,
+                                        "Flow identity row lost its descriptor; cannot launch"
+                                    );
+                                    return;
+                                };
+                                tracing::info!(
+                                    event = "flow_session_launch_requested",
+                                    flow_id = %flow.id,
+                                    flow_name = %flow.name,
+                                    engine = %flow.engine,
+                                    "Flow selected from main menu"
+                                );
+                                self.resume_or_start_flow_session(flow, None, cx);
+                            }
                         }
-                        // Flow identity rows resume the flow's conversation
-                        // (live session, then persisted transcript) and only
-                        // start a blank Threadline when none exists.
-                        tracing::info!(
-                            event = "flow_session_launch_requested",
-                            flow_id = %flow_match.flow.id,
-                            flow_name = %flow_match.flow.name,
-                            engine = %flow_match.flow.engine,
-                            "Flow selected from main menu"
-                        );
-                        self.resume_or_start_flow_session(&flow_match.flow, None, cx);
                     }
                     scripts::SearchResult::Skill(skill_match) => {
                         // Skills always open Agent Chat with the selected skill staged

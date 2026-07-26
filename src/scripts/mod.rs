@@ -54,7 +54,7 @@ pub(crate) use self::grouping::pin_alias_match_first;
 #[allow(unused_imports)]
 pub(crate) use self::grouping::prepend_root_brain_inbox_section;
 #[allow(unused_imports)]
-pub(crate) use self::grouping::prepend_root_flow_sessions_section;
+pub(crate) use self::grouping::prepend_root_conversations_section;
 #[allow(unused_imports)]
 pub use self::loader::{read_scripts, read_scripts_report};
 pub use self::scheduling::register_scheduled_scripts;
@@ -70,10 +70,11 @@ pub use self::search::{
 pub use self::types::{
     preview_cache_is_valid, preview_match_signature, AgentChatHistoryMatch, AgentMatch,
     AiVaultMatch, AppMatch, BrainInboxMatch, BrainMatch, BrowserHistoryMatch, BrowserTabMatch,
-    BuiltInMatch, ClipboardHistoryMatch, DictationHistoryMatch, FallbackConfig, FallbackMatch,
-    FileMatch, FlowMatch, MatchEvidence, MatchEvidenceField, MatchIndices, NoteMatch,
-    RootWindowEntry, Script, ScriptContentMatch, ScriptIssueMatch, ScriptMatch, ScriptMatchKind,
-    Scriptlet, ScriptletMatch, SearchResult, SkillMatch, TodoMatch, WindowMatch,
+    BuiltInMatch, ClipboardHistoryMatch, ConversationRowTarget, DictationHistoryMatch,
+    FallbackConfig, FallbackMatch, FileMatch, FlowMatch, MatchEvidence, MatchEvidenceField,
+    MatchIndices, NoteMatch, RootWindowEntry, Script, ScriptContentMatch, ScriptIssueMatch,
+    ScriptMatch, ScriptMatchKind, Scriptlet, ScriptletMatch, SearchResult, SkillMatch, TodoMatch,
+    WindowMatch,
 };
 #[allow(unused_imports)]
 pub use self::validation::{

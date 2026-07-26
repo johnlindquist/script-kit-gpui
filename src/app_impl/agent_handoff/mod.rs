@@ -4352,13 +4352,16 @@ impl ScriptListApp {
                 "description": m.agent.description,
             }),
             scripts::SearchResult::Flow(m) => serde_json::json!({
-                "flowId": m.flow.id,
-                "name": m.flow.name,
+                "flowId": m.flow.as_ref().map(|flow| flow.id.clone()),
+                "name": m.flow.as_ref().map(|flow| flow.name.clone()),
                 "displayName": m.display_name,
-                "path": m.flow.path,
-                "description": m.flow.description,
-                "engine": m.flow.engine,
-                "origin": m.flow.origin_label(),
+                "path": m.flow.as_ref().map(|flow| flow.path.clone()),
+                "description": m.flow.as_ref().and_then(|flow| flow.description.clone()),
+                "engine": m.flow.as_ref().map(|flow| flow.engine.clone()),
+                "origin": m.flow.as_ref().map(|flow| flow.origin_label()),
+                "conversationId": m
+                    .conversation_id()
+                    .map(crate::ai::conversations::ConversationSessionId::automation_id),
             }),
             scripts::SearchResult::Skill(m) => serde_json::json!({
                 "pluginId": m.skill.plugin_id,

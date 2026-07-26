@@ -265,10 +265,13 @@ pub struct SkillMatch {
 /// Threadline conversation with that flow (never a raw run).
 #[derive(Clone, Debug)]
 pub struct FlowMatch {
-    pub flow: crate::flows::model::FlowDescriptor,
-    /// Existing live conversation to reattach. `None` means this is the
-    /// flow identity row and Enter starts a new conversation.
-    pub session_id: Option<u64>,
+    /// Flow identity for flow rows (identity rows and flow conversations).
+    /// `None` for detached conversations (Agent Chat, Quick AI), which have
+    /// no flow descriptor. Invalid pairings are prevented by construction:
+    /// only `prepend_root_conversations_section` builds detached rows.
+    pub flow: Option<crate::flows::model::FlowDescriptor>,
+    /// What Enter targets — typed, never a fake optional id.
+    pub target: ConversationRowTarget,
     /// Precomputed `friendly_name()` so `name()` can return a borrow.
     pub display_name: String,
     /// Precomputed "purpose · engine · origin" row subtitle.
@@ -276,6 +279,42 @@ pub struct FlowMatch {
     pub score: i32,
     /// Indices of matched characters for UI highlighting
     pub match_indices: MatchIndices,
+}
+
+impl FlowMatch {
+    /// The backgrounded conversation this row resumes, if it is a
+    /// conversation row (rather than a flow identity row).
+    pub fn conversation_id(&self) -> Option<&crate::ai::conversations::ConversationSessionId> {
+        match &self.target {
+            ConversationRowTarget::Conversation(id) => Some(id),
+            ConversationRowTarget::FlowIdentity { .. } => None,
+        }
+    }
+
+    /// Flow session id when this row resumes a flow conversation.
+    pub fn flow_session_id(&self) -> Option<u64> {
+        match &self.target {
+            ConversationRowTarget::Conversation(
+                crate::ai::conversations::ConversationSessionId::Flow(
+                    crate::ai::conversations::FlowSessionId(id),
+                ),
+            ) => Some(*id),
+            _ => None,
+        }
+    }
+}
+
+/// Enter/click target for a `SearchResult::Flow` row.
+///
+/// Exhaustive by construction: a row is either a flow IDENTITY (Enter
+/// starts/resumes that flow's conversation) or a backgrounded CONVERSATION
+/// (Enter resumes the exact retained entity in the
+/// `BackgroundedSessionStore`, dispatched by its tagged session id). There
+/// is no unrepresentable "identity with a session id" state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConversationRowTarget {
+    FlowIdentity { flow_id: String },
+    Conversation(crate::ai::conversations::ConversationSessionId),
 }
 
 /// Represents a scored match result for fuzzy search on agents
@@ -742,9 +781,18 @@ impl SearchResult {
     /// needs to remember non-bindable items like skills and windows.
     pub fn history_result_key(&self) -> Option<String> {
         match self {
-            SearchResult::Flow(fm) => Some(match fm.session_id {
-                Some(session_id) => format!("flow-session:{session_id}"),
-                None => format!("flow:{}", fm.flow.id),
+            // Conversation rows key by the TAGGED session id so selection
+            // follows the session across recency reorders; the historical
+            // `flow-session:{id}` prefix is kept for flow conversations so
+            // existing exact-query memory entries stay valid.
+            SearchResult::Flow(fm) => Some(match &fm.target {
+                ConversationRowTarget::Conversation(id) => match id {
+                    crate::ai::conversations::ConversationSessionId::Flow(
+                        crate::ai::conversations::FlowSessionId(session_id),
+                    ) => format!("flow-session:{session_id}"),
+                    other => format!("conversation:{}", other.automation_id()),
+                },
+                ConversationRowTarget::FlowIdentity { flow_id } => format!("flow:{flow_id}"),
             }),
             SearchResult::Skill(sm) => Some(format!(
                 "skill:{}:{}",
@@ -812,7 +860,10 @@ impl SearchResult {
         match self {
             SearchResult::Script(_) => ("Script", "file-code"),
             SearchResult::Scriptlet(_) => ("Snippet", "scroll-text"),
-            SearchResult::Flow(_) => ("Flow", "bot"),
+            SearchResult::Flow(fm) => match fm.target {
+                ConversationRowTarget::Conversation(_) => ("Conversation", "message-circle"),
+                ConversationRowTarget::FlowIdentity { .. } => ("Flow", "bot"),
+            },
             SearchResult::Skill(_) => ("Skill", "workflow"),
             SearchResult::BuiltIn(_) => ("Command", "command"),
             SearchResult::App(_) => ("App", "package"),
@@ -861,7 +912,10 @@ impl SearchResult {
                         Some(sm.scriptlet.plugin_id.as_str())
                     })
             }
-            SearchResult::Flow(_) => Some("Flows"),
+            SearchResult::Flow(fm) => match fm.target {
+                ConversationRowTarget::Conversation(_) => Some("Conversations"),
+                ConversationRowTarget::FlowIdentity { .. } => Some("Flows"),
+            },
             SearchResult::Skill(sm) => {
                 if sm.skill.plugin_title.is_empty() {
                     Some(&sm.skill.plugin_id)
@@ -923,7 +977,10 @@ impl SearchResult {
                     _ => "Run Snippet",
                 }
             }
-            SearchResult::Flow(_) => "Converse",
+            SearchResult::Flow(fm) => match fm.target {
+                ConversationRowTarget::Conversation(_) => "Resume",
+                ConversationRowTarget::FlowIdentity { .. } => "Converse",
+            },
             SearchResult::Skill(_) => "Open Skill",
             SearchResult::BuiltIn(bm) => bm.entry.default_action_text(),
             SearchResult::App(_) => "Launch App",

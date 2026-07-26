@@ -438,9 +438,20 @@ pub fn render_design_item(
                     fm.display_name.clone(),
                     Some(fm.subtitle.clone()),
                     None,
-                    // Chevron-fade is the flows brand mark (icon brainstorm
-                    // 2026-07-11); resolves via IconName::Flow.
-                    Some(IconKind::Svg("flow".to_string())),
+                    // One common conversation icon for every Conversations
+                    // row regardless of surface (Oracle step 7: surface kind
+                    // is subtitle text, not a visual category). Flow IDENTITY
+                    // rows keep the chevron-fade flows brand mark (icon
+                    // brainstorm 2026-07-11); resolves via IconName::Flow.
+                    Some(IconKind::Svg(
+                        match fm.target {
+                            crate::scripts::ConversationRowTarget::Conversation(_) => {
+                                "message-circle"
+                            }
+                            crate::scripts::ConversationRowTarget::FlowIdentity { .. } => "flow",
+                        }
+                        .to_string(),
+                    )),
                 ),
             };
 

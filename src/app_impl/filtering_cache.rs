@@ -2015,22 +2015,23 @@ impl ScriptListApp {
             }
             (grouped_items, flat_results)
         };
-        // Active conversations are prepended after Brain so they outrank it.
+        // Conversations are prepended after Brain so they outrank it:
+        // ordinary root order is [Conversations, Brain Inbox, everything
+        // else]. Suppression policy (explicit, not inherited): the section
+        // never renders while menu syntax owns the main list or the spine
+        // owns the computed list — those surfaces own their own row sets.
         let (grouped_items, flat_results) = {
             let (mut grouped_items, mut flat_results) = (grouped_items, flat_results);
             if !menu_syntax_owns_main_list && !spine_owns_for_computed {
-                let sessions: Vec<_> = self
-                    .conversations.flow_sessions
-                    .iter()
-                    .map(|(meta, _)| meta.clone())
-                    .collect();
+                let records = self.conversations.ordered_rows();
                 let flows = self.flow_desk_corpus();
-                crate::scripts::prepend_root_flow_sessions_section(
+                crate::scripts::prepend_root_conversations_section(
                     &mut grouped_items,
                     &mut flat_results,
                     &raw_filter_text,
-                    &sessions,
+                    &records,
                     &flows,
+                    chrono::Utc::now().timestamp(),
                 );
             }
             (grouped_items, flat_results)

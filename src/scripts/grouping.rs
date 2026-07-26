@@ -326,49 +326,110 @@ pub(crate) fn prepend_root_brain_inbox_section(
     grouped.splice(0..0, section);
 }
 
-/// Pin live flow conversations above every other launcher row, including the
-/// synthetic Brain Inbox section. Session rows reuse the flow row language,
-/// but carry a session id so Enter reattaches instead of starting over.
-pub(crate) fn prepend_root_flow_sessions_section(
+/// Human-readable liveness lane for a Conversations row. The running dot is
+/// literal text ("● Working") so it is visible AND readable by the element
+/// collector — never color-only, never animated (reduced-motion safe).
+fn conversation_state_text(
+    liveness: &crate::ai::conversations::ConversationLiveness,
+) -> &'static str {
+    match liveness {
+        crate::ai::conversations::ConversationLiveness::Live { .. } => "● Working",
+        crate::ai::conversations::ConversationLiveness::Idle => "Ready",
+        crate::ai::conversations::ConversationLiveness::Failed { .. } => "Needs attention",
+    }
+}
+
+/// Compact relative activity age ("now", "3m", "2h", "5d") for the row's
+/// trailing lane. Saturates at days; a negative delta (clock skew) reads
+/// "now" rather than inventing future activity.
+fn conversation_relative_age(last_activity: std::time::SystemTime, now_unix: i64) -> String {
+    let activity_unix = last_activity
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    let elapsed = now_unix.saturating_sub(activity_unix);
+    if elapsed < 60 {
+        "now".to_string()
+    } else if elapsed < 3600 {
+        format!("{}m", elapsed / 60)
+    } else if elapsed < 86_400 {
+        format!("{}h", elapsed / 3600)
+    } else {
+        format!("{}d", elapsed / 86_400)
+    }
+}
+
+/// Pin every backgrounded AI conversation — Flow, Agent Chat, Quick AI —
+/// above every other launcher row as ONE flat "Conversations" section
+/// (spec §8 step 7; Oracle UX ruling 2026-07-25).
+///
+/// Contract:
+/// - One ungrouped list ordered by semantic recency (`last_activity` desc,
+///   tagged stable id desc). Surface kind lives in the SUBTITLE, never as a
+///   grouping key. No running-first pinning — a stale running operation must
+///   not outrank conversations the user touched afterward.
+/// - A completed turn stays as an idle resumable row; a failed-but-resumable
+///   turn stays marked "Needs attention"; an explicitly closed session is
+///   already gone from the store and therefore from this section.
+/// - No header and no placeholder when the store is empty — Brain Inbox
+///   becomes the first section naturally.
+/// - `records` MUST come from `BackgroundedSessionStore::ordered_rows()`;
+///   this function never reads history, so a closed Quick AI session cannot
+///   resurrect here by construction.
+pub(crate) fn prepend_root_conversations_section(
     grouped: &mut Vec<GroupedListItem>,
     flat_results: &mut Vec<SearchResult>,
     filter_text: &str,
-    sessions: &[crate::flows::session::FlowSessionMeta],
+    records: &[crate::ai::conversations::ConversationRecord],
     flows: &[crate::flows::model::FlowDescriptor],
+    now_unix: i64,
 ) {
     let query = filter_text.trim().to_lowercase();
-    let mut live: Vec<&crate::flows::session::FlowSessionMeta> = sessions
+    let mut records: Vec<&crate::ai::conversations::ConversationRecord> = records
         .iter()
-        .filter(|meta| meta.state.is_live())
-        .filter(|meta| {
+        .filter(|record| {
             query.is_empty()
-                || meta.friendly_name.to_lowercase().contains(&query)
-                || meta.flow_name.to_lowercase().contains(&query)
-                || meta.state.label().contains(&query)
+                || record.title.to_lowercase().contains(&query)
+                || record.subtitle.to_lowercase().contains(&query)
+                || conversation_state_text(&record.liveness)
+                    .to_lowercase()
+                    .contains(&query)
         })
         .collect();
-    // Semantic recency, not creation order: returning to an older session
-    // moves it back to the top. Stable id descending breaks timestamp ties so
-    // equal clocks cannot reorder rows frame-to-frame (keyboard selection
-    // must never watch two rows swap under it).
-    live.sort_by(|a, b| b.last_activity.cmp(&a.last_activity).then(b.id.cmp(&a.id)));
+    // Defensive re-sort with the canonical rule: the store already orders,
+    // but this function's contract must hold for any caller.
+    records.sort_by(|a, b| {
+        b.last_activity
+            .cmp(&a.last_activity)
+            .then_with(|| b.id.cmp(&a.id))
+    });
 
-    let rows: Vec<SearchResult> = live
+    let rows: Vec<SearchResult> = records
         .into_iter()
-        .filter_map(|meta| {
-            let flow = flows.iter().find(|flow| flow.id == meta.flow_id)?.clone();
-            Some(SearchResult::Flow(crate::scripts::FlowMatch {
+        .map(|record| {
+            // A flow conversation keeps its descriptor when the flow is
+            // still on disk; a missing descriptor must NOT drop the row —
+            // resume only needs the session id, and silently hiding a live
+            // session would orphan its in-flight turn.
+            let flow = match &record.surface {
+                crate::ai::conversations::ConversationSurface::Flow { flow_id } => {
+                    flows.iter().find(|flow| &flow.id == flow_id).cloned()
+                }
+                _ => None,
+            };
+            SearchResult::Flow(crate::scripts::FlowMatch {
                 flow,
-                session_id: Some(meta.id),
-                display_name: meta.friendly_name.clone(),
+                target: crate::scripts::ConversationRowTarget::Conversation(record.id.clone()),
+                display_name: record.title.clone(),
                 subtitle: format!(
-                    "{} · {} · active conversation",
-                    meta.state.label(),
-                    meta.engine
+                    "{} · {} · {}",
+                    record.subtitle,
+                    conversation_state_text(&record.liveness),
+                    conversation_relative_age(record.last_activity, now_unix),
                 ),
                 score: i32::MAX,
                 match_indices: crate::scripts::MatchIndices::default(),
-            }))
+            })
         })
         .collect();
     if rows.is_empty() {
@@ -386,8 +447,8 @@ pub(crate) fn prepend_root_flow_sessions_section(
     }
     let mut section = Vec::with_capacity(shift + 1);
     section.push(GroupedListItem::SectionHeader(
-        "Active Flows".to_string(),
-        Some("bot".to_string()),
+        "Conversations".to_string(),
+        Some("message-circle".to_string()),
     ));
     section.extend((0..shift).map(GroupedListItem::Item));
     grouped.splice(0..0, section);
@@ -6568,12 +6629,17 @@ mod capture_mode_tests {
 }
 
 #[cfg(test)]
-mod active_flow_session_section_tests {
+mod conversations_section_tests {
     use super::*;
+    use crate::ai::conversations::{
+        AgentChatSessionId, ConversationLiveness, ConversationRecord, ConversationSessionId,
+        ConversationSurface, FlowSessionId, QuickAiSessionId,
+    };
     use crate::brain::inbox::InboxKind;
     use crate::brain::{InboxItem, RootBrainInboxSectionOptions};
     use crate::flows::model::{FlowDescriptor, FlowSource};
-    use crate::flows::session::{FlowSessionMeta, SessionState, SessionTransport};
+
+    const NOW: i64 = 1_000_000;
 
     fn flow() -> FlowDescriptor {
         FlowDescriptor {
@@ -6593,35 +6659,60 @@ mod active_flow_session_section_tests {
         }
     }
 
-    fn session() -> FlowSessionMeta {
-        FlowSessionMeta {
-            id: 42,
-            flow_id: "project:test".into(),
-            flow_name: "flow-test".into(),
-            friendly_name: "Test".into(),
-            origin: "Project".into(),
-            engine: "codex".into(),
-            flow_path: "/tmp/flow-test.md".into(),
-            flow_mtime_ms: 0,
-            cwd: "/tmp".into(),
-            transport: SessionTransport::CodexThread,
-            state: SessionState::NeedsYou,
-            started_at: std::time::Instant::now(),
-            last_activity: std::time::SystemTime::now(),
-            turns: vec![],
-            active_turn: None,
-            thread_ready: true,
-            needs_rethread: false,
-            reliability: crate::flows::session::FlowReliability::new(
-                "project:test",
-                "/tmp/flow-test.md",
-                "codex",
-            ),
+    fn at(secs: u64) -> std::time::SystemTime {
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    fn flow_record(id: u64, secs: u64) -> ConversationRecord {
+        ConversationRecord {
+            id: ConversationSessionId::Flow(FlowSessionId(id)),
+            surface: ConversationSurface::Flow {
+                flow_id: "project:test".into(),
+            },
+            title: "Release checklist".into(),
+            subtitle: "Flow · codex".into(),
+            last_activity: at(secs),
+            liveness: ConversationLiveness::Idle,
         }
     }
 
+    fn agent_chat_record(id: &str, secs: u64) -> ConversationRecord {
+        ConversationRecord {
+            id: ConversationSessionId::AgentChat(AgentChatSessionId(id.into())),
+            surface: ConversationSurface::AgentChat {
+                profile_id: "default".into(),
+            },
+            title: "Fix the footer color drift now".into(),
+            subtitle: "Agent Chat · GPT-5.6".into(),
+            last_activity: at(secs),
+            liveness: ConversationLiveness::Live {
+                turn_in_flight: true,
+            },
+        }
+    }
+
+    fn quick_ai_record(id: u64, secs: u64) -> ConversationRecord {
+        ConversationRecord {
+            id: ConversationSessionId::QuickAi(QuickAiSessionId(id)),
+            surface: ConversationSurface::QuickAi,
+            title: "Why is the tint moving?".into(),
+            subtitle: "Quick AI · Spark".into(),
+            last_activity: at(secs),
+            liveness: ConversationLiveness::Idle,
+        }
+    }
+
+    fn stable_keys(flat: &[SearchResult]) -> Vec<String> {
+        flat.iter()
+            .filter_map(SearchResult::stable_selection_key)
+            .collect()
+    }
+
+    /// Oracle step 7: one flat Conversations section, interleaved strictly
+    /// by activity across ALL THREE surfaces — surface kind is subtitle
+    /// text, never a grouping key — pinned above Brain Inbox.
     #[test]
-    fn live_sessions_pin_above_brain_and_drop_out_after_termination() {
+    fn mixed_surfaces_render_one_flat_section_above_brain_inbox() {
         let inbox = InboxItem {
             id: 1,
             kind: InboxKind::Commitment,
@@ -6642,96 +6733,217 @@ mod active_flow_session_section_tests {
             RootBrainInboxSectionOptions::default(),
             2,
         );
-        prepend_root_flow_sessions_section(&mut grouped, &mut flat, "", &[session()], &[flow()]);
-        assert!(
-            matches!(&grouped[0], GroupedListItem::SectionHeader(label, _) if label == "Active Flows")
-        );
-        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(42)));
-        assert!(matches!(&flat[1], SearchResult::BrainInboxItem(_)));
+        let records = vec![
+            flow_record(1, 100),
+            agent_chat_record("a", 300),
+            quick_ai_record(9, 200),
+        ];
+        prepend_root_conversations_section(&mut grouped, &mut flat, "", &records, &[flow()], NOW);
 
-        let mut after_grouped = vec![];
-        let mut after_flat = vec![];
-        prepend_root_flow_sessions_section(&mut after_grouped, &mut after_flat, "", &[], &[flow()]);
+        // Exactly ONE Conversations header, at the very top.
+        let headers: Vec<&String> = grouped
+            .iter()
+            .filter_map(|item| match item {
+                GroupedListItem::SectionHeader(label, _) if label == "Conversations" => Some(label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers.len(), 1, "one header for all three surfaces");
         assert!(
-            after_grouped.is_empty(),
-            "terminated sessions add no launcher row"
+            matches!(&grouped[0], GroupedListItem::SectionHeader(label, _) if label == "Conversations")
         );
-        assert!(after_flat.is_empty());
+
+        // Interleaved by recency: agent chat (300), quick ai (200), flow (100).
+        assert!(
+            matches!(&flat[0], SearchResult::Flow(row) if row.conversation_id() == Some(&ConversationSessionId::AgentChat(AgentChatSessionId("a".into()))))
+        );
+        assert!(
+            matches!(&flat[1], SearchResult::Flow(row) if row.conversation_id() == Some(&ConversationSessionId::QuickAi(QuickAiSessionId(9))))
+        );
+        assert!(matches!(&flat[2], SearchResult::Flow(row) if row.flow_session_id() == Some(1)));
+        // Brain Inbox comes after every conversation.
+        assert!(matches!(&flat[3], SearchResult::BrainInboxItem(_)));
+
+        // No two rows share a stable key (tagged ids cannot collide).
+        let keys = stable_keys(&flat);
+        let mut deduped = keys.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(keys.len(), deduped.len(), "stable keys must be unique");
+    }
+
+    /// No running-first pinning: a NEWER idle conversation outranks an OLDER
+    /// running one. Running state is an indicator, not a sort key — a stale
+    /// running operation must not stay pinned above rows the user touched.
+    #[test]
+    fn newer_idle_row_outranks_older_running_row() {
+        let older_running = agent_chat_record("running", 100);
+        let newer_idle = flow_record(2, 200);
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_conversations_section(
+            &mut grouped,
+            &mut flat,
+            "",
+            &[older_running, newer_idle],
+            &[flow()],
+            NOW,
+        );
+        assert!(
+            matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(2)),
+            "idle-but-newer must lead"
+        );
+    }
+
+    /// Running rows carry a VISIBLE, text-readable indicator; idle rows read
+    /// Ready; failed-but-resumable rows read Needs attention and remain.
+    #[test]
+    fn liveness_lane_is_visible_text() {
+        let mut failed = flow_record(3, 100);
+        failed.liveness = ConversationLiveness::Failed {
+            code: "ProviderOverloaded".into(),
+        };
+        let records = vec![agent_chat_record("a", 300), flow_record(1, 200), failed];
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_conversations_section(&mut grouped, &mut flat, "", &records, &[flow()], NOW);
+        let subtitle = |index: usize| match &flat[index] {
+            SearchResult::Flow(row) => row.subtitle.clone(),
+            other => panic!("expected conversation row, got {other:?}"),
+        };
+        assert!(subtitle(0).contains("● Working"), "{}", subtitle(0));
+        assert!(subtitle(1).contains("Ready"), "{}", subtitle(1));
+        assert!(
+            subtitle(2).contains("Needs attention"),
+            "failed-but-resumable row remains, marked: {}",
+            subtitle(2)
+        );
+    }
+
+    /// Empty store → no header, no placeholder row. Brain Inbox becomes the
+    /// first section naturally.
+    #[test]
+    fn empty_store_renders_no_header() {
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_conversations_section(&mut grouped, &mut flat, "", &[], &[flow()], NOW);
+        assert!(grouped.is_empty(), "no Conversations header when empty");
+        assert!(flat.is_empty());
     }
 
     /// Oracle step 5 (submission 98cab5e5): the section orders by SEMANTIC
-    /// recency, not creation order. These use `touch_at` with a controlled
-    /// clock so ordering is provable without sleeping.
+    /// recency, not creation order. Controlled clocks, no sleeping.
     #[test]
     fn returning_to_an_older_session_moves_it_back_to_the_top() {
-        let epoch = std::time::SystemTime::UNIX_EPOCH;
-        let at = |secs: u64| epoch + std::time::Duration::from_secs(secs);
-
-        let mut older = session();
-        older.id = 1;
-        older.touch_at(at(100));
-        let mut newer = session();
-        newer.id = 2;
-        newer.touch_at(at(200));
+        let older = flow_record(1, 100);
+        let newer = flow_record(2, 200);
 
         // Creation order alone: newer (id 2) first.
         let mut grouped = vec![];
         let mut flat = vec![];
-        prepend_root_flow_sessions_section(
+        prepend_root_conversations_section(
             &mut grouped,
             &mut flat,
             "",
             &[older.clone(), newer.clone()],
             &[flow()],
+            NOW,
         );
-        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(2)));
+        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(2)));
 
         // The user returns to the OLDER session: it must move to the top even
-        // though its id is smaller. This is the observable behavior the spec's
-        // build order names as step 1's proof.
-        older.touch_at(at(300));
+        // though its id is smaller.
+        let mut touched_older = older;
+        touched_older.last_activity = at(300);
         let mut grouped = vec![];
         let mut flat = vec![];
-        prepend_root_flow_sessions_section(&mut grouped, &mut flat, "", &[older, newer], &[flow()]);
+        prepend_root_conversations_section(
+            &mut grouped,
+            &mut flat,
+            "",
+            &[touched_older, newer],
+            &[flow()],
+            NOW,
+        );
         assert!(
-            matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(1)),
+            matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(1)),
             "resumed session must outrank a newer-created but untouched one"
         );
     }
 
+    /// Stable selection follows the SESSION across a recency reorder: the
+    /// same session id keeps the same stable key whichever row position it
+    /// lands in, so selection restore tracks it rather than the old index.
     #[test]
-    fn equal_activity_falls_back_to_stable_id_order() {
-        // Equal timestamps must produce deterministic order (id descending),
-        // or keyboard selection could watch two rows swap frame-to-frame.
-        let epoch = std::time::SystemTime::UNIX_EPOCH;
-        let same = epoch + std::time::Duration::from_secs(500);
-
-        let mut a = session();
-        a.id = 1;
-        a.touch_at(same);
-        let mut b = session();
-        b.id = 2;
-        b.touch_at(same);
-
-        let mut grouped = vec![];
-        let mut flat = vec![];
-        prepend_root_flow_sessions_section(&mut grouped, &mut flat, "", &[a, b], &[flow()]);
-        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(2)));
-        assert!(matches!(&flat[1], SearchResult::Flow(row) if row.session_id == Some(1)));
+    fn stable_keys_follow_sessions_across_reorder() {
+        let build = |records: &[ConversationRecord]| {
+            let mut grouped = vec![];
+            let mut flat = vec![];
+            prepend_root_conversations_section(
+                &mut grouped,
+                &mut flat,
+                "",
+                records,
+                &[flow()],
+                NOW,
+            );
+            stable_keys(&flat)
+        };
+        let before = build(&[flow_record(1, 100), flow_record(2, 200)]);
+        let mut resumed = flow_record(1, 300);
+        resumed.last_activity = at(300);
+        let after = build(&[resumed, flow_record(2, 200)]);
+        assert_eq!(before[0], after[1], "session 2 keeps its key");
+        assert_eq!(before[1], after[0], "session 1 keeps its key");
     }
 
     #[test]
-    fn live_sessions_match_typed_state_query() {
+    fn equal_activity_falls_back_to_stable_id_order() {
+        let a = flow_record(1, 500);
+        let b = flow_record(2, 500);
         let mut grouped = vec![];
         let mut flat = vec![];
-        prepend_root_flow_sessions_section(
+        prepend_root_conversations_section(&mut grouped, &mut flat, "", &[a, b], &[flow()], NOW);
+        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(2)));
+        assert!(matches!(&flat[1], SearchResult::Flow(row) if row.flow_session_id() == Some(1)));
+    }
+
+    /// A flow conversation whose definition file vanished must NOT lose its
+    /// row: resume only needs the session id, and hiding a live session
+    /// would orphan its in-flight turn.
+    #[test]
+    fn missing_flow_descriptor_does_not_drop_the_row() {
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_conversations_section(
             &mut grouped,
             &mut flat,
-            "needs you",
-            &[session()],
-            &[flow()],
+            "",
+            &[flow_record(7, 100)],
+            &[], // no descriptors on disk
+            NOW,
         );
-        assert!(matches!(&flat[0], SearchResult::Flow(row) if row.session_id == Some(42)));
+        assert!(
+            matches!(&flat[0], SearchResult::Flow(row) if row.flow_session_id() == Some(7) && row.flow.is_none())
+        );
+    }
+
+    #[test]
+    fn rows_match_typed_state_query() {
+        let mut grouped = vec![];
+        let mut flat = vec![];
+        prepend_root_conversations_section(
+            &mut grouped,
+            &mut flat,
+            "working",
+            &[flow_record(1, 100), agent_chat_record("a", 200)],
+            &[flow()],
+            NOW,
+        );
+        assert_eq!(flat.len(), 1, "only the Working row matches");
+        assert!(
+            matches!(&flat[0], SearchResult::Flow(row) if row.conversation_id() == Some(&ConversationSessionId::AgentChat(AgentChatSessionId("a".into()))))
+        );
     }
 }
 

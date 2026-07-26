@@ -1099,19 +1099,36 @@ fn render_focused_info_for_result(
         }
         scripts::SearchResult::Flow(flow_match) => {
             // Flow rows keep the focused panel minimal: engine + origin.
-            content = content.child(focused_info_labeled_section(
-                "ENGINE",
-                &flow_match.flow.engine,
-                style,
-            ));
-            content = content.child(focused_info_labeled_section(
-                "ORIGIN",
-                flow_match.flow.origin_label(),
-                style,
-            ));
+            // Detached conversation rows (no descriptor) fall back to the
+            // row subtitle, which already carries surface · context · state.
+            match flow_match.flow.as_ref() {
+                Some(flow) => {
+                    content = content.child(focused_info_labeled_section(
+                        "ENGINE",
+                        &flow.engine,
+                        style,
+                    ));
+                    content = content.child(focused_info_labeled_section(
+                        "ORIGIN",
+                        flow.origin_label(),
+                        style,
+                    ));
+                }
+                None => {
+                    content = content.child(focused_info_labeled_section(
+                        "CONTEXT",
+                        &flow_match.subtitle,
+                        style,
+                    ));
+                }
+            }
+            let type_label = match flow_match.target {
+                scripts::ConversationRowTarget::Conversation(_) => "Conversation",
+                scripts::ConversationRowTarget::FlowIdentity { .. } => "Flow",
+            };
             content = content
                 .child(focused_info_divider(style))
-                .child(focused_info_type_indicator("Flow", style));
+                .child(focused_info_type_indicator(type_label, style));
             let _ = match_indices;
             let _ = shortcut_display;
         }
@@ -1284,7 +1301,7 @@ impl ScriptListApp {
                         Some(format!("agent:{}", m.agent.path.to_string_lossy()))
                     }
                     scripts::SearchResult::Skill(_) => None, // Skills don't track frecency
-                    scripts::SearchResult::Flow(m) => Some(format!("flow:{}", m.flow.id)),
+                    scripts::SearchResult::Flow(m) => m.flow.as_ref().map(|flow| format!("flow:{}", flow.id)),
                     scripts::SearchResult::Fallback(_) => None, // Fallbacks don't track frecency
                     scripts::SearchResult::ScriptIssue(_) => None, // Diagnostic row doesn't track frecency
                     scripts::SearchResult::SpineProjection(_) => None, // Spine projections don't track frecency
@@ -1516,9 +1533,19 @@ impl ScriptListApp {
                     scripts::SearchResult::SpineProjection(_) => None, // Spine projections have no info panel
                     scripts::SearchResult::Flow(m) => Some(ScriptInfo::with_action_verb(
                         &m.display_name,
-                        m.flow.path.clone(),
+                        m.flow
+                            .as_ref()
+                            .map(|flow| flow.path.clone())
+                            .unwrap_or_else(|| {
+                                m.conversation_id()
+                                    .map(|id| id.automation_id())
+                                    .unwrap_or_default()
+                            }),
                         false,
-                        "Converse",
+                        match m.target {
+                            scripts::ConversationRowTarget::Conversation(_) => "Resume",
+                            scripts::ConversationRowTarget::FlowIdentity { .. } => "Converse",
+                        },
                     )),
                 }
             } else {
