@@ -196,6 +196,7 @@ fn state_result_serializes_all_fields() {
         })),
         None, // ghost_prediction
         None, // flow_ux
+        None, // backgrounded_sessions
     );
     let json = serde_json::to_value(&msg).expect("serialize stateResult");
     assert_eq!(json["type"], "stateResult");
@@ -270,6 +271,7 @@ fn state_result_round_trips() {
         None,
         None, // ghost_prediction
         None, // flow_ux
+        None, // backgrounded_sessions
     );
     let serialized = serde_json::to_string(&msg).expect("serialize");
     assert!(
