@@ -206,6 +206,18 @@ pub enum NotesSurfaceMode {
     AgentChat,
 }
 
+/// What a Notes window close/exit (or an exit-superseding reopen) does with
+/// the entry-reveal state. See [`NotesEntryReveal::prepare_for_window_exit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotesExitRevealDisposition {
+    /// The body was stably visible; keep phase, body visibility, and the
+    /// animation-key generation exactly as they are.
+    PreserveVisible,
+    /// The reveal was incomplete; it was cancelled and a superseding reopen
+    /// must restart the ordered reveal from hidden.
+    RestartHidden,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotesEntryRevealPhase {
     Hidden,
@@ -347,6 +359,50 @@ impl NotesEntryReveal {
         self.phase = NotesEntryRevealPhase::Cancelled;
         self.body_visible = false;
         self.generation
+    }
+
+    /// A reveal that fully completed and still has its body rendered.
+    ///
+    /// Only this state may survive a window close: anything mid-reveal must
+    /// cancel so an interrupted entry never renders a half-revealed body.
+    fn is_stably_visible(&self) -> bool {
+        self.phase == NotesEntryRevealPhase::Visible && self.body_visible
+    }
+
+    /// Prepare the reveal state for a Notes window close/exit.
+    ///
+    /// User-visible contract (bug report 2026-07-26, "text fades in twice"):
+    /// when a close is superseded by a reopen during the native exit fade,
+    /// text that was already stably visible must stay visible — restarting
+    /// the reveal replays the generation-keyed 90ms body fade. So a stably
+    /// visible reveal is PRESERVED (generation untouched — it is the GPUI
+    /// animation key); an incomplete reveal still cancels so a fresh entry
+    /// begins hidden.
+    fn prepare_for_window_exit(&mut self) -> NotesExitRevealDisposition {
+        if self.is_stably_visible() {
+            NotesExitRevealDisposition::PreserveVisible
+        } else {
+            self.cancel();
+            NotesExitRevealDisposition::RestartHidden
+        }
+    }
+
+    /// Decide what an exit-superseding reopen does with the reveal state.
+    ///
+    /// Returns `None` when the native exit could not be cancelled — the
+    /// caller must not reuse a window whose destruction is still pending.
+    fn exit_supersede_disposition(
+        &self,
+        native_exit_cancelled: bool,
+    ) -> Option<NotesExitRevealDisposition> {
+        if !native_exit_cancelled {
+            return None;
+        }
+        Some(if self.is_stably_visible() {
+            NotesExitRevealDisposition::PreserveVisible
+        } else {
+            NotesExitRevealDisposition::RestartHidden
+        })
     }
 
     fn restart(&mut self) -> u64 {
@@ -747,3 +803,147 @@ pub use window_ops::{
 
 #[cfg(test)]
 mod tests;
+
+/// Pure state-machine coverage for the exit/supersede reveal contract.
+///
+/// Bug report 2026-07-26: "the notes window text seems to fade in twice
+/// after opening". Mechanism: the exit-superseded reopen restarted an
+/// already-visible reveal, so the body vanished instantly and replayed the
+/// generation-keyed 90ms fade. These tests lock the preservation decision.
+#[cfg(test)]
+mod entry_reveal_exit_tests {
+    use super::{NotesEntryReveal, NotesEntryRevealPhase, NotesExitRevealDisposition};
+
+    fn fresh() -> NotesEntryReveal {
+        NotesEntryReveal::new(1)
+    }
+
+    /// Drive the full ordered reveal sequence to Visible.
+    fn stably_visible() -> NotesEntryReveal {
+        let mut reveal = fresh();
+        let generation = reveal.generation;
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::AwaitingPostConfigFrame));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::Settling));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::AwaitingRevealFrame));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::Visible));
+        assert!(reveal.is_stably_visible());
+        reveal
+    }
+
+    #[test]
+    fn visible_reveal_is_preserved_for_window_exit() {
+        let mut reveal = stably_visible();
+        let generation_before = reveal.generation;
+        let disposition = reveal.prepare_for_window_exit();
+        assert_eq!(disposition, NotesExitRevealDisposition::PreserveVisible);
+        assert_eq!(reveal.phase, NotesEntryRevealPhase::Visible);
+        assert!(reveal.body_visible);
+        assert_eq!(reveal.generation, generation_before);
+    }
+
+    #[test]
+    fn native_exit_supersede_preserves_only_stably_visible_reveal() {
+        let reveal = stably_visible();
+        assert_eq!(
+            reveal.exit_supersede_disposition(true),
+            Some(NotesExitRevealDisposition::PreserveVisible)
+        );
+    }
+
+    #[test]
+    fn native_cancel_failure_cannot_preserve_or_restart_live_reuse() {
+        let reveal = stably_visible();
+        // A window whose destruction is still pending must not be reused at
+        // all — the caller aborts instead of choosing a reveal disposition.
+        assert_eq!(reveal.exit_supersede_disposition(false), None);
+        let incomplete = fresh();
+        assert_eq!(incomplete.exit_supersede_disposition(false), None);
+    }
+
+    #[test]
+    fn settling_reveal_is_cancelled_and_restarted_after_supersede() {
+        let mut reveal = fresh();
+        let generation = reveal.generation;
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::AwaitingPostConfigFrame));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::Settling));
+        let disposition = reveal.prepare_for_window_exit();
+        assert_eq!(disposition, NotesExitRevealDisposition::RestartHidden);
+        assert_eq!(reveal.phase, NotesEntryRevealPhase::Cancelled);
+        assert!(!reveal.body_visible);
+        assert!(reveal.generation > generation);
+        // A successful native supersede on this cancelled state restarts.
+        assert_eq!(
+            reveal.exit_supersede_disposition(true),
+            Some(NotesExitRevealDisposition::RestartHidden)
+        );
+        reveal.restart();
+        assert_eq!(reveal.phase, NotesEntryRevealPhase::Hidden);
+        assert!(!reveal.body_visible);
+    }
+
+    #[test]
+    fn awaiting_reveal_frame_never_survives_as_visible() {
+        let mut reveal = fresh();
+        let generation = reveal.generation;
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::AwaitingPostConfigFrame));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::Settling));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::AwaitingRevealFrame));
+        let disposition = reveal.prepare_for_window_exit();
+        assert_eq!(disposition, NotesExitRevealDisposition::RestartHidden);
+        assert_eq!(reveal.phase, NotesEntryRevealPhase::Cancelled);
+        assert!(!reveal.body_visible);
+    }
+
+    #[test]
+    fn preserved_exit_does_not_change_animation_key_generation() {
+        // The generation IS the GPUI animation key
+        // ("notes-editor-body-reveal-fade", generation): any bump replays the
+        // 90ms body fade even when body_visible stays true.
+        let mut reveal = stably_visible();
+        let generation_before_close = reveal.generation;
+        let close_disposition = reveal.prepare_for_window_exit();
+        assert_eq!(
+            close_disposition,
+            NotesExitRevealDisposition::PreserveVisible
+        );
+        assert_eq!(reveal.generation, generation_before_close);
+        let supersede = reveal.exit_supersede_disposition(true);
+        assert_eq!(supersede, Some(NotesExitRevealDisposition::PreserveVisible));
+        assert_eq!(reveal.generation, generation_before_close);
+    }
+
+    #[test]
+    fn fresh_entry_still_requires_ordered_reveal_transitions() {
+        let mut reveal = fresh();
+        let generation = reveal.restart();
+        assert_eq!(reveal.phase, NotesEntryRevealPhase::Hidden);
+        assert!(!reveal.body_visible);
+        // Direct Hidden -> Visible stays rejected; only the ordered
+        // four-stage sequence reaches visible.
+        assert!(!reveal.advance(generation, NotesEntryRevealPhase::Visible));
+        assert!(!reveal.body_visible);
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::AwaitingPostConfigFrame));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::Settling));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::AwaitingRevealFrame));
+        assert!(reveal.advance(generation, NotesEntryRevealPhase::Visible));
+        assert!(reveal.body_visible);
+    }
+
+    #[test]
+    fn inconsistent_visible_phase_with_hidden_body_restarts() {
+        let mut reveal = stably_visible();
+        // A fixture-only inconsistency: Visible phase with a hidden body must
+        // never be preserved as if it were stably visible.
+        reveal.body_visible = false;
+        assert!(!reveal.is_stably_visible());
+        assert_eq!(
+            reveal.prepare_for_window_exit(),
+            NotesExitRevealDisposition::RestartHidden
+        );
+        assert_eq!(reveal.phase, NotesEntryRevealPhase::Cancelled);
+        assert_eq!(
+            reveal.exit_supersede_disposition(true),
+            Some(NotesExitRevealDisposition::RestartHidden)
+        );
+    }
+}

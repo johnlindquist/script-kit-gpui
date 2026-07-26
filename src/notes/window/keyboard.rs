@@ -239,7 +239,7 @@ impl NotesApp {
         crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
 
         window.close_all_dialogs(cx);
-        self.entry_reveal.cancel();
+        let _ = self.entry_reveal.prepare_for_window_exit();
         super::window_ops::close_current_notes_window(window, cx);
         cx.stop_propagation();
     }
@@ -575,7 +575,7 @@ impl NotesApp {
                         wb,
                     );
                     window.close_all_dialogs(cx);
-                    self.entry_reveal.cancel();
+                    let _ = self.entry_reveal.prepare_for_window_exit();
                     super::window_ops::close_current_notes_window(window, cx);
                     cx.stop_propagation();
                     return;
@@ -648,7 +648,7 @@ impl NotesApp {
             let wb = window.window_bounds();
             crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
             window.close_all_dialogs(cx);
-            self.entry_reveal.cancel();
+            let _ = self.entry_reveal.prepare_for_window_exit();
             super::window_ops::close_current_notes_window(window, cx);
             return;
         }
@@ -863,7 +863,7 @@ impl NotesApp {
                         wb,
                     );
                     window.close_all_dialogs(cx);
-                    self.entry_reveal.cancel();
+                    let _ = self.entry_reveal.prepare_for_window_exit();
                     super::window_ops::close_current_notes_window(window, cx);
                     cx.stop_propagation();
                 }

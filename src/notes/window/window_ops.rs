@@ -900,47 +900,98 @@ fn open_notes_window_with_close_behavior(
 
     // Check if window already exists and is valid
     if let Some(handle) = existing_handle {
+        // Read the pending exit ticket WITHOUT taking it: the ticket may only
+        // leave the slot after the native exit cancellation actually
+        // succeeded, otherwise the delayed removal must keep running.
         let pending_exit = NOTES_EXIT_TICKET
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .take();
-        if pending_exit.is_some() {
+            .as_ref()
+            .copied();
+        if let Some(ticket) = pending_exit {
             let reopened = update_notes_window_detached(handle, cx, |window, _cx| {
-                crate::platform::cancel_gpui_window_exit_dematerialize(window);
+                let native_exit_cancelled =
+                    crate::platform::cancel_gpui_window_exit_dematerialize(window);
+                if !native_exit_cancelled {
+                    return (false, None);
+                }
                 let native = configure_notes_as_floating_panel(window);
                 window.activate_window();
-                native
+                (true, native)
             });
-            if let Ok(native) = reopened {
-                crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-                    id: "notes".to_string(),
-                    kind: crate::protocol::AutomationWindowKind::Notes,
-                    title: Some("Notes".to_string()),
-                    focused: true,
-                    visible: true,
-                    semantic_surface: Some("notes".to_string()),
-                    bounds: None,
-                    parent_window_id: None,
-                    parent_kind: None,
-                    pid: Some(std::process::id()),
-                });
-                logging::log(
-                    "PANEL",
-                    "Notes exit superseded - reused the live native window",
-                );
-                if let Some(notes_app) = NOTES_APP_ENTITY
-                    .get_or_init(|| std::sync::Mutex::new(None))
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.clone())
-                {
-                    notes_app.update(cx, |app, cx| {
-                        app.entry_reveal.restart();
-                        cx.notify();
-                    });
-                    schedule_notes_entry_reveal(handle, notes_app, native, cx);
+            match reopened {
+                Ok((true, native)) => {
+                    let removed_ticket = {
+                        let mut slot = NOTES_EXIT_TICKET
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner());
+                        if *slot != Some(ticket) {
+                            anyhow::bail!("Notes exit ticket changed while superseding reopen");
+                        }
+                        slot.take()
+                    };
+                    debug_assert_eq!(removed_ticket, Some(ticket));
+                    crate::windows::upsert_automation_window(
+                        crate::protocol::AutomationWindowInfo {
+                            id: "notes".to_string(),
+                            kind: crate::protocol::AutomationWindowKind::Notes,
+                            title: Some("Notes".to_string()),
+                            focused: true,
+                            visible: true,
+                            semantic_surface: Some("notes".to_string()),
+                            bounds: None,
+                            parent_window_id: None,
+                            parent_kind: None,
+                            pid: Some(std::process::id()),
+                        },
+                    );
+                    logging::log(
+                        "PANEL",
+                        "Notes exit superseded - reused the live native window",
+                    );
+                    if let Some(notes_app) = NOTES_APP_ENTITY
+                        .get_or_init(|| std::sync::Mutex::new(None))
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.clone())
+                    {
+                        // User-visible contract (bug report 2026-07-26, "text
+                        // fades in twice"): text that was still stably visible
+                        // through the superseded exit must NOT vanish and
+                        // replay the 90ms body reveal. Restart only when the
+                        // reveal never completed.
+                        let disposition = notes_app.update(cx, |app, _cx| {
+                            app.entry_reveal
+                                .exit_supersede_disposition(true)
+                                .expect("native exit was cancelled")
+                        });
+                        match disposition {
+                            NotesExitRevealDisposition::PreserveVisible => {
+                                tracing::info!(
+                                    target: "script_kit::notes",
+                                    event = "notes_exit_supersede_preserved_visible_reveal",
+                                    "Notes exit supersede kept the already-visible body"
+                                );
+                            }
+                            NotesExitRevealDisposition::RestartHidden => {
+                                notes_app.update(cx, |app, cx| {
+                                    app.entry_reveal.restart();
+                                    cx.notify();
+                                });
+                                schedule_notes_entry_reveal(handle, notes_app, native, cx);
+                            }
+                        }
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                Ok((false, _)) => {
+                    anyhow::bail!("Notes exit supersede could not cancel the native exit");
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "Notes exit supersede failed to update the live window: {error}"
+                    ));
+                }
             }
         }
         // Window exists - check if it's valid and close it (toggle OFF)
@@ -952,7 +1003,7 @@ fn open_notes_window_with_close_behavior(
             .and_then(|guard| guard.clone())
         {
             notes_app.update(cx, |app, cx| {
-                app.entry_reveal.cancel();
+                let _ = app.entry_reveal.prepare_for_window_exit();
                 cx.notify();
             });
         }
@@ -1639,7 +1690,7 @@ pub fn close_notes_window(cx: &mut App) {
         .and_then(|guard| guard.clone())
     {
         notes_app.update(cx, |app, cx| {
-            app.entry_reveal.cancel();
+            let _ = app.entry_reveal.prepare_for_window_exit();
             cx.notify();
         });
     }
