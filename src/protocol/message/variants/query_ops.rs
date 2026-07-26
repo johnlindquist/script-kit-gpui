@@ -275,6 +275,16 @@ macro_rules! protocol_message_variants_query_ops {
         /// never present. Omitted when the flow substrate has no state.
         #[serde(rename = "flowUx", default, skip_serializing_if = "Option::is_none")]
         flow_ux: Option<serde_json::Value>,
+        /// Canonical backgrounded-AI-session store receipt (spec §8 step 6):
+        /// count plus per-session tagged id, surface, liveness, turnInFlight,
+        /// and lastActivityUnixMs. Privacy-safe by construction — never
+        /// transcripts, prompts, drafts, provider payloads, or titles.
+        #[serde(
+            rename = "backgroundedSessions",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        backgrounded_sessions: Option<serde_json::Value>,
     },
 
     // ============================================================

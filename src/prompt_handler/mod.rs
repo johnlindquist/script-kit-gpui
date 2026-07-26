@@ -2674,6 +2674,7 @@ impl ScriptListApp {
                                 None,
                                 None,
                                 None,
+                                None,
                             ));
                         }
                         return;
@@ -2706,6 +2707,7 @@ impl ScriptListApp {
                                 None,
                                 None,
                                 Some(actions_state),
+                                None,
                                 None,
                                 None,
                                 None,
@@ -2758,6 +2760,7 @@ impl ScriptListApp {
                                 None,
                                 None,
                                 None,
+                                None,
                             ));
                         }
                         return;
@@ -2780,6 +2783,7 @@ impl ScriptListApp {
                                 None,
                                 false,
                                 false,
+                                None,
                                 None,
                                 None,
                                 None,
@@ -4119,6 +4123,7 @@ impl ScriptListApp {
                         })
                     }),
                     Some(self.flow_ux_automation_snapshot(cx)),
+                    Some(self.conversations.snapshot()),
                 );
 
                 tracing::info!(

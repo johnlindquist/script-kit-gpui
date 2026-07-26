@@ -1279,7 +1279,7 @@ impl ScriptListApp {
             let actions_open = self.show_actions_popup || crate::actions::is_actions_window_open();
             let enabled = !footer_disabled;
             let working = self
-                .flow_sessions
+                .conversations.flow_sessions
                 .iter()
                 .find(|(meta, _)| meta.id == session_id)
                 .is_some_and(|(meta, _)| meta.active_turn.is_some());
@@ -2104,7 +2104,7 @@ impl ScriptListApp {
         // spine agent, which is not what this conversation talks to.
         let flow_session_label = match &self.current_view {
             AppView::FlowSessionView { session_id } => self
-                .flow_sessions
+                .conversations.flow_sessions
                 .iter()
                 .find(|(meta, _)| meta.id == *session_id)
                 .map(|(meta, _)| format!("{} · {}", meta.friendly_name, meta.engine)),

@@ -553,7 +553,7 @@ impl ScriptListApp {
                         // only keep the tick alive while a turn is in
                         // flight; submitting restarts the tick.
                         let any_turn_in_flight = app
-                            .flow_sessions
+                            .conversations.flow_sessions
                             .iter()
                             .any(|(meta, _)| meta.active_turn.is_some());
                         let keep = view_active || registry.active_count() > 0 || any_turn_in_flight;
@@ -593,7 +593,7 @@ impl ScriptListApp {
         let query = filter.trim().to_lowercase();
 
         let mut sessions: Vec<&crate::flows::session::FlowSessionMeta> =
-            self.flow_sessions.iter().map(|(meta, _)| meta).collect();
+            self.conversations.flow_sessions.iter().map(|(meta, _)| meta).collect();
         sessions.sort_by(|a, b| b.id.cmp(&a.id));
         for meta in sessions {
             let matches = query.is_empty()
@@ -658,7 +658,7 @@ impl ScriptListApp {
     }
 
     fn flow_session_index(&self, session_id: u64) -> Option<usize> {
-        self.flow_sessions
+        self.conversations.flow_sessions
             .iter()
             .position(|(meta, _)| meta.id == session_id)
     }
@@ -669,7 +669,7 @@ impl ScriptListApp {
     /// never suppresses an affordance on a live conversation.
     pub(crate) fn flow_session_has_active_turn(&self, session_id: u64) -> bool {
         self.flow_session_index(session_id)
-            .is_some_and(|index| self.flow_sessions[index].0.active_turn.is_some())
+            .is_some_and(|index| self.conversations.flow_sessions[index].0.active_turn.is_some())
     }
 
     /// Activate the desk's selected row — Enter (`run_once: false`) and ⇧↵
@@ -809,11 +809,11 @@ impl ScriptListApp {
         // Identity is flow id + definition path: `project:review` exists in
         // many projects, and matching by id alone reattached (or restored)
         // the WRONG project's conversation (2026-07-11 audit P0).
-        if let Some(index) = self.flow_sessions.iter().rposition(|(meta, _)| {
+        if let Some(index) = self.conversations.flow_sessions.iter().rposition(|(meta, _)| {
             meta.flow_id == flow.id && meta.flow_path == flow.path && meta.state.is_live()
         }) {
             let (session_id, went_stale) = {
-                let meta = &mut self.flow_sessions[index].0;
+                let meta = &mut self.conversations.flow_sessions[index].0;
                 let current_mtime = crate::flows::session::flow_definition_mtime_ms(&flow.path);
                 let went_stale = current_mtime != meta.flow_mtime_ms;
                 if went_stale {
@@ -832,7 +832,7 @@ impl ScriptListApp {
             };
             if went_stale
                 && matches!(
-                    self.flow_sessions[index].0.transport,
+                    self.conversations.flow_sessions[index].0.transport,
                     crate::flows::session::SessionTransport::CodexThread
                 )
             {
@@ -876,7 +876,7 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        let entity = self.flow_sessions[index].1.clone();
+        let entity = self.conversations.flow_sessions[index].1.clone();
         // ONE canonical conversion (WP-A4): migrate/normalize the snapshot
         // into canonical turns, then render AND store from that same vector,
         // so the restored session is semantically identical to the live one.
@@ -911,7 +911,7 @@ impl ScriptListApp {
                 }
             }
         });
-        let meta = &mut self.flow_sessions[index].0;
+        let meta = &mut self.conversations.flow_sessions[index].0;
         meta.turns = turns;
         meta.needs_rethread = true;
         tracing::info!(
@@ -957,8 +957,8 @@ impl ScriptListApp {
     ) -> u64 {
         let cwd = self.flow_ux_cwd();
         crate::flows::remember_flow_cwd(&cwd);
-        self.flow_session_counter += 1;
-        let session_id = self.flow_session_counter;
+        self.conversations.flow_session_counter += 1;
+        let session_id = self.conversations.flow_session_counter;
         let transport = crate::flows::session::SessionTransport::for_engine(&flow.engine);
 
         tracing::info!(
@@ -1077,7 +1077,7 @@ impl ScriptListApp {
                 })
                 .ok();
         }
-        self.flow_sessions.push((meta, entity));
+        self.conversations.flow_sessions.push((meta, entity));
         session_id
     }
 
@@ -1099,7 +1099,7 @@ impl ScriptListApp {
         }
         // Busy check runs BEFORE any input/transcript mutation so a rejected
         // submit leaves the composer draft untouched for the caller to keep.
-        if self.flow_sessions[index].0.active_turn.is_some() {
+        if self.conversations.flow_sessions[index].0.active_turn.is_some() {
             self.toast_manager.push(
                 crate::components::toast::Toast::error(
                     "Still working — stop the current turn first (⌘K)".to_string(),
@@ -1114,7 +1114,7 @@ impl ScriptListApp {
         let mut thread_profile: Option<crate::flows::session::FlowThreadProfile> = None;
         let mut flow_unreadable: Option<String> = None;
         let (transport, prompt) = {
-            let meta = &self.flow_sessions[index].0;
+            let meta = &self.conversations.flow_sessions[index].0;
             let prompt = match meta.transport {
                 crate::flows::session::SessionTransport::CodexThread => {
                     if meta.turns.is_empty() || meta.needs_rethread {
@@ -1158,9 +1158,9 @@ impl ScriptListApp {
             (meta.transport, prompt)
         };
 
-        let turn_index = self.flow_sessions[index].0.turns.len();
+        let turn_index = self.conversations.flow_sessions[index].0.turns.len();
         let message_id = format!("flow-{session_id}-turn-{turn_index}");
-        let entity = self.flow_sessions[index].1.clone();
+        let entity = self.conversations.flow_sessions[index].1.clone();
         let user_text = text.clone();
         entity.update(cx, |chat, cx| {
             chat.add_message(crate::protocol::ChatPromptMessage::user(user_text), cx);
@@ -1179,7 +1179,7 @@ impl ScriptListApp {
                 error = %error,
                 "Flow definition unreadable — failing the turn closed"
             );
-            let meta = &mut self.flow_sessions[index].0;
+            let meta = &mut self.conversations.flow_sessions[index].0;
             // Turn submit is semantic activity (Oracle step 5): recency ordering.
             meta.touch_now();
             meta.active_turn = Some(crate::flows::session::ActiveTurn {
@@ -1226,7 +1226,7 @@ impl ScriptListApp {
         // even a synchronously queued failure event observes a valid turn
         // (Oracle audit 2026-07-21). The mdflow run id is filled in after
         // launch, before returning to the event loop.
-        let meta = &mut self.flow_sessions[index].0;
+        let meta = &mut self.conversations.flow_sessions[index].0;
         // Turn submit is semantic activity (Oracle step 5): recency ordering.
         meta.touch_now();
         meta.active_turn = Some(crate::flows::session::ActiveTurn {
@@ -1246,7 +1246,7 @@ impl ScriptListApp {
 
         match transport {
             crate::flows::session::SessionTransport::CodexThread => {
-                let meta = &self.flow_sessions[index].0;
+                let meta = &self.conversations.flow_sessions[index].0;
                 crate::flows::codex_client::codex_app_server().converse(
                     session_id,
                     &meta.cwd,
@@ -1256,7 +1256,7 @@ impl ScriptListApp {
             }
             crate::flows::session::SessionTransport::MdflowTurns => {
                 let run_id = {
-                    let meta = &self.flow_sessions[index].0;
+                    let meta = &self.conversations.flow_sessions[index].0;
                     crate::flows::runner::launch_flow(
                         &meta.flow_id,
                         &meta.flow_name,
@@ -1271,7 +1271,7 @@ impl ScriptListApp {
                         true,
                     )
                 };
-                if let Some(active) = self.flow_sessions[index].0.active_turn.as_mut() {
+                if let Some(active) = self.conversations.flow_sessions[index].0.active_turn.as_mut() {
                     active.run_id = Some(run_id);
                 }
             }
@@ -1343,8 +1343,8 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        let entity = self.flow_sessions[index].1.clone();
-        let Some(active) = self.flow_sessions[index].0.active_turn.as_mut() else {
+        let entity = self.conversations.flow_sessions[index].1.clone();
+        let Some(active) = self.conversations.flow_sessions[index].0.active_turn.as_mut() else {
             return;
         };
         active.assistant_acc.push_str(delta);
@@ -1369,7 +1369,7 @@ impl ScriptListApp {
             return;
         };
         let needs_break = {
-            let Some(active) = self.flow_sessions[index].0.active_turn.as_mut() else {
+            let Some(active) = self.conversations.flow_sessions[index].0.active_turn.as_mut() else {
                 return;
             };
             active.enter_item(item_id)
@@ -1377,7 +1377,7 @@ impl ScriptListApp {
         if needs_break {
             self.append_flow_turn_text(session_id, "\n\n", cx);
             // The break belongs to the boundary, not the new item's text.
-            if let Some(active) = self.flow_sessions[index].0.active_turn.as_mut() {
+            if let Some(active) = self.conversations.flow_sessions[index].0.active_turn.as_mut() {
                 active.item_acc.clear();
             }
         }
@@ -1397,14 +1397,14 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        let Some(active) = self.flow_sessions[index].0.active_turn.take() else {
+        let Some(active) = self.conversations.flow_sessions[index].0.active_turn.take() else {
             return;
         };
         // A turn reaching a terminal state is semantic activity (Oracle step
         // 5). Streamed tokens deliberately never touch: per-token updates
         // would reorder the list continuously mid-answer.
-        self.flow_sessions[index].0.touch_now();
-        let entity = self.flow_sessions[index].1.clone();
+        self.conversations.flow_sessions[index].0.touch_now();
+        let entity = self.conversations.flow_sessions[index].1.clone();
         let message_id = active.message_id.clone();
         // Drive the reducer-owned reliability state BEFORE projecting the
         // transcript so recovery actions are already truthful when the card
@@ -1412,16 +1412,16 @@ impl ScriptListApp {
         let had_partial_output = !active.assistant_acc.is_empty();
         match &outcome {
             FlowTurnOutcome::Ok => {
-                self.flow_sessions[index].0.reliability.complete_turn();
+                self.conversations.flow_sessions[index].0.reliability.complete_turn();
             }
             FlowTurnOutcome::Stopped => {
-                self.flow_sessions[index]
+                self.conversations.flow_sessions[index]
                     .0
                     .reliability
                     .cancel_turn(had_partial_output);
             }
             FlowTurnOutcome::Failed(record) => {
-                self.flow_sessions[index]
+                self.conversations.flow_sessions[index]
                     .0
                     .reliability
                     .fail_turn(record.failure.clone());
@@ -1456,7 +1456,7 @@ impl ScriptListApp {
                 chat.set_message_failure(&message_id, failure, note, cx);
             }
         });
-        let meta = &mut self.flow_sessions[index].0;
+        let meta = &mut self.conversations.flow_sessions[index].0;
         meta.turns.push(turn);
         meta.state = state;
         // Snapshot the conversation through the FIFO store so an app restart
@@ -1499,16 +1499,16 @@ impl ScriptListApp {
         match event {
             FlowThreadEvent::ThreadStarted { session_id, model } => {
                 if let Some(index) = self.flow_session_index(session_id) {
-                    self.flow_sessions[index].0.thread_ready = true;
+                    self.conversations.flow_sessions[index].0.thread_ready = true;
                     if !model.is_empty() {
-                        self.flow_sessions[index].0.engine = format!("codex · {model}");
+                        self.conversations.flow_sessions[index].0.engine = format!("codex · {model}");
                     }
                 }
             }
             FlowThreadEvent::TurnStarted { session_id } => {
                 if let Some(index) = self.flow_session_index(session_id) {
-                    if self.flow_sessions[index].0.active_turn.is_some() {
-                        self.flow_sessions[index].0.state = SessionState::Working;
+                    if self.conversations.flow_sessions[index].0.active_turn.is_some() {
+                        self.conversations.flow_sessions[index].0.state = SessionState::Working;
                     }
                 }
             }
@@ -1534,7 +1534,7 @@ impl ScriptListApp {
                 let Some(index) = self.flow_session_index(session_id) else {
                     return;
                 };
-                let item_acc = self.flow_sessions[index]
+                let item_acc = self.conversations.flow_sessions[index]
                     .0
                     .active_turn
                     .as_ref()
@@ -1583,9 +1583,9 @@ impl ScriptListApp {
                 // failure). The next submit must re-thread with the flow's
                 // contract + transcript rollup, and the footer must show
                 // Connecting again instead of pretending the thread lives.
-                self.flow_sessions[index].0.thread_ready = false;
-                self.flow_sessions[index].0.needs_rethread = true;
-                if self.flow_sessions[index].0.active_turn.is_some() {
+                self.conversations.flow_sessions[index].0.thread_ready = false;
+                self.conversations.flow_sessions[index].0.needs_rethread = true;
+                if self.conversations.flow_sessions[index].0.active_turn.is_some() {
                     self.finish_flow_turn(
                         session_id,
                         crate::flows::session::SessionState::Done(None),
@@ -1595,11 +1595,11 @@ impl ScriptListApp {
                 } else {
                     // Engine death while idle: no turn to settle, but the
                     // typed recovery state must still become actionable.
-                    self.flow_sessions[index]
+                    self.conversations.flow_sessions[index]
                         .0
                         .reliability
                         .fail_outside_turn(failure.failure.clone());
-                    self.flow_sessions[index].0.state =
+                    self.conversations.flow_sessions[index].0.state =
                         crate::flows::session::SessionState::Done(None);
                     cx.notify();
                 }
@@ -1612,11 +1612,11 @@ impl ScriptListApp {
     fn sync_mdflow_turns(&mut self, cx: &mut Context<Self>) -> bool {
         let registry = crate::flows::run_registry::flow_run_registry();
         let mut dirty = false;
-        for index in 0..self.flow_sessions.len() {
+        for index in 0..self.conversations.flow_sessions.len() {
             // WP-B3: one session scanned per sync pass (the O(sessions) walk).
             crate::chat_hot_counters::record_flow_session_scanned();
             let (session_id, run_id, acc_len) = {
-                let meta = &self.flow_sessions[index].0;
+                let meta = &self.conversations.flow_sessions[index].0;
                 let Some(active) = &meta.active_turn else {
                     continue;
                 };
@@ -1695,10 +1695,10 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        let friendly = self.flow_sessions[index].0.friendly_name.clone();
+        let friendly = self.conversations.flow_sessions[index].0.friendly_name.clone();
         // Explicit open/resume is semantic activity (Oracle step 5): returning
         // to an older session moves it back to the top of Active Flows.
-        self.flow_sessions[index].0.touch_now();
+        self.conversations.flow_sessions[index].0.touch_now();
         self.flow_session_return_to_desk =
             flow_session_returns_to_desk(&self.current_view, self.flow_session_return_to_desk);
         self.current_view = AppView::FlowSessionView { session_id };
@@ -1799,7 +1799,7 @@ impl ScriptListApp {
             return false;
         };
 
-        let has_active_turn = self.flow_sessions[index].0.active_turn.is_some();
+        let has_active_turn = self.conversations.flow_sessions[index].0.active_turn.is_some();
         if matches!(
             resolve_flow_conversation_reset_guard(cause, has_active_turn),
             FlowConversationResetGuard::BlockedByActiveTurn
@@ -1829,13 +1829,13 @@ impl ScriptListApp {
         // Shared transport bookkeeping: the next submit re-resolves the flow
         // contract and lands on a fresh thread.
         {
-            let meta = &mut self.flow_sessions[index].0;
+            let meta = &mut self.conversations.flow_sessions[index].0;
             meta.thread_ready = false;
             meta.needs_rethread = true;
         }
 
         if !cause.preserves_transcript() {
-            let entity = self.flow_sessions[index].1.clone();
+            let entity = self.conversations.flow_sessions[index].1.clone();
             // Drop the engine-side thread as well. Without this the fresh
             // thread would be started against a server session that still
             // holds the old conversation, and "new conversation" would be a
@@ -1845,7 +1845,7 @@ impl ScriptListApp {
                 chat.clear_messages(cx);
             });
             let (flow_id, flow_path, engine) = {
-                let meta = &mut self.flow_sessions[index].0;
+                let meta = &mut self.conversations.flow_sessions[index].0;
                 meta.turns.clear();
                 meta.state = crate::flows::session::SessionState::NeedsYou;
                 (
@@ -1857,7 +1857,7 @@ impl ScriptListApp {
             // Recovery state is per-conversation. Carrying the old failure
             // forward would leave a recovery card offering to repair a
             // conversation that no longer exists.
-            self.flow_sessions[index].0.reliability =
+            self.conversations.flow_sessions[index].0.reliability =
                 crate::flows::session::FlowReliability::new(&flow_id, &flow_path, &engine);
             // Replace the persisted snapshot with an empty one. Ordered
             // through the same FIFO store as every other write, so a
@@ -1898,7 +1898,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let response = self
-            .flow_sessions
+            .conversations.flow_sessions
             .iter()
             .find(|(meta, _)| meta.id == session_id)
             .and_then(|(meta, _)| {
@@ -1935,10 +1935,10 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        let Some(active) = self.flow_sessions[index].0.active_turn.clone() else {
+        let Some(active) = self.conversations.flow_sessions[index].0.active_turn.clone() else {
             return;
         };
-        match self.flow_sessions[index].0.transport {
+        match self.conversations.flow_sessions[index].0.transport {
             crate::flows::session::SessionTransport::CodexThread => {
                 crate::flows::codex_client::codex_app_server().interrupt(session_id);
                 // turn/completed {status: interrupted} settles the turn.
@@ -1963,8 +1963,8 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        if let Some(active) = self.flow_sessions[index].0.active_turn.clone() {
-            match self.flow_sessions[index].0.transport {
+        if let Some(active) = self.conversations.flow_sessions[index].0.active_turn.clone() {
+            match self.conversations.flow_sessions[index].0.transport {
                 crate::flows::session::SessionTransport::CodexThread => {
                     crate::flows::codex_client::codex_app_server().interrupt(session_id);
                 }
@@ -1983,7 +1983,7 @@ impl ScriptListApp {
         // "Terminate Flow" promises to PERMANENTLY end the conversation —
         // erase the persisted transcript too, or the next activation would
         // silently restore it (2026-07-11 audit P0: UI-contract violation).
-        if let Some(removed) = remove_flow_session(&mut self.flow_sessions, session_id) {
+        if let Some(removed) = remove_flow_session(&mut self.conversations.flow_sessions, session_id) {
             // FIFO store (WP-A1): the delete is ordered AFTER any pending
             // persist for this conversation, so a straggling snapshot can
             // never resurrect a terminated transcript.
@@ -2258,7 +2258,7 @@ impl ScriptListApp {
             let display_rows = rows.clone();
             let hovered = self.hovered_index;
             let session_meta: Vec<crate::flows::session::FlowSessionMeta> = self
-                .flow_sessions
+                .conversations.flow_sessions
                 .iter()
                 .map(|(meta, _)| meta.clone())
                 .collect();
@@ -2439,7 +2439,7 @@ impl ScriptListApp {
         // Footer + shell (Conversation Desk contract: primary verbs only).
         // ------------------------------------------------------------------
         let live_sessions = self
-            .flow_sessions
+            .conversations.flow_sessions
             .iter()
             .filter(|(meta, _)| meta.state.is_live())
             .count();
@@ -2525,10 +2525,10 @@ impl ScriptListApp {
         // WP-B3: one session scanned + the per-render `FlowSessionMeta` clone.
         // The clone is O(turns) and happens every session render; count it so
         // WP9 can see the per-render allocation cost (the borrow checker forces
-        // it here because `entity` and `meta` both borrow `self.flow_sessions`).
+        // it here because `entity` and `meta` both borrow `self.conversations.flow_sessions`).
         crate::chat_hot_counters::record_flow_session_scanned();
         let (meta, entity) = {
-            let (meta, entity) = &self.flow_sessions[index];
+            let (meta, entity) = &self.conversations.flow_sessions[index];
             (meta.clone(), entity.clone())
         };
 
@@ -2560,7 +2560,7 @@ impl ScriptListApp {
                 let shift = event.keystroke.modifiers.shift;
                 let turn_active = this
                     .flow_session_index(session_id)
-                    .and_then(|index| this.flow_sessions[index].0.active_turn.as_ref())
+                    .and_then(|index| this.conversations.flow_sessions[index].0.active_turn.as_ref())
                     .is_some();
                 let actions_open = this.show_actions_popup;
 
@@ -2761,7 +2761,7 @@ impl ScriptListApp {
                 self.retry_flow_turn(session_id, cx);
             }
             AiRecoveryAction::RethreadFlow => {
-                if !self.flow_sessions[index].0.reliability.select_rethread() {
+                if !self.conversations.flow_sessions[index].0.reliability.select_rethread() {
                     return;
                 }
                 // A rethread lands the next submit on a FRESH protocol
@@ -2780,7 +2780,7 @@ impl ScriptListApp {
             AiRecoveryAction::RepairComponent { .. } => {
                 // mdflow missing/broken: the desk's install affordance is
                 // the one repair path (quick terminal `npm i -g mdflow`).
-                self.flow_sessions[index]
+                self.conversations.flow_sessions[index]
                     .0
                     .reliability
                     .select_recovery(AiRecoveryAction::RepairComponent {
@@ -2790,7 +2790,7 @@ impl ScriptListApp {
                 self.open_quick_terminal_with_command(None, "npm i -g mdflow".to_string(), cx);
             }
             AiRecoveryAction::CopyDetails => {
-                let meta = &self.flow_sessions[index].0;
+                let meta = &self.conversations.flow_sessions[index].0;
                 let details = flow_recovery_copy_details(meta);
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(details));
                 self.toast_manager.push(
@@ -2818,7 +2818,7 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        self.flow_sessions[index].0.reliability.dismiss();
+        self.conversations.flow_sessions[index].0.reliability.dismiss();
         cx.notify();
     }
 
@@ -2829,10 +2829,10 @@ impl ScriptListApp {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        if self.flow_sessions[index].0.active_turn.is_some() {
+        if self.conversations.flow_sessions[index].0.active_turn.is_some() {
             return;
         }
-        let Some(user_text) = self.flow_sessions[index]
+        let Some(user_text) = self.conversations.flow_sessions[index]
             .0
             .turns
             .iter()
@@ -2844,9 +2844,9 @@ impl ScriptListApp {
         else {
             return;
         };
-        let turn_ordinal = self.flow_sessions[index].0.turns.len();
-        let flow_id = self.flow_sessions[index].0.flow_id.clone();
-        if !self.flow_sessions[index]
+        let turn_ordinal = self.conversations.flow_sessions[index].0.turns.len();
+        let flow_id = self.conversations.flow_sessions[index].0.flow_id.clone();
+        if !self.conversations.flow_sessions[index]
             .0
             .reliability
             .retry_turn(&flow_id, turn_ordinal)
@@ -2878,7 +2878,7 @@ impl ScriptListApp {
         };
         let mut thread_profile: Option<crate::flows::session::FlowThreadProfile> = None;
         let (transport, prompt) = {
-            let meta = &self.flow_sessions[index].0;
+            let meta = &self.conversations.flow_sessions[index].0;
             let prompt = match meta.transport {
                 crate::flows::session::SessionTransport::CodexThread => {
                     if meta.turns.is_empty() || meta.needs_rethread {
@@ -2907,9 +2907,9 @@ impl ScriptListApp {
             };
             (meta.transport, prompt)
         };
-        let turn_index = self.flow_sessions[index].0.turns.len();
+        let turn_index = self.conversations.flow_sessions[index].0.turns.len();
         let message_id = format!("flow-{session_id}-retry-{turn_index}");
-        let entity = self.flow_sessions[index].1.clone();
+        let entity = self.conversations.flow_sessions[index].1.clone();
         entity.update(cx, |chat, cx| {
             chat.start_streaming(
                 message_id.clone(),
@@ -2917,7 +2917,7 @@ impl ScriptListApp {
                 cx,
             );
         });
-        let meta = &mut self.flow_sessions[index].0;
+        let meta = &mut self.conversations.flow_sessions[index].0;
         // Turn submit is semantic activity (Oracle step 5): recency ordering.
         meta.touch_now();
         meta.active_turn = Some(crate::flows::session::ActiveTurn {
@@ -2932,7 +2932,7 @@ impl ScriptListApp {
         meta.state = crate::flows::session::SessionState::Working;
         match transport {
             crate::flows::session::SessionTransport::CodexThread => {
-                let meta = &self.flow_sessions[index].0;
+                let meta = &self.conversations.flow_sessions[index].0;
                 crate::flows::codex_client::codex_app_server().converse(
                     session_id,
                     &meta.cwd,
@@ -2942,7 +2942,7 @@ impl ScriptListApp {
             }
             crate::flows::session::SessionTransport::MdflowTurns => {
                 let run_id = {
-                    let meta = &self.flow_sessions[index].0;
+                    let meta = &self.conversations.flow_sessions[index].0;
                     crate::flows::runner::launch_flow(
                         &meta.flow_id,
                         &meta.flow_name,
@@ -2955,7 +2955,7 @@ impl ScriptListApp {
                         true,
                     )
                 };
-                if let Some(active) = self.flow_sessions[index].0.active_turn.as_mut() {
+                if let Some(active) = self.conversations.flow_sessions[index].0.active_turn.as_mut() {
                     active.run_id = Some(run_id);
                 }
             }
@@ -2976,7 +2976,7 @@ impl ScriptListApp {
                 let selected = rows.get(*selected_index).and_then(|row| match row {
                     FlowDeskRow::Flow(flow) => Some(flow.id.clone()),
                     FlowDeskRow::Session(id) => self
-                        .flow_sessions
+                        .conversations.flow_sessions
                         .iter()
                         .find(|(meta, _)| meta.id == *id)
                         .map(|(meta, _)| meta.flow_id.clone()),
@@ -2991,7 +2991,7 @@ impl ScriptListApp {
             }
             AppView::FlowSessionView { session_id } => (
                 false,
-                self.flow_sessions
+                self.conversations.flow_sessions
                     .iter()
                     .find(|(meta, _)| meta.id == *session_id)
                     .map(|(meta, _)| meta.flow_id.clone()),
@@ -3001,7 +3001,7 @@ impl ScriptListApp {
         let cwd = self.flow_ux_cwd();
         let roster_entry = crate::flows::catalog::flow_catalog().roster_for(&cwd);
         let sessions: Vec<crate::flows::automation::SessionSnapshot> = self
-            .flow_sessions
+            .conversations.flow_sessions
             .iter()
             .map(|(meta, _)| crate::flows::automation::SessionSnapshot {
                 id: meta.id,
@@ -3048,7 +3048,7 @@ impl ScriptListApp {
         );
         let active_transcript = match &self.current_view {
             AppView::FlowSessionView { session_id } => self
-                .flow_sessions
+                .conversations.flow_sessions
                 .iter()
                 .find(|(meta, _)| meta.id == *session_id)
                 .map(|(_, entity)| entity.read(cx).transcript_geometry_snapshot()),

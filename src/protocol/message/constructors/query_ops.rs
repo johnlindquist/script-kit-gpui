@@ -115,6 +115,7 @@ impl Message {
         dictation_state: Option<serde_json::Value>,
         ghost_prediction: Option<serde_json::Value>,
         flow_ux: Option<serde_json::Value>,
+        backgrounded_sessions: Option<serde_json::Value>,
     ) -> Self {
         Message::StateResult {
             request_id,
@@ -151,6 +152,7 @@ impl Message {
             dictation_state,
             ghost_prediction,
             flow_ux,
+            backgrounded_sessions,
         }
     }
 

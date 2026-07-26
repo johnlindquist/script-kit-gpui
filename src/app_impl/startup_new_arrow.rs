@@ -92,7 +92,7 @@
                                 // The history IS the session's turns; there is
                                 // no second copy to drift out of step.
                                 let history: Vec<String> = this
-                                    .flow_sessions
+                                    .conversations.flow_sessions
                                     .iter()
                                     .find(|(meta, _)| meta.id == session_id)
                                     .map(|(meta, _)| {

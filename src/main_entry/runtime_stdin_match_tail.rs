@@ -481,7 +481,7 @@
                                         })
                                     }
                                     AppView::FlowSessionView { session_id } => view
-                                        .flow_sessions
+                                        .conversations.flow_sessions
                                         .iter()
                                         .find(|(meta, _)| meta.id == *session_id)
                                         .map(|(_, entity)| entity.clone())
@@ -558,7 +558,7 @@
                                         })
                                     }
                                     AppView::FlowSessionView { session_id } => view
-                                        .flow_sessions
+                                        .conversations.flow_sessions
                                         .iter()
                                         .find(|(meta, _)| meta.id == *session_id)
                                         .map(|(_, entity)| entity.clone())

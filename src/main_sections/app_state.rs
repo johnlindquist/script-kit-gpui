@@ -1047,16 +1047,13 @@ pub(crate) struct ScriptListApp {
     // typing rather than to an empty composer.
     flow_session_prompt_history_index: Option<usize>,
     flow_session_prompt_draft: Option<String>,
-    // Live conversational flow sessions (Enter = converse). Each pairs
-    // metadata with its Threadline ChatPrompt entity; backgrounding keeps
-    // the entity (and any in-flight turn) alive, re-entering an Active row
-    // restores the SAME transcript.
-    pub(crate) flow_sessions: Vec<(
-        crate::flows::session::FlowSessionMeta,
-        Entity<crate::prompts::ChatPrompt>,
-    )>,
-    // Monotonic id source for flow sessions.
-    pub(crate) flow_session_counter: u64,
+    /// One canonical backgrounded-AI-conversation store (spec §8 step 6).
+    /// Owns the live conversational flow sessions (metadata + ChatPrompt
+    /// entity pairs) and any detached Agent Chat / Quick AI records. Lives
+    /// OUTSIDE `current_view`: it survives `reset_to_script_list`,
+    /// `close_and_reset_window`, and filtering-cache rebuilds, and shrinks
+    /// only on explicit session close/removal.
+    pub(crate) conversations: crate::ai::conversations::BackgroundedSessionStore,
     /// Escape origin for the CURRENT flow session view: true when the
     /// session was entered from the Conversation Desk (FlowUxView), false
     /// when entered from the main launcher or anywhere else. Escape must
@@ -1585,7 +1582,7 @@ pub(crate) const ROOT_LAUNCHER_PLACEHOLDER: &str =
 
 #[cfg(test)]
 mod app_state_selection_tests {
-    use super::{main_menu_refresh_selection_policy, MainMenuRefreshSelectionPolicy};
+    use super::{MainMenuRefreshSelectionPolicy, main_menu_refresh_selection_policy};
 
     /// Hard rule (user, 2026-07-20): no down-arrow → focus pinned to the
     /// first item even when async results inject rows above it. Deliberate
@@ -1600,5 +1597,164 @@ mod app_state_selection_tests {
             main_menu_refresh_selection_policy(true),
             MainMenuRefreshSelectionPolicy::RestoreIdentity
         );
+    }
+}
+
+#[cfg(test)]
+mod backgrounded_session_store_tests {
+    use super::*;
+
+    fn store_test_flow_meta(id: u64) -> crate::flows::session::FlowSessionMeta {
+        crate::flows::session::FlowSessionMeta {
+            id,
+            flow_id: "project:store-test".into(),
+            flow_name: "flow-store-test".into(),
+            friendly_name: "Store Test".into(),
+            origin: "Project".into(),
+            engine: "codex".into(),
+            flow_path: "/tmp/flow-store-test.md".into(),
+            flow_mtime_ms: 0,
+            cwd: "/tmp".into(),
+            transport: crate::flows::session::SessionTransport::CodexThread,
+            state: crate::flows::session::SessionState::NeedsYou,
+            started_at: std::time::Instant::now(),
+            last_activity: std::time::SystemTime::now(),
+            turns: vec![],
+            active_turn: None,
+            thread_ready: true,
+            needs_rethread: false,
+            reliability: crate::flows::session::FlowReliability::new(
+                "project:store-test",
+                "/tmp/flow-store-test.md",
+                "codex",
+            ),
+        }
+    }
+
+    fn store_test_chat_prompt(
+        session_id: u64,
+        cx: &mut gpui::App,
+    ) -> gpui::Entity<crate::prompts::ChatPrompt> {
+        let focus_handle = cx.focus_handle();
+        cx.new(|_| {
+            crate::prompts::ChatPrompt::new(
+                format!("flow-session-{session_id}"),
+                None,
+                vec![],
+                None,
+                None,
+                focus_handle,
+                std::sync::Arc::new(|_, _| {}) as crate::prompts::ChatSubmitCallback,
+                std::sync::Arc::new(crate::theme::Theme::default()),
+            )
+        })
+    }
+
+    /// The store lives OUTSIDE `current_view`: backgrounding a flow session
+    /// by leaving `FlowSessionView` through `reset_to_script_list` must
+    /// leave exactly one resumable record — a reset that wiped the store
+    /// would orphan the live ChatPrompt entity (and any in-flight turn)
+    /// with no route back to it.
+    #[gpui::test]
+    fn reset_to_script_list_does_not_clear_the_store(cx: &mut gpui::TestAppContext) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            let entity = store_test_chat_prompt(61, cx);
+            app.conversations
+                .flow_sessions
+                .push((store_test_flow_meta(61), entity));
+            app.current_view = AppView::FlowSessionView { session_id: 61 };
+
+            app.reset_to_script_list(cx);
+
+            assert!(
+                matches!(app.current_view, AppView::ScriptList),
+                "reset must land on the script list"
+            );
+            assert_eq!(
+                app.conversations.len(),
+                1,
+                "exactly one resumable record survives the reset"
+            );
+            let rows = app.conversations.ordered_rows();
+            assert_eq!(
+                rows[0].id,
+                crate::ai::conversations::ConversationSessionId::Flow(
+                    crate::ai::conversations::FlowSessionId(61)
+                )
+            );
+        });
+    }
+
+    /// The driver receipt must be the model, not a parallel projection:
+    /// same count, same tagged ids, same order.
+    #[gpui::test]
+    fn snapshot_reports_the_same_count_and_ids_as_the_model(cx: &mut gpui::TestAppContext) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            for (id, activity_secs) in [(7u64, 100u64), (9, 300), (8, 200)] {
+                let mut meta = store_test_flow_meta(id);
+                meta.touch_at(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(activity_secs),
+                );
+                let entity = store_test_chat_prompt(id, cx);
+                app.conversations.flow_sessions.push((meta, entity));
+            }
+
+            let snapshot = app.conversations.snapshot();
+            assert_eq!(snapshot["count"], 3);
+            let snapshot_ids: Vec<&str> = snapshot["sessions"]
+                .as_array()
+                .expect("sessions array")
+                .iter()
+                .map(|session| session["id"].as_str().expect("id string"))
+                .collect();
+            let model_ids: Vec<String> = app
+                .conversations
+                .ordered_rows()
+                .iter()
+                .map(|row| row.id.automation_id())
+                .collect();
+            assert_eq!(snapshot_ids, vec!["flow:9", "flow:8", "flow:7"]);
+            assert_eq!(
+                snapshot_ids,
+                model_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+                "receipt order must be the model's order"
+            );
+            // Privacy: no transcript, prompt, draft, or title fields.
+            let first = &snapshot["sessions"][0];
+            assert!(first.get("title").is_none());
+            assert!(first.get("turns").is_none());
+        });
+    }
+
+    /// Resume must hand back the SAME retained entity, tagged with the
+    /// correct surface kind — a wrong-kind or fresh entity would silently
+    /// drop the live transcript.
+    #[gpui::test]
+    fn resume_returns_the_retained_flow_entity(cx: &mut gpui::TestAppContext) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            let entity = store_test_chat_prompt(4, cx);
+            app.conversations
+                .flow_sessions
+                .push((store_test_flow_meta(4), entity.clone()));
+
+            let resumed = app.conversations.resume_entity(
+                &crate::ai::conversations::ConversationSessionId::Flow(
+                    crate::ai::conversations::FlowSessionId(4),
+                ),
+            );
+            match resumed {
+                Some(crate::ai::conversations::SessionEntity::Flow(resumed_entity)) => {
+                    assert_eq!(
+                        resumed_entity.entity_id(),
+                        entity.entity_id(),
+                        "resume must return the retained entity, not a copy"
+                    );
+                }
+                _ => panic!("expected the Flow entity kind"),
+            }
+        });
     }
 }

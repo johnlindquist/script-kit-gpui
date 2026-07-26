@@ -2020,7 +2020,7 @@ impl ScriptListApp {
             let (mut grouped_items, mut flat_results) = (grouped_items, flat_results);
             if !menu_syntax_owns_main_list && !spine_owns_for_computed {
                 let sessions: Vec<_> = self
-                    .flow_sessions
+                    .conversations.flow_sessions
                     .iter()
                     .map(|(meta, _)| meta.clone())
                     .collect();

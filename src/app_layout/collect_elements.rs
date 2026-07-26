@@ -507,7 +507,7 @@ impl ScriptListApp {
                     .iter()
                     .map(|row| match row {
                         FlowDeskRow::Session(id) => self
-                            .flow_sessions
+                            .conversations.flow_sessions
                             .iter()
                             .find(|(meta, _)| meta.id == *id)
                             .map(|(meta, _)| {
@@ -1694,7 +1694,7 @@ impl ScriptListApp {
 
             AppView::FlowSessionView { session_id } => {
                 let entity = self
-                    .flow_sessions
+                    .conversations.flow_sessions
                     .iter()
                     .find(|(meta, _)| meta.id == *session_id)
                     .map(|(_, entity)| entity.clone());
@@ -1729,7 +1729,7 @@ impl ScriptListApp {
                     // S12: the shared recovery card, from the same projection
                     // the flow session renderer uses.
                     if let Some(meta) = self
-                        .flow_sessions
+                        .conversations.flow_sessions
                         .iter()
                         .map(|(meta, _)| meta)
                         .find(|meta| meta.id == *session_id)

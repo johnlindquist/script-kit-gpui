@@ -1331,7 +1331,7 @@ impl ScriptListApp {
                 self.copy_flow_session_last_response(id, cx);
             }
             ("flow_desk_session_copy_transcript", Some(FlowDeskSubject::Session { id, .. })) => {
-                if let Some((meta, _)) = self.flow_sessions.iter().find(|(meta, _)| meta.id == id) {
+                if let Some((meta, _)) = self.conversations.flow_sessions.iter().find(|(meta, _)| meta.id == id) {
                     let transcript = meta
                         .turns
                         .iter()

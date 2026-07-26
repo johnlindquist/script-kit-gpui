@@ -1069,7 +1069,7 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                         })
                                     }
                                     AppView::FlowSessionView { session_id } => view
-                                        .flow_sessions
+                                        .conversations.flow_sessions
                                         .iter()
                                         .find(|(meta, _)| meta.id == *session_id)
                                         .map(|(_, entity)| entity.clone())
@@ -1146,7 +1146,7 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                         })
                                     }
                                     AppView::FlowSessionView { session_id } => view
-                                        .flow_sessions
+                                        .conversations.flow_sessions
                                         .iter()
                                         .find(|(meta, _)| meta.id == *session_id)
                                         .map(|(_, entity)| entity.clone())
