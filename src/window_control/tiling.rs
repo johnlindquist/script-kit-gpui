@@ -57,45 +57,19 @@ pub(super) fn move_to_adjacent_display(window_id: u32, next: bool) -> Result<()>
         return Ok(());
     }
 
-    let current_display_idx = displays
-        .iter()
-        .position(|d| {
-            current_x >= d.x
-                && current_x < d.x + d.width as i32
-                && current_y >= d.y
-                && current_y < d.y + d.height as i32
-        })
-        .unwrap_or(0);
+    let current_bounds = Bounds::new(current_x, current_y, current_width, current_height);
+    let target = super::presets::legacy_adjacent_display_bounds(
+        current_bounds,
+        (current_width, current_height),
+        &displays,
+        next,
+    )?;
 
-    let target_idx = if next {
-        (current_display_idx + 1) % displays.len()
-    } else if current_display_idx == 0 {
-        displays.len() - 1
-    } else {
-        current_display_idx - 1
-    };
-
-    let current_display = &displays[current_display_idx];
-    let target_display = &displays[target_idx];
-
-    let rel_x = (current_x - current_display.x) as f64 / current_display.width as f64;
-    let rel_y = (current_y - current_display.y) as f64 / current_display.height as f64;
-
-    let new_x = target_display.x + (rel_x * target_display.width as f64) as i32;
-    let new_y = target_display.y + (rel_y * target_display.height as f64) as i32;
-
-    let scale_x = target_display.width as f64 / current_display.width as f64;
-    let scale_y = target_display.height as f64 / current_display.height as f64;
-    let new_width = (current_width as f64 * scale_x).min(target_display.width as f64) as u32;
-    let new_height = (current_height as f64 * scale_y).min(target_display.height as f64) as u32;
-
-    set_window_position(window.as_ptr(), new_x, new_y)?;
-    set_window_size(window.as_ptr(), new_width, new_height)?;
+    set_window_position(window.as_ptr(), target.x, target.y)?;
+    set_window_size(window.as_ptr(), target.width, target.height)?;
 
     info!(
         window_id,
-        from_display = current_display_idx,
-        to_display = target_idx,
         "Moved window to {} display",
         if next { "next" } else { "previous" }
     );
@@ -103,203 +77,15 @@ pub(super) fn move_to_adjacent_display(window_id: u32, next: bool) -> Result<()>
 }
 
 /// Calculate the bounds for a tiling position within a display.
+///
+/// Delegates to the preset engine in `GeometryMode::LegacyV1` — output is
+/// byte-identical to the historical formulas (snap calibration depends on it).
 pub(super) fn calculate_tile_bounds(display: &Bounds, position: TilePosition) -> Bounds {
-    let half_width = display.width / 2;
-    let half_height = display.height / 2;
-    let third_width = display.width / 3;
-    let third_height = display.height / 3;
-    let two_thirds_width = (display.width * 2) / 3;
-    let two_thirds_height = (display.height * 2) / 3;
-
-    match position {
-        // Half positions
-        TilePosition::LeftHalf => Bounds {
-            x: display.x,
-            y: display.y,
-            width: half_width,
-            height: display.height,
-        },
-        TilePosition::RightHalf => Bounds {
-            x: display.x + half_width as i32,
-            y: display.y,
-            width: half_width,
-            height: display.height,
-        },
-        TilePosition::TopHalf => Bounds {
-            x: display.x,
-            y: display.y,
-            width: display.width,
-            height: half_height,
-        },
-        TilePosition::BottomHalf => Bounds {
-            x: display.x,
-            y: display.y + half_height as i32,
-            width: display.width,
-            height: half_height,
-        },
-
-        // Quadrant positions
-        TilePosition::TopLeft => Bounds {
-            x: display.x,
-            y: display.y,
-            width: half_width,
-            height: half_height,
-        },
-        TilePosition::TopRight => Bounds {
-            x: display.x + half_width as i32,
-            y: display.y,
-            width: half_width,
-            height: half_height,
-        },
-        TilePosition::BottomLeft => Bounds {
-            x: display.x,
-            y: display.y + half_height as i32,
-            width: half_width,
-            height: half_height,
-        },
-        TilePosition::BottomRight => Bounds {
-            x: display.x + half_width as i32,
-            y: display.y + half_height as i32,
-            width: half_width,
-            height: half_height,
-        },
-
-        // Sixth positions (top/bottom row split into thirds)
-        TilePosition::TopLeftSixth => Bounds {
-            x: display.x,
-            y: display.y,
-            width: third_width,
-            height: half_height,
-        },
-        TilePosition::TopCenterSixth => Bounds {
-            x: display.x + third_width as i32,
-            y: display.y,
-            width: third_width,
-            height: half_height,
-        },
-        TilePosition::TopRightSixth => Bounds {
-            x: display.x + two_thirds_width as i32,
-            y: display.y,
-            width: third_width,
-            height: half_height,
-        },
-        TilePosition::BottomLeftSixth => Bounds {
-            x: display.x,
-            y: display.y + half_height as i32,
-            width: third_width,
-            height: half_height,
-        },
-        TilePosition::BottomCenterSixth => Bounds {
-            x: display.x + third_width as i32,
-            y: display.y + half_height as i32,
-            width: third_width,
-            height: half_height,
-        },
-        TilePosition::BottomRightSixth => Bounds {
-            x: display.x + two_thirds_width as i32,
-            y: display.y + half_height as i32,
-            width: third_width,
-            height: half_height,
-        },
-
-        // Horizontal thirds positions
-        TilePosition::LeftThird => Bounds {
-            x: display.x,
-            y: display.y,
-            width: third_width,
-            height: display.height,
-        },
-        TilePosition::CenterThird => Bounds {
-            x: display.x + third_width as i32,
-            y: display.y,
-            width: third_width,
-            height: display.height,
-        },
-        TilePosition::RightThird => Bounds {
-            x: display.x + (two_thirds_width) as i32,
-            y: display.y,
-            width: third_width,
-            height: display.height,
-        },
-
-        // Vertical thirds positions
-        TilePosition::TopThird => Bounds {
-            x: display.x,
-            y: display.y,
-            width: display.width,
-            height: third_height,
-        },
-        TilePosition::MiddleThird => Bounds {
-            x: display.x,
-            y: display.y + third_height as i32,
-            width: display.width,
-            height: third_height,
-        },
-        TilePosition::BottomThird => Bounds {
-            x: display.x,
-            y: display.y + two_thirds_height as i32,
-            width: display.width,
-            height: third_height,
-        },
-
-        // Horizontal two-thirds positions
-        TilePosition::FirstTwoThirds => Bounds {
-            x: display.x,
-            y: display.y,
-            width: two_thirds_width,
-            height: display.height,
-        },
-        TilePosition::LastTwoThirds => Bounds {
-            x: display.x + third_width as i32,
-            y: display.y,
-            width: two_thirds_width,
-            height: display.height,
-        },
-
-        // Vertical two-thirds positions
-        TilePosition::TopTwoThirds => Bounds {
-            x: display.x,
-            y: display.y,
-            width: display.width,
-            height: two_thirds_height,
-        },
-        TilePosition::BottomTwoThirds => Bounds {
-            x: display.x,
-            y: display.y + third_height as i32,
-            width: display.width,
-            height: two_thirds_height,
-        },
-
-        // Centered positions
-        TilePosition::Center => {
-            // 60% of screen, centered
-            let width = (display.width * 60) / 100;
-            let height = (display.height * 60) / 100;
-            let x_offset = (display.width - width) / 2;
-            let y_offset = (display.height - height) / 2;
-            Bounds {
-                x: display.x + x_offset as i32,
-                y: display.y + y_offset as i32,
-                width,
-                height,
-            }
-        }
-        TilePosition::AlmostMaximize => {
-            // 90% of screen with margins
-            let margin_x = (display.width * 5) / 100; // 5% margin on each side
-            let margin_y = (display.height * 5) / 100;
-            Bounds {
-                x: display.x + margin_x as i32,
-                y: display.y + margin_y as i32,
-                width: display.width - (margin_x * 2),
-                height: display.height - (margin_y * 2),
-            }
-        }
-
-        TilePosition::Fullscreen | TilePosition::NextDisplay | TilePosition::PreviousDisplay => {
-            *display
-        }
-    }
+    super::presets::resolve_tile_position(
+        *display,
+        position,
+        super::geometry::GeometryMode::LegacyV1,
+    )
 }
 
 #[cfg(test)]
