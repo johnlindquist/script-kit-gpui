@@ -154,9 +154,9 @@ pub use prompt_footer::{PromptFooter, PromptFooterColors, PromptFooterConfig};
 pub(crate) use prompt_layout_shell::{
     editor_prompt_hints, emit_prompt_chrome_audit, emit_prompt_hint_audit,
     emit_surface_prompt_hint_audit, is_universal_prompt_hints,
-    render_universal_footer_action_button_frames, render_universal_footer_action_buttons,
-    render_universal_footer_action_rail, render_universal_prompt_hint_strip,
-    render_universal_prompt_hint_strip_clickable,
+    render_footer_actions_agent_button_frames, render_universal_footer_action_button_frames,
+    render_universal_footer_action_buttons, render_universal_footer_action_rail,
+    render_universal_prompt_hint_strip, render_universal_prompt_hint_strip_clickable,
     render_universal_prompt_hint_strip_clickable_with_primary_key_label,
     render_universal_prompt_hint_strip_clickable_with_primary_label, template_prompt_hints,
     universal_prompt_hints, universal_prompt_hints_with_primary_key_label,

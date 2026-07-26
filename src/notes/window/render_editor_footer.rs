@@ -47,21 +47,16 @@ impl NotesApp {
 
         // Same footer_chrome button frames as the main window footer — shared
         // component, shared keycap language (one cap per key), shared slots.
+        // Notes intentionally renders NO primary (⌘P) button: three capsules
+        // crowded the footer and clipped the status/mention text (user
+        // report 2026-07-26). The ⌘P note-switcher keybinding still works —
+        // only the button is gone; the hint audit above keeps documenting it
+        // as the keyboard primary.
         let buttons = if in_focus_mode && !window_hovered {
             Vec::new()
         } else {
-            crate::components::render_universal_footer_action_button_frames(
+            crate::components::render_footer_actions_agent_button_frames(
                 "notes",
-                "⌘P",
-                "Notes",
-                cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                    this.close_actions_panel(window, cx);
-                    if this.note_switcher.is_open() {
-                        this.close_browse_panel(window, cx);
-                    } else {
-                        this.open_browse_panel(window, cx);
-                    }
-                }),
                 cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                     if this.command_bar.is_open() {
                         this.close_actions_panel(window, cx);

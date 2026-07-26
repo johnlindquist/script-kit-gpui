@@ -1013,6 +1013,88 @@ pub(crate) fn render_universal_footer_action_buttons(
         .into_any_element()
 }
 
+/// One shared frame builder so every universal footer button — with or
+/// without a surface primary — keeps the same pill/keycap language.
+fn universal_footer_button_frame(
+    theme: &crate::theme::Theme,
+    id: &'static str,
+    label: SharedString,
+    key: &'static str,
+    slot_width_px: f32,
+    height_px: f32,
+) -> gpui::Stateful<gpui::Div> {
+    use crate::components::footer_chrome::{
+        render_footer_hint_action_button_frame, FooterHintActionButtonFrameSpec,
+        FooterHintButtonLayoutOverrides, FooterHintContentJustify,
+    };
+    render_footer_hint_action_button_frame(
+        FooterHintActionButtonFrameSpec {
+            id,
+            label,
+            key: SharedString::from(key),
+            slot_width_px,
+            height_px,
+            selected: false,
+            key_first: false,
+            justify: FooterHintContentJustify::Center,
+            layout: FooterHintButtonLayoutOverrides {
+                // Flexbox-native: pill AND slot hug label + keycaps (slot
+                // width is only a max bound), so the row stays whole in
+                // narrow windows instead of truncating labels.
+                shrink_frame_to_content_px: true,
+                hug_frame_to_content: true,
+                ..FooterHintButtonLayoutOverrides::default()
+            },
+        },
+        theme,
+    )
+}
+
+/// Actions + Agent footer frames WITHOUT a surface-primary button — for
+/// surfaces whose primary affordance is keyboard-only. Notes uses this: the
+/// ⌘P note-switcher keybinding stays, but its third capsule crowded the
+/// footer and clipped the status/mention text (user report 2026-07-26).
+pub(crate) fn render_footer_actions_agent_button_frames(
+    id_prefix: &'static str,
+    on_actions: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_ai: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> Vec<AnyElement> {
+    use crate::components::footer_chrome::{
+        footer_action_slot_width, footer_button_height, footer_rail_chrome, FooterActionSlot,
+    };
+
+    let theme = crate::theme::get_cached_theme();
+    let rail = footer_rail_chrome(&theme);
+    let height = footer_button_height(rail.height_px);
+    let (actions_id, ai_id) = match id_prefix {
+        "notes" => ("notes-footer-actions", "notes-footer-ai"),
+        _ => ("universal-footer-actions", "universal-footer-ai"),
+    };
+
+    vec![
+        (universal_footer_button_frame(
+            &theme,
+            actions_id,
+            SharedString::from("Actions"),
+            "⌘K",
+            footer_action_slot_width(FooterActionSlot::Actions),
+            height,
+        )
+        .on_click(move |event, window, cx| on_actions(event, window, cx))
+        .into_any_element()),
+        (universal_footer_button_frame(
+            &theme,
+            ai_id,
+            SharedString::from("Agent"),
+            "⌘↵",
+            footer_action_slot_width(FooterActionSlot::Ai),
+            height,
+        )
+        .on_click(move |event, window, cx| on_ai(event, window, cx))
+        .into_any_element()),
+    ]
+}
+
 pub(crate) fn render_universal_footer_action_button_frames(
     id_prefix: &'static str,
     primary_key: &'static str,
@@ -1022,84 +1104,36 @@ pub(crate) fn render_universal_footer_action_button_frames(
     on_ai: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> Vec<AnyElement> {
     use crate::components::footer_chrome::{
-        footer_action_slot_width, footer_button_height, footer_rail_chrome,
-        render_footer_hint_action_button_frame, FooterActionSlot, FooterHintActionButtonFrameSpec,
-        FooterHintButtonLayoutOverrides, FooterHintContentJustify,
+        footer_action_slot_width, footer_button_height, footer_rail_chrome, FooterActionSlot,
     };
 
     let theme = crate::theme::get_cached_theme();
     let primary_label = primary_label.into();
     let rail = footer_rail_chrome(&theme);
     let height = footer_button_height(rail.height_px);
-    let button = |id: &'static str,
-                  label: SharedString,
-                  key: &'static str,
-                  slot_width_px: f32|
-     -> gpui::Stateful<gpui::Div> {
-        render_footer_hint_action_button_frame(
-            FooterHintActionButtonFrameSpec {
-                id,
-                label,
-                key: SharedString::from(key),
-                slot_width_px,
-                height_px: height,
-                selected: false,
-                key_first: false,
-                justify: FooterHintContentJustify::Center,
-                layout: FooterHintButtonLayoutOverrides {
-                    // Flexbox-native: pill AND slot hug label + keycaps (slot
-                    // width is only a max bound), so the row stays whole in
-                    // narrow windows instead of truncating labels.
-                    shrink_frame_to_content_px: true,
-                    hug_frame_to_content: true,
-                    ..FooterHintButtonLayoutOverrides::default()
-                },
-            },
-            &theme,
-        )
-    };
-
     // Ids are formatted per-surface via the prefix so multiple windows can host
     // the row without colliding element ids.
-    let (primary_id, actions_id, ai_id) = match id_prefix {
-        "notes" => (
-            "notes-footer-primary",
-            "notes-footer-actions",
-            "notes-footer-ai",
-        ),
-        _ => (
-            "universal-footer-primary",
-            "universal-footer-actions",
-            "universal-footer-ai",
-        ),
+    let primary_id = match id_prefix {
+        "notes" => "notes-footer-primary",
+        _ => "universal-footer-primary",
     };
 
-    vec![
-        (button(
+    let mut frames = vec![
+        (universal_footer_button_frame(
+            &theme,
             primary_id,
             primary_label,
             primary_key,
             footer_action_slot_width(FooterActionSlot::Run),
+            height,
         )
         .on_click(move |event, window, cx| on_primary(event, window, cx))
         .into_any_element()),
-        (button(
-            actions_id,
-            SharedString::from("Actions"),
-            "⌘K",
-            footer_action_slot_width(FooterActionSlot::Actions),
-        )
-        .on_click(move |event, window, cx| on_actions(event, window, cx))
-        .into_any_element()),
-        (button(
-            ai_id,
-            SharedString::from("Agent"),
-            "⌘↵",
-            footer_action_slot_width(FooterActionSlot::Ai),
-        )
-        .on_click(move |event, window, cx| on_ai(event, window, cx))
-        .into_any_element()),
-    ]
+    ];
+    frames.extend(render_footer_actions_agent_button_frames(
+        id_prefix, on_actions, on_ai,
+    ));
+    frames
 }
 
 /// Canonical in-window universal footer: native rail geometry containing the
