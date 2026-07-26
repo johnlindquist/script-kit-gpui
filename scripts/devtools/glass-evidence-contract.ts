@@ -188,3 +188,123 @@ export function compositeEvaluator(
       : "EVALUABLE_FAIL",
   };
 }
+
+/**
+ * WP9 (glass-smoke-harness-max-info): validate that an already-captured
+ * lifecycle receipt may be REUSED as evidence by another probe instead of
+ * duplicating the capture.
+ *
+ * Fail-closed on every axis: a reused receipt is accepted only when the
+ * binary SHA, theme-fixture SHA, background-fixture identity, display
+ * identity, exact scenario set, capture health, interference, helper
+ * hashes, and every frame hash all match. A field the caller requires that
+ * the receipt does not carry is a MISMATCH, never a silent pass — and
+ * INVALID_INTERFERENCE imported evidence stays invalid.
+ */
+export type ArtifactReferenceExpectation = {
+  binarySha256: string;
+  themeFixtureSha256?: string;
+  backgroundFixtureMode?: string;
+  backgroundFixtureConfigurationSha256?: string;
+  displayId?: number;
+  refreshRateHz?: number;
+  backingScale?: number;
+  requiredScenarioNames: string[];
+  helperSha256?: string;
+};
+
+export function validateArtifactReference(
+  receipt: any,
+  expected: ArtifactReferenceExpectation,
+  options: {
+    /** Re-hash a referenced frame on disk. Return null when unreadable. */
+    hashFile?: (path: string) => string | null;
+  } = {},
+): string[] {
+  const errors: string[] = [];
+  if (!receipt || typeof receipt !== "object") {
+    return ["imported lifecycle receipt is missing or not an object"];
+  }
+  const expect = (
+    label: string,
+    actual: unknown,
+    wanted: unknown,
+  ) => {
+    if (wanted === undefined) return;
+    if (actual == null) {
+      errors.push(`${label}: receipt does not carry the field (required ${wanted})`);
+    } else if (actual !== wanted) {
+      errors.push(`${label}: receipt has ${actual}, expected ${wanted}`);
+    }
+  };
+  expect("binarySha256", receipt.binarySha256, expected.binarySha256);
+  expect(
+    "themeFixtureSha256",
+    receipt.themeFixture?.sha256,
+    expected.themeFixtureSha256,
+  );
+  expect(
+    "backgroundFixtureMode",
+    receipt.backgroundFixture?.mode,
+    expected.backgroundFixtureMode,
+  );
+  expect(
+    "backgroundFixtureConfigurationSha256",
+    receipt.backgroundFixture?.configurationSha256,
+    expected.backgroundFixtureConfigurationSha256,
+  );
+  expect(
+    "displayId",
+    receipt.backgroundFixture?.displayID ?? receipt.displayId,
+    expected.displayId,
+  );
+  expect("helperSha256", receipt.helperSha256, expected.helperSha256);
+
+  const scenarios: any[] = Array.isArray(receipt.scenarios)
+    ? receipt.scenarios
+    : [];
+  errors.push(
+    ...validateUniqueScenarioSet(
+      scenarios.map((scenario) => String(scenario?.name)),
+      expected.requiredScenarioNames,
+    ).map((error) => `scenario set: ${error}`),
+  );
+  if (receipt.interference?.pass !== true) {
+    errors.push(
+      `interference: imported evidence is not interference-clean (disposition ${receipt.interference?.disposition ?? "missing"})`,
+    );
+  }
+  for (const scenario of scenarios) {
+    const filmstripReceipt = scenario?.filmstrip?.receipt;
+    if (filmstripReceipt?.captureHealthPass !== true) {
+      errors.push(`${scenario?.name}: captureHealthPass is not true`);
+    }
+    if (expected.refreshRateHz !== undefined) {
+      expect(
+        `${scenario?.name}: refreshRateHz`,
+        filmstripReceipt?.refreshRateHz,
+        expected.refreshRateHz,
+      );
+    }
+    if (expected.backingScale !== undefined) {
+      expect(
+        `${scenario?.name}: backingScale`,
+        filmstripReceipt?.backingScale ?? receipt.backingScale,
+        expected.backingScale,
+      );
+    }
+    if (options.hashFile) {
+      for (const frame of filmstripReceipt?.frames ?? []) {
+        const actual = options.hashFile(String(frame?.path ?? ""));
+        if (actual === null) {
+          errors.push(`${scenario?.name}: frame missing on disk: ${frame?.path}`);
+        } else if (actual !== frame?.sha256) {
+          errors.push(
+            `${scenario?.name}: frame hash mismatch for ${frame?.path}`,
+          );
+        }
+      }
+    }
+  }
+  return errors;
+}

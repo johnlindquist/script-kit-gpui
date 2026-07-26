@@ -195,6 +195,10 @@ const declaredStartAlphaArg = arg("--declared-start-alpha");
 const declaredDurationNs = Number(arg("--declared-duration-ns", "280000000"));
 const contractWindowName = arg("--contract-window-name", "Main window")!;
 const telemetryIntervalMs = Number(arg("--telemetry-interval-ms", "250"));
+// WP9: when the orchestrator owns a backdrop fixture, its receipt identity
+// is embedded so imported-evidence validation (validateArtifactReference)
+// can match background-fixture mode/config/display on reuse.
+const backgroundFixtureReceiptArg = arg("--background-fixture-receipt");
 if (!binary || !existsSync(binary)) {
   throw new Error(`binary missing: ${binary || "<unset>"}`);
 }
@@ -290,6 +294,26 @@ const receipt: Json = {
         .digest("hex"),
     }
     : null,
+  backgroundFixture: (() => {
+    if (!backgroundFixtureReceiptArg) return null;
+    const path = resolve(backgroundFixtureReceiptArg);
+    if (!existsSync(path)) {
+      throw new Error(`background fixture receipt missing: ${path}`);
+    }
+    const fixture = JSON.parse(readFileSync(path, "utf8"));
+    if (fixture.status !== "ready") {
+      throw new Error(
+        `background fixture receipt status ${fixture.status} — refusing to bind a non-ready fixture`,
+      );
+    }
+    return {
+      receiptPath: path,
+      mode: fixture.mode ?? null,
+      configurationSha256: fixture.configurationSha256 ?? null,
+      displayID: fixture.displayID ?? null,
+      visualSha256: fixture.visualDiagnostics?.visualSha256 ?? null,
+    };
+  })(),
   helperSha256: createHash("sha256").update(readFileSync(helper)).digest("hex"),
   scenarios: [],
   pass: false,

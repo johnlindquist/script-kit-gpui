@@ -634,6 +634,8 @@ async function main(): Promise<number> {
         String(build.expected.morphStartAlpha),
         "--declared-duration-ns",
         String(build.expected.settleDurationNs),
+        "--background-fixture-receipt",
+        fixtureReceiptPath,
       ],
       10 * 60_000,
     );

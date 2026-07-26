@@ -99,3 +99,136 @@ describe("glass evidence contract", () => {
     expect(errors).toContain("main-window width matrix must contain exactly six rows");
   });
 });
+
+// ---------------------------------------------------------------------------
+// WP9 (glass-smoke-harness-max-info): imported lifecycle evidence must be
+// identity- and integrity-matched on EVERY axis before reuse.
+// ---------------------------------------------------------------------------
+
+import { validateArtifactReference } from "./glass-evidence-contract.ts";
+
+const LIFECYCLE_SCENARIOS = [
+  "main-exit",
+  "main-entry",
+  "notes-entry",
+  "notes-close-before-settle-reopen",
+  "dictation-exit-reopen",
+];
+
+function importableReceipt() {
+  return {
+    binarySha256: "bin-sha",
+    themeFixture: { sha256: "theme-sha" },
+    backgroundFixture: {
+      mode: "saturated-stripes",
+      configurationSha256: "config-sha",
+      displayID: 1,
+    },
+    helperSha256: "helper-sha",
+    interference: { pass: true, disposition: "EVALUABLE_PASS" },
+    scenarios: LIFECYCLE_SCENARIOS.map((name) => ({
+      name,
+      filmstrip: {
+        receipt: {
+          captureHealthPass: true,
+          refreshRateHz: 120,
+          frames: [
+            { path: `/frames/${name}.png`, sha256: `frame-${name}` },
+          ],
+        },
+      },
+    })),
+  };
+}
+
+const expectation = {
+  binarySha256: "bin-sha",
+  themeFixtureSha256: "theme-sha",
+  backgroundFixtureMode: "saturated-stripes",
+  backgroundFixtureConfigurationSha256: "config-sha",
+  displayId: 1,
+  refreshRateHz: 120,
+  helperSha256: "helper-sha",
+  requiredScenarioNames: LIFECYCLE_SCENARIOS,
+};
+
+const matchingHash = (path: string) =>
+  `frame-${path.split("/").at(-1)!.replace(".png", "")}`;
+
+describe("validateArtifactReference", () => {
+  test("a fully matching receipt with intact frames is accepted", () => {
+    expect(
+      validateArtifactReference(importableReceipt(), expectation, {
+        hashFile: matchingHash,
+      }),
+    ).toEqual([]);
+  });
+
+  test("a receipt for another binary is rejected", () => {
+    const receipt = { ...importableReceipt(), binarySha256: "other" };
+    const errors = validateArtifactReference(receipt, expectation);
+    expect(errors.join(" ")).toContain("binarySha256");
+  });
+
+  test("one modified frame after import is rejected", () => {
+    const errors = validateArtifactReference(
+      importableReceipt(),
+      expectation,
+      {
+        hashFile: (path) =>
+          path.includes("main-entry") ? "tampered" : matchingHash(path),
+      },
+    );
+    expect(errors.join(" ")).toContain("frame hash mismatch");
+  });
+
+  test("a frame missing on disk is rejected", () => {
+    const errors = validateArtifactReference(
+      importableReceipt(),
+      expectation,
+      { hashFile: () => null },
+    );
+    expect(errors.join(" ")).toContain("frame missing on disk");
+  });
+
+  test("INVALID_INTERFERENCE imported evidence remains invalid", () => {
+    const receipt = importableReceipt();
+    receipt.interference = {
+      pass: false,
+      disposition: "INVALID_INTERFERENCE",
+    };
+    const errors = validateArtifactReference(receipt, expectation, {
+      hashFile: matchingHash,
+    });
+    expect(errors.join(" ")).toContain("not interference-clean");
+  });
+
+  test("a receipt lacking a required identity field is a mismatch, never a pass", () => {
+    const receipt = importableReceipt();
+    delete (receipt as any).backgroundFixture;
+    const errors = validateArtifactReference(receipt, expectation, {
+      hashFile: matchingHash,
+    });
+    expect(errors.join(" ")).toContain(
+      "backgroundFixtureMode: receipt does not carry the field",
+    );
+  });
+
+  test("a wrong or incomplete scenario set is rejected", () => {
+    const receipt = importableReceipt();
+    receipt.scenarios = receipt.scenarios.slice(0, 3);
+    const errors = validateArtifactReference(receipt, expectation, {
+      hashFile: matchingHash,
+    });
+    expect(errors.join(" ")).toContain("expected exactly one, observed 0");
+  });
+
+  test("capture-health failure in any scenario is rejected", () => {
+    const receipt = importableReceipt();
+    (receipt.scenarios[2].filmstrip.receipt as any).captureHealthPass = false;
+    const errors = validateArtifactReference(receipt, expectation, {
+      hashFile: matchingHash,
+    });
+    expect(errors.join(" ")).toContain("captureHealthPass is not true");
+  });
+});

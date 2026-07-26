@@ -9,10 +9,12 @@ import {
   compositeEvaluator,
   newRunId,
   sha256File,
+  validateArtifactReference,
   validateChildReceipt,
   validateUniqueScenarioSet,
   type EvidenceIdentity,
 } from "./glass-evidence-contract.ts";
+import { LEGACY_FULL_SCENARIO_ORDER } from "./glass-lifecycle-filmstrip-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
 
@@ -75,6 +77,7 @@ async function runLockedTreatmentCell(options: {
   fixture: string;
   identity: EvidenceIdentity;
   policyId: string;
+  importLifecycleReceipt?: string;
 }) {
   const slug = `${options.fixture}-locked-${options.policyId}`;
   const cellDirectory = join(options.outputDirectory, slug);
@@ -183,7 +186,86 @@ async function runLockedTreatmentCell(options: {
       writeFileSync(motionMetricsPath, `${JSON.stringify(motionMetrics, null, 2)}\n`);
     }
     let saturatedLifecycle: any = null;
-    if (motionRequired) {
+    if (motionRequired && options.importLifecycleReceipt) {
+      // WP9: reuse already-captured lifecycle evidence instead of
+      // duplicating the capture — accepted ONLY when every identity and
+      // integrity axis matches. A non-matching import is a hard failure,
+      // never a silent fallback to a fresh capture (a fallback would let a
+      // stale import mask a real mismatch).
+      const importPath = resolve(options.importLifecycleReceipt);
+      const importedReceipt = existsSync(importPath)
+        ? JSON.parse(readFileSync(importPath, "utf8"))
+        : null;
+      const importErrors = validateArtifactReference(
+        importedReceipt,
+        {
+          binarySha256: options.identity.binarySha256,
+          requiredScenarioNames: [...LEGACY_FULL_SCENARIO_ORDER],
+        },
+        {
+          hashFile: (path) => {
+            try {
+              return sha256File(path);
+            } catch {
+              return null;
+            }
+          },
+        },
+      );
+      const importUsable = importErrors.length === 0;
+      const entryMotionMetricsPath = join(
+        cellDirectory,
+        "main-entry-motion-metrics.json",
+      );
+      const entryMotionMetricsResult = importUsable
+        ? await run([
+          "python3",
+          resolve(import.meta.dir, "../agentic/glass-motion-color-metrics.py"),
+          "--receipt",
+          mainReceiptPath,
+          "--lifecycle-receipt",
+          importPath,
+          "--scenario",
+          "main-entry",
+          "--out",
+          entryMotionMetricsPath,
+        ])
+        : {
+          exitCode: 1,
+          stdout: "",
+          stderr: `imported lifecycle receipt rejected: ${importErrors.join("; ")}`,
+        };
+      saturatedLifecycle = {
+        exitCode: importUsable ? 0 : 1,
+        receiptPath: importPath,
+        receipt: importedReceipt,
+        importedFrom: importPath,
+        importedReceiptSha256: existsSync(importPath)
+          ? sha256File(importPath)
+          : null,
+        importErrors,
+        entryMotionMetricsPath,
+        entryMotionMetricsExitCode: entryMotionMetricsResult.exitCode,
+        entryMotionMetrics: existsSync(entryMotionMetricsPath)
+          ? JSON.parse(readFileSync(entryMotionMetricsPath, "utf8"))
+          : null,
+        stderr: entryMotionMetricsResult.stderr.trim().slice(-4_000),
+        binarySha256Before: options.identity.binarySha256,
+        binarySha256After: sha256File(options.binary),
+      };
+      if (saturatedLifecycle.entryMotionMetrics) {
+        Object.assign(saturatedLifecycle.entryMotionMetrics, {
+          runId: options.identity.runId,
+          gitCommit: options.identity.gitCommit,
+          binarySha256: options.identity.binarySha256,
+          scenario: "lifecycle-saturated:main-entry-motion-metrics",
+        });
+        writeFileSync(
+          entryMotionMetricsPath,
+          `${JSON.stringify(saturatedLifecycle.entryMotionMetrics, null, 2)}\n`,
+        );
+      }
+    } else if (motionRequired) {
       const lifecycleBinarySha256Before = sha256File(options.binary);
       const lifecycleDirectory = join(cellDirectory, "saturated-lifecycle");
       const lifecycleResult = await run([
@@ -487,6 +569,9 @@ async function main() {
         fixture,
         identity,
         policyId,
+        importLifecycleReceipt: fixture === "saturated-stripes"
+          ? value("--import-lifecycle-receipt")
+          : undefined,
       }));
     }
     const stability = cells.find((cell) => cell.fixture === "saturated-stripes");
