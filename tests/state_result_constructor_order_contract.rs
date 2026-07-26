@@ -2,44 +2,28 @@
 //!
 //! `Message::state_result(...)` is a narrow constructor wrapper around the
 //! `Message::StateResult { ... }` variant, but its positional parameter list
-//! is fragile because several adjacent fields share the same Rust type.
+//! is fragile because several adjacent fields share the same Rust type
+//! (`prompt_id`/`placeholder`/`selected_value`/`screenshot_identity`,
+//! `choice_count`/`visible_choice_count`, `is_focused`/`window_visible`).
+//!
+//! WHY this invariant exists: a caller passing 35 positional arguments cannot
+//! be type-checked against transpositions of same-typed neighbors, so the
+//! constructor signature and its forwarding literal must mirror the variant's
+//! declaration order exactly — the variant declaration is the single order
+//! authority.
+//!
+//! History note (pruning rule, AGENTS.md Source Audit Test Policy): the
+//! original version of this lock hardcoded an EXPECTED field list and rotted
+//! through 11 maintenance patches, ending several features stale (missing
+//! `filter_input_diagnostics`, `active_list_scroll`, `day_page_state`,
+//! `flow_ux`) so it failed on every compile of this rarely-built target
+//! rather than on real desynchronization. It was rewritten structurally
+//! (variant as authority) after the three-legitimate-refactor threshold
+//! fired. Same two reader sites; no new source-audit surface.
 
 const QUERY_OPS_VARIANTS: &str = include_str!("../src/protocol/message/variants/query_ops.rs");
 const QUERY_OPS_CONSTRUCTORS: &str =
     include_str!("../src/protocol/message/constructors/query_ops.rs");
-
-const EXPECTED_STATE_RESULT_FIELDS: &[&str] = &[
-    "request_id",
-    "prompt_type",
-    "prompt_id",
-    "surface_contract",
-    "active_popup_contract",
-    "active_footer",
-    "submit_diagnostics",
-    "placeholder",
-    "input_value",
-    "choice_count",
-    "visible_choice_count",
-    "selected_index",
-    "selected_value",
-    "is_focused",
-    "window_visible",
-    "mini_ai",
-    "focused_text_agent_chat",
-    "filter_input_decorations",
-    "menu_syntax_main_hint",
-    "capture_history_picker",
-    "main_window_preflight",
-    "actions_dialog",
-    "root_file_search",
-    "main_list_scroll",
-    "screenshot_identity",
-    "drop_state",
-    "path_state",
-    "notes_state",
-    "dictation_state",
-    "ghost_prediction",
-];
 
 fn source_between<'a>(source: &'a str, start_pat: &str, end_pat: &str) -> &'a str {
     let start = source
@@ -57,6 +41,7 @@ fn is_ident(name: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+/// Field/parameter names from a `name: Type,` declaration block, in order.
 fn declared_field_names(source: &str) -> Vec<String> {
     source
         .lines()
@@ -78,6 +63,7 @@ fn declared_field_names(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// Shorthand-forwarded names (`name,`) from a struct literal body, in order.
 fn forwarded_field_names(source: &str) -> Vec<String> {
     source
         .lines()
@@ -85,7 +71,6 @@ fn forwarded_field_names(source: &str) -> Vec<String> {
             let name = line.trim().strip_suffix(',')?;
             is_ident(name).then(|| name.to_string())
         })
-        .filter(|name| EXPECTED_STATE_RESULT_FIELDS.contains(&name.as_str()))
         .collect()
 }
 
@@ -103,29 +88,38 @@ fn state_result_constructor_signature_and_forwarding_match_variant_field_order()
     );
     let signature = source_between(constructor, "pub fn state_result(", ") -> Self");
     let literal = source_between(constructor, "Message::StateResult {", "\n        }\n    }");
-    let expected = EXPECTED_STATE_RESULT_FIELDS
-        .iter()
-        .map(|field| field.to_string())
-        .collect::<Vec<_>>();
+
+    // The variant declaration is the one order authority.
+    let authority = declared_field_names(variant);
+
+    // Guard the extractor itself: if parsing rots, fail loudly rather than
+    // vacuously comparing empty lists.
+    assert!(
+        authority.len() >= 30,
+        "StateResult variant parser extracted only {} fields — the extraction \
+         patterns no longer match the source layout",
+        authority.len()
+    );
+    assert_eq!(
+        authority.first().map(String::as_str),
+        Some("request_id"),
+        "StateResult variant parsing must start at request_id"
+    );
 
     assert_eq!(
-        declared_field_names(variant),
-        expected,
-        "StateResult variant fields changed. Update this test deliberately so reviewers see \
-         whether a new field belongs before or after the repeated-type slots: \
+        declared_field_names(signature),
+        authority,
+        "Message::state_result parameter order must exactly match the StateResult \
+         variant field order. Positional callers are too easy to desynchronize \
+         otherwise — especially across the repeated-type slots \
          prompt_id/placeholder/selected_value/screenshot_identity, \
          choice_count/visible_choice_count, and is_focused/window_visible."
     );
     assert_eq!(
-        declared_field_names(signature),
-        expected,
-        "Message::state_result parameter order must exactly match the StateResult field order. \
-         Positional callers are too easy to desynchronize otherwise."
-    );
-    assert_eq!(
         forwarded_field_names(literal),
-        expected,
-        "Message::state_result must forward every parameter into Message::StateResult in the \
-         same order as the variant fields."
+        authority,
+        "Message::state_result must forward every parameter into Message::StateResult \
+         in the same order as the variant fields (shorthand only, so a transposition \
+         here silently swaps same-typed values)."
     );
 }
