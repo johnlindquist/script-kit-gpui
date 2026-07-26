@@ -512,7 +512,13 @@ impl GlassButtonHost {
                     NSSize::new(width.max(1.0), height.max(1.0)),
                 );
                 if restyle {
-                    let _ = crate::platform::apply_native_glass_style(view, style);
+                    // Signature change means the cached theme changed — an
+                    // explicitly recorded refresh, never a per-frame mutation.
+                    let _ = crate::platform::apply_native_glass_style_with_reason(
+                        view,
+                        style,
+                        crate::platform::NativeGlassStyleApplicationReason::ThemeRefresh,
+                    );
                 }
                 let _: () = msg_send![view, setFrame: frame];
                 let _: () = msg_send![view, setCornerRadius: radius];

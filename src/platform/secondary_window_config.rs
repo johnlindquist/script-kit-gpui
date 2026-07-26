@@ -1931,6 +1931,7 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
     };
     let fade = (tuning.duration * GLASS_MORPH_FADE_FRACTION).max(GLASS_MORPH_MIN_FADE_DURATION);
     let _: () = msg_send![window, setAlphaValue: 0.0f64];
+    record_native_glass_entry_span(window, fade);
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
     let _: () = msg_send![ctx, setDuration: fade];
@@ -2150,6 +2151,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
 
     let _: () = msg_send![window, setFrame: start display: true];
     let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
+    record_native_glass_entry_span(window, tuning.duration);
 
     // Record the in-flight duration so sibling windows (footer overlay) can
     // hide until the morph settles (glass_morph_remaining).
@@ -2442,6 +2444,154 @@ pub(crate) fn resolve_native_glass_style(
     }
 }
 
+/// Why a native glass style application happened. The material contract
+/// allows exactly two temporal shapes: the initial installation of a surface
+/// and an explicitly recorded theme refresh. Anything else that lands between
+/// morph start and settle is a per-frame material mutation — the exact class
+/// of change the Glass Motion Calibration Lock forbids (tint RGB, tint alpha,
+/// veil alpha, and native layer opacity must be static during entry).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeGlassStyleApplicationReason {
+    Install,
+    ThemeRefresh,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct NativeGlassStyleApplication {
+    window_number: i64,
+    at_ns: u64,
+    reason: NativeGlassStyleApplicationReason,
+    signature: NativeGlassStyleSignature,
+}
+
+/// Pure, testable record of entry spans and style applications so the runtime
+/// can prove `styleMutationCountDuringEntry == 0` instead of asserting it
+/// from source reading.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct NativeGlassStyleLedger {
+    /// `(window_number, morph_start_ns, settle_end_ns)`; one live span per
+    /// window (re-entry replaces the previous span).
+    entry_spans: Vec<(i64, u64, u64)>,
+    applications: Vec<NativeGlassStyleApplication>,
+}
+
+#[cfg(target_os = "macos")]
+const NATIVE_GLASS_STYLE_LEDGER_CAPACITY: usize = 512;
+
+#[cfg(target_os = "macos")]
+impl NativeGlassStyleLedger {
+    fn record_entry_span(&mut self, window_number: i64, start_ns: u64, end_ns: u64) {
+        self.entry_spans
+            .retain(|(window, _, _)| *window != window_number);
+        self.entry_spans.push((window_number, start_ns, end_ns));
+        if self.entry_spans.len() > NATIVE_GLASS_STYLE_LEDGER_CAPACITY {
+            self.entry_spans.remove(0);
+        }
+    }
+
+    fn entry_span(&self, window_number: i64) -> Option<(u64, u64)> {
+        self.entry_spans
+            .iter()
+            .find(|(window, _, _)| *window == window_number)
+            .map(|(_, start, end)| (*start, *end))
+    }
+
+    /// Record one application; returns `true` when it is a forbidden
+    /// mid-entry mutation: an `Install`-shaped (re)application inside the
+    /// window's morph span with any earlier application for the same window.
+    /// The initial installation (no prior application) and explicitly tagged
+    /// theme refreshes are the only allowed in-span shapes.
+    fn record_application(&mut self, application: NativeGlassStyleApplication) -> bool {
+        let in_span = self
+            .entry_span(application.window_number)
+            .is_some_and(|(start, end)| {
+                application.at_ns >= start && application.at_ns <= end
+            });
+        let has_prior = self
+            .applications
+            .iter()
+            .any(|prior| prior.window_number == application.window_number);
+        let mutation = in_span
+            && has_prior
+            && application.reason == NativeGlassStyleApplicationReason::Install;
+        self.applications.push(application);
+        if self.applications.len() > NATIVE_GLASS_STYLE_LEDGER_CAPACITY {
+            self.applications.remove(0);
+        }
+        mutation
+    }
+
+    fn style_mutation_count_during_entry(&self, window_number: i64) -> usize {
+        let Some((start, end)) = self.entry_span(window_number) else {
+            return 0;
+        };
+        let mut seen_before_span = self
+            .applications
+            .iter()
+            .any(|app| app.window_number == window_number && app.at_ns < start);
+        let mut count = 0;
+        for application in self
+            .applications
+            .iter()
+            .filter(|app| app.window_number == window_number)
+            .filter(|app| app.at_ns >= start && app.at_ns <= end)
+        {
+            if seen_before_span
+                && application.reason == NativeGlassStyleApplicationReason::Install
+            {
+                count += 1;
+            }
+            seen_before_span = true;
+        }
+        count
+    }
+}
+
+#[cfg(target_os = "macos")]
+static NATIVE_GLASS_STYLE_LEDGER: std::sync::Mutex<Option<NativeGlassStyleLedger>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+fn with_native_glass_style_ledger<T>(
+    operation: impl FnOnce(&mut NativeGlassStyleLedger) -> T,
+) -> T {
+    let mut guard = NATIVE_GLASS_STYLE_LEDGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    operation(guard.get_or_insert_with(NativeGlassStyleLedger::default))
+}
+
+/// Record the morph span so any style application landing inside it can be
+/// classified. Called at morph start by every entry variant.
+#[cfg(target_os = "macos")]
+unsafe fn record_native_glass_entry_span(window: id, duration_seconds: f64) {
+    if window == nil {
+        return;
+    }
+    let window_number: i64 = msg_send![window, windowNumber];
+    if window_number <= 0 {
+        return;
+    }
+    let start_ns = crate::platform::host_clock::host_time_ns();
+    let end_ns = start_ns.saturating_add((duration_seconds.max(0.0) * 1e9) as u64);
+    with_native_glass_style_ledger(|ledger| {
+        ledger.record_entry_span(window_number, start_ns, end_ns)
+    });
+}
+
+/// Runtime count of forbidden mid-entry style mutations for a window. A
+/// healthy entry reports 0.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+pub(crate) fn native_glass_style_mutation_count_during_entry(window_number: i64) -> usize {
+    with_native_glass_style_ledger(|ledger| {
+        ledger.style_mutation_count_during_entry(window_number)
+    })
+}
+
 /// Apply the complete shared native glass policy. AppKit mutations are made
 /// in one disabled-actions transaction so a theme refresh cannot expose an
 /// intermediate untinted or mismatched frame.
@@ -2449,6 +2599,24 @@ pub(crate) fn resolve_native_glass_style(
 pub(crate) unsafe fn apply_native_glass_style(
     glass_view: id,
     style: NativeGlassStyle,
+) -> bool {
+    apply_native_glass_style_with_reason(
+        glass_view,
+        style,
+        NativeGlassStyleApplicationReason::Install,
+    )
+}
+
+/// See [`apply_native_glass_style`]; `reason` feeds the style-application
+/// ledger that proves the material stack stays static during entry.
+///
+/// # Safety
+/// Same contract as [`apply_native_glass_style`].
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn apply_native_glass_style_with_reason(
+    glass_view: id,
+    style: NativeGlassStyle,
+    reason: NativeGlassStyleApplicationReason,
 ) -> bool {
     if glass_view == nil {
         return false;
@@ -2558,21 +2726,54 @@ pub(crate) unsafe fn apply_native_glass_style(
     } else {
         -1
     };
+    let at_ns = crate::platform::host_clock::host_time_ns();
+    let mid_entry_mutation = with_native_glass_style_ledger(|ledger| {
+        ledger.record_application(NativeGlassStyleApplication {
+            window_number,
+            at_ns,
+            reason,
+            signature: style.signature,
+        })
+    });
+    let role_name = match style.role {
+        NativeGlassSurfaceRole::WindowBackdrop => "window_backdrop",
+        NativeGlassSurfaceRole::FloatingCapsule => "floating_capsule",
+    };
     tracing::info!(
         target: "script_kit::native_glass",
         event = "native_glass_style_applied",
         window_number,
-        role = match style.role {
-            NativeGlassSurfaceRole::WindowBackdrop => "window_backdrop",
-            NativeGlassSurfaceRole::FloatingCapsule => "floating_capsule",
+        at_ns,
+        role = role_name,
+        reason = match reason {
+            NativeGlassStyleApplicationReason::Install => "install",
+            NativeGlassStyleApplicationReason::ThemeRefresh => "theme_refresh",
         },
+        material = current_window_material_name(current_window_material()),
+        dark = style.signature.dark,
         tint_rgb = style.signature.tint_rgb,
         requested_tint_alpha_bits = ?style.signature.requested_tint_alpha_bits,
+        effective_tint_alpha_bits = style.signature.effective_tint_alpha_bits,
         effective_tint_alpha = style.effective_tint_alpha,
+        veil_alpha_bits = style.signature.veil_alpha_bits,
         veil_alpha = style.veil_alpha,
         rim_rgba = style.signature.rim_rgba,
+        rim_width_bits = style.signature.rim_width_bits,
         "native_glass_style_applied"
     );
+    if mid_entry_mutation {
+        // The material stack must be static between morph start and settle.
+        // This is the runtime tripwire the probes assert against: a healthy
+        // entry emits zero of these events.
+        tracing::error!(
+            target: "script_kit::native_glass",
+            event = "native_glass_style_mutation_during_entry",
+            window_number,
+            at_ns,
+            role = role_name,
+            "native_glass_style_mutation_during_entry"
+        );
+    }
     true
 }
 
@@ -2584,9 +2785,10 @@ pub(crate) unsafe fn apply_native_glass_style(
 #[cfg(target_os = "macos")]
 pub(crate) unsafe fn apply_theme_glass_tint(glass_view: id) -> bool {
     let theme = crate::theme::get_cached_theme();
-    apply_native_glass_style(
+    apply_native_glass_style_with_reason(
         glass_view,
         resolve_native_glass_style(&theme, NativeGlassSurfaceRole::WindowBackdrop),
+        NativeGlassStyleApplicationReason::ThemeRefresh,
     )
 }
 
@@ -2745,7 +2947,17 @@ unsafe fn configure_tahoe_window_backdrop_with_result(
     let corner_selector_supported: bool =
         msg_send![glass_view, respondsToSelector: sel!(setCornerRadius:)];
     let native_selectors_supported = tint_selector_supported && corner_selector_supported;
-    let tint_applied = apply_native_glass_style(glass_view, style);
+    // A reconfigure pass over an existing backdrop is a theme/appearance
+    // refresh, not a new installation.
+    let tint_applied = apply_native_glass_style_with_reason(
+        glass_view,
+        style,
+        if created {
+            NativeGlassStyleApplicationReason::Install
+        } else {
+            NativeGlassStyleApplicationReason::ThemeRefresh
+        },
+    );
 
     let corner_radius = {
         let radius = tahoe_content_corner_radius(content_view);
@@ -3418,6 +3630,38 @@ mod secondary_window_config_tests {
             backdrop.signature.effective_tint_alpha_bits,
             capsule.signature.effective_tint_alpha_bits
         );
+        // Material/appearance parity: both roles resolve the same appearance
+        // mode from the same theme — the capsule may not diverge to its own
+        // dark/light decision.
+        assert_eq!(backdrop.signature.dark, capsule.signature.dark);
+        let light_backdrop = super::resolve_native_glass_style(
+            &light,
+            super::NativeGlassSurfaceRole::WindowBackdrop,
+        );
+        assert_eq!(
+            light_backdrop.signature.tint_rgb,
+            light_capsule.signature.tint_rgb
+        );
+        assert_eq!(
+            light_backdrop.signature.effective_tint_alpha_bits,
+            light_capsule.signature.effective_tint_alpha_bits
+        );
+        assert_eq!(light_backdrop.signature.dark, light_capsule.signature.dark);
+        // The native capsule veil is the calibrated 0.80 chrome token. The
+        // GPUI glass-mode veil CAP is a different constant with a different
+        // job; substituting it here would flatten the capsule to the backdrop.
+        assert_eq!(
+            capsule.veil_alpha,
+            crate::ui::chrome::LIQUID_GLASS_CAPSULE_VEIL_ALPHA
+        );
+        assert_ne!(
+            capsule.veil_alpha,
+            crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP
+        );
+        assert_eq!(
+            backdrop.effective_tint_alpha,
+            crate::ui::chrome::LIQUID_GLASS_STABILITY_TINT_ALPHA_FLOOR
+        );
         assert_eq!(backdrop.signature.requested_tint_alpha_bits, None);
         assert_eq!(
             explicit.signature.requested_tint_alpha_bits,
@@ -3437,6 +3681,63 @@ mod secondary_window_config_tests {
         assert_eq!(light_capsule.rim_width, 1.0);
         assert_eq!(light_capsule.signature.rim_rgba, 0x0000_002E);
         assert_ne!(backdrop.signature, explicit.signature);
+    }
+
+    /// The material stack must be STATIC between morph start and settle: only
+    /// the initial installation and explicitly recorded theme refreshes may
+    /// apply native styles. A per-frame tint/veil/opacity animation during
+    /// entry would land here as an in-span `Install` re-application — the
+    /// ledger flags it so runtime receipts (and probes reading
+    /// `native_glass_style_mutation_during_entry` error events) can prove
+    /// `styleMutationCountDuringEntry == 0`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_glass_style_ledger_flags_only_mid_entry_reapplications() {
+        let theme = crate::theme::Theme::default();
+        let signature = super::resolve_native_glass_style(
+            &theme,
+            super::NativeGlassSurfaceRole::FloatingCapsule,
+        )
+        .signature;
+        let application = |window_number: i64,
+                           at_ns: u64,
+                           reason: super::NativeGlassStyleApplicationReason| {
+            super::NativeGlassStyleApplication {
+                window_number,
+                at_ns,
+                reason,
+                signature,
+            }
+        };
+        use super::NativeGlassStyleApplicationReason::{Install, ThemeRefresh};
+
+        let mut ledger = super::NativeGlassStyleLedger::default();
+        ledger.record_entry_span(7, 1_000, 2_000);
+        // Initial install before the morph span: allowed.
+        assert!(!ledger.record_application(application(7, 900, Install)));
+        // Pooled capsule views style themselves before attaching to a window
+        // (window number -1): never counted against a real window's span.
+        assert!(!ledger.record_application(application(-1, 1_100, Install)));
+        // Theme refresh mid-span is the explicitly recorded exception.
+        assert!(!ledger.record_application(application(7, 1_200, ThemeRefresh)));
+        assert_eq!(ledger.style_mutation_count_during_entry(7), 0);
+        // A tint/veil/opacity animation during entry looks exactly like this:
+        // an Install-shaped re-application inside the span. It must be
+        // flagged — this is the assertion that fails if anyone temporarily
+        // mutates capsule tint during entry.
+        assert!(ledger.record_application(application(7, 1_500, Install)));
+        assert_eq!(ledger.style_mutation_count_during_entry(7), 1);
+        // After settle, re-applications are outside the entry contract.
+        assert!(!ledger.record_application(application(7, 2_500, Install)));
+        assert_eq!(ledger.style_mutation_count_during_entry(7), 1);
+        // A first-ever installation landing inside its own span (window whose
+        // backdrop is created mid-morph) is the initial install, not a
+        // mutation.
+        ledger.record_entry_span(9, 1_000, 2_000);
+        assert!(!ledger.record_application(application(9, 1_050, Install)));
+        assert_eq!(ledger.style_mutation_count_during_entry(9), 0);
+        assert!(ledger.record_application(application(9, 1_060, Install)));
+        assert_eq!(ledger.style_mutation_count_during_entry(9), 1);
     }
 
     #[cfg(target_os = "macos")]
