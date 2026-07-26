@@ -119,6 +119,53 @@ pub enum SearchVisibility {
 #[serde(transparent)]
 pub struct DisplayId(pub u32);
 
+/// Physical display orientation derived from full-frame aspect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayOrientation {
+    Landscape,
+    Portrait,
+    Square,
+}
+
+/// Edge insets between a display's full frame and its usable frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Insets {
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+    pub left: u32,
+}
+
+/// Physical direction for display/window navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Full public description of one display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayDescriptor {
+    pub id: DisplayId,
+    /// Stable UUID from `CGDisplayCreateUUIDFromDisplayID`, or
+    /// `cg-display-{id}` (marked `unstable_display_uuid`) when unavailable.
+    pub uuid: String,
+    pub localized_name: String,
+    /// Full frame in CoreGraphics top-left coordinates.
+    pub full_bounds: Bounds,
+    /// `visibleFrame` (menu bar/Dock excluded) — the authoritative placement area.
+    pub visible_bounds: Bounds,
+    pub usable_insets: Insets,
+    pub backing_scale_factor: f64,
+    pub orientation: DisplayOrientation,
+    pub is_primary: bool,
+    /// NSScreen enumeration order (legacy next/previous semantics).
+    pub legacy_order: usize,
+    pub topology_generation: u64,
+}
+
 /// One observed window with full identity, capability, and state.
 #[derive(Debug, Clone)]
 pub struct WindowObservation {

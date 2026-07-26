@@ -26,6 +26,7 @@ mod capabilities;
 mod cf;
 mod diagnostics;
 mod display;
+mod display_topology;
 mod ffi;
 mod identity;
 mod observation;
