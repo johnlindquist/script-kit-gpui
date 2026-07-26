@@ -26,6 +26,7 @@ mod cf;
 mod diagnostics;
 mod display;
 mod ffi;
+mod identity;
 mod query;
 mod snap;
 mod snap_mode;

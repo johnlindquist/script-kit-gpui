@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use super::AXUIElementRef;
 
 /// Represents the bounds (position and size) of a window
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Bounds {
     pub x: i32,
     pub y: i32,
@@ -32,6 +32,121 @@ impl Bounds {
             height: rect.size.height as u32,
         }
     }
+}
+
+/// A native CoreGraphics window number (`kCGWindowNumber`), obtained ONLY by
+/// public CoreGraphics enumeration plus confidence-graded correlation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeWindowId(pub u32);
+
+/// Transient, generation-scoped window identity.
+///
+/// A handle with an old `registry_generation` is stale and cannot mutate.
+/// Legacy numeric IDs resolve through the current registry map; they are
+/// never decoded for PID, window index, or authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowHandle {
+    pub pid: i32,
+    pub native_window_id: Option<NativeWindowId>,
+    pub registry_generation: u64,
+    pub nonce: u64,
+}
+
+/// Stable identity of the application owning a window.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AppIdentity {
+    pub bundle_id: Option<String>,
+    pub app_path: Option<PathBuf>,
+    pub localized_name: String,
+}
+
+/// How the native window id (if any) was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeIdConfidence {
+    /// Exactly one public CG candidate matched the AX row.
+    UniquePublicCorrelation,
+    /// Multiple AX rows proven to share one CG window (native tabs).
+    NativeTabGroup,
+    /// Multiple candidates remained; no native id assigned.
+    Ambiguous,
+    /// No correlation was possible (e.g. CG-only or AX-only row).
+    Unavailable,
+}
+
+/// Mutation capabilities observed via public AX settable/action queries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCapabilities {
+    pub can_move: bool,
+    pub can_resize: bool,
+    pub can_minimize: bool,
+    pub can_close: bool,
+    pub can_raise: bool,
+    pub can_set_fullscreen: bool,
+    /// An AX reference exists and at least one supported action is available.
+    pub actionable: bool,
+    /// Why the window is not actionable, when it is not.
+    pub non_actionable_reason: Option<String>,
+}
+
+impl WindowCapabilities {
+    /// Capabilities for a row without any usable AX reference.
+    pub fn non_actionable(reason: impl Into<String>) -> Self {
+        Self {
+            can_move: false,
+            can_resize: false,
+            can_minimize: false,
+            can_close: false,
+            can_raise: false,
+            can_set_fullscreen: false,
+            actionable: false,
+            non_actionable_reason: Some(reason.into()),
+        }
+    }
+}
+
+/// Whether a window appears in ordinary search/listing surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchVisibility {
+    /// Shown in ordinary window listings.
+    Ordinary,
+    /// Observable internally (dialog/sheet/utility) but excluded from
+    /// ordinary listings unless explicitly requested.
+    InternalOnly,
+}
+
+/// Identifier for a display, matching `NSScreenNumber`/CGDirectDisplayID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct DisplayId(pub u32);
+
+/// One observed window with full identity, capability, and state.
+#[derive(Debug, Clone)]
+pub struct WindowObservation {
+    pub handle: WindowHandle,
+    pub legacy_id: u32,
+    pub app: AppIdentity,
+    pub title: String,
+    pub role: Option<String>,
+    pub subrole: Option<String>,
+    pub bounds: Bounds,
+    pub display_id: Option<DisplayId>,
+    pub minimized: bool,
+    pub focused: bool,
+    pub main: bool,
+    pub frontmost_app: bool,
+    pub current_space: bool,
+    pub capabilities: WindowCapabilities,
+    pub native_id_confidence: NativeIdConfidence,
+    pub search_visibility: SearchVisibility,
+}
+
+/// A native-tab group observed as one movable unit.
+#[derive(Debug, Clone)]
+pub struct WindowGroupObservation {
+    pub primary: WindowObservation,
+    pub members: Vec<WindowObservation>,
 }
 
 /// Information about a window
