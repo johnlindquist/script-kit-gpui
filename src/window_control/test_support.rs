@@ -237,9 +237,9 @@ impl ProviderWindowState {
 }
 
 #[derive(Debug, Default)]
-struct ProviderState {
+pub(crate) struct ProviderState {
     raw: String,
-    windows: Vec<ProviderWindowState>,
+    pub(crate) windows: Vec<ProviderWindowState>,
     displays: Vec<TestProviderDisplay>,
     frontmost_window_id: Option<u32>,
     /// Total mutations applied against this fixture instance. Plan-compilation

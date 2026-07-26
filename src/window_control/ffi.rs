@@ -52,6 +52,10 @@ extern "C" {
         names: *mut CFArrayRef,
     ) -> i32;
     pub(super) fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
+    pub(super) fn AXUIElementSetMessagingTimeout(
+        element: AXUIElementRef,
+        timeout_in_seconds: f32,
+    ) -> i32;
     pub(super) fn AXValueCreate(value_type: i32, value: *const c_void) -> AXValueRef;
     pub(super) fn AXValueGetValue(
         value: AXValueRef,

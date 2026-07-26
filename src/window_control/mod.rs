@@ -20,6 +20,7 @@
 #![allow(dead_code)]
 
 mod actions;
+mod app_profiles;
 mod ax;
 mod cache;
 mod capabilities;
@@ -31,6 +32,7 @@ mod ffi;
 mod geometry;
 mod identity;
 mod legacy;
+mod mutation;
 mod observation;
 mod plan;
 mod presets;
