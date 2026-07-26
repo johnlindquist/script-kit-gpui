@@ -104,21 +104,45 @@ try write([
     "pointer": point(initialPointer),
 ], to: readyPath)
 
+// WindowServer synthesizes hover-update mouseMoved events when the window
+// under a STATIONARY cursor changes — inherent to a window-lifecycle probe
+// (2026-07-26: 840/1064 study attempts were invalidated by exactly one
+// zero-displacement mouseMoved). A mouseMoved that arrives while the cursor
+// has not displaced since the previous 120 Hz sample cannot be human input:
+// record it as a visible phantom event, but do not count it as interference.
+// All other event types (clicks, keys, scroll, drags) have no synthetic
+// stationary source and keep failing closed exactly as before.
+var phantomStationaryMouseMovedCount = 0
+var previousPointer = initialPointer
 while !FileManager.default.fileExists(atPath: stopPath) {
     Thread.sleep(forTimeInterval: 1.0 / 120.0)
     sampleCount += 1
+    let pointerNow = NSEvent.mouseLocation
+    let movedSinceLastSample = hypot(
+        pointerNow.x - previousPointer.x,
+        pointerNow.y - previousPointer.y
+    ) > 0.5
+    previousPointer = pointerNow
     for (name, eventType) in watched {
         let age = CGEventSource.secondsSinceLastEventType(
             .combinedSessionState,
             eventType: eventType
         )
         if let previous = previousAges[name], age + 0.004 < previous {
-            eventCounts[name, default: 0] += 1
-            recordInterferenceEvent("untaggedInput", ["eventType": name])
+            if name == "mouseMoved" && !movedSinceLastSample {
+                phantomStationaryMouseMovedCount += 1
+                recordInterferenceEvent(
+                    "phantomStationaryMouseMoved",
+                    ["eventType": name]
+                )
+            } else {
+                eventCounts[name, default: 0] += 1
+                recordInterferenceEvent("untaggedInput", ["eventType": name])
+            }
         }
         previousAges[name] = age
     }
-    let pointer = NSEvent.mouseLocation
+    let pointer = pointerNow
     let pointerDeviation = hypot(
         pointer.x - initialPointer.x,
         pointer.y - initialPointer.y
@@ -173,6 +197,7 @@ let receipt: [String: Any] = [
     "intendedPointerPath": "stationary",
     "taggedInputCount": 0,
     "untaggedInputCount": untaggedInputCount,
+    "phantomStationaryMouseMovedCount": phantomStationaryMouseMovedCount,
     "eventCounts": eventCounts,
     "events": interferenceEvents,
     "droppedEventCount": droppedEventCount,

@@ -22,6 +22,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
   appendFileSync,
 } from "node:fs";
@@ -288,6 +289,13 @@ export function requiredFreeStorageBytes(
   );
 }
 
+/** Fourth whitespace column of the last `df -k` line, in bytes. */
+export function parseDfFreeBytes(stdout: string): number | null {
+  const line = stdout.trim().split("\n").at(-1) ?? "";
+  const kb = Number(line.split(/\s+/)[3]);
+  return Number.isFinite(kb) ? kb * 1024 : null;
+}
+
 export function p95Bytes(sizes: number[]): number {
   if (sizes.length === 0) return 0;
   const sorted = [...sizes].sort((a, b) => a - b);
@@ -366,11 +374,20 @@ export function blockInferenceValidity(
 }
 
 export interface RetryBlock extends MirroredBlock {
+  /** Immediate parent block this one retries (plan semantic). */
   retryOfBlockId: number;
+  /**
+   * The ORIGINAL scheduled block at the root of the retry chain. The retry
+   * cap counts against this id. Counting against the immediate parent gave
+   * every retry generation a fresh zero counter — the 2026-07-26 plumbing
+   * smoke retried one poisoned block ~175 times (1064 attempts) until the
+   * disk filled. Regression: retry_chain_counts_against_the_root_block.
+   */
+  rootBlockIndex: number;
 }
 
 export function scheduleRetryBlock(
-  block: MirroredBlock,
+  block: MirroredBlock | RetryBlock,
   nextBlockIndex: number,
 ): RetryBlock {
   return {
@@ -379,6 +396,7 @@ export function scheduleRetryBlock(
     reverse: [...block.reverse],
     slots: [...block.slots],
     retryOfBlockId: block.blockIndex,
+    rootBlockIndex: (block as RetryBlock).rootBlockIndex ?? block.blockIndex,
   };
 }
 
@@ -758,6 +776,20 @@ async function main(): Promise<number> {
   const slots = planScheduledSlots(resolved);
   const captureSlots = slots.length;
   const storage = await measureStoragePreflight(repoRoot, captureSlots);
+  const storagePreflightP95 = storage.p95LifecycleBytes;
+  const sessionErrors: string[] = [];
+  const keepDriverSessions = process.argv.includes("--keep-driver-sessions");
+  const freeDiskBytes = (path: string): number | null => {
+    const proc = Bun.spawnSync(["df", "-k", path]);
+    return parseDfFreeBytes(proc.stdout.toString());
+  };
+  // Runaway backstop: with the root-keyed retry cap this ceiling should
+  // never bind; it exists so no future scheduling defect can fill the disk
+  // again (2026-07-26: 15 planned slots became 1064 attempts → ENOSPC).
+  const attemptCeiling =
+    slots.length
+    + slots.filter((slot) => slot.kind === "scheduled").length
+      * (resolved.design.maxBlockRetries ?? 2);
   const schedule = mirroredCyclicSchedule(
     resolved.builds.map((build: ResolvedBuild) => build.id),
     resolved.design.requiredBlocks,
@@ -940,6 +972,20 @@ async function main(): Promise<number> {
     const receipt = existsSync(receiptPath)
       ? JSON.parse(readFileSync(receiptPath, "utf8"))
       : null;
+    // Reap the probe's driver scratch: frames and receipts needed for
+    // grading live in the attempt dir; the /tmp session (app log, driver
+    // artifacts, ~130MB each) has already been consumed by the runtime
+    // contract at capture time. 1307 unreaped sessions = 165G = the
+    // 2026-07-26 ENOSPC.
+    const driverSessionDir =
+      typeof receipt?.sessionDir === "string" ? receipt.sessionDir : null;
+    if (
+      driverSessionDir
+      && driverSessionDir.startsWith("/tmp/sk-driver-sessions/")
+      && !keepDriverSessions
+    ) {
+      rmSync(driverSessionDir, { recursive: true, force: true });
+    }
     const row: AttemptRow & Record<string, unknown> = {
       attemptId,
       slotId: slot.slotId,
@@ -988,6 +1034,13 @@ async function main(): Promise<number> {
     let nextBlockIndex = baseBlocks.length;
     const retryCounts = new Map<number, number>();
     while (pendingBlocks.length > 0) {
+      if (attemptCounter >= attemptCeiling) {
+        sessionErrors.push(
+          `attempt ceiling ${attemptCeiling} reached with ${pendingBlocks.length} blocks pending — terminating capture (runaway backstop)`,
+        );
+        exitStatus = 1;
+        break;
+      }
       const block = pendingBlocks.shift()!;
       if ([...haltedBuilds].some((id) => block.slots.includes(id))) {
         completedBlocks.push({
@@ -1011,9 +1064,26 @@ async function main(): Promise<number> {
       const validity = blockInferenceValidity(block, attemptsBySlot);
       completedBlocks.push(validity);
       if (!validity.valid) {
-        const origin = (block as RetryBlock).retryOfBlockId ?? block.blockIndex;
+        // Cap retries against the ROOT of the chain, never the immediate
+        // parent (each parent index is fresh, so a parent-keyed counter
+        // never binds — the 2026-07-26 runaway).
+        const origin =
+          (block as RetryBlock).rootBlockIndex ?? block.blockIndex;
         const used = retryCounts.get(origin) ?? 0;
-        if (used < maxRetries) {
+        const freeBytes = freeDiskBytes(outAbsolute);
+        const retryStorageNeeded = requiredFreeStorageBytes(
+          storagePreflightP95,
+          block.slots.length,
+        );
+        if (used >= maxRetries) {
+          sessionErrors.push(
+            `block ${origin}: retry cap ${maxRetries} exhausted; not rescheduling`,
+          );
+        } else if (freeBytes !== null && freeBytes < retryStorageNeeded) {
+          sessionErrors.push(
+            `block ${origin}: retry withheld — free storage ${freeBytes} below required ${retryStorageNeeded}`,
+          );
+        } else {
           retryCounts.set(origin, used + 1);
           pendingBlocks.push(scheduleRetryBlock(block, nextBlockIndex));
           nextBlockIndex += 1;
@@ -1191,13 +1261,22 @@ async function main(): Promise<number> {
   );
   writeFileSync(
     join(outAbsolute, "session.json"),
-    `${JSON.stringify({ ...session, ...summary, gradedAttempts }, null, 2)}\n`,
+    `${JSON.stringify(
+      { ...session, ...summary, gradedAttempts, errors: sessionErrors },
+      null,
+      2,
+    )}\n`,
   );
   console.log(
     JSON.stringify(
       {
-        status: designIncomplete ? "INCOMPLETE_DESIGN" : "CAPTURED",
+        status: designIncomplete
+          ? "INCOMPLETE_DESIGN"
+          : sessionErrors.length
+            ? "CAPTURED_WITH_ERRORS"
+            : "CAPTURED",
         out: outAbsolute,
+        errors: sessionErrors,
         ...summary,
       },
       null,

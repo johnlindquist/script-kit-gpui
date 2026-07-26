@@ -21,6 +21,7 @@ import {
   blockInferenceValidity,
   mirroredCyclicSchedule,
   p95Bytes,
+  parseDfFreeBytes,
   planScheduledSlots,
   requiredFreeStorageBytes,
   resolveManifest,
@@ -262,6 +263,32 @@ describe("attempt and block semantics", () => {
     expect(retry.retryOfBlockId).toBe(0);
     expect(retry.blockIndex).toBe(7);
     expect(retry.slots).toEqual(["A", "B", "B", "A"]);
+  });
+
+  test("retry chains count against the ROOT block, not the immediate parent", () => {
+    // Regression for the 2026-07-26 runaway: keying the retry cap on the
+    // immediate parent gives every generation a fresh zero counter, so a
+    // persistently poisoned block retried ~175 times (1064 attempts) until
+    // the disk filled. rootBlockIndex must survive arbitrary chain depth.
+    const [block] = mirroredCyclicSchedule(["A", "B"], 1);
+    const retry1 = scheduleRetryBlock(block, 10);
+    expect(retry1.retryOfBlockId).toBe(block.blockIndex);
+    expect(retry1.rootBlockIndex).toBe(block.blockIndex);
+    const retry2 = scheduleRetryBlock(retry1, 11);
+    expect(retry2.retryOfBlockId).toBe(10);
+    expect(retry2.rootBlockIndex).toBe(block.blockIndex);
+    const retry3 = scheduleRetryBlock(retry2, 12);
+    expect(retry3.retryOfBlockId).toBe(11);
+    expect(retry3.rootBlockIndex).toBe(block.blockIndex);
+  });
+
+  test("parseDfFreeBytes reads the df -k free column and fails closed", () => {
+    const df =
+      "Filesystem 1024-blocks      Used Available Capacity iused ifree %iused  Mounted on\n"
+      + "/dev/disk3s5   971350180 838860800 108003328    89%     12M  1.1G    1%   /System/Volumes/Data";
+    expect(parseDfFreeBytes(df)).toBe(108003328 * 1024);
+    expect(parseDfFreeBytes("")).toBeNull();
+    expect(parseDfFreeBytes("garbage output")).toBeNull();
   });
 
   test("a fully green block is valid for paired inference", () => {
