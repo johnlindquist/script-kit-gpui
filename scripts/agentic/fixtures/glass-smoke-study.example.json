@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "studyId": "alpha-ladder-example",
+  "profile": "full",
+  "builds": [
+    {
+      "id": "alpha000",
+      "role": "negative-control",
+      "binary": "target-agent/artifacts/alpha0-baseline/script-kit-gpui",
+      "expected": { "morphStartAlpha": 0.0 }
+    },
+    {
+      "id": "alpha085",
+      "role": "baseline",
+      "binary": "target-agent/artifacts/alpha085-candidate/script-kit-gpui",
+      "expected": { "morphStartAlpha": 0.85 }
+    },
+    {
+      "id": "alpha090",
+      "role": "candidate",
+      "binary": "target-agent/artifacts/alpha090-ladder/script-kit-gpui",
+      "expected": { "morphStartAlpha": 0.9 }
+    }
+  ],
+  "design": {
+    "type": "mirrored-cyclic",
+    "warmupsPerBuild": 3,
+    "requiredBlocks": 5,
+    "failureOnlyEarlyStop": true,
+    "maxBlockRetries": 2
+  },
+  "fixture": { "mode": "saturated-stripes" }
+}
