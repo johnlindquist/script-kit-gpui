@@ -380,6 +380,13 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
             && crate::theme::get_cached_theme().is_vibrancy_enabled()
         {
             animate_tahoe_glass_appearance(window, "PANEL", "Main window");
+        } else {
+            // Instrumentation only: a silently un-morphed show made the
+            // runtime contract's missing enter line undiagnosable.
+            logging::log(
+                "PANEL",
+                "event=glass_morph_gate_skip window=Main window reason=composition_or_vibrancy_unavailable",
+            );
         }
 
         // orderFrontRegardless brings window to front without activating the app
@@ -480,6 +487,12 @@ pub fn show_main_window_background() {
             && crate::theme::get_cached_theme().is_vibrancy_enabled()
         {
             animate_tahoe_glass_appearance(window, "PANEL", "Main window");
+        } else {
+            // Instrumentation only: see the foreground show path.
+            logging::log(
+                "PANEL",
+                "event=glass_morph_gate_skip window=Main window reason=composition_or_vibrancy_unavailable",
+            );
         }
 
         // orderFrontRegardless brings the window to front without activating the app.

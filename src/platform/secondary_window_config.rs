@@ -2168,30 +2168,48 @@ unsafe fn animate_tahoe_glass_appearance_directed(
         let _: () = msg_send![window, setAlphaValue: 1.0f64];
     };
 
+    // Instrumentation only: every skipped morph names its reason, so an
+    // absent `phase=enter` log line is diagnosable instead of ambiguous
+    // ("old binary or missing log capture" vs a silently skipped morph —
+    // the 2026-07-26 runtime-contract false INVALID_SETUP).
+    let log_skip = |reason: &str| {
+        logging::log(
+            log_target,
+            &format!(
+                "event=glass_morph_skip window={} phase=enter reason={}",
+                window_name, reason
+            ),
+        );
+    };
     let Some(tuning) = glass_morph_tuning() else {
         restore_alpha(window);
+        log_skip("sliders_disabled");
         return; // morph disabled via theme sliders
     };
     let is_main_window = crate::window_manager::get_main_window() == Some(window);
     if is_main_window && glass_morph_recently_started() {
         restore_alpha(window);
+        log_skip("recently_started_debounce");
         return;
     }
 
     let final_frame: NSRect = msg_send![window, frame];
     if final_frame.size.width < 40.0 || final_frame.size.height < 40.0 {
         restore_alpha(window);
+        log_skip("frame_too_small");
         return;
     }
 
     let content_view: id = msg_send![window, contentView];
     if content_view == nil {
         restore_alpha(window);
+        log_skip("no_content_view");
         return;
     }
     let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
     if glass_view == nil {
         restore_alpha(window);
+        log_skip("no_glass_view");
         return;
     }
 
