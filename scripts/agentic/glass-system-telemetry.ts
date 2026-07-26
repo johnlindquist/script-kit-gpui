@@ -268,7 +268,14 @@ export function parseSwapUsage(stdout: string): number | null {
 
 export function parseCpuSpeedLimit(stdout: string): number | null {
   const match = stdout.match(/CPU_Speed_Limit\s*=\s*(\d+)/);
-  return match ? Number(match[1]) : null;
+  if (match) return Number(match[1]);
+  // Apple Silicon hosts have no CPU_Speed_Limit line; pmset instead prints
+  // an explicit "No CPU power status has been recorded" note. That is a
+  // positive no-throttle statement, equivalent to limit 100 — parse it,
+  // don't default it. Empty/unrecognized output still returns null so the
+  // thermal gate fails closed without evidence.
+  if (/No CPU power status has been recorded/.test(stdout)) return 100;
+  return null;
 }
 
 export function parseVmStatFreeBytes(stdout: string): number | null {

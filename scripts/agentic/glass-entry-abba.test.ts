@@ -230,4 +230,41 @@ describe("legacyPairV1 shell runner contract", () => {
       expect(row.eligible).toBe(false);
     }
   });
+
+  test("legacyPairV1: Apple Silicon pmset no-status note is not-limited (eligible)", () => {
+    // Real hosts without an Intel-style CPU_Speed_Limit line print an
+    // explicit "No CPU power status has been recorded" note. That is a
+    // positive no-throttle statement; runs under load stay eligible.
+    // Regression for the 2026-07-26 all-ineligible false negative.
+    const harness = makeHarness();
+    writeExecutable(
+      join(harness.root, "stubs", "pmset"),
+      `#!/bin/bash\nprintf 'Note: No thermal warning level has been recorded\\nNote: No performance warning level has been recorded\\nNote: No CPU power status has been recorded\\n'\n`,
+    );
+    const { exitCode } = runScript(harness, ["--warmups", "0", "--blocks", "1"]);
+    expect(exitCode).toBe(0);
+
+    const rows = readRuns(harness);
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.eligible).toBe(true);
+      expect(row.thermLimited).toBe(false);
+    }
+  });
+
+  test("legacyPairV1: unrecognized pmset output stays thermal-ineligible (fail closed)", () => {
+    const harness = makeHarness();
+    writeExecutable(
+      join(harness.root, "stubs", "pmset"),
+      `#!/bin/bash\necho 'pmset: unrecognized output'\n`,
+    );
+    const { exitCode } = runScript(harness, ["--warmups", "0", "--blocks", "1"]);
+    expect(exitCode).toBe(0);
+
+    const rows = readRuns(harness);
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.eligible).toBe(false);
+    }
+  });
 });

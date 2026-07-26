@@ -48,7 +48,23 @@ RUNS="$OUT/runs.jsonl"
 
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
-therm_limited() { pmset -g therm 2>/dev/null | awk -F= '/CPU_Speed_Limit/ {gsub(/ /,"",$2); print ($2+0 < 100) ? "true" : "false"}'; }
+# Apple Silicon hosts report "Note: No CPU power status has been recorded"
+# instead of an Intel-style CPU_Speed_Limit line. That sentence is pmset's
+# positive statement that no throttle event has occurred — parse it as
+# not-limited. Empty or unrecognized output still fails closed: "unknown" is
+# never equal to "false", so eligibility stays red without evidence.
+therm_limited() {
+  local out
+  out="$(pmset -g therm 2>/dev/null || true)"
+  case "$out" in
+    *CPU_Speed_Limit*)
+      printf '%s\n' "$out" | awk -F= '/CPU_Speed_Limit/ {gsub(/ /,"",$2); print ($2+0 < 100) ? "true" : "false"}' ;;
+    *"No CPU power status has been recorded"*)
+      echo "false" ;;
+    *)
+      echo "unknown" ;;
+  esac
+}
 
 record_env() { # $1 = file prefix
   uptime > "$1.uptime.txt"

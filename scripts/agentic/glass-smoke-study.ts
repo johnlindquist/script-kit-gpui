@@ -886,7 +886,13 @@ async function main(): Promise<number> {
   const cpuSpeedLimit = async () => {
     const therm = await runCommand(["pmset", "-g", "therm"]);
     const match = therm.stdout.match(/CPU_Speed_Limit\s*=\s*(\d+)/);
-    return match ? Number(match[1]) : null;
+    if (match) return Number(match[1]);
+    // Apple Silicon: pmset prints an explicit no-throttle note instead of a
+    // CPU_Speed_Limit line. Parse it as 100; anything else stays null
+    // (thermal-ineligible, fail closed).
+    return /No CPU power status has been recorded/.test(therm.stdout)
+      ? 100
+      : null;
   };
   const shaOf = (path: string) =>
     createHash("sha256").update(readFileSync(path)).digest("hex");

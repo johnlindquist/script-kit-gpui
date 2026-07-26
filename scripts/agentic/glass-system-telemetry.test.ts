@@ -136,6 +136,21 @@ describe("system parsers fail closed", () => {
     expect(parseSwapUsage("nonsense")).toBeNull();
     expect(parseCpuSpeedLimit("CPU_Speed_Limit \t= 100")).toBe(100);
     expect(parseCpuSpeedLimit("")).toBeNull();
+    // Apple Silicon: pmset's explicit no-throttle note parses as nominal
+    // (100); it is a positive statement, not an unknown. Anything else
+    // (empty above, garbage below) stays null so thermal fails closed.
+    expect(
+      parseCpuSpeedLimit(
+        "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+      ),
+    ).toBe(100);
+    expect(parseCpuSpeedLimit("pmset: unrecognized output")).toBeNull();
+    // A real numeric line always wins over the note.
+    expect(
+      parseCpuSpeedLimit(
+        "CPU_Speed_Limit = 60\nNote: No CPU power status has been recorded\n",
+      ),
+    ).toBe(60);
     expect(
       parseVmStatFreeBytes(
         "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1000.\n",
