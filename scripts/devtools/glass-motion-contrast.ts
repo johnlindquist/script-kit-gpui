@@ -14,6 +14,7 @@ import {
   type EvidenceIdentity,
 } from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
+import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
 
 type Disposition =
   | "EVALUABLE_PASS"
@@ -449,17 +450,26 @@ async function main() {
   const disposition = classify(mainResult, mainReceipt);
   let lockedTreatment: any = null;
   if (mode === "all" || mode === "locked") {
-    const helper = join(outputDirectory, "macos-glass-background-fixture");
-    const compiled = await run([
-      "xcrun",
-      "swiftc",
-      "-O",
-      resolve(import.meta.dir, "../agentic/macos-glass-background-fixture.swift"),
-      "-o",
-      helper,
-    ]);
-    if (compiled.exitCode !== 0) {
-      throw new Error(`fixture compile failed: ${compiled.stderr}`);
+    // WP4 (glass-smoke-harness-max-info): accept a pre-compiled
+    // hash-validated fixture helper; compile per-run only when absent.
+    const suppliedFixtureHelper = value("--fixture-helper");
+    let helper: string;
+    if (suppliedFixtureHelper) {
+      helper = requireValidatedHelper(suppliedFixtureHelper, "fixture")
+        .binaryPath;
+    } else {
+      helper = join(outputDirectory, "macos-glass-background-fixture");
+      const compiled = await run([
+        "xcrun",
+        "swiftc",
+        "-O",
+        resolve(import.meta.dir, "../agentic/macos-glass-background-fixture.swift"),
+        "-o",
+        helper,
+      ]);
+      if (compiled.exitCode !== 0) {
+        throw new Error(`fixture compile failed: ${compiled.stderr}`);
+      }
     }
     const lockedDirectory = join(outputDirectory, "locked-treatment");
     mkdirSync(lockedDirectory, { recursive: true });

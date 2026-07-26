@@ -16,6 +16,7 @@ import {
   newRunId,
 } from "./glass-evidence-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
+import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
 import {
   classifyNativeInventory,
   deriveUniqueOwnerDelta,
@@ -192,22 +193,33 @@ if (!binary || !existsSync(binary)) {
   throw new Error(`binary missing: ${binary || "<unset>"}`);
 }
 mkdirSync(dirname(outPath), { recursive: true });
-const interferenceHelper = join(
-  dirname(outPath),
-  "macos-glass-interference-monitor",
-);
-const interferenceCompile = Bun.spawnSync([
-  "xcrun",
-  "swiftc",
-  "-O",
-  resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
-  "-o",
-  interferenceHelper,
-]);
-if (interferenceCompile.exitCode !== 0) {
-  throw new Error(
-    `interference helper compile failed: ${interferenceCompile.stderr.toString()}`,
+// WP4 (glass-smoke-harness-max-info): accept a pre-compiled hash-validated
+// interference helper from the study orchestrator; compile only when absent.
+const suppliedInterferenceHelper = arg("--interference-helper");
+let interferenceHelper: string;
+if (suppliedInterferenceHelper) {
+  interferenceHelper = requireValidatedHelper(
+    suppliedInterferenceHelper,
+    "interference",
+  ).binaryPath;
+} else {
+  interferenceHelper = join(
+    dirname(outPath),
+    "macos-glass-interference-monitor",
   );
+  const interferenceCompile = Bun.spawnSync([
+    "xcrun",
+    "swiftc",
+    "-O",
+    resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
+    "-o",
+    interferenceHelper,
+  ]);
+  if (interferenceCompile.exitCode !== 0) {
+    throw new Error(
+      `interference helper compile failed: ${interferenceCompile.stderr.toString()}`,
+    );
+  }
 }
 let interferenceMonitor: ReturnType<typeof startInterferenceMonitor> | null = null;
 

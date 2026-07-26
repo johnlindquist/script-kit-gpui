@@ -8,6 +8,7 @@ import {
   identityFromEnvironment,
   newRunId,
 } from "./glass-evidence-contract.ts";
+import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
 import { announceTestStatus } from "./test-status.ts";
 
 export type Rect = { x: number; y: number; width: number; height: number };
@@ -1854,28 +1855,48 @@ async function cli() {
   } = parseCLI();
   if (!binary || !existsSync(binary)) throw new Error(`binary missing: ${binary ?? "<unset>"}`);
   mkdirSync(outDir, { recursive: true });
-  const helper = join(outDir, "macos-native-drag-sampler");
-  const compile = await run([
-    "xcrun",
-    "swiftc",
-    "-O",
-    "-whole-module-optimization",
-    resolve(import.meta.dir, "../agentic/macos-native-drag-sampler.swift"),
-    "-o",
-    helper,
-  ]);
-  if (compile.exitCode !== 0) throw new Error(`Swift helper compile failed: ${compile.stderr}`);
-  const resizeHelper = join(outDir, "macos-window-resize");
-  const resizeCompile = await run([
-    "xcrun",
-    "swiftc",
-    "-O",
-    resolve(import.meta.dir, "../agentic/macos-window-resize.swift"),
-    "-o",
-    resizeHelper,
-  ]);
-  if (resizeCompile.exitCode !== 0) {
-    throw new Error(`Swift resize helper compile failed: ${resizeCompile.stderr}`);
+  // WP4 (glass-smoke-harness-max-info): accept pre-compiled hash-validated
+  // helpers from the study orchestrator; compile per-run only when absent.
+  const helperArg = (name: string) => {
+    const args = process.argv.slice(2);
+    const index = args.indexOf(name);
+    return index >= 0 ? args[index + 1] : undefined;
+  };
+  const suppliedDragHelper = helperArg("--drag-helper");
+  const suppliedResizeHelper = helperArg("--resize-helper");
+  let helper: string;
+  if (suppliedDragHelper) {
+    helper = requireValidatedHelper(suppliedDragHelper, "drag").binaryPath;
+  } else {
+    helper = join(outDir, "macos-native-drag-sampler");
+    const compile = await run([
+      "xcrun",
+      "swiftc",
+      "-O",
+      "-whole-module-optimization",
+      resolve(import.meta.dir, "../agentic/macos-native-drag-sampler.swift"),
+      "-o",
+      helper,
+    ]);
+    if (compile.exitCode !== 0) throw new Error(`Swift helper compile failed: ${compile.stderr}`);
+  }
+  let resizeHelper: string;
+  if (suppliedResizeHelper) {
+    resizeHelper = requireValidatedHelper(suppliedResizeHelper, "resize")
+      .binaryPath;
+  } else {
+    resizeHelper = join(outDir, "macos-window-resize");
+    const resizeCompile = await run([
+      "xcrun",
+      "swiftc",
+      "-O",
+      resolve(import.meta.dir, "../agentic/macos-window-resize.swift"),
+      "-o",
+      resizeHelper,
+    ]);
+    if (resizeCompile.exitCode !== 0) {
+      throw new Error(`Swift resize helper compile failed: ${resizeCompile.stderr}`);
+    }
   }
 
   const gitCommit = (await run(["git", "rev-parse", "HEAD"])).stdout.trim();

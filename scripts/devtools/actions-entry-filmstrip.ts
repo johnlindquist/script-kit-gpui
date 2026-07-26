@@ -22,6 +22,7 @@ import {
   waitForInterferenceReady,
 } from "./glass-interference.ts";
 import { announceTestStatus } from "./test-status.ts";
+import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
 
 function arg(name: string, fallback?: string) {
   const index = process.argv.indexOf(name);
@@ -114,30 +115,48 @@ if (!existsSync(themeFixture)) {
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const helper = join(outDir, "macos-native-window-filmstrip");
-const helperCompile = await run([
-  "xcrun",
-  "swiftc",
-  "-parse-as-library",
-  "-O",
-  resolve(import.meta.dir, "../agentic/macos-native-window-filmstrip.swift"),
-  "-o",
-  helper,
-]);
-if (helperCompile.exitCode !== 0) {
-  throw new Error(`filmstrip helper compile failed: ${helperCompile.stderr}`);
+// WP4 (glass-smoke-harness-max-info): accept pre-compiled hash-validated
+// helpers from the study orchestrator; compile per-run only when absent.
+const suppliedFilmstripHelper = arg("--filmstrip-helper");
+const suppliedInterferenceHelper = arg("--interference-helper");
+let helper: string;
+if (suppliedFilmstripHelper) {
+  helper = requireValidatedHelper(suppliedFilmstripHelper, "filmstrip")
+    .binaryPath;
+} else {
+  helper = join(outDir, "macos-native-window-filmstrip");
+  const helperCompile = await run([
+    "xcrun",
+    "swiftc",
+    "-parse-as-library",
+    "-O",
+    resolve(import.meta.dir, "../agentic/macos-native-window-filmstrip.swift"),
+    "-o",
+    helper,
+  ]);
+  if (helperCompile.exitCode !== 0) {
+    throw new Error(`filmstrip helper compile failed: ${helperCompile.stderr}`);
+  }
 }
-const interferenceHelper = join(outDir, "macos-glass-interference-monitor");
-const interferenceCompile = await run([
-  "xcrun",
-  "swiftc",
-  "-O",
-  resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
-  "-o",
-  interferenceHelper,
-]);
-if (interferenceCompile.exitCode !== 0) {
-  throw new Error(`interference helper compile failed: ${interferenceCompile.stderr}`);
+let interferenceHelper: string;
+if (suppliedInterferenceHelper) {
+  interferenceHelper = requireValidatedHelper(
+    suppliedInterferenceHelper,
+    "interference",
+  ).binaryPath;
+} else {
+  interferenceHelper = join(outDir, "macos-glass-interference-monitor");
+  const interferenceCompile = await run([
+    "xcrun",
+    "swiftc",
+    "-O",
+    resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
+    "-o",
+    interferenceHelper,
+  ]);
+  if (interferenceCompile.exitCode !== 0) {
+    throw new Error(`interference helper compile failed: ${interferenceCompile.stderr}`);
+  }
 }
 
 const receipt: Json = {
