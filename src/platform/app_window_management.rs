@@ -447,6 +447,31 @@ pub fn ensure_main_panel_configured(context: &'static str) -> bool {
         return true;
     }
 
+    // The boot-time accessory transform can silently fail for unbundled
+    // binaries: macOS may return NO from setActivationPolicy before NSApp
+    // finishes launching, leaving the process at Prohibited(2). Observed
+    // 2026-07-26 in every driver-launched probe session: "Configured app as
+    // accessory" logged at boot, yet [NSApp activationPolicy] read 2 121ms
+    // later, panicking the AfterConfigure invariant. ensure_* re-applies the
+    // transform here — by ensure-time the app is running, where the
+    // transform reliably takes — so the invariant asserts a converged state
+    // instead of a boot race.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let app: id = NSApp();
+        let policy: i64 = msg_send![app, activationPolicy];
+        if policy != NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY {
+            logging::log(
+                "PANEL",
+                &format!(
+                    "ensure_main_panel_configured({}): activationPolicy={} — re-applying accessory transform",
+                    context, policy
+                ),
+            );
+            configure_as_accessory_app();
+        }
+    }
+
     configure_as_floating_panel();
     swizzle_gpui_blurred_view();
 
