@@ -333,8 +333,9 @@ fn replace_pending_context_parts_clears_previous_parts_and_resets_consumption() 
 /// sequence through `stage_inline_context_parts_from_host` ->
 /// `replace_pending_context_parts` on the shared host-reuse path.
 ///
-/// Pairs with `tests/notes_ai_routing.rs::notes_cart_reopen_replaces_previous_pending_parts`
-/// (source-level pin) and `tests/notes_ai_routing.rs::notes_target_staging_uses_shared_host_replacement_path`
+/// Historical pairing: `tests/notes_ai_routing.rs` carried the source-level
+/// pins for this behavior until the hosted Notes Agent Chat surface was
+/// removed (2026-07-27, Notes AI ownership moved to the main window)
 /// (ensures the note-target code path does not regress to `add_context_part`).
 #[test]
 fn two_sequential_note_handoffs_leave_only_the_second_notes_parts() {
