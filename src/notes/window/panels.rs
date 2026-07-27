@@ -241,12 +241,10 @@ impl NotesApp {
                 self.reset_window_position_to_default(window, cx);
             }
             NotesAction::SendToAi => {
-                let opened = self
-                    .open_selected_note_cart_in_embedded_agent_chat("NotesAction::SendToAi", cx);
+                // Close the panel first, then run the one-shot handoff — it
+                // owns its own success/blocked feedback.
                 self.close_actions_panel(window, cx);
-                if opened {
-                    self.show_action_feedback("Staged in Agent Chat", false);
-                }
+                let _ = self.handoff_selected_note_to_main_agent_chat("NotesAction::SendToAi", cx);
                 return;
             }
             NotesAction::Cancel => {

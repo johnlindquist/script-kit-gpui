@@ -751,19 +751,20 @@ impl NotesApp {
                         cx.stop_propagation();
                     }
                 }
-                // Cmd+Enter: open embedded Agent Chat with the staged note cart as
-                // inline @mentions. Must precede plain Enter and other
-                // platform shortcuts.
+                // Cmd+Enter: hand the selected note (plus staged cart) off to
+                // the MAIN window's Agent Chat as an explicit @note reference.
+                // Must precede plain Enter and other platform shortcuts. Stop
+                // propagation whether the handoff staged or presented
+                // reason-specific feedback — never fall through to insert a
+                // newline after a blocked handoff.
                 key if is_key_enter(key)
                     && !modifiers.shift
                     && !modifiers.control
                     && !modifiers.alt =>
                 {
-                    if self
-                        .open_selected_note_cart_in_embedded_agent_chat("NotesWindowCmdEnter", cx)
-                    {
-                        cx.stop_propagation();
-                    }
+                    let _ =
+                        self.handoff_selected_note_to_main_agent_chat("NotesWindowCmdEnter", cx);
+                    cx.stop_propagation();
                 }
                 key if key.eq_ignore_ascii_case("k") => {
                     if self.command_bar.is_open() {
@@ -808,22 +809,10 @@ impl NotesApp {
                 }
                 key if key.eq_ignore_ascii_case("a") => {
                     if modifiers.shift {
-                        if self.surface_mode == NotesSurfaceMode::AgentChat {
-                            self.request_focus_surface(
-                                focus::NotesFocusSurface::AgentChat,
-                                window,
-                                cx,
-                            );
-                            cx.stop_propagation();
-                            return;
-                        }
-
-                        if self.open_selected_note_cart_in_embedded_agent_chat(
-                            "NotesWindowCmdShiftA",
-                            cx,
-                        ) {
-                            cx.stop_propagation();
-                        }
+                        // Compatibility alias for the same one-shot handoff.
+                        let _ = self
+                            .handoff_selected_note_to_main_agent_chat("NotesWindowCmdShiftA", cx);
+                        cx.stop_propagation();
                     }
                 }
                 key if key.eq_ignore_ascii_case("n") => {

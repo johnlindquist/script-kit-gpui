@@ -2258,9 +2258,8 @@ pub fn handle_notes_editor_key_for_automation(
                 && !alt
                 && crate::ui_foundation::is_key_enter(&key)
             {
-                action = "openNotesAgentChatFromCmdEnter";
-                handled =
-                    app.open_selected_note_cart_in_embedded_agent_chat("NotesWindowCmdEnter", cx);
+                action = "openMainAgentChatFromNotesCmdEnter";
+                handled = app.handoff_selected_note_to_main_agent_chat("NotesWindowCmdEnter", cx);
             } else if platform && !shift && !control && !alt && key == "." {
                 action = "activateNotesDeeplinkOrFocusMode";
                 if !app.activate_deeplink_under_cursor(window, cx) {

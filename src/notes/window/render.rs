@@ -23,9 +23,9 @@ impl NotesApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    // Shared persistent Notes / Agent switcher — same owner as
-                    // the Notes-mode titlebar.
-                    .child(self.render_surface_switcher(cx)),
+                    // Transitional: the mode switcher is gone; this whole
+                    // surface renderer is deleted with the embedded host.
+                    .child(self.render_ask_ai_button(cx)),
             )
             .child(
                 div()

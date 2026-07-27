@@ -118,7 +118,7 @@ impl NotesAction {
             NotesAction::PermanentlyDeleteNote => "Delete Permanently",
             NotesAction::EnableAutoSizing => "Toggle Auto-Sizing",
             NotesAction::ResetWindowPosition => "Reset Window Position",
-            NotesAction::SendToAi => "Send to Agent Chat",
+            NotesAction::SendToAi => "Ask AI About This Note",
             NotesAction::Cancel => "Cancel",
         }
     }

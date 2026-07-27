@@ -1,96 +1,18 @@
 use super::*;
 
 impl NotesApp {
-    /// One segment of the persistent Notes / Agent surface switcher.
-    ///
-    /// The selected state is independent of hover; the inactive segment is a
-    /// real click target with at least the shared minimum hit size.
-    fn render_surface_segment(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        selected: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted_color = cx.theme().muted_foreground;
-        let accent_color = cx.theme().accent;
-        let target: NotesSurfaceMode = if id == "notes-switch-notes" {
-            NotesSurfaceMode::Notes
-        } else {
-            NotesSurfaceMode::AgentChat
-        };
-
-        div()
-            .id(id)
-            .min_w(px(MIN_TARGET_SIZE))
-            .min_h(px(MIN_TARGET_SIZE))
-            .px_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_sm()
-            .when(selected, |d| d.text_color(accent_color))
-            .when(!selected, |d| {
-                d.text_color(muted_color.opacity(OPACITY_MUTED))
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(accent_color))
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                match target {
-                    NotesSurfaceMode::Notes => {
-                        if this.surface_mode != NotesSurfaceMode::Notes {
-                            // Plain mode navigation: preserves the Agent
-                            // entity, conversation, and any in-flight turn
-                            // (prepare_for_host_hide keeps the live session).
-                            this.switch_to_notes_surface(window, cx);
-                        }
-                    }
-                    NotesSurfaceMode::AgentChat => {
-                        if this.surface_mode != NotesSurfaceMode::AgentChat {
-                            // Plain mode navigation MUST NOT stage the current
-                            // note: reuse/focus with no initial input. The
-                            // explicit "ask about this note" handoff stays on
-                            // Cmd+Enter (`open_selected_note_cart_in_embedded_agent_chat`).
-                            let _ = this.open_or_focus_embedded_agent_chat(None, window, cx);
-                        }
-                    }
-                }
+    /// Center titlebar control: a one-shot "Ask AI" command that hands the
+    /// selected note off to the MAIN window's Agent Chat. This is a command,
+    /// not a mode — it never displays a toggled/selected state, and the Notes
+    /// window stays open.
+    pub(super) fn render_ask_ai_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("notes-ask-ai")
+            .ghost()
+            .xsmall()
+            .label("Ask AI")
+            .on_click(cx.listener(|this, _, _window, cx| {
+                let _ = this.handoff_selected_note_to_main_agent_chat("NotesTitlebarAskAi", cx);
             }))
-            .child(label)
-            .into_any_element()
-    }
-
-    /// The persistent Notes / Agent switcher — the primary affordance for
-    /// moving between the editor and the embedded Agent Chat surface. Visible
-    /// in BOTH modes (the floating footer no longer exists in Notes mode).
-    pub(super) fn render_surface_switcher(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted_color = cx.theme().muted_foreground;
-        let selected = self.surface_mode;
-
-        div()
-            .id("notes-surface-switcher")
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .child(self.render_surface_segment(
-                "notes-switch-notes",
-                "Notes",
-                selected == NotesSurfaceMode::Notes,
-                cx,
-            ))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted_color.opacity(OPACITY_SUBTLE))
-                    .child("/"),
-            )
-            .child(self.render_surface_segment(
-                "notes-switch-agent_chat",
-                "Agent",
-                selected == NotesSurfaceMode::AgentChat,
-                cx,
-            ))
             .into_any_element()
     }
 
@@ -217,9 +139,9 @@ impl NotesApp {
                     })
                     .child(title),
             )
-            // Center: the persistent Notes / Agent switcher — the primary
-            // transition affordance in both modes. Fades with focus mode like
-            // the rest of the chrome but never disappears for the title.
+            // Center: the one-shot Ask AI command (replaces the removed
+            // Notes/Agent mode switcher). Fades with focus mode like the rest
+            // of the chrome but never disappears for the title.
             .child(
                 div()
                     .flex_none()
@@ -227,7 +149,7 @@ impl NotesApp {
                     .when(in_focus_mode && window_hovered, |d| {
                         d.opacity(OPACITY_DISABLED)
                     })
-                    .child(self.render_surface_switcher(cx)),
+                    .child(self.render_ask_ai_button(cx)),
             )
             // Trailing lane: save status + trash/actions cluster.
             .child(
