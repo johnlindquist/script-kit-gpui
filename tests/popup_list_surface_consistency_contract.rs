@@ -3,7 +3,6 @@
 
 const AGENT_CHAT_VIEW: &str = include_str!("../src/ai/agent_chat/ui/view.rs");
 const AGENT_CHAT_WINDOW: &str = include_str!("../src/ai/agent_chat/ui/chat_window.rs");
-const NOTES_AGENT_CHAT_HOST: &str = include_str!("../src/notes/window/agent_chat_host.rs");
 const AGENT_CHAT_TESTS: &str = include_str!("../src/ai/agent_chat/ui/tests.rs");
 const DICTATION_MIC_POPUP: &str = include_str!("../src/dictation/microphone_popup_window.rs");
 
@@ -31,17 +30,6 @@ fn agent_chat_history_prompt_popup_is_only_used_for_composer_portals() {
         detached_portal_body.contains("view.open_history_portal_with_entries(query, hits, cx);")
             && detached_portal_body.contains("view.open_history_popup_from_host("),
         "detached Agent Chat should use the history popup only after a composer portal request has staged rows"
-    );
-
-    let notes_portal_body = function_body(
-        NOTES_AGENT_CHAT_HOST,
-        "fn handle_agent_chat_portal_static(",
-        "/// Wire Agent Chat host callbacks",
-    );
-    assert!(
-        notes_portal_body.contains("view.open_history_portal_with_entries(query, hits, cx)")
-            && !NOTES_AGENT_CHAT_HOST.contains("open_embedded_agent_chat_history_popup"),
-        "Notes-hosted Agent Chat history shortcuts must use actions; only composer portal rows may use the popup"
     );
 
     assert!(

@@ -95,7 +95,6 @@ const contractReceipt: NotesLiveResizeReceipt = {
   directions: [],
   settleProof: null,
   minClamp: null,
-  modePartition: null,
   persistence: null,
   morph: null,
   ownerConsistent: true,
@@ -417,29 +416,6 @@ async function postUpStability(pid: number, windowId: number): Promise<number> {
   return maxDelta;
 }
 
-/** Click a titlebar switcher segment by sweeping x-offsets from center. */
-async function clickSurfaceSwitcher(
-  segment: "notes" | "agent",
-  windowWidth: number,
-  titlebarHeight: number,
-  expectMode: string,
-): Promise<boolean> {
-  const offsets =
-    segment === "agent" ? [30, 24, 36, 20, 42] : [-30, -24, -36, -20, -42];
-  for (const offset of offsets) {
-    await driver.simulateGpuiClick(windowWidth / 2 + offset, titlebarHeight / 2, {
-      target,
-      timeoutMs: 5_000,
-    });
-    const deadline = performance.now() + 1_200;
-    while (performance.now() < deadline) {
-      if ((await surfaceMode()) === expectMode) return true;
-      await Bun.sleep(40);
-    }
-  }
-  return (await surfaceMode()) === expectMode;
-}
-
 function layoutComponent(layout: Json, name: string): Json | null {
   const components = layout?.components ?? layout?.layout?.components ?? [];
   return (
@@ -722,77 +698,6 @@ try {
     };
     receiptExtras.minClampSkipped = { rPass, bPass };
   }
-
-  // ── Notes ↔ Agent backdrop partition ───────────────────────────────────
-  await announceTestStatus(
-    "Notes/Agent partition",
-    "Switching surfaces; backdrop must re-partition without frame changes",
-  );
-  receiptExtras.statusAnnouncements.push("Notes/Agent partition");
-  await setNotesFrameWithSystemEvents(pid, baseline);
-  await waitForExactFrame(pid, pinnedWindowId, baseline, 1);
-  const elements = await driver.getElements({ target }, { timeoutMs: 5_000 });
-  const elementIds = ((elements?.elements ?? []) as Json[]).map(
-    (element) => element?.semanticId ?? element?.semantic_id ?? element?.id,
-  );
-  receiptExtras.switcherElements = elementIds;
-  const switcherProjected =
-    elementIds.includes("control:notes-switch-notes") &&
-    elementIds.includes("control:notes-switch-agent_chat");
-  const partitionLogOffset = existsSync(driver.logPath) ? statSync(driver.logPath).size : 0;
-  const frameBefore = (await exactNotesWindow(pid, pinnedWindowId)).bounds as Rect;
-  const titlebarHeight = 36;
-  const toAgent = await clickSurfaceSwitcher("agent", frameBefore.width, titlebarHeight, "AgentChat");
-  await Bun.sleep(400);
-  const agentFrame = (await exactNotesWindow(pid, pinnedWindowId)).bounds as Rect;
-  const agentLayout = await notesLayout();
-  const agentStage = layoutComponent(agentLayout, "NotesContentStage");
-  const agentGutter = layoutComponent(agentLayout, "NotesFooterDesktopGutter");
-  const toNotes = await clickSurfaceSwitcher("notes", frameBefore.width, titlebarHeight, "Notes");
-  await Bun.sleep(400);
-  const backFrame = (await exactNotesWindow(pid, pinnedWindowId)).bounds as Rect;
-  const backLayout = await notesLayout();
-  const backStage = layoutComponent(backLayout, "NotesContentStage");
-  const slice = readLogSlice(driver.logPath, partitionLogOffset);
-  const insetReceipts = extractNamedReceipts(slice.text, "window_backdrop_bottom_inset_set")
-    .map((entry) => ({
-      before: Number(entry.fields.bottom_inset_before),
-      after: Number(entry.fields.bottom_inset_after),
-      raw: entry.raw,
-    }));
-  receiptExtras.insetReceipts = insetReceipts;
-  const first = insetReceipts.find((receipt) => receipt.after > 0) ?? null;
-  const second = insetReceipts.find((receipt) => receipt.before > 0 && receipt.after === 0) ?? null;
-  const outerDeltaMaxPt = Math.max(
-    ...(["x", "y", "width", "height"] as const).map((key) =>
-      Math.max(
-        Math.abs(Number(agentFrame[key]) - Number(frameBefore[key])),
-        Math.abs(Number(backFrame[key]) - Number(frameBefore[key])),
-      ),
-    ),
-  );
-  const agentStageDeficit =
-    agentStage === null
-      ? null
-      : Number(frameBefore.height) - Number(agentStage?.bounds?.height ?? Number.NaN);
-  const measuredGap = agentGutter === null ? null : Number(agentGutter?.bounds?.height ?? Number.NaN);
-  const notesDeficitAfterReturn = backStage === null ? 0 : Number.NaN;
-  contractReceipt.modePartition = {
-    disposition:
-      switcherProjected && toAgent && toNotes ? "EVALUABLE_PASS" : "INVALID_OBSERVER",
-    sameWindowId: true,
-    outerDeltaMaxPt,
-    firstInsetBefore: first?.before ?? Number.NaN,
-    firstInsetAfter: first?.after ?? Number.NaN,
-    secondInsetBefore: second?.before ?? Number.NaN,
-    secondInsetAfter: second?.after ?? Number.NaN,
-    agentStageDeficitPt: Number.isFinite(agentStageDeficit as number) ? agentStageDeficit : null,
-    measuredGapPt: Number.isFinite(measuredGap as number) ? measuredGap : null,
-    notesStageDeficitAfterReturnPt: Number.isFinite(notesDeficitAfterReturn)
-      ? notesDeficitAfterReturn
-      : null,
-  };
-  receiptExtras.partitionFrames = { frameBefore, agentFrame, backFrame };
 
   // ── Stable persistence ─────────────────────────────────────────────────
   await announceTestStatus(

@@ -211,7 +211,7 @@ fn full_agent_chat_profile_icon_moves_to_header_focused_text_keeps_icon() {
     let footer_marker_fn = source_between(
         AGENT_CHAT_VIEW,
         "fn render_profile_status_marker_from_snapshot",
-        "pub(crate) fn build_external_host_footer",
+        "pub(crate) fn register_inline_owned_token",
     );
     let left_info_fn = source_between(
         AGENT_CHAT_VIEW,

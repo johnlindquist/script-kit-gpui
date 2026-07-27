@@ -12,7 +12,7 @@
   "entries": [
     {
       "file": "src/app_actions/handle_action/mod.rs",
-      "line": 1104,
+      "line": 1105,
       "owner": "transition_to_script_list_after_action",
       "receiver": "self",
       "operation": "assign",
@@ -22,7 +22,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3363,
+      "line": 3402,
       "owner": "open_builtin_filterable_view",
       "receiver": "self",
       "operation": "assign",
@@ -32,7 +32,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3422,
+      "line": 3461,
       "owner": "open_main_window",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -56,7 +56,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3461,
+      "line": 3500,
       "owner": "open_ai_vault_source_filter",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -80,7 +80,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 3506,
+      "line": 3545,
       "owner": "open_builtin_filterable_view_with_filter",
       "receiver": "self",
       "operation": "assign",
@@ -90,7 +90,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 4932,
+      "line": 4971,
       "owner": "execute_configure_snap_mode_prompt",
       "receiver": "self",
       "operation": "assign",
@@ -100,7 +100,7 @@
     },
     {
       "file": "src/app_execute/builtin_execution.rs",
-      "line": 5023,
+      "line": 5062,
       "owner": "execute_select_microphone_builtin",
       "receiver": "self",
       "operation": "assign",
@@ -335,7 +335,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/agent_chat_launch.rs",
-      "line": 604,
+      "line": 609,
       "owner": "open_tab_ai_codex_exec_view_from_launch",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -364,7 +364,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/agent_chat_launch.rs",
-      "line": 815,
+      "line": 823,
       "owner": "open_tab_ai_pi_view_from_launch",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -451,7 +451,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 829,
+      "line": 847,
       "owner": "reattach_embedded_agent_chat_from_detached",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -480,7 +480,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 1600,
+      "line": 1630,
       "owner": "try_reuse_embedded_agent_chat_view",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -509,7 +509,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 2901,
+      "line": 2938,
       "owner": "open_tab_ai_harness_terminal_from_request",
       "receiver": "self",
       "operation": "assign",
@@ -519,7 +519,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 3640,
+      "line": 3677,
       "owner": "close_tab_ai_harness_terminal_impl",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -543,7 +543,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 3685,
+      "line": 3722,
       "owner": "close_tab_ai_harness_terminal",
       "receiver": "self",
       "operation": "transitionHelper",
@@ -567,7 +567,7 @@
     },
     {
       "file": "src/app_impl/agent_handoff/mod.rs",
-      "line": 3777,
+      "line": 3814,
       "owner": "close_agent_chat_to_script_list",
       "receiver": "self",
       "operation": "assign",
@@ -777,7 +777,7 @@
     },
     {
       "file": "src/app_impl/selection_fallback.rs",
-      "line": 804,
+      "line": 822,
       "owner": "open_brain_memory_preview",
       "receiver": "self",
       "operation": "assign",
@@ -787,7 +787,7 @@
     },
     {
       "file": "src/app_impl/selection_fallback.rs",
-      "line": 1549,
+      "line": 1567,
       "owner": "open_script_issues_view",
       "receiver": "self",
       "operation": "assign",
@@ -831,7 +831,7 @@
     },
     {
       "file": "src/app_impl/ui_window.rs",
-      "line": 812,
+      "line": 832,
       "owner": "dispatch_main_window_footer_action",
       "receiver": "self",
       "operation": "assign",
@@ -841,7 +841,7 @@
     },
     {
       "file": "src/app_impl/ui_window.rs",
-      "line": 870,
+      "line": 890,
       "owner": "dispatch_main_window_footer_action",
       "receiver": "self",
       "operation": "assign",
@@ -851,7 +851,7 @@
     },
     {
       "file": "src/app_impl/ui_window.rs",
-      "line": 2679,
+      "line": 2707,
       "owner": "resolve_confirm_prompt",
       "receiver": "self",
       "operation": "assign",
@@ -871,7 +871,7 @@
     },
     {
       "file": "src/main_sections/day_page_view.rs",
-      "line": 1983,
+      "line": 1984,
       "owner": "show_day_page_view_with_substrate",
       "receiver": "self",
       "operation": "assign",
@@ -881,7 +881,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 1860,
+      "line": 1832,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -891,7 +891,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 1897,
+      "line": 1869,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -901,7 +901,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 1935,
+      "line": 1907,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -911,7 +911,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2000,
+      "line": 1972,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -921,7 +921,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2022,
+      "line": 1994,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -931,7 +931,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2057,
+      "line": 2029,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -941,7 +941,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2105,
+      "line": 2077,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -951,7 +951,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 2225,
+      "line": 2197,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -961,7 +961,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 7660,
+      "line": 7580,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -971,7 +971,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 7752,
+      "line": 7672,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -981,7 +981,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 7789,
+      "line": 7709,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -991,7 +991,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 7820,
+      "line": 7740,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -1001,7 +1001,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 7865,
+      "line": 7785,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -1011,7 +1011,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 8157,
+      "line": 8077,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",
@@ -1021,7 +1021,7 @@
     },
     {
       "file": "src/prompt_handler/mod.rs",
-      "line": 8385,
+      "line": 8308,
       "owner": "handle_prompt_message_with_window",
       "receiver": "self",
       "operation": "assign",

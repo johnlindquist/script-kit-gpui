@@ -418,9 +418,9 @@ pub fn get_notes_command_bar_actions(info: &NotesInfo) -> Vec<Action> {
         actions.push(
             Action::new(
                 "send_to_ai",
-                "Send to Agent Chat",
+                "Ask AI About This Note",
                 Some(
-                    "Open Agent Chat inside the Notes window and stage the note cart as @mentions"
+                    "Open the main window's Agent Chat with this note staged as @note context"
                         .to_string(),
                 ),
                 ActionCategory::ScriptContext,

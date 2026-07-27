@@ -23,31 +23,13 @@ fn detached_agent_chat_window_focuses_view_and_wires_history_callback() {
 }
 
 #[test]
-fn notes_cmd_shift_a_routes_through_existing_embedded_agent_chat_path() {
+fn notes_cmd_shift_a_routes_through_shared_main_handoff_path() {
     let source = include_str!("../src/notes/window/keyboard.rs");
 
     assert!(
-        source.contains("self.request_focus_surface(")
-            && source.contains("focus::NotesFocusSurface::AgentChat")
-            && source.contains("open_selected_note_cart_in_embedded_agent_chat")
+        source.contains("handoff_selected_note_to_main_agent_chat")
             && source.contains("\"NotesWindowCmdShiftA\""),
-        "Notes Cmd+Shift+A should reuse the embedded Agent Chat cart handoff path instead of duplicating AI routing"
-    );
-}
-
-#[test]
-fn notes_agent_chat_history_uses_actions_route() {
-    let source = include_str!("../src/notes/window/agent_chat_host.rs");
-
-    assert!(
-        source.contains("chat.set_on_open_history_command")
-            && source.contains("let _ = app.open_agent_chat_history_actions(window, cx);"),
-        "Notes-hosted Agent Chat Cmd+P should open the Notes-anchored ActionsDialog history route"
-    );
-    assert!(
-        source.contains("action_id.strip_prefix(crate::actions::AGENT_CHAT_HISTORY_SELECT_ACTION_PREFIX)")
-            && source.contains("chat.select_history_session_by_id(session_id, cx)"),
-        "Notes-hosted Agent Chat history rows should dispatch back into the embedded Agent Chat view by session id"
+        "Notes Cmd+Shift+A should reuse the shared notes->main Agent Chat handoff instead of duplicating AI routing"
     );
 }
 
@@ -69,8 +51,10 @@ fn global_cmd_enter_uses_return_preserving_agent_chat_entry_helper() {
 #[test]
 fn entry_intent_return_helper_restores_previous_state_on_short_circuit() {
     let source = include_str!("../src/app_impl/agent_handoff/mod.rs");
+    // The helper dropped its "_and_options" suffix in a pre-2026-07-26
+    // refactor; the invariant (seed + restore-on-short-circuit) is unchanged.
     let fn_start = source
-        .find("fn open_tab_ai_agent_chat_with_entry_intent_preserving_return_and_options(")
+        .find("fn open_tab_ai_agent_chat_with_entry_intent_preserving_return(")
         .expect("entry-intent preserving helper must exist");
     let fn_body = &source[fn_start..];
 

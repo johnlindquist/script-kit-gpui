@@ -85,19 +85,7 @@ function baseReceipt(
       ownerStable: true,
       legacyResizeStartedSeen: false,
     },
-    modePartition: {
-      disposition: "EVALUABLE_PASS",
-      sameWindowId: true,
-      outerDeltaMaxPt: 0,
-      firstInsetBefore: 0,
-      firstInsetAfter: 44,
-      secondInsetBefore: 44,
-      secondInsetAfter: 0,
-      agentStageDeficitPt: 44,
-      measuredGapPt: 8,
-      notesStageDeficitAfterReturnPt: 0,
-    },
-    persistence: {
+persistence: {
       disposition: "EVALUABLE_PASS",
       widthDeltaPt: 0,
       heightDeltaPt: 0,
@@ -231,25 +219,6 @@ describe("validateNotesLiveResizeReceipt", () => {
     });
     const verdict = validateNotesLiveResizeReceipt(receipt);
     expect(verdict.landingReady).toBe(false);
-  });
-
-  test("agent inset correct but outer width drifts 1.01pt → partition fails", () => {
-    const receipt = baseReceipt();
-    receipt.modePartition = {
-      ...receipt.modePartition!,
-      outerDeltaMaxPt: 1.01,
-    };
-    const verdict = validateNotesLiveResizeReceipt(receipt);
-    expect(verdict.nonDirectionalContractPass).toBe(false);
-  });
-
-  test("measured gap 7.99 or 8.01 fails the exact-gap tolerance", () => {
-    for (const gap of [7.99, 8.01]) {
-      const receipt = baseReceipt();
-      receipt.modePartition = { ...receipt.modePartition!, measuredGapPt: gap };
-      const verdict = validateNotesLiveResizeReceipt(receipt);
-      expect(verdict.nonDirectionalContractPass).toBe(false);
-    }
   });
 
   test("content 349×280 or 350×279 fails the clamp clause", () => {

@@ -293,28 +293,6 @@ fn notes_command_bar_uses_notes_as_actions_parent() {
 }
 
 #[test]
-fn notes_agent_chat_actions_use_notes_as_actions_parent() {
-    let source = include_str!("../../src/notes/window/agent_chat_host.rs");
-    let toggle_start = source
-        .find("pub(super) fn toggle_agent_chat_actions")
-        .expect("Notes Agent Chat toggle should exist");
-    let toggle_body = &source[toggle_start..];
-    let toggle_end = toggle_body
-        .find("/// Relaunch the cached Notes-hosted Agent Chat surface")
-        .expect("toggle_agent_chat_actions should end before relaunch docs");
-    let toggle_body = &toggle_body[..toggle_end];
-
-    assert!(
-        toggle_body.contains("let parent_automation_id = Some(\"notes\".to_string());"),
-        "Notes-hosted Agent Chat actions must use the Notes window as their popup parent"
-    );
-    assert!(
-        !toggle_body.contains("focused_automation_window_id()"),
-        "Notes-hosted Agent Chat actions must not inherit main/focused automation parent identity"
-    );
-}
-
-#[test]
 fn notes_wait_for_not_rejected_as_main_only() {
     let source = include_str!("../../src/prompt_handler/mod.rs");
     assert!(

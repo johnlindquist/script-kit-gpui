@@ -307,33 +307,32 @@ fn notes_send_to_agent_chat_label_is_consistent_across_builder_and_panel() {
     let panel = include_str!("../src/notes/actions_panel.rs");
 
     assert!(
-        builder.contains("\"Send to Agent Chat\""),
-        "Notes builder must use 'Send to Agent Chat' label"
+        builder.contains("\"Ask AI About This Note\""),
+        "Notes builder must use 'Ask AI About This Note' label"
     );
     assert!(
-        panel.contains("\"Send to Agent Chat\""),
-        "Notes actions panel must use 'Send to Agent Chat' display name"
+        panel.contains("\"Ask AI About This Note\""),
+        "Notes actions panel must use 'Ask AI About This Note' display name"
     );
 }
 
 #[test]
-fn notes_embedded_agent_chat_switch_emits_structured_logs() {
-    let panels = include_str!("../src/notes/window/panels.rs");
+fn notes_main_handoff_emits_structured_logs() {
+    let handoff = include_str!("../src/notes/window/ai_handoff.rs");
     assert!(
-        panels.contains("notes_cart_open_embedded_agent_chat_requested"),
-        "Notes cart handler must emit notes_cart_open_embedded_agent_chat_requested structured log"
+        handoff.contains("notes_ai_handoff_requested"),
+        "Notes handoff must emit notes_ai_handoff_requested structured log"
     );
     assert!(
-        panels.contains("notes_cart_handoff_skipped"),
-        "Notes cart handler must emit notes_cart_handoff_skipped for empty notes"
+        handoff.contains("notes_ai_handoff_main_staged"),
+        "Notes handoff must emit notes_ai_handoff_main_staged structured log"
     );
     assert!(
-        panels.contains("open_or_focus_embedded_agent_chat")
-            || panels.contains("relaunch_embedded_agent_chat"),
-        "Notes must route through the Notes-owned embedded Agent Chat helpers"
+        handoff.contains("notes_ai_handoff_blocked"),
+        "Notes handoff must emit notes_ai_handoff_blocked for empty notes"
     );
     assert!(
-        !panels.contains("request_explicit_agent_chat_handoff_from_secondary_window"),
+        !handoff.contains("request_explicit_agent_chat_handoff_from_secondary_window"),
         "Notes must not use the detached secondary-window Agent Chat handoff path"
     );
 

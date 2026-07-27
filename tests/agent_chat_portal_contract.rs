@@ -5,7 +5,6 @@ const AGENT_CHAT_TYPES_SOURCE: &str = include_str!("../src/ai/agent_chat/ui/type
 const PORTAL_CONTRACT_SOURCE: &str = include_str!("../src/ai/agent_chat/ui/portal_contract.rs");
 const ATTACHMENT_PORTAL_SOURCE: &str = include_str!("../src/app_impl/attachment_portal.rs");
 const CHAT_WINDOW_SOURCE: &str = include_str!("../src/ai/agent_chat/ui/chat_window.rs");
-const NOTES_AGENT_CHAT_HOST_SOURCE: &str = include_str!("../src/notes/window/agent_chat_host.rs");
 const PASTED_TEXT_SOURCE: &str = include_str!("../src/pasted_text.rs");
 const PASTED_IMAGE_SOURCE: &str = include_str!("../src/pasted_image.rs");
 
@@ -96,15 +95,6 @@ fn host_transitions_preserve_the_staged_portal_session() {
         !prepare_for_host_hide.contains("self.pending_portal_session = None;"),
         "prepare_for_host_hide must preserve the staged portal session across host transitions"
     );
-    assert!(
-        NOTES_AGENT_CHAT_HOST_SOURCE.contains("let portal_view = view.downgrade();"),
-        "Notes portal callback must capture the originating Agent Chat view"
-    );
-    assert!(
-        NOTES_AGENT_CHAT_HOST_SOURCE
-            .contains("Self::handle_agent_chat_portal_static(Some(chat), kind, cx);"),
-        "Notes portal callback must reopen history against the originating Agent Chat view"
-    );
 }
 
 #[test]
@@ -117,15 +107,6 @@ fn history_portal_hosts_seed_query_from_the_pending_contract() {
         CHAT_WINDOW_SOURCE
             .contains("detached_agent_chat_history_portal_query_seeded_from_contract"),
         "detached Agent Chat must log history query seeding from the contract"
-    );
-    assert!(
-        NOTES_AGENT_CHAT_HOST_SOURCE
-            .contains("notes_agent_chat_history_portal_query_seeded_from_contract"),
-        "Notes-hosted Agent Chat must log history query seeding from the contract"
-    );
-    assert!(
-        NOTES_AGENT_CHAT_HOST_SOURCE.contains("PortalKind::AgentChatHistory"),
-        "Notes host must remain restricted to history portals in this iteration"
     );
 }
 

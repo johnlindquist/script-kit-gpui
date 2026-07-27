@@ -12,7 +12,7 @@
  * - `productPass` is true only when every premise clause passes, including all
  *   eight native drag directions.
  * - `nonDirectionalContractPass` covers settle/policy receipts, the 350×280
- *   clamp, the Notes↔Agent backdrop partition, stable-bounds persistence,
+ *   clamp, stable-bounds persistence,
  *   morph-frame non-persistence, owner topology, and cleanup.
  * - `landingReady = evidenceValid && nonDirectionalContractPass` — it may be
  *   true while one or more directions cleanly fail; that is the explicitly
@@ -183,19 +183,6 @@ export interface MinClampProof {
   legacyResizeStartedSeen: boolean;
 }
 
-export interface ModePartitionProof {
-  disposition: TrialDisposition;
-  sameWindowId: boolean;
-  outerDeltaMaxPt: number;
-  firstInsetBefore: number;
-  firstInsetAfter: number;
-  secondInsetBefore: number;
-  secondInsetAfter: number;
-  agentStageDeficitPt: number | null;
-  measuredGapPt: number | null;
-  notesStageDeficitAfterReturnPt: number | null;
-}
-
 export interface PersistenceProof {
   disposition: TrialDisposition;
   widthDeltaPt: number;
@@ -216,7 +203,6 @@ export interface NotesLiveResizeReceipt {
   directions: DirectionTrial[];
   settleProof: SettleProof | null;
   minClamp: MinClampProof | null;
-  modePartition: ModePartitionProof | null;
   persistence: PersistenceProof | null;
   morph: MorphProof | null;
   ownerConsistent: boolean;
@@ -307,40 +293,6 @@ function validateMinClamp(proof: MinClampProof | null, failures: string[]): bool
   return ok;
 }
 
-function validateModePartition(
-  proof: ModePartitionProof | null,
-  failures: string[],
-): boolean {
-  if (proof === null) {
-    failures.push("mode partition proof missing");
-    return false;
-  }
-  if (INVALID_DISPOSITIONS.includes(proof.disposition)) return false;
-  const insetOk =
-    proof.firstInsetBefore === 0 &&
-    proof.firstInsetAfter > GAP_PT &&
-    proof.secondInsetBefore === proof.firstInsetAfter &&
-    proof.secondInsetAfter === 0;
-  const frameOk =
-    proof.sameWindowId &&
-    Math.abs(proof.outerDeltaMaxPt) <= OUTER_FRAME_TOLERANCE_PT;
-  const stageOk =
-    proof.agentStageDeficitPt !== null &&
-    Math.abs(proof.agentStageDeficitPt - proof.firstInsetAfter) <= 1 &&
-    proof.notesStageDeficitAfterReturnPt !== null &&
-    Math.abs(proof.notesStageDeficitAfterReturnPt) <= 1;
-  const gapOk =
-    proof.measuredGapPt !== null &&
-    Math.abs(proof.measuredGapPt - GAP_PT) < GAP_TOLERANCE_PT;
-  const ok = insetOk && frameOk && stageOk && gapOk;
-  if (!ok) {
-    failures.push(
-      `mode partition failed (insets ${proof.firstInsetBefore}→${proof.firstInsetAfter}→${proof.secondInsetAfter}, outerΔ ${proof.outerDeltaMaxPt}, gap ${proof.measuredGapPt})`,
-    );
-  }
-  return ok;
-}
-
 function validatePersistence(
   proof: PersistenceProof | null,
   failures: string[],
@@ -407,7 +359,6 @@ export function validateNotesLiveResizeReceipt(
   for (const proof of [
     receipt.settleProof,
     receipt.minClamp,
-    receipt.modePartition,
     receipt.persistence,
     receipt.morph,
   ]) {
@@ -451,7 +402,6 @@ export function validateNotesLiveResizeReceipt(
   // ── Non-directional contract ─────────────────────────────────────────
   const settleOk = validateSettleProof(receipt.settleProof, failures);
   const minOk = validateMinClamp(receipt.minClamp, failures);
-  const partitionOk = validateModePartition(receipt.modePartition, failures);
   const persistOk = validatePersistence(receipt.persistence, failures);
   const morphOk = validateMorph(receipt.morph, failures);
   if (!receipt.cleanedUp) failures.push("probe did not clean up its app instance");
@@ -464,7 +414,6 @@ export function validateNotesLiveResizeReceipt(
   const nonDirectionalContractPass =
     settleOk &&
     minOk &&
-    partitionOk &&
     persistOk &&
     morphOk &&
     receipt.cleanedUp &&

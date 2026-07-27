@@ -63,8 +63,8 @@ fn cmd_enter_origins_have_real_source_callers() {
         assert!(tab_ai.contains(needle), "missing caller for {needle}");
     }
     assert!(
-        notes.contains("open_selected_note_cart_in_embedded_agent_chat"),
-        "Notes Cmd+Enter must stay on the Notes-owned embedded Agent Chat path"
+        notes.contains("handoff_selected_note_to_main_agent_chat"),
+        "Notes Cmd+Enter must route through the notes->main Agent Chat handoff"
     );
 }
 
