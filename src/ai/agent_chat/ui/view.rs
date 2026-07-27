@@ -1193,6 +1193,12 @@ impl AgentChatView {
         self.focused_text.is_some() && self.ui_variant == AgentChatUiVariant::FocusedTextMini
     }
 
+    /// Read-only UI variant accessor for host-side reuse decisions (e.g. the
+    /// Notes→main handoff only reuses a Standard full-session chat).
+    pub(crate) fn current_ui_variant(&self) -> AgentChatUiVariant {
+        self.ui_variant
+    }
+
     pub(crate) fn locks_main_window_resize(&self) -> bool {
         matches!(self.ui_variant, AgentChatUiVariant::FocusedTextMini)
     }
@@ -8066,6 +8072,99 @@ impl AgentChatView {
         );
         cx.notify();
         Ok(())
+    }
+
+    /// Stage a single primary context part from a host handoff WITHOUT
+    /// clearing the existing conversation, pending context, or composer
+    /// draft.
+    ///
+    /// Contract (Notes→main handoff):
+    /// - blank composer → `"<token> "`;
+    /// - non-blank composer → `"<token> <existing draft>"`;
+    /// - token already owned by this view → leave the draft unchanged;
+    /// - never clears messages, never auto-submits.
+    pub(crate) fn stage_primary_context_part_from_host_preserving_composer(
+        &mut self,
+        part: crate::ai::message_parts::AiContextPart,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.is_setup_mode() {
+            return Err("Agent Chat is in setup mode".to_string());
+        }
+
+        let inline_token =
+            crate::ai::context_mentions::part_to_inline_token(&part).unwrap_or_else(|| {
+                crate::ai::context_mentions::format_typed_label_mention_token(
+                    "context",
+                    part.label(),
+                )
+            });
+        let token_already_owned = self.inline_owned_context_tokens.contains(&inline_token);
+
+        let staged_part = part.clone();
+        let token_for_prefix = inline_token.clone();
+        self.live_thread().update(cx, move |thread, cx| {
+            thread.add_context_part(staged_part, cx);
+            if !token_already_owned {
+                let existing = thread.input.text().to_string();
+                let new_text = if existing.trim().is_empty() {
+                    format!("{token_for_prefix} ")
+                } else {
+                    format!("{token_for_prefix} {existing}")
+                };
+                let cursor = new_text.chars().count();
+                thread.input.set_text(new_text);
+                thread.input.set_cursor(cursor);
+            }
+            cx.notify();
+        });
+
+        if !token_already_owned {
+            self.register_inline_owned_context_part(inline_token.clone(), part);
+        }
+
+        tracing::info!(
+            target: "script_kit::tab_ai",
+            event = "agent_chat_host_primary_context_staged_preserving_composer",
+            source,
+            token = %inline_token,
+            token_already_owned,
+        );
+        cx.notify();
+        Ok(())
+    }
+
+    /// Stage supplemental context parts from a host handoff as pending chips
+    /// only: the composer text is never modified and duplicates are dropped
+    /// by the thread's equality dedupe. Returns the requested part count.
+    pub(crate) fn stage_supplemental_context_parts_from_host(
+        &mut self,
+        parts: Vec<crate::ai::message_parts::AiContextPart>,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Result<usize, String> {
+        if self.is_setup_mode() {
+            return Err("Agent Chat is in setup mode".to_string());
+        }
+        if parts.is_empty() {
+            return Ok(0);
+        }
+        let count = parts.len();
+        self.live_thread().update(cx, move |thread, cx| {
+            for part in parts {
+                thread.add_context_part(part, cx);
+            }
+            cx.notify();
+        });
+        tracing::info!(
+            target: "script_kit::tab_ai",
+            event = "agent_chat_host_supplemental_context_staged",
+            source,
+            part_count = count,
+        );
+        cx.notify();
+        Ok(count)
     }
 
     pub(crate) fn stage_focused_text_from_host(

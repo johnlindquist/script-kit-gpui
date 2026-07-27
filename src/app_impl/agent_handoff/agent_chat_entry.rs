@@ -105,6 +105,35 @@ impl AgentChatEntryRequest {
         Self::clean_main_launcher(None)
     }
 
+    /// Notes→main handoff: open (or reuse) the MAIN window's Agent Chat with
+    /// the selected note staged as an explicit `@note` reference, leaving the
+    /// Notes window open.
+    ///
+    /// CONTRACT: origin is `Notes`; target is main-host-only
+    /// (`CurrentHostEmbedded` — never the detached chat window); the UI
+    /// variant is Standard; nothing auto-submits; no ambient or implicit
+    /// focused context is inherited; no seed text may displace the canonical
+    /// `@note` prefill.
+    pub(crate) fn notes(
+        target: crate::ai::TabAiTargetContext,
+        supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
+        source: &'static str,
+    ) -> Self {
+        Self {
+            origin: AgentChatEntryOrigin::Notes,
+            target: AgentChatThreadTarget::CurrentHostEmbedded,
+            seed_text: None,
+            ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            seed_policy: AgentChatSeedPolicy::ComposerOnly,
+            context_policy: AgentChatContextPolicy::NotesHandoff {
+                target,
+                supplemental_parts,
+                source,
+            },
+            return_origin: None,
+        }
+    }
+
     /// Promote a bounded Quick AI result into a fresh full Agent Chat without
     /// submitting it or inheriting ambient launcher context.
     pub(crate) fn quick_ai_handoff(seed_text: String) -> Self {
@@ -126,13 +155,48 @@ impl ScriptListApp {
         req: AgentChatEntryRequest,
         cx: &mut Context<Self>,
     ) {
+        let _ = self.dispatch_agent_chat_entry_request(req, cx);
+    }
+
+    /// Open the MAIN window's Agent Chat from the Notes window with the
+    /// selected note staged as the primary explicit context part and the
+    /// persisted note-cart parts staged as supplemental chips.
+    ///
+    /// Returns `true` only when a live, non-setup main-window Agent Chat
+    /// received the primary note context (supplemental staging failures are
+    /// logged but do not retroactively fail the handoff).
+    pub(crate) fn open_agent_chat_from_notes(
+        &mut self,
+        target: crate::ai::TabAiTargetContext,
+        supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.dispatch_agent_chat_entry_request(
+            AgentChatEntryRequest::notes(target, supplemental_parts, source),
+            cx,
+        )
+    }
+
+    /// Dispatch an entry request, reporting whether the intended destination
+    /// received its initial state/context.
+    ///
+    /// Legacy (non-Notes) policies keep their historical fire-and-forget
+    /// semantics and report `true` unconditionally; only the `NotesHandoff`
+    /// branch computes a real staging result, which `open_agent_chat_from_notes`
+    /// surfaces to the Notes window for cart-consumption decisions.
+    fn dispatch_agent_chat_entry_request(
+        &mut self,
+        req: AgentChatEntryRequest,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.agent_chat_surface_state.blocks_launcher_ai_entry() {
             tracing::warn!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_entry_request_blocked_by_portal",
                 origin = ?req.origin,
             );
-            return;
+            return false;
         }
 
         let source_view = req
@@ -153,7 +217,16 @@ impl ScriptListApp {
         );
 
         let seed_policy = req.seed_policy.clone();
-        let force_fresh = matches!(req.target, AgentChatThreadTarget::FreshEmbedded);
+        // Exhaustive on purpose: `CurrentHostEmbedded` means "the main
+        // ScriptListApp's own Agent Chat, never the detached chat window" —
+        // it is not an alias for `ExistingDetachedOrEmbedded`. Its only
+        // producer today is the NotesHandoff policy, whose handler below
+        // never consults `chat_window` reuse paths.
+        let force_fresh = match req.target {
+            AgentChatThreadTarget::ExistingDetachedOrEmbedded => false,
+            AgentChatThreadTarget::CurrentHostEmbedded => false,
+            AgentChatThreadTarget::FreshEmbedded => true,
+        };
         match req.context_policy {
             AgentChatContextPolicy::AmbientOrFocused => {
                 self.open_tab_ai_agent_chat_with_options(
@@ -164,6 +237,7 @@ impl ScriptListApp {
                     force_fresh,
                     cx,
                 );
+                true
             }
             AgentChatContextPolicy::SuppressFocused => {
                 self.open_tab_ai_agent_chat_with_options(
@@ -174,6 +248,7 @@ impl ScriptListApp {
                     force_fresh,
                     cx,
                 );
+                true
             }
             AgentChatContextPolicy::Parts { parts, source } => {
                 // Fail closed: the supported explicit-parts contract is exactly
@@ -184,19 +259,182 @@ impl ScriptListApp {
                         event = "agent_chat_entry_parts_cardinality_unsupported",
                         part_count = parts.len(),
                     );
-                    return;
+                    return false;
                 }
                 // Cardinality is exactly one (checked above); the `else` is
                 // unreachable but kept fail-closed to honor the crate's
                 // `clippy::expect_used` deny.
                 let Some(part) = parts.into_iter().next() else {
-                    return;
+                    return false;
                 };
                 self.open_tab_ai_agent_chat_with_context_part(part, source, cx);
+                true
             }
             AgentChatContextPolicy::ActionsPayload { target } => {
                 self.open_tab_ai_agent_chat_with_explicit_target(target, cx);
+                true
             }
+            AgentChatContextPolicy::NotesHandoff {
+                target,
+                supplemental_parts,
+                source,
+            } => self.open_tab_ai_agent_chat_for_notes_handoff(
+                target,
+                supplemental_parts,
+                source,
+                cx,
+            ),
+        }
+    }
+
+    /// Main-window handler for the Notes handoff policy.
+    ///
+    /// Decision order (locked by the Notes handoff contract):
+    /// 1. Attachment portal or save-offer overlay active → fail closed.
+    /// 2. Current view is a usable full-session Standard Agent Chat (not
+    ///    setup, not focused-text mini) → stage into it, preserving messages
+    ///    and any composer draft.
+    /// 3. Otherwise open a Standard Agent Chat through the main-only
+    ///    context-part seam and stage supplemental parts after the view
+    ///    exists.
+    ///
+    /// Never consults the detached chat window; never auto-submits.
+    fn open_tab_ai_agent_chat_for_notes_handoff(
+        &mut self,
+        target: crate::ai::TabAiTargetContext,
+        supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.tab_ai_save_offer_state.is_some() {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "notes_handoff_blocked_by_save_offer",
+                source,
+            );
+            return false;
+        }
+
+        let label = crate::ai::format_explicit_target_chip_label(&target);
+        let semantic_id = target.semantic_id.clone();
+        let part = crate::ai::message_parts::AiContextPart::FocusedTarget { target, label };
+
+        // Reuse the live main-window Agent Chat when it is a usable full
+        // session: preserve its messages and composer draft.
+        if let AppView::AgentChatView { entity, .. } = &self.current_view {
+            let entity = entity.clone();
+            let reusable = {
+                let view = entity.read(cx);
+                !view.is_setup_mode()
+                    && !view.is_focused_text_mini()
+                    && view.current_ui_variant()
+                        == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard
+                    && view.session_policy()
+                        == crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full
+            };
+            if reusable {
+                let staged = entity.update(cx, |view, cx| {
+                    view.stage_primary_context_part_from_host_preserving_composer(
+                        part.clone(),
+                        source,
+                        cx,
+                    )
+                });
+                return match staged {
+                    Ok(()) => {
+                        self.stage_notes_supplemental_parts(
+                            &entity,
+                            supplemental_parts,
+                            source,
+                            cx,
+                        );
+                        tracing::info!(
+                            target: "script_kit::tab_ai",
+                            event = "notes_handoff_main_staged",
+                            source,
+                            semantic_id = %semantic_id,
+                            reused_existing_chat = true,
+                        );
+                        true
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "script_kit::tab_ai",
+                            event = "notes_handoff_reuse_stage_failed",
+                            source,
+                            error = %error,
+                        );
+                        false
+                    }
+                };
+            }
+        }
+
+        // Replacing an unsuitable Agent Chat view must not make Agent Chat its
+        // own return target: derive a non-chat return origin first.
+        let derived_return_origin = match &self.current_view {
+            AppView::AgentChatView { .. } => self
+                .tab_ai_harness_return_view
+                .clone()
+                .filter(|view| !matches!(view, AppView::AgentChatView { .. }))
+                .unwrap_or(AppView::ScriptList),
+            other => other.clone(),
+        };
+
+        self.open_tab_ai_agent_chat_with_context_part(part, source, cx);
+
+        let staged_entity = match &self.current_view {
+            AppView::AgentChatView { entity, .. } if !entity.read(cx).is_setup_mode() => {
+                Some(entity.clone())
+            }
+            _ => None,
+        };
+        let Some(entity) = staged_entity else {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "notes_handoff_main_stage_failed",
+                source,
+                semantic_id = %semantic_id,
+                reason = "no_live_agent_chat_view_after_open",
+            );
+            return false;
+        };
+
+        self.tab_ai_harness_return_view = Some(derived_return_origin);
+        self.stage_notes_supplemental_parts(&entity, supplemental_parts, source, cx);
+        tracing::info!(
+            target: "script_kit::tab_ai",
+            event = "notes_handoff_main_staged",
+            source,
+            semantic_id = %semantic_id,
+            reused_existing_chat = false,
+        );
+        true
+    }
+
+    /// Stage persisted note-cart parts as supplemental context chips without
+    /// touching the composer. A supplemental failure is logged, never fatal —
+    /// the primary note context already staged successfully.
+    fn stage_notes_supplemental_parts(
+        &mut self,
+        entity: &gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>,
+        supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if supplemental_parts.is_empty() {
+            return;
+        }
+        let result = entity.update(cx, |view, cx| {
+            view.stage_supplemental_context_parts_from_host(supplemental_parts, source, cx)
+        });
+        if let Err(error) = result {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "notes_handoff_supplemental_stage_failed",
+                source,
+                error = %error,
+            );
         }
     }
 }
@@ -236,6 +474,59 @@ mod quick_question_contract {
         assert_eq!(req.seed_policy, AgentChatSeedPolicy::ComposerOnly);
         assert_eq!(req.context_policy, AgentChatContextPolicy::SuppressFocused,);
         assert_eq!(req.seed_text.as_deref(), Some("bounded result"));
+    }
+
+    fn notes_target_fixture() -> crate::ai::TabAiTargetContext {
+        crate::ai::TabAiTargetContext {
+            source: "Notes".to_string(),
+            kind: "note".to_string(),
+            semantic_id: "note:test-fixture".to_string(),
+            label: "Test Note".to_string(),
+            metadata: None,
+        }
+    }
+
+    /// The Notes handoff is main-host-only, composer-only, and fully
+    /// explicit: origin Notes, target CurrentHostEmbedded (never the
+    /// detached chat window), Standard variant, no seed text, no
+    /// auto-submit, and a NotesHandoff context policy.
+    #[test]
+    fn notes_entry_is_main_host_composer_only_and_explicit() {
+        let req = AgentChatEntryRequest::notes(notes_target_fixture(), Vec::new(), "test");
+        assert_eq!(
+            req.target,
+            super::AgentChatThreadTarget::CurrentHostEmbedded,
+            "notes entry must target the main host's own Agent Chat",
+        );
+        assert_ne!(
+            req.target,
+            super::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
+            "notes entry must never target the detached chat window",
+        );
+        assert!(req.seed_text.is_none(), "notes entry carries no seed text");
+        assert_eq!(
+            req.seed_policy,
+            AgentChatSeedPolicy::ComposerOnly,
+            "notes entry must never auto-submit",
+        );
+        assert!(
+            matches!(
+                req.context_policy,
+                AgentChatContextPolicy::NotesHandoff { .. }
+            ),
+            "notes entry must carry the NotesHandoff context policy",
+        );
+    }
+
+    /// The launcher's implicitly selected row must never leak into a
+    /// Notes-origin request.
+    #[test]
+    fn notes_entry_never_admits_implicit_focused_context() {
+        let req = AgentChatEntryRequest::notes(notes_target_fixture(), Vec::new(), "test");
+        assert!(
+            !req.context_policy.admits_implicit_focused_part(),
+            "NotesHandoff must suppress the implicit focused row",
+        );
     }
 
     /// Behavior replacement for the former source-string audit that lived in
