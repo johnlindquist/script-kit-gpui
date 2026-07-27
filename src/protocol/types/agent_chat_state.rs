@@ -102,6 +102,14 @@ pub struct AgentChatStateSnapshot {
     /// Context chip count (staged context parts in the composer).
     pub context_chip_count: usize,
 
+    /// Redacted identity of each staged context part (kind/label/source and
+    /// the focused-target identity when present). Lets automation prove not
+    /// just that "a chip is present" but that the RIGHT chip is present —
+    /// e.g. the notes→main handoff's `focusedTarget` note part. Labels only;
+    /// never part content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_parts: Vec<AgentChatContextPartSnapshot>,
+
     /// Human-readable summary of staged context chips (comma-joined labels).
     ///
     /// Present when `context_chip_count > 0`. Sharpens the bare count into a
@@ -154,6 +162,28 @@ pub struct AgentChatStateSnapshot {
     pub warnings: Vec<String>,
 }
 
+/// Redacted identity of one staged context part.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentChatContextPartSnapshot {
+    /// Part kind: `resourceUri`, `filePath`, `skillFile`, `focusedTarget`,
+    /// `ambientContext`, or `textBlock`.
+    pub kind: String,
+    /// Human-readable chip label (e.g. `Note: My Note`).
+    pub label: String,
+    /// Part source string (surface identity, never content).
+    pub source: String,
+    /// Focused-target kind (e.g. `note`) when `kind == focusedTarget`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<String>,
+    /// Focused-target source surface (e.g. `Notes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_source: Option<String>,
+    /// Focused-target semantic id (e.g. `note:...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_semantic_id: Option<String>,
+}
+
 impl Default for AgentChatStateSnapshot {
     fn default() -> Self {
         Self {
@@ -175,6 +205,7 @@ impl Default for AgentChatStateSnapshot {
             picker: None,
             spine: None,
             last_accepted_item: None,
+            context_parts: Vec::new(),
             context_chip_count: 0,
             context_summary: None,
             dictation_phase: None,
@@ -1080,6 +1111,7 @@ mod tests {
     #[test]
     fn agent_chat_state_snapshot_full_json_shape() {
         let snap = AgentChatStateSnapshot {
+            context_parts: Vec::new(),
             schema_version: AGENT_CHAT_STATE_SCHEMA_VERSION,
             resolved_target: None,
             status: "streaming".to_string(),

@@ -808,7 +808,7 @@ try {
   );
   const notesBodyBounds = (notesLayout?.components ?? []).find(
     (component: Json) =>
-      ["NotesEditor", "NotesPreview", "NotesEmbeddedAgentChat"].includes(
+      ["NotesEditor", "NotesPreview"].includes(
         String(component?.name ?? ""),
       ),
   )?.bounds;

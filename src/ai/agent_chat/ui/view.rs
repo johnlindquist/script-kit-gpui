@@ -6351,6 +6351,10 @@ impl AgentChatView {
             spine: self.build_agent_chat_spine_state_snapshot(),
             last_accepted_item: self.last_accepted_item.clone(),
             context_chip_count: pending_parts.len(),
+            context_parts: pending_parts
+                .iter()
+                .map(Self::context_part_identity_snapshot)
+                .collect(),
             context_summary: Self::build_agent_chat_context_summary(pending_parts),
             dictation_phase,
             context_ready,
@@ -6549,6 +6553,39 @@ impl AgentChatView {
             visible_start,
             visible_end,
             cursor_in_window: cursor_index.saturating_sub(visible_start),
+        }
+    }
+
+    /// Redacted per-part identity for automation: kind/label/source, plus the
+    /// focused-target identity so probes can prove the RIGHT chip is staged
+    /// (e.g. the notes→main handoff's note part). Never part content.
+    fn context_part_identity_snapshot(
+        part: &crate::ai::message_parts::AiContextPart,
+    ) -> crate::protocol::AgentChatContextPartSnapshot {
+        use crate::ai::message_parts::AiContextPart;
+        let kind = match part {
+            AiContextPart::ResourceUri { .. } => "resourceUri",
+            AiContextPart::FilePath { .. } => "filePath",
+            AiContextPart::SkillFile { .. } => "skillFile",
+            AiContextPart::FocusedTarget { .. } => "focusedTarget",
+            AiContextPart::AmbientContext { .. } => "ambientContext",
+            AiContextPart::TextBlock { .. } => "textBlock",
+        };
+        let (target_kind, target_source, target_semantic_id) = match part {
+            AiContextPart::FocusedTarget { target, .. } => (
+                Some(target.kind.clone()),
+                Some(target.source.clone()),
+                Some(target.semantic_id.clone()),
+            ),
+            _ => (None, None, None),
+        };
+        crate::protocol::AgentChatContextPartSnapshot {
+            kind: kind.to_string(),
+            label: part.label().to_string(),
+            source: part.source().to_string(),
+            target_kind,
+            target_source,
+            target_semantic_id,
         }
     }
 

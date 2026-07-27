@@ -442,6 +442,7 @@ fn get_agent_chat_state_request_parses() {
 #[test]
 fn agent_chat_state_result_round_trips() {
     let snapshot = crate::protocol::AgentChatStateSnapshot {
+        context_parts: Vec::new(),
         schema_version: crate::protocol::AGENT_CHAT_STATE_SCHEMA_VERSION,
         resolved_target: None,
         status: "idle".to_string(),
