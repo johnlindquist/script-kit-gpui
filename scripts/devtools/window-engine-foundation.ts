@@ -270,7 +270,8 @@ export const SUITES: Record<string, SuiteRunner> = {
       detail: `${executor.detail}; ${undo.detail}`,
     };
   },
-  "legacy-actions": pendingSuite("legacy-actions", "S12"),
+  "legacy-actions": (context) =>
+    cargoProviderTests(context, "window_control::actions", "legacy-actions"),
   snap: pendingSuite("snap", "S13"),
   protocol: pendingSuite("protocol", "S14"),
   "window-switcher": pendingSuite("window-switcher", "S14"),

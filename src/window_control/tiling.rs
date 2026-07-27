@@ -1,80 +1,11 @@
-use anyhow::Result;
-use tracing::{info, instrument};
+//! Legacy geometry compatibility helpers.
+//!
+//! No AX setters live here: tiling execution routes through the plan/
+//! transaction engine (see `actions.rs`/`legacy.rs`). This module keeps the
+//! `calculate_tile_bounds` compatibility entry point that snap target
+//! construction depends on.
 
-use super::ax::{get_window_position, get_window_size, set_window_position, set_window_size};
-use super::display::{get_all_display_bounds, get_visible_display_bounds};
 use super::types::*;
-
-/// Tile a window to a predefined position on the screen.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-/// * `position` - The tiling position (half, quadrant, or fullscreen)
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
-#[instrument]
-pub(super) fn tile_window(window_id: u32, position: TilePosition) -> Result<()> {
-    let (_observation, window) = super::actions::resolve_action_target(window_id)?;
-
-    // Get current position to determine which display the window is on
-    let (current_x, current_y) = get_window_position(window.as_ptr()).unwrap_or((0, 0));
-
-    // Get the visible display bounds (accounting for menu bar and dock)
-    let display = get_visible_display_bounds(current_x, current_y);
-
-    let bounds = calculate_tile_bounds(&display, position);
-
-    set_window_position(window.as_ptr(), bounds.x, bounds.y)?;
-    set_window_size(window.as_ptr(), bounds.width, bounds.height)?;
-
-    info!(window_id, ?position, "Tiled window");
-    Ok(())
-}
-
-/// Move a window to the next display (cycles through available displays).
-#[instrument]
-pub(super) fn move_to_next_display(window_id: u32) -> Result<()> {
-    move_to_adjacent_display(window_id, true)
-}
-
-/// Move a window to the previous display (cycles through available displays).
-#[instrument]
-pub(super) fn move_to_previous_display(window_id: u32) -> Result<()> {
-    move_to_adjacent_display(window_id, false)
-}
-
-/// Internal helper to move window to adjacent display
-pub(super) fn move_to_adjacent_display(window_id: u32, next: bool) -> Result<()> {
-    let (_observation, window) = super::actions::resolve_action_target(window_id)?;
-
-    let (current_x, current_y) = get_window_position(window.as_ptr()).unwrap_or((0, 0));
-    let (current_width, current_height) = get_window_size(window.as_ptr()).unwrap_or((800, 600));
-
-    let displays = get_all_display_bounds()?;
-    if displays.len() <= 1 {
-        info!(window_id, "Only one display, cannot move to adjacent");
-        return Ok(());
-    }
-
-    let current_bounds = Bounds::new(current_x, current_y, current_width, current_height);
-    let target = super::presets::legacy_adjacent_display_bounds(
-        current_bounds,
-        (current_width, current_height),
-        &displays,
-        next,
-    )?;
-
-    set_window_position(window.as_ptr(), target.x, target.y)?;
-    set_window_size(window.as_ptr(), target.width, target.height)?;
-
-    info!(
-        window_id,
-        "Moved window to {} display",
-        if next { "next" } else { "previous" }
-    );
-    Ok(())
-}
 
 /// Calculate the bounds for a tiling position within a display.
 ///
@@ -170,7 +101,8 @@ mod tests {
     fn test_tile_window_left_half() {
         let windows = super::super::list_windows().expect("Should list windows");
         if let Some(window) = windows.first() {
-            tile_window(window.id, TilePosition::LeftHalf).expect("Should tile window");
+            super::super::tile_window(window.id, TilePosition::LeftHalf)
+                .expect("Should tile window");
             println!("Tiled '{}' to left half", window.title);
         } else {
             panic!("No windows found to test with");

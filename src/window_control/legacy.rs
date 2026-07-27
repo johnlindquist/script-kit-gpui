@@ -93,6 +93,14 @@ fn legacy_display_frame(observation: &WindowObservation) -> Bounds {
     super::display::get_visible_display_bounds(observation.bounds.x, observation.bounds.y)
 }
 
+/// Compile AND execute a legacy action through the transaction engine.
+pub fn execute_legacy_window_action(
+    action: LegacyWindowAction,
+) -> Result<super::transaction::TransactionReceipt> {
+    let plan = compile_legacy_window_action(action)?;
+    super::transaction::execute_plan(&plan)
+}
+
 /// Compile a legacy action into an immutable plan.
 pub fn compile_legacy_window_action(action: LegacyWindowAction) -> Result<WindowMutationPlan> {
     let observation = resolve_observation(action.window_id())?;

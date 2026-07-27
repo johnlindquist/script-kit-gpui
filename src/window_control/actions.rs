@@ -1,19 +1,25 @@
-use anyhow::{bail, Context, Result};
+//! Public legacy compatibility wrappers.
+//!
+//! Every existing signature is preserved, but ALL execution routes through
+//! the plan/transaction engine: resolve identity -> compile an immutable
+//! plan -> preflight -> bounded per-PID execution -> readback verification.
+//! This module contains NO direct AX writes, no close-button presses, no
+//! application activation, and never decodes a PID from a numeric window ID.
+//! `Ok(())` is returned ONLY for a verified `Succeeded` receipt.
+
+use anyhow::{Context, Result};
 use tracing::{info, instrument};
 
-use super::ax::{
-    get_ax_attribute, get_window_position, perform_ax_action, set_window_position, set_window_size,
-};
 use super::cache::OwnedCachedWindowRef;
-use super::cf::{cf_release, try_create_cf_string};
-use super::display::get_visible_display_bounds;
-use super::ffi::{kAXErrorSuccess, AXUIElementRef, AXUIElementSetAttributeValue, CFTypeRef};
+use super::legacy::{execute_legacy_window_action, LegacyWindowAction};
+use super::transaction::TransactionReceipt;
 use super::types::{Bounds, TilePosition, WindowObservation};
 
 /// Resolve a legacy numeric ID to its current observation + retained AX ref.
 ///
 /// On a miss, refreshes the registry once and retries. PID and all authority
-/// come from the OBSERVATION — never decoded from the numeric ID.
+/// come from the OBSERVATION — never decoded from the numeric ID. (Used by
+/// the snap poll path, which reads but never writes.)
 pub(super) fn resolve_action_target(
     window_id: u32,
 ) -> Result<(WindowObservation, OwnedCachedWindowRef)> {
@@ -31,217 +37,190 @@ pub(super) fn resolve_action_target(
 }
 
 /// Tile a window to a predefined position on the screen.
+#[instrument]
 pub fn tile_window(window_id: u32, position: TilePosition) -> Result<()> {
-    super::tiling::tile_window(window_id, position)
+    // NextDisplay/PreviousDisplay are routing positions, preserved exactly.
+    let receipt = match position {
+        TilePosition::NextDisplay => {
+            execute_legacy_window_action(LegacyWindowAction::MoveToNextDisplay { window_id })?
+        }
+        TilePosition::PreviousDisplay => {
+            execute_legacy_window_action(LegacyWindowAction::MoveToPreviousDisplay { window_id })?
+        }
+        _ => execute_legacy_window_action(LegacyWindowAction::Tile {
+            window_id,
+            position,
+        })?,
+    };
+    let result = TransactionReceipt::into_legacy_result(receipt);
+    if result.is_ok() {
+        info!(window_id, ?position, "Tiled window");
+    }
+    result
 }
 
 /// Move a window to the next display (cycles through available displays).
+#[instrument]
 pub fn move_to_next_display(window_id: u32) -> Result<()> {
-    super::tiling::move_to_next_display(window_id)
+    execute_legacy_window_action(LegacyWindowAction::MoveToNextDisplay { window_id })
+        .and_then(TransactionReceipt::into_legacy_result)
 }
 
 /// Move a window to the previous display (cycles through available displays).
+#[instrument]
 pub fn move_to_previous_display(window_id: u32) -> Result<()> {
-    super::tiling::move_to_previous_display(window_id)
+    execute_legacy_window_action(LegacyWindowAction::MoveToPreviousDisplay { window_id })
+        .and_then(TransactionReceipt::into_legacy_result)
 }
 
 /// Move a window to a new position.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-/// * `x` - The new X coordinate (screen pixels from left)
-/// * `y` - The new Y coordinate (screen pixels from top)
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
 #[instrument]
 pub fn move_window(window_id: u32, x: i32, y: i32) -> Result<()> {
-    let (_observation, window) = resolve_action_target(window_id)?;
-
-    set_window_position(window.as_ptr(), x, y)?;
-    info!(window_id, x, y, "Moved window");
-    Ok(())
+    execute_legacy_window_action(LegacyWindowAction::Move { window_id, x, y })
+        .and_then(TransactionReceipt::into_legacy_result)
+        .inspect(|_| info!(window_id, x, y, "Moved window"))
 }
 
 /// Resize a window to new dimensions.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-/// * `width` - The new width in pixels
-/// * `height` - The new height in pixels
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
 #[instrument]
 pub fn resize_window(window_id: u32, width: u32, height: u32) -> Result<()> {
-    let (_observation, window) = resolve_action_target(window_id)?;
-
-    set_window_size(window.as_ptr(), width, height)?;
-    info!(window_id, width, height, "Resized window");
-    Ok(())
+    execute_legacy_window_action(LegacyWindowAction::Resize {
+        window_id,
+        width,
+        height,
+    })
+    .and_then(TransactionReceipt::into_legacy_result)
+    .inspect(|_| info!(window_id, width, height, "Resized window"))
 }
 
 /// Set the complete bounds (position and size) of a window.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-/// * `bounds` - The new bounds for the window
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
 #[instrument]
 pub fn set_window_bounds(window_id: u32, bounds: Bounds) -> Result<()> {
-    let (_observation, window) = resolve_action_target(window_id)?;
-
-    // Set position first, then size
-    set_window_position(window.as_ptr(), bounds.x, bounds.y)?;
-    set_window_size(window.as_ptr(), bounds.width, bounds.height)?;
-
-    info!(
-        window_id,
-        x = bounds.x,
-        y = bounds.y,
-        width = bounds.width,
-        height = bounds.height,
-        "Set window bounds"
+    let handle = super::registry::resolve_legacy_window_id(window_id)
+        .or_else(|_| {
+            let _ = super::registry::refresh_window_registry();
+            super::registry::resolve_legacy_window_id(window_id)
+        })
+        .context("Window not found")?;
+    let observation = super::registry::resolve_handle(handle)?;
+    let plan = super::plan::build_explicit_bounds_plan(
+        super::diagnostics::OperationSource::LegacyAction,
+        &observation,
+        bounds,
+        super::plan::RollbackPolicy::Strict,
+        true,
     );
-    Ok(())
+    super::transaction::execute_plan(&plan)
+        .and_then(TransactionReceipt::into_legacy_result)
+        .inspect(|_| {
+            info!(
+                window_id,
+                x = bounds.x,
+                y = bounds.y,
+                width = bounds.width,
+                height = bounds.height,
+                "Set window bounds"
+            );
+        })
 }
 
 /// Minimize a window.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
 #[instrument]
 pub fn minimize_window(window_id: u32) -> Result<()> {
-    let (_observation, window) = resolve_action_target(window_id)?;
-
-    // Use AXMinimized attribute to minimize
-    let minimize_attr = try_create_cf_string("AXMinimized")?;
-
-    // AXMinimized expects a CFBoolean, so we need to use the attribute differently
-    // Actually, we should perform the press action on the minimize button
-    // or set the AXMinimized attribute to true
-
-    // Try setting AXMinimized directly with a boolean value
-    // SAFETY: kCFBooleanTrue is a well-known CoreFoundation constant. window.as_ptr()
-    // returns a valid AXUIElementRef from the cache. minimize_attr is a valid CFStringRef.
-    unsafe {
-        #[link(name = "CoreFoundation", kind = "framework")]
-        extern "C" {
-            static kCFBooleanTrue: CFTypeRef;
-        }
-
-        let result = AXUIElementSetAttributeValue(window.as_ptr(), minimize_attr, kCFBooleanTrue);
-
-        cf_release(minimize_attr);
-
-        if result != kAXErrorSuccess {
-            bail!("Failed to minimize window: error {}", result);
-        }
-    }
-
-    info!(window_id, "Minimized window");
-    Ok(())
+    execute_legacy_window_action(LegacyWindowAction::Minimize { window_id })
+        .and_then(TransactionReceipt::into_legacy_result)
+        .inspect(|_| info!(window_id, "Minimized window"))
 }
 
 /// Maximize a window (fills the display without entering fullscreen mode).
-///
-/// This positions the window to fill the available display area (excluding
-/// dock and menu bar) without entering macOS fullscreen mode.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
 #[instrument]
 pub fn maximize_window(window_id: u32) -> Result<()> {
-    let (_observation, window) = resolve_action_target(window_id)?;
-
-    // Get current position to determine which display the window is on
-    let (current_x, current_y) = get_window_position(window.as_ptr()).unwrap_or((0, 0));
-
-    // Get the display bounds (accounting for menu bar and dock)
-    let display_bounds = get_visible_display_bounds(current_x, current_y);
-
-    // Set the window to fill the visible area
-    set_window_position(window.as_ptr(), display_bounds.x, display_bounds.y)?;
-    set_window_size(window.as_ptr(), display_bounds.width, display_bounds.height)?;
-
-    info!(window_id, "Maximized window");
-    Ok(())
+    execute_legacy_window_action(LegacyWindowAction::Maximize { window_id })
+        .and_then(TransactionReceipt::into_legacy_result)
+        .inspect(|_| info!(window_id, "Maximized window"))
 }
 
 /// Close a window.
 ///
-/// Note: This performs the close action on the window, which may prompt
-/// the user to save unsaved changes depending on the application.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
+/// Note: an application save prompt keeps the window alive; that is
+/// truthfully reported as an error rather than silent success.
 #[instrument]
 pub fn close_window(window_id: u32) -> Result<()> {
-    let (_observation, window) = resolve_action_target(window_id)?;
-
-    // Get the close button and press it
-    if let Ok(close_button) = get_ax_attribute(window.as_ptr(), "AXCloseButton") {
-        perform_ax_action(close_button as AXUIElementRef, "AXPress")?;
-        cf_release(close_button);
-    } else {
-        bail!("Window does not have a close button");
-    }
-
-    info!(window_id, "Closed window");
-    Ok(())
+    execute_legacy_window_action(LegacyWindowAction::Close { window_id })
+        .and_then(TransactionReceipt::into_legacy_result)
+        .inspect(|_| info!(window_id, "Closed window"))
 }
 
 /// Focus (bring to front) a window.
-///
-/// # Arguments
-/// * `window_id` - The unique window identifier from `list_windows()`
-///
-/// # Errors
-/// Returns error if window not found or operation fails.
 #[instrument]
 pub fn focus_window(window_id: u32) -> Result<()> {
-    let (observation, window) = resolve_action_target(window_id)?;
+    execute_legacy_window_action(LegacyWindowAction::Focus { window_id })
+        .and_then(TransactionReceipt::into_legacy_result)
+        .inspect(|_| info!(window_id, "Focused window"))
+}
 
-    // Raise the window
-    perform_ax_action(window.as_ptr(), "AXRaise")?;
+#[cfg(test)]
+mod tests {
+    use super::super::registry;
+    use super::super::test_support::test_env::EnvGuard;
+    use super::*;
 
-    // Also activate the owning application. PID comes from the OBSERVATION,
-    // never decoded from the numeric window ID.
-    let pid = observation.handle.pid;
-
-    // SAFETY: Standard objc messaging to NSWorkspace/NSRunningApplication.
-    // We iterate running apps to find the one matching our PID, then activate it.
-    unsafe {
-        use objc::runtime::{Class, Object};
-        use objc::{msg_send, sel, sel_impl};
-
-        let workspace_class = Class::get("NSWorkspace").context("Failed to get NSWorkspace")?;
-        let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
-        let running_apps: *mut Object = msg_send![workspace, runningApplications];
-        let app_count: usize = msg_send![running_apps, count];
-
-        for i in 0..app_count {
-            let app: *mut Object = msg_send![running_apps, objectAtIndex: i];
-            let app_pid: i32 = msg_send![app, processIdentifier];
-
-            if app_pid == pid {
-                let _: bool = msg_send![app, activateWithOptions: 1u64]; // NSApplicationActivateIgnoringOtherApps
-                break;
-            }
-        }
+    fn refreshed() {
+        registry::reset_registry_for_tests();
+        registry::refresh_from_test_provider().expect("refresh");
     }
 
-    info!(window_id, "Focused window");
-    Ok(())
+    #[test]
+    fn every_wrapper_routes_through_the_engine_with_verified_readback() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Doc","pid":9,
+                 "bounds":{"x":0,"y":0,"width":800,"height":600}}
+            ]}"#,
+        );
+        refreshed();
+
+        move_window(1, 40, 30).expect("move");
+        assert_eq!(
+            super::super::test_support::window_state(1).unwrap().bounds,
+            Bounds::new(40, 30, 800, 600)
+        );
+        resize_window(1, 640, 480).expect("resize");
+        assert_eq!(
+            super::super::test_support::window_state(1).unwrap().bounds,
+            Bounds::new(40, 30, 640, 480)
+        );
+        set_window_bounds(1, Bounds::new(10, 10, 700, 500)).expect("bounds");
+        minimize_window(1).expect("minimize");
+        assert!(
+            super::super::test_support::window_state(1)
+                .unwrap()
+                .minimized
+        );
+        focus_window(1).expect("focus");
+        assert!(super::super::test_support::window_state(1).unwrap().focused);
+    }
+
+    #[test]
+    fn wrapper_failure_uses_the_window_engine_error_channel() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Clamped","pid":9,
+                 "mutation":{"minWidth":500,"minHeight":400}}
+            ]}"#,
+        );
+        refreshed();
+        let error = resize_window(1, 200, 100).expect_err("clamp must fail");
+        assert!(error.to_string().starts_with("window_engine:"));
+    }
+
+    #[test]
+    fn stale_ids_reject_rather_than_target_a_replacement() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = EnvGuard::set(r#"{"windows":[{"id":7,"app":"A","title":"Doc","pid":9}]}"#);
+        refreshed();
+        assert!(move_window(999, 5, 5).is_err());
+    }
 }
