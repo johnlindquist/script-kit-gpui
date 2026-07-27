@@ -6,8 +6,6 @@ pub(super) enum NotesFocusSurface {
     ActionsPanel,
     BrowsePanel,
     Dialog,
-    /// Embedded Agent Chat chat inside the Notes window.
-    AgentChat,
 }
 
 impl NotesApp {
@@ -28,7 +26,6 @@ impl NotesApp {
             command_bar_open: self.command_bar.is_open(),
             note_switcher_open: self.note_switcher.is_open(),
             has_active_dialog: window.has_active_dialog(cx),
-            surface_mode: self.surface_mode,
             recorded_at: Instant::now(),
         });
         const MAX_FOCUS_TRANSITIONS: usize = 24;
@@ -43,8 +40,6 @@ impl NotesApp {
             NotesFocusSurface::ActionsPanel
         } else if self.note_switcher.is_open() {
             NotesFocusSurface::BrowsePanel
-        } else if self.surface_mode == NotesSurfaceMode::AgentChat {
-            NotesFocusSurface::AgentChat
         } else {
             NotesFocusSurface::Editor
         }
@@ -96,8 +91,6 @@ impl NotesApp {
             NotesFocusSurface::ActionsPanel
         } else if self.note_switcher.is_open() {
             NotesFocusSurface::BrowsePanel
-        } else if self.surface_mode == NotesSurfaceMode::AgentChat {
-            NotesFocusSurface::AgentChat
         } else {
             NotesFocusSurface::Editor
         };
@@ -141,14 +134,6 @@ impl NotesApp {
             }
             NotesFocusSurface::Dialog => {
                 // Dialog manages its own focus — no action needed
-            }
-            NotesFocusSurface::AgentChat => {
-                if let Some(agent_chat_entity) = self.embedded_agent_chat.as_ref() {
-                    let focus_handle = agent_chat_entity.read(cx).focus_handle(cx);
-                    window.focus(&focus_handle, cx);
-                } else {
-                    self.focus_handle.focus(window, cx);
-                }
             }
         }
 

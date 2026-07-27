@@ -1,9 +1,10 @@
-//! Host-neutral Agent Chat bootstrap.
+//! Host-neutral Agent Chat thread bootstrap.
 //!
 //! Extracts the warm Pi connection/thread creation logic out of the
-//! detached-only `open_or_focus_chat_with_input` so that any host surface
-//! (launcher, Notes, detached window) can spawn a live Agent Chat view without
-//! knowing the window ownership details.
+//! detached-only `open_or_focus_chat_with_input` so a host surface can spawn
+//! a live Agent Chat thread without knowing the window ownership details.
+//! (The former `spawn_hosted_view` factory was removed with the Notes-hosted
+//! Agent Chat surface — the main window and detached chat own their views.)
 
 use gpui::{App, AppContext as _, Entity};
 
@@ -63,18 +64,4 @@ pub(crate) fn spawn_hosted_thread(
     });
 
     Ok(thread)
-}
-
-/// Spawn a new `AgentChatView` entity backed by a fresh hosted thread.
-///
-/// The returned view has no host callbacks wired — the caller is responsible
-/// for calling `set_on_toggle_actions`, `set_on_close_requested`, etc.
-pub(crate) fn spawn_hosted_view(
-    initial_input: Option<String>,
-    requirements: AgentChatLaunchRequirements,
-    cx: &mut App,
-) -> Result<Entity<AgentChatView>, String> {
-    let thread = spawn_hosted_thread(initial_input, requirements, cx)?;
-    let view = cx.new(|cx| AgentChatView::new(thread, cx));
-    Ok(view)
 }

@@ -34,10 +34,6 @@ impl Drop for NotesApp {
             return;
         }
 
-        let _ = crate::windows::remove_automation_window(
-            crate::notes::window::NOTES_EMBEDDED_AI_AUTOMATION_ID,
-        );
-
         // Clear the global window handle when NotesApp is dropped
         // This ensures is_notes_window_open() returns false after the window closes
         // regardless of how it was closed (Cmd+W, traffic light, toggle, etc.)

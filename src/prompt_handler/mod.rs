@@ -218,11 +218,6 @@ enum AgentChatReadTarget {
         info: crate::protocol::AutomationWindowInfo,
         entity: gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>,
     },
-    /// Read from the Notes-hosted embedded Agent Chat chat entity.
-    Notes {
-        info: crate::protocol::AutomationWindowInfo,
-        entity: gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>,
-    },
 }
 
 /// Resolved automation target for batch/waitFor operations.
@@ -629,37 +624,19 @@ fn resolve_agent_chat_read_target(
             }
         }
         crate::protocol::AutomationWindowKind::Notes => {
-            match crate::notes::get_notes_app_entity_and_handle()
-                .and_then(|(entity, _handle)| entity.read(cx).embedded_agent_chat_entity())
-            {
-                Some(entity) => {
-                    tracing::info!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        kind = ?resolved.kind,
-                        "automation.agent_chat_target.notes_resolved"
-                    );
-                    Ok(AgentChatReadTarget::Notes {
-                        info: resolved,
-                        entity,
-                    })
-                }
-                None => {
-                    tracing::warn!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        "automation.agent_chat_target.notes_no_entity"
-                    );
-                    Err(crate::protocol::TransactionError::action_failed(format!(
-                        "{op} resolved Notes target {} but no embedded Agent Chat view is available",
-                        resolved.id
-                    )))
-                }
-            }
+            // The Notes window no longer hosts an Agent Chat surface: every
+            // notes→AI affordance stages into the MAIN window's Agent Chat.
+            tracing::warn!(
+                target: "script_kit::automation",
+                request_id = %request_id,
+                op = op,
+                window_id = %resolved.id,
+                "automation.agent_chat_target.notes_not_a_chat_host"
+            );
+            Err(crate::protocol::TransactionError::action_failed(format!(
+                "{op} resolved Notes target {}, but Notes no longer hosts an Agent Chat surface; target the main window instead",
+                resolved.id
+            )))
         }
         other_kind => {
             tracing::warn!(
@@ -671,7 +648,7 @@ fn resolve_agent_chat_read_target(
                 "automation.agent_chat_target.non_agent_chat_rejected"
             );
             Err(crate::protocol::TransactionError::action_failed(format!(
-                "{op} supports only Main, Ai, AgentChatDetached, and Notes targets; resolved {} ({:?})",
+                "{op} supports only Main, Ai, and AgentChatDetached targets; resolved {} ({:?})",
                 resolved.id, other_kind
             )))
         }
@@ -704,11 +681,6 @@ fn build_agent_chat_resolved_target(
             }
         }
         AgentChatReadTarget::Detached { info, .. } => (
-            info.id.clone(),
-            info.kind.as_camel_case().to_string(),
-            info.title.clone(),
-        ),
-        AgentChatReadTarget::Notes { info, .. } => (
             info.id.clone(),
             info.kind.as_camel_case().to_string(),
             info.title.clone(),
@@ -4198,18 +4170,13 @@ impl ScriptListApp {
                         let view = entity.read(cx);
                         view.collect_agent_chat_state_snapshot(cx)
                     }
-                    AgentChatReadTarget::Notes { entity, .. } => {
-                        let view = entity.read(cx);
-                        view.collect_agent_chat_state_snapshot(cx)
-                    }
                 };
                 state.resolved_target = resolved_target;
                 let reliability_window_id = match &agent_chat_target {
                     AgentChatReadTarget::Main { info } => {
                         info.as_ref().map(|info| info.id.as_str()).unwrap_or("main")
                     }
-                    AgentChatReadTarget::Detached { info, .. }
-                    | AgentChatReadTarget::Notes { info, .. } => info.id.as_str(),
+                    AgentChatReadTarget::Detached { info, .. } => info.id.as_str(),
                 };
                 if let Some(fixture) =
                     crate::ai::reliability::ai_reliability_fixture_for_target(reliability_window_id)
@@ -4364,7 +4331,6 @@ impl ScriptListApp {
                     resolved_target = match &agent_chat_target {
                         AgentChatReadTarget::Main { .. } => "main",
                         AgentChatReadTarget::Detached { .. } => "detached",
-                        AgentChatReadTarget::Notes { .. } => "notes",
                     },
                     "automation.agent_chat_action_target_resolved"
                 );
@@ -4388,18 +4354,11 @@ impl ScriptListApp {
                             view.perform_setup_automation_action(action, agent_id.as_deref(), cx)
                         })
                     }
-                    AgentChatReadTarget::Notes { entity, .. } => entity.update(cx, |view, cx| {
-                        view.perform_setup_automation_action(action, agent_id.as_deref(), cx)
-                    }),
                 };
 
                 let mut state = match &agent_chat_target {
                     AgentChatReadTarget::Main { .. } => self.collect_agent_chat_state(cx),
                     AgentChatReadTarget::Detached { entity, .. } => {
-                        let view = entity.read(cx);
-                        view.collect_agent_chat_state_snapshot(cx)
-                    }
-                    AgentChatReadTarget::Notes { entity, .. } => {
                         let view = entity.read(cx);
                         view.collect_agent_chat_state_snapshot(cx)
                     }
@@ -4476,11 +4435,6 @@ impl ScriptListApp {
                             view.reset_test_probe();
                         });
                     }
-                    AgentChatReadTarget::Notes { entity, .. } => {
-                        entity.update(cx, |view, _cx| {
-                            view.reset_test_probe();
-                        });
-                    }
                 };
 
                 // Respond with the current (now-empty) probe snapshot.
@@ -4490,10 +4444,6 @@ impl ScriptListApp {
                         cx,
                     ),
                     AgentChatReadTarget::Detached { entity, .. } => {
-                        let view = entity.read(cx);
-                        view.test_probe_snapshot(protocol::AGENT_CHAT_TEST_PROBE_MAX_EVENTS, cx)
-                    }
-                    AgentChatReadTarget::Notes { entity, .. } => {
                         let view = entity.read(cx);
                         view.test_probe_snapshot(protocol::AGENT_CHAT_TEST_PROBE_MAX_EVENTS, cx)
                     }
@@ -4571,10 +4521,6 @@ impl ScriptListApp {
                         self.collect_agent_chat_test_probe(tail, cx)
                     }
                     AgentChatReadTarget::Detached { entity, .. } => {
-                        let view = entity.read(cx);
-                        view.test_probe_snapshot(tail, cx)
-                    }
-                    AgentChatReadTarget::Notes { entity, .. } => {
                         let view = entity.read(cx);
                         view.test_probe_snapshot(tail, cx)
                     }
@@ -4996,9 +4942,6 @@ impl ScriptListApp {
                             cx,
                         ) {
                             Ok(AgentChatReadTarget::Detached { entity, info }) => {
-                                AutomationReadTarget::AgentChatDetached { entity, info }
-                            }
-                            Ok(AgentChatReadTarget::Notes { entity, info }) => {
                                 AutomationReadTarget::AgentChatDetached { entity, info }
                             }
                             Ok(AgentChatReadTarget::Main { info }) => {
@@ -5966,25 +5909,11 @@ impl ScriptListApp {
                                     let nh = notes_handle;
                                     let result = nh.update(cx, |_root, window, cx| {
                                         ne.update(cx, |app, cx| {
-                                            let embedded_agent_chat = (app.surface_mode()
-                                                == crate::notes::NotesSurfaceMode::AgentChat)
-                                                .then(|| app.embedded_agent_chat_entity())
-                                                .flatten();
-                                            if let Some(chat) = embedded_agent_chat {
-                                                chat.update(cx, |chat, cx| {
-                                                    chat.set_input_in_window(
-                                                        text.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            } else {
-                                                app.set_editor_text_for_automation(
-                                                    text.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            }
+                                            app.set_editor_text_for_automation(
+                                                text.clone(),
+                                                window,
+                                                cx,
+                                            );
                                         });
                                         tracing::info!(
                                             target: "script_kit::transaction",
@@ -6089,68 +6018,6 @@ impl ScriptListApp {
                                                 index,
                                                 success: false,
                                                 command: "togglePreview".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::OpenNotesAgentChat => {
-                                    let ne = notes_entity.clone();
-                                    let nh = notes_handle;
-                                    // Detached update: focus-surface transitions inside
-                                    // open_or_focus_embedded_agent_chat read Root, which
-                                    // would double-lease under WindowHandle::update.
-                                    let result = crate::notes::update_notes_window_detached(nh, cx, |window, cx| {
-                                        let open_result = ne.update(cx, |app, cx| {
-                                            app.open_or_focus_embedded_agent_chat(None, window, cx)
-                                        });
-                                        tracing::info!(
-                                            target: "script_kit::transaction",
-                                            event = "transaction_notes_open_agent_chat",
-                                            request_id = %rid,
-                                            "Notes open_notes_agent_chat dispatched"
-                                        );
-                                        open_result
-                                    });
-                                    match result {
-                                        Ok(Ok(())) => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index, command = "openNotesAgentChat", "batch.notes.step.ok");
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: true,
-                                                command: "openNotesAgentChat".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: None,
-                                            });
-                                        }
-                                        Ok(Err(e)) => {
-                                            tracing::warn!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_notes_open_agent_chat_failed",
-                                                error = %e,
-                                                "Notes open_notes_agent_chat failed"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: false,
-                                                command: "openNotesAgentChat".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(e)),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: false,
-                                                command: "openNotesAgentChat".to_string(),
                                                 elapsed: Some(cmd_start.elapsed().as_millis() as u64),
                                                 value: None,
                                                 error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
@@ -7373,24 +7240,6 @@ impl ScriptListApp {
                                 }
                             }
                             protocol::BatchCommand::TogglePreview => {
-                                let command = batch_command_name(cmd);
-                                results.push(protocol::BatchResultEntry {
-                                    index,
-                                    success: false,
-                                    command,
-                                    elapsed: Some(0),
-                                    value: None,
-                                    error: Some(unsupported_batch_command_error(
-                                        AutomationBatchTargetKind::Main,
-                                        cmd,
-                                    )),
-                                });
-                                failed = true;
-                                if opts.stop_on_error {
-                                    break;
-                                }
-                            }
-                            protocol::BatchCommand::OpenNotesAgentChat => {
                                 let command = batch_command_name(cmd);
                                 results.push(protocol::BatchResultEntry {
                                     index,
@@ -9981,7 +9830,6 @@ fn batch_command_name(cmd: &protocol::BatchCommand) -> String {
         protocol::BatchCommand::SetInput { .. } => "setInput".to_string(),
         protocol::BatchCommand::OpenActions => "openActions".to_string(),
         protocol::BatchCommand::TogglePreview => "togglePreview".to_string(),
-        protocol::BatchCommand::OpenNotesAgentChat => "openNotesAgentChat".to_string(),
         protocol::BatchCommand::ForceSubmit { .. } => "forceSubmit".to_string(),
         protocol::BatchCommand::WaitFor { .. } => "waitFor".to_string(),
         protocol::BatchCommand::SelectByValue { .. } => "selectByValue".to_string(),

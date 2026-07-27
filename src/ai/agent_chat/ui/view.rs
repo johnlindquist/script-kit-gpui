@@ -358,12 +358,6 @@ impl FocusedTextMiniAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AgentChatFooterHost {
-    Inline,
-    External,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentChatFooterButtonSpec {
     pub(crate) action: crate::footer_popup::FooterAction,
@@ -967,7 +961,6 @@ pub(crate) struct AgentChatView {
     on_continue_in_agent_chat: Option<AgentChatEscalationHandler>,
     /// Transactional session for the currently staged attachment portal open.
     pending_portal_session: Option<AgentChatPendingPortalSession>,
-    footer_host: AgentChatFooterHost,
     /// Validated script path from a `SCRIPT_READY` receipt in assistant output.
     /// When `Some`, the footer Run button dispatches this path instead of
     /// the generic `execute_selected`.
@@ -1495,20 +1488,8 @@ impl AgentChatView {
         self.on_focused_text_collapse_requested = Some(std::sync::Arc::new(callback));
     }
 
-    pub(crate) fn set_footer_host(&mut self, footer_host: AgentChatFooterHost) {
-        self.footer_host = footer_host;
-    }
-
-    pub(crate) fn uses_external_footer_host(&self) -> bool {
-        matches!(self.footer_host, AgentChatFooterHost::External)
-    }
-
     fn inline_footer_height(&self) -> f32 {
-        if self.uses_external_footer_host() {
-            0.0
-        } else {
-            crate::window_resize::main_layout::HINT_STRIP_HEIGHT
-        }
+        crate::window_resize::main_layout::HINT_STRIP_HEIGHT
     }
 
     fn composer_height(
@@ -1723,7 +1704,7 @@ impl AgentChatView {
         };
         let focused_text_active = self.is_focused_text_mini() && !is_setup_mode;
         let footer_inputs = AgentChatFooterInputs {
-            uses_external_footer_host: self.uses_external_footer_host(),
+            uses_external_footer_host: false,
             is_main_window,
             // Automation approximates the detached glass path off; the reserved
             // band count is identical (one local band) whether or not the glass
@@ -2267,7 +2248,7 @@ impl AgentChatView {
         let glass_in_window_footer = false;
 
         crate::ai::agent_chat::ui::layout::AgentChatFooterInputs {
-            uses_external_footer_host: self.uses_external_footer_host(),
+            uses_external_footer_host: false,
             is_main_window,
             glass_in_window_footer,
             platform_native_detached_footer: cfg!(target_os = "macos"),
@@ -4280,43 +4261,6 @@ impl AgentChatView {
         }
     }
 
-    fn render_external_host_footer_from_snapshot(
-        snapshot: AgentChatFooterSnapshot,
-        weak_view: WeakEntity<AgentChatView>,
-    ) -> gpui::AnyElement {
-        // Same config-driven rail as every other glass footer: the snapshot's
-        // buttons + profile left-info render through the shared footer
-        // chrome, and clicks dispatch through the same footer authority.
-        use crate::footer_popup::{FooterButtonConfig, MainWindowFooterConfig};
-
-        let buttons = snapshot
-            .buttons
-            .iter()
-            .map(|btn| {
-                let mut config = FooterButtonConfig::new(btn.action, btn.key, btn.label)
-                    .selected(btn.selected)
-                    .enabled(btn.enabled);
-                if let Some(reason) = btn.disabled_reason {
-                    config = config.disabled_reason(reason);
-                }
-                config
-            })
-            .collect();
-        let mut config = MainWindowFooterConfig::new("agent_chat", buttons);
-        config.left_info = Some(snapshot.profile_left_info());
-
-        crate::components::footer_chrome::render_main_window_footer_config_rail(
-            config,
-            move |action, window, cx| {
-                if let Some(view) = weak_view.upgrade() {
-                    view.update(cx, |view, cx| {
-                        view.dispatch_footer_button(action, window, cx);
-                    });
-                }
-            },
-        )
-    }
-
     fn footer_slot_width(action: crate::footer_popup::FooterAction, leading: bool) -> f32 {
         use crate::components::footer_chrome;
         use crate::footer_popup::FooterAction;
@@ -4546,21 +4490,6 @@ impl AgentChatView {
                     )
             })
             .into_any_element()
-    }
-
-    pub(crate) fn build_external_host_footer(
-        &self,
-        weak_view: WeakEntity<AgentChatView>,
-        cx: &App,
-    ) -> Option<gpui::AnyElement> {
-        if !self.uses_external_footer_host() || self.is_setup_mode() {
-            return None;
-        }
-
-        Some(Self::render_external_host_footer_from_snapshot(
-            self.footer_snapshot(cx),
-            weak_view,
-        ))
     }
 
     /// Register an inline mention token as owned so the mention sync system
@@ -6923,7 +6852,6 @@ impl AgentChatView {
             on_profile_selected: None,
             on_continue_in_agent_chat: None,
             pending_portal_session: None,
-            footer_host: AgentChatFooterHost::Inline,
             ready_script_path: None,
             pending_slash_prime: None,
             context_capture_pending: false,
@@ -7034,7 +6962,6 @@ impl AgentChatView {
             on_profile_selected: None,
             on_continue_in_agent_chat: None,
             pending_portal_session: None,
-            footer_host: AgentChatFooterHost::Inline,
             ready_script_path: None,
             pending_slash_prime: None,
             context_capture_pending: false,

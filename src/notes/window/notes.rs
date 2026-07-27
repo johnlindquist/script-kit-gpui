@@ -304,11 +304,7 @@ impl NotesApp {
             }
         }
 
-        let prev_note_id = self.selected_note_id;
         self.selected_note_id = Some(id);
-        if prev_note_id != Some(id) {
-            self.clear_notes_hosted_agent_chat_context_for_note(prev_note_id, cx);
-        }
 
         // Load content into editor
         let note_list = if self.view_mode == NotesViewMode::Trash {
@@ -410,10 +406,6 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        if self.surface_mode == NotesSurfaceMode::AgentChat {
-            self.switch_to_notes_surface(window, cx);
-        }
-
         if self.has_unsaved_changes && !self.save_current_note() {
             anyhow::bail!("Failed to save current note before opening root note");
         }

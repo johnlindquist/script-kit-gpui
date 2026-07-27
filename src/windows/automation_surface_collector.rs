@@ -370,30 +370,22 @@ fn collect_notes_snapshot(
         text_size_source: Some("theme.mono_font_size".to_string()),
     });
 
-    // The persistent Notes / Agent titlebar switcher — projected from the
-    // SAME `surface_mode` state the renderer's `render_surface_switcher`
-    // consumes, so automation can prove which segment is selected. The
-    // element ids mirror the renderer's GPUI ids.
-    let surface_mode = crate::notes::get_notes_surface_mode(cx)?;
-    let notes_selected = surface_mode == crate::notes::NotesSurfaceMode::Notes;
-    let switcher_notes = element(
-        "control:notes-switch-notes",
+    // The one-shot titlebar Ask AI command (replaces the removed Notes/Agent
+    // mode switcher). The element id mirrors the renderer's GPUI id; its
+    // role/kind advertise that activation hands off to the MAIN window's
+    // Agent Chat rather than changing any Notes-local mode.
+    let mut ask_ai = element(
+        "button:notes-ask-ai",
         ElementType::Button,
-        Some("Notes".to_string()),
-        None,
-        Some(notes_selected),
+        Some("Ask AI".to_string()),
         None,
         None,
+        None,
+        Some(0),
     );
-    let switcher_agent = element(
-        "control:notes-switch-agent_chat",
-        ElementType::Button,
-        Some("Agent".to_string()),
-        None,
-        Some(!notes_selected),
-        None,
-        None,
-    );
+    ask_ai.role = Some("handoff".to_string());
+    ask_ai.kind = Some("MainAgentChat".to_string());
+    ask_ai.selectable = Some(true);
 
     Some(SurfaceElementSnapshot {
         elements: vec![
@@ -406,11 +398,10 @@ fn collect_notes_snapshot(
                 None,
                 None,
             ),
-            switcher_notes,
-            switcher_agent,
+            ask_ai,
             editor,
         ],
-        total_count: 4,
+        total_count: 3,
         focused_semantic_id: Some("input:notes-editor".to_string()),
         selected_semantic_id: None,
         warnings: Vec::new(),

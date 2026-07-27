@@ -176,7 +176,6 @@ impl NotesApp {
     pub(super) fn notes_spine_surface_allows_editor_list(&self) -> bool {
         self.selected_note_id.is_some()
             && self.view_mode != NotesViewMode::Trash
-            && self.surface_mode == NotesSurfaceMode::Notes
             && !self.preview_enabled
             && self.kit_resource_preview.is_none()
             && !self.show_search

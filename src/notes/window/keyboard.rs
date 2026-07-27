@@ -61,30 +61,6 @@ impl NotesApp {
             self.close_browse_panel(window, cx);
             return ("closeBrowsePanel", true);
         }
-        if self.surface_mode == NotesSurfaceMode::AgentChat {
-            // The Agent Chat Cmd+K actions popup is a detached window owned by
-            // the shared actions-window singleton (not by self.command_bar), so
-            // it must be dismissed explicitly before any surface change.
-            if crate::actions::is_actions_window_open() {
-                crate::actions::close_actions_window(cx);
-                return ("closeAgentChatActionsPopup", true);
-            }
-            if let Some(ref entity) = self.embedded_agent_chat {
-                let dismissed = entity.update(cx, |chat, cx| chat.dismiss_escape_popup(cx));
-                if dismissed {
-                    tracing::info!(event = "notes_agent_chat_escape_dismissed_local_popup");
-                    return ("dismissAgentChatPopup", true);
-                }
-                let cancelled_streaming =
-                    entity.update(cx, |chat, cx| chat.cancel_streaming_from_escape(cx));
-                if cancelled_streaming {
-                    tracing::info!(event = "notes_agent_chat_escape_cancelled_streaming");
-                    return ("cancelAgentChatStreaming", true);
-                }
-            }
-            self.switch_to_notes_surface(window, cx);
-            return ("switchAgentChatToNotes", true);
-        }
         if self.notes_spine_input(cx).is_some() {
             self.reset_notes_spine_navigation(cx);
             return ("dismissNotesSpine", true);
@@ -220,17 +196,12 @@ impl NotesApp {
             event = "top_level_cmd_w_close_notes_window",
             reason,
             focus_surface = ?self.current_focus_surface(),
-            surface_mode = ?self.surface_mode,
             show_search = self.show_search,
             focus_mode = self.focus_mode,
             has_active_dialog = window.has_active_dialog(cx),
         );
 
         self.save_current_note();
-
-        if self.surface_mode == NotesSurfaceMode::AgentChat {
-            self.prepare_embedded_agent_chat_for_window_close(reason, cx);
-        }
 
         self.command_bar.close_app(cx);
         self.note_switcher.close_app(cx);
@@ -546,57 +517,6 @@ impl NotesApp {
                     }
                 }
             }
-            return;
-        }
-
-        // In Agent Chat mode, intercept host-owned shortcuts before propagating to Agent Chat.
-        if self.surface_mode == NotesSurfaceMode::AgentChat {
-            if is_key_escape(key) {
-                // Shared ladder: detached actions popup → chat-local popups →
-                // streaming cancel → switch back to the Notes surface.
-                let (_action, _handled) = self.escape_dismiss_ladder(window, cx);
-                cx.stop_propagation();
-                return;
-            }
-            if modifiers.platform {
-                // Cmd+K: toggle Notes-hosted Agent Chat actions.
-                if key.eq_ignore_ascii_case("k") {
-                    self.toggle_agent_chat_actions(window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                // Cmd+W: close the Notes window (same as Notes mode).
-                if key.eq_ignore_ascii_case("w") && !modifiers.shift {
-                    self.save_current_note();
-                    self.prepare_embedded_agent_chat_for_window_close("notes_agent_chat_cmd_w", cx);
-                    self.maybe_save_stable_bounds_for_exit(window);
-                    window.close_all_dialogs(cx);
-                    let _ = self.entry_reveal.prepare_for_window_exit();
-                    self.lock_native_resize_for_exit(window);
-                    super::window_ops::close_current_notes_window(window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-            }
-            // Detached actions popup routing: when the popup is open but THIS
-            // window stayed key (click-back into the host, or popup activation
-            // failed), arrows/typing/Enter must drive the visible popup instead
-            // of leaking into the composer where Enter silently no-ops. The
-            // same guard exists in AgentChatView::handle_key_down for the
-            // composer-focused dispatch path; this covers root-focused keys.
-            if crate::actions::is_actions_window_open()
-                && crate::actions::route_key_to_detached_actions_window(
-                    key,
-                    event.keystroke.key_char.as_deref(),
-                    modifiers,
-                    cx,
-                )
-            {
-                cx.stop_propagation();
-                return;
-            }
-            // All other keys propagate to the Agent Chat chat view.
-            cx.propagate();
             return;
         }
 

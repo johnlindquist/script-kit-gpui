@@ -27,8 +27,6 @@ impl NotesApp {
             "actionsPanel"
         } else if self.note_switcher.is_open() {
             "noteSwitcher"
-        } else if self.surface_mode == NotesSurfaceMode::AgentChat {
-            "embeddedAgentChat"
         } else {
             "editor"
         };
@@ -59,15 +57,8 @@ impl NotesApp {
                     "handles": ["Escape", "Cmd+P", "Enter", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown", "Backspace", "Delete", "text input"],
                 },
                 {
-                    "id": "embeddedAgentChat",
-                    "open": self.surface_mode == NotesSurfaceMode::AgentChat,
-                    "owner": "Notes-hosted Agent Chat",
-                    "toggle": "Cmd+Enter",
-                    "handles": ["Escape", "Cmd+K", "Cmd+W", "Cmd+Shift+A"],
-                },
-                {
                     "id": "editor",
-                    "open": self.surface_mode == NotesSurfaceMode::Notes,
+                    "open": true,
                     "owner": "Notes editor",
                     "handles": [
                         "Escape", "Tab", "Shift+Tab", "Alt+Up", "Alt+Down", "Alt+Shift+Up", "Alt+Shift+Down",
@@ -97,7 +88,6 @@ impl NotesApp {
                     "commandBarOpen": entry.command_bar_open,
                     "noteSwitcherOpen": entry.note_switcher_open,
                     "hasActiveDialog": entry.has_active_dialog,
-                    "surfaceMode": format!("{:?}", entry.surface_mode),
                     "ageMs": entry.recorded_at.elapsed().as_millis() as u64,
                 })
             })
@@ -109,41 +99,6 @@ impl NotesApp {
             "generation": self.focus_transition_generation,
             "entryCount": entries.len(),
             "entries": entries,
-        })
-    }
-
-    fn automation_embedded_agent_chat_isolation_snapshot(&self) -> serde_json::Value {
-        let active = self.surface_mode == NotesSurfaceMode::AgentChat;
-        let child = crate::windows::automation_window_by_id(
-            crate::notes::window::NOTES_EMBEDDED_AI_AUTOMATION_ID,
-        );
-        let main_ai = crate::windows::automation_window_by_id("ai");
-
-        serde_json::json!({
-            "schemaVersion": 1,
-            "source": "runtime.notes.embeddedAgentChatIsolation",
-            "redacted": true,
-            "host": "notes",
-            "active": active,
-            "cached": self.embedded_agent_chat.is_some(),
-            "generation": self.notes_agent_chat_generation,
-            "automationId": crate::notes::window::NOTES_EMBEDDED_AI_AUTOMATION_ID,
-            "parentWindowId": "notes",
-            "parentKind": "notes",
-            "semanticSurface": "notesAgentChat",
-            "actionsParentAutomationId": "notes",
-            "usesMainAiAutomationWindow": false,
-            "mainAiAutomationId": "ai",
-            "mainAiWindowPresent": main_ai.is_some(),
-            "registered": child.as_ref().map(|info| serde_json::json!({
-                "id": info.id,
-                "kind": info.kind.as_camel_case(),
-                "parentWindowId": info.parent_window_id,
-                "parentKind": info.parent_kind.map(|kind| kind.as_camel_case()),
-                "semanticSurface": info.semantic_surface,
-                "focused": info.focused,
-                "visible": info.visible,
-            })),
         })
     }
 
@@ -535,7 +490,6 @@ impl NotesApp {
             "deeplinkHoverHint": self.last_deeplink_hover_hint.clone(),
             "view": {
                 "viewMode": format!("{:?}", self.view_mode),
-                "surfaceMode": format!("{:?}", self.surface_mode),
                 "focusSurface": format!("{:?}", self.current_focus_surface()),
                 "focusMode": self.focus_mode,
                 "sortMode": format!("{:?}", self.sort_mode),
@@ -547,7 +501,6 @@ impl NotesApp {
                 "autoSizingEnabled": self.auto_sizing_enabled,
                 "initialHeight": self.initial_height,
                 "lastWindowHeight": self.last_window_height,
-                "notesAgentChatGeneration": self.notes_agent_chat_generation,
             },
             "entryReveal": {
                 "schemaVersion": 1,
@@ -644,7 +597,6 @@ impl NotesApp {
                 "noteSwitcher": self.note_switcher.automation_state("notes.switcher", cx),
             },
             "spine": self.automation_notes_spine_state(cx),
-            "embeddedAgentChat": self.automation_embedded_agent_chat_isolation_snapshot(),
             "shortcutRegistry": self.automation_shortcut_registry(),
             "focusTransitions": self.automation_focus_transition_timeline(),
             "ghostAutocomplete": self.automation_ghost_autocomplete_state(cx),
@@ -764,36 +716,10 @@ impl NotesApp {
             .unwrap_or((728.0, self.last_window_height.max(self.initial_height)));
         let metrics = style::adopted_metrics();
         let titlebar_height = metrics.titlebar_height;
-        // Project the SAME chrome partition the renderer resolves: Notes mode
-        // owns the full window (no footer band, no gutter); Agent mode under
-        // active glass reserves the external footer + 8pt gap. Anything else
-        // here would let automation prove a footer that no longer renders.
-        let glass_active = crate::footer_popup::glass_scroll_bands_active();
-        let chrome = super::contract::notes_chrome_policy(self.surface_mode, glass_active);
-        let detached_footer = chrome.reserves_external_footer();
-        let footer_height = if detached_footer {
-            crate::components::footer_chrome::current_main_menu_footer_height()
-        } else {
-            0.0
-        };
-        let footer_gap = if detached_footer {
-            crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
-        } else {
-            0.0
-        };
-        let regions = crate::footer_popup::main_window_detached_footer_regions_gpui(
-            window_width,
-            window_height,
-            footer_height,
-            footer_gap,
-            1.0,
-        );
-        let stage_height = regions.main_content.height;
-        let content_parent = if detached_footer {
-            "NotesContentStage"
-        } else {
-            "NotesWindow"
-        };
+        // The Notes content stage always fills the Notes window: no footer
+        // band, no desktop gutter, no partitioned stage.
+        let stage_height = window_height;
+        let content_parent = "NotesWindow";
         let search_height = if self.show_search { 40.0 } else { 0.0 };
         let toolbar_height = if self.show_format_toolbar { 36.0 } else { 0.0 };
         let content_top = titlebar_height + search_height + toolbar_height;
@@ -804,56 +730,17 @@ impl NotesApp {
             LayoutComponentInfo::new("NotesWindow", LayoutComponentType::Container)
                 .with_bounds(0.0, 0.0, window_width, window_height)
                 .with_visual_style(
-                    if detached_footer {
-                        chrome_tokens::CHROME_LAYER_WINDOW_BACKDROP
-                    } else {
-                        chrome_tokens::CHROME_LAYER_FLOATING
-                    },
-                    if detached_footer {
-                        chrome_tokens::MATERIAL_NATIVE_WINDOW_BACKDROP
-                    } else {
-                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT
-                    },
-                    if detached_footer {
-                        None
-                    } else {
-                        Some(chrome_tokens::LIQUID_GLASS_WINDOW_RADIUS_PX)
-                    },
+                    chrome_tokens::CHROME_LAYER_FLOATING,
+                    chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
+                    Some(chrome_tokens::LIQUID_GLASS_WINDOW_RADIUS_PX),
                 )
                 .with_visual_token("chrome.notesWindow")
                 .with_flex_column()
                 .with_depth(0)
                 .with_explanation(
-                    if detached_footer {
-                        "Single transparent Notes composition host containing a bounded glass stage, an exact desktop gutter, and floating glass footer capsules."
-                    } else {
-                        "Floating Notes window root measured from the resolved target bounds."
-                    },
+                    "Floating Notes window root measured from the resolved target bounds.",
                 ),
         );
-        if detached_footer {
-            components.push(
-                LayoutComponentInfo::new("NotesContentStage", LayoutComponentType::Container)
-                    .with_bounds(
-                        regions.main_content.x,
-                        regions.main_content.y,
-                        regions.main_content.width,
-                        regions.main_content.height,
-                    )
-                    .with_visual_style(
-                        chrome_tokens::CHROME_LAYER_FLOATING,
-                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
-                        Some(chrome_tokens::LIQUID_GLASS_WINDOW_RADIUS_PX),
-                    )
-                    .with_visual_token("chrome.notesContentStage")
-                    .with_flex_column()
-                    .with_depth(1)
-                    .with_parent("NotesWindow")
-                    .with_explanation(
-                        "Bounded Notes glass stage; its bottom edge stops before the desktop gutter.",
-                    ),
-            );
-        }
         components.push(
             LayoutComponentInfo::new("NotesTitlebar", LayoutComponentType::Header)
                 .with_bounds(0.0, 0.0, window_width, titlebar_height)
@@ -863,7 +750,7 @@ impl NotesApp {
                     Some(chrome_tokens::LIQUID_GLASS_PANEL_RADIUS_PX),
                 )
                 .with_visual_token("chrome.notesTitlebar")
-                .with_depth(if detached_footer { 2 } else { 1 })
+                .with_depth(1)
                 .with_parent(content_parent)
                 .with_explanation(
                     "Titlebar area that hosts note title and hover-revealed controls.",
@@ -880,7 +767,7 @@ impl NotesApp {
                         Some(chrome_tokens::LIQUID_GLASS_CONTROL_RADIUS_PX),
                     )
                     .with_visual_token("chrome.notesSearch")
-                    .with_depth(if detached_footer { 2 } else { 1 })
+                    .with_depth(1)
                     .with_parent(content_parent)
                     .with_explanation("Editor find/search row shown by Cmd+F."),
             );
@@ -901,7 +788,7 @@ impl NotesApp {
                         Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
                     )
                     .with_visual_token("chrome.notesFormatToolbar")
-                    .with_depth(if detached_footer { 2 } else { 1 })
+                    .with_depth(1)
                     .with_parent(content_parent)
                     .with_explanation(
                         "Formatting toolbar shown for rich-text and markdown actions.",
@@ -909,9 +796,7 @@ impl NotesApp {
             );
         }
 
-        let editor_name = if self.surface_mode == NotesSurfaceMode::AgentChat {
-            "NotesEmbeddedAgentChat"
-        } else if self.preview_enabled {
+        let editor_name = if self.preview_enabled {
             "NotesPreview"
         } else {
             "NotesEditor"
@@ -927,55 +812,12 @@ impl NotesApp {
                 .with_visual_token("content.notesEditor")
                 .with_flex_column()
                 .with_flex_grow(1.0)
-                .with_depth(if detached_footer { 2 } else { 1 })
+                .with_depth(1)
                 .with_parent(content_parent)
                 .with_explanation(
                     "Primary Notes content region after titlebar/search/toolbar reservations.",
                 ),
         );
-
-        if detached_footer {
-            components.push(
-                LayoutComponentInfo::new("NotesFooterDesktopGutter", LayoutComponentType::Other)
-                    .with_bounds(
-                        regions.transparent_gap.x,
-                        regions.transparent_gap.y,
-                        regions.transparent_gap.width,
-                        regions.transparent_gap.height,
-                    )
-                    .with_depth(1)
-                    .with_parent("NotesWindow")
-                    .with_explanation(
-                        "Fully transparent 8-point desktop gutter separating the Notes stage from its floating controls.",
-                    ),
-            );
-        }
-        // "NotesFooter" exists ONLY while the Agent surface reserves the
-        // external capsule band; Notes mode renders no footer at all (its
-        // save status lives in the titlebar), so projecting one would be a
-        // phantom element automation could "prove".
-        if detached_footer {
-            components.push(
-                LayoutComponentInfo::new("NotesFooter", LayoutComponentType::Panel)
-                    .with_bounds(
-                        regions.footer.x,
-                        regions.footer.y,
-                        regions.footer.width,
-                        regions.footer.height,
-                    )
-                    .with_visual_style(
-                        chrome_tokens::CHROME_LAYER_FLOATING,
-                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
-                        Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
-                    )
-                    .with_visual_token("chrome.notesFooter")
-                    .with_depth(1)
-                    .with_parent("NotesWindow")
-                    .with_explanation(
-                        "Transparent positioning rail containing discrete native glass capsules; it has no full-width footer surface.",
-                    ),
-            );
-        }
 
         if self.command_bar.is_open() {
             components.push(

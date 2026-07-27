@@ -2097,18 +2097,6 @@ fn configure_notes_as_floating_panel(_window: &gpui::Window) -> Option<NotesNati
 /// Used by the automation surface collector to expose Notes state to
 /// `getElements` and `inspectAutomationWindow` without routing through
 /// the main window.
-/// Current Notes surface mode (`Notes` editor vs embedded `AgentChat`) for
-/// the live Notes window. Read from the SAME entity state the renderer and
-/// titlebar switcher consume, so automation projections cannot drift from
-/// the visible selection.
-pub fn get_notes_surface_mode(cx: &gpui::App) -> Option<super::NotesSurfaceMode> {
-    let entity = {
-        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok()?.clone()?
-    };
-    Some(entity.read(cx).surface_mode)
-}
-
 pub fn get_notes_editor_text(cx: &gpui::App) -> Option<String> {
     let entity = {
         let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));

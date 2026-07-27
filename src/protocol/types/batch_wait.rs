@@ -189,7 +189,6 @@ pub enum BatchCommand {
     },
     OpenActions,
     TogglePreview,
-    OpenNotesAgentChat,
     ForceSubmit {
         value: serde_json::Value,
     },

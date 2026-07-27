@@ -28,16 +28,6 @@ fn batch_command_open_actions_round_trips() {
 }
 
 #[test]
-fn batch_command_open_notes_agent_chat_round_trips() {
-    let cmd = BatchCommand::OpenNotesAgentChat;
-    let json = serde_json::to_value(&cmd).expect("serialize openNotesAgentChat");
-    assert_eq!(json["type"], "openNotesAgentChat");
-
-    let back: BatchCommand = serde_json::from_value(json).expect("deserialize openNotesAgentChat");
-    assert_eq!(back, cmd);
-}
-
-#[test]
 fn batch_command_select_by_value_round_trips() {
     let cmd = BatchCommand::SelectByValue {
         value: "apple".to_string(),

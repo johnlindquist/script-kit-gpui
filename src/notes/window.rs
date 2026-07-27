@@ -192,20 +192,6 @@ pub enum NotesViewMode {
     Trash,
 }
 
-/// Which surface is currently visible inside the Notes window.
-///
-/// The Notes window is a persistent host that can show either the editor
-/// or an embedded Agent Chat chat.  Switching modes does not destroy state — the
-/// inactive surface is hidden, not dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NotesSurfaceMode {
-    /// The Notes editor (default).
-    #[default]
-    Notes,
-    /// An embedded Agent Chat chat session inside the Notes window.
-    AgentChat,
-}
-
 /// What a Notes window close/exit (or an exit-superseding reopen) does with
 /// the entry-reveal state. See [`NotesEntryReveal::prepare_for_window_exit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,7 +425,6 @@ struct NotesFocusTransition {
     command_bar_open: bool,
     note_switcher_open: bool,
     has_active_dialog: bool,
-    surface_mode: NotesSurfaceMode,
     recorded_at: Instant,
 }
 
@@ -653,10 +638,6 @@ pub struct NotesApp {
     /// while this is `Enabled`; calibrated entry/exit morphs own the frame in
     /// the locked phases. See `resize::NotesNativeResizePhase`.
     native_resize_phase: resize::NotesNativeResizePhase,
-    /// Last backdrop bottom inset pushed to the native Tahoe glass partition
-    /// (`None` until the first successful sync). Keeps the per-frame render
-    /// side effect idempotent.
-    last_synced_backdrop_inset: Option<f32>,
     /// Last bounds published to the automation window registry. Native
     /// (AppKit-tracked) resizes never pass through the custom resize
     /// observation, so the render loop keeps automation truth fresh itself.
@@ -758,15 +739,6 @@ pub struct NotesApp {
     /// hint re-serves it without another model call.
     notes_ghost_llm_cache: std::collections::VecDeque<NotesGhostLlmCacheEntry>,
 
-    // ── Agent Chat host surface ──────────────────────────────────────────────
-    /// Which surface is currently visible (Notes editor or embedded Agent Chat).
-    surface_mode: NotesSurfaceMode,
-
-    /// Cached Agent Chat chat entity — survives mode switches so conversation state
-    /// is preserved when toggling between Notes and Agent Chat.
-    embedded_agent_chat: Option<Entity<crate::ai::agent_chat::ui::AgentChatView>>,
-    /// Generation for the currently embedded Agent Chat view, used to reject stale popup actions.
-    notes_agent_chat_generation: u64,
     /// Redacted receipt of the most recent notes→main Agent Chat handoff
     /// (identity/shape only — never note content). Projected into devtools
     /// state as `lastAiHandoff`.
@@ -780,7 +752,6 @@ pub struct NotesApp {
     kit_resource_preview: Option<NotesKitResourcePreviewState>,
 }
 
-mod agent_chat_host;
 pub(crate) mod ai_handoff;
 mod clipboard_ops;
 pub(crate) mod contract;
@@ -806,18 +777,15 @@ mod traits;
 mod vibrancy;
 mod window_ops;
 
-pub use agent_chat_host::close_notes_embedded_agent_chat;
-pub(crate) use agent_chat_host::NOTES_EMBEDDED_AI_AUTOMATION_ID;
 pub(crate) use window_ops::update_notes_window_detached;
 pub use window_ops::{
     accept_notes_ghost_for_automation, apply_mcp_notes_mutation_on_main_thread, close_notes_window,
     get_notes_app_entity_and_handle, get_notes_editor_runtime_info, get_notes_editor_text,
-    get_notes_surface_mode, handle_notes_editor_key_for_automation,
-    handle_notes_ghost_key_for_automation, inject_text_into_notes, is_notes_window,
-    is_notes_window_open, open_day_note_in_notes_window, open_note_in_notes_window,
-    open_notes_search, open_notes_window, open_notes_window_without_launcher_restore,
-    quick_capture, save_note_with_content, save_note_with_content_and_source,
-    toggle_notes_popup_for_automation,
+    handle_notes_editor_key_for_automation, handle_notes_ghost_key_for_automation,
+    inject_text_into_notes, is_notes_window, is_notes_window_open, open_day_note_in_notes_window,
+    open_note_in_notes_window, open_notes_search, open_notes_window,
+    open_notes_window_without_launcher_restore, quick_capture, save_note_with_content,
+    save_note_with_content_and_source, toggle_notes_popup_for_automation,
 };
 
 #[cfg(test)]

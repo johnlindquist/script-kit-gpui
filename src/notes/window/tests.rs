@@ -40,38 +40,6 @@ fn formatting_replacement_inserts_and_positions_cursor() {
 }
 
 #[test]
-fn build_note_text_part_for_ai_prefers_selection_when_present() {
-    let part = NotesApp::build_note_text_part_for_ai("Demo Note", "demo-id", "hello world", 6..11)
-        .expect("Expected selected note part");
-
-    assert_eq!(
-        part,
-        AiContextPart::TextBlock {
-            label: "Selected Text".to_string(),
-            source: "notes://demo-id#selection=6-11".to_string(),
-            text: "world".to_string(),
-            mime_type: Some("text/markdown".to_string()),
-        }
-    );
-}
-
-#[test]
-fn build_note_text_part_for_ai_falls_back_to_full_note_when_selection_is_empty() {
-    let part = NotesApp::build_note_text_part_for_ai("Demo Note", "demo-id", "hello world", 5..5)
-        .expect("Expected full note part");
-
-    assert_eq!(
-        part,
-        AiContextPart::TextBlock {
-            label: "Demo Note".to_string(),
-            source: "notes://demo-id".to_string(),
-            text: "hello world".to_string(),
-            mime_type: Some("text/markdown".to_string()),
-        }
-    );
-}
-
-#[test]
 fn test_format_search_match_counter_uses_selected_position_when_available() {
     let counter = NotesApp::format_search_match_counter(Some((3, 8)), 8);
     assert_eq!(counter, "3/8");
@@ -167,10 +135,6 @@ fn test_notes_keyboard_escape_routes_through_shared_dismiss_ladder() {
     let note_switcher = live_keyboard
         .find("if self.note_switcher.is_open()")
         .expect("note switcher should own escape before editor");
-    let agent_chat_surface = live_keyboard[note_switcher..]
-        .find("if self.surface_mode == NotesSurfaceMode::AgentChat")
-        .expect("Agent Chat surface should own escape before editor")
-        + note_switcher;
     let editor_escape = live_keyboard
         .find("if is_key_escape(key) {\n            cx.stop_propagation();")
         .expect("editor escape branch should exist");
@@ -182,13 +146,12 @@ fn test_notes_keyboard_escape_routes_through_shared_dismiss_ladder() {
     assert!(
         dialog_guard < command_bar
             && command_bar < note_switcher
-            && note_switcher < agent_chat_surface
-            && agent_chat_surface < editor_escape
+            && note_switcher < editor_escape
             && editor_escape < ladder_call,
-        "Notes escape must route popups/dialog/agent-chat first, then delegate to escape_dismiss_ladder"
+        "Notes escape must route popups/dialog first, then delegate to escape_dismiss_ladder"
     );
 
-    // Inside the shared ladder: popups → agent chat → ghost → search, so a
+    // Inside the shared ladder: popups → ghost → search, so a
     // visible popup is always dismissed before ghost/search state.
     let ladder = KEYBOARD_SOURCE
         .find("pub(super) fn escape_dismiss_ladder(")
@@ -738,58 +701,6 @@ fn test_notes_keyboard_stops_propagation_at_start_of_global_escape_chain() {
 }
 
 #[test]
-fn test_notes_agent_chat_escape_dismisses_local_popup_before_leaving_surface() {
-    const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
-
-    // The live Agent Chat escape branch must delegate to the shared ladder so
-    // it cannot drift from the automation path.
-    let live_branch = KEYBOARD_SOURCE
-        .find("// In Agent Chat mode, intercept host-owned shortcuts before propagating to Agent Chat.")
-        .and_then(|start| {
-            KEYBOARD_SOURCE[start..]
-                .find("if modifiers.platform {")
-                .map(|end| &KEYBOARD_SOURCE[start..start + end])
-        })
-        .expect("Expected Notes Agent Chat keyboard branch");
-    assert!(
-        live_branch.contains("self.escape_dismiss_ladder(window, cx)"),
-        "Notes Agent Chat escape must route through the shared dismiss ladder"
-    );
-
-    // Inside the ladder's Agent Chat branch: detached actions popup first,
-    // then chat-local popups, then streaming cancel, then surface switch.
-    let ladder = KEYBOARD_SOURCE
-        .find("pub(super) fn escape_dismiss_ladder(")
-        .expect("shared escape dismiss ladder should exist");
-    let ladder_src = &KEYBOARD_SOURCE[ladder..];
-    let agent_chat_branch = ladder_src
-        .find("if self.surface_mode == NotesSurfaceMode::AgentChat {")
-        .expect("ladder should own the Agent Chat escape progression");
-    let branch_src = &ladder_src[agent_chat_branch..];
-    let actions_popup_idx = branch_src
-        .find("crate::actions::close_actions_window(cx);")
-        .expect("Agent Chat escape must close the detached Cmd+K actions popup");
-    let dismiss_idx = branch_src
-        .find("chat.dismiss_escape_popup(cx)")
-        .expect("Agent Chat escape should check for local popup dismissal");
-    let cancel_idx = branch_src
-        .find("chat.cancel_streaming_from_escape(cx)")
-        .expect("Agent Chat escape should cancel streaming before leaving the surface");
-    let switch_idx = branch_src
-        .find("self.switch_to_notes_surface(window, cx);")
-        .expect("Agent Chat escape should fall back to leaving Agent Chat mode");
-
-    assert!(
-        actions_popup_idx < dismiss_idx && dismiss_idx < cancel_idx && cancel_idx < switch_idx,
-        "Agent Chat escape ladder must dismiss the detached actions popup, then local popups, then streaming, then switch surfaces"
-    );
-    assert!(
-        branch_src.contains("event = \"notes_agent_chat_escape_dismissed_local_popup\""),
-        "Agent Chat escape ladder should keep the popup-dismissal tracing event"
-    );
-}
-
-#[test]
 fn test_notes_keyboard_delete_shortcut_routes_through_confirmation_helper() {
     const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
     assert!(
@@ -978,91 +889,6 @@ fn test_notes_render_does_not_apply_pending_focus_surface_in_render() {
     assert!(
         !RENDER_SOURCE.contains("self.apply_pending_focus_surface(window, cx);"),
         "Notes render must stay read-only; apply focus outside render"
-    );
-}
-
-#[test]
-fn test_notes_agent_chat_focus_surface_targets_embedded_chat_focus_handle() {
-    const FOCUS_SOURCE: &str = include_str!("focus.rs");
-    assert!(
-        FOCUS_SOURCE.contains("let focus_handle = agent_chat_entity.read(cx).focus_handle(cx);")
-            && FOCUS_SOURCE.contains("window.focus(&focus_handle, cx);"),
-        "Notes Agent Chat focus surface should focus the embedded Agent Chat view handle"
-    );
-}
-
-#[test]
-fn test_notes_agent_chat_actions_close_requests_embedded_chat_refocus() {
-    const AGENT_CHAT_HOST_SOURCE: &str = include_str!("agent_chat_host.rs");
-    assert!(
-        AGENT_CHAT_HOST_SOURCE.contains(
-            "self.request_focus_surface(focus::NotesFocusSurface::AgentChat, window, cx);"
-        ) && AGENT_CHAT_HOST_SOURCE
-            .contains("self.pending_focus_surface = Some(focus::NotesFocusSurface::AgentChat);"),
-        "Closing the Notes-hosted Agent Chat actions popup should restore Agent Chat focus"
-    );
-    assert!(
-        AGENT_CHAT_HOST_SOURCE.contains(
-            "app.close_notes_agent_chat_actions_via_host(\"dialog_on_close\", None, cx);"
-        ),
-        "Dialog on_close should route Notes Agent Chat actions close through the shared host helper"
-    );
-}
-
-#[test]
-fn test_notes_agent_chat_host_routes_close_paths_through_host_helpers() {
-    const AGENT_CHAT_HOST_SOURCE: &str = include_str!("agent_chat_host.rs");
-    // Whitespace-insensitive: rustfmt may wrap these calls across lines.
-    let condensed: String = AGENT_CHAT_HOST_SOURCE
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    assert!(
-        condensed.contains(
-            "app.close_embedded_agent_chat_via_host(\"agent_chat_close_requested\",Some(window),cx"
-        ) && condensed.contains(
-            "self.close_notes_agent_chat_actions_via_host(\"toggle_existing_window\",Some(window),cx"
-        ) && condensed
-            .contains("app.close_notes_agent_chat_actions_via_host(\"dialog_on_close\",None,cx")
-            && condensed.contains(
-                "app.close_embedded_agent_chat_via_host(\"agent_chat_action_close\",Some(window),cx"
-            )
-            && condensed
-                .contains("event=\"notes_agent_chat_action_cancel_consumed_after_on_close\""),
-        "Notes embedded Agent Chat close and Agent Chat-actions close should route through shared host helpers"
-    );
-}
-
-#[test]
-fn test_notes_agent_chat_uses_shared_external_footer_renderer() {
-    const AGENT_CHAT_HOST_SOURCE: &str = include_str!("agent_chat_host.rs");
-    const RENDER_SOURCE: &str = include_str!("render.rs");
-    const AGENT_CHAT_VIEW_SOURCE: &str = include_str!("../../ai/agent_chat/ui/view.rs");
-    assert!(
-        AGENT_CHAT_HOST_SOURCE.contains(
-            "chat.set_footer_host(crate::ai::agent_chat::ui::view::AgentChatFooterHost::External);"
-        ),
-        "Notes-hosted Agent Chat should opt into the shared externally rendered footer"
-    );
-    assert!(
-        RENDER_SOURCE
-            .contains("view.build_external_host_footer(agent_chat_entity.downgrade(), cx)")
-            && RENDER_SOURCE.contains("self.render_agent_chat_window_footer(cx)")
-            && RENDER_SOURCE.contains(".when_some(footer, |d, footer| d.child(footer))"),
-        "Notes Agent Chat surface should resolve the shared external footer and place it in the window footer lane"
-    );
-    let footer_hints = &AGENT_CHAT_VIEW_SOURCE[AGENT_CHAT_VIEW_SOURCE
-        .find("fn footer_hint_label(")
-        .expect("Agent Chat footer should define shared hint labels")..];
-    let run_pos = footer_hints
-        .find("\"↵ Send\"")
-        .expect("Agent Chat footer should render the Send hint");
-    let actions_pos = footer_hints
-        .find("\"⌘K Actions\"")
-        .expect("Agent Chat footer should render the Actions hint");
-    assert!(
-        run_pos < actions_pos,
-        "Notes-hosted Agent Chat should mirror the main-window Agent Chat footer labels and order"
     );
 }
 

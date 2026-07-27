@@ -166,7 +166,6 @@ impl NotesApp {
             last_autosize_transition: None,
             last_bottom_resize_receipt: None,
             native_resize_phase: resize::NotesNativeResizePhase::EntryLocked,
-            last_synced_backdrop_inset: None,
             last_automation_synced_bounds: None,
             focus_handle,
             _subscriptions: vec![editor_sub, editor_hover_observation, search_sub],
@@ -212,9 +211,6 @@ impl NotesApp {
             notes_ghost_llm_generation: 0,
             notes_ghost_llm_cancel: None,
             notes_ghost_llm_cache: std::collections::VecDeque::new(),
-            surface_mode: NotesSurfaceMode::default(),
-            embedded_agent_chat: None,
-            notes_agent_chat_generation: 0,
             last_ai_handoff: None,
             ai_handoff_generation: 0,
             mention_portal_edit: None,
@@ -481,7 +477,6 @@ impl NotesApp {
 
         if self.preview_enabled
             || self.view_mode == NotesViewMode::Trash
-            || self.surface_mode != NotesSurfaceMode::Notes
             || self.show_search
             || self.command_bar.is_open()
             || self.note_switcher.is_open()
@@ -833,7 +828,7 @@ impl NotesApp {
     /// resize path and `automation_layout_info` so the two cannot drift.
     ///
     /// The Notes footer rail was removed (chrome policy
-    /// `NotesFooterMode::None` reserves nothing in-window), so the equation
+    /// Notes renders no footer), so the equation
     /// reserves ZERO footer height — `metrics.footer_height` remains a style
     /// value consumed by other layout, not by autosize.
     pub(super) fn autosize_desired_height(
@@ -850,12 +845,6 @@ impl NotesApp {
         line_count: usize,
         _cx: &mut Context<Self>,
     ) {
-        // Agent mode never runs the Notes editor auto-sizing: the embedded
-        // chat owns its own layout inside the shared shell.
-        if self.surface_mode != NotesSurfaceMode::Notes {
-            return;
-        }
-
         // Use initial_height as minimum - never shrink below starting size
         let min_height = self.initial_height;
 
