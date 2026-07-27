@@ -275,7 +275,78 @@ export const SUITES: Record<string, SuiteRunner> = {
   snap: (context) => cargoProviderTests(context, "window_control::snap", "snap"),
   protocol: pendingSuite("protocol", "S14"),
   "window-switcher": pendingSuite("window-switcher", "S14"),
-  "sdk-parity": pendingSuite("sdk-parity", "S15"),
+  "sdk-parity": (context) => {
+    const repoRoot = resolve(import.meta.dir, "../..");
+    // 1. Locked public files must be byte-identical to the recorded baseline.
+    const ledgerPath = resolve(
+      repoRoot,
+      ".notes/oracle/window-engine-foundation/ledger.md",
+    );
+    let base = "";
+    try {
+      const ledger = readFileSync(ledgerPath, "utf8");
+      base = ledger.match(/^baseline_commit: (\S+)/m)?.[1] ?? "";
+    } catch {
+      // Ledger absent (fresh checkout): fall back to HEAD-relative check.
+    }
+    const lockedFiles = [
+      "scripts/kit-sdk.ts",
+      "src/protocol/types/primitives.rs",
+      "src/protocol/message/variants/system_control.rs",
+      "src/config/types.rs",
+      "src/builtins/mod.rs",
+      "kit-init/scriptlets/window-management/main.md",
+    ];
+    if (base) {
+      const diff = spawnSync("git", ["diff", "--exit-code", base, "--", ...lockedFiles], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+      if (diff.status !== 0) {
+        return {
+          suite: "sdk-parity",
+          status: "fail",
+          detail: `locked public files changed since baseline ${base}: ${diff.stdout.slice(0, 400)}`,
+        };
+      }
+    }
+    // 2. The SDK test carries the exact 21-string wire vocabulary and the
+    //    fixture-only mutation gate.
+    const sdkTest = readFileSync(
+      resolve(repoRoot, "tests/sdk/test-window-management.ts"),
+      "utf8",
+    );
+    const required = [
+      '"almost-maximize"',
+      '"first-two-thirds"',
+      "isMutableFixture",
+      "SK Window Fixture",
+      "Disposable",
+    ];
+    const missing = required.filter((needle) => !sdkTest.includes(needle));
+    if (missing.length > 0) {
+      return {
+        suite: "sdk-parity",
+        status: "fail",
+        detail: `SDK test contract markers missing: ${missing.join(", ")}`,
+      };
+    }
+    if (sdkTest.includes("sixth")) {
+      return {
+        suite: "sdk-parity",
+        status: "fail",
+        detail: "SDK test must not add internal sixth positions to the wire vocabulary",
+      };
+    }
+    // 3. Engine-side legacy parity tests.
+    const legacy = cargoProviderTests(context, "window_control::legacy", "sdk-parity");
+    if (legacy.status !== "pass") return { ...legacy, suite: "sdk-parity" };
+    return {
+      suite: "sdk-parity",
+      status: "pass",
+      detail: `locked files clean vs ${base || "HEAD"}; SDK test contract markers present; ${legacy.detail}`,
+    };
+  },
   native: pendingSuite("native", "S16"),
   "app-profiles": pendingSuite("app-profiles", "S16"),
   "rapid-cycle": pendingSuite("rapid-cycle", "S16"),
