@@ -32,6 +32,8 @@ struct DragArmState {
 }
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+/// At most one drag-time AX poll in flight.
+static DRAG_POLL_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static DRAG_ARM_STATE: LazyLock<Mutex<Option<DragArmState>>> = LazyLock::new(|| Mutex::new(None));
 static SNAP_MONITOR_CHANNEL: LazyLock<(
     async_channel::Sender<SnapMonitorEvent>,
@@ -82,10 +84,32 @@ fn handle_snap_monitor_event(event: SnapMonitorEvent, cx: &mut App) -> Result<()
                 return Ok(());
             }
 
-            let armed = get_frontmost_window_of_previous_app()?
-                .as_ref()
-                .map(arm_state_for_window);
-            *super::snap_lock(&DRAG_ARM_STATE, "monitor arm")? = armed;
+            // Previous-app resolution performs AX reads: run it OFF the GPUI
+            // thread. The arm generation invalidates a late resolution after
+            // release.
+            *super::snap_lock(&DRAG_ARM_STATE, "monitor arm")? = None;
+            let arm_generation = super::snap_runtime::snap_arm_generation();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let armed = cx
+                    .background_executor()
+                    .spawn(async move {
+                        get_frontmost_window_of_previous_app()
+                            .ok()
+                            .flatten()
+                            .as_ref()
+                            .map(arm_state_for_window)
+                    })
+                    .await;
+                if super::snap_runtime::snap_arm_generation() != arm_generation {
+                    return; // released before resolution completed
+                }
+                if let (Some(armed), Ok(mut guard)) =
+                    (armed, super::snap_lock(&DRAG_ARM_STATE, "monitor arm"))
+                {
+                    *guard = Some(armed);
+                }
+            })
+            .detach();
         }
         SnapMonitorEvent::Dragged => {
             if is_snap_runtime_active() {
@@ -97,22 +121,46 @@ fn handle_snap_monitor_event(event: SnapMonitorEvent, cx: &mut App) -> Result<()
                 return Ok(());
             };
 
-            let current_bounds = poll_armed_window_bounds(armed.window_id);
-
-            if should_start_runtime(armed, current_bounds) {
-                *super::snap_lock(&DRAG_ARM_STATE, "monitor arm")? = None;
-                tracing::info!(
-                    target: "script_kit::snap_monitor",
-                    event = "snap_drag_started",
-                    window_id = armed.window_id,
-                    "detected external window drag"
-                );
-                start_snap_runtime(cx)?;
-            } else if current_bounds.is_none() {
-                *super::snap_lock(&DRAG_ARM_STATE, "monitor arm")? = None;
+            // One in-flight poll; AX read happens on the background executor.
+            if DRAG_POLL_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+                return Ok(());
             }
+            let arm_generation = super::snap_runtime::snap_arm_generation();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let current_bounds = cx
+                    .background_executor()
+                    .spawn(async move { poll_armed_window_bounds(armed.window_id) })
+                    .await;
+                DRAG_POLL_IN_FLIGHT.store(false, Ordering::SeqCst);
+                cx.update(|cx| {
+                    if super::snap_runtime::snap_arm_generation() != arm_generation
+                        || is_snap_runtime_active()
+                    {
+                        return;
+                    }
+                    if should_start_runtime(armed, current_bounds) {
+                        if let Ok(mut guard) = super::snap_lock(&DRAG_ARM_STATE, "monitor arm") {
+                            *guard = None;
+                        }
+                        tracing::info!(
+                            target: "script_kit::snap_monitor",
+                            event = "snap_drag_started",
+                            window_id = armed.window_id,
+                            "detected external window drag"
+                        );
+                        let _ = start_snap_runtime(cx);
+                    } else if current_bounds.is_none() {
+                        if let Ok(mut guard) = super::snap_lock(&DRAG_ARM_STATE, "monitor arm") {
+                            *guard = None;
+                        }
+                    }
+                });
+            })
+            .detach();
         }
         SnapMonitorEvent::Released => {
+            // Invalidate any in-flight arm resolution or poll decision.
+            super::snap_runtime::bump_snap_arm_generation();
             *super::snap_lock(&DRAG_ARM_STATE, "monitor arm")? = None;
 
             if is_snap_runtime_active() {

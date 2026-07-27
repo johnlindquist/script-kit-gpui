@@ -272,7 +272,7 @@ export const SUITES: Record<string, SuiteRunner> = {
   },
   "legacy-actions": (context) =>
     cargoProviderTests(context, "window_control::actions", "legacy-actions"),
-  snap: pendingSuite("snap", "S13"),
+  snap: (context) => cargoProviderTests(context, "window_control::snap", "snap"),
   protocol: pendingSuite("protocol", "S14"),
   "window-switcher": pendingSuite("window-switcher", "S14"),
   "sdk-parity": pendingSuite("sdk-parity", "S15"),

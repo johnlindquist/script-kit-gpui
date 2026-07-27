@@ -89,6 +89,8 @@ pub struct SnapOverlayScene {
 pub struct SnapSession {
     /// The tracked external window's ID.
     pub window_id: u32,
+    /// The registry handle backing the tracked window (identity-safe).
+    pub window_handle: super::types::WindowHandle,
     /// Application name of the tracked window.
     pub app_name: String,
     /// Window title.
@@ -180,6 +182,7 @@ pub fn begin_snap_session() -> Result<SnapSession> {
 
     Ok(SnapSession {
         window_id: window.id,
+        window_handle: window.handle(),
         app_name: window.app,
         window_title: window.title,
         display: display_bounds,
@@ -199,9 +202,15 @@ pub fn begin_snap_session() -> Result<SnapSession> {
 ///
 /// Returns `None` if the window is no longer accessible (e.g., closed).
 pub fn poll_window_bounds(session: &SnapSession) -> Option<Bounds> {
-    // Poll path: registry lookup only, no refresh — this runs at 16 ms cadence.
-    let handle = super::registry::resolve_legacy_window_id(session.window_id).ok()?;
-    let window = super::registry::retained_window(handle).ok()?;
+    // Poll path: handle lookup only, no refresh — this runs at 16 ms cadence.
+    let window = super::registry::retained_window(session.window_handle)
+        .or_else(|_| {
+            // Generation moved mid-drag (e.g. a background refresh): recover
+            // the SAME window by nonce without a full refresh.
+            let observation = super::registry::resolve_nonce(session.window_handle.nonce)?;
+            super::registry::retained_window(observation.handle)
+        })
+        .ok()?;
     let (x, y) = get_window_position(window.as_ptr()).ok()?;
     let (w, h) = get_window_size(window.as_ptr()).ok()?;
     Some(Bounds::new(x, y, w, h))
@@ -457,12 +466,42 @@ pub fn commit_snap_session(session: &SnapSession) -> Result<SnapSessionOutcome> 
         "committing snap session"
     );
 
-    super::actions::set_window_bounds(session.window_id, active.target.bounds)?;
+    let plan = build_snap_commit_plan(session)?;
+    let receipt = super::transaction::execute_plan(&plan)?;
+    if receipt.status != super::transaction::MutationStatus::Succeeded {
+        let detail = receipt
+            .operations
+            .iter()
+            .find_map(|operation| operation.error.clone())
+            .unwrap_or_else(|| format!("{:?}", receipt.status));
+        anyhow::bail!("snap commit failed: {detail}");
+    }
 
     Ok(SnapSessionOutcome::Committed {
         tile: active.target.tile,
         bounds: active.target.bounds,
     })
+}
+
+/// Build the strict, undoable SetBounds plan for the active snap target.
+///
+/// Geometry comes from the CALIBRATED snap target bounds untouched; only the
+/// execution path changes (verified transaction instead of raw AX writes).
+pub fn build_snap_commit_plan(session: &SnapSession) -> Result<super::plan::WindowMutationPlan> {
+    let active = session
+        .active_match
+        .context("No active snap target to commit")?;
+    let observation = super::registry::resolve_handle(session.window_handle).or_else(|_| {
+        // Recover the same window by nonce after a generation change.
+        super::registry::resolve_nonce(session.window_handle.nonce)
+    })?;
+    Ok(super::plan::build_explicit_bounds_plan(
+        super::diagnostics::OperationSource::SnapSession,
+        &observation,
+        active.target.bounds,
+        super::plan::RollbackPolicy::Strict,
+        true,
+    ))
 }
 
 /// Cancel the snap session without applying any changes.
@@ -554,6 +593,12 @@ mod tests {
         }];
         SnapSession {
             window_id: 0x1234_0000,
+            window_handle: super::super::types::WindowHandle {
+                pid: 0,
+                native_window_id: None,
+                registry_generation: 0,
+                nonce: 0,
+            },
             app_name: "TestApp".to_string(),
             window_title: "Test Window".to_string(),
             display: display_val,
@@ -790,6 +835,12 @@ mod tests {
 
         SnapSession {
             window_id: 0xABCD_0000,
+            window_handle: super::super::types::WindowHandle {
+                pid: 0,
+                native_window_id: None,
+                registry_generation: 0,
+                nonce: 0,
+            },
             app_name: "DualApp".to_string(),
             window_title: "Dual Window".to_string(),
             display: display_a,
@@ -876,5 +927,74 @@ mod tests {
         assert_eq!(active.target.tile, TilePosition::LeftHalf);
         assert_eq!(active.target.bounds.x, 1440);
         assert_eq!(session.display, Bounds::new(1440, 24, 1440, 876));
+    }
+
+    #[test]
+    fn snap_commit_routes_through_the_transaction_engine() {
+        let _lock = super::super::registry::REGISTRY_TEST_LOCK.lock();
+        let _env = super::super::test_support::test_env::EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Dragged","pid":9,
+                 "bounds":{"x":5,"y":5,"width":800,"height":600}}
+            ]}"#,
+        );
+        super::super::registry::reset_registry_for_tests();
+        super::super::registry::refresh_from_test_provider().expect("refresh");
+        let handle = super::super::registry::resolve_legacy_window_id(1).expect("resolve");
+
+        let mut session = make_session();
+        session.window_id = 1;
+        session.window_handle = handle;
+        session.active_match = Some(super::super::snap::SnapMatch {
+            target: super::super::snap::SnapTarget {
+                tile: TilePosition::LeftHalf,
+                bounds: Bounds::new(0, 25, 960, 1055),
+            },
+            overlap_ratio: 0.9,
+        });
+
+        let outcome = commit_snap_session(&session).expect("commit");
+        assert!(matches!(
+            outcome,
+            SnapSessionOutcome::Committed {
+                tile: TilePosition::LeftHalf,
+                ..
+            }
+        ));
+        // The provider window verifiably moved to the CALIBRATED target frame.
+        let state = super::super::test_support::window_state(1).expect("state");
+        assert_eq!(state.bounds, Bounds::new(0, 25, 960, 1055));
+        // The commit is undoable (engine-recorded).
+        assert!(super::super::undo::window_undo_depths().0 >= 1);
+        super::super::undo::clear_window_undo_history();
+    }
+
+    #[test]
+    fn failed_snap_verification_is_not_reported_committed() {
+        let _lock = super::super::registry::REGISTRY_TEST_LOCK.lock();
+        let _env = super::super::test_support::test_env::EnvGuard::set(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Sticky","pid":9,
+                 "mutation":{"positionDeltaX":40}}
+            ]}"#,
+        );
+        super::super::registry::reset_registry_for_tests();
+        super::super::registry::refresh_from_test_provider().expect("refresh");
+        let handle = super::super::registry::resolve_legacy_window_id(1).expect("resolve");
+
+        let mut session = make_session();
+        session.window_id = 1;
+        session.window_handle = handle;
+        session.active_match = Some(super::super::snap::SnapMatch {
+            target: super::super::snap::SnapTarget {
+                tile: TilePosition::LeftHalf,
+                bounds: Bounds::new(0, 25, 960, 1055),
+            },
+            overlap_ratio: 0.9,
+        });
+
+        let error = commit_snap_session(&session).expect_err("mismatch must fail");
+        assert!(error.to_string().contains("snap commit failed"));
+        super::super::undo::clear_window_undo_history();
     }
 }
