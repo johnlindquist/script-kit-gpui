@@ -325,12 +325,26 @@ impl ScriptListApp {
             let entity = entity.clone();
             let reusable = {
                 let view = entity.read(cx);
-                !view.is_setup_mode()
-                    && !view.is_focused_text_mini()
-                    && view.current_ui_variant()
+                let is_setup = view.is_setup_mode();
+                let is_mini = view.is_focused_text_mini();
+                let variant = view.current_ui_variant();
+                let policy = view.session_policy();
+                let reusable = !is_setup
+                    && !is_mini
+                    && variant
                         == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard
-                    && view.session_policy()
-                        == crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full
+                    && policy
+                        == crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::Full;
+                tracing::info!(
+                    target: "script_kit::tab_ai",
+                    event = "notes_handoff_reuse_gate",
+                    reusable,
+                    is_setup,
+                    is_mini,
+                    variant = variant.state_id(),
+                    policy = ?policy,
+                );
+                reusable
             };
             if reusable {
                 let staged = entity.update(cx, |view, cx| {

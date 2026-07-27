@@ -80,6 +80,19 @@ async function main() {
   let agentSetupMode = false;
 
   try {
+    // The sandboxed session starts without a live main window; create/show it
+    // first so the cross-window handoff has a real destination window.
+    driver.send({ type: "show" });
+    await pollUntil(
+      "main window registered",
+      15000,
+      () => driver.listAutomationWindows(),
+      (windows) =>
+        asArray(asObject(windows).windows).some(
+          (w) => asObject(w).id === "main" && asObject(w).visible === true,
+        ),
+    );
+
     // ── Open Notes and stage a live editor snapshot ────────────────────────
     driver.send({ type: "openNotes" });
     await pollUntil(
@@ -168,13 +181,21 @@ async function main() {
             { expect: "agentChatStateResult", timeoutMs: 8000 },
           ),
         ),
-      (chat) => {
-        const state = asObject(chat.state ?? chat);
-        return (
-          state.messageCount === 2 &&
-          String(state.inputText ?? "") === "Fixture follow-up"
-        );
-      },
+      (chat) => asObject(chat.state ?? chat).messageCount === 2,
+    );
+    // Stage a known composer draft so scenario B proves draft preservation.
+    driver.send({ type: "setAgentChatInput", text: "keep this draft", submit: false });
+    await pollUntil(
+      "fixture draft staged",
+      10000,
+      async () =>
+        asObject(
+          await driver.request(
+            { type: "getAgentChatState" },
+            { expect: "agentChatStateResult", timeoutMs: 8000 },
+          ),
+        ),
+      (chat) => String(asObject(chat.state ?? chat).inputText ?? "") === "keep this draft",
     );
 
     const generationBefore = Number(handoffA.generation ?? 0);
@@ -211,9 +232,7 @@ async function main() {
       handoffB.destinationSurface === "agentChat";
     predicates.reuseMessagesPreserved = stateB.messageCount === 2;
     predicates.reuseComposerStartsWithNoteToken = composerB.startsWith("@note:");
-    predicates.reuseExistingDraftPreserved = composerB.endsWith(
-      "Fixture follow-up",
-    );
+    predicates.reuseExistingDraftPreserved = composerB.endsWith("keep this draft");
     predicates.reusePrimaryKindFocusedTarget =
       notePartB?.kind === "focusedTarget";
     predicates.reuseTargetSourceNotes = notePartB?.targetSource === "Notes";
@@ -280,6 +299,8 @@ async function main() {
       coveredBy:
         "unit tests: notes::window::ai_handoff::tests::unsaved_draft_is_accepted_and_uses_instance_scoped_identity",
     };
+  } catch (error) {
+    receipt.error = String(error);
   } finally {
     await driver.close();
   }
@@ -288,7 +309,7 @@ async function main() {
   receipt.predicates = predicates;
   const failed = Object.entries(predicates).filter(([, ok]) => !ok);
   receipt.failedPredicates = failed.map(([name]) => name);
-  receipt.green = failed.length === 0;
+  receipt.green = failed.length === 0 && receipt.error == null;
   console.log(JSON.stringify(receipt, null, 2));
   if (!receipt.green) {
     process.exit(1);

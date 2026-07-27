@@ -96,7 +96,7 @@ fn coverage_pins_notes_features_shortcuts_and_missing_primitives() {
         "independent app-hide behavior",
         "src/notes/window.rs",
         "src/notes/window/keyboard.rs",
-        "src/notes/window/agent_chat_host.rs",
+        "src/notes/window/ai_handoff.rs",
         "src/notes/actions_panel.rs",
         "src/notes/storage.rs",
         "Cmd+N",
@@ -133,7 +133,7 @@ fn coverage_pins_notes_features_shortcuts_and_missing_primitives() {
         "getState(target notes) redacted active note",
         "getState(target notes) redacted draft snapshot fingerprint",
         "notes.resize-compare sandboxed auto-resize before/after receipt",
-        "Agent Chat embedded origin receipts",
+        "notes AI handoff receipt",
     ] {
         assert!(
             COVERAGE.contains(needle),
@@ -358,7 +358,7 @@ fn coverage_source_files_exist_for_notes_and_dictation() {
     for path in [
         "src/notes/window.rs",
         "src/notes/window/keyboard.rs",
-        "src/notes/window/agent_chat_host.rs",
+        "src/notes/window/ai_handoff.rs",
         "src/notes/window/window_ops.rs",
         "src/notes/actions_panel.rs",
         "src/notes/window/panels.rs",

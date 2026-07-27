@@ -403,10 +403,21 @@ impl NotesApp {
                 false
             }
             Err(error) => {
-                if error == "main_window_handle_missing" {
-                    // Ask the app to create/show main, then retry exactly once
-                    // on the next frame through a weak entity.
-                    crate::request_show_main_window();
+                if error == "main_window_handle_missing"
+                    || error.starts_with("main_window_update_failed")
+                {
+                    // Recoverable: either no live main window yet, or the
+                    // dispatch arrived while the main window was already on
+                    // the GPUI update stack (automation simulateKey routes
+                    // through the main app), which reads as "window not
+                    // found" from a re-entrant update. Retry exactly once
+                    // outside the update stack. Only request a show when the
+                    // main window is genuinely not visible — showing the
+                    // launcher resets its view and would destroy a reusable
+                    // Agent Chat before the retry.
+                    if !crate::is_main_window_visible() {
+                        crate::request_show_main_window();
+                    }
                     self.schedule_ai_handoff_retry(payload, cx);
                     return false;
                 }
