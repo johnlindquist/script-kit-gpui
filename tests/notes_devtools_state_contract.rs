@@ -59,7 +59,7 @@ fn notes_automation_state_is_runtime_derived_and_redacted() {
         "\"focusSurface\"",
         "\"autoSizingEnabled\"",
         "\"lastWindowHeight\"",
-        "\"notesAgentChatGeneration\"",
+        "\"lastAiHandoff\"",
         "\"redacted\": true",
         "\"storage\"",
         "\"commandBars\"",
@@ -204,7 +204,6 @@ fn notes_state_exposes_shortcut_registry_and_focus_owner_scope() {
         "\"modalGuard\"",
         "\"actionsPanel\"",
         "\"noteSwitcher\"",
-        "\"embeddedAgentChat\"",
         "\"Cmd+K\"",
         "\"Cmd+P\"",
         "\"Cmd+Enter\"",
@@ -226,44 +225,6 @@ fn notes_state_exposes_shortcut_registry_and_focus_owner_scope() {
                 || DEVTOOLS_COVERAGE.contains(needle)
                 || DEVTOOLS_NOTES.contains(needle),
             "Notes DevTools CLI/schema/coverage must report shortcut registry field: {needle}"
-        );
-    }
-}
-
-#[test]
-fn notes_state_exposes_embedded_agent_chat_origin_isolation_receipt() {
-    for needle in [
-        "fn automation_embedded_agent_chat_isolation_snapshot(&self)",
-        "\"embeddedAgentChat\"",
-        "\"host\": \"notes\"",
-        "\"automationId\"",
-        "NOTES_EMBEDDED_AI_AUTOMATION_ID",
-        "\"parentWindowId\": \"notes\"",
-        "\"parentKind\": \"notes\"",
-        "\"actionsParentAutomationId\": \"notes\"",
-        "\"usesMainAiAutomationWindow\": false",
-        "\"mainAiAutomationId\": \"ai\"",
-        "\"registered\"",
-    ] {
-        assert!(
-            NOTES_NAVIGATION.contains(needle),
-            "Notes state must expose embedded Agent Chat origin/isolation receipt: {needle}"
-        );
-    }
-}
-
-#[test]
-fn notes_cli_reports_embedded_agent_chat_origin_receipt() {
-    for needle in [
-        "embeddedAgentChat: runtimeNotes.embeddedAgentChat ?? null",
-        "function hasNotesAgentChatOriginReceipt",
-        "embeddedAgentChat.host === \"notes\"",
-        "embeddedAgentChat.automationId === \"notes:ai\"",
-        "embeddedAgentChat.usesMainAiAutomationWindow === false",
-    ] {
-        assert!(
-            DEVTOOLS_NOTES.contains(needle),
-            "Notes DevTools CLI must report embedded Agent Chat origin receipt: {needle}"
         );
     }
 }
@@ -315,22 +276,6 @@ fn notes_batch_supports_target_scoped_open_actions() {
         assert!(
             DEVTOOLS_NOTES.contains(needle) || DEVTOOLS_COVERAGE.contains(needle),
             "Notes DevTools CLI/coverage must prefer target-scoped openActions receipts: {needle}"
-        );
-    }
-}
-
-#[test]
-fn notes_batch_supports_target_scoped_open_agent_chat() {
-    for needle in [
-        "OpenNotesAgentChat",
-        "openNotesAgentChat",
-        "protocol::BatchCommand::OpenNotesAgentChat",
-        "transaction_notes_open_agent_chat",
-        "app.open_or_focus_embedded_agent_chat(",
-    ] {
-        assert!(
-            BATCH_WAIT.contains(needle) || PROMPT_HANDLER.contains(needle),
-            "Batch protocol must define target-scoped Notes Agent Chat primitive: {needle}"
         );
     }
 }
@@ -524,18 +469,24 @@ fn notes_state_exposes_editor_scroll_metrics_and_preview_mount_command() {
         );
     }
 
+    // The preview scroll handle moved into the shared notes_editor component;
+    // the invariant is unchanged: the preview owns a REAL runtime scroll
+    // handle and the automation anchor reads it, never a synthetic value.
     for needle in [
         "preview_scroll_handle: ScrollHandle",
         "preview_scroll_handle: ScrollHandle::new()",
         ".track_scroll(&self.preview_scroll_handle)",
     ] {
         assert!(
-            NOTES_WINDOW.contains(needle)
-                || include_str!("../src/notes/window/init.rs").contains(needle)
-                || include_str!("../src/notes/window/render_editor_body.rs").contains(needle),
+            include_str!("../src/components/notes_editor/component.rs").contains(needle)
+                || include_str!("../src/components/notes_editor/render.rs").contains(needle),
             "Notes preview must own a runtime scroll handle for DevTools: {needle}"
         );
     }
+    assert!(
+        NOTES_NAVIGATION.contains("editor.preview_scroll_handle()"),
+        "Notes automation anchors must read the component's live preview scroll handle"
+    );
 
     for needle in [
         "editor.automation_scroll_metrics()",
@@ -573,7 +524,6 @@ fn notes_target_has_target_scoped_layout_info() {
         "NotesWindow",
         "NotesTitlebar",
         "NotesEditor",
-        "NotesFooter",
         "NotesActionsPanel",
         "NotesBrowsePanel",
     ] {
@@ -629,5 +579,34 @@ fn notes_cli_consumes_runtime_state_instead_of_guessing_everything_from_elements
     assert!(
         DEVTOOLS_COVERAGE.contains("getState(target notes) redacted active note"),
         "coverage should mark active note, dirty state, and selection as protocol-supported"
+    );
+}
+
+/// The notes→main AI handoff replaces the embedded Agent Chat receipts: the
+/// devtools state must expose a REDACTED lastAiHandoff receipt with a stable
+/// inactive shape (probes assert on the key without existence checks) and
+/// identity/shape fields only — never note content.
+#[test]
+fn notes_state_exposes_redacted_last_ai_handoff_receipt() {
+    for needle in [
+        "fn automation_last_ai_handoff_state(&self)",
+        "\"lastAiHandoff\": self.automation_last_ai_handoff_state()",
+        "\"active\": false",
+        "\"targetSemanticId\"",
+        "\"targetLabelFingerprint\"",
+        "\"destinationWindowId\"",
+        "\"destinationSurface\"",
+        "\"supplementalPartCount\"",
+        "\"errorCode\"",
+    ] {
+        assert!(
+            NOTES_NAVIGATION.contains(needle),
+            "Notes state must expose the redacted lastAiHandoff receipt field: {needle}"
+        );
+    }
+    assert!(
+        !NOTES_NAVIGATION.contains("receipt.target_label,")
+            && NOTES_NAVIGATION.contains("receipt.target_label_fingerprint"),
+        "lastAiHandoff must carry the label fingerprint, never the raw label"
     );
 }
