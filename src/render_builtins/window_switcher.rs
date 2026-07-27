@@ -23,6 +23,27 @@ impl WindowSwitcherFocusAction {
     }
 }
 
+/// What the UI does after an async focus attempt completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowSwitcherFocusCompletion {
+    /// Focus verified: hide Script Kit and reset.
+    HideMainWindow,
+    /// Focus failed: keep the switcher open and show the error toast.
+    ShowErrorToast(String),
+}
+
+/// Pure reducer: focus result -> UI completion. The main window is hidden
+/// ONLY from a successful completion — never before the result is known.
+fn reduce_window_switcher_focus_result(
+    action: WindowSwitcherFocusAction,
+    result: Result<(), String>,
+) -> WindowSwitcherFocusCompletion {
+    match result {
+        Ok(()) => WindowSwitcherFocusCompletion::HideMainWindow,
+        Err(error) => WindowSwitcherFocusCompletion::ShowErrorToast(action.failure_message(error)),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowSwitcherEmptyState {
     NoWindowsFound,
@@ -50,6 +71,60 @@ impl ScriptListApp {
     /// Render window switcher view with 50/50 split layout
     /// P0 FIX: Data comes from self.cached_windows, view passes only state
     fn render_window_switcher(
+        &mut self,
+        filter: String,
+        selected_index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_window_switcher_inner(filter, selected_index, cx)
+    }
+
+    /// Execute the switcher's focus action OFF the GPUI thread.
+    ///
+    /// The main window hides ONLY from the successful completion callback;
+    /// a failed focus keeps the switcher open with an error toast. Does
+    /// nothing when the entity no longer exists.
+    fn focus_window_switcher_target_async(
+        &mut self,
+        window_id: u32,
+        window_title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let focus_action = WindowSwitcherFocusAction::FocusSelectedWindow;
+        logging::log("EXEC", &focus_action.attempt_log(&window_title));
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    window_control::focus_window(window_id).map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = cx.update(|cx| {
+                let Some(entity) = this.upgrade() else {
+                    return;
+                };
+                entity.update(cx, |this, cx| {
+                    match reduce_window_switcher_focus_result(focus_action, result) {
+                        WindowSwitcherFocusCompletion::HideMainWindow => {
+                            logging::log("EXEC", &focus_action.success_log(&window_title));
+                            this.hide_main_and_reset(cx);
+                        }
+                        WindowSwitcherFocusCompletion::ShowErrorToast(failure_message) => {
+                            logging::log("ERROR", &failure_message);
+                            this.toast_manager.push(
+                                components::toast::Toast::error(failure_message, &this.theme)
+                                    .duration_ms(Some(TOAST_ERROR_MS)),
+                            );
+                            cx.notify();
+                        }
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn render_window_switcher_inner(
         &mut self,
         filter: String,
         selected_index: usize,
@@ -164,28 +239,17 @@ impl ScriptListApp {
                             cx.notify();
                         }
                         _ if is_key_enter(key) => {
-                            // Focus selected window and hide Script Kit
+                            // Focus selected window (async, off the GPUI
+                            // thread); Script Kit hides only after verified
+                            // focus success.
                             if let Some((_, window_info)) = filtered_windows.get(*selected_index) {
-                                let focus_action = WindowSwitcherFocusAction::FocusSelectedWindow;
-                                logging::log("EXEC", &focus_action.attempt_log(&window_info.title));
-                                if let Err(e) = window_control::focus_window(window_info.id) {
-                                    let failure_message = focus_action.failure_message(e);
-                                    logging::log("ERROR", &failure_message);
-                                    this.toast_manager.push(
-                                        components::toast::Toast::error(
-                                            failure_message,
-                                            &this.theme,
-                                        )
-                                        .duration_ms(Some(TOAST_ERROR_MS)),
-                                    );
-                                    cx.notify();
-                                } else {
-                                    logging::log(
-                                        "EXEC",
-                                        &focus_action.success_log(&window_info.title),
-                                    );
-                                    this.hide_main_and_reset(cx);
-                                }
+                                let window_id = window_info.id;
+                                let window_title = window_info.title.clone();
+                                this.focus_window_switcher_target_async(
+                                    window_id,
+                                    window_title,
+                                    cx,
+                                );
                             }
                         }
                         // Note: "escape" is handled by handle_global_shortcut_with_options above
@@ -245,6 +309,7 @@ impl ScriptListApp {
                                 // Click handler: select on click, focus window on double-click
                                 let click_entity = click_entity_handle.clone();
                                 let win_id = window_info.id;
+                                let win_title = window_info.title.clone();
                                 let click_handler =
                                     move |event: &gpui::ClickEvent,
                                           _window: &mut Window,
@@ -263,6 +328,8 @@ impl ScriptListApp {
                                                 this.note_list_pointer_click(ix, cx);
 
                                                 // Double-click: focus window
+                                                // through the same async
+                                                // helper as Enter.
                                                 if let gpui::ClickEvent::Mouse(mouse_event) = event
                                                 {
                                                     if mouse_event.down.click_count == 2 {
@@ -273,11 +340,11 @@ impl ScriptListApp {
                                                                 win_id
                                                             ),
                                                         );
-                                                        if window_control::focus_window(win_id)
-                                                            .is_ok()
-                                                        {
-                                                            this.hide_main_and_reset(cx);
-                                                        }
+                                                        this.focus_window_switcher_target_async(
+                                                            win_id,
+                                                            win_title.clone(),
+                                                            cx,
+                                                        );
                                                     }
                                                 }
                                             });
@@ -458,5 +525,37 @@ mod window_switcher_chrome_audit {
             0,
             "window_switcher should not use PromptFooter"
         );
+    }
+}
+
+#[cfg(test)]
+mod focus_reducer_tests {
+    // NOTE: no `use super::*` here — this file is include!()d beneath
+    // `use gpui::*`, whose `test` macro would shadow `#[test]` and silently
+    // unregister these tests (see gpui-test-macro-shadowing).
+
+    #[test]
+    fn successful_focus_hides_the_main_window() {
+        let completion = super::reduce_window_switcher_focus_result(
+            super::WindowSwitcherFocusAction::FocusSelectedWindow,
+            Ok(()),
+        );
+        assert_eq!(
+            completion,
+            super::WindowSwitcherFocusCompletion::HideMainWindow
+        );
+    }
+
+    #[test]
+    fn failed_focus_keeps_the_switcher_open_with_an_error_toast() {
+        let completion = super::reduce_window_switcher_focus_result(
+            super::WindowSwitcherFocusAction::FocusSelectedWindow,
+            Err("window_engine:Failed:gone".to_string()),
+        );
+        let super::WindowSwitcherFocusCompletion::ShowErrorToast(message) = completion else {
+            panic!("failed focus must show a toast, never hide the window");
+        };
+        assert!(message.contains("Failed to focus window"));
+        assert!(message.contains("window_engine:Failed:gone"));
     }
 }

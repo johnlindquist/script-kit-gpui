@@ -66,7 +66,9 @@ pub use actions::{
     close_window, focus_window, maximize_window, minimize_window, move_to_next_display,
     move_to_previous_display, move_window, resize_window, tile_window,
 };
+pub use display_topology::{display_topology_snapshot, list_displays, DisplayTopologySnapshot};
 pub use query::{get_frontmost_window_of_previous_app, has_accessibility_permission, list_windows};
+pub use registry::{refresh_window_registry, registry_snapshot, RegistrySnapshot};
 #[allow(unused_imports)]
 pub use snap_mode::{
     current_snap_mode, load_snap_mode_from_preferences, persist_snap_mode, set_snap_mode, SnapMode,
@@ -77,4 +79,8 @@ pub use snap_runtime::{
     cancel_snap_runtime, finish_snap_runtime, is_snap_runtime_active,
     refresh_snap_runtime_for_mode, start_snap_runtime,
 };
+pub use transaction::{MutationStatus, TransactionReceipt};
 pub use types::*;
+pub use undo::{
+    clear_window_undo_history, redo_last_window_transaction, undo_last_window_transaction,
+};

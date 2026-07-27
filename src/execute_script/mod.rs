@@ -29,9 +29,63 @@ fn protocol_tile_to_window_control(pos: &protocol::TilePosition) -> window_contr
         P::Maximize => WC::Fullscreen,
     }
 }
-/// Standard macOS menu bar height in points (consistent since macOS 10.0)
-/// Note: This is an approximation - the actual height can vary with accessibility settings
-const MACOS_MENU_BAR_HEIGHT: i32 = 24;
+
+/// Dispatch one legacy protocol window action through the public wrappers.
+///
+/// Exhaustive over `WindowActionType` (no wildcard arm); field validation
+/// preserves the historical error strings exactly.
+fn dispatch_legacy_window_action(
+    action: &protocol::WindowActionType,
+    window_id: Option<u32>,
+    bounds: Option<&protocol::TargetWindowBounds>,
+    tile_position: Option<&protocol::TilePosition>,
+) -> anyhow::Result<()> {
+    match action {
+        protocol::WindowActionType::Focus => {
+            let id = window_id.ok_or_else(|| anyhow::anyhow!("Missing window_id"))?;
+            window_control::focus_window(id)
+        }
+        protocol::WindowActionType::Close => {
+            let id = window_id.ok_or_else(|| anyhow::anyhow!("Missing window_id"))?;
+            window_control::close_window(id)
+        }
+        protocol::WindowActionType::Minimize => {
+            let id = window_id.ok_or_else(|| anyhow::anyhow!("Missing window_id"))?;
+            window_control::minimize_window(id)
+        }
+        protocol::WindowActionType::Maximize => {
+            let id = window_id.ok_or_else(|| anyhow::anyhow!("Missing window_id"))?;
+            window_control::maximize_window(id)
+        }
+        protocol::WindowActionType::Resize => {
+            let (id, b) = window_id
+                .zip(bounds)
+                .ok_or_else(|| anyhow::anyhow!("Missing window_id or bounds"))?;
+            window_control::resize_window(id, b.width, b.height)
+        }
+        protocol::WindowActionType::Move => {
+            let (id, b) = window_id
+                .zip(bounds)
+                .ok_or_else(|| anyhow::anyhow!("Missing window_id or bounds"))?;
+            window_control::move_window(id, b.x, b.y)
+        }
+        protocol::WindowActionType::Tile => {
+            let (id, pos) = window_id
+                .zip(tile_position)
+                .ok_or_else(|| anyhow::anyhow!("Missing window_id or tile_position"))?;
+            window_control::tile_window(id, protocol_tile_to_window_control(pos))
+        }
+        protocol::WindowActionType::MoveToNextDisplay => {
+            let id = window_id.ok_or_else(|| anyhow::anyhow!("Missing window_id"))?;
+            window_control::move_to_next_display(id)
+        }
+        protocol::WindowActionType::MoveToPreviousDisplay => {
+            let id = window_id.ok_or_else(|| anyhow::anyhow!("Missing window_id"))?;
+            window_control::move_to_previous_display(id)
+        }
+    }
+}
+
 const CLIPBOARD_HISTORY_PREVIEW_CHAR_LIMIT: usize = 1000;
 
 #[derive(Debug)]
@@ -224,47 +278,29 @@ fn write_clipboard_image_from_base64(content: Option<&String>) -> Result<(), Cli
 fn get_displays() -> anyhow::Result<Vec<protocol::DisplayInfo>> {
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::display::CGDisplay;
-
-        let display_ids = CGDisplay::active_displays()
-            .map_err(|_| anyhow::anyhow!("Failed to get active displays"))?;
-
-        let mut displays = Vec::new();
-        let main_display_id = CGDisplay::main().id;
-
-        for (index, &display_id) in display_ids.iter().enumerate() {
-            let display = CGDisplay::new(display_id);
-            let bounds = display.bounds();
-            let is_primary = display_id == main_display_id;
-
-            // Estimate visible bounds by subtracting menu bar height from the top
-            // This is an approximation - dock and menu bar sizes can vary with settings
-            let visible_y = bounds.origin.y as i32 + MACOS_MENU_BAR_HEIGHT;
-            let visible_height =
-                (bounds.size.height as u32).saturating_sub(MACOS_MENU_BAR_HEIGHT as u32);
-
-            displays.push(protocol::DisplayInfo {
-                display_id,
-                name: format!("Display {}", index + 1),
-                is_primary,
+        // window_control::display_topology is the sole display owner: exact
+        // NSScreen visibleFrame geometry, localized names, real scale factors.
+        let displays = window_control::list_displays()?
+            .into_iter()
+            .map(|display| protocol::DisplayInfo {
+                display_id: display.id.0,
+                name: display.localized_name,
+                is_primary: display.is_primary,
                 bounds: protocol::TargetWindowBounds {
-                    x: bounds.origin.x as i32,
-                    y: bounds.origin.y as i32,
-                    width: bounds.size.width as u32,
-                    height: bounds.size.height as u32,
+                    x: display.full_bounds.x,
+                    y: display.full_bounds.y,
+                    width: display.full_bounds.width,
+                    height: display.full_bounds.height,
                 },
                 visible_bounds: protocol::TargetWindowBounds {
-                    x: bounds.origin.x as i32,
-                    y: visible_y,
-                    width: bounds.size.width as u32,
-                    height: visible_height,
+                    x: display.visible_bounds.x,
+                    y: display.visible_bounds.y,
+                    width: display.visible_bounds.width,
+                    height: display.visible_bounds.height,
                 },
-                // Scale factor is typically 2.0 for Retina displays, 1.0 otherwise
-                // We can't easily detect this from CGDisplay, so we'll leave it as None
-                scale_factor: None,
-            });
-        }
-
+                scale_factor: Some(display.backing_scale_factor),
+            })
+            .collect::<Vec<_>>();
         Ok(displays)
     }
 
@@ -1410,83 +1446,12 @@ impl ScriptListApp {
                                             "WindowAction request"
                                         );
 
-                                        let result = match action {
-                                            protocol::WindowActionType::Focus => {
-                                                if let Some(id) = window_id {
-                                                    window_control::focus_window(*id)
-                                                } else {
-                                                    Err(anyhow::anyhow!("Missing window_id"))
-                                                }
-                                            }
-                                            protocol::WindowActionType::Close => {
-                                                if let Some(id) = window_id {
-                                                    window_control::close_window(*id)
-                                                } else {
-                                                    Err(anyhow::anyhow!("Missing window_id"))
-                                                }
-                                            }
-                                            protocol::WindowActionType::Minimize => {
-                                                if let Some(id) = window_id {
-                                                    window_control::minimize_window(*id)
-                                                } else {
-                                                    Err(anyhow::anyhow!("Missing window_id"))
-                                                }
-                                            }
-                                            protocol::WindowActionType::Maximize => {
-                                                if let Some(id) = window_id {
-                                                    window_control::maximize_window(*id)
-                                                } else {
-                                                    Err(anyhow::anyhow!("Missing window_id"))
-                                                }
-                                            }
-                                            protocol::WindowActionType::Resize => {
-                                                if let (Some(id), Some(b)) = (window_id, bounds) {
-                                                    window_control::resize_window(
-                                                        *id, b.width, b.height,
-                                                    )
-                                                } else {
-                                                    Err(anyhow::anyhow!(
-                                                        "Missing window_id or bounds"
-                                                    ))
-                                                }
-                                            }
-                                            protocol::WindowActionType::Move => {
-                                                if let (Some(id), Some(b)) = (window_id, bounds) {
-                                                    window_control::move_window(*id, b.x, b.y)
-                                                } else {
-                                                    Err(anyhow::anyhow!(
-                                                        "Missing window_id or bounds"
-                                                    ))
-                                                }
-                                            }
-                                            protocol::WindowActionType::Tile => {
-                                                if let (Some(id), Some(pos)) =
-                                                    (window_id, tile_position)
-                                                {
-                                                    let wc_pos =
-                                                        protocol_tile_to_window_control(pos);
-                                                    window_control::tile_window(*id, wc_pos)
-                                                } else {
-                                                    Err(anyhow::anyhow!(
-                                                        "Missing window_id or tile_position"
-                                                    ))
-                                                }
-                                            }
-                                            protocol::WindowActionType::MoveToNextDisplay => {
-                                                if let Some(id) = window_id {
-                                                    window_control::move_to_next_display(*id)
-                                                } else {
-                                                    Err(anyhow::anyhow!("Missing window_id"))
-                                                }
-                                            }
-                                            protocol::WindowActionType::MoveToPreviousDisplay => {
-                                                if let Some(id) = window_id {
-                                                    window_control::move_to_previous_display(*id)
-                                                } else {
-                                                    Err(anyhow::anyhow!("Missing window_id"))
-                                                }
-                                            }
-                                        };
+                                        let result = dispatch_legacy_window_action(
+                                            action,
+                                            *window_id,
+                                            bounds.as_ref(),
+                                            tile_position.as_ref(),
+                                        );
 
                                         let response = match result {
                                             Ok(()) => {
