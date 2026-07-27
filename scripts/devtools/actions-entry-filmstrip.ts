@@ -16,7 +16,11 @@ import {
 } from "./glass-evidence-contract.ts";
 import {
   ACTIONS_GLASS_ENTRY_EXPECTATION,
+  analyzeEntryMotionEnvelope,
+  analyzeEntrySurfaceFields,
   analyzeLoggedEntryGeometry,
+  analyzeOnsetReceipt,
+  type NativeWindowBounds,
 } from "./glass-entry-motion-contract.ts";
 import { validateFilmstripCapture } from "./glass-lifecycle-filmstrip-contract.ts";
 import {
@@ -202,7 +206,7 @@ try {
 
   await announceTestStatus(
     "Animation lock · Actions entry",
-    "120 Hz exact-window filmstrip; 94% grow-in must remain inside the golden envelope",
+    "120 Hz exact-window filmstrip; 98.8% -> 101.3% -> 100% grow-in must remain inside the golden envelope",
   );
   const framesDir = join(outDir, "frames");
   mkdirSync(framesDir, { recursive: true });
@@ -271,6 +275,39 @@ try {
     motionLog,
     ACTIONS_GLASS_ENTRY_EXPECTATION,
   );
+
+  // WP0 (Oracle `glass-entry-feel-options`): until now this probe judged the
+  // Actions curve from its LOGGED targets while the main lifecycle probe judged
+  // main from CAPTURED frames. The two references were therefore not measured
+  // symmetrically, and the user has named the Actions entry as the perceptual
+  // target for a main-window retune. Since `open_actions_window` configures the
+  // morph before attaching the popup to its parent, AppKit's parent-child
+  // machinery may be damping what actually renders — so the logged target is
+  // not proof of the reference feel. Measure the rendered bounds too.
+  const settledActionsBounds = settledNative.window?.bounds;
+  const settledBounds: NativeWindowBounds = settledActionsBounds
+    ? [
+      [
+        Number(settledActionsBounds.x),
+        Number(settledActionsBounds.y),
+      ],
+      [
+        Number(settledActionsBounds.width),
+        Number(settledActionsBounds.height),
+      ],
+    ]
+    : null;
+  const renderedGeometry = analyzeEntryMotionEnvelope(
+    filmstrip?.frames ?? [],
+    settledBounds,
+    ACTIONS_GLASS_ENTRY_EXPECTATION,
+  );
+  const surfaceFields = analyzeEntrySurfaceFields(motionLog);
+  const onsetLog = appLog
+    .split("\n")
+    .filter((line) => line.includes("event=native_glass_entry_onset"))
+    .slice(-3);
+  const onset = analyzeOnsetReceipt(onsetLog);
   receipt.capture = {
     command,
     exitCode: captureExitCode,
@@ -285,7 +322,14 @@ try {
   receipt.opened = opened;
   receipt.settledNative = settledNative;
   receipt.motionEnvelope = motionEnvelope;
+  receipt.motion = {
+    loggedGeometry: motionEnvelope,
+    renderedGeometry,
+    surfaceFields,
+    onset,
+  };
   receipt.motionLog = motionLog;
+  receipt.onsetLog = onsetLog;
 
   const closeDispatch = await driver.simulateGpuiKeyDown("escape", {
     target: { type: "id", id: "actions-dialog" },
@@ -299,6 +343,11 @@ try {
     && opened.pass === true
     && settledNative.error == null
     && motionEnvelope.pass === true
+    // Rendered geometry is a SOFT gate: a damage-driven capture that produced
+    // too few geometry samples falls back to the exact logged proof rather than
+    // failing the run (decision rule 5B, glass-entry-spotlight-retune). It only
+    // fails the probe when it resolved enough frames to judge AND disagreed.
+    && (renderedGeometry.underResolved === true || renderedGeometry.pass === true)
     && motionLog.length >= 1
     && closeDispatch?.success === true
     && closed.pass === true;

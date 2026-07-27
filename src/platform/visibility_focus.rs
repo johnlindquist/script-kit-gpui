@@ -364,6 +364,8 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
             PanelInvariantPhase::PreShow,
         );
 
+        crate::platform::host_clock::log_entry_timeline_event("main_show_requested");
+
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("before_order_front", cycle_id, None, None);
         }
@@ -372,6 +374,9 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
         // been applied by the caller, so refresh every local composition
         // region before the first visible AppKit frame.
         prepare_main_window_native_composition_for_show();
+        crate::platform::host_clock::log_entry_timeline_event(
+            "main_native_composition_prepared",
+        );
 
         // Glass mode: set the morph start state (alpha 0, larger frame) and
         // begin animating BEFORE ordering front — ordering front first
@@ -379,7 +384,8 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
         if tahoe_native_glass_composition_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled()
         {
-            animate_tahoe_glass_appearance(window, "PANEL", "Main window");
+            animate_tahoe_glass_main_appearance(window, "PANEL", "Main window");
+            crate::platform::host_clock::log_entry_timeline_event("main_morph_armed");
         } else {
             // Instrumentation only: a silently un-morphed show made the
             // runtime contract's missing enter line undiagnosable.
@@ -391,6 +397,7 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
 
         // orderFrontRegardless brings window to front without activating the app
         let _: () = msg_send![window, orderFrontRegardless];
+        crate::platform::host_clock::log_entry_timeline_event("main_order_front_returned");
 
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("after_order_front", cycle_id, None, None);
@@ -400,6 +407,7 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
         // For NSPanel with NonactivatingPanel style (PopUp windows), this works
         // without activating the application
         let _: () = msg_send![window, makeKeyWindow];
+        crate::platform::host_clock::log_entry_timeline_event("main_make_key_returned");
 
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("after_make_key", cycle_id, None, None);
@@ -480,13 +488,19 @@ pub fn show_main_window_background() {
             PanelInvariantPhase::BackgroundShow,
         );
 
+        crate::platform::host_clock::log_entry_timeline_event("main_show_requested");
+
         prepare_main_window_native_composition_for_show();
+        crate::platform::host_clock::log_entry_timeline_event(
+            "main_native_composition_prepared",
+        );
 
         // Glass mode: morph the glass backdrop into place on background shows too.
         if tahoe_native_glass_composition_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled()
         {
-            animate_tahoe_glass_appearance(window, "PANEL", "Main window");
+            animate_tahoe_glass_main_appearance(window, "PANEL", "Main window");
+            crate::platform::host_clock::log_entry_timeline_event("main_morph_armed");
         } else {
             // Instrumentation only: see the foreground show path.
             logging::log(
@@ -499,6 +513,7 @@ pub fn show_main_window_background() {
         // Crucially, we do NOT call makeKeyWindow so keyboard focus stays with
         // whatever surface currently owns it.
         let _: () = msg_send![window, orderFrontRegardless];
+        crate::platform::host_clock::log_entry_timeline_event("main_order_front_returned");
 
         logging::log(
             "PANEL",

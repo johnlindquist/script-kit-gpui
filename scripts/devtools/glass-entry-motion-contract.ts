@@ -192,6 +192,71 @@ function parseExactField(line: string, key: string): number | null {
 }
 
 /**
+ * The material-onset receipt (`event=native_glass_entry_onset`).
+ *
+ * Both the main and Actions probes must report this identically. Oracle
+ * (`glass-entry-feel-options`) ranked "onset applicability differs between the
+ * two surfaces" as a candidate cause of the perceptual gap and its verdict was:
+ * compare the fields the runtime ALREADY logs before inventing another onset
+ * theory. That comparison is impossible while only one probe parses them.
+ */
+export function analyzeOnsetReceipt(logLines: string[]) {
+  const line = [...logLines].reverse().find((candidate) =>
+    candidate.includes("event=native_glass_entry_onset")
+  );
+  if (!line) {
+    return { present: false, line: null };
+  }
+  const supportedMatch = line.match(/supported=(true|false)/);
+  return {
+    present: true,
+    line,
+    supported: supportedMatch ? supportedMatch[1] === "true" : null,
+    contentRootCount: parseExactField(line, "content_root_count"),
+    onsetDurationNs: parseExactField(line, "duration_ns"),
+    contentHoldNs: parseExactField(line, "content_hold_ns"),
+    contentFadeNs: parseExactField(line, "content_fade_ns"),
+    windowAlpha: parseExactField(line, "window_alpha"),
+  };
+}
+
+/**
+ * The WP0 surface/travel fields added to the entry morph line.
+ *
+ * These answer questions the fractional scale fields cannot: how far the window
+ * actually moves in POINTS (the same percentage is a very different gesture on
+ * a 750pt window than a 340pt popup), and whether AppKit still considered the
+ * popup a child window when its morph was armed.
+ */
+export function analyzeEntrySurfaceFields(
+  logLines: string[],
+) {
+  const line = [...logLines].reverse().find((candidate) =>
+    candidate.includes("variant=window_frame")
+    && candidate.includes("phase=enter")
+  );
+  if (!line) return { present: false, line: null };
+  const text = (key: string) => {
+    const match = line.match(new RegExp(`${key}=([A-Za-z_]+)`));
+    return match ? match[1] : null;
+  };
+  return {
+    present: true,
+    line,
+    surfaceProfile: text("surface_profile"),
+    direction: text("direction"),
+    travelPolicy: text("travel_policy"),
+    finalWidthPt: parseExactField(line, "final_width_pt"),
+    startTravelPerSidePt: parseExactField(line, "start_travel_per_side_pt"),
+    extremeTravelPerSidePt: parseExactField(line, "extreme_travel_per_side_pt"),
+    visibleTailDurationNs: parseExactField(line, "visible_tail_duration_ns"),
+    totalEntryDurationNs: parseExactField(line, "total_entry_duration_ns"),
+    parentAttachedAtArm: text("parent_attached_at_arm") === "true",
+    nativeParentWindowNumber: parseExactField(line, "native_parent_window_number"),
+  };
+}
+
+/**
  * Verify the morph's EXACT logged calibration against a named expectation.
  * A binary that logs only the old integer schema fails closed (old-schema
  * receipts cannot prove the visible-tail calibration).

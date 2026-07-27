@@ -1781,6 +1781,7 @@ pub fn open_actions_window(
     position: WindowPosition,
     parent_automation_id: Option<&str>,
 ) -> anyhow::Result<WindowHandle<ActionsWindow>> {
+    crate::platform::host_clock::log_entry_timeline_event("actions_open_requested");
     let parent_automation_id = resolve_actions_popup_parent_automation_id(
         parent_window_handle,
         main_window_bounds,
@@ -1896,13 +1897,27 @@ pub fn open_actions_window(
         let configure_result = handle.update(cx, move |_this, window, cx| {
             window.defer(cx, move |window, cx| {
                 if let Some(ns_window) = actions_popup_ns_window(window) {
+                    // Instrumentation only (Oracle `glass-entry-feel-options`
+                    // WP0). The configure-then-attach ORDER below is load
+                    // bearing product behavior and is deliberately unchanged:
+                    // the popup's entry morph is armed while `parentWindow` is
+                    // still nil, and the attach lands while that animation is
+                    // in flight. The user likes the resulting feel, so these
+                    // events exist to MEASURE that sequence, not to correct it.
+                    crate::platform::host_clock::log_entry_timeline_event(
+                        "actions_native_configure_started",
+                    );
                     // SAFETY: `ns_window` comes from the live GPUI popup window via
                     // `actions_popup_ns_window`, so it is a valid AppKit NSWindow
                     // pointer on the main thread when configuration runs.
                     unsafe {
                         platform::configure_actions_popup_window(ns_window, is_dark_vibrancy);
                     }
+                    crate::platform::host_clock::log_entry_timeline_event("actions_morph_armed");
                     attach_actions_popup_to_parent_window(cx, parent_window_handle, ns_window);
+                    crate::platform::host_clock::log_entry_timeline_event(
+                        "actions_parent_attached",
+                    );
                 } else {
                     tracing::warn!(
                         target: "script_kit::actions",

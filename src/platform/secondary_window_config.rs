@@ -102,6 +102,203 @@ struct GlassMorphTuning {
     content_fade_duration: f64,
 }
 
+/// Which product surface is entering. The geometry function must be told this
+/// EXPLICITLY by its caller — never infer it from `window_name`, which is a
+/// human-readable log label and not a policy input.
+///
+/// Introduced by Oracle session `glass-entry-feel-options` WP1 as the typed
+/// replacement for the old `grow_in: bool`. The bool could only express
+/// direction; the user's request ("make main feel like the Cmd+K Actions
+/// menu") needs direction, travel scaling, and onset to vary per surface.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlassEntrySurface {
+    /// The launcher panel, summoned by the global hotkey.
+    Main,
+    /// A popup attached to a parent NSWindow (Actions/Cmd+K and friends).
+    ChildPopup,
+    /// Notes, Dictation, HUD — free-standing secondary windows.
+    FreeStandingSecondary,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlassEntryDirection {
+    /// Spotlight's outset enter: start wider, compress below final, rebound.
+    ShrinkIn,
+    /// The child-popup enter: start below final, overshoot past it, settle.
+    GrowIn,
+}
+
+#[cfg(target_os = "macos")]
+impl GlassEntryDirection {
+    /// Multiplies every per-side travel. `ShrinkIn` keeps the historical
+    /// `+1.0` (start outset, squish under final); `GrowIn` inverts it.
+    fn geometry_sign(self) -> f64 {
+        match self {
+            Self::ShrinkIn => 1.0,
+            Self::GrowIn => -1.0,
+        }
+    }
+
+    fn log_name(self) -> &'static str {
+        match self {
+            Self::ShrinkIn => "shrink_in",
+            Self::GrowIn => "grow_in",
+        }
+    }
+}
+
+/// How per-side travel is derived from the settled window width.
+///
+/// `Fractional` is the only policy production uses today. The other two are
+/// the WP2/WP4 candidates from `glass-entry-feel-options` and are unreachable
+/// until `glass_entry_policy` returns them.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlassEntryTravelPolicy {
+    /// Travel = width × fraction. Same percentage on every surface, which
+    /// means a wide window physically moves further and faster.
+    Fractional,
+    /// Travel capped at the Actions popup's point displacement, so a large
+    /// window moves the same NUMBER OF POINTS as the popup rather than the
+    /// same percentage.
+    ///
+    /// Not yet resolved by `glass_entry_policy` — this is the WP2 candidate
+    /// from `glass-entry-feel-options`. Implemented and unit-tested now so the
+    /// retune is a one-line policy change rather than new geometry code.
+    #[allow(dead_code)]
+    ActionsPointCapped,
+    /// No geometry at all — alpha-only entry. The WP4 fade-only candidate;
+    /// see `ActionsPointCapped` for why it is implemented ahead of use.
+    #[allow(dead_code)]
+    FixedFrame,
+}
+
+#[cfg(target_os = "macos")]
+impl GlassEntryTravelPolicy {
+    fn log_name(self) -> &'static str {
+        match self {
+            Self::Fractional => "fractional",
+            Self::ActionsPointCapped => "actions_point_capped",
+            Self::FixedFrame => "fixed_frame",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlassEntryOnsetPolicy {
+    /// Material onset prefix (glass Clear→Regular + held GPUI content roots)
+    /// before the visible tail.
+    Full,
+    /// Skip the onset; the visible tail starts immediately. The WP4 tail-only
+    /// candidate — not yet resolved by `glass_entry_policy`.
+    #[allow(dead_code)]
+    TailOnly,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GlassEntryPolicy {
+    direction: GlassEntryDirection,
+    travel: GlassEntryTravelPolicy,
+    onset: GlassEntryOnsetPolicy,
+}
+
+/// The per-surface entry policy.
+///
+/// This resolver is the single place a retune happens. As of WP1 it is
+/// deliberately BEHAVIOR-PRESERVING: it reproduces exactly what the old
+/// `grow_in: bool` did at each call site, so the typed refactor can land and
+/// be verified before any motion changes.
+#[cfg(target_os = "macos")]
+fn glass_entry_policy(surface: GlassEntrySurface) -> GlassEntryPolicy {
+    match surface {
+        GlassEntrySurface::Main => GlassEntryPolicy {
+            direction: GlassEntryDirection::ShrinkIn,
+            travel: GlassEntryTravelPolicy::Fractional,
+            onset: GlassEntryOnsetPolicy::Full,
+        },
+        GlassEntrySurface::ChildPopup => GlassEntryPolicy {
+            direction: GlassEntryDirection::GrowIn,
+            travel: GlassEntryTravelPolicy::Fractional,
+            onset: GlassEntryOnsetPolicy::Full,
+        },
+        GlassEntrySurface::FreeStandingSecondary => GlassEntryPolicy {
+            direction: GlassEntryDirection::ShrinkIn,
+            travel: GlassEntryTravelPolicy::Fractional,
+            onset: GlassEntryOnsetPolicy::Full,
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl GlassEntrySurface {
+    fn log_name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::ChildPopup => "child_popup",
+            Self::FreeStandingSecondary => "free_standing_secondary",
+        }
+    }
+}
+
+/// Per-side HORIZONTAL travel, in points, for one entry.
+///
+/// Vertical travel is deliberately NOT modelled here: it is derived from the
+/// window HEIGHT (not width) and damped by `GLASS_MORPH_VERTICAL_DAMPING`, and
+/// routing it through a width-based resolver would change its formula.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GlassEntryTravel {
+    /// Distance per side at the first visible frame.
+    start_per_side: f64,
+    /// Distance per side at the opposite extreme (max compression for
+    /// shrink-in, max overshoot for grow-in).
+    extreme_per_side: f64,
+}
+
+/// Resolve per-side horizontal travel for a surface.
+///
+/// `Fractional` reproduces the pre-WP1 arithmetic exactly, so this function is
+/// a no-op refactor at today's policies.
+#[cfg(target_os = "macos")]
+fn glass_entry_travel(
+    policy: GlassEntryTravelPolicy,
+    final_width: f64,
+    inset_fraction: f64,
+    actions_reference_width: f64,
+) -> GlassEntryTravel {
+    let squish_fraction = (inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
+        .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
+    let fractional = GlassEntryTravel {
+        start_per_side: final_width * inset_fraction,
+        extreme_per_side: final_width * squish_fraction,
+    };
+    match policy {
+        GlassEntryTravelPolicy::Fractional => fractional,
+        GlassEntryTravelPolicy::ActionsPointCapped => GlassEntryTravel {
+            start_per_side: fractional
+                .start_per_side
+                .min(actions_reference_width * inset_fraction),
+            extreme_per_side: fractional
+                .extreme_per_side
+                .min(actions_reference_width * squish_fraction),
+        },
+        GlassEntryTravelPolicy::FixedFrame => GlassEntryTravel {
+            start_per_side: 0.0,
+            extreme_per_side: 0.0,
+        },
+    }
+}
+
+/// Nominal Actions popup width used by `ActionsPointCapped`. Unused until a
+/// policy selects that travel mode; WP0 exists to replace this nominal value
+/// with the measured median rendered Actions width.
+#[cfg(target_os = "macos")]
+const GLASS_ENTRY_ACTIONS_REFERENCE_WIDTH: f64 = 340.0;
+
 #[cfg(target_os = "macos")]
 impl GlassMorphTuning {
     /// The geometry/alpha tail (compression + rebound) — `duration`.
@@ -835,7 +1032,7 @@ unsafe fn configure_window_vibrancy_common(
     if glass_created {
         match morph_variant {
             GlassMorphVariant::WindowFrame => {
-                animate_tahoe_glass_appearance(window, log_target, window_name)
+                animate_tahoe_glass_secondary_appearance(window, log_target, window_name)
             }
             GlassMorphVariant::ContentLayer => {
                 // Runtime-proven (real-pixel capture + static-transform
@@ -2506,7 +2703,12 @@ unsafe fn animate_tahoe_glass_child_appearance(window: id, log_target: &str, win
         schedule_child_morph_settle(parent, window, tuning.total_entry_duration() + 0.08);
     }
 
-    animate_tahoe_glass_appearance_directed(window, log_target, window_name, true);
+    animate_tahoe_glass_appearance_profiled(
+        window,
+        log_target,
+        window_name,
+        GlassEntrySurface::ChildPopup,
+    );
     logging::log(
         log_target,
         &format!(
@@ -2585,23 +2787,53 @@ unsafe fn schedule_child_morph_settle(parent: id, window: id, delay_seconds: f64
 /// # Safety
 /// `window` must be a valid NSWindow on the main thread.
 #[cfg(target_os = "macos")]
-unsafe fn animate_tahoe_glass_appearance(window: id, log_target: &str, window_name: &str) {
-    animate_tahoe_glass_appearance_directed(window, log_target, window_name, false)
+unsafe fn animate_tahoe_glass_main_appearance(window: id, log_target: &str, window_name: &str) {
+    animate_tahoe_glass_appearance_profiled(
+        window,
+        log_target,
+        window_name,
+        GlassEntrySurface::Main,
+    )
 }
 
-/// `grow_in = false`: the Spotlight outset enter (start wider, compress
-/// below final, rebound out) used by free-standing windows. `grow_in =
-/// true`: the child-popup direction — start BELOW final size, overshoot
-/// slightly past it, settle back — same phases and curves, inverted travel,
-/// so live GPUI reflow reads as the menu materializing instead of a squeeze.
+/// Notes, Dictation, HUD — free-standing secondary windows. Keeps the
+/// Spotlight-derived shrink-in profile.
 #[cfg(target_os = "macos")]
-unsafe fn animate_tahoe_glass_appearance_directed(
+unsafe fn animate_tahoe_glass_secondary_appearance(
     window: id,
     log_target: &str,
     window_name: &str,
-    grow_in: bool,
+) {
+    animate_tahoe_glass_appearance_profiled(
+        window,
+        log_target,
+        window_name,
+        GlassEntrySurface::FreeStandingSecondary,
+    )
+}
+
+/// Run the entry morph under the named surface's policy.
+///
+/// `GlassEntryDirection::ShrinkIn` is the Spotlight outset enter (start wider,
+/// compress below final, rebound out) used by the main window and
+/// free-standing secondaries. `GrowIn` is the child-popup direction — start
+/// BELOW final size, overshoot slightly past it, settle back — same phases and
+/// curves, inverted travel, so live GPUI reflow reads as the menu materializing
+/// instead of a squeeze.
+///
+/// The surface is a PARAMETER, never inferred from `window_name`: the label is
+/// log text and must not steer geometry.
+#[cfg(target_os = "macos")]
+unsafe fn animate_tahoe_glass_appearance_profiled(
+    window: id,
+    log_target: &str,
+    window_name: &str,
+    surface: GlassEntrySurface,
 ) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+    let policy = glass_entry_policy(surface);
+    let outset_sign = policy.direction.geometry_sign();
 
     // Every show is an exit supersession boundary. Invalidate delayed removal,
     // cancel old settle/order-out callbacks, and clear common-ancestor effects
@@ -2666,9 +2898,14 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     // (the "inset" slider is the start outset) and glide down. Measured
     // from the real Spotlight: the morph is WIDTH-DOMINANT — height locks
     // early and barely undershoots — so the vertical deltas are damped.
-    let outset_x = final_frame.size.width * tuning.inset_fraction;
+    let travel = glass_entry_travel(
+        policy.travel,
+        final_frame.size.width,
+        tuning.inset_fraction,
+        GLASS_ENTRY_ACTIONS_REFERENCE_WIDTH,
+    );
+    let outset_x = travel.start_per_side;
     let outset_y = final_frame.size.height * (tuning.inset_fraction * GLASS_MORPH_VERTICAL_DAMPING);
-    let outset_sign = if grow_in { -1.0 } else { 1.0 };
     let start = NSRect::new(
         NSPoint::new(
             final_frame.origin.x - outset_x * outset_sign,
@@ -2698,7 +2935,27 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     // is changed): the moment the enter morph is armed, on the same host
     // clock the lifecycle receipts use.
     let configured_at_host_time_ns = crate::platform::host_clock::host_time_ns();
+    // HISTORICAL OVERLOAD: `settle_duration_ns` has only ever carried the
+    // VISIBLE TAIL (105ms at default), even though the receipt struct and
+    // `record_native_glass_entry_span` both track the full onset+tail entry
+    // (149ms). The name is kept for receipt compatibility; every new consumer
+    // must read `visible_tail_duration_ns` / `total_entry_duration_ns` below,
+    // which state which is which.
     let settle_duration_ns = (tuning.duration * 1_000_000_000.0) as u64;
+    let visible_tail_duration_ns = (tuning.visible_tail_duration() * 1_000_000_000.0).round() as u64;
+    let total_entry_duration_ns = (tuning.total_entry_duration() * 1_000_000_000.0).round() as u64;
+    // Whether AppKit still considered this a child window at the moment the
+    // morph was armed. `animate_tahoe_glass_child_appearance` intends to
+    // detach first, but the Actions open path configures the popup BEFORE
+    // attaching it, so the real state here is an empirical question — which is
+    // exactly what this field exists to answer.
+    let parent_window_at_arm: id = msg_send![window, parentWindow];
+    let parent_attached_at_arm = parent_window_at_arm != nil;
+    let native_parent_window_number: i64 = if parent_attached_at_arm {
+        msg_send![parent_window_at_arm, windowNumber]
+    } else {
+        0
+    };
 
     // Record the in-flight duration so sibling windows (footer overlay) can
     // hide until the morph settles (glass_morph_remaining).
@@ -2714,7 +2971,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     // (squish_fraction is per side; the ×2 below doubles it).
     let squish_fraction = (tuning.inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
         .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
-    let squish_x = final_frame.size.width * squish_fraction;
+    let squish_x = travel.extreme_per_side;
     let squish_y = final_frame.size.height * (squish_fraction * GLASS_MORPH_VERTICAL_DAMPING);
     // Grow-in inverts the mid-point too: a slight overshoot PAST final.
     let squish = NSRect::new(
@@ -2752,7 +3009,12 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     // runtime lacks them the onset degrades to the plain scheduled tail.
     let style_supported: bool = msg_send![glass_view, respondsToSelector: sel!(setStyle:)];
     let tint_supported: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
-    let onset_supported = style_supported && tint_supported;
+    // `GlassEntryOnsetPolicy::Full` is the only policy production resolves
+    // today, so this gate is always open; it exists so a `TailOnly` surface
+    // can skip the prefix without another branch being invented later.
+    let onset_supported = style_supported
+        && tint_supported
+        && policy.onset == GlassEntryOnsetPolicy::Full;
     if onset_supported {
         // Seed clear/untinted with implicit actions disabled.
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
@@ -2894,9 +3156,19 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start_alpha={:.2} start_alpha_bits={:016x} settle_duration_ns={} configured_at_host_time_ns={} expected_settle_deadline_ns={} frames={}x{}->{}x{}->{}x{} start_scale_x={:.6} start_scale_y={:.6} squish_scale_x={:.6} squish_scale_y={:.6} phase1_ns={} hold_ns={} phase2_ns={} alpha_phase1_target={:.6} alpha_ramp_ns={} alpha_finish_ns={} geometry_curve=easeOut rebound_curve=easeInEaseOut alpha_curve=easeOut",
+            "event=glass_morph window={} variant={} phase=enter surface_profile={} direction={} travel_policy={} final_width_pt={:.2} start_travel_per_side_pt={:.4} extreme_travel_per_side_pt={:.4} visible_tail_duration_ns={} total_entry_duration_ns={} parent_attached_at_arm={} native_parent_window_number={} duration={:.2}s inset={:.3} start_alpha={:.2} start_alpha_bits={:016x} settle_duration_ns={} configured_at_host_time_ns={} expected_settle_deadline_ns={} frames={}x{}->{}x{}->{}x{} start_scale_x={:.6} start_scale_y={:.6} squish_scale_x={:.6} squish_scale_y={:.6} phase1_ns={} hold_ns={} phase2_ns={} alpha_phase1_target={:.6} alpha_ramp_ns={} alpha_finish_ns={} geometry_curve=easeOut rebound_curve=easeInEaseOut alpha_curve=easeOut",
             window_name,
             GlassMorphVariant::WindowFrame.log_name(),
+            surface.log_name(),
+            policy.direction.log_name(),
+            policy.travel.log_name(),
+            final_frame.size.width,
+            travel.start_per_side,
+            travel.extreme_per_side,
+            visible_tail_duration_ns,
+            total_entry_duration_ns,
+            parent_attached_at_arm,
+            native_parent_window_number,
             tuning.duration,
             tuning.inset_fraction,
             tuning.start_alpha,
@@ -4242,6 +4514,147 @@ mod secondary_window_config_tests {
     fn glass_morph_tuning_respects_slider_disable_thresholds() {
         assert!(super::glass_morph_tuning_from(0.0, 0.03).is_none());
         assert!(super::glass_morph_tuning_from(0.105, 0.0).is_none());
+    }
+
+    // ── Entry surface policy (Oracle `glass-entry-feel-options` WP1) ────────
+    //
+    // These four lock the BASELINE that the typed-policy refactor had to
+    // preserve. They are ordinary behavior tests on pure functions, not source
+    // audits: they assert what the geometry resolves to, so a future retune
+    // fails them loudly with the actual numbers rather than a string diff.
+    //
+    // WP2 will deliberately flip `Main` to grow-in. When it does, the two
+    // `*_before_the_retune` tests are the ones that must be UPDATED (with the
+    // measured evidence in the commit), while the two `fractional_*_profile_*`
+    // tests must keep passing untouched — they pin the shape of each
+    // direction, not which surface uses it.
+
+    /// The shrink-in profile is Spotlight's outset enter: the first visible
+    /// frame is 1.2% wider than settled, and phase one compresses to 1.3%
+    /// narrower. At the default inset the squish lands on its 0.0065 floor.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fractional_shrink_profile_reproduces_1_012_to_0_987() {
+        let tuning = super::glass_morph_tuning_from(
+            f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION),
+            f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET),
+        )
+        .expect("default sliders enable the morph");
+        let sign = super::GlassEntryDirection::ShrinkIn.geometry_sign();
+        assert_eq!(sign, 1.0);
+
+        let final_width = 750.0_f64;
+        let travel = super::glass_entry_travel(
+            super::GlassEntryTravelPolicy::Fractional,
+            final_width,
+            tuning.inset_fraction,
+            super::GLASS_ENTRY_ACTIONS_REFERENCE_WIDTH,
+        );
+        // Width path, expressed the way the motion contract states it.
+        let start_scale = 1.0 + (travel.start_per_side * 2.0 / final_width) * sign;
+        let extreme_scale = 1.0 - (travel.extreme_per_side * 2.0 / final_width) * sign;
+        assert!(
+            (start_scale - 1.012).abs() < 1e-9,
+            "shrink-in must start at 101.2% width, got {start_scale}"
+        );
+        assert!(
+            (extreme_scale - 0.987).abs() < 1e-9,
+            "shrink-in must compress to 98.7% width, got {extreme_scale}"
+        );
+        // Squish floor: 0.006 × 0.25 = 0.0015 clamps up to 0.0065 per side.
+        assert!(
+            (travel.extreme_per_side / final_width - super::GLASS_MORPH_MIN_SQUISH).abs() < 1e-9
+        );
+    }
+
+    /// Grow-in is the same magnitudes with inverted travel: start 1.2% NARROWER
+    /// and overshoot 1.3% wider before settling.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fractional_grow_profile_reproduces_0_988_to_1_013() {
+        let tuning = super::glass_morph_tuning_from(
+            f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION),
+            f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET),
+        )
+        .expect("default sliders enable the morph");
+        let sign = super::GlassEntryDirection::GrowIn.geometry_sign();
+        assert_eq!(sign, -1.0);
+
+        let final_width = 340.0_f64;
+        let travel = super::glass_entry_travel(
+            super::GlassEntryTravelPolicy::Fractional,
+            final_width,
+            tuning.inset_fraction,
+            super::GLASS_ENTRY_ACTIONS_REFERENCE_WIDTH,
+        );
+        let start_scale = 1.0 + (travel.start_per_side * 2.0 / final_width) * sign;
+        let extreme_scale = 1.0 - (travel.extreme_per_side * 2.0 / final_width) * sign;
+        assert!(
+            (start_scale - 0.988).abs() < 1e-9,
+            "grow-in must start at 98.8% width, got {start_scale}"
+        );
+        assert!(
+            (extreme_scale - 1.013).abs() < 1e-9,
+            "grow-in must overshoot to 101.3% width, got {extreme_scale}"
+        );
+
+        // The point-travel asymmetry Oracle identified: the SAME fractional
+        // policy moves a 750pt main window ~2.2x further per side than this
+        // 340pt popup, over the same 35ms phase one.
+        let main_travel = super::glass_entry_travel(
+            super::GlassEntryTravelPolicy::Fractional,
+            750.0,
+            tuning.inset_fraction,
+            super::GLASS_ENTRY_ACTIONS_REFERENCE_WIDTH,
+        );
+        let ratio = main_travel.start_per_side / travel.start_per_side;
+        assert!(
+            (ratio - 750.0 / 340.0).abs() < 1e-9,
+            "fractional travel must scale linearly with width, got {ratio}"
+        );
+        // Capping a 750pt window to this popup's reference makes the point
+        // travel identical — the WP2 candidate, proven here before it ships.
+        let capped = super::glass_entry_travel(
+            super::GlassEntryTravelPolicy::ActionsPointCapped,
+            750.0,
+            tuning.inset_fraction,
+            super::GLASS_ENTRY_ACTIONS_REFERENCE_WIDTH,
+        );
+        assert!((capped.start_per_side - travel.start_per_side).abs() < 1e-9);
+        assert!((capped.extreme_per_side - travel.extreme_per_side).abs() < 1e-9);
+    }
+
+    /// Baseline lock: the main window and free-standing secondaries (Notes,
+    /// Dictation, HUD) still enter with Spotlight's shrink-in. WP1 was a typed
+    /// refactor with ZERO behavior change; if this fails, the refactor moved
+    /// motion it was not allowed to move.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn main_and_secondary_remain_shrink_before_the_retune() {
+        let main = super::glass_entry_policy(super::GlassEntrySurface::Main);
+        assert_eq!(main.direction, super::GlassEntryDirection::ShrinkIn);
+        assert_eq!(main.travel, super::GlassEntryTravelPolicy::Fractional);
+        assert_eq!(main.onset, super::GlassEntryOnsetPolicy::Full);
+
+        let secondary =
+            super::glass_entry_policy(super::GlassEntrySurface::FreeStandingSecondary);
+        assert_eq!(secondary.direction, super::GlassEntryDirection::ShrinkIn);
+        assert_eq!(secondary.travel, super::GlassEntryTravelPolicy::Fractional);
+        assert_eq!(secondary.onset, super::GlassEntryOnsetPolicy::Full);
+    }
+
+    /// Baseline lock: the Cmd+K Actions popup keeps the grow-in direction that
+    /// the user named as the reference feel. This must NOT change in WP2 —
+    /// WP2 moves main TOWARD this, it does not move this.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn child_popup_remains_grow_before_the_retune() {
+        let child = super::glass_entry_policy(super::GlassEntrySurface::ChildPopup);
+        assert_eq!(child.direction, super::GlassEntryDirection::GrowIn);
+        assert_eq!(child.travel, super::GlassEntryTravelPolicy::Fractional);
+        assert_eq!(child.onset, super::GlassEntryOnsetPolicy::Full);
+        assert_eq!(child.direction.geometry_sign(), -1.0);
+        assert_eq!(child.direction.log_name(), "grow_in");
     }
 
     #[cfg(target_os = "macos")]

@@ -32,6 +32,8 @@ import {
 import {
   MAIN_GLASS_ENTRY_EXPECTATION,
   analyzeEntryMotionEnvelope,
+  analyzeEntrySurfaceFields,
+  analyzeOnsetReceipt,
 } from "./glass-entry-motion-contract.ts";
 import {
   finishInterferenceMonitor,
@@ -1226,6 +1228,33 @@ try {
       receipt.interference.receipt,
       scenarioUnixIntervals,
     ) as Json;
+  }
+  // WP0 (Oracle `glass-entry-feel-options`): the main and Actions receipts must
+  // carry the SAME onset and surface/travel evidence so the two entries can be
+  // compared field by field. Oracle's verdict on the "onset applicability
+  // differs" theory was to compare what the runtime already logs before adding
+  // speculative code — impossible while only one probe parsed it.
+  {
+    const appLogLines = (existsSync(driver.logPath)
+      ? readFileSync(driver.logPath, "utf8")
+      : "").split("\n");
+    const entryLines = appLogLines.filter((line) =>
+      line.includes("event=glass_morph")
+      && line.includes(contractWindowName)
+      && line.includes("phase=enter")
+    ).slice(-3);
+    const onsetLines = appLogLines
+      .filter((line) => line.includes("event=native_glass_entry_onset"))
+      .slice(-3);
+    const timelineLines = appLogLines
+      .filter((line) => line.includes("host_time_ns="))
+      .filter((line) => /event=(main|actions)_/.test(line))
+      .slice(-24);
+    receipt.entryEvidence = {
+      surfaceFields: analyzeEntrySurfaceFields(entryLines),
+      onset: analyzeOnsetReceipt(onsetLines),
+      timeline: timelineLines,
+    } as Json;
   }
   if (declaredStartAlphaArg !== undefined) {
     const appLogText = existsSync(driver.logPath)
