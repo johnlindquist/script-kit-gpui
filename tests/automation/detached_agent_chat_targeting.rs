@@ -12,8 +12,17 @@ use script_kit_gpui::protocol::{
 };
 use script_kit_gpui::stdin_commands::KeyModifier;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(30_000);
+
+/// Serializes tests that resolve by KIND + INDEX (or register/remove windows
+/// of the same kind). The automation registry is process-global, so
+/// kind-indexed queries scan every test thread's windows — unique ID prefixes
+/// cannot isolate them and parallel scheduling makes index/title assertions
+/// racy (observed once under full-suite load: index 0 resolved another test's
+/// "Closing Agent Chat" window).
+static REGISTRY_ORDER_LOCK: Mutex<()> = Mutex::new(());
 fn prefix() -> String {
     let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     format!("!agent_chat{n}")
@@ -27,6 +36,9 @@ fn cleanup(prefix: &str, ids: &[&str]) {
 
 #[test]
 fn detached_agent_chat_targeting_flow() {
+    let _registry_order = REGISTRY_ORDER_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let p = prefix();
 
     // Register main
@@ -95,6 +107,9 @@ fn detached_agent_chat_targeting_flow() {
 
 #[test]
 fn multiple_detached_agent_chat_windows_indexed() {
+    let _registry_order = REGISTRY_ORDER_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let p = prefix();
 
     let agent_chat0 = AutomationWindowInfo {
@@ -194,6 +209,9 @@ fn agent_chat_simulate_gpui_event_request_round_trip() {
 
 #[test]
 fn agent_chat_window_close_removes_from_registry() {
+    let _registry_order = REGISTRY_ORDER_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let p = prefix();
 
     let agent_chat = AutomationWindowInfo {
@@ -232,6 +250,9 @@ fn agent_chat_window_close_removes_from_registry() {
 
 #[test]
 fn agent_chat_visibility_toggle() {
+    let _registry_order = REGISTRY_ORDER_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let p = prefix();
 
     let agent_chat = AutomationWindowInfo {

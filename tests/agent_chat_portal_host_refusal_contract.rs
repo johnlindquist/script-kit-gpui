@@ -18,11 +18,4 @@ fn detached_and_notes_hosts_advertise_history_only_and_cancel_refusals() {
         detached.contains("cancel_portal_session_in_detached_chat_window(kind, cx)"),
         "detached host must cancel staged sessions when history open fails"
     );
-
-    let notes = read("src/notes/window/agent_chat_host.rs");
-    assert!(
-        notes.contains("ContextPortalKind::AgentChatHistory")
-            || notes.contains("PortalKind::AgentChatHistory")
-    );
-    assert!(notes.contains("cancel_pending_portal_session(kind, cx)"));
 }

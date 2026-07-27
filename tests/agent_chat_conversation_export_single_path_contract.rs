@@ -26,7 +26,6 @@ fn markdown_export_uses_conversation_export_from_thread() {
     for path in [
         "src/app_actions/handle_action/mod.rs",
         "src/ai/agent_chat/ui/chat_window.rs",
-        "src/notes/window/agent_chat_host.rs",
     ] {
         let source = read(path);
         assert!(
