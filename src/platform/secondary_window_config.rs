@@ -23,7 +23,16 @@ pub(crate) struct NativeGlassEntryReceipt {
     /// `f64::to_bits` of the visible entry start alpha the morph launched
     /// with (bits keep the receipt `Eq`). `None` when no morph ran.
     pub(crate) morph_start_alpha_bits: Option<u64>,
+    /// TOTAL entry duration (material onset + visible tail) in ms.
     pub(crate) settle_duration_ms: u64,
+    /// Material onset prefix (glass Clear→Regular ramp) in ms.
+    pub(crate) material_onset_duration_ms: u64,
+    /// Geometry/alpha tail duration in ms.
+    pub(crate) visible_tail_duration_ms: u64,
+    /// GPUI content hold before its fade, in ms.
+    pub(crate) content_hold_duration_ms: u64,
+    /// GPUI content fade duration in ms.
+    pub(crate) content_fade_duration_ms: u64,
     /// Time from native morph start until phase one first crosses the final
     /// window size — the pure GEOMETRIC crossing (23ms at the default
     /// visible-tail calibration). Content reveal must use
@@ -85,6 +94,27 @@ struct GlassMorphTuning {
     /// Duration of the phase1_alpha_target → 1.0 leg from rebound start
     /// (clamped to phase2).
     alpha_finish_duration: f64,
+    /// Material onset prefix duration before the visible tail begins.
+    material_onset_duration: f64,
+    /// GPUI content hold before its fade (within the onset).
+    content_hold_duration: f64,
+    /// GPUI content fade duration (ends at tail start).
+    content_fade_duration: f64,
+}
+
+#[cfg(target_os = "macos")]
+impl GlassMorphTuning {
+    /// The geometry/alpha tail (compression + rebound) — `duration`.
+    fn visible_tail_duration(self) -> f64 {
+        self.duration
+    }
+    /// Onset prefix + visible tail.
+    fn total_entry_duration(self) -> f64 {
+        self.material_onset_duration + self.visible_tail_duration()
+    }
+    fn visible_tail_start_delay_ms(self) -> u64 {
+        (self.material_onset_duration * 1000.0).round() as u64
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -132,8 +162,9 @@ fn settled_size_crossing_delay_ms(tuning: GlassMorphTuning) -> u64 {
 /// a double fade.
 #[cfg(target_os = "macos")]
 fn entry_content_reveal_delay_ms(tuning: GlassMorphTuning) -> u64 {
-    settled_size_crossing_delay_ms(tuning)
-        .max((tuning.alpha_ramp_duration * 1000.0).ceil() as u64)
+    tuning.visible_tail_start_delay_ms()
+        + settled_size_crossing_delay_ms(tuning)
+            .max((tuning.alpha_ramp_duration * 1000.0).ceil() as u64)
 }
 
 #[cfg(target_os = "macos")]
@@ -215,6 +246,27 @@ const GLASS_MORPH_ALPHA_RAMP_DURATION: f64 = 0.035;
 /// Clamped to phase two for short custom durations.
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_ALPHA_FINISH_DURATION: f64 = 0.052;
+/// Material-onset prefix (glass-entry-onset-v2, measured from the
+/// 2026-07-27 Spotlight footage): Spotlight materializes presence
+/// 0.04→0.86 over ~88ms BEFORE the visible geometry tail. Script Kit
+/// reproduces it as a glass material ramp (Clear→Regular + tint) at a
+/// constant 0.85 NSWindow alpha — never sub-0.85 window alpha.
+#[cfg(target_os = "macos")]
+const GLASS_MATERIAL_ONSET_DURATION: f64 = 0.088;
+/// GPUI content roots stay hidden through the early onset…
+#[cfg(target_os = "macos")]
+const GLASS_ENTRY_CONTENT_HOLD_DURATION: f64 = 0.053;
+/// …then fade in over 35ms, finishing exactly when the tail begins.
+#[cfg(target_os = "macos")]
+const GLASS_ENTRY_CONTENT_FADE_DURATION: f64 = 0.035;
+/// Onset timing curve reproducing the measured normalized presence samples
+/// (~0.294/0.535/0.761/1.0 at 35/53/70/88ms).
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // consumed by the onset animator (plan steps 3–6)
+const GLASS_MATERIAL_ONSET_C1: (f32, f32) = (0.18, 0.00);
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+const GLASS_MATERIAL_ONSET_C2: (f32, f32) = (0.14, 0.00);
 #[cfg(target_os = "macos")]
 const GLASS_EXIT_DURATION: f64 = 0.12;
 const GLASS_EXIT_REMOVE_DELAY_MS: u64 = 135;
@@ -253,12 +305,13 @@ pub fn glass_exit_remove_delay() -> std::time::Duration {
 }
 
 pub(crate) fn glass_entry_settle_delay() -> std::time::Duration {
-    let duration = crate::theme::get_cached_theme()
+    let tail = crate::theme::get_cached_theme()
         .get_opacity()
         .glass_morph_duration
         .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
         .clamp(0.0, GLASS_MORPH_MAX_DURATION as f32);
-    std::time::Duration::from_secs_f32(duration)
+    // Total entry = material onset prefix + visible tail (298ms default).
+    std::time::Duration::from_secs_f64(f64::from(tail) + GLASS_MATERIAL_ONSET_DURATION)
 }
 
 #[cfg(target_os = "macos")]
@@ -552,6 +605,22 @@ unsafe fn cancel_pending_glass_window_selectors(window: id) {
     if let Ok(mut targets) = GLASS_MORPH_SETTLE_TARGETS.lock() {
         targets.remove(&(window as usize));
     }
+    if let Ok(mut targets) = GLASS_MORPH_TAIL_TARGETS.lock() {
+        targets.remove(&(window as usize));
+    }
+    // Restore any onset-held GPUI content roots exactly once.
+    if let Some(content) = GLASS_ENTRY_CONTENT_TARGETS
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.remove(&(window as usize)))
+    {
+        for (view_ptr, original_alpha) in content {
+            let view = view_ptr as id;
+            if view != nil {
+                let _: () = msg_send![view, setAlphaValue: original_alpha];
+            }
+        }
+    }
     let content_view: id = msg_send![window, contentView];
     if content_view == nil {
         return;
@@ -572,6 +641,14 @@ unsafe fn cancel_pending_glass_window_selectors(window: id) {
         selector: sel!(orderOutOwnWindow)
         object: nil
     ];
+    for selector in [sel!(revealOwnWindowEntryContent), sel!(beginOwnWindowEntryTail)] {
+        let _: () = msg_send![
+            class!(NSObject),
+            cancelPreviousPerformRequestsWithTarget: glass_view
+            selector: selector
+            object: nil
+        ];
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -667,6 +744,10 @@ fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMo
         phase1_alpha_target: GLASS_MORPH_PHASE1_ALPHA_TARGET,
         alpha_ramp_duration: GLASS_MORPH_ALPHA_RAMP_DURATION.min(phase1),
         alpha_finish_duration: GLASS_MORPH_ALPHA_FINISH_DURATION.min(phase2),
+        material_onset_duration: GLASS_MATERIAL_ONSET_DURATION,
+        content_hold_duration: GLASS_ENTRY_CONTENT_HOLD_DURATION,
+        content_fade_duration: GLASS_ENTRY_CONTENT_FADE_DURATION
+            .min(GLASS_MATERIAL_ONSET_DURATION - GLASS_ENTRY_CONTENT_HOLD_DURATION),
     })
 }
 
@@ -824,7 +905,35 @@ unsafe fn configure_window_vibrancy_common(
         },
         settle_duration_ms: if glass_created {
             morph_tuning
-                .map(|tuning| (tuning.duration * 1000.0).round() as u64)
+                .map(|tuning| (tuning.total_entry_duration() * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        material_onset_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| tuning.visible_tail_start_delay_ms())
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        visible_tail_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.visible_tail_duration() * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        content_hold_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.content_hold_duration * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        content_fade_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.content_fade_duration * 1000.0).round() as u64)
                 .unwrap_or(0)
         } else {
             0
@@ -1223,6 +1332,14 @@ fn tahoe_glass_backdrop_view_class(glass_class: id) -> Option<*const objc::runti
             sel!(orderOutOwnWindow),
             tahoe_glass_backdrop_order_out_window as extern "C" fn(&Object, Sel),
         );
+        decl.add_method(
+            sel!(revealOwnWindowEntryContent),
+            tahoe_glass_backdrop_reveal_entry_content as extern "C" fn(&Object, Sel),
+        );
+        decl.add_method(
+            sel!(beginOwnWindowEntryTail),
+            tahoe_glass_backdrop_begin_entry_tail as extern "C" fn(&Object, Sel),
+        );
         decl.register() as *const Class as usize
     });
     if ptr == 0 {
@@ -1485,6 +1602,155 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
 /// windows can materialize concurrently, so a single global slot would let one
 /// window steal another's rebound target.
 #[cfg(target_os = "macos")]
+/// Everything the delayed visible tail needs at T=88ms. Stored per-window
+/// (same non-retaining pointer-key pattern as the settle targets; the
+/// cancellation path clears these before window teardown).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct GlassMorphTailTarget {
+    squish_frame: [f64; 4],
+    final_frame: [f64; 4],
+    phase1: f64,
+    phase2: f64,
+    alpha_ramp_duration: f64,
+    phase1_alpha_target: f64,
+    alpha_finish_duration: f64,
+}
+
+#[cfg(target_os = "macos")]
+static GLASS_MORPH_TAIL_TARGETS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, GlassMorphTailTarget>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// GPUI content roots hidden during the onset: (view ptr, original alpha).
+#[cfg(target_os = "macos")]
+static GLASS_ENTRY_CONTENT_TARGETS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, Vec<(usize, f64)>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// T=53ms: fade the held GPUI content roots to their original alpha over
+/// 35ms (ease-out). Transparent GPUI pixels reveal the already-present
+/// glass, never bare desktop.
+#[cfg(target_os = "macos")]
+extern "C" fn tahoe_glass_backdrop_reveal_entry_content(
+    this: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+) {
+    // SAFETY: main thread (performSelector on the main run loop).
+    unsafe {
+        let this_id = this as *const objc::runtime::Object as id;
+        let window: id = msg_send![this_id, window];
+        if window == nil {
+            return;
+        }
+        let targets = GLASS_ENTRY_CONTENT_TARGETS
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&(window as usize)));
+        let Some(targets) = targets else { return };
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![ctx, setDuration: GLASS_ENTRY_CONTENT_FADE_DURATION];
+        let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![ctx, setTimingFunction: timing];
+                }
+            }
+        }
+        for (view_ptr, original_alpha) in targets {
+            let view = view_ptr as id;
+            if view != nil {
+                let animator: id = msg_send![view, animator];
+                let _: () = msg_send![animator, setAlphaValue: original_alpha];
+            }
+        }
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+    }
+}
+
+/// T=88ms: run the (unchanged) visible tail — ease-out compression with the
+/// 0.85→0.99 alpha ramp, then the scheduled rebound.
+#[cfg(target_os = "macos")]
+extern "C" fn tahoe_glass_backdrop_begin_entry_tail(
+    this: &objc::runtime::Object,
+    _: objc::runtime::Sel,
+) {
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    // SAFETY: main thread (performSelector on the main run loop).
+    unsafe {
+        let this_id = this as *const objc::runtime::Object as id;
+        let window: id = msg_send![this_id, window];
+        if window == nil {
+            return;
+        }
+        let target = GLASS_MORPH_TAIL_TARGETS
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&(window as usize)));
+        let Some(target) = target else { return };
+        let [sx, sy, sw, sh] = target.squish_frame;
+        let squish = NSRect::new(NSPoint::new(sx, sy), NSSize::new(sw, sh));
+
+        // Frame compression: its own context (phase one, ease-out).
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![ctx, setDuration: target.phase1];
+        let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![ctx, setTimingFunction: timing];
+                }
+            }
+        }
+        let animator: id = msg_send![window, animator];
+        let _: () = msg_send![animator, setFrame: squish display: true];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+        // Alpha ramp 0.85 -> 0.99 (separate context, shorter, ease-out).
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let alpha_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![alpha_ctx, setDuration: target.alpha_ramp_duration];
+        let _: () = msg_send![alpha_ctx, setAllowsImplicitAnimation: true];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![alpha_ctx, setTimingFunction: timing];
+                }
+            }
+        }
+        let alpha_animator: id = msg_send![window, animator];
+        let _: () = msg_send![alpha_animator, setAlphaValue: target.phase1_alpha_target];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+        // Schedule the (unchanged) rebound.
+        if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGETS.lock() {
+            guard.insert(
+                window as usize,
+                GlassMorphSettleTarget {
+                    frame: target.final_frame,
+                    frame_duration: target.phase2,
+                    alpha_duration: target.alpha_finish_duration,
+                },
+            );
+        }
+        let _: () = msg_send![
+            this_id,
+            performSelector: sel!(settleOwnWindowFrame)
+            withObject: nil
+            afterDelay: (target.phase1 + GLASS_MORPH_SQUISH_HOLD)
+        ];
+    }
+}
+
 /// Rebound target for one in-flight entry morph. Named fields (not a
 /// positional tuple) so the frame and alpha legs cannot be silently
 /// transposed as the schedule grows.
@@ -2236,7 +2502,7 @@ unsafe fn animate_tahoe_glass_child_appearance(window: id, log_target: &str, win
         let _: id = msg_send![parent, retain];
         let _: () = msg_send![parent, removeChildWindow: window];
         let _: id = msg_send![window, retain];
-        schedule_child_morph_settle(parent, window, tuning.duration + 0.08);
+        schedule_child_morph_settle(parent, window, tuning.total_entry_duration() + 0.08);
     }
 
     animate_tahoe_glass_appearance_directed(window, log_target, window_name, true);
@@ -2426,7 +2692,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     // displayed above the visible-entry start alpha.
     let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
     let _: () = msg_send![window, setFrame: start display: true];
-    record_native_glass_entry_span(window, tuning.duration);
+    record_native_glass_entry_span(window, tuning.total_entry_duration());
     // Instrumentation only (runtime-contract cross-check, no animation value
     // is changed): the moment the enter morph is armed, on the same host
     // clock the lifecycle receipts use.
@@ -2437,7 +2703,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     // hide until the morph settles (glass_morph_remaining).
     if is_main_window {
         GLASS_MORPH_LAST_DURATION_MS.store(
-            (tuning.duration * 1000.0) as u64,
+            (tuning.total_entry_duration() * 1000.0) as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
     }
@@ -2479,67 +2745,150 @@ unsafe fn animate_tahoe_glass_appearance_directed(
         object: nil
     ];
 
-    // Frame compression: its own context (duration = phase one, ease-out).
-    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
-    let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: phase1];
-    let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
-    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeOut");
-        if name != nil {
-            let timing: id = msg_send![timing_class, functionWithName: name];
-            if timing != nil {
-                let _: () = msg_send![ctx, setTimingFunction: timing];
+    // ── Material onset (T=0..88ms): the glass materializes Clear→Regular
+    // with its tint at a CONSTANT 0.85 NSWindow alpha — the measured
+    // Spotlight prefix. Best-effort on public selectors only; when the
+    // runtime lacks them the onset degrades to the plain scheduled tail.
+    let style_supported: bool = msg_send![glass_view, respondsToSelector: sel!(setStyle:)];
+    let tint_supported: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
+    let onset_supported = style_supported && tint_supported;
+    if onset_supported {
+        // Seed clear/untinted with implicit actions disabled.
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let seed_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![seed_ctx, setDuration: 0.0f64];
+        let _: () = msg_send![glass_view, setStyle: 1isize]; // NSGlassEffectViewStyleClear
+        let nil_color: id = nil;
+        let _: () = msg_send![glass_view, setTintColor: nil_color];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+        // One 88ms animation group back to the resolved production material.
+        let final_style = resolve_native_glass_style(
+            &crate::theme::get_cached_theme(),
+            NativeGlassSurfaceRole::WindowBackdrop,
+        );
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let onset_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![onset_ctx, setDuration: tuning.material_onset_duration];
+        let _: () = msg_send![onset_ctx, setAllowsImplicitAnimation: true];
+        let curve = timing_function_with_control_points(
+            GLASS_MATERIAL_ONSET_C1.0,
+            GLASS_MATERIAL_ONSET_C1.1,
+            GLASS_MATERIAL_ONSET_C2.0,
+            GLASS_MATERIAL_ONSET_C2.1,
+        );
+        if curve != nil {
+            let _: () = msg_send![onset_ctx, setTimingFunction: curve];
+        }
+        let glass_animator: id = msg_send![glass_view, animator];
+        let _: () = msg_send![glass_animator, setStyle: 0isize]; // Regular
+        // Resolved production tint, same construction as
+        // apply_native_glass_style_with_reason.
+        let red = f64::from((final_style.signature.tint_rgb >> 16) & 0xff) / 255.0;
+        let green = f64::from((final_style.signature.tint_rgb >> 8) & 0xff) / 255.0;
+        let blue = f64::from(final_style.signature.tint_rgb & 0xff) / 255.0;
+        let tint: id = msg_send![
+            class!(NSColor),
+            colorWithCalibratedRed: red
+            green: green
+            blue: blue
+            alpha: f64::from(final_style.effective_tint_alpha)
+        ];
+        if tint != nil {
+            let _: () = msg_send![glass_animator, setTintColor: tint];
+        }
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+    }
+
+    // Hold GPUI content roots (never the contentView or the glass itself)
+    // at alpha 0 until T=53ms; transparent GPUI pixels expose the glass.
+    let mut content_targets: Vec<(usize, f64)> = Vec::new();
+    let subviews: id = msg_send![content_view, subviews];
+    if subviews != nil {
+        let count: usize = msg_send![subviews, count];
+        for index in 0..count {
+            let child: id = msg_send![subviews, objectAtIndex: index];
+            if child == nil || child == glass_view {
+                continue;
             }
+            let is_glass: bool = if let Some(class) =
+                objc::runtime::Class::get("NSGlassEffectView")
+            {
+                msg_send![child, isKindOfClass: class]
+            } else {
+                false
+            };
+            let is_container: bool = if let Some(class) =
+                objc::runtime::Class::get("NSGlassEffectContainerView")
+            {
+                msg_send![child, isKindOfClass: class]
+            } else {
+                false
+            };
+            if is_glass || is_container {
+                continue;
+            }
+            let alpha: f64 = msg_send![child, alphaValue];
+            if alpha <= 0.001 {
+                continue;
+            }
+            let _: () = msg_send![child, setAlphaValue: 0.0f64];
+            content_targets.push((child as usize, alpha));
         }
     }
-    let animator: id = msg_send![window, animator];
-    let _: () = msg_send![animator, setFrame: squish display: true];
-    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
-
-    // Alpha ramp: separate context (shorter duration, ease-out) targeting
-    // 0.99 — the finishing 0.99 -> 1.0 leg runs from the rebound callback.
-    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
-    let alpha_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![alpha_ctx, setDuration: tuning.alpha_ramp_duration];
-    let _: () = msg_send![alpha_ctx, setAllowsImplicitAnimation: true];
-    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeOut");
-        if name != nil {
-            let timing: id = msg_send![timing_class, functionWithName: name];
-            if timing != nil {
-                let _: () = msg_send![alpha_ctx, setTimingFunction: timing];
-            }
-        }
+    let content_root_count = content_targets.len();
+    if let Ok(mut guard) = GLASS_ENTRY_CONTENT_TARGETS.lock() {
+        guard.insert(window as usize, content_targets);
     }
-    let alpha_animator: id = msg_send![window, animator];
-    let _: () = msg_send![alpha_animator, setAlphaValue: tuning.phase1_alpha_target];
-    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
 
-    // Phase 2: rebound out to the natural size (settle selector, run-loop
-    // scheduled at the end of compression; SQUISH_HOLD is 0.0 in the
-    // visible-tail calibration and retained only as a tunable term).
-    if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGETS.lock() {
+    // Stash the tail and schedule: content reveal @53ms, tail @88ms.
+    if let Ok(mut guard) = GLASS_MORPH_TAIL_TARGETS.lock() {
         guard.insert(
             window as usize,
-            GlassMorphSettleTarget {
-                frame: [
+            GlassMorphTailTarget {
+                squish_frame: [
+                    squish.origin.x,
+                    squish.origin.y,
+                    squish.size.width,
+                    squish.size.height,
+                ],
+                final_frame: [
                     final_frame.origin.x,
                     final_frame.origin.y,
                     final_frame.size.width,
                     final_frame.size.height,
                 ],
-                frame_duration: phase2,
-                alpha_duration: tuning.alpha_finish_duration,
+                phase1,
+                phase2,
+                alpha_ramp_duration: tuning.alpha_ramp_duration,
+                phase1_alpha_target: tuning.phase1_alpha_target,
+                alpha_finish_duration: tuning.alpha_finish_duration,
             },
         );
     }
     let _: () = msg_send![
         glass_view,
-        performSelector: sel!(settleOwnWindowFrame)
+        performSelector: sel!(revealOwnWindowEntryContent)
         withObject: nil
-        afterDelay: (phase1 + GLASS_MORPH_SQUISH_HOLD)
+        afterDelay: tuning.content_hold_duration
     ];
+    let _: () = msg_send![
+        glass_view,
+        performSelector: sel!(beginOwnWindowEntryTail)
+        withObject: nil
+        afterDelay: tuning.material_onset_duration
+    ];
+    logging::log(
+        log_target,
+        &format!(
+            "event=native_glass_entry_onset primitive=material_parameters supported={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
+            onset_supported,
+            (tuning.material_onset_duration * 1_000_000_000.0).round() as u64,
+            content_root_count,
+            (tuning.content_hold_duration * 1_000_000_000.0).round() as u64,
+            (tuning.content_fade_duration * 1_000_000_000.0).round() as u64,
+            tuning.start_alpha,
+        ),
+    );
 
     logging::log(
         log_target,
@@ -3810,10 +4159,21 @@ mod secondary_window_config_tests {
         assert!((tuning.phase1_alpha_target - 0.99).abs() < epsilon);
         assert!((tuning.alpha_ramp_duration - 0.035).abs() < epsilon);
         assert!((tuning.alpha_finish_duration - 0.052).abs() < epsilon);
-        // Geometry crossing (ease-out compression) vs the material-safe
-        // reveal anchor, which also waits out the 35ms alpha ramp.
+        // Material onset prefix (glass-entry-onset-v2): 88ms Clear→Regular
+        // ramp before the unchanged 210ms tail — 298ms total, matching the
+        // measured Spotlight first-photon→settled span. Content holds 53ms
+        // then fades 35ms, ending exactly at tail start.
+        assert!((tuning.material_onset_duration - 0.088).abs() < epsilon);
+        assert!((tuning.content_hold_duration - 0.053).abs() < epsilon);
+        assert!((tuning.content_fade_duration - 0.035).abs() < epsilon);
+        assert!((tuning.visible_tail_duration() - 0.21).abs() < epsilon);
+        assert!((tuning.total_entry_duration() - 0.298).abs() < epsilon);
+        assert_eq!(tuning.visible_tail_start_delay_ms(), 88);
+        // Geometry crossing is TAIL-relative (23ms after tail start = 111ms
+        // absolute); the reveal anchor is ABSOLUTE from configure:
+        // 88 + max(23, 35) = 123ms.
         assert_eq!(super::settled_size_crossing_delay_ms(tuning), 23);
-        assert_eq!(super::entry_content_reveal_delay_ms(tuning), 35);
+        assert_eq!(super::entry_content_reveal_delay_ms(tuning), 123);
     }
 
     #[cfg(target_os = "macos")]
@@ -3858,10 +4218,15 @@ mod secondary_window_config_tests {
         assert_eq!(super::GLASS_MORPH_ALPHA_RAMP_DURATION, 0.035);
         assert_eq!(super::GLASS_MORPH_ALPHA_FINISH_DURATION, 0.052);
         assert_eq!(super::GLASS_MORPH_FADE_FRACTION, 2.0 / 3.0);
+        assert_eq!(super::GLASS_MATERIAL_ONSET_DURATION, 0.088);
+        assert_eq!(super::GLASS_ENTRY_CONTENT_HOLD_DURATION, 0.053);
+        assert_eq!(super::GLASS_ENTRY_CONTENT_FADE_DURATION, 0.035);
         let tuning =
             super::glass_morph_tuning_from(duration, inset).expect("fixture enables glass morph");
         assert_eq!(super::settled_size_crossing_delay_ms(tuning), 23);
-        assert_eq!(super::entry_content_reveal_delay_ms(tuning), 35);
+        assert_eq!(super::entry_content_reveal_delay_ms(tuning), 123);
+        assert_eq!(tuning.visible_tail_start_delay_ms(), 88);
+        assert!((tuning.total_entry_duration() - 0.298).abs() < 1e-9);
         assert_eq!(super::GLASS_EXIT_DURATION, 0.12);
         assert_eq!(super::GLASS_EXIT_REMOVE_DELAY_MS, 135);
         assert_eq!(super::GLASS_EXIT_GROW_X, 0.03);
