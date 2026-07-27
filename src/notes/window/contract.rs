@@ -151,6 +151,71 @@ pub(crate) fn resolved_notes_footer_intrinsic_height(button_padding_y: f32) -> f
     )
 }
 
+/// Glass capsule group id the Notes editor footer rail used to own. The rail
+/// is gone (Notes mode renders no footer), but the constant remains the one
+/// name mode-transition cleanup uses — never duplicate the string.
+pub(crate) const NOTES_EDITOR_FOOTER_GROUP: &str = "notes-footer-action-rail";
+
+/// Hit-region group name used to fail closed while Notes mode owns no footer.
+pub(crate) const NOTES_EMPTY_FOOTER_HIT_GROUP: &str = "notes-footer-empty";
+
+// ── Notes chrome policy (mode → footer/backdrop partition) ────────────────
+//
+// One pure decision point driving the GPUI stage height, gap reservation,
+// footer rendering, native backdrop inset, and capsule-group cleanup for the
+// Notes window shell. Notes mode owns the full window (no floating footer,
+// no empty gap); Agent mode keeps the external cwd/agent/model/Send capsule
+// row below the glass body. No independent booleans in five files.
+
+/// Which external footer band the Notes window shell currently owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotesFooterMode {
+    /// Notes editor: no floating capsules, no reserved gap, full backdrop.
+    None,
+    /// Embedded Agent Chat: external capsule row + gap below the glass body.
+    AgentChatExternal,
+}
+
+/// The resolved chrome partition for the current surface mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NotesChromePolicy {
+    pub footer_mode: NotesFooterMode,
+    /// Height (px) the native backdrop and GPUI stage leave below the glass
+    /// body: footer strip + the fixed container gap when Agent mode owns an
+    /// external footer under active glass bands, otherwise `0`.
+    pub backdrop_bottom_inset: f32,
+}
+
+impl NotesChromePolicy {
+    pub(crate) fn reserves_external_footer(&self) -> bool {
+        self.footer_mode == NotesFooterMode::AgentChatExternal && self.backdrop_bottom_inset > 0.0
+    }
+}
+
+/// Map the Notes surface mode (+ live glass-band availability) to its chrome
+/// partition. Pure so both the renderer and the native-backdrop sync consume
+/// the same decision.
+pub(crate) fn notes_chrome_policy(
+    mode: crate::notes::window::NotesSurfaceMode,
+    glass_active: bool,
+) -> NotesChromePolicy {
+    match mode {
+        crate::notes::window::NotesSurfaceMode::Notes => NotesChromePolicy {
+            footer_mode: NotesFooterMode::None,
+            backdrop_bottom_inset: 0.0,
+        },
+        crate::notes::window::NotesSurfaceMode::AgentChat => NotesChromePolicy {
+            footer_mode: NotesFooterMode::AgentChatExternal,
+            backdrop_bottom_inset: if glass_active {
+                crate::components::footer_chrome::current_main_menu_footer_height()
+                    + crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+            } else {
+                0.0
+            },
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +248,38 @@ mod tests {
         assert_eq!(m.auto_resize_assumed_line_height, 20.0);
         assert_eq!(m.auto_resize_threshold, 5.0);
         assert_eq!(m.auto_resize_padding, 24.0);
+    }
+
+    #[test]
+    fn notes_chrome_policy_matches_surface_mode() {
+        use crate::notes::window::NotesSurfaceMode;
+
+        // Notes mode: never a footer band, never an inset — regardless of
+        // glass availability.
+        for glass_active in [false, true] {
+            let chrome = notes_chrome_policy(NotesSurfaceMode::Notes, glass_active);
+            assert_eq!(chrome.footer_mode, NotesFooterMode::None);
+            assert_eq!(chrome.backdrop_bottom_inset, 0.0);
+            assert!(!chrome.reserves_external_footer());
+        }
+
+        // Agent mode with glass bands: external footer + footer height plus
+        // exactly the fixed 8pt container gap.
+        let chrome = notes_chrome_policy(NotesSurfaceMode::AgentChat, true);
+        assert_eq!(chrome.footer_mode, NotesFooterMode::AgentChatExternal);
+        assert_eq!(
+            chrome.backdrop_bottom_inset,
+            crate::components::footer_chrome::current_main_menu_footer_height()
+                + crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
+        );
+        assert!(chrome.reserves_external_footer());
+
+        // Agent mode without glass bands: footer identity is preserved but no
+        // band is reserved (the in-window fallback footer owns its own height).
+        let chrome = notes_chrome_policy(NotesSurfaceMode::AgentChat, false);
+        assert_eq!(chrome.footer_mode, NotesFooterMode::AgentChatExternal);
+        assert_eq!(chrome.backdrop_bottom_inset, 0.0);
+        assert!(!chrome.reserves_external_footer());
     }
 
     #[test]

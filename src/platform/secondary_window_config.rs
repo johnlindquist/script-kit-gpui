@@ -186,7 +186,7 @@ pub(crate) enum GlassExitMode {
 
 #[cfg(target_os = "macos")]
 fn glass_exit_mode(window_name: &str) -> GlassExitMode {
-    if window_name_owns_detached_footer(window_name) {
+    if window_name_uses_fixed_frame_exit(window_name) {
         GlassExitMode::DetachedRegionsFadeOnly
     } else {
         GlassExitMode::PopupTransformAndBlur
@@ -219,6 +219,11 @@ struct GlassExitLifecycle {
     generation: u64,
     mode: &'static str,
     original_frame: [f64; 4],
+    /// Whether a native glass host (capsule container or footer panel) was
+    /// attached when the exit was REQUESTED. The "host must not detach before
+    /// the exit resolves" invariant is only meaningful when this is true —
+    /// Notes mode legitimately owns no capsules at all.
+    host_attached_at_request: bool,
     request_host_time_ns: u64,
     fade_duration_ns: u64,
     expected_removal_deadline_ns: u64,
@@ -275,6 +280,9 @@ fn record_glass_exit_begin(window: id, ticket: GlassExitTicket, window_name: &st
             frame.size.width,
             frame.size.height,
         ],
+        host_attached_at_request: crate::platform::glass_button_host::host_attached(
+            ticket.window_key,
+        ) || unsafe { crate::footer_popup::native_footer_host_attached(window) },
         request_host_time_ns: now,
         fade_duration_ns,
         expected_removal_deadline_ns: deadline_ns,
@@ -406,6 +414,7 @@ pub(crate) fn glass_exit_lifecycle_receipt(window_name: &str) -> serde_json::Val
         "currentAlpha": current_alpha,
         "commonContentViewFilterCount": filter_count,
         "glassHostAttached": glass_host_attached,
+        "hostAttachedAtRequest": record.host_attached_at_request,
         "history": record.events.iter().map(|(event, host_time_ns)| {
             serde_json::json!({"event": event, "hostTimeNs": host_time_ns})
         }).collect::<Vec<_>>(),
@@ -1002,9 +1011,23 @@ impl TahoeBackdropLayout {
     }
 }
 
+/// Windows whose calibrated glass EXIT is the fixed-frame fade
+/// (`GlassExitMode::DetachedRegionsFadeOnly`). This is a motion-calibration
+/// contract and deliberately independent of the backdrop layout below: Notes
+/// keeps its calibrated fade-only exit in BOTH surface modes, even while its
+/// backdrop is full-window (no footer band).
+#[cfg(target_os = "macos")]
+fn window_name_uses_fixed_frame_exit(window_name: &str) -> bool {
+    matches!(window_name, "Main window" | "Notes" | "Dictation overlay")
+}
+
+/// Windows whose DEFAULT backdrop reserves the detached-footer band. Notes is
+/// intentionally absent: its default (Notes editor mode) is a full-window
+/// backdrop; Agent mode opts into the band dynamically via
+/// [`set_gpui_window_backdrop_bottom_inset`].
 #[cfg(target_os = "macos")]
 fn window_name_owns_detached_footer(window_name: &str) -> bool {
-    matches!(window_name, "Main window" | "Notes" | "Dictation overlay")
+    matches!(window_name, "Main window" | "Dictation overlay")
 }
 
 #[cfg(target_os = "macos")]
@@ -1178,6 +1201,35 @@ unsafe fn remove_tahoe_window_backdrop(window: id, window_name: &str) {
             ];
             let _: () = msg_send![content_layer, setMasksToBounds: true];
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// Resolve the backdrop's corner radius for one owning surface.
+///
+/// Detached-footer windows expose the backdrop's corners mid-window, where
+/// the ordinary NSWindow mask cannot round them. Notes needs its stage radius
+/// in BOTH layouts: its NSWindow is transparent, so a square full-window
+/// backdrop would poke out of the rounded GPUI stage.
+#[cfg(target_os = "macos")]
+unsafe fn tahoe_backdrop_corner_radius_for(
+    window_name: &str,
+    backdrop_layout: TahoeBackdropLayout,
+    content_view: id,
+) -> f64 {
+    let radius = tahoe_content_corner_radius(content_view);
+    if radius > 0.0 {
+        radius
+    } else if window_name == "Notes" {
+        f64::from(crate::ui::chrome::LIQUID_GLASS_WINDOW_RADIUS_PX)
+    } else if backdrop_layout.is_detached_footer() {
+        if window_name == "Dictation overlay" {
+            f64::from(crate::ui::chrome::LIQUID_GLASS_PANEL_RADIUS_PX)
+        } else {
+            f64::from(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX)
+        }
+    } else {
+        radius
     }
 }
 
@@ -2973,7 +3025,7 @@ unsafe fn configure_tahoe_window_backdrop_with_result(
     }
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
-    let backdrop_layout = tahoe_backdrop_layout(window_name);
+    let mut backdrop_layout = tahoe_backdrop_layout(window_name);
     let backdrop_frame = backdrop_layout.frame(content_bounds);
     let vev_count_before =
         tahoe_count_views_kind_of_excluding(content_view, class!(NSVisualEffectView), nil);
@@ -2994,6 +3046,21 @@ unsafe fn configure_tahoe_window_backdrop_with_result(
                 ),
             );
             return None;
+        }
+        // Appearance/theme refresh over an existing Notes backdrop must
+        // preserve the dynamically selected inset (Agent mode reserves the
+        // footer band via `set_gpui_window_backdrop_bottom_inset`); resetting
+        // to the static default would silently collapse the Agent partition.
+        if window_name == "Notes" {
+            let existing_inset: f64 = *(*(glass_view as *const objc::runtime::Object))
+                .get_ivar::<f64>("_scriptKitBottomInset");
+            backdrop_layout = if existing_inset > 0.0 {
+                TahoeBackdropLayout::ContentAboveDetachedFooter {
+                    bottom_inset: existing_inset,
+                }
+            } else {
+                TahoeBackdropLayout::FullWindow
+            };
         }
     } else {
         let Some(backdrop_class) = tahoe_glass_backdrop_view_class(glass_class) else {
@@ -3061,23 +3128,7 @@ unsafe fn configure_tahoe_window_backdrop_with_result(
         },
     );
 
-    let corner_radius = {
-        let radius = tahoe_content_corner_radius(content_view);
-        // Detached-footer windows expose the backdrop's corners mid-window,
-        // where the ordinary NSWindow mask cannot round them. Match the GPUI
-        // content-stage radius for each owning surface.
-        if backdrop_layout.is_detached_footer() && radius <= 0.0 {
-            if window_name == "Notes" {
-                f64::from(crate::ui::chrome::LIQUID_GLASS_WINDOW_RADIUS_PX)
-            } else if window_name == "Dictation overlay" {
-                f64::from(crate::ui::chrome::LIQUID_GLASS_PANEL_RADIUS_PX)
-            } else {
-                f64::from(crate::ui::chrome::MAIN_WINDOW_CONTENT_RADIUS_PX)
-            }
-        } else {
-            radius
-        }
-    };
+    let corner_radius = tahoe_backdrop_corner_radius_for(window_name, backdrop_layout, content_view);
     let corner_applied = {
         let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setCornerRadius:)];
         if responds {
@@ -3659,34 +3710,75 @@ mod secondary_window_config_tests {
         assert!(footer_top <= frame.origin.y);
     }
 
+    /// The exit-motion contract and the backdrop partition are now SEPARATE
+    /// decisions: Notes keeps the calibrated fixed-frame fade exit in both
+    /// surface modes while its DEFAULT backdrop is full-window (its Agent
+    /// mode reserves the footer band dynamically through
+    /// `set_gpui_window_backdrop_bottom_inset`).
     #[cfg(target_os = "macos")]
     #[test]
-    fn main_notes_and_dictation_share_the_detached_footer_backdrop_partition() {
-        for window_name in ["Main window", "Notes", "Dictation overlay"] {
+    fn notes_defaults_to_full_backdrop() {
+        // Default (static) partition owners: Main + Dictation only.
+        for window_name in ["Main window", "Dictation overlay"] {
             assert!(
                 super::window_name_owns_detached_footer(window_name),
-                "{window_name} must own the shared floating footer partition"
+                "{window_name} must own the default floating footer partition"
             );
         }
+        assert!(
+            !super::window_name_owns_detached_footer("Notes"),
+            "Notes must default to the full-window backdrop (Notes mode has no footer)"
+        );
         assert!(!super::window_name_owns_detached_footer("Actions popup"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn detached_footer_owners_use_region_preserving_exit() {
+    fn notes_exit_remains_fixed_frame_fade_only_in_both_modes() {
+        // The calibrated exit motion keys off the fixed-frame-exit set, NOT
+        // the backdrop layout — Notes stays fade-only with zero inset.
         for window_name in ["Main window", "Notes", "Dictation overlay"] {
+            assert!(super::window_name_uses_fixed_frame_exit(window_name));
             assert_eq!(
                 super::glass_exit_mode(window_name),
                 super::GlassExitMode::DetachedRegionsFadeOnly
             );
         }
         for window_name in ["Actions popup", "Confirm popup", "Inline popup"] {
+            assert!(!super::window_name_uses_fixed_frame_exit(window_name));
             assert_eq!(
                 super::glass_exit_mode(window_name),
                 super::GlassExitMode::PopupTransformAndBlur
             );
         }
         assert_eq!(super::glass_exit_remove_delay().as_millis(), 135);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notes_backdrop_layout_can_toggle_without_changing_outer_frame() {
+        use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+        // The same outer content bounds partition into full-window and
+        // footer-inset layouts; toggling layouts never changes the outer
+        // frame, only the backdrop's share of it.
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(350.0, 280.0));
+        let full = super::TahoeBackdropLayout::FullWindow.frame(bounds);
+        assert_eq!(full.origin.y, 0.0);
+        assert_eq!(full.size.height, 280.0);
+
+        let inset = 44.0;
+        let partitioned =
+            super::TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset: inset }
+                .frame(bounds);
+        assert_eq!(partitioned.origin.y, inset);
+        assert_eq!(partitioned.size.height, 280.0 - inset);
+        assert_eq!(partitioned.size.width, full.size.width);
+
+        // Round-trip back to full-window restores the exact original frame.
+        let restored = super::TahoeBackdropLayout::FullWindow.frame(bounds);
+        assert_eq!(restored.origin.y, full.origin.y);
+        assert_eq!(restored.size.height, full.size.height);
     }
 
     #[cfg(target_os = "macos")]
@@ -4184,6 +4276,163 @@ pub fn set_window_resizable(window: &mut gpui::Window, resizable: bool) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_window_resizable(_window: &mut gpui::Window, _resizable: bool) {}
+
+/// Apply a complete [`WindowResizePolicy`] to the native window backing a GPUI
+/// window: the resizable style bit (policy AND the caller's interaction gate)
+/// plus content min/max size constraints. Returns `false` when the native
+/// window cannot be resolved.
+///
+/// The `interaction_enabled` gate lets lifecycle owners keep a policy-resizable
+/// shell locked while a calibrated entry/exit morph owns the frame (the glass
+/// motion calibration is untouched by this function — it only flips the style
+/// bit and constraints).
+#[cfg(target_os = "macos")]
+pub(crate) fn apply_window_resize_policy(
+    window: &gpui::Window,
+    policy: crate::window_resize::policy::WindowResizePolicy,
+    interaction_enabled: bool,
+) -> bool {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSSize;
+    use objc::{msg_send, sel, sel_impl};
+
+    const NS_WINDOW_STYLE_MASK_RESIZABLE: u64 = 1 << 3;
+
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return false;
+    };
+    unsafe {
+        let ns_view = appkit.ns_view.as_ptr() as id;
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window == nil {
+            return false;
+        }
+        let before: u64 = msg_send![ns_window, styleMask];
+        let should_resize = policy.user_resizable && interaction_enabled;
+        let desired = if should_resize {
+            before | NS_WINDOW_STYLE_MASK_RESIZABLE
+        } else {
+            before & !NS_WINDOW_STYLE_MASK_RESIZABLE
+        };
+        if desired != before {
+            let _: () = msg_send![ns_window, setStyleMask: desired];
+        }
+        let _: () = msg_send![
+            ns_window,
+            setContentMinSize: NSSize::new(policy.min_content_width, policy.min_content_height)
+        ];
+        if let (Some(width), Some(height)) = (policy.max_content_width, policy.max_content_height) {
+            let _: () = msg_send![ns_window, setContentMaxSize: NSSize::new(width, height)];
+        }
+        let window_number: i64 = msg_send![ns_window, windowNumber];
+        let in_live_resize: bool = msg_send![ns_window, inLiveResize];
+        let backing_scale: f64 = msg_send![ns_window, backingScaleFactor];
+        tracing::info!(
+            target: "script_kit::platform",
+            event = "window_resize_policy_applied",
+            window_number,
+            style_mask_before = before,
+            style_mask_after = desired,
+            user_resizable = policy.user_resizable,
+            interaction_enabled,
+            min_content_width = policy.min_content_width,
+            min_content_height = policy.min_content_height,
+            max_content_width = policy.max_content_width,
+            max_content_height = policy.max_content_height,
+            backing_scale,
+            in_live_resize,
+        );
+        true
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn apply_window_resize_policy(
+    _window: &gpui::Window,
+    _policy: crate::window_resize::policy::WindowResizePolicy,
+    _interaction_enabled: bool,
+) -> bool {
+    false
+}
+
+/// Dynamically re-partition a GPUI window's Tahoe glass backdrop between the
+/// full-window layout (`bottom_inset <= 0`) and the detached-footer layout
+/// (`bottom_inset > 0`). Owns geometry + shadow only: tint/material are NOT
+/// reapplied (the theme signature did not change), so calling this on every
+/// mode switch cannot flash the glass style.
+///
+/// Returns `false` when the native window or tagged backdrop cannot be
+/// resolved (e.g. glass composition unavailable) — callers treat that as
+/// "no native backdrop to partition", not an error.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_gpui_window_backdrop_bottom_inset(
+    window: &gpui::Window,
+    window_name: &'static str,
+    bottom_inset: f64,
+) -> bool {
+    use cocoa::base::{id, nil};
+    use objc::{msg_send, sel, sel_impl};
+
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return false;
+    };
+    unsafe {
+        let ns_view = appkit.ns_view.as_ptr() as id;
+        let ns_window: id = msg_send![ns_view, window];
+        if ns_window == nil {
+            return false;
+        }
+        let content_view: id = msg_send![ns_window, contentView];
+        if content_view == nil {
+            return false;
+        }
+        let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
+        if glass_view == nil {
+            return false;
+        }
+        let layout = if bottom_inset > 0.0 {
+            TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset }
+        } else {
+            TahoeBackdropLayout::FullWindow
+        };
+        let current_inset: f64 = *(*(glass_view as *const objc::runtime::Object))
+            .get_ivar::<f64>("_scriptKitBottomInset");
+        let corner_radius = tahoe_backdrop_corner_radius_for(window_name, layout, content_view);
+        update_tahoe_backdrop_geometry_and_shadow(
+            ns_window,
+            content_view,
+            glass_view,
+            layout,
+            corner_radius,
+        );
+        let window_number: i64 = msg_send![ns_window, windowNumber];
+        tracing::info!(
+            target: "script_kit::platform",
+            event = "window_backdrop_bottom_inset_set",
+            window_name,
+            window_number,
+            bottom_inset_before = current_inset,
+            bottom_inset_after = layout.bottom_inset(),
+            corner_radius,
+        );
+        true
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn set_gpui_window_backdrop_bottom_inset(
+    _window: &gpui::Window,
+    _window_name: &'static str,
+    _bottom_inset: f64,
+) -> bool {
+    false
+}
 
 // Re-export display/coordinate helpers from the unified display module.
 pub use self::display::{

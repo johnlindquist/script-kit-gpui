@@ -150,6 +150,27 @@ describe("exact detached-owner lifecycle", () => {
     expect(errors).toContain("native glass host detached before current exit resolved");
   });
 
+  test("a window that never owned a glass host cannot detach one early", () => {
+    // Notes mode owns no floating capsules (2026-07-26 chrome partition):
+    // hostAttachedAtRequest=false makes the early-teardown invariant vacuous,
+    // while a receipt WITHOUT the field keeps the original fail-closed check.
+    const errors = validateDetachedExitLifecycle({
+      ...active,
+      glassHostAttached: false,
+      hostAttachedAtRequest: false,
+    }, 77, "exiting");
+    expect(errors).not.toContain(
+      "native glass host detached before current exit resolved",
+    );
+    const legacy = validateDetachedExitLifecycle({
+      ...active,
+      glassHostAttached: false,
+    }, 77, "exiting");
+    expect(legacy).toContain(
+      "native glass host detached before current exit resolved",
+    );
+  });
+
   test("requires cancellation and restored alpha on reopen", () => {
     expect(validateDetachedExitLifecycle({
       ...active,

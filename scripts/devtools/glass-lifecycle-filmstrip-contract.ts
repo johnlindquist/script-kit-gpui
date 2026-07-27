@@ -320,7 +320,14 @@ export function validateDetachedExitLifecycle(
   if (Number(receipt?.commonContentViewFilterCount) !== 0) {
     errors.push("common content-view filter must remain absent");
   }
-  if (receipt?.glassHostAttached !== true) {
+  // The "host must not detach before the exit resolves" invariant is only
+  // meaningful for windows that OWNED a native glass host when the exit was
+  // requested. Notes mode owns no capsules at all (2026-07-26 chrome
+  // partition), so its exits legitimately report no attached host. Receipts
+  // that predate `hostAttachedAtRequest` keep the original fail-closed
+  // behavior (missing field is treated as "a host existed").
+  const hostExistedAtRequest = receipt?.hostAttachedAtRequest !== false;
+  if (hostExistedAtRequest && receipt?.glassHostAttached !== true) {
     errors.push("native glass host detached before current exit resolved");
   }
   const request = Number(receipt?.requestHostTimeNs);

@@ -136,6 +136,58 @@ fn notes_native_window_number(_window: &gpui::Window) -> Option<i64> {
     None
 }
 
+/// Schedule the native-resize unlock for the calibrated entry morph.
+///
+/// The unlock anchor is `configured_at + settle_duration_ms` — the FULL glass
+/// settle, deliberately later than the body-reveal crossing
+/// (`settled_crossing_delay_ms`) that `schedule_notes_entry_reveal` uses. The
+/// text reveal begins while the window is still compressing/rebounding;
+/// unlocking there would let a user drag fight the rebound. Stale generations,
+/// replaced windows, and active exit tickets are all rejected — both here and
+/// again by the phase transition table in `resize.rs`.
+fn schedule_notes_resize_unlock(
+    handle: gpui::WindowHandle<Root>,
+    notes_app: Entity<NotesApp>,
+    native: Option<&NotesNativeEntryConfig>,
+    cx: &mut App,
+) {
+    if !notes_entry_owner_is_current(handle, &notes_app) || !notes_entry_lifecycle_is_open() {
+        return;
+    }
+    let fallback_used = native.is_none_or(|config| !config.configured);
+    let settle_duration_ms = if fallback_used {
+        // Same bounded fallback delay the reveal path uses when native
+        // configuration failed.
+        250
+    } else {
+        native.map(|config| config.settle_duration_ms).unwrap_or(0)
+    };
+    let configured_at_monotonic_ns = native
+        .map(|config| config.configured_at_monotonic_ns)
+        .unwrap_or_else(crate::platform::host_clock::host_time_ns);
+    let unlock_target_ns =
+        resize::native_resize_unlock_target_ns(configured_at_monotonic_ns, settle_duration_ms);
+    let unlock_delay = std::time::Duration::from_nanos(
+        unlock_target_ns.saturating_sub(crate::platform::host_clock::host_time_ns()),
+    );
+    let owner = notes_app.clone();
+    let weak = notes_app.downgrade();
+    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+        cx.background_executor().timer(unlock_delay).await;
+        cx.update(|cx| {
+            if !notes_entry_owner_is_current(handle, &owner) || !notes_entry_lifecycle_is_open() {
+                return;
+            }
+            let _ = handle.update(cx, |_root, window, cx| {
+                let _ = weak.update(cx, |app, _cx| {
+                    app.unlock_native_resize_after_entry(window);
+                });
+            });
+        });
+    })
+    .detach();
+}
+
 fn schedule_notes_entry_reveal(
     handle: gpui::WindowHandle<Root>,
     notes_app: Entity<NotesApp>,
@@ -967,6 +1019,16 @@ fn open_notes_window_with_close_behavior(
                         });
                         match disposition {
                             NotesExitRevealDisposition::PreserveVisible => {
+                                // The window stayed visible at its user-chosen
+                                // frame: restore the user-resizable policy
+                                // immediately (ExitLocked -> Enabled).
+                                let _ = update_notes_window_detached(handle, cx, |window, cx| {
+                                    notes_app.update(cx, |app, _cx| {
+                                        app.restore_native_resize_after_exit_supersede(
+                                            true, window,
+                                        );
+                                    });
+                                });
                                 tracing::info!(
                                     target: "script_kit::notes",
                                     event = "notes_exit_supersede_preserved_visible_reveal",
@@ -974,10 +1036,25 @@ fn open_notes_window_with_close_behavior(
                                 );
                             }
                             NotesExitRevealDisposition::RestartHidden => {
+                                // Remain locked (ExitLocked -> EntryLocked) and
+                                // run the normal entry unlock after settle.
+                                let _ = update_notes_window_detached(handle, cx, |window, cx| {
+                                    notes_app.update(cx, |app, _cx| {
+                                        app.restore_native_resize_after_exit_supersede(
+                                            false, window,
+                                        );
+                                    });
+                                });
                                 notes_app.update(cx, |app, cx| {
                                     app.entry_reveal.restart();
                                     cx.notify();
                                 });
+                                schedule_notes_resize_unlock(
+                                    handle,
+                                    notes_app.clone(),
+                                    native.as_ref(),
+                                    cx,
+                                );
                                 schedule_notes_entry_reveal(handle, notes_app, native, cx);
                             }
                         }
@@ -1008,15 +1085,37 @@ fn open_notes_window_with_close_behavior(
             });
         }
         let close_result = handle.update(cx, |root, window, cx| {
-            // Save bounds before closing (fixes bounds persistence on toggle close)
-            let wb = window.window_bounds();
-            crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
+            // Save bounds before closing (fixes bounds persistence on toggle
+            // close) — but only a STABLE frame; a mid-morph close must not
+            // persist the transient entry geometry.
+            if let Some(notes_app) = NOTES_APP_ENTITY
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                notes_app.update(cx, |app, _cx| {
+                    app.maybe_save_stable_bounds_for_exit(window);
+                });
+            }
             // Avoid re-entrant Root lease: `window.close_all_dialogs(cx)` wraps its body
             // in `Root::update(self, cx, ...)`, but we already hold the Root lease via
             // `handle.update`. Calling the inner method on the leased `root` directly
             // bypasses the second lease and prevents the entity_map.rs:142 double-lease
             // panic that fires on rapid `openNotes` -> `hide` -> `openNotes` toggles.
             root.close_all_dialogs(window, cx);
+            // Lock native resizing so the user-selected frame becomes the
+            // fixed exit frame; an edge drag must not fight the fade.
+            if let Some(notes_app) = NOTES_APP_ENTITY
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                notes_app.update(cx, |app, _cx| {
+                    app.lock_native_resize_for_exit(window);
+                });
+            }
             // Glass mode: play the Spotlight dematerialize (same as the
             // main window's exit), then remove after the fade.
             if let Some(ticket) =
@@ -1107,11 +1206,26 @@ fn open_notes_window_with_close_behavior(
     let bounds = if std::env::var_os("SCRIPT_KIT_TEST_NOTES_DB_PATH").is_some() {
         default_bounds
     } else {
-        crate::window_state::get_initial_bounds(
+        let restored = crate::window_state::get_initial_bounds(
             crate::window_state::WindowRole::Notes,
             default_bounds,
             &displays,
-        )
+        );
+        // Sanitize the restored size against the Notes shell policy: clamp up
+        // to the policy minimum, no product maximum (a user size beyond the
+        // 600pt auto-size ceiling restores unchanged).
+        let policy = crate::window_resize::policy::resize_policy(
+            crate::window_resize::policy::WindowShellKind::Notes,
+        );
+        let (width, height) = crate::window_resize::policy::clamp_restored_content_size(
+            f32::from(restored.size.width).into(),
+            f32::from(restored.size.height).into(),
+            &policy,
+        );
+        gpui::Bounds {
+            origin: restored.origin,
+            size: gpui::size(px(width as f32), px(height as f32)),
+        }
     };
 
     // Load theme to determine window background appearance (vibrancy)
@@ -1222,7 +1336,18 @@ fn open_notes_window_with_close_behavior(
     // reveal sequence begins. A title scan can select a stale tail window
     // during rapid close/reopen and is therefore not an acceptable owner.
     let native_config = update_notes_window_detached(handle, cx, |window, _cx| {
-        configure_notes_as_floating_panel(window)
+        let native = configure_notes_as_floating_panel(window);
+        // Apply the Notes shell's minimum-size constraints immediately, but
+        // keep native user resizing locked until the calibrated entry morph
+        // fully settles (`schedule_notes_resize_unlock`).
+        crate::platform::apply_window_resize_policy(
+            window,
+            crate::window_resize::policy::resize_policy(
+                crate::window_resize::policy::WindowShellKind::Notes,
+            ),
+            false,
+        );
+        native
     })
     .ok()
     .flatten();
@@ -1295,6 +1420,7 @@ fn open_notes_window_with_close_behavior(
                 cx.notify();
             });
         });
+        schedule_notes_resize_unlock(handle, notes_app.clone(), native_config.as_ref(), cx);
         schedule_notes_entry_reveal(handle, notes_app, native_config, cx);
     }
 
@@ -1706,12 +1832,32 @@ pub fn close_notes_window(cx: &mut App) {
 
     if let Some(handle) = handle {
         match update_notes_window_detached(handle, cx, |window, cx| {
-            // Save window bounds before closing
-            let wb = window.window_bounds();
-            crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
+            // Save window bounds before closing — stable frames only (a
+            // mid-morph close must not persist transient entry geometry).
+            if let Some(notes_app) = NOTES_APP_ENTITY
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                notes_app.update(cx, |app, _cx| {
+                    app.maybe_save_stable_bounds_for_exit(window);
+                });
+            }
             // Safe here: no Root lease is held, so the Root::update inside
             // close_all_dialogs does not double-lease.
             window.close_all_dialogs(cx);
+            // Lock native resizing before the fixed-frame exit fade begins.
+            if let Some(notes_app) = NOTES_APP_ENTITY
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                notes_app.update(cx, |app, _cx| {
+                    app.lock_native_resize_for_exit(window);
+                });
+            }
             if let Some(ticket) =
                 crate::platform::begin_gpui_window_exit_with_ticket(window, "PANEL", "Notes")
             {
@@ -1948,6 +2094,18 @@ fn configure_notes_as_floating_panel(_window: &gpui::Window) -> Option<NotesNati
 /// Used by the automation surface collector to expose Notes state to
 /// `getElements` and `inspectAutomationWindow` without routing through
 /// the main window.
+/// Current Notes surface mode (`Notes` editor vs embedded `AgentChat`) for
+/// the live Notes window. Read from the SAME entity state the renderer and
+/// titlebar switcher consume, so automation projections cannot drift from
+/// the visible selection.
+pub fn get_notes_surface_mode(cx: &gpui::App) -> Option<super::NotesSurfaceMode> {
+    let entity = {
+        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
+        slot.lock().ok()?.clone()?
+    };
+    Some(entity.read(cx).surface_mode)
+}
+
 pub fn get_notes_editor_text(cx: &gpui::App) -> Option<String> {
     let entity = {
         let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));

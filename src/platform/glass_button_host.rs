@@ -26,6 +26,27 @@ const GLASS_GROUP_STALE_TTL: std::time::Duration = std::time::Duration::from_mil
 
 pub(crate) type GlassButtonFrame = (f64, f64, f64, f64, f64);
 
+/// Pure GPUI→AppKit capsule frame conversion: GPUI window coordinates are
+/// logical pixels with y-down; AppKit content-view coordinates are points
+/// with y-up (equal magnitude, no scale factor). Returns `(x, y, w, h)` with
+/// the same 1pt minimum the sync loop has always enforced.
+///
+/// Extracted so live-resize tracking is provable: the y-flip depends on the
+/// CURRENT content height, so a frame synced against a resized window follows
+/// the resize with no other correction.
+pub(crate) fn appkit_frame_for_gpui_capsule(
+    frame: GlassButtonFrame,
+    content_height: f64,
+) -> (f64, f64, f64, f64) {
+    let (x, y, width, height, _radius) = frame;
+    (
+        x,
+        content_height - y - height,
+        width.max(1.0),
+        height.max(1.0),
+    )
+}
+
 thread_local! {
     static HOSTS_BY_WINDOW: RefCell<HashMap<usize, WindowGlassState>> =
         RefCell::new(HashMap::new());
@@ -377,6 +398,27 @@ pub(crate) fn set_hover(window: &gpui::Window, group: &'static str, index: usize
 }
 
 /// Remove the host for a window before its native handle is retired.
+/// Recursively update `contentsScale` on a view's layer tree after a
+/// backing-scale change. Geometry/raster metadata only — no style mutation.
+unsafe fn refresh_layer_contents_scale_recursive(view: id, backing_scale: f64) {
+    if view == nil {
+        return;
+    }
+    let layer: id = msg_send![view, layer];
+    if layer != nil {
+        let _: () = msg_send![layer, setContentsScale: backing_scale];
+    }
+    let subviews: id = msg_send![view, subviews];
+    if subviews == nil {
+        return;
+    }
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let child: id = msg_send![subviews, objectAtIndex: index];
+        refresh_layer_contents_scale_recursive(child, backing_scale);
+    }
+}
+
 pub(crate) fn remove_for_window(window: &gpui::Window) {
     let Some((_, ns_window)) = gpui_view_and_ns_window(window) else {
         return;
@@ -398,6 +440,11 @@ pub(crate) struct GlassButtonHost {
     views: Vec<id>,
     hovered: Vec<bool>,
     style_signature: Option<crate::platform::NativeGlassStyleSignature>,
+    /// Backing scale of the owning window at last sync. A change (window moved
+    /// to a display with a different scale, or the display reconfigured) needs
+    /// a recursive `contentsScale` refresh on the pooled glass layers — but it
+    /// must NEVER reapply tint/material (frame churn is not a style event).
+    last_backing_scale: Option<f64>,
 }
 
 impl GlassButtonHost {
@@ -442,6 +489,7 @@ impl GlassButtonHost {
                 views: Vec::new(),
                 hovered: Vec::new(),
                 style_signature: None,
+                last_backing_scale: None,
             })
         }
     }
@@ -498,8 +546,30 @@ impl GlassButtonHost {
             let content_bounds: NSRect = msg_send![self.native.content_view(), bounds];
             let content_height = content_bounds.size.height;
 
+            // Track display-scale changes (window dragged to a 1×/2× display):
+            // refresh layer contentsScale recursively on the pooled views —
+            // geometry-only, never a tint/material reapplication.
+            let owning_window: id = msg_send![self.native.content_view(), window];
+            if owning_window != nil {
+                let backing_scale: f64 = msg_send![owning_window, backingScaleFactor];
+                if backing_scale > 0.0 && self.last_backing_scale != Some(backing_scale) {
+                    if self.last_backing_scale.is_some() {
+                        for view in self.views.iter().copied() {
+                            refresh_layer_contents_scale_recursive(view, backing_scale);
+                        }
+                        tracing::info!(
+                            target: "script_kit::dictation",
+                            event = "glass_button_host_backing_scale_refreshed",
+                            window_key = self.window_key,
+                            backing_scale,
+                        );
+                    }
+                    self.last_backing_scale = Some(backing_scale);
+                }
+            }
+
             for (index, view) in self.views.iter().copied().enumerate() {
-                let Some(&(x, y, width, height, radius)) = frames.get(index) else {
+                let Some(&capsule) = frames.get(index) else {
                     let _: () = msg_send![view, setHidden: YES];
                     if self.hovered.get(index).copied().unwrap_or(false) {
                         set_glass_view_scale(view, 1.0, false);
@@ -507,10 +577,9 @@ impl GlassButtonHost {
                     }
                     continue;
                 };
-                let frame = NSRect::new(
-                    NSPoint::new(x, content_height - y - height),
-                    NSSize::new(width.max(1.0), height.max(1.0)),
-                );
+                let radius = capsule.4;
+                let (x, y, width, height) = appkit_frame_for_gpui_capsule(capsule, content_height);
+                let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
                 if restyle {
                     // Signature change means the cached theme changed — an
                     // explicitly recorded refresh, never a per-frame mutation.
@@ -687,6 +756,25 @@ mod tests {
             frames,
             last_synced: std::time::Instant::now(),
         }
+    }
+
+    #[test]
+    fn glass_frame_flip_tracks_changed_content_height() {
+        // Same GPUI capsule frame, two different window heights: the AppKit
+        // y-up origin must follow the CURRENT content height so capsules ride
+        // a live resize with no extra correction.
+        let capsule: GlassButtonFrame = (12.0, 240.0, 80.0, 28.0, 8.0);
+
+        let (x, y, w, h) = appkit_frame_for_gpui_capsule(capsule, 280.0);
+        assert_eq!((x, y, w, h), (12.0, 280.0 - 240.0 - 28.0, 80.0, 28.0));
+
+        let (_, y_taller, _, _) = appkit_frame_for_gpui_capsule(capsule, 420.0);
+        assert_eq!(y_taller, 420.0 - 240.0 - 28.0);
+        assert_eq!(y_taller - y, 140.0);
+
+        // Degenerate layout frames keep the historical 1pt floor.
+        let (_, _, w_min, h_min) = appkit_frame_for_gpui_capsule((0.0, 0.0, 0.0, 0.0, 0.0), 280.0);
+        assert_eq!((w_min, h_min), (1.0, 1.0));
     }
 
     #[test]

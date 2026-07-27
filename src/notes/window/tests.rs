@@ -621,13 +621,37 @@ fn test_note_switcher_preview_metadata_summary_format() {
 }
 
 #[test]
-fn test_note_footer_preview_advertises_replace_shortcut() {
-    const FOOTER_SOURCE: &str = include_str!("render_editor_footer.rs");
-    const NAVIGATION_SOURCE: &str = include_str!("navigation.rs");
-    assert!(
-        FOOTER_SOURCE.contains("self.focused_note_mention_preview(cx)"),
-        "Notes footer should derive focused note mention preview state"
+fn notes_auto_size_has_no_removed_footer_reservation() {
+    // The Notes footer rail is gone; the autosize height equation must
+    // reserve ZERO footer height. `metrics.footer_height` (28) remains a
+    // style/model value but no longer appears in the desired-height sum.
+    let metrics =
+        super::style::NotesLayoutMetrics::from_style(super::style::NotesWindowStyle::current());
+    let line_count = 7usize;
+    let desired = NotesApp::autosize_desired_height(&metrics, line_count);
+    assert_eq!(
+        desired,
+        metrics.titlebar_height
+            + (line_count as f32) * metrics.auto_resize_line_height
+            + metrics.auto_resize_padding
     );
+    // Guard against the reservation silently returning: adding the 28pt
+    // footer term back would shift every autosize target by footer_height.
+    assert!(metrics.footer_height > 0.0);
+    assert_eq!(
+        NotesApp::autosize_desired_height(&metrics, 0)
+            - metrics.titlebar_height
+            - metrics.auto_resize_padding,
+        0.0
+    );
+}
+
+#[test]
+fn test_note_mention_preview_advertises_replace_shortcut() {
+    // The Notes footer rail is gone (Notes mode owns the full window); the
+    // mention preview now renders as a transient editor overlay in render.rs.
+    // The load-bearing invariant kept here is the advertised replace shortcut.
+    const NAVIGATION_SOURCE: &str = include_str!("navigation.rs");
     assert!(
         NAVIGATION_SOURCE.contains("Cmd+Shift+O replace"),
         "Focused note mention preview should advertise the replace shortcut"

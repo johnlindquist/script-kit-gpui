@@ -235,11 +235,11 @@ impl NotesApp {
         self.command_bar.close_app(cx);
         self.note_switcher.close_app(cx);
 
-        let wb = window.window_bounds();
-        crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
+        self.maybe_save_stable_bounds_for_exit(window);
 
         window.close_all_dialogs(cx);
         let _ = self.entry_reveal.prepare_for_window_exit();
+        self.lock_native_resize_for_exit(window);
         super::window_ops::close_current_notes_window(window, cx);
         cx.stop_propagation();
     }
@@ -569,13 +569,10 @@ impl NotesApp {
                 if key.eq_ignore_ascii_case("w") && !modifiers.shift {
                     self.save_current_note();
                     self.prepare_embedded_agent_chat_for_window_close("notes_agent_chat_cmd_w", cx);
-                    let wb = window.window_bounds();
-                    crate::window_state::save_window_from_gpui(
-                        crate::window_state::WindowRole::Notes,
-                        wb,
-                    );
+                    self.maybe_save_stable_bounds_for_exit(window);
                     window.close_all_dialogs(cx);
                     let _ = self.entry_reveal.prepare_for_window_exit();
+                    self.lock_native_resize_for_exit(window);
                     super::window_ops::close_current_notes_window(window, cx);
                     cx.stop_propagation();
                     return;
@@ -645,10 +642,10 @@ impl NotesApp {
             // the autosave debounce (SAVE_DEBOUNCE_MS) cannot outrun
             // remove_window(), so save synchronously first.
             self.save_current_note();
-            let wb = window.window_bounds();
-            crate::window_state::save_window_from_gpui(crate::window_state::WindowRole::Notes, wb);
+            self.maybe_save_stable_bounds_for_exit(window);
             window.close_all_dialogs(cx);
             let _ = self.entry_reveal.prepare_for_window_exit();
+            self.lock_native_resize_for_exit(window);
             super::window_ops::close_current_notes_window(window, cx);
             return;
         }
@@ -857,13 +854,10 @@ impl NotesApp {
                     );
                     self.command_bar.close_app(cx);
                     self.note_switcher.close_app(cx);
-                    let wb = window.window_bounds();
-                    crate::window_state::save_window_from_gpui(
-                        crate::window_state::WindowRole::Notes,
-                        wb,
-                    );
+                    self.maybe_save_stable_bounds_for_exit(window);
                     window.close_all_dialogs(cx);
                     let _ = self.entry_reveal.prepare_for_window_exit();
+                    self.lock_native_resize_for_exit(window);
                     super::window_ops::close_current_notes_window(window, cx);
                     cx.stop_propagation();
                 }

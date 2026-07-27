@@ -165,6 +165,9 @@ impl NotesApp {
             autosize_generation: 0,
             last_autosize_transition: None,
             last_bottom_resize_receipt: None,
+            native_resize_phase: resize::NotesNativeResizePhase::EntryLocked,
+            last_synced_backdrop_inset: None,
+            last_automation_synced_bounds: None,
             focus_handle,
             _subscriptions: vec![editor_sub, editor_hover_observation, search_sub],
             last_deeplink_hover_hint: None,
@@ -239,7 +242,46 @@ impl NotesApp {
     ///
     /// This ensures bounds are saved even when the window is closed via traffic light
     /// (red close button) which doesn't go through our close handlers.
+    /// Bounds may only persist while the interlock is `Enabled`: the
+    /// calibrated entry morph (compression/rebound) and exit fade own the
+    /// frame in the locked phases, and persisting one of THOSE intermediate
+    /// frames would restore a morph-sized window after a rapid close or
+    /// crash. The close paths save the stable frame explicitly before the
+    /// exit begins.
+    fn bounds_are_persistable(&self) -> bool {
+        self.native_resize_phase == resize::NotesNativeResizePhase::Enabled
+            && NOTES_EXIT_TICKET
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .is_none()
+    }
+
+    /// Explicit close-path save of the stable pre-exit frame. Skipped while
+    /// the interlock is locked: a close during the calibrated entry morph
+    /// would otherwise persist a transient 106%/98.5% morph frame (runtime
+    /// probe notes-live-resize, morph clause, 2026-07-26). The last stable
+    /// save simply remains authoritative.
+    pub(super) fn maybe_save_stable_bounds_for_exit(&self, window: &gpui::Window) {
+        if !self.bounds_are_persistable() {
+            tracing::info!(
+                target: "notes",
+                event = "notes_exit_bounds_save_skipped",
+                phase = self.native_resize_phase.as_str(),
+                "Notes close-path bounds save skipped — frame is morph-owned"
+            );
+            return;
+        }
+        crate::window_state::save_window_from_gpui(
+            crate::window_state::WindowRole::Notes,
+            window.window_bounds(),
+        );
+    }
+
     pub(super) fn maybe_persist_bounds(&mut self, window: &gpui::Window) {
+        if !self.bounds_are_persistable() {
+            return;
+        }
+
         let wb = window.window_bounds();
 
         // Skip if bounds haven't changed
@@ -785,22 +827,39 @@ impl NotesApp {
         total_height.clamp(min_height, max_height)
     }
 
+    /// Desired auto-size height for `line_count` editor lines. Shared by the
+    /// resize path and `automation_layout_info` so the two cannot drift.
+    ///
+    /// The Notes footer rail was removed (chrome policy
+    /// `NotesFooterMode::None` reserves nothing in-window), so the equation
+    /// reserves ZERO footer height — `metrics.footer_height` remains a style
+    /// value consumed by other layout, not by autosize.
+    pub(super) fn autosize_desired_height(
+        metrics: &style::NotesLayoutMetrics,
+        line_count: usize,
+    ) -> f32 {
+        let content_height = (line_count as f32) * metrics.auto_resize_line_height;
+        metrics.titlebar_height + content_height + metrics.auto_resize_padding
+    }
+
     pub(super) fn update_window_height(
         &mut self,
         window: &mut Window,
         line_count: usize,
         _cx: &mut Context<Self>,
     ) {
+        // Agent mode never runs the Notes editor auto-sizing: the embedded
+        // chat owns its own layout inside the shared shell.
+        if self.surface_mode != NotesSurfaceMode::Notes {
+            return;
+        }
+
         // Use initial_height as minimum - never shrink below starting size
         let min_height = self.initial_height;
 
         // Calculate desired height from the same metrics used by render/layout receipts.
         let metrics = style::adopted_metrics();
-        let content_height = (line_count as f32) * metrics.auto_resize_line_height;
-        let total_height = metrics.titlebar_height
-            + content_height
-            + metrics.footer_height
-            + metrics.auto_resize_padding;
+        let total_height = Self::autosize_desired_height(&metrics, line_count);
         let clamped_height = Self::resolve_auto_resize_height(
             total_height,
             min_height,

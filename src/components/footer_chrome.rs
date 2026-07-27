@@ -871,12 +871,18 @@ where
         .into_any_element();
 
     render_footer_action_rail_with_leading_and_cleanup(
-        "main-window-footer-config-rail",
+        MAIN_WINDOW_FOOTER_CONFIG_RAIL_GROUP,
         Some(leading),
         right_buttons,
         stale_left_info_groups,
     )
 }
+
+/// Glass capsule group id owned by [`render_main_window_footer_config_rail`].
+/// Exported so mode-transition owners (e.g. the Notes window's Agent surface)
+/// can remove this group explicitly instead of duplicating the string or
+/// waiting for the stale-TTL sweep.
+pub(crate) const MAIN_WINDOW_FOOTER_CONFIG_RAIL_GROUP: &str = "main-window-footer-config-rail";
 
 #[allow(dead_code)] // callers live in binary-only render modules
 fn footer_hint_button_parts(hint: &str) -> (SharedString, SharedString) {

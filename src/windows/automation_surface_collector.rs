@@ -370,6 +370,31 @@ fn collect_notes_snapshot(
         text_size_source: Some("theme.mono_font_size".to_string()),
     });
 
+    // The persistent Notes / Agent titlebar switcher — projected from the
+    // SAME `surface_mode` state the renderer's `render_surface_switcher`
+    // consumes, so automation can prove which segment is selected. The
+    // element ids mirror the renderer's GPUI ids.
+    let surface_mode = crate::notes::get_notes_surface_mode(cx)?;
+    let notes_selected = surface_mode == crate::notes::NotesSurfaceMode::Notes;
+    let switcher_notes = element(
+        "control:notes-switch-notes",
+        ElementType::Button,
+        Some("Notes".to_string()),
+        None,
+        Some(notes_selected),
+        None,
+        None,
+    );
+    let switcher_agent = element(
+        "control:notes-switch-agent_chat",
+        ElementType::Button,
+        Some("Agent".to_string()),
+        None,
+        Some(!notes_selected),
+        None,
+        None,
+    );
+
     Some(SurfaceElementSnapshot {
         elements: vec![
             element(
@@ -381,9 +406,11 @@ fn collect_notes_snapshot(
                 None,
                 None,
             ),
+            switcher_notes,
+            switcher_agent,
             editor,
         ],
-        total_count: 2,
+        total_count: 4,
         focused_semantic_id: Some("input:notes-editor".to_string()),
         selected_semantic_id: None,
         warnings: Vec::new(),

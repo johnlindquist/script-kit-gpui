@@ -93,6 +93,12 @@ pub(crate) fn capped_main_window_selectable_rows(visible_section_headers: usize)
     }
 }
 
+/// Per-shell user-resize policy (which shells the user may resize, and their
+/// size constraints). Kept separate from the programmatic frame math in this
+/// module: these functions calculate and apply app-driven frames; `policy`
+/// owns user-drag capability.
+pub(crate) mod policy;
+
 /// Shared layout constants for the main window render branch.
 /// Both resize logic and render code consume these so the geometry contract stays in sync.
 /// Constants are consumed from the binary target via `include!()` render code.

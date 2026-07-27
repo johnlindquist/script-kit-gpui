@@ -649,6 +649,18 @@ pub struct NotesApp {
     last_autosize_transition: Option<NotesAutosizeTransition>,
     /// Last root pointer-down classification for bottom-resize verification.
     last_bottom_resize_receipt: Option<resize::NotesBottomResizeReceipt>,
+    /// Native (all-edge) resize interlock: the resizable style bit is only on
+    /// while this is `Enabled`; calibrated entry/exit morphs own the frame in
+    /// the locked phases. See `resize::NotesNativeResizePhase`.
+    native_resize_phase: resize::NotesNativeResizePhase,
+    /// Last backdrop bottom inset pushed to the native Tahoe glass partition
+    /// (`None` until the first successful sync). Keeps the per-frame render
+    /// side effect idempotent.
+    last_synced_backdrop_inset: Option<f32>,
+    /// Last bounds published to the automation window registry. Native
+    /// (AppKit-tracked) resizes never pass through the custom resize
+    /// observation, so the render loop keeps automation truth fresh itself.
+    last_automation_synced_bounds: Option<[f32; 4]>,
     /// Focus handle for keyboard navigation
     focus_handle: FocusHandle,
 
@@ -780,7 +792,6 @@ mod panels;
 mod render;
 mod render_editor;
 mod render_editor_body;
-mod render_editor_footer;
 mod render_editor_titlebar;
 mod render_ui;
 mod resize;
@@ -794,11 +805,12 @@ pub(crate) use window_ops::update_notes_window_detached;
 pub use window_ops::{
     accept_notes_ghost_for_automation, apply_mcp_notes_mutation_on_main_thread, close_notes_window,
     get_notes_app_entity_and_handle, get_notes_editor_runtime_info, get_notes_editor_text,
-    handle_notes_editor_key_for_automation, handle_notes_ghost_key_for_automation,
-    inject_text_into_notes, is_notes_window, is_notes_window_open, open_day_note_in_notes_window,
-    open_note_in_notes_window, open_notes_search, open_notes_window,
-    open_notes_window_without_launcher_restore, quick_capture, save_note_with_content,
-    save_note_with_content_and_source, toggle_notes_popup_for_automation,
+    get_notes_surface_mode, handle_notes_editor_key_for_automation,
+    handle_notes_ghost_key_for_automation, inject_text_into_notes, is_notes_window,
+    is_notes_window_open, open_day_note_in_notes_window, open_note_in_notes_window,
+    open_notes_search, open_notes_window, open_notes_window_without_launcher_restore,
+    quick_capture, save_note_with_content, save_note_with_content_and_source,
+    toggle_notes_popup_for_automation,
 };
 
 #[cfg(test)]

@@ -147,7 +147,8 @@ pub(crate) fn snapshot_for_window(window: &gpui::Window) -> Option<FooterHitRegi
         let state = registry.get(&window_key)?;
         let width = size.width.as_f32();
         let height = size.height.as_f32();
-        if (state.window_width - width).abs() > 0.5 || (state.window_height - height).abs() > 0.5 {
+        if !snapshot_dimensions_are_current(state.window_width, state.window_height, width, height)
+        {
             return None;
         }
         Some(snapshot(state))
@@ -164,6 +165,19 @@ pub(crate) fn snapshot_for_native_window_number(
             .find(|state| state.native_window_number == native_window_number)
             .map(snapshot)
     })
+}
+
+/// A hit-region snapshot is only valid for the window dimensions it was
+/// synced against (within half a point). During a live resize the layout
+/// changes faster than the sync; consumers must fail CLOSED (no snapshot)
+/// rather than route clicks through stale geometry.
+fn snapshot_dimensions_are_current(
+    synced_width: f32,
+    synced_height: f32,
+    current_width: f32,
+    current_height: f32,
+) -> bool {
+    (synced_width - current_width).abs() <= 0.5 && (synced_height - current_height).abs() <= 0.5
 }
 
 fn snapshot(state: &WindowFooterHitRegions) -> FooterHitRegionSnapshot {
@@ -183,6 +197,17 @@ fn snapshot(state: &WindowFooterHitRegions) -> FooterHitRegionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_hit_region_snapshot_fails_closed_after_resize() {
+        // Within half a point: still current (sub-pixel rounding noise).
+        assert!(snapshot_dimensions_are_current(350.0, 280.0, 350.4, 279.6));
+        // A live resize moved the window beyond the tolerance in either
+        // dimension: the snapshot must fail closed.
+        assert!(!snapshot_dimensions_are_current(350.0, 280.0, 351.0, 280.0));
+        assert!(!snapshot_dimensions_are_current(350.0, 280.0, 350.0, 281.0));
+        assert!(!snapshot_dimensions_are_current(350.0, 280.0, 480.0, 360.0));
+    }
 
     #[test]
     fn guarded_region_contains_only_its_interaction_box() {

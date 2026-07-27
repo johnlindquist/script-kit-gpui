@@ -406,11 +406,7 @@ impl NotesApp {
         });
         let search_text = self.search_state.read(cx).value().to_string();
         let metrics = style::adopted_metrics();
-        let content_height = (self.last_line_count as f32) * metrics.auto_resize_line_height;
-        let desired_height = metrics.titlebar_height
-            + content_height
-            + metrics.footer_height
-            + metrics.auto_resize_padding;
+        let desired_height = Self::autosize_desired_height(&metrics, self.last_line_count);
         let clamped_height = Self::resolve_auto_resize_height(
             desired_height,
             self.initial_height,
@@ -768,11 +764,17 @@ impl NotesApp {
             .unwrap_or((728.0, self.last_window_height.max(self.initial_height)));
         let metrics = style::adopted_metrics();
         let titlebar_height = metrics.titlebar_height;
-        let detached_footer = crate::footer_popup::glass_scroll_bands_active();
+        // Project the SAME chrome partition the renderer resolves: Notes mode
+        // owns the full window (no footer band, no gutter); Agent mode under
+        // active glass reserves the external footer + 8pt gap. Anything else
+        // here would let automation prove a footer that no longer renders.
+        let glass_active = crate::footer_popup::glass_scroll_bands_active();
+        let chrome = super::contract::notes_chrome_policy(self.surface_mode, glass_active);
+        let detached_footer = chrome.reserves_external_footer();
         let footer_height = if detached_footer {
             crate::components::footer_chrome::current_main_menu_footer_height()
         } else {
-            metrics.footer_height
+            0.0
         };
         let footer_gap = if detached_footer {
             crate::footer_popup::FLOAT_FOOTER_CONTAINER_GAP_PX
@@ -948,36 +950,32 @@ impl NotesApp {
                     ),
             );
         }
-        components.push(
-            LayoutComponentInfo::new("NotesFooter", LayoutComponentType::Panel)
-                .with_bounds(
-                    regions.footer.x,
-                    regions.footer.y,
-                    regions.footer.width,
-                    regions.footer.height,
-                )
-                .with_visual_style(
-                    if detached_footer {
-                        chrome_tokens::CHROME_LAYER_FLOATING
-                    } else {
-                        chrome_tokens::CHROME_LAYER_FUNCTIONAL
-                    },
-                    if detached_footer {
-                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT
-                    } else {
-                        chrome_tokens::MATERIAL_SOLID_THEME_TOKEN
-                    },
-                    Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
-                )
-                .with_visual_token("chrome.notesFooter")
-                .with_depth(1)
-                .with_parent("NotesWindow")
-                .with_explanation(if detached_footer {
-                    "Transparent positioning rail containing discrete native glass capsules; it has no full-width footer surface."
-                } else {
-                    "Status/footer strip with save state, counts, and mode hints."
-                }),
-        );
+        // "NotesFooter" exists ONLY while the Agent surface reserves the
+        // external capsule band; Notes mode renders no footer at all (its
+        // save status lives in the titlebar), so projecting one would be a
+        // phantom element automation could "prove".
+        if detached_footer {
+            components.push(
+                LayoutComponentInfo::new("NotesFooter", LayoutComponentType::Panel)
+                    .with_bounds(
+                        regions.footer.x,
+                        regions.footer.y,
+                        regions.footer.width,
+                        regions.footer.height,
+                    )
+                    .with_visual_style(
+                        chrome_tokens::CHROME_LAYER_FLOATING,
+                        chrome_tokens::MATERIAL_NS_VISUAL_EFFECT,
+                        Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
+                    )
+                    .with_visual_token("chrome.notesFooter")
+                    .with_depth(1)
+                    .with_parent("NotesWindow")
+                    .with_explanation(
+                        "Transparent positioning rail containing discrete native glass capsules; it has no full-width footer surface.",
+                    ),
+            );
+        }
 
         if self.command_bar.is_open() {
             components.push(
