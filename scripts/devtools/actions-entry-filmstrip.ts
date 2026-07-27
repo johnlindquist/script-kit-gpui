@@ -14,7 +14,10 @@ import {
   identityFromEnvironment,
   newRunId,
 } from "./glass-evidence-contract.ts";
-import { analyzeLoggedEntryGeometry } from "./glass-entry-motion-contract.ts";
+import {
+  ACTIONS_GLASS_ENTRY_EXPECTATION,
+  analyzeLoggedEntryGeometry,
+} from "./glass-entry-motion-contract.ts";
 import { validateFilmstripCapture } from "./glass-lifecycle-filmstrip-contract.ts";
 import {
   finishInterferenceMonitor,
@@ -264,7 +267,10 @@ try {
       && line.includes("phase=enter")
     )
     .slice(-3);
-  const motionEnvelope = analyzeLoggedEntryGeometry(motionLog, 0.94);
+  const motionEnvelope = analyzeLoggedEntryGeometry(
+    motionLog,
+    ACTIONS_GLASS_ENTRY_EXPECTATION,
+  );
   receipt.capture = {
     command,
     exitCode: captureExitCode,

@@ -117,30 +117,48 @@ generic bug fix, refactor, theme change, or contrast task is not permission.
 If a requested change appears to require different motion values, preserve the
 calibration and ask for explicit permission instead.
 
-The locked production contract is (retuned 2026-07-24 from side-by-side
-Spotlight/Script Kit footage, `CleanShot 2026-07-24 at 09.18.40.mp4`, against
-the measurement page https://eager-hollow-dyyf.here.now/):
+The locked production contract is (entry retuned 2026-07-26 to the
+Spotlight visible tail — Oracle session `glass-entry-spotlight-retune`,
+user-authorized, evidence: the frame-by-frame measurement page
+https://eager-hollow-dyyf.here.now/ and the before/after receipts in
+`.artifacts/glass-entry-spotlight-retune/`; lineage 09bddd931 → eb8e1e115 →
+cd5634ec8; exit/material values remain from the 2026-07-24 calibration
+against `CleanShot 2026-07-24 at 09.18.40.mp4`):
 
-- default entry duration `0.28s`: compression `140ms`, squish hold `50ms`
-  (Spotlight rests ~3 frames at max compression), rebound `90ms`;
-- entry inset `0.03`, producing a main-window `106% → 98.5% → 100%` width path
-  and an Actions/popup `94% → 101.5% → 100%` path — Spotlight's measured max
-  undershoot is `−1.3%` of TOTAL width; the earlier `97%`/`103%` mid-points
-  had doubled the measurement via a per-side ×2 and read rubbery;
-- visible entry start alpha `0.85` (retuned from `0.0` on 2026-07-25,
-  authorized by HITL submission `98cab5e5-6f15-4311-8d49-83e31602e641` /
-  Oracle plan `floating-capsule-entry-material`: NSWindow alpha multiplies
-  every contributed pixel, so visible entry frames at low alpha displayed
-  mostly wallpaper), animated to `1.0` during phase one; truly hidden
-  parking (window ordered out) stays alpha `0.0` via
-  `GLASS_HIDDEN_PARK_ALPHA`, and zero-alpha parking of a visible window is
+- default entry duration `0.21s` — the VISIBLE TAIL of Spotlight's enter
+  (retuned 2026-07-26, Oracle session `glass-entry-spotlight-retune`, after
+  the user reported the post-cd5634ec8 entry felt too aggressive): `70ms`
+  ease-out compression, NO explicit hold, `140ms` ease-in-out rebound. The
+  compression ease-out ends at zero velocity and the rebound begins at zero
+  velocity — that turn, not a dead hold, is the physical settling;
+- entry inset `0.006` per side, producing a main/Notes/Dictation shrink-in
+  `101.2% → 98.7% → 100%` width path and an Actions/popup grow-in
+  `98.8% → 101.3% → 100%` path. Script Kit's first visible frame is
+  phase-aligned to Spotlight's measured `t≈88ms` state (101.2% width at
+  presence 0.85): NSWindow alpha below 0.85 exposes desktop pixels rather
+  than Spotlight's coherent faint glass, so the unsafe `0.05 → 0.85`
+  presence prefix (Spotlight's ~110% first photon) is deliberately omitted.
+  Height participation is `0` (vertical damping 0.0 — Spotlight measures
+  ±0–2px). Squish factor stays `0.25`, clamped `0.0065–0.015` per side; the
+  default hits the 0.0065 minimum = Spotlight's measured `−1.3%` total
+  squish;
+- entry alpha: visible start `0.85`, easing to `0.99` over `35ms`
+  (ease-out), holding the model value at `0.99` through max compression,
+  then easing `0.99 → 1.0` over `52ms` from rebound start. A shrink-in
+  frame must NEVER be fully opaque while wider than natural size;
+- the `0.85` floor lineage: retuned from `0.0` on 2026-07-25 (HITL
+  submission `98cab5e5-6f15-4311-8d49-83e31602e641` / Oracle plan
+  `floating-capsule-entry-material` — NSWindow alpha multiplies every
+  contributed pixel, so low-alpha visible frames displayed mostly
+  wallpaper). Truly hidden parking (window ordered out) stays alpha `0.0`
+  via `GLASS_HIDDEN_PARK_ALPHA`; zero-alpha parking of a visible window is
   a contract violation (runtime tripwire
   `glass_hidden_park_on_visible_window`);
-- vertical damping `0.4`, squish factor `0.25` (per side, of the inset,
-  clamped `0.006–0.015`), squish hold `0.05s`, phase-one fraction `0.5`;
-- Notes body reveal is derived from the calibrated geometry: it starts at the
-  phase-one settled-size crossing (`97ms` with the default calibration), then
-  fades over `90ms` while the window compresses and rebounds;
+- phase-one fraction `1/3`, squish hold `0.0s`, fade fraction `2/3`;
+- Notes body reveal uses the material-safe anchor: the geometric
+  settled-size crossing is `23ms` (ease-out compression), but the reveal
+  waits for `max(23ms, 35ms alpha ramp) = 35ms`, then keeps its `90ms`
+  body fade;
 - glass material: stability tint floor `0.35` and capsule veil `0.80`
   (`src/ui/chrome/tokens.rs`) — the Jul 23 `0.55`/`0.94` stack read
   near-solid mid-entry, visibly heavier than the Spotlight reference fade;

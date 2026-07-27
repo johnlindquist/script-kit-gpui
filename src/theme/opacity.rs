@@ -27,13 +27,20 @@ pub const OPACITY_VIBRANCY_BACKGROUND: f32 = 0.30;
 /// alone carries the frost and content sits directly on it. Raise this to
 /// restore a themed tint over the glass (0.15 was the previous value).
 pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.0;
-/// Default duration (seconds) of the glass appear morph. Measured from a
-/// 57fps Spotlight recording: compression ~140ms + rebound ~140ms.
-pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.28;
+/// Default duration (seconds) of the glass appear morph — the VISIBLE TAIL
+/// of Spotlight's enter. Script Kit's first safe frame (NSWindow alpha 0.85)
+/// is phase-aligned to Spotlight's measured t≈88ms state, so the visible
+/// tail is ~210ms: 70ms ease-out compression + 140ms ease-in-out rebound
+/// (retuned 2026-07-26, Oracle session glass-entry-spotlight-retune, from
+/// the frame-by-frame page https://eager-hollow-dyyf.here.now/).
+pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.21;
 /// Default start outset (fraction of width per side) of the glass appear
-/// morph. Spotlight measures ~+10% total width at first photon (~3-5% per
-/// side); height participation is damped in the morph itself.
-pub const GLASS_MORPH_DEFAULT_INSET: f32 = 0.03;
+/// morph. Spotlight measures ~101.2% total width at the first frame with
+/// presence comparable to our 0.85 alpha floor — 0.006 per side ×2 = +1.2%
+/// total. (Spotlight's wider ~110% first photon is nearly invisible at
+/// presence 0.05 and is deliberately omitted: plain NSWindow alpha at that
+/// level shows wallpaper, not faint glass.)
+pub const GLASS_MORPH_DEFAULT_INSET: f32 = 0.006;
 /// Softer ghost-tier background opacity for barely-there fills (0.03–0.06 range).
 #[allow(dead_code)]
 pub const OPACITY_GHOST_SOFT: f32 = 0.03;

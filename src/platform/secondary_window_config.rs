@@ -25,8 +25,20 @@ pub(crate) struct NativeGlassEntryReceipt {
     pub(crate) morph_start_alpha_bits: Option<u64>,
     pub(crate) settle_duration_ms: u64,
     /// Time from native morph start until phase one first crosses the final
-    /// window size. Content can begin revealing here and finish during rebound.
+    /// window size — the pure GEOMETRIC crossing (23ms at the default
+    /// visible-tail calibration). Content reveal must use
+    /// `content_reveal_delay_ms`, which also waits out the alpha ramp.
     pub(crate) settled_crossing_delay_ms: u64,
+    /// Material-safe reveal anchor: max(geometric crossing, alpha ramp).
+    pub(crate) content_reveal_delay_ms: u64,
+    /// Compression duration (phase one) in ms.
+    pub(crate) phase_one_duration_ms: u64,
+    /// Rebound duration (phase two) in ms.
+    pub(crate) phase_two_duration_ms: u64,
+    /// 0.85 → 0.99 alpha ramp duration in ms.
+    pub(crate) alpha_ramp_duration_ms: u64,
+    /// 0.99 → 1.0 finishing alpha duration in ms.
+    pub(crate) alpha_finish_duration_ms: u64,
     pub(crate) configured_at_monotonic_ns: u64,
     pub(crate) configured_at_unix_ms: u64,
 }
@@ -64,6 +76,15 @@ struct GlassMorphTuning {
     squish_scale_y: f64,
     phase1: f64,
     phase2: f64,
+    /// Alpha the phase-one ramp targets (0.99 — never fully opaque while the
+    /// window is wider than natural size).
+    phase1_alpha_target: f64,
+    /// Duration of the start_alpha → phase1_alpha_target leg (clamped to
+    /// phase1).
+    alpha_ramp_duration: f64,
+    /// Duration of the phase1_alpha_target → 1.0 leg from rebound start
+    /// (clamped to phase2).
+    alpha_finish_duration: f64,
 }
 
 #[cfg(target_os = "macos")]
@@ -72,10 +93,11 @@ fn cubic_bezier_axis(t: f64, first: f64, second: f64) -> f64 {
     3.0 * inverse * inverse * t * first + 3.0 * inverse * t * t * second + t * t * t
 }
 
-/// Convert a phase-one geometry progress to elapsed time for AppKit's
-/// `easeInEaseOut` timing function (`cubic-bezier(0.42, 0, 0.58, 1)`).
+/// Convert a phase-one geometry progress to elapsed time for a CAMediaTiming
+/// cubic-bezier whose value axis has control values (0, 1) and whose time
+/// axis has control values (`time_c1`, `time_c2`).
 #[cfg(target_os = "macos")]
-fn ease_in_out_time_fraction_for_progress(progress: f64) -> f64 {
+fn bezier_time_fraction_for_progress(progress: f64, time_c1: f64, time_c2: f64) -> f64 {
     let progress = progress.clamp(0.0, 1.0);
     let mut low = 0.0;
     let mut high = 1.0;
@@ -88,9 +110,11 @@ fn ease_in_out_time_fraction_for_progress(progress: f64) -> f64 {
             high = parameter;
         }
     }
-    cubic_bezier_axis((low + high) * 0.5, 0.42, 0.58)
+    cubic_bezier_axis((low + high) * 0.5, time_c1, time_c2)
 }
 
+/// Time from native morph start until phase one's ease-out compression
+/// (`cubic-bezier(0, 0, 0.58, 1)`) first crosses the final window size.
 #[cfg(target_os = "macos")]
 fn settled_size_crossing_delay_ms(tuning: GlassMorphTuning) -> u64 {
     let phase_distance = tuning.start_scale_x - tuning.squish_scale_x;
@@ -98,8 +122,18 @@ fn settled_size_crossing_delay_ms(tuning: GlassMorphTuning) -> u64 {
         return 0;
     }
     let geometry_progress = ((tuning.start_scale_x - 1.0) / phase_distance).clamp(0.0, 1.0);
-    let time_fraction = ease_in_out_time_fraction_for_progress(geometry_progress);
+    let time_fraction = bezier_time_fraction_for_progress(geometry_progress, 0.0, 0.58);
     (tuning.phase1 * time_fraction * 1000.0).round() as u64
+}
+
+/// Material-safe content reveal anchor: content may begin revealing only
+/// once BOTH the geometry has crossed the final size AND the alpha ramp has
+/// completed — revealing text while alpha is still below 0.99 would read as
+/// a double fade.
+#[cfg(target_os = "macos")]
+fn entry_content_reveal_delay_ms(tuning: GlassMorphTuning) -> u64 {
+    settled_size_crossing_delay_ms(tuning)
+        .max((tuning.alpha_ramp_duration * 1000.0).ceil() as u64)
 }
 
 #[cfg(target_os = "macos")]
@@ -131,35 +165,56 @@ const GLASS_MORPH_ENTRY_START_ALPHA: f64 = 0.85;
 const GLASS_HIDDEN_PARK_ALPHA: f64 = 0.0;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_INSET: f64 = 0.4;
+/// Height participation in the entry morph. Spotlight's measured height
+/// undershoot is ±0–2px ("~0% height participation in the squish" —
+/// https://eager-hollow-dyyf.here.now/): the morph is width-dominant, so the
+/// visible-tail calibration removes vertical motion entirely.
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_VERTICAL_DAMPING: f64 = 0.4;
+const GLASS_MORPH_VERTICAL_DAMPING: f64 = 0.0;
 /// Squish depth as a fraction of the entry inset, applied PER SIDE (the frame
 /// math doubles it into total width). Spotlight's measured maximum undershoot
-/// is −1.3% of total width (https://eager-hollow-dyyf.here.now/, re-verified
-/// frame-by-frame against CleanShot 2026-07-24 09.18.40.mp4); 0.25 × the
-/// 0.03 production inset yields 1.5% total, which renders ≈1.3% at 57fps
-/// sampling. The earlier 0.5 factor doubled the measurement (−3% total) and
-/// made the entry read rubbery next to Spotlight.
+/// is −1.3% of total width (https://eager-hollow-dyyf.here.now/). With the
+/// visible-tail inset of 0.006 the factor product (0.0015) sits below the
+/// clamp, so the per-side minimum of 0.0065 is what actually renders:
+/// 0.0065 ×2 = 1.3% total — exactly the measured squish.
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_SQUISH_FACTOR: f64 = 0.25;
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_MIN_SQUISH: f64 = 0.006;
+const GLASS_MORPH_MIN_SQUISH: f64 = 0.0065;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MAX_SQUISH: f64 = 0.015;
-/// Rest at max compression before the rebound. Spotlight holds its minimum
-/// width for ~3 frames at 57fps (~50ms) — the pause is what makes the turn
-/// read as physical settling instead of a sharp V. Taken out of phase two so
-/// the total entry stays at the locked duration.
+/// No explicit rest at max compression: the compression ease-out ends at
+/// zero velocity and the rebound ease-in-out begins at zero velocity, which
+/// is what reads as physical settling. (The earlier 50ms dead hold plus a
+/// 90ms rebound made the tail feel sticky-then-quick; Spotlight's measured
+/// rebound gets a full ~140ms.)
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_SQUISH_HOLD: f64 = 0.05;
+const GLASS_MORPH_SQUISH_HOLD: f64 = 0.0;
+/// Compression is one third of the visible tail (70ms at the 0.21s default),
+/// leaving the measured 140ms for the rebound.
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_PHASE1_FRACTION: f64 = 0.5;
+const GLASS_MORPH_PHASE1_FRACTION: f64 = 1.0 / 3.0;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MIN_REBOUND_DURATION: f64 = 0.08;
 #[cfg(target_os = "macos")]
-const GLASS_MORPH_FADE_FRACTION: f64 = 0.7;
+const GLASS_MORPH_FADE_FRACTION: f64 = 2.0 / 3.0;
 #[cfg(target_os = "macos")]
 const GLASS_MORPH_MIN_FADE_DURATION: f64 = 0.10;
+/// Alpha target for the phase-one ramp. Spotlight's fade completes (≥0.99)
+/// at almost exactly the moment width bottoms out — the window is never
+/// fully opaque while wider than its natural size. The final 0.99 → 1.0 leg
+/// runs from rebound start.
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_PHASE1_ALPHA_TARGET: f64 = 0.99;
+/// Duration of the 0.85 → 0.99 alpha ramp (ease-out), phase-locked so alpha
+/// is at 0.99 well before max compression. Clamped to phase one for short
+/// custom durations.
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_ALPHA_RAMP_DURATION: f64 = 0.035;
+/// Duration of the 0.99 → 1.0 finishing leg (ease-out) starting at rebound.
+/// Clamped to phase two for short custom durations.
+#[cfg(target_os = "macos")]
+const GLASS_MORPH_ALPHA_FINISH_DURATION: f64 = 0.052;
 #[cfg(target_os = "macos")]
 const GLASS_EXIT_DURATION: f64 = 0.12;
 const GLASS_EXIT_REMOVE_DELAY_MS: u64 = 135;
@@ -597,6 +652,8 @@ fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMo
     let squish_fraction = (inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
         .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
     let phase1 = duration * GLASS_MORPH_PHASE1_FRACTION;
+    let phase2 = (duration - phase1 - GLASS_MORPH_SQUISH_HOLD)
+        .max(GLASS_MORPH_MIN_REBOUND_DURATION);
     Some(GlassMorphTuning {
         duration,
         inset_fraction,
@@ -606,8 +663,10 @@ fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMo
         squish_scale_x: 1.0 - squish_fraction * 2.0,
         squish_scale_y: 1.0 - squish_fraction * GLASS_MORPH_VERTICAL_DAMPING * 2.0,
         phase1,
-        phase2: (duration - phase1 - GLASS_MORPH_SQUISH_HOLD)
-            .max(GLASS_MORPH_MIN_REBOUND_DURATION),
+        phase2,
+        phase1_alpha_target: GLASS_MORPH_PHASE1_ALPHA_TARGET,
+        alpha_ramp_duration: GLASS_MORPH_ALPHA_RAMP_DURATION.min(phase1),
+        alpha_finish_duration: GLASS_MORPH_ALPHA_FINISH_DURATION.min(phase2),
     })
 }
 
@@ -773,6 +832,39 @@ unsafe fn configure_window_vibrancy_common(
         settled_crossing_delay_ms: if glass_created {
             morph_tuning
                 .map(settled_size_crossing_delay_ms)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        content_reveal_delay_ms: if glass_created {
+            morph_tuning.map(entry_content_reveal_delay_ms).unwrap_or(0)
+        } else {
+            0
+        },
+        phase_one_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.phase1 * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        phase_two_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.phase2 * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        alpha_ramp_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.alpha_ramp_duration * 1000.0).round() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        },
+        alpha_finish_duration_ms: if glass_created {
+            morph_tuning
+                .map(|tuning| (tuning.alpha_finish_duration * 1000.0).round() as u64)
                 .unwrap_or(0)
         } else {
             0
@@ -1393,12 +1485,29 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
 /// windows can materialize concurrently, so a single global slot would let one
 /// window steal another's rebound target.
 #[cfg(target_os = "macos")]
+/// Rebound target for one in-flight entry morph. Named fields (not a
+/// positional tuple) so the frame and alpha legs cannot be silently
+/// transposed as the schedule grows.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct GlassMorphSettleTarget {
+    frame: [f64; 4],
+    /// Rebound frame animation duration (phase two, ease-in-out).
+    frame_duration: f64,
+    /// 0.99 → 1.0 finishing alpha duration (ease-out), starting at rebound.
+    alpha_duration: f64,
+}
+
+#[cfg(target_os = "macos")]
 static GLASS_MORPH_SETTLE_TARGETS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<usize, (f64, f64, f64, f64, f64)>>,
+    std::sync::Mutex<std::collections::HashMap<usize, GlassMorphSettleTarget>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// Phase 2 of the appear bounce: ease the window from its overshoot
-/// (slightly smaller than final) back up to the final frame.
+/// Phase 2 of the appear bounce: ease the window from its compression
+/// extreme back up to the final frame (ease-in-out — it starts at zero
+/// velocity where the ease-out compression ended), while the finishing
+/// alpha leg (0.99 → 1.0, ease-out) runs in its OWN animation context
+/// because it has a different duration.
 #[cfg(target_os = "macos")]
 extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc::runtime::Sel) {
     use cocoa::foundation::{NSPoint, NSRect, NSSize};
@@ -1414,16 +1523,19 @@ extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc:
             .lock()
             .ok()
             .and_then(|mut guard| guard.remove(&(window as usize)));
-        let Some((x, y, w, h, settle_duration)) = target else {
+        let Some(target) = target else {
             return;
         };
+        let [x, y, w, h] = target.frame;
         let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+
+        // Frame rebound: its own context (duration = phase two).
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-        let _: () = msg_send![ctx, setDuration: settle_duration];
+        let _: () = msg_send![ctx, setDuration: target.frame_duration];
         let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
         if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-            let name = tahoe_ns_string("easeOut");
+            let name = tahoe_ns_string("easeInEaseOut");
             if name != nil {
                 let timing: id = msg_send![timing_class, functionWithName: name];
                 if timing != nil {
@@ -1433,6 +1545,24 @@ extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc:
         }
         let animator: id = msg_send![window, animator];
         let _: () = msg_send![animator, setFrame: frame display: true];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+        // Finishing alpha leg: separate context (different duration).
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let alpha_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![alpha_ctx, setDuration: target.alpha_duration];
+        let _: () = msg_send![alpha_ctx, setAllowsImplicitAnimation: true];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![alpha_ctx, setTimingFunction: timing];
+                }
+            }
+        }
+        let alpha_animator: id = msg_send![window, animator];
+        let _: () = msg_send![alpha_animator, setAlphaValue: 1.0f64];
         let _: () = msg_send![class!(NSAnimationContext), endGrouping];
     }
 }
@@ -2331,10 +2461,13 @@ unsafe fn animate_tahoe_glass_appearance_directed(
         ),
     );
 
-    // Phase 1: wide -> squished-under-final, soft on both ends, then a
-    // ~50ms rest at max compression before the rebound (measured: Spotlight
-    // holds its minimum width ~3 frames at 57fps). The rebound travels ~1/5
-    // the compression distance, so it reads far gentler.
+    // Phase 1: wide -> squished-under-final. The compression is EASE-OUT
+    // (ends at zero velocity — no explicit hold), phase-locked with an
+    // independent ease-out alpha ramp 0.85 -> 0.99 over its own (shorter)
+    // duration. Separate AppKit contexts because frame and alpha have
+    // different durations; alpha must NOT reach 1.0 while the window is
+    // wider than natural (Spotlight: "never fully opaque while still larger
+    // than its natural size").
     let phase1 = tuning.phase1;
     let phase2 = tuning.phase2;
 
@@ -2346,12 +2479,13 @@ unsafe fn animate_tahoe_glass_appearance_directed(
         object: nil
     ];
 
+    // Frame compression: its own context (duration = phase one, ease-out).
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
     let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
     let _: () = msg_send![ctx, setDuration: phase1];
     let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
     if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeInEaseOut");
+        let name = tahoe_ns_string("easeOut");
         if name != nil {
             let timing: id = msg_send![timing_class, functionWithName: name];
             if timing != nil {
@@ -2361,21 +2495,43 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     }
     let animator: id = msg_send![window, animator];
     let _: () = msg_send![animator, setFrame: squish display: true];
-    let _: () = msg_send![animator, setAlphaValue: 1.0f64];
+    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+
+    // Alpha ramp: separate context (shorter duration, ease-out) targeting
+    // 0.99 — the finishing 0.99 -> 1.0 leg runs from the rebound callback.
+    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+    let alpha_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+    let _: () = msg_send![alpha_ctx, setDuration: tuning.alpha_ramp_duration];
+    let _: () = msg_send![alpha_ctx, setAllowsImplicitAnimation: true];
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeOut");
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![alpha_ctx, setTimingFunction: timing];
+            }
+        }
+    }
+    let alpha_animator: id = msg_send![window, animator];
+    let _: () = msg_send![alpha_animator, setAlphaValue: tuning.phase1_alpha_target];
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
 
     // Phase 2: rebound out to the natural size (settle selector, run-loop
-    // scheduled, ease-out over the remaining duration).
+    // scheduled at the end of compression; SQUISH_HOLD is 0.0 in the
+    // visible-tail calibration and retained only as a tunable term).
     if let Ok(mut guard) = GLASS_MORPH_SETTLE_TARGETS.lock() {
         guard.insert(
             window as usize,
-            (
-                final_frame.origin.x,
-                final_frame.origin.y,
-                final_frame.size.width,
-                final_frame.size.height,
-                phase2,
-            ),
+            GlassMorphSettleTarget {
+                frame: [
+                    final_frame.origin.x,
+                    final_frame.origin.y,
+                    final_frame.size.width,
+                    final_frame.size.height,
+                ],
+                frame_duration: phase2,
+                alpha_duration: tuning.alpha_finish_duration,
+            },
         );
     }
     let _: () = msg_send![
@@ -2388,7 +2544,7 @@ unsafe fn animate_tahoe_glass_appearance_directed(
     logging::log(
         log_target,
         &format!(
-            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start_alpha={:.2} start_alpha_bits={:016x} settle_duration_ns={} configured_at_host_time_ns={} expected_settle_deadline_ns={} frames={}x{}->{}x{}->{}x{}",
+            "event=glass_morph window={} variant={} phase=enter duration={:.2}s inset={:.3} start_alpha={:.2} start_alpha_bits={:016x} settle_duration_ns={} configured_at_host_time_ns={} expected_settle_deadline_ns={} frames={}x{}->{}x{}->{}x{} start_scale_x={:.6} start_scale_y={:.6} squish_scale_x={:.6} squish_scale_y={:.6} phase1_ns={} hold_ns={} phase2_ns={} alpha_phase1_target={:.6} alpha_ramp_ns={} alpha_finish_ns={} geometry_curve=easeOut rebound_curve=easeInEaseOut alpha_curve=easeOut",
             window_name,
             GlassMorphVariant::WindowFrame.log_name(),
             tuning.duration,
@@ -2404,6 +2560,19 @@ unsafe fn animate_tahoe_glass_appearance_directed(
             squish.size.height as i64,
             final_frame.size.width as i64,
             final_frame.size.height as i64,
+            // Direction-adjusted EFFECTIVE scales: grow-in inverts the
+            // travel (start below final, overshoot above), so the logged
+            // exact fields must reflect the frames actually animated.
+            1.0 + (tuning.start_scale_x - 1.0) * outset_sign,
+            1.0 + (tuning.start_scale_y - 1.0) * outset_sign,
+            1.0 + (tuning.squish_scale_x - 1.0) * outset_sign,
+            1.0 + (tuning.squish_scale_y - 1.0) * outset_sign,
+            (phase1 * 1_000_000_000.0).round() as u64,
+            (GLASS_MORPH_SQUISH_HOLD * 1_000_000_000.0).round() as u64,
+            (phase2 * 1_000_000_000.0).round() as u64,
+            tuning.phase1_alpha_target,
+            (tuning.alpha_ramp_duration * 1_000_000_000.0).round() as u64,
+            (tuning.alpha_finish_duration * 1_000_000_000.0).round() as u64,
         ),
     );
 }
@@ -3621,20 +3790,30 @@ mod secondary_window_config_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn glass_morph_tuning_drives_matching_frame_and_layer_geometry() {
-        let tuning = super::glass_morph_tuning_from(0.28, 0.03).expect("morph enabled");
+        // Visible-tail calibration (2026-07-26, Oracle session
+        // glass-entry-spotlight-retune): the first safe frame is
+        // phase-aligned to Spotlight's measured t≈88ms state — 101.2% width
+        // at the 0.85 alpha floor — with a 70ms ease-out compression, no
+        // hold, and a 140ms ease-in-out rebound. Height participation is 0.
+        let tuning = super::glass_morph_tuning_from(0.21, 0.006).expect("morph enabled");
         let epsilon = 1e-12;
-        assert!((tuning.start_scale_x - 1.06).abs() < epsilon);
-        assert!((tuning.start_scale_y - 1.024).abs() < epsilon);
-        // Visible entry starts at 0.85 — the ONE calibration value unlocked
-        // by the color-consistency premise (HITL submission
-        // 98cab5e5-6f15-4311-8d49-83e31602e641): at 0.0 the compositor showed
-        // pure wallpaper on visible entry frames.
+        assert!((tuning.start_scale_x - 1.012).abs() < epsilon);
+        assert!((tuning.start_scale_y - 1.0).abs() < epsilon);
+        // Visible entry starts at 0.85 — the wallpaper-bleed floor (HITL
+        // submission 98cab5e5-6f15-4311-8d49-83e31602e641): below it the
+        // compositor shows desktop pixels, not faint glass.
         assert!((tuning.start_alpha - 0.85).abs() < epsilon);
-        assert!((tuning.squish_scale_x - 0.985).abs() < epsilon);
-        assert!((tuning.squish_scale_y - 0.994).abs() < epsilon);
-        assert!((tuning.phase1 - 0.14).abs() < epsilon);
-        assert!((tuning.phase2 - 0.09).abs() < epsilon);
-        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 97);
+        assert!((tuning.squish_scale_x - 0.987).abs() < epsilon);
+        assert!((tuning.squish_scale_y - 1.0).abs() < epsilon);
+        assert!((tuning.phase1 - 0.07).abs() < epsilon);
+        assert!((tuning.phase2 - 0.14).abs() < epsilon);
+        assert!((tuning.phase1_alpha_target - 0.99).abs() < epsilon);
+        assert!((tuning.alpha_ramp_duration - 0.035).abs() < epsilon);
+        assert!((tuning.alpha_finish_duration - 0.052).abs() < epsilon);
+        // Geometry crossing (ease-out compression) vs the material-safe
+        // reveal anchor, which also waits out the 35ms alpha ramp.
+        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 23);
+        assert_eq!(super::entry_content_reveal_delay_ms(tuning), 35);
     }
 
     #[cfg(target_os = "macos")]
@@ -3659,20 +3838,30 @@ mod secondary_window_config_tests {
         assert!(
             (inset - f64::from(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET)).abs() < epsilon
         );
-        // Entry start alpha retuned 0.0 -> 0.85 on 2026-07-25 (authorized by
-        // HITL submission 98cab5e5-6f15-4311-8d49-83e31602e641, Oracle plan
-        // floating-capsule-entry-material): visible windows must never start
-        // at alpha 0. Hidden parking keeps 0.0 via GLASS_HIDDEN_PARK_ALPHA.
-        // Every other value below is the untouched locked calibration.
+        // Visible-tail entry calibration (retuned 2026-07-26, Oracle session
+        // glass-entry-spotlight-retune, user-authorized): the first safe
+        // frame is phase-aligned to Spotlight's measured t≈88ms state (see
+        // https://eager-hollow-dyyf.here.now/). Start alpha stays at the
+        // 0.85 wallpaper-bleed floor (HITL 98cab5e5-6f15-4311-8d49-
+        // 83e31602e641); it ramps to 0.99 over 35ms and finishes to 1.0
+        // over 52ms from rebound start — never fully opaque while wider
+        // than natural size. Hidden parking keeps 0.0.
         assert_eq!(super::GLASS_MORPH_ENTRY_START_ALPHA, 0.85);
         assert_eq!(super::GLASS_HIDDEN_PARK_ALPHA, 0.0);
-        assert_eq!(super::GLASS_MORPH_VERTICAL_DAMPING, 0.4);
+        assert_eq!(super::GLASS_MORPH_VERTICAL_DAMPING, 0.0);
         assert_eq!(super::GLASS_MORPH_SQUISH_FACTOR, 0.25);
-        assert_eq!(super::GLASS_MORPH_SQUISH_HOLD, 0.05);
-        assert_eq!(super::GLASS_MORPH_PHASE1_FRACTION, 0.5);
+        assert_eq!(super::GLASS_MORPH_MIN_SQUISH, 0.0065);
+        assert_eq!(super::GLASS_MORPH_MAX_SQUISH, 0.015);
+        assert_eq!(super::GLASS_MORPH_SQUISH_HOLD, 0.0);
+        assert_eq!(super::GLASS_MORPH_PHASE1_FRACTION, 1.0 / 3.0);
+        assert_eq!(super::GLASS_MORPH_PHASE1_ALPHA_TARGET, 0.99);
+        assert_eq!(super::GLASS_MORPH_ALPHA_RAMP_DURATION, 0.035);
+        assert_eq!(super::GLASS_MORPH_ALPHA_FINISH_DURATION, 0.052);
+        assert_eq!(super::GLASS_MORPH_FADE_FRACTION, 2.0 / 3.0);
         let tuning =
             super::glass_morph_tuning_from(duration, inset).expect("fixture enables glass morph");
-        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 97);
+        assert_eq!(super::settled_size_crossing_delay_ms(tuning), 23);
+        assert_eq!(super::entry_content_reveal_delay_ms(tuning), 35);
         assert_eq!(super::GLASS_EXIT_DURATION, 0.12);
         assert_eq!(super::GLASS_EXIT_REMOVE_DELAY_MS, 135);
         assert_eq!(super::GLASS_EXIT_GROW_X, 0.03);

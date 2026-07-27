@@ -87,6 +87,8 @@ struct NotesNativeEntryConfig {
     configured_at_unix_ms: u64,
     settle_duration_ms: u64,
     settled_crossing_delay_ms: u64,
+    /// Material-safe reveal anchor: max(geometric crossing, alpha ramp).
+    content_reveal_delay_ms: u64,
     morph_started: bool,
     morph_start_alpha_bits: Option<u64>,
 }
@@ -212,7 +214,7 @@ fn schedule_notes_entry_reveal(
     } else {
         native
             .as_ref()
-            .map(|config| config.settled_crossing_delay_ms)
+            .map(|config| config.content_reveal_delay_ms)
             .unwrap_or(0)
     };
     let configured_at_monotonic_ns = native
@@ -2078,6 +2080,7 @@ fn configure_notes_as_floating_panel(gpui_window: &gpui::Window) -> Option<Notes
             configured_at_unix_ms: receipt.configured_at_unix_ms,
             settle_duration_ms: receipt.settle_duration_ms,
             settled_crossing_delay_ms: receipt.settled_crossing_delay_ms,
+            content_reveal_delay_ms: receipt.content_reveal_delay_ms,
             morph_started: receipt.morph_started,
             morph_start_alpha_bits: receipt.morph_start_alpha_bits,
         })

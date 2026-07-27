@@ -136,7 +136,9 @@ export function checkRuntimeContract(
   const alphaBitsMatch =
     observed.observedMorphStartAlphaBits === declaredBits;
   const durationMatch =
-    observed.configuredDurationNs === declared.expectedDurationNs;
+    // f32 theme durations quantize the configured nanoseconds (0.21f32 →
+    // 209,999,993ns); tolerate 1ms of quantization, never more.
+    Math.abs(observed.configuredDurationNs - declared.expectedDurationNs) <= 1_000_000;
   if (!alphaBitsMatch) {
     errors.push(
       `observed morph start alpha bits ${observed.observedMorphStartAlphaBits} do not match declared ${declaredBits} (declared alpha ${declared.declaredMorphStartAlpha})`,
