@@ -308,8 +308,8 @@ pub use script_kit_gpui::{
     agentic_protocol_bus, clear_main_state_restore_after_focus_loss,
     consume_main_state_restore_after_focus_loss, emoji, emoji_usage, get_main_window_handle,
     is_main_window_visible, main_window_visibility_generation,
-    mark_main_state_restore_after_focus_loss, set_main_window_handle, set_main_window_visible,
-    terminal_history,
+    mark_main_state_restore_after_focus_loss, request_show_main_window, set_main_window_handle,
+    set_main_window_visible, terminal_history,
 };
 // Oracle-Session `window-activation-invariants-guard` PR1 — the
 // `PANEL_CONFIGURED` one-shot lives at each crate root so

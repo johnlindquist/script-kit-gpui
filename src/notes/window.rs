@@ -767,6 +767,12 @@ pub struct NotesApp {
     embedded_agent_chat: Option<Entity<crate::ai::agent_chat::ui::AgentChatView>>,
     /// Generation for the currently embedded Agent Chat view, used to reject stale popup actions.
     notes_agent_chat_generation: u64,
+    /// Redacted receipt of the most recent notes→main Agent Chat handoff
+    /// (identity/shape only — never note content). Projected into devtools
+    /// state as `lastAiHandoff`.
+    last_ai_handoff: Option<ai_handoff::NotesAiHandoffReceipt>,
+    /// Monotonic generation for handoff receipts.
+    ai_handoff_generation: u64,
     /// Active inline mention replacement session for note-local `@note`
     /// reopen/replace flows via the note switcher.
     mention_portal_edit: Option<NotesMentionPortalEditSession>,
@@ -775,6 +781,7 @@ pub struct NotesApp {
 }
 
 mod agent_chat_host;
+pub(crate) mod ai_handoff;
 mod clipboard_ops;
 pub(crate) mod contract;
 mod editor_formatting;

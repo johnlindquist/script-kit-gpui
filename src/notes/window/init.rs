@@ -215,6 +215,8 @@ impl NotesApp {
             surface_mode: NotesSurfaceMode::default(),
             embedded_agent_chat: None,
             notes_agent_chat_generation: 0,
+            last_ai_handoff: None,
+            ai_handoff_generation: 0,
             mention_portal_edit: None,
             kit_resource_preview: None,
         }
