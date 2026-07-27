@@ -693,4 +693,44 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn one_hundred_rapid_alternating_placements_hit_only_their_targets() {
+        let _lock = registry::REGISTRY_TEST_LOCK.lock();
+        let _env = fixture(
+            r#"[{"id":1,"app":"A","title":"Left","pid":9,
+                 "bounds":{"x":0,"y":0,"width":800,"height":600}},
+                {"id":2,"app":"B","title":"Right","pid":10,
+                 "bounds":{"x":900,"y":0,"width":800,"height":600}}]"#,
+        );
+        refreshed();
+        for cycle in 0..100u32 {
+            let (target, x) = if cycle % 2 == 0 { (1, 10) } else { (2, 910) };
+            let plan = compile_legacy_window_action(LegacyWindowAction::Move {
+                window_id: target,
+                x: x + (cycle as i32 % 7),
+                y: 20,
+            })
+            .expect("plan");
+            let receipt = execute_plan(&plan).expect("execute");
+            assert_eq!(
+                receipt.status,
+                MutationStatus::Succeeded,
+                "cycle {cycle} failed"
+            );
+        }
+        // Zero wrong-window mutations: each window only ever landed in its
+        // own lane.
+        let one = super::super::test_support::window_state(1).expect("state");
+        let two = super::super::test_support::window_state(2).expect("state");
+        assert!(
+            (10..=16).contains(&one.bounds.x),
+            "window 1 stayed in its lane"
+        );
+        assert!(
+            (910..=916).contains(&two.bounds.x),
+            "window 2 stayed in its lane"
+        );
+        super::super::undo::clear_window_undo_history();
+    }
 }

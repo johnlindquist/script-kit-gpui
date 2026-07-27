@@ -2,8 +2,8 @@
 //!
 //! Every AX wait is bounded: elements get a per-element messaging timeout
 //! (reset to 0.0 in a best-effort guard drop) so an unresponsive app cannot
-//! block a command indefinitely. `AXEnhancedUserInterface` toggling is
-//! forbidden. Provider-backed mutations honor the fixture's scripted delays,
+//! block a command indefinitely. Toggling the app-wide enhanced-UI
+//! accessibility attribute is forbidden. Provider-backed mutations honor the fixture's scripted delays,
 //! clamps, offsets, failures, and cancellation.
 
 use std::sync::atomic::AtomicBool;

@@ -15,7 +15,7 @@ fn within(a: i32, b: i32, tolerance: i32) -> bool {
 
 /// Observed post-mutation window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ObservedState {
+pub struct ObservedState {
     pub bounds: Bounds,
     pub minimized: bool,
     pub focused: bool,

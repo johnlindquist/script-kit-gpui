@@ -2897,3 +2897,131 @@ mod execute_script_session_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod window_dispatch_tests {
+    // NOTE: no `use super::*` — this file is include!()d beneath `use gpui::*`
+    // in main.rs; the glob would shadow `#[test]` (gpui-test-macro-shadowing).
+
+    fn refreshed_provider(fixture: &str) -> crate::window_control::provider_test_env::EnvGuard {
+        crate::window_control::provider_test_env::EnvGuard::set(fixture)
+    }
+
+    #[test]
+    fn missing_required_fields_keep_the_historical_error_strings() {
+        let error = super::dispatch_legacy_window_action(
+            &crate::protocol::WindowActionType::Focus,
+            None,
+            None,
+            None,
+        )
+        .expect_err("missing id must fail");
+        assert_eq!(error.to_string(), "Missing window_id");
+
+        let error = super::dispatch_legacy_window_action(
+            &crate::protocol::WindowActionType::Move,
+            Some(1),
+            None,
+            None,
+        )
+        .expect_err("missing bounds must fail");
+        assert_eq!(error.to_string(), "Missing window_id or bounds");
+
+        let error = super::dispatch_legacy_window_action(
+            &crate::protocol::WindowActionType::Tile,
+            Some(1),
+            None,
+            None,
+        )
+        .expect_err("missing tile position must fail");
+        assert_eq!(error.to_string(), "Missing window_id or tile_position");
+    }
+
+    #[test]
+    fn all_21_public_tile_positions_map_to_window_control() {
+        use crate::protocol::TilePosition as P;
+        use crate::window_control::TilePosition as WC;
+        let mappings = [
+            (P::Left, WC::LeftHalf),
+            (P::Right, WC::RightHalf),
+            (P::Top, WC::TopHalf),
+            (P::Bottom, WC::BottomHalf),
+            (P::TopLeft, WC::TopLeft),
+            (P::TopRight, WC::TopRight),
+            (P::BottomLeft, WC::BottomLeft),
+            (P::BottomRight, WC::BottomRight),
+            (P::LeftThird, WC::LeftThird),
+            (P::CenterThird, WC::CenterThird),
+            (P::RightThird, WC::RightThird),
+            (P::TopThird, WC::TopThird),
+            (P::MiddleThird, WC::MiddleThird),
+            (P::BottomThird, WC::BottomThird),
+            (P::FirstTwoThirds, WC::FirstTwoThirds),
+            (P::LastTwoThirds, WC::LastTwoThirds),
+            (P::TopTwoThirds, WC::TopTwoThirds),
+            (P::BottomTwoThirds, WC::BottomTwoThirds),
+            (P::Center, WC::Center),
+            (P::AlmostMaximize, WC::AlmostMaximize),
+            (P::Maximize, WC::Fullscreen),
+        ];
+        assert_eq!(
+            mappings.len(),
+            21,
+            "the public wire vocabulary is 21 strings"
+        );
+        for (wire, expected) in mappings {
+            assert_eq!(super::protocol_tile_to_window_control(&wire), expected);
+        }
+    }
+
+    #[test]
+    fn dispatched_action_routes_through_the_engine_on_the_provider() {
+        let _guard = refreshed_provider(
+            r#"{"windows":[
+                {"id":1,"app":"A","title":"Doc","pid":9,
+                 "bounds":{"x":0,"y":0,"width":800,"height":600}}
+            ]}"#,
+        );
+        crate::window_control::refresh_window_registry().expect("refresh");
+        super::dispatch_legacy_window_action(
+            &crate::protocol::WindowActionType::Move,
+            Some(1),
+            Some(&crate::protocol::TargetWindowBounds {
+                x: 42,
+                y: 24,
+                width: 800,
+                height: 600,
+            }),
+            None,
+        )
+        .expect("move via dispatch");
+    }
+
+    #[test]
+    fn protocol_display_output_equals_topology_output() {
+        let _guard = refreshed_provider(
+            r#"{
+                "windows": [{"app":"A","title":"T"}],
+                "displays": [
+                    {"id": 1, "uuid": "fixture-primary", "name": "Main",
+                     "fullBounds": {"x":0,"y":0,"width":1920,"height":1080},
+                     "visibleBounds": {"x":0,"y":25,"width":1920,"height":1055},
+                     "scaleFactor": 2.0, "isPrimary": true}
+                ]
+            }"#,
+        );
+        let protocol_displays = super::get_displays().expect("protocol displays");
+        let topology = crate::window_control::list_displays().expect("topology");
+        assert_eq!(protocol_displays.len(), topology.len());
+        for (wire, descriptor) in protocol_displays.iter().zip(&topology) {
+            assert_eq!(wire.display_id, descriptor.id.0);
+            assert_eq!(wire.name, descriptor.localized_name);
+            assert_eq!(wire.is_primary, descriptor.is_primary);
+            assert_eq!(wire.bounds.x, descriptor.full_bounds.x);
+            assert_eq!(wire.bounds.width, descriptor.full_bounds.width);
+            assert_eq!(wire.visible_bounds.y, descriptor.visible_bounds.y);
+            assert_eq!(wire.visible_bounds.height, descriptor.visible_bounds.height);
+            assert_eq!(wire.scale_factor, Some(descriptor.backing_scale_factor));
+        }
+    }
+}

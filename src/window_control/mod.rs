@@ -84,3 +84,8 @@ pub use types::*;
 pub use undo::{
     clear_window_undo_history, redo_last_window_transaction, undo_last_window_transaction,
 };
+
+/// Shared provider-env test guard for OTHER modules' tests (dispatch tests
+/// in execute_script). One process-wide lock prevents env races.
+#[cfg(test)]
+pub(crate) use test_support::test_env as provider_test_env;
