@@ -9,7 +9,6 @@ type Args = {
   session: string;
   open: boolean;
   openActions: boolean;
-  openAgentChat: boolean;
   start: boolean;
   sandbox: boolean;
   sandboxPath: string;
@@ -24,7 +23,7 @@ type Args = {
 function usage() {
   return [
     "Usage:",
-    "  bun scripts/devtools/notes.ts inspect [--session <name>] [--open] [--open-actions] [--open-agent_chat] [--start] [--limit <n>]",
+    "  bun scripts/devtools/notes.ts inspect [--session <name>] [--open] [--open-actions] [--start] [--limit <n>]",
     "  bun scripts/devtools/notes.ts resize-compare --session <name> --start --sandbox [--short-line-count <n>] [--tall-line-count <n>]",
   ].join("\n");
 }
@@ -43,7 +42,6 @@ function parseArgs(argv: string[]): Args {
     session: "default",
     open: false,
     openActions: false,
-    openAgentChat: false,
     start: false,
     sandbox: false,
     sandboxPath: "",
@@ -62,8 +60,6 @@ function parseArgs(argv: string[]): Args {
       args.open = true;
     } else if (arg === "--open-actions") {
       args.openActions = true;
-    } else if (arg === "--open-agent_chat" || arg === "--open-notes-agent_chat") {
-      args.openAgentChat = true;
     } else if (arg === "--start") {
       args.start = true;
     } else if (arg === "--sandbox") {
@@ -150,39 +146,6 @@ async function maybeOpenActions(args: Args) {
   return receipt;
 }
 
-async function maybeOpenAgentChat(args: Args) {
-  if (!args.openAgentChat) {
-    return null;
-  }
-  const receipt = await run([
-    "bash",
-    "scripts/agentic/session.sh",
-    "rpc",
-    args.session,
-    JSON.stringify({
-      type: "batch",
-      requestId: `devtools-notes-open-agent_chat-${Date.now()}`,
-      target: { type: "kind", kind: "notes" },
-      commands: [{ type: "openNotesAgentChat" }],
-      options: { stopOnError: true, rollbackOnError: false, timeout: args.timeoutMs },
-      trace: "on",
-    }),
-    "--expect",
-    "batchResult",
-    "--timeout",
-    String(args.timeoutMs),
-  ], "open-agent_chat");
-  // Settle on the real observable instead of a fixed sleep: the Notes
-  // shortcut registry reports the embedded Agent Chat scope active once
-  // the surface mode switch applies.
-  await pollNotesState(
-    args,
-    "open-agent_chat-settle",
-    (runtimeNotes) => notesActiveScope(runtimeNotes) === "embeddedAgentChat",
-  );
-  return receipt;
-}
-
 function notesRuntimeState(envelope: JsonObject): JsonObject {
   return ((responseOf(envelope).notes as JsonObject | undefined) ?? {});
 }
@@ -220,7 +183,7 @@ function missingCoveragePrimitives(coverage: ReturnType<typeof notesCoverage>, r
     if (hasDraftSnapshot(runtimeNotes) && primitive === "draft snapshot fingerprint") {
       return false;
     }
-    if (hasNotesAgentChatOriginReceipt(runtimeNotes) && primitive.includes("Agent Chat embedded origin receipts")) {
+    if (hasNotesAiHandoffReceipt(runtimeNotes) && primitive.includes("notes AI handoff receipt")) {
       return false;
     }
     return true;
@@ -235,25 +198,22 @@ function shortcutSnapshot(value: JsonObject) {
   };
 }
 
-function hasNotesAgentChatOriginReceipt(runtimeNotes: JsonObject): boolean {
-  const embeddedAgentChat = asObject(runtimeNotes.embeddedAgentChat);
-  const registered = asObject(embeddedAgentChat.registered);
+function hasNotesAiHandoffReceipt(runtimeNotes: JsonObject): boolean {
+  // Redacted notes→main handoff receipt: always present with a stable shape
+  // (active:false before any handoff), identity/shape fields only.
+  const lastAiHandoff = asObject(runtimeNotes.lastAiHandoff);
+  if (lastAiHandoff.redacted !== true) {
+    return false;
+  }
+  if (lastAiHandoff.active === false) {
+    return true;
+  }
   return (
-    embeddedAgentChat.host === "notes" &&
-    embeddedAgentChat.automationId === "notes:ai" &&
-    embeddedAgentChat.parentWindowId === "notes" &&
-    embeddedAgentChat.parentKind === "notes" &&
-    embeddedAgentChat.usesMainAiAutomationWindow === false &&
-    (
-      embeddedAgentChat.active !== true ||
-      (
-        registered.id === "notes:ai" &&
-        registered.kind === "ai" &&
-        registered.parentWindowId === "notes" &&
-        registered.parentKind === "notes" &&
-        registered.focused === false
-      )
-    )
+    lastAiHandoff.active === true &&
+    lastAiHandoff.destinationWindowId === "main" &&
+    lastAiHandoff.destinationSurface === "agentChat" &&
+    typeof lastAiHandoff.targetSemanticId === "string" &&
+    typeof lastAiHandoff.targetLabelFingerprint === "string"
   );
 }
 
@@ -451,7 +411,7 @@ function notesState(elements: JsonObject, focus: JsonObject, text: JsonObject, r
   const layoutRegions = asArray(layout.regions);
   const editorRegion = layoutRegions.find((region) => {
     const name = String(region.name ?? "");
-    return name === "NotesEditor" || name === "NotesPreview" || name === "NotesEmbeddedAgentChat";
+    return name === "NotesEditor" || name === "NotesPreview";
   }) ?? null;
   return {
     panelPresent: nodes.some((node) => node.semanticId === "panel:notes-window"),
@@ -470,7 +430,7 @@ function notesState(elements: JsonObject, focus: JsonObject, text: JsonObject, r
     previewAnchor: runtimeNotes.previewAnchor ?? null,
     view: runtimeNotes.view ?? null,
     commandBars: runtimeNotes.commandBars ?? null,
-    embeddedAgentChat: runtimeNotes.embeddedAgentChat ?? null,
+    lastAiHandoff: runtimeNotes.lastAiHandoff ?? null,
     shortcutRegistry: runtimeNotes.shortcutRegistry ?? null,
     focusTransitions: runtimeNotes.focusTransitions ?? null,
     ghostAutocomplete: runtimeNotes.ghostAutocomplete ?? null,
@@ -806,7 +766,6 @@ async function runInspect(args: Args) {
     shortcutBeforeEnvelope,
     shortcutAfterEnvelope,
   );
-  const openAgentChatReceipt = await maybeOpenAgentChat(args);
   const targetArgs = ["--session", args.session, "--target-id", notesTargetId, "--strict"];
   const elements = await run(["bun", "scripts/devtools/elements.ts", "snapshot", ...targetArgs, "--limit", String(args.limit)], "elements.snapshot");
   const focus = await run(["bun", "scripts/devtools/focus.ts", "inspect", ...targetArgs], "focus.inspect");
@@ -854,7 +813,7 @@ async function runInspect(args: Args) {
       previewAnchor.previewEnabled === true && previewAnchor.scrollMetricsAvailable !== true
         ? "preview scroll metrics"
         : "",
-      hasNotesAgentChatOriginReceipt(runtimeNotes) ? "" : "Agent Chat embedded origin receipts",
+      hasNotesAiHandoffReceipt(runtimeNotes) ? "" : "notes AI handoff receipt",
       "portal session provenance",
       state.commandBars == null ? "notes command bar runtime state" : "",
       state.shortcutRegistry == null ? "notes shortcut registry" : "",
@@ -869,7 +828,6 @@ async function runInspect(args: Args) {
     session: args.session,
     openReceipt,
     openActionsReceipt,
-    openAgentChatReceipt,
     shortcutActivation,
     availableActions: {
       togglePreview: {
@@ -877,10 +835,11 @@ async function runInspect(args: Args) {
         command: "togglePreview",
         target: { type: "kind", kind: "notes" },
       },
-      openAgentChat: {
-        channel: "protocol.batch.openNotesAgentChat",
-        command: "openNotesAgentChat",
+      askAiHandoff: {
+        channel: "protocol.simulateKey",
+        command: "cmd+enter",
         target: { type: "kind", kind: "notes" },
+        note: "Opens the MAIN window's Agent Chat with the selected note staged as @note context; Notes stays open.",
       },
     },
     target: target.resolvedTarget ?? null,
