@@ -21,7 +21,7 @@ const mainTailFrames = [
 ] as const;
 
 const NEW_MAIN_LOG =
-  "event=glass_morph window=Main window variant=window_frame phase=enter duration=0.21s inset=0.006 start_alpha=0.85 start_alpha_bits=3feb333333333333 settle_duration_ns=209999993 configured_at_host_time_ns=1 expected_settle_deadline_ns=209999994 frames=759x480->740x480->750x480 start_scale_x=1.012000 start_scale_y=1.000000 squish_scale_x=0.987000 squish_scale_y=1.000000 phase1_ns=69999998 hold_ns=0 phase2_ns=139999995 alpha_phase1_target=0.990000 alpha_ramp_ns=35000000 alpha_finish_ns=52000000 geometry_curve=easeOut rebound_curve=easeInEaseOut alpha_curve=easeOut";
+  "event=glass_morph window=Main window variant=window_frame phase=enter duration=0.10s inset=0.006 start_alpha=0.85 start_alpha_bits=3feb333333333333 settle_duration_ns=104999996 configured_at_host_time_ns=1 expected_settle_deadline_ns=104999997 frames=759x480->740x480->750x480 start_scale_x=1.012000 start_scale_y=1.000000 squish_scale_x=0.987000 squish_scale_y=1.000000 phase1_ns=34999999 hold_ns=0 phase2_ns=69999998 alpha_phase1_target=0.990000 alpha_ramp_ns=18000000 alpha_finish_ns=26000000 geometry_curve=easeOut rebound_curve=easeInEaseOut alpha_curve=easeOut";
 
 describe("visible-tail glass entry motion contract", () => {
   test("accepts the predicted main visible-tail frames", () => {
@@ -161,7 +161,7 @@ describe("exact runtime geometry receipt", () => {
       analyzeLoggedEntryGeometry([held], MAIN_GLASS_ENTRY_EXPECTATION).pass,
     ).toBe(false);
     const shortRebound = NEW_MAIN_LOG.replace(
-      "phase2_ns=139999995",
+      "phase2_ns=69999998",
       "phase2_ns=90000000",
     );
     expect(

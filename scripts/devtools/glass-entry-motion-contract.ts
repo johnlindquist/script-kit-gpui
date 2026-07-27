@@ -1,13 +1,13 @@
 /**
  * Glass entry-motion contract — the visible-tail calibration.
  *
- * Retuned 2026-07-26 (Oracle session glass-entry-spotlight-retune, user
- * authorized): Script Kit's first safe frame (NSWindow alpha 0.85) is
- * phase-aligned to Spotlight's measured t≈88ms state (101.2% width), not
- * Spotlight's nearly invisible ~110% first photon. 70ms ease-out
- * compression, no hold, 140ms ease-in-out rebound; alpha 0.85 → 0.99 over
- * 35ms (ease-out) and 0.99 → 1.0 over 52ms from rebound start. Reference:
- * https://eager-hollow-dyyf.here.now/
+ * Shape retuned 2026-07-26 (glass-entry-spotlight-retune): the first safe
+ * frame (NSWindow alpha 0.85) is phase-aligned to Spotlight's measured
+ * materialized state (101.2% width), ease-out compression, no hold,
+ * ease-in-out rebound at a 1:2 ratio, alpha 0.85 → 0.99 → 1.0.
+ * Every duration was then HALVED on 2026-07-27 at explicit user request
+ * ("2x faster"): 35ms compression, 70ms rebound, 18ms alpha ramp, 26ms
+ * alpha finish. Reference shape: https://eager-hollow-dyyf.here.now/
  *
  * The analyzers verify the EXACT floating-point runtime scale fields logged
  * by the morph (integer `frames=` values are diagnostics only — far too
@@ -27,10 +27,10 @@ type EntryFrame = {
 };
 
 export const MAIN_GLASS_ENTRY_EXPECTATION = {
-  durationMs: 210,
-  compressionMs: 70,
+  durationMs: 105,
+  compressionMs: 35,
   holdMs: 0,
-  reboundMs: 140,
+  reboundMs: 70,
   startWidthScale: 1.012,
   extremeWidthScale: 0.987,
   finalWidthScale: 1,
@@ -38,8 +38,8 @@ export const MAIN_GLASS_ENTRY_EXPECTATION = {
   extremeHeightScale: 1,
   startAlpha: 0.85,
   phase1Alpha: 0.99,
-  alphaRampMs: 35,
-  alphaFinishMs: 52,
+  alphaRampMs: 18,
+  alphaFinishMs: 26,
   direction: "shrink-in",
 } as const;
 

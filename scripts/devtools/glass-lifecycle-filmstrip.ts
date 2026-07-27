@@ -195,7 +195,7 @@ const analysisMode = parseAnalysisMode(arg("--analysis-mode", "inline"));
 // instrumented log line must match it exactly — a mismatch is INVALID_SETUP
 // (mislabeled artifact), never a product verdict.
 const declaredStartAlphaArg = arg("--declared-start-alpha");
-const declaredDurationNs = Number(arg("--declared-duration-ns", "210000000"));
+const declaredDurationNs = Number(arg("--declared-duration-ns", "105000000"));
 const contractWindowName = arg("--contract-window-name", "Main window")!;
 const telemetryIntervalMs = Number(arg("--telemetry-interval-ms", "250"));
 // WP9: when the orchestrator owns a backdrop fixture, its receipt identity

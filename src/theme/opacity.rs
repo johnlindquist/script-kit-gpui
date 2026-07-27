@@ -30,10 +30,13 @@ pub const OPACITY_GLASS_MODE_VEIL_CAP: f32 = 0.0;
 /// Default duration (seconds) of the glass appear morph — the VISIBLE TAIL
 /// of Spotlight's enter. Script Kit's first safe frame (NSWindow alpha 0.85)
 /// is phase-aligned to Spotlight's measured t≈88ms state, so the visible
-/// tail is ~210ms: 70ms ease-out compression + 140ms ease-in-out rebound
-/// (retuned 2026-07-26, Oracle session glass-entry-spotlight-retune, from
-/// the frame-by-frame page https://eager-hollow-dyyf.here.now/).
-pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.21;
+/// tail is ~105ms: 35ms ease-out compression + 70ms ease-in-out rebound.
+/// Shape is Spotlight's (glass-entry-spotlight-retune / glass-entry-onset-v2,
+/// https://eager-hollow-dyyf.here.now/); every entry duration was then
+/// halved on 2026-07-27 at explicit user request ("make the animate in
+/// like 2x faster") — a deliberate, authorized departure from Spotlight's
+/// 1:1 wall-clock timing. Ratios, curves, and geometry are unchanged.
+pub const GLASS_MORPH_DEFAULT_DURATION: f32 = 0.105;
 /// Default start outset (fraction of width per side) of the glass appear
 /// morph. Spotlight measures ~101.2% total width at the first frame with
 /// presence comparable to our 0.85 alpha floor — 0.006 per side ×2 = +1.2%

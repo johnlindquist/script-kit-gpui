@@ -125,12 +125,20 @@ https://eager-hollow-dyyf.here.now/ and the before/after receipts in
 cd5634ec8; exit/material values remain from the 2026-07-24 calibration
 against `CleanShot 2026-07-24 at 09.18.40.mp4`):
 
-- default entry duration `0.21s` — the VISIBLE TAIL of Spotlight's enter
-  (retuned 2026-07-26, Oracle session `glass-entry-spotlight-retune`, after
-  the user reported the post-cd5634ec8 entry felt too aggressive): `70ms`
-  ease-out compression, NO explicit hold, `140ms` ease-in-out rebound. The
+- **2026-07-27 SPEED SCALE (authorized): every entry duration is HALVED**
+  relative to Spotlight's measured wall clock, at explicit user request
+  ("make the animate in like 2x faster"). Shape, ratios, curves, geometry,
+  and alpha semantics are Spotlight's; only the tempo departs. Restoring
+  1:1 Spotlight timing = doubling every entry duration below;
+- default entry duration (visible tail) `0.105s`: `35ms` ease-out
+  compression, NO explicit hold, `70ms` ease-in-out rebound. The
   compression ease-out ends at zero velocity and the rebound begins at zero
   velocity — that turn, not a dead hold, is the physical settling;
+- material onset prefix `44ms` (glass Clear→Regular + tint ramp at a
+  CONSTANT `0.85` NSWindow alpha, curve `(0.18,0)/(0.14,0)`); GPUI content
+  roots hold `26ms` then fade `18ms`, ending exactly at tail start. Total
+  entry `149ms` = onset + tail (Oracle session `glass-entry-onset-v2`,
+  measured from `CleanShot 2026-07-27 at 10.08.42.mp4`);
 - entry inset `0.006` per side, producing a main/Notes/Dictation shrink-in
   `101.2% → 98.7% → 100%` width path and an Actions/popup grow-in
   `98.8% → 101.3% → 100%` path. Script Kit's first visible frame is
@@ -142,9 +150,9 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
   ±0–2px). Squish factor stays `0.25`, clamped `0.0065–0.015` per side; the
   default hits the 0.0065 minimum = Spotlight's measured `−1.3%` total
   squish;
-- entry alpha: visible start `0.85`, easing to `0.99` over `35ms`
+- entry alpha: visible start `0.85`, easing to `0.99` over `18ms`
   (ease-out), holding the model value at `0.99` through max compression,
-  then easing `0.99 → 1.0` over `52ms` from rebound start. A shrink-in
+  then easing `0.99 → 1.0` over `26ms` from rebound start. A shrink-in
   frame must NEVER be fully opaque while wider than natural size;
 - the `0.85` floor lineage: retuned from `0.0` on 2026-07-25 (HITL
   submission `98cab5e5-6f15-4311-8d49-83e31602e641` / Oracle plan
@@ -155,10 +163,9 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
   a contract violation (runtime tripwire
   `glass_hidden_park_on_visible_window`);
 - phase-one fraction `1/3`, squish hold `0.0s`, fade fraction `2/3`;
-- Notes body reveal uses the material-safe anchor: the geometric
-  settled-size crossing is `23ms` (ease-out compression), but the reveal
-  waits for `max(23ms, 35ms alpha ramp) = 35ms`, then keeps its `90ms`
-  body fade;
+- Notes body reveal uses the material-safe anchor, ABSOLUTE from native
+  configure: onset + `max(geometric crossing 11ms, alpha ramp 18ms)` =
+  `62ms`, then keeps its `90ms` body fade;
 - glass material: stability tint floor `0.35` and capsule veil `0.80`
   (`src/ui/chrome/tokens.rs`) — the Jul 23 `0.55`/`0.94` stack read
   near-solid mid-entry, visibly heavier than the Spotlight reference fade;
