@@ -102,6 +102,39 @@ impl NotesApp {
         })
     }
 
+    /// Redacted receipt of the most recent notes→main Agent Chat handoff.
+    ///
+    /// Always present with a stable shape: `active: false` before any
+    /// handoff, so probes can assert on the key without existence checks.
+    /// Identity/shape only — never note content or selection text.
+    fn automation_last_ai_handoff_state(&self) -> serde_json::Value {
+        match self.last_ai_handoff.as_ref() {
+            None => serde_json::json!({
+                "schemaVersion": 1,
+                "redacted": true,
+                "active": false,
+            }),
+            Some(receipt) => serde_json::json!({
+                "schemaVersion": 1,
+                "redacted": true,
+                "active": true,
+                "generation": receipt.generation,
+                "status": receipt.status.as_str(),
+                "source": receipt.source,
+                "targetSemanticId": receipt.target_semantic_id,
+                "targetLabelLength": receipt.target_label_length,
+                "targetLabelFingerprint": receipt.target_label_fingerprint,
+                "draft": receipt.is_draft,
+                "supplementalPartCount": receipt.supplemental_part_count,
+                "destinationWindowId": receipt.destination_window_id,
+                "destinationSurface": receipt.destination_surface,
+                "notesInstanceId": receipt.notes_instance_id,
+                "errorCode": receipt.error_code,
+                "ageMs": receipt.recorded_at.elapsed().as_millis() as u64,
+            }),
+        }
+    }
+
     fn automation_ghost_autocomplete_state(&self, cx: &gpui::App) -> serde_json::Value {
         let prediction = self.notes_ghost_prediction.as_ref();
         let last_action = self.notes_ghost_last_action.as_ref().map(|action| {
@@ -502,6 +535,7 @@ impl NotesApp {
                 "initialHeight": self.initial_height,
                 "lastWindowHeight": self.last_window_height,
             },
+            "lastAiHandoff": self.automation_last_ai_handoff_state(),
             "entryReveal": {
                 "schemaVersion": 1,
                 "instanceId": self.entry_reveal.instance_id,
