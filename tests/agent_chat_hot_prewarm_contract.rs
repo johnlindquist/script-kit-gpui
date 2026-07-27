@@ -85,9 +85,19 @@ fn agent_chat_hot_prewarm_helper_uses_pi_warm_session() {
         fs::read_to_string("src/app_impl/agent_handoff/mod.rs").expect("read tab ai source");
     let body = fn_body(&tab_ai, "pub(crate) fn warm_agent_chat_on_startup(");
 
+    // The opt-out check moved into the shared `agent_chat_hot_prewarm_enabled`
+    // helper (agent_chat_launch.rs), which reads
+    // SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM; startup must gate on it
+    // before spawning any Agent Chat runtime.
     assert!(
-        body.contains("SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM"),
+        body.contains("agent_chat_hot_prewarm_enabled()"),
         "warm_agent_chat_on_startup must honor the dev opt-out before spawning an Agent Chat runtime"
+    );
+    let launch = fs::read_to_string("src/app_impl/agent_handoff/agent_chat_launch.rs")
+        .expect("read agent chat launch source");
+    assert!(
+        launch.contains("SCRIPT_KIT_DISABLE_AGENT_CHAT_HOT_PREWARM"),
+        "the shared hot-prewarm gate must read the dev opt-out env var"
     );
     assert!(
         body.contains("spine_cwd_for_agent_chat_launch"),
@@ -106,8 +116,8 @@ fn agent_chat_hot_prewarm_helper_uses_pi_warm_session() {
         "startup prewarm must not block the UI update path"
     );
     assert!(
-        !body.contains("crate::ai::agent_chat::ui::hosted::spawn_hosted_view("),
-        "startup prewarm must not create a hidden hosted Agent Chat view on the UI thread"
+        !body.contains("cx.new(|cx| crate::ai::agent_chat::ui::AgentChatView::new("),
+        "startup prewarm must not create a hidden Agent Chat view on the UI thread"
     );
 }
 

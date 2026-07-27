@@ -249,8 +249,15 @@ fn embedded_agent_chat_entry_and_return_paths_rekey_from_current_view_contract()
             .count()
     })
     .sum();
+    // Enumerated delegation sites (do not grow this list casually):
+    // 1. agent_chat_setup.rs — setup view entry
+    // 2. agent_chat_launch.rs — standard mock fixture entry
+    // 3. agent_chat_launch.rs — Quick AI codex-exec entry
+    // 4. agent_chat_launch.rs — Pi launch entry
+    // 5. agent_handoff/mod.rs — reattach-from-detached entry
+    // 6. agent_handoff/mod.rs — cached-view reuse entry
     assert_eq!(
-        entry_delegate_count, 4,
-        "setup, launch, reuse, and focused-text Agent Chat entry paths must delegate to enter_embedded_agent_chat_surface"
+        entry_delegate_count, 6,
+        "setup, launch (fixture/quick-ai/pi), reattach, and reuse Agent Chat entry paths must delegate to enter_embedded_agent_chat_surface"
     );
 }
