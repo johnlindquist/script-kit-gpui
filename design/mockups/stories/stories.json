@@ -2,12 +2,13 @@
   "schemaVersion": 2,
   "buildId": "story-mockup-realism-v2",
   "architecture": "continuous-iframe-timeline",
+  "generated": "derived from story.js definitions by build-manifest.mjs — do not hand-edit derived fields",
   "count": 9,
   "stories": [
     {
       "id": "01-run-script-with-arg",
       "title": "Run a Script with Choices",
-      "blurb": "Type to filter the launcher, move selection, open an arg prompt, pick a fruit, and run \u2014 continuous keystroke-level motion.",
+      "blurb": "Type to filter the launcher, move selection, open an arg prompt, pick a fruit, and run — continuous keystroke-level motion.",
       "entry": "01-run-script-with-arg/index.html",
       "chapters": [
         {
@@ -17,36 +18,42 @@
         },
         {
           "id": "type",
-          "label": "Type filter",
-          "at": 400
+          "label": "Type to filter",
+          "at": 500
+        },
+        {
+          "id": "narrow",
+          "label": "List narrows live",
+          "at": 2200
         },
         {
           "id": "select",
-          "label": "Select script",
-          "at": 2200
+          "label": "Select Fruit Picker",
+          "at": 3000
         },
         {
           "id": "arg",
           "label": "Arg prompt",
-          "at": 3200
+          "at": 4000
         },
         {
           "id": "pick",
           "label": "Pick fruit",
-          "at": 4200
+          "at": 5000
         },
         {
           "id": "run",
           "label": "Run",
-          "at": 6200
+          "at": 7200
         }
       ],
       "surfaces": [
-        "main-menu",
-        "arg-prompt"
+        "arg-prompt",
+        "main-menu"
       ],
-      "durationMs": 7500,
+      "durationMs": 9000,
       "actionKinds": [
+        "ensureRows",
         "hideSurface",
         "pressKey",
         "setFooterState",
@@ -59,7 +66,7 @@
     {
       "id": "02-delete-via-actions",
       "title": "Delete via Actions Menu",
-      "blurb": "Focus a row, open \u2318K over the live launcher, filter to Delete, confirm the danger prompt.",
+      "blurb": "Focus a row, open ⌘K over the live launcher, filter to Delete, confirm the danger prompt.",
       "entry": "02-delete-via-actions/index.html",
       "chapters": [
         {
@@ -69,7 +76,7 @@
         },
         {
           "id": "actions",
-          "label": "Open Actions \u2318K",
+          "label": "Open Actions ⌘K",
           "at": 900
         },
         {
@@ -94,9 +101,9 @@
         }
       ],
       "surfaces": [
-        "main-menu",
         "actions-dialog",
-        "confirm-popup"
+        "confirm-popup",
+        "main-menu"
       ],
       "durationMs": 7000,
       "actionKinds": [
@@ -137,7 +144,7 @@
         },
         {
           "id": "paste",
-          "label": "Paste \u21b5",
+          "label": "Paste ↵",
           "at": 5200
         }
       ],
@@ -240,20 +247,25 @@
           "at": 600
         },
         {
-          "id": "select",
-          "label": "Theme Designer",
+          "id": "filter",
+          "label": "List filters live",
           "at": 2400
         },
         {
+          "id": "select",
+          "label": "Theme Designer",
+          "at": 3200
+        },
+        {
           "id": "ready",
-          "label": "Ready to open",
-          "at": 3600
+          "label": "Open ↵",
+          "at": 4500
         }
       ],
       "surfaces": [
         "settings"
       ],
-      "durationMs": 5000,
+      "durationMs": 6500,
       "actionKinds": [
         "setFooterState",
         "setSelection",

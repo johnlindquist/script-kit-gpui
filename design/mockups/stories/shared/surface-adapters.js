@@ -392,10 +392,70 @@
     setSearch(doc, text);
   }
 
+  /** Reconcile the COMPLETE ordered message list into the transcript.
+   *
+   *  Replaces the previous append-with-random-id model, which was the second
+   *  half of the seek-determinism defect: random ids made DOM unaddressable,
+   *  and appending meant seeking backward could not remove a message. Now the
+   *  DOM is a pure function of `messages`, so any seek order converges.
+   *
+   *  Non-message nodes in the transcript (fixture content, receipts) are left
+   *  untouched — only [data-story-msg] nodes are owned by the story.
+   */
+  function reconcileChatMessages(doc, messages) {
+    var host = q(doc, ".sk-chat-messages, .sk-agent-chat-transcript, .sk-conversation__transcript");
+    if (!host) return;
+    var isAgentLike = !host.classList.contains("sk-chat-messages");
+    var wanted = messages || [];
+    var wantedIds = wanted.map(function (m) { return m.id; });
+
+    // Remove story-owned nodes that are no longer in state (backward seek).
+    qa(doc, "[data-story-msg]").forEach(function (el) {
+      if (wantedIds.indexOf(el.getAttribute("data-story-msg")) === -1) {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      }
+    });
+
+    wanted.forEach(function (msg) {
+      var el = host.querySelector('[data-story-msg="' + msg.id + '"]');
+      if (!el) {
+        el = doc.createElement("div");
+        el.setAttribute("data-story-msg", msg.id);
+        host.appendChild(el);
+      }
+      el.setAttribute("data-turn-state", msg.state || "complete");
+      if (isAgentLike) {
+        el.className =
+          msg.role === "user"
+            ? "sk-agent-chat-turn sk-agent-chat-turn--user"
+            : "sk-agent-chat-turn sk-agent-chat-turn--assistant";
+        el.textContent = msg.text || "";
+      } else {
+        el.className = "sk-chat-turn";
+        el.innerHTML =
+          '<div class="sk-chat-card"><div class="' +
+          (msg.role === "user" ? "sk-chat-user" : "sk-chat-md") +
+          '">' +
+          (msg.role === "user"
+            ? msg.text || ""
+            : '<p class="sk-chat-md__p">' + (msg.text || "") + "</p>") +
+          "</div></div>";
+      }
+    });
+
+    var last = host.querySelector("[data-story-msg]:last-child");
+    if (last) {
+      try {
+        last.scrollIntoView({ block: "nearest" });
+      } catch (_) {}
+    }
+  }
+
   function appendChatMessage(doc, role, text) {
     var messages = q(doc, ".sk-chat-messages, .sk-agent-chat-transcript");
     if (!messages) return;
-    var id = "story-msg-" + role + "-" + Math.random().toString(36).slice(2, 7);
+    // Deterministic id derived from content — no Math.random.
+    var id = "story-msg-" + role + "-" + String(text || "").length;
     var el = doc.createElement("div");
     el.setAttribute("data-story-msg", id);
     if (messages.classList.contains("sk-agent-chat-transcript")) {
@@ -568,6 +628,7 @@
         return { composer: t ? t.textContent : "" };
       },
       appendMessage: appendChatMessage,
+      reconcileMessages: reconcileChatMessages,
     },
     "terminal-prompt": {
       apply: function (doc, state) {
@@ -594,6 +655,7 @@
         return { composer: t ? t.textContent : "" };
       },
       appendMessage: appendChatMessage,
+      reconcileMessages: reconcileChatMessages,
     },
   };
 

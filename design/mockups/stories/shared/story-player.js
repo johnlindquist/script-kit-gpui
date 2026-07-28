@@ -24,6 +24,21 @@
     return text.slice(0, Math.min(n, text.length));
   }
 
+  /** Ordered, keyed message upsert. Never appends a duplicate id, so replaying
+   *  the same action list is idempotent and seek(t) == play-through-to(t). */
+  function upsertMessage(sem, msg) {
+    if (!sem.messages) sem.messages = [];
+    var i;
+    for (i = 0; i < sem.messages.length; i++) {
+      if (sem.messages[i].id === msg.id) {
+        sem.messages[i] = Object.assign({}, sem.messages[i], msg);
+        return sem.messages[i];
+      }
+    }
+    sem.messages.push(msg);
+    return msg;
+  }
+
   function reduce(story, t) {
     var state = {
       t: t,
@@ -31,7 +46,6 @@
       visible: {},
       overlays: {},
       semantic: {},
-      _msgs: {},
     };
     (story.surfaces || []).forEach(function (s) {
       state.surfaces[s.id] = { id: s.id, role: s.role || "window" };
@@ -133,16 +147,77 @@
         case "streamText":
           {
             var partial = typePrefix(action.text, progress);
+            var streamId = action.msgId || "stream";
+            // Update the ADDRESSED message rather than parallel slots, so the
+            // full transcript is recoverable from state alone at any t.
+            upsertMessage(sem, {
+              id: streamId,
+              role: "assistant",
+              text: partial,
+              state: progress < 1 ? "streaming" : "complete",
+            });
+            // Legacy projections (DR1) — derived, never authoritative.
             sem.streamText = partial;
-            sem.streamMsgId = action.msgId || "stream";
+            sem.streamMsgId = streamId;
             sem.streamPhase = progress < 1 ? "partial" : "completed";
             if (progress > 0) sem.streamStarted = true;
           }
           break;
         case "appendMessage":
-          if (progress >= 1 || t >= at) {
-            sem.appendMessage = { role: action.role, text: action.text, id: action.msgId };
+          {
+            var msgId = action.msgId || action.role + "-" + at;
+            upsertMessage(sem, {
+              id: msgId,
+              role: action.role,
+              text: action.text || "",
+              state: "complete",
+            });
+            // Legacy projection (DR1). The adapter no longer consumes this.
+            sem.appendMessage = { role: action.role, text: action.text, id: msgId };
           }
+          break;
+        // ── Idempotent set* kinds (schema v3). Replacement semantics only —
+        // never add*/remove* — so any seek order yields the same state. ──
+        case "setConversationMode":
+          sem.mode = action.mode;
+          sem.identity = action.identity || null;
+          sem.contextPolicy = action.contextPolicy || "none";
+          break;
+        case "setTurnState":
+          upsertMessage(sem, {
+            id: action.turnId,
+            state: action.state,
+            statusLabel: action.statusLabel || null,
+            failure: action.failure || null,
+          });
+          break;
+        case "setQueuedTurn":
+          sem.queuedTurn = action.turn || null;
+          break;
+        case "setContextGrants":
+          sem.grants = action.grants || [];
+          break;
+        case "setContextReceipt":
+          sem.receipt = action.receipt || null;
+          break;
+        case "setListRows":
+          sem.sections = action.sections || [];
+          break;
+        case "setNotice":
+          sem.notice = action.notice || null;
+          break;
+        case "setDocumentState":
+          sem.document = {
+            title: action.title,
+            markdown: action.markdown,
+            dirty: !!action.dirty,
+            selection: action.selection || null,
+            insertion: action.insertion || null,
+            undoDepth: action.undoDepth || 0,
+          };
+          break;
+        case "setArtifactState":
+          sem.artifact = action.artifact || null;
           break;
         case "setSendState":
           sem.sendState = action.value;
@@ -157,7 +232,12 @@
           }
           break;
         case "pressKey":
+          // Evidence + keystroke visualization ONLY. `outcome` is a label the
+          // story author asserts; the player must never infer product routing
+          // from it. The next explicit action produces the state change.
           sem.lastKey = action.key;
+          sem.lastKeyModifiers = action.modifiers || [];
+          sem.lastKeyOutcome = action.outcome || null;
           break;
         case "pause":
           break;
@@ -184,7 +264,6 @@
       frameMap[el.getAttribute("data-story-surface")] = el;
     });
     var ready = {};
-    var msgOnce = {};
     var labelEl = root.querySelector("[data-story-step-label]");
     var rail = root.querySelector("[data-story-rail]");
     var playBtn = root.querySelector("[data-story-play]");
@@ -246,12 +325,11 @@
         if (!doc) return;
         var adapter = adapters[id];
         var sem = state.semantic[id];
-        if (sem.appendMessage && adapter && adapter.appendMessage) {
-          var key = id + ":" + (sem.appendMessage.id || sem.appendMessage.text);
-          if (!msgOnce[key]) {
-            adapter.appendMessage(doc, sem.appendMessage.role, sem.appendMessage.text);
-            msgOnce[key] = true;
-          }
+        // Reconcile the COMPLETE message list from state on every paint. There
+        // is deliberately no once-cache: a cache outside reduce() is exactly
+        // what made seek(t) differ from play-through-to(t).
+        if (adapter && adapter.reconcileMessages) {
+          adapter.reconcileMessages(doc, sem.messages || []);
         }
         if (adapter && adapter.apply) adapter.apply(doc, sem);
       });
@@ -341,14 +419,12 @@
     }
 
     function seek(ms) {
+      // No cache to reset: every paint reconciles from reduce(story, t) alone.
       t = clamp(ms, 0, duration);
-      // reset ephemeral message cache on full restart only when seeking to 0
-      if (t === 0) msgOnce = {};
       paint();
     }
 
     function restart() {
-      msgOnce = {};
       seek(0);
       play();
     }
