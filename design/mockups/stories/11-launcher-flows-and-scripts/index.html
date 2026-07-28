@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en" data-story="11-launcher-flows-and-scripts">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flows and Scripts, One List — Script Kit story</title>
+<link rel="stylesheet" href="../../generated/tokens.css">
+<link rel="stylesheet" href="../shared/story-shell.css">
+<script>
+(function(){
+  try {
+    var q = new URLSearchParams(location.search);
+    if (q.get("theater") === "1") document.documentElement.classList.add("theater-mode");
+  } catch (e) {}
+})();
+</script>
+</head>
+<body class="story-body" data-story-root>
+<!--
+  Continuous DevTools-style story (Oracle story-mockup-realism-v2).
+  Surfaces: real screens/*/index.html?embed=story iframes.
+  Motion: rAF timeline (type / walkSelection / streamText) — no full-scene slideshow.
+  Steps: 1. Rest — no cold flows · 2. Type — mixed results · 3. Router preselects · 4. Enter converses
+-->
+<div class="story-layout">
+  <aside class="story-sidebar">
+    <a class="story-sidebar__back" href="../index.html">← All stories</a>
+    <h1 class="story-sidebar__title">Flows and Scripts, One List</h1>
+    <p class="story-sidebar__blurb">115 saved agents share one result list with scripts, without drowning them. Enter converses; the router preselects but never executes.</p>
+    <p class="story-step-label" data-story-step-label></p>
+    <div class="story-controls">
+      <button type="button" data-story-play aria-pressed="false">Play</button>
+      <button type="button" data-story-prev>Prev</button>
+      <button type="button" data-story-next>Next</button>
+    </div>
+    <nav class="story-rail" data-story-rail aria-label="Story chapters"></nav>
+  </aside>
+  <main class="story-main">
+    <div class="story-surface-stack" data-story-surface-stack>
+      <iframe data-story-surface="launcher-flow-rows" src="../../screens/launcher-flow-rows/index.html?embed=story" title="launcher-flow-rows"></iframe>
+    </div>
+  </main>
+</div>
+<script src="../shared/surface-adapters.js"></script>
+<script src="../shared/story-player.js"></script>
+<script src="./story.js"></script>
+</body>
+</html>

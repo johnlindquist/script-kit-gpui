@@ -36,7 +36,12 @@ const V3_KINDS = new Set([
   "setArtifactState",
 ]);
 const ALL_KINDS = new Set([...LEGACY_KINDS, ...V3_KINDS]);
-const ASSERTION_KINDS = new Set(["rectEquals", "actionKindsAbsent", "receiptAtChapter"]);
+const ASSERTION_KINDS = new Set([
+  "rectEquals",          // structural precondition here; pixel proof needs a browser
+  "actionKindsAbsent",   // proven in Node
+  "receiptAtChapter",    // proven in Node
+  "fixtureTextAbsent",   // proven in Node — content facts asserted as content facts
+]);
 const EFFORTS = new Set(["new-design", "reskin", "hybrid", "comparison"]);
 
 function loadStory(dir) {
@@ -104,6 +109,9 @@ for (const dir of dirs) {
     for (const as of s.assertions || []) {
       if (!as.id) tag("assertion missing id");
       if (!ASSERTION_KINDS.has(as.kind)) tag(`unknown assertion kind "${as.kind}"`);
+      if (as.kind === "fixtureTextAbsent" && !as.pattern) {
+        tag(`${as.id}: fixtureTextAbsent needs a pattern`);
+      }
       if (as.kind === "rectEquals") {
         if (!as.baselineChapter) tag(`${as.id}: rectEquals needs baselineChapter`);
         if (!(as.selectors || []).length) tag(`${as.id}: rectEquals needs selectors`);

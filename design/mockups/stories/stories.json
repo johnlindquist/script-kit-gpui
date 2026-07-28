@@ -3,7 +3,7 @@
   "buildId": "story-mockup-realism-v2",
   "architecture": "continuous-iframe-timeline",
   "generated": "derived from story.js definitions by build-manifest.mjs — do not hand-edit derived fields",
-  "count": 10,
+  "count": 11,
   "stories": [
     {
       "id": "01-run-script-with-arg",
@@ -452,6 +452,67 @@
         "conversation.same-shell-rects",
         "conversation.mode-changes-without-surface-swap",
         "conversation.ask-receipt-attempted-zero"
+      ]
+    },
+    {
+      "id": "11-launcher-flows-and-scripts",
+      "title": "Flows and Scripts, One List",
+      "blurb": "115 saved agents share one result list with scripts, without drowning them. Enter converses; the router preselects but never executes.",
+      "entry": "11-launcher-flows-and-scripts/index.html",
+      "storyVersion": 3,
+      "covers": [
+        "E01",
+        "E02",
+        "E03",
+        "E04",
+        "E05",
+        "E09",
+        "E12",
+        "E13",
+        "C1",
+        "C2",
+        "C3",
+        "C4"
+      ],
+      "effort": "new-design",
+      "chapters": [
+        {
+          "id": "rest",
+          "label": "Rest — no cold flows",
+          "at": 0
+        },
+        {
+          "id": "type",
+          "label": "Type — mixed results",
+          "at": 1200
+        },
+        {
+          "id": "preselect",
+          "label": "Router preselects",
+          "at": 4600
+        },
+        {
+          "id": "converse",
+          "label": "Enter converses",
+          "at": 7800
+        }
+      ],
+      "surfaces": [
+        "launcher-flow-rows"
+      ],
+      "durationMs": 11000,
+      "actionKinds": [
+        "pressKey",
+        "setFooterState",
+        "setSelection",
+        "setText",
+        "type",
+        "walkSelection"
+      ],
+      "assertions": [
+        "launcher.router-preselects-without-executing",
+        "launcher.rows-carry-no-engine-suffix-in-title",
+        "launcher.shell-geometry-stable-across-query"
       ]
     }
   ]

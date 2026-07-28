@@ -124,8 +124,12 @@ for (const dir of dirs) {
         continue;
       }
       const missing = as.selectors.filter((sel) => {
-        const m = sel.match(/^\[([\w-]+)\]$/);
-        return m ? !new RegExp(`\\b${m[1]}\\b`).test(html) : !html.includes(sel);
+        const attr = sel.match(/^\[([\w-]+)\]$/);
+        if (attr) return !new RegExp(`\\b${attr[1]}\\b`).test(html);
+        const cls = sel.match(/^\.([\w-]+)$/);
+        // A class selector appears in markup as class="... name ...", not as ".name".
+        if (cls) return !new RegExp(`class="[^"]*\\b${cls[1]}\\b`).test(html);
+        return !html.includes(sel);
       });
       if (missing.length) {
         failures.push(`${label}: fixture is missing asserted selector(s): ${missing.join(", ")}`);
@@ -145,6 +149,31 @@ for (const dir of dirs) {
       pending.push(
         `${label}: structurally sound (${as.selectors.length} selectors present, no surface swaps) — PIXEL PROOF PENDING a browser probe`,
       );
+      continue;
+    }
+
+    if (as.kind === "fixtureTextAbsent") {
+      // Content assertion: prove the fixture does not render a forbidden
+      // pattern. Used for "flow titles must not leak the engine suffix",
+      // which is a text fact, not a geometry fact — asserting it with
+      // rectEquals would have been a name that lied about what it checked.
+      const surface = (story.surfaces || []).find((s2) => s2.id === as.surface);
+      const fixture = surface && (surface.fixture || surface.id);
+      let html;
+      try {
+        html = readFileSync(join(mockups, "screens", fixture, "index.html"), "utf8");
+      } catch {
+        failures.push(`${label}: fixture screens/${fixture}/index.html not found`);
+        continue;
+      }
+      // Only inspect rendered row titles, not comments explaining the rule.
+      const titles = [...html.matchAll(/class="sk-list-row__name">([^<]*)</g)].map((m2) => m2[1]);
+      const bad = titles.filter((t) => new RegExp(as.pattern).test(t));
+      if (bad.length) {
+        failures.push(`${label}: row title(s) match forbidden /${as.pattern}/: ${bad.join(", ")}`);
+      } else if (!titles.length) {
+        failures.push(`${label}: no row titles found in fixture — assertion would pass vacuously`);
+      } else proven++;
       continue;
     }
 
