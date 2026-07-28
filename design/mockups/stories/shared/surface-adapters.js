@@ -638,6 +638,95 @@
       appendMessage: appendChatMessage,
       reconcileMessages: reconcileChatMessages,
     },
+
+    // Conversation shell (PROPOSAL fixture — screens/conversation/).
+    //
+    // The whole point of this adapter is that a MODE CHANGE MUST NOT CHANGE
+    // GEOMETRY. It therefore only ever writes text and chips into elements that
+    // already exist, and never adds, removes, hides, or resizes any of the five
+    // same-shell nodes. If proving "one shell, three modes" required structural
+    // edits here, the fixture would be wrong — not this adapter.
+    conversation: {
+      apply: function (doc, state) {
+        ensureEmbedStyles(doc);
+        var shell = q(doc, ".sk-conversation");
+        if (!shell) return;
+
+        if (state.mode) {
+          shell.setAttribute("data-mode", state.mode);
+          shell.setAttribute(
+            "data-durability",
+            state.mode === "ask" ? "ephemeral" : "durable",
+          );
+        }
+        if (state.contextPolicy) {
+          var lane = q(doc, "[data-conversation-context-lane]");
+          if (lane) lane.setAttribute("data-context-policy", state.contextPolicy);
+        }
+
+        var id = state.identity || {};
+        var modeLabel = q(doc, "[data-conversation-mode-label]");
+        if (modeLabel && id.label) modeLabel.textContent = id.label;
+        var subject = q(doc, "[data-conversation-subject]");
+        if (subject) subject.textContent = id.subject || "";
+        var authority = q(doc, "[data-conversation-authority]");
+        if (authority && id.authority) authority.textContent = id.authority;
+
+        // Context lane: policy item is structural and always present; grants
+        // are appended AFTER it, never in place of it.
+        var lane2 = q(doc, "[data-conversation-context-lane]");
+        if (lane2 && state.grants) {
+          qa(doc, "[data-story-grant]").forEach(function (el) {
+            if (el.parentNode) el.parentNode.removeChild(el);
+          });
+          state.grants.forEach(function (g) {
+            var chip = doc.createElement("span");
+            chip.setAttribute("data-story-grant", g.id);
+            chip.setAttribute("data-state", g.state || "staged");
+            chip.className = "sk-conversation__grant";
+            chip.textContent = g.label + (g.detail ? " · " + g.detail : "");
+            lane2.appendChild(chip);
+          });
+        }
+
+        var policy = q(doc, ".sk-conversation__policy");
+        if (policy && state.policyLabel) policy.textContent = state.policyLabel;
+
+        var placeholder = q(doc, ".sk-conversation__placeholder");
+        if (placeholder && state.placeholder) placeholder.textContent = state.placeholder;
+
+        // Footer slot 3 is mode-specific: Ask->Work, Work->Context,
+        // Flow->Definition. It is deliberately NOT a universal "Agent" label.
+        if (state.footerModeLabel) {
+          var fm = q(doc, "[data-footer-mode-label]");
+          if (fm) fm.textContent = state.footerModeLabel;
+        }
+        if (state.footerPrimaryLabel) {
+          var fp = q(doc, "[data-footer-primary-label]");
+          if (fp) fp.textContent = state.footerPrimaryLabel;
+        }
+
+        if (state.receipt) {
+          var r = q(doc, "[data-conversation-receipt]");
+          if (r) {
+            r.setAttribute("data-outcome", state.receipt.outcome || "none");
+            var a = (state.receipt.attempted || []).length;
+            var res = (state.receipt.resolved || []).length;
+            var f = (state.receipt.failed || []).length;
+            r.textContent = "Context: " + a + " attempted · " + res + " resolved · " + f + " failed";
+          }
+        }
+        if (state.composer != null) setSearch(doc, state.composer);
+      },
+      reconcileMessages: reconcileChatMessages,
+      inspect: function (doc) {
+        var shell = q(doc, ".sk-conversation");
+        return {
+          mode: shell ? shell.getAttribute("data-mode") : null,
+          grants: qa(doc, "[data-story-grant]").length,
+        };
+      },
+    },
   };
 
   global.StorySurfaces = {

@@ -2,7 +2,9 @@
 /**
  * Gating test for continuous DevTools-style user-story mockups.
  * Asserts:
- * - exactly 9 stories (stories.json schema v2)
+ * - the manifest count matches the number of story directories on disk
+ *   (previously hardcoded to 9, which is the same class of lie that
+ *   build-manifest.mjs was written to eliminate)
  * - each story embeds real screen fixtures via embed=story iframes
  * - parent HTML has no cloned .sk-window app DOM / no .sk-footer-btn
  * - story.js mounts StoryPlayer with continuous action kinds
@@ -10,7 +12,7 @@
  * - index links all nine by title
  * - lint-mockups.mjs is green
  */
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -26,7 +28,18 @@ const assert = (c, m) => {
 
 const manifest = JSON.parse(readFileSync(join(storiesRoot, "stories.json"), "utf8"));
 assert(manifest.schemaVersion === 2, `schemaVersion 2 required, got ${manifest.schemaVersion}`);
-assert(manifest.count === 9, `expected 9 stories, got ${manifest.count}`);
+const storyDirCount = readdirSync(storiesRoot).filter((e) => {
+  if (e === "shared" || e.startsWith(".")) return false;
+  try {
+    return statSync(join(storiesRoot, e)).isDirectory() && statSync(join(storiesRoot, e, "story.js")).isFile();
+  } catch {
+    return false;
+  }
+}).length;
+assert(
+  manifest.count === storyDirCount,
+  `manifest count ${manifest.count} != ${storyDirCount} story directories on disk`,
+);
 assert(manifest.architecture === "continuous-iframe-timeline", "architecture marker missing");
 assert(!!manifest.buildId, "buildId required");
 

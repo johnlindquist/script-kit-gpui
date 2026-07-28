@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Script Kit — Conversation shell (one shell, three modes)</title>
+<link rel="stylesheet" href="../../generated/tokens.css">
+<link rel="stylesheet" href="../../shared/components.css">
+<link rel="stylesheet" href="./screen.css">
+<link rel="stylesheet" href="../../shared/story-embed.css">
+</head>
+<body>
+<!--
+  PROPOSAL fixture — see ./contract.json ({"implemented": false}).
+  NOT a capture of shipped behavior. The shipped ancestors
+  (screens/agent-chat, screens/chat-prompt) remain production-truth
+  baselines and must NOT be restyled into this proposal.
+
+  ONE shell hosts Ask / Work / Flow. Mode lives on [data-mode] and may
+  change TEXT and CHIPS only. These five selectors must keep identical
+  bounding boxes across every mode change:
+      [data-conversation-identity]
+      [data-conversation-composer]
+      [data-conversation-context-lane]
+      [data-conversation-transcript]
+      [data-native-footer]
+  A story asserts that as `conversation.same-shell-rects`. A mode change
+  must NEVER call hideSurface/showSurface.
+
+  Anatomy order deliberately matches shipped Agent Chat — identity,
+  composer, context lane, transcript, footer. The composer is NOT moved to
+  the bottom to resemble generic chat products.
+
+  PER-MODE CONTENT (the only things allowed to differ):
+
+    element         ask                    work                    flow
+    left identity   Ask                    Work · Build            Flow · Deep Improvements
+    right identity  No local context       Build profile · 2 grants  mdflow · Project · Claude
+    context lane    locked policy item     grant chips | No grants  flow policy + grants
+    add-context     absent                 present                 flow-policy-allowed only
+    placeholder     Ask anything — no…     Ask Build…              Ask Deep Improvements…
+    footer slot 1   Send ↵ / Stop ⌘.       Send ↵ / Stop ⌘.        Send ↵ / Stop ⌘.
+    footer slot 2   Actions ⌘K             Actions ⌘K              Actions ⌘K
+    footer slot 3   Work ⌘↵                Context ⌘↵              Definition ⌘↵
+    durability      ephemeral              durable                 durable
+
+  NOTE on footer slot 3: consult storyboard-redesign-v4 overruled the
+  earlier universal "Agent" third label — freezing "Agent" everywhere would
+  reintroduce the exact product separation the three-mode decision removed.
+
+  There is deliberately NO segmented Ask/Work/Flow tab bar. Mode is a
+  STATUS; transitions are explicit launcher rows or actions, so authority
+  cannot change by accident.
+
+  This document is rendered in ASK mode, the strictest case: zero local
+  context, a non-removable policy item, no add-context control, and a
+  receipt that records zero sources ATTEMPTED (not merely zero chips shown).
+-->
+<main class="stage" id="stage">
+  <div class="sk-window" id="window">
+    <div class="sk-window__material"></div>
+    <div class="sk-window__tint"></div>
+    <canvas class="sk-window__effect" id="starfield" width="1500" height="960"></canvas>
+
+    <div class="sk-window__content">
+      <div class="sk-conversation sk-conversation__content"
+           data-shell="Conversation"
+           data-mode="ask"
+           data-durability="ephemeral">
+
+        <!-- ── Identity rail — STATUS, never a control ────────────────── -->
+        <header class="sk-conversation__identity" data-conversation-identity>
+          <span class="sk-conversation__identity-lane">
+            <span class="sk-conversation__mode" data-conversation-mode-label>Ask</span>
+            <span class="sk-conversation__subject" data-conversation-subject></span>
+          </span>
+          <span class="sk-conversation__identity-lane" data-conversation-authority>
+            <!-- Signal 1 of 3 for the zero-context guarantee: persistent identity.
+                 Wording is deliberately narrow — NOT "private", "local", or
+                 "sealed", none of which the runtime separately guarantees. -->
+            <span>No local context</span>
+          </span>
+        </header>
+
+        <!-- ── Composer ──────────────────────────────────────────────── -->
+        <div class="sk-conversation__composer"
+             data-conversation-composer
+             data-component="conversation composer (successor to render_composer_input_shell)">
+          <span class="sk-conversation__composer-body">
+            <span class="sk-agent-chat-composer__caret"></span>
+            <span class="sk-conversation__placeholder">Ask anything — no local context</span>
+          </span>
+          <button class="sk-agent-chat-send" data-state="disabled" aria-label="Type a message first">↑</button>
+        </div>
+
+        <!-- ── Context lane — ALWAYS PRESENT ──────────────────────────
+             Signal 2 of 3. In Ask this is a LOCKED policy item with no
+             remove affordance and no add-context control anywhere on the
+             surface. The lane's fixed height is what makes the same-shell
+             rect assertion honest when Work later shows grant chips. -->
+        <div class="sk-conversation__context-lane"
+             data-conversation-context-lane
+             data-context-policy="none">
+          <span class="sk-conversation__policy" data-removable="false">
+            No local context
+          </span>
+        </div>
+
+        <!-- ── Transcript ────────────────────────────────────────────── -->
+        <section class="sk-conversation__transcript"
+                 data-conversation-transcript
+                 data-component="promoted AgentChatTranscript">
+
+          <div class="sk-conversation__turn sk-conversation__turn--user" data-turn-id="turn-1" data-turn-state="complete">
+            <span class="sk-conversation__bubble sk-agent-chat-md">What is the difference between a Rust trait object and an impl Trait return?</span>
+          </div>
+
+          <div class="sk-conversation__turn sk-conversation__turn--assistant" data-turn-id="turn-1-a" data-turn-state="complete">
+            <span class="sk-conversation__bubble sk-agent-chat-md">A trait object (<code>dyn Trait</code>) erases the concrete type and dispatches dynamically through a vtable, so one value can hold any implementor at runtime. <code>impl Trait</code> in return position keeps a single concrete type, resolved statically at compile time — no vtable, no allocation, but every return path must produce the same type.</span>
+            <!-- Signal 3 of 3: the receipt records that ZERO sources were
+                 ATTEMPTED. Omitting chips would only prove nothing was
+                 shown; this proves nothing was tried. -->
+            <div class="sk-conversation__receipt" data-conversation-receipt data-outcome="none">
+              Context: 0 attempted · 0 resolved · 0 failed
+            </div>
+          </div>
+        </section>
+
+        <!-- ── Native footer ──────────────────────────────────────────
+             Honest modelling: in a real GPUI capture this band is an EMPTY
+             spacer and the user-visible content belongs to a native AppKit
+             overlay window (see screens/agent-chat/known-divergence.json).
+             The overlay below is a MODEL of that native content and must be
+             verified against runtime footer receipts before it is treated
+             as proof — a pretty iframe footer is not evidence. -->
+        <footer class="sk-footer-host" data-native-footer data-component="native footer host (GPUI spacer band)">
+          <div class="sk-footer-rail" data-component="footer_chrome — modeled native overlay">
+            <span class="sk-footer-spacer"></span>
+            <button class="sk-footer-action sk-footer-action--run" data-footer-slot="1">
+              <span class="sk-footer-label" data-footer-primary-label>Send</span>
+              <kbd class="sk-keycap">↵</kbd>
+            </button>
+            <button class="sk-footer-action sk-footer-action--actions" data-footer-slot="2">
+              <span class="sk-footer-label">Actions</span>
+              <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">K</kbd>
+            </button>
+            <!-- Slot 3 is MODE-SPECIFIC. Ask promotes to Work. -->
+            <button class="sk-footer-action sk-footer-action--agent" data-footer-slot="3">
+              <span class="sk-footer-label" data-footer-mode-label>Work</span>
+              <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">↵</kbd>
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="./starfield.js"></script>
+<script src="../../shared/story-embed.js"></script>
+</body>
+</html>

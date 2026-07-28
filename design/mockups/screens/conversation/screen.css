@@ -1,0 +1,236 @@
+/* Conversation shell (PROPOSAL — see ./contract.json).
+ *
+ * One shell DOM hosts Ask / Work / Flow. Mode is carried by
+ * [data-mode] on .sk-conversation and may change TEXT and CHIPS only.
+ * The five same-shell selectors must keep identical bounding boxes across
+ * modes, which is why the context lane has a fixed height and always exists:
+ *   Ask  -> one locked "No local context" policy item
+ *   Work -> zero or more explicit grant chips
+ *   Flow -> flow-policy item + explicit grant chips
+ * Without a permanently-present lane, "same shell" would silently change
+ * height the moment a grant appeared, and the proof would be false.
+ *
+ * TOKEN STATUS: every visual value consumes a generated --sk-* variable.
+ * Reuse justifications and the not-yet-owned concepts are recorded in
+ * ./contract.json. No product value is defined under --sk-emulator-*.
+ *
+ * Nearest Rust owners today:
+ *   src/ai/agent_chat/ui/style_contract.rs        (transcript + composer)
+ *   src/ai/agent_chat/ui/components/transcript.rs (row renderers)
+ *   src/components/footer_chrome.rs               (footer rail)
+ */
+
+body {
+  margin: 0;
+}
+
+.stage {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--sk-color-background-main);
+}
+
+.sk-window {
+  background: var(--sk-color-background-main);
+}
+
+.sk-window__material,
+.sk-window__tint,
+.sk-window__effect {
+  display: none;
+}
+
+/* ── Identity rail ──────────────────────────────────────────────────────
+ * Left = mode + subject. Right = governing authority. Both are STATUS,
+ * never controls: consult storyboard-redesign-v4 rejects a segmented
+ * Ask/Work/Flow tab bar because it would make authority changes accidental.
+ */
+.sk-conversation__identity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-main-menu-context-gap);
+  height: var(--sk-main-menu-context-height);
+  padding-left: var(--sk-main-menu-header-padding-x);
+  padding-right: var(--sk-main-menu-header-padding-x);
+  font-family: var(--sk-main-menu-context-font-family);
+  font-size: var(--sk-main-menu-context-font-size);
+  opacity: var(--sk-main-menu-context-opacity);
+  color: var(--sk-color-text-primary);
+}
+
+.sk-conversation__identity-lane {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-main-menu-context-gap);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sk-conversation__mode {
+  padding-left: var(--sk-main-menu-context-pill-padding-x);
+  padding-right: var(--sk-main-menu-context-pill-padding-x);
+  border-radius: var(--sk-main-menu-context-pill-radius);
+  background: var(--sk-main-menu-icon-tile-background);
+  white-space: nowrap;
+}
+
+.sk-conversation__subject {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Composer ───────────────────────────────────────────────────────────
+ * Deliberately stays ABOVE the transcript, matching the shipped Agent Chat
+ * ordering. Consult storyboard-redesign-v4: do not move it to the bottom
+ * merely to resemble generic chat products.
+ */
+.sk-conversation__composer {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-footer-content-gap);
+  min-height: var(--sk-agent-chat-composer-single-line-height);
+  padding-left: var(--sk-main-menu-header-padding-x);
+  padding-right: var(--sk-main-menu-header-padding-x);
+  font-size: var(--sk-agent-chat-composer-font-size);
+  font-weight: var(--sk-agent-chat-composer-font-weight);
+  line-height: var(--sk-agent-chat-composer-line-height);
+  color: var(--sk-color-text-primary);
+}
+
+.sk-conversation__composer-body {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.sk-conversation__placeholder {
+  opacity: var(--sk-main-menu-context-opacity);
+}
+
+/* ── Context lane — ALWAYS PRESENT, fixed height ────────────────────────
+ * This is the load-bearing element of the same-shell proof.
+ */
+.sk-conversation__context-lane {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-agent-chat-block-header-gap);
+  height: var(--sk-main-menu-context-height);
+  padding-left: var(--sk-main-menu-header-padding-x);
+  padding-right: var(--sk-main-menu-header-padding-x);
+  overflow: hidden;
+}
+
+.sk-conversation__policy,
+.sk-conversation__grant {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-agent-chat-block-header-gap);
+  padding-left: var(--sk-agent-chat-block-padding-x);
+  padding-right: var(--sk-agent-chat-block-padding-x);
+  padding-top: var(--sk-agent-chat-block-padding-y);
+  padding-bottom: var(--sk-agent-chat-block-padding-y);
+  border-radius: var(--sk-main-menu-context-pill-radius);
+  font-size: var(--sk-main-menu-context-font-size);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A policy item states authority and is NOT removable. */
+.sk-conversation__policy {
+  background: var(--sk-main-menu-icon-tile-background);
+  opacity: var(--sk-main-menu-context-opacity);
+}
+
+/* A grant is user-supplied authority and IS removable. */
+.sk-conversation__grant {
+  background: var(--sk-agent-chat-user-bg);
+}
+
+.sk-conversation__grant[data-state="failed"] {
+  background: var(--sk-agent-chat-error-bg);
+  border: var(--sk-agent-chat-block-border-width) solid var(--sk-agent-chat-error-border);
+}
+
+.sk-conversation__grant-detail {
+  opacity: var(--sk-agent-chat-block-status-opacity);
+}
+
+.sk-conversation__grant-remove {
+  opacity: var(--sk-agent-chat-block-status-opacity);
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+}
+
+/* +N disclosure keeps the tray from becoming a second toolbar. */
+.sk-conversation__grant-more {
+  opacity: var(--sk-agent-chat-block-status-opacity);
+  font-size: var(--sk-main-menu-context-font-size);
+}
+
+/* ── Transcript ─────────────────────────────────────────────────────────*/
+.sk-conversation__transcript {
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding-left: var(--sk-agent-chat-row-padding-x);
+  padding-right: var(--sk-agent-chat-row-padding-x);
+}
+
+.sk-conversation__turn {
+  padding-bottom: var(--sk-agent-chat-row-padding-bottom);
+}
+
+.sk-conversation__turn--user .sk-conversation__bubble {
+  display: inline-block;
+  background: var(--sk-agent-chat-user-bg);
+  border-radius: var(--sk-agent-chat-user-radius);
+  padding-left: var(--sk-agent-chat-user-padding-x);
+  padding-right: var(--sk-agent-chat-user-padding-x);
+  padding-top: var(--sk-agent-chat-user-padding-y);
+  padding-bottom: var(--sk-agent-chat-user-padding-y);
+}
+
+.sk-conversation__turn--assistant .sk-conversation__bubble {
+  padding-left: var(--sk-agent-chat-assistant-padding-x);
+  padding-right: var(--sk-agent-chat-assistant-padding-x);
+  padding-top: var(--sk-agent-chat-assistant-padding-y);
+  padding-bottom: var(--sk-agent-chat-assistant-padding-y);
+}
+
+/* A queued turn is a pending USER turn — exactly one may exist. */
+.sk-conversation__turn--queued .sk-conversation__bubble {
+  display: inline-block;
+  background: var(--sk-agent-chat-user-bg);
+  border-radius: var(--sk-agent-chat-user-radius);
+  padding-left: var(--sk-agent-chat-user-padding-x);
+  padding-right: var(--sk-agent-chat-user-padding-x);
+  padding-top: var(--sk-agent-chat-user-padding-y);
+  padding-bottom: var(--sk-agent-chat-user-padding-y);
+  opacity: var(--sk-agent-chat-block-status-opacity);
+}
+
+.sk-conversation__turn-status {
+  opacity: var(--sk-agent-chat-block-status-opacity);
+  font-size: var(--sk-main-menu-context-font-size);
+}
+
+/* ── Receipt ────────────────────────────────────────────────────────────*/
+.sk-conversation__receipt {
+  font-size: var(--sk-main-menu-context-font-size);
+  opacity: var(--sk-agent-chat-block-status-opacity);
+  padding-top: var(--sk-agent-chat-block-body-padding-top);
+}
+
+.sk-conversation__content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}

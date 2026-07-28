@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Script Kit — Launcher flow rows (corrected row language)</title>
+<link rel="stylesheet" href="../../generated/tokens.css">
+<link rel="stylesheet" href="../../shared/components.css">
+<link rel="stylesheet" href="./screen.css">
+<link rel="stylesheet" href="../../shared/story-embed.css">
+</head>
+<body>
+<!--
+  PROPOSED fixture — not a capture of shipped behavior.
+
+  Storyboards the corrected flow-row language decided by Oracle consult
+  `flow-notes-reality-v3`, derived from the live 115-flow roster
+  (`md roster --json`, 2026-07-27): 110/115 flows are no-input,
+  non-interactive, non-workflow — i.e. saved local agents you converse with.
+
+  Deltas from screens/main-menu/index.html (which captures shipped behavior):
+
+  1. TITLE is FlowDescriptor::friendly_name() via the proposed
+     normalize_flow_display_name(name, engine, interactive):
+       Article.claude              -> Article
+       Capture.copilot             -> Capture
+       deep-improvements.i.claude  -> Deep Improvements
+       flow-aws.codex              -> AWS
+     Shipped main-menu renders "Article.claude" / "Capture.copilot" raw —
+     the engine suffix leaks into launcher identity.
+
+  2. SUBTITLE is the structured descriptor, never the bare description:
+       <description | "Saved local agent"> · Flow · <engine> · <source>
+         [· <origin>] [· <capability>]
+     `Flow` is a literal type token so "saved agent vs script" is legible
+     before "Claude vs Codex". Path is NOT in the subtitle (it belongs in ⌘K).
+
+  3. EVERY flow row carries the flow glyph AND the Flow token — engine is
+     never the primary type signal.
+
+  4. FOOTER reflects the corrected verb assignment:
+       Enter = Converse (was: run once)   Shift+Enter = Run Once (in ⌘K)
+       Cmd+Enter = Agent
+     Three affordances only; "Run Once" lives in Actions, not the footer.
+
+  5. A SCRIPT row is interleaved to prove at-a-glance disambiguation, and a
+     capability row (Terminal) shows the n=5 interactive case.
+
+  Every visual value resolves through generated --sk-* tokens; no new
+  literals are introduced. Verified by design/mockups/tests/lint-mockups.mjs.
+-->
+<main class="stage" id="stage">
+  <div class="sk-window" id="window">
+    <div class="sk-window__material"></div>
+    <div class="sk-window__tint"></div>
+    <canvas class="sk-window__effect" id="starfield" width="1500" height="960"></canvas>
+
+    <div class="sk-window__content">
+      <header class="sk-header">
+        <div class="sk-context-zone" data-component="main_view_chrome::context_zone">
+          <span class="sk-context-pill">~/.scriptkit <span class="sk-context-key">⇥</span></span>
+          <span class="sk-context-pill">Script Kit · gpt-5.5 <span class="sk-context-key">⇧</span><span class="sk-context-key">⇥</span></span>
+        </div>
+        <div class="sk-search-shell" data-component="main filter input">
+          <span class="sk-caret"></span>
+          <span class="sk-placeholder">commit</span>
+        </div>
+      </header>
+
+      <section class="sk-list" data-component="render_script_list">
+        <div class="sk-section-slot" data-first="true" data-component="render_section_header">
+          <div class="sk-section-header">
+            <span class="sk-section-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"><path d="m2.5 4.5 3.5 3.5-3.5 3.5" opacity=".3"/><path d="m6.5 4.5 3.5 3.5-3.5 3.5" opacity=".6"/><path d="m10.5 4.5 3.5 3.5-3.5 3.5"/></g></svg>
+            </span>
+            Flows
+          </div>
+        </div>
+
+        <!-- Exact display-name match elevates past the 4-row unscoped quota. -->
+        <div class="sk-list-row" data-state="selected" data-component="list_item">
+          <div class="sk-list-row__surface">
+            <span class="sk-list-row__icon-tile" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"><path d="m2.5 4.5 3.5 3.5-3.5 3.5" opacity=".3"/><path d="m6.5 4.5 3.5 3.5-3.5 3.5" opacity=".6"/><path d="m10.5 4.5 3.5 3.5-3.5 3.5"/></g></svg>
+            </span>
+            <span class="sk-list-row__copy">
+              <span class="sk-list-row__name">Casual Commit</span>
+              <span class="sk-list-row__description">Write a relaxed conventional commit · Flow · Claude · Global</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="sk-list-row" data-component="list_item">
+          <div class="sk-list-row__surface">
+            <span class="sk-list-row__icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"><path d="m2.5 4.5 3.5 3.5-3.5 3.5" opacity=".3"/><path d="m6.5 4.5 3.5 3.5-3.5 3.5" opacity=".6"/><path d="m10.5 4.5 3.5 3.5-3.5 3.5"/></g></svg>
+            </span>
+            <span class="sk-list-row__copy">
+              <span class="sk-list-row__name">Fix Workflow</span>
+              <span class="sk-list-row__description">Repair a failing CI workflow · Flow · Claude · Global</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- Interactive flow (n=5 in the real roster): capability token shown.
+             Activation routes to the shared terminal, never a native form. -->
+        <div class="sk-list-row" data-component="list_item">
+          <div class="sk-list-row__surface">
+            <span class="sk-list-row__icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"><path d="m2.5 4.5 3.5 3.5-3.5 3.5" opacity=".3"/><path d="m6.5 4.5 3.5 3.5-3.5 3.5" opacity=".6"/><path d="m10.5 4.5 3.5 3.5-3.5 3.5"/></g></svg>
+            </span>
+            <span class="sk-list-row__copy">
+              <span class="sk-list-row__name">Deep Improvements</span>
+              <span class="sk-list-row__description">Find deeper improvements across the codebase · Flow · Claude · Global · Terminal</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- Project flow: breaks a same-class tie ahead of Global. -->
+        <div class="sk-list-row" data-component="list_item">
+          <div class="sk-list-row__surface">
+            <span class="sk-list-row__icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"><path d="m2.5 4.5 3.5 3.5-3.5 3.5" opacity=".3"/><path d="m6.5 4.5 3.5 3.5-3.5 3.5" opacity=".6"/><path d="m10.5 4.5 3.5 3.5-3.5 3.5"/></g></svg>
+            </span>
+            <span class="sk-list-row__copy">
+              <span class="sk-list-row__name">Build Doctor</span>
+              <span class="sk-list-row__description">Diagnose and repair project builds · Flow · Codex · Project · script-kit-gpui</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- Quota boundary: at most four flow-definition rows unscoped.
+             A script follows, proving at-a-glance type disambiguation. -->
+        <div class="sk-section-slot" data-component="render_section_header">
+          <div class="sk-section-header">
+            <span class="sk-section-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"><path d="M4.5 2.5h5l3 3v8h-8z"/><path d="M9.5 2.5v3h3" opacity=".6"/></g></svg>
+            </span>
+            Scripts
+          </div>
+        </div>
+
+        <div class="sk-list-row" data-component="list_item">
+          <div class="sk-list-row__surface">
+            <span class="sk-list-row__icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><g stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.3"><path d="M4.5 2.5h5l3 3v8h-8z"/><path d="M9.5 2.5v3h3" opacity=".6"/></g></svg>
+            </span>
+            <span class="sk-list-row__copy">
+              <span class="sk-list-row__name">Commit Staged Changes</span>
+              <span class="sk-list-row__description">commit-staged.ts · Script · ~/.scriptkit/scripts</span>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Native AppKit footer overlay. Corrected verb assignment: Enter now
+           owns "Converse" for the 110/115 conversational majority. "Run Once"
+           (⇧↵) is an Actions entry, not a fourth footer affordance — the
+           three-affordance discipline holds: Primary · Actions · Agent. -->
+      <footer class="sk-footer-host" data-component="native footer host" data-native-footer>
+        <div class="sk-footer-rail" data-component="footer_chrome">
+          <span class="sk-footer-spacer"></span>
+          <button class="sk-footer-action sk-footer-action--run">
+            <span class="sk-footer-label">Converse</span>
+            <kbd class="sk-keycap">↵</kbd>
+          </button>
+          <button class="sk-footer-action sk-footer-action--actions">
+            <span class="sk-footer-label">Actions</span>
+            <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">K</kbd>
+          </button>
+          <button class="sk-footer-action sk-footer-action--agent">
+            <span class="sk-footer-label">Agent</span>
+            <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">↵</kbd>
+          </button>
+        </div>
+      </footer>
+    </div>
+  </div>
+</main>
+<script src="./starfield.js"></script>
+<script src="../../shared/story-embed.js"></script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "status": "proposal",
+  "shell": "Conversation",
+  "implemented": false,
+  "note": "Future-state fixture for the one-shell/three-mode Conversation product decided by Oracle consults product-fold-matrix-v1 and conv-core-migration-v2. NOT a capture of shipped behavior and NOT pixel-verified against a reference. The shipped ancestors remain screens/agent-chat (Work-like) and screens/chat-prompt (SDK-hosted); those stay production-truth baselines and must not be restyled into this proposal.",
+  "modes": ["ask", "work", "flow"],
+  "sameShellSelectors": [
+    "[data-conversation-identity]",
+    "[data-conversation-composer]",
+    "[data-conversation-context-lane]",
+    "[data-conversation-transcript]",
+    "[data-native-footer]"
+  ],
+  "tokenReuse": [
+    {
+      "concept": "transcript rows, user/assistant bubbles, composer shell",
+      "tokens": "--sk-agent-chat-*",
+      "justification": "Same Rust component owner. The Conversation shell is the successor to AgentChatView's transcript + render_composer_input_shell; consult conv-core-migration-v2 rules that AgentChatTranscript is promoted (not replaced) and the real composer is extracted from AgentChatView."
+    },
+    {
+      "concept": "identity rail pills",
+      "tokens": "--sk-main-menu-context-*",
+      "justification": "The shipped agent-chat header zone already renders .sk-context-pill using the main-menu context tokens; the identity rail is the same chrome lane with mode-owned content."
+    },
+    {
+      "concept": "native footer host + rail",
+      "tokens": "--sk-footer-*",
+      "justification": "Unchanged footer_chrome ownership; only slot-3 label is mode-specific."
+    }
+  ],
+  "tokensNotYetOwned": [
+    {
+      "concept": "context lane / grant chip",
+      "status": "reusing --sk-agent-chat-block-* and --sk-main-menu-context-* as the nearest genuine owners",
+      "action": "Before implementation, add a Rust-owned source contract + exporter record for the grant chip and context lane, marked not-yet-consumed-by-a-renderer. Do NOT invent literals and do NOT hide product values under --sk-emulator-*."
+    },
+    {
+      "concept": "queued-turn card",
+      "status": "reusing --sk-agent-chat-user-* (it is a pending user turn)",
+      "action": "Confirm the Rust owner once the queue model lands; a queued turn may warrant its own contract."
+    }
+  ],
+  "provenance": {
+    "decidedBy": ["product-fold-matrix-v1", "conv-core-migration-v2", "storyboard-redesign-v4"],
+    "created": "2026-07-27"
+  }
+}

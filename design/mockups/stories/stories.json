@@ -3,7 +3,7 @@
   "buildId": "story-mockup-realism-v2",
   "architecture": "continuous-iframe-timeline",
   "generated": "derived from story.js definitions by build-manifest.mjs — do not hand-edit derived fields",
-  "count": 9,
+  "count": 10,
   "stories": [
     {
       "id": "01-run-script-with-arg",
@@ -389,6 +389,69 @@
         "setText",
         "streamText",
         "type"
+      ]
+    },
+    {
+      "id": "10-conversation-three-modes",
+      "title": "One Conversation, Three Modes",
+      "blurb": "Ask, Work, and Flow are the same shell. Identity, composer, context lane, transcript, and footer keep identical geometry; only text and chips change.",
+      "entry": "10-conversation-three-modes/index.html",
+      "storyVersion": 3,
+      "covers": [
+        "A01",
+        "A03",
+        "A04",
+        "A07",
+        "A10",
+        "B01",
+        "C01",
+        "C02",
+        "H04"
+      ],
+      "effort": "new-design",
+      "chapters": [
+        {
+          "id": "ask",
+          "label": "Ask — zero context",
+          "at": 0
+        },
+        {
+          "id": "ask-answer",
+          "label": "Ask answers",
+          "at": 2200
+        },
+        {
+          "id": "work",
+          "label": "Work — explicit grants",
+          "at": 5200
+        },
+        {
+          "id": "flow",
+          "label": "Flow — governed by a definition",
+          "at": 8600
+        }
+      ],
+      "surfaces": [
+        "conversation"
+      ],
+      "durationMs": 12000,
+      "actionKinds": [
+        "appendMessage",
+        "pressKey",
+        "setArtifactState",
+        "setContextGrants",
+        "setContextReceipt",
+        "setConversationMode",
+        "setListRows",
+        "setQueuedTurn",
+        "setText",
+        "streamText",
+        "type"
+      ],
+      "assertions": [
+        "conversation.same-shell-rects",
+        "conversation.mode-changes-without-surface-swap",
+        "conversation.ask-receipt-attempted-zero"
       ]
     }
   ]
