@@ -359,3 +359,9 @@ html.marketing-mode .story-surface-stack {
   height: 100%;
   min-height: 0;
 }
+
+/* Story-shell presentation chrome: browser-only caret blink cadence used by
+ * story-adapter.css. Emulator namespace — never maps back to Rust. */
+:root {
+  --sk-emulator-story-caret-blink: 1.05s;
+}

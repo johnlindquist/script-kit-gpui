@@ -1,0 +1,85 @@
+/* Story adapter visuals.
+ *
+ * WHY THIS FILE EXISTS
+ * --------------------
+ * surface-adapters.js used to inject a <style> block and assign inline pixel
+ * styles, which routed around the mockup honesty lint: the lint only walked
+ * .css files, so literals like `2px`, `17px`, `1px` and `1.05s` lived in JS
+ * and were never checked. Moving them here puts every adapter visual back
+ * under the same contract as the rest of the mockups.
+ *
+ * Adapters may still toggle CLASSES and non-visual properties (display,
+ * position, and computed caret offsets measured from real layout). They may
+ * not carry magnitudes or colors.
+ *
+ * This is story presentation chrome, so --sk-emulator-* is permitted here for
+ * browser-only calibration. Product surfaces (screens/**) may not use it.
+ */
+
+@keyframes sk-story-caret-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.sk-caret.is-typing,
+.sk-arg-caret.is-typing,
+.sk-agent-chat-composer__caret.is-typing,
+.sk-term-cursor.is-typing {
+  animation: sk-story-caret-blink var(--sk-emulator-story-caret-blink) steps(1) infinite;
+}
+
+.sk-search-shell,
+.sk-actions-search,
+.sk-arg-input,
+.sk-chat-input,
+.sk-agent-chat-composer__body {
+  position: relative;
+}
+
+.sk-search-text,
+.sk-arg-text,
+.sk-chat-input-text,
+.sk-agent-chat-composer__text {
+  color: var(--sk-text-name);
+  white-space: pre;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: clip;
+}
+
+.sk-list-row[data-story-hidden="true"] {
+  display: none !important;
+}
+
+.sk-list-row[data-state="selected"] .sk-list-row__surface {
+  outline: none;
+}
+
+.sk-section-header[data-story-results="true"] {
+  opacity: 1;
+}
+
+/* Notes/day-page typing caret — previously assigned inline in JS with literal
+ * fallbacks (2px / 17px / 1px). Every value is now a real generated token; the
+ * tokens existed all along, so the fallbacks were never justified. */
+.sk-story-caret {
+  display: inline-block;
+  width: var(--sk-notes-caret-width);
+  height: var(--sk-notes-caret-height);
+  background: var(--sk-notes-caret-color);
+  vertical-align: text-bottom;
+  margin-left: var(--sk-caret-width);
+}
+
+.sk-story-caret--input {
+  width: var(--sk-caret-width);
+  height: var(--sk-caret-height);
+  margin-left: var(--sk-caret-width);
+}

@@ -12,25 +12,16 @@
     return Array.from(doc.querySelectorAll(sel));
   }
 
+  /** Link the adapter stylesheet into the iframe document.
+   *  Visual values live in story-adapter.css so the mockup honesty lint can
+   *  see them; injecting a <style> string here was a route around the lint. */
   function ensureEmbedStyles(doc) {
     if (doc.getElementById("sk-story-adapter-style")) return;
-    var style = doc.createElement("style");
-    style.id = "sk-story-adapter-style";
-    style.textContent = [
-      "@keyframes sk-story-caret-blink{0%,45%{opacity:1}50%,100%{opacity:0}}",
-      ".sk-caret.is-typing,.sk-arg-caret.is-typing,.sk-agent-chat-composer__caret.is-typing,",
-      ".sk-term-cursor.is-typing{animation:sk-story-caret-blink 1.05s steps(1) infinite}",
-      ".sk-search-shell,.sk-actions-search,.sk-arg-input,.sk-chat-input,.sk-agent-chat-composer__body{",
-      "  position:relative}",
-      ".sk-search-text,.sk-arg-text,.sk-chat-input-text,.sk-agent-chat-composer__text{",
-      "  color:var(--sk-text-name); white-space:pre; display:inline-block; max-width:100%;",
-      "  overflow:hidden; text-overflow:clip}",
-      ".sk-list-row[data-story-hidden='true']{display:none !important}",
-      ".sk-list-row[data-state='selected'] .sk-list-row__surface{",
-      "  outline: none}",
-      ".sk-section-header[data-story-results='true']{opacity:1}",
-    ].join("");
-    (doc.head || doc.documentElement).appendChild(style);
+    var link = doc.createElement("link");
+    link.id = "sk-story-adapter-style";
+    link.rel = "stylesheet";
+    link.href = "../../stories/shared/story-adapter.css";
+    (doc.head || doc.documentElement).appendChild(link);
   }
 
   function findShell(doc) {
@@ -288,12 +279,7 @@
     if (!caret) {
       caret = doc.createElement("span");
       caret.className = "sk-caret is-typing";
-      caret.style.display = "inline-block";
-      caret.style.width = "var(--sk-notes-caret-width, 2px)";
-      caret.style.height = "var(--sk-notes-caret-height, 17px)";
-      caret.style.background = "var(--sk-notes-caret-color, var(--sk-text-name))";
-      caret.style.verticalAlign = "text-bottom";
-      caret.style.marginLeft = "1px";
+      caret.classList.add("sk-story-caret");
     } else {
       caret.classList.add("is-typing");
     }
@@ -332,12 +318,7 @@
     if (lines.length && existing[lines.length - 1]) {
       var caret = doc.createElement("span");
       caret.className = "sk-caret is-typing sk-day-caret";
-      caret.style.display = "inline-block";
-      caret.style.width = "var(--sk-caret-width)";
-      caret.style.height = "var(--sk-caret-height)";
-      caret.style.background = "var(--sk-text-name)";
-      caret.style.marginLeft = "1px";
-      caret.style.verticalAlign = "text-bottom";
+      caret.classList.add("sk-story-caret", "sk-story-caret--input");
       existing[lines.length - 1].appendChild(caret);
     }
   }
