@@ -23,6 +23,7 @@ node_modules/
 .test-screenshots/
 .test-output/
 .hitl-choice/
+.hitl-align/
 .mocks/
 session*.md
 oracle-questions.md

@@ -3495,6 +3495,39 @@ unsafe fn remove_reusable_window_footer_host(ns_window: id) {
 }
 
 #[cfg(target_os = "macos")]
+/// The native footer view that should participate in the main window's entry
+/// choreography, or `nil` when no same-host footer is installed.
+///
+/// The floating footer buttons live in the main NSWindow but OUTSIDE both
+/// surfaces the entry animates: the glass backdrop (which is laid out to stop
+/// above the 8pt gutter) and the GPUI content roots (whose collection loop
+/// deliberately skips `NSGlassEffectContainerView`, which is exactly what the
+/// glass-mode footer is hosted in). The result is buttons that sit at full
+/// alpha and full sharpness from the first frame while everything above them
+/// materializes — user report 2026-07-27: "why aren't the floating buttons
+/// fading/blurring too?".
+///
+/// Prefers the glass container (glass mode) and falls back to the plain footer
+/// host, so the caller animates the outermost footer surface in either mode.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn main_window_footer_entry_target(ns_window: id) -> id {
+    use objc::{msg_send, sel, sel_impl};
+
+    if ns_window == nil {
+        return nil;
+    }
+    let content_view: id = msg_send![ns_window, contentView];
+    if content_view == nil {
+        return nil;
+    }
+    let container = find_subview_by_identifier(content_view, FOOTER_GLASS_CONTAINER_ID);
+    if container != nil {
+        return container;
+    }
+    find_subview_by_identifier(content_view, FOOTER_EFFECT_ID)
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn find_subview_by_identifier(parent: id, identifier: &str) -> id {
     use objc::{msg_send, sel, sel_impl};
 

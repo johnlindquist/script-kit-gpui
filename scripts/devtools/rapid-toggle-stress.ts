@@ -471,17 +471,35 @@ try {
     await Bun.sleep(20);
     revealAfterReopen = await notesLifecycleState(driver);
   }
+  const noteReveals = [
+    ...notesSamples.map((sample) => sample?.notesState?.entryReveal),
+    duringNotesExit?.entryReveal,
+    revealAfterReopen?.entryReveal,
+  ].filter((reveal) => reveal != null);
   const notesRevealGenerations = [
     ...new Set(
-      [
-        ...notesSamples.map(
-          (sample) => sample?.notesState?.entryReveal?.generation,
-        ),
-        duringNotesExit?.entryReveal?.generation,
-        revealAfterReopen?.entryReveal?.generation,
-      ]
-        .map(Number)
+      noteReveals
+        .map((reveal) => Number(reveal?.generation))
         .filter(Number.isFinite),
+    ),
+  ];
+  // Generation numbers are local to a Notes window instance. Rapid close/open
+  // pulses can construct several instances that each begin at generation 1,
+  // so a generation-only set collapses real independent reveals into one and
+  // produces a false failure. The composite identity proves that at least two
+  // distinct reveal lifecycles ran without weakening any timing or topology
+  // requirement.
+  const notesRevealInstances = [
+    ...new Set(
+      noteReveals
+        .map((reveal) => {
+          const instanceId = Number(reveal?.instanceId);
+          const generation = Number(reveal?.generation);
+          return Number.isFinite(instanceId) && Number.isFinite(generation)
+            ? `${instanceId}:${generation}`
+            : null;
+        })
+        .filter((identity): identity is string => identity != null),
     ),
   ];
   const notesCloseStarted = performance.now();
@@ -501,7 +519,7 @@ try {
     && notesSamples.every((sample) => sample?.nativeTopology?.pass === true)
     && notesOpen.pass
     && hiddenInputAccepted
-    && notesRevealGenerations.length >= 2
+    && notesRevealInstances.length >= 2
     && duringNotesExit?.windowLifecycle?.phase === "Exiting"
     && duringNotesExit?.windowLifecycle?.hasExitTicket === true
     && typeof duringNotesExit?.windowLifecycle?.exitGeneration === "number"
@@ -549,6 +567,7 @@ try {
       entryReveal: revealAfterReopen,
     },
     revealGenerations: notesRevealGenerations,
+    revealInstances: notesRevealInstances,
     errors: notesErrors,
   };
 

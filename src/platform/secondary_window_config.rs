@@ -482,6 +482,72 @@ const GLASS_EXIT_GROW_Y: f64 = 0.012;
 #[cfg(target_os = "macos")]
 const GLASS_EXIT_BLUR_RADIUS: f64 = 8.0;
 
+/// Entry defocus radius, in points: the window materializes OUT of a blur.
+///
+/// Why this exists (user report 2026-07-27: "we're missing the type of
+/// fade-in/blur that spotlight does"). Spotlight's entry begins well before
+/// our first visible frame, fading up from near-nothing. We deliberately
+/// omitted that prefix — see the entry-alpha lock — because `NSWindow`
+/// `alphaValue` multiplies EVERY contributed pixel, so a low-alpha visible
+/// frame shows wallpaper rather than Spotlight's coherent faint glass. The
+/// result is an entry that has Spotlight's geometry but almost none of its
+/// materialization: alpha only ever travels 0.85 -> 1.0.
+///
+/// A layer blur is the missing primitive, because it is a WITHIN-window
+/// effect: it defocuses the window's own pixels without letting the desktop
+/// through. That buys the "resolving into being" read that the alpha floor
+/// forbids, while leaving every locked geometry, timing, and alpha value
+/// untouched.
+///
+/// Mirrors `GLASS_EXIT_BLUR_RADIUS` so entry and exit are inverses.
+#[cfg(target_os = "macos")]
+const GLASS_ENTRY_BLUR_RADIUS: f64 = 8.0;
+
+/// Live override for the entry defocus radius, in points, so the radius can be
+/// judged by feel without a rebuild:
+/// `SCRIPT_KIT_GLASS_ENTRY_BLUR=16 script-kit-gpui`. `0` disables the defocus
+/// and restores the exact pre-2026-07-27 entry.
+///
+/// Deliberately an env override rather than a theme slider: this is an open
+/// perceptual question, not a settled product value, and it must not enter the
+/// calibration fixture until the user picks a radius.
+#[cfg(target_os = "macos")]
+fn glass_entry_blur_radius() -> f64 {
+    std::env::var("SCRIPT_KIT_GLASS_ENTRY_BLUR")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 64.0)
+        .unwrap_or(GLASS_ENTRY_BLUR_RADIUS)
+}
+
+/// Effective GPUI content fade duration for the entry.
+///
+/// THE DEFAULT IS THE THING THAT MAKES THE ENTRY FEEL UNFADED. The stock value
+/// is `GLASS_ENTRY_CONTENT_FADE_DURATION` clamped so the fade ENDS at the
+/// material-onset boundary: `0.018.min(0.044 - 0.026)` = 18ms. The content is
+/// therefore fully opaque at t=44ms, before the 105ms geometry tail begins — so
+/// across the whole visible tail nothing is fading, and the entry reads as a
+/// solid panel doing a 1.2% width wiggle rather than something materializing.
+///
+/// `SCRIPT_KIT_GLASS_CONTENT_FADE=<ms>` overrides it and is INTENTIONALLY
+/// UNCLAMPED, so the fade may run concurrently with the geometry tail (the
+/// shape Spotlight actually has). Try 90 or 105 to make the fade span the tail.
+/// Total entry duration is unchanged either way — this overlaps existing time
+/// rather than adding any, so it does not fight the authorized 2x tempo.
+#[cfg(target_os = "macos")]
+fn glass_entry_content_fade_duration() -> f64 {
+    if let Some(seconds) = std::env::var("SCRIPT_KIT_GLASS_CONTENT_FADE")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 2000.0)
+        .map(|ms| ms / 1000.0)
+    {
+        return seconds;
+    }
+    GLASS_ENTRY_CONTENT_FADE_DURATION
+        .min(GLASS_MATERIAL_ONSET_DURATION - GLASS_ENTRY_CONTENT_HOLD_DURATION)
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GlassExitMode {
@@ -944,8 +1010,7 @@ fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMo
         alpha_finish_duration: GLASS_MORPH_ALPHA_FINISH_DURATION.min(phase2),
         material_onset_duration: GLASS_MATERIAL_ONSET_DURATION,
         content_hold_duration: GLASS_ENTRY_CONTENT_HOLD_DURATION,
-        content_fade_duration: GLASS_ENTRY_CONTENT_FADE_DURATION
-            .min(GLASS_MATERIAL_ONSET_DURATION - GLASS_ENTRY_CONTENT_HOLD_DURATION),
+        content_fade_duration: glass_entry_content_fade_duration(),
     })
 }
 
@@ -1848,7 +1913,11 @@ extern "C" fn tahoe_glass_backdrop_reveal_entry_content(
         let Some(targets) = targets else { return };
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-        let _: () = msg_send![ctx, setDuration: GLASS_ENTRY_CONTENT_FADE_DURATION];
+        // Must resolve the SAME way `glass_morph_tuning_from` does. This used
+        // the bare constant while the tuning used the clamped value; they were
+        // both 18ms so nothing diverged, but an override would have applied to
+        // the receipt and not to the actual animation.
+        let _: () = msg_send![ctx, setDuration: glass_entry_content_fade_duration()];
         let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
         if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
             let name = tahoe_ns_string("easeOut");
@@ -2087,6 +2156,111 @@ unsafe fn timing_function_with_control_points(c1x: f32, c1y: f32, c2x: f32, c2y:
         c2x,
         c2y,
     )
+}
+
+/// Ramp an entry defocus on the window's content view layer: the window
+/// resolves FROM `GLASS_ENTRY_BLUR_RADIUS` INTO sharp focus over the entry.
+///
+/// The exact inverse of the exit blur, with one deliberate difference: the
+/// layer's model value is left at radius 0 and the animation is
+/// `removedOnCompletion`, so a finished entry leaves NO residual filter to
+/// clean up. (The exit ramp must persist at 8pt, so it keeps
+/// `fillMode=forwards` + `removedOnCompletion=false` and relies on
+/// `clear_exit_dematerialize_blur`.)
+///
+/// Must be installed AFTER `cancel_ns_window_exit_dematerialize_impl`, which
+/// clears ALL layer filters and animations.
+///
+/// Returns the radius actually installed (0.0 when the runtime lacks the
+/// private `CAFilter` class, so the receipt can distinguish "no blur ran"
+/// from "blur ran at 0").
+#[cfg(target_os = "macos")]
+unsafe fn ramp_entry_defocus(
+    target_view: id,
+    duration: f64,
+    radius: f64,
+    log_target: &str,
+) -> f64 {
+    // Every bail-out names itself: a silent 0.0 was indistinguishable from
+    // "blur ran and did nothing".
+    let bail = |reason: &str| {
+        logging::log(
+            log_target,
+            &format!("event=glass_entry_defocus_skip reason={}", reason),
+        );
+        0.0
+    };
+    if radius <= 0.0 || duration <= 0.0 {
+        return bail("zero_radius_or_duration");
+    }
+    // CHOOSE THE TARGET CAREFULLY. Runtime-proven 2026-07-27: on the MAIN
+    // window, filtering the contentView layer blurs across the 8pt transparent
+    // footer gutter and fills it, which the exit metrics catch as "transparent
+    // footer gutter was not preserved". Main therefore passes its glass
+    // backdrop, which is already laid out to EXCLUDE that gutter
+    // (`TahoeBackdropLayout::ContentAboveDetachedFooter`). The floating footer
+    // is its own window with no gutter, so it passes its own content view.
+    if target_view == nil {
+        return bail("no_target_view");
+    }
+    // `filters` is a CALayer property and the target is not guaranteed
+    // layer-backed at entry time; without this the ramp silently no-ops.
+    let wants_layer: bool = msg_send![target_view, wantsLayer];
+    if !wants_layer {
+        let _: () = msg_send![target_view, setWantsLayer: true];
+    }
+    let layer: id = msg_send![target_view, layer];
+    if layer == nil {
+        return bail("no_layer");
+    }
+    // A layer filter can sample beyond its bounds. Clip the defocus to the
+    // owning surface so the main backdrop and detached footer cannot blur
+    // across the calibrated transparent gutter between them.
+    let _: () = msg_send![layer, setMasksToBounds: cocoa::base::YES];
+    let (Some(filter_class), Some(anim_class)) = (
+        objc::runtime::Class::get("CAFilter"),
+        objc::runtime::Class::get("CABasicAnimation"),
+    ) else {
+        return bail("no_cafilter_class");
+    };
+    let blur_type = tahoe_ns_string("gaussianBlur");
+    let filter: id = msg_send![filter_class, filterWithType: blur_type];
+    if filter == nil {
+        return bail("filter_alloc_failed");
+    }
+    let entry_name = tahoe_ns_string("entryBlur");
+    let _: () = msg_send![filter, setName: entry_name];
+    let radius_key = tahoe_ns_string("inputRadius");
+    // Model value 0: once the animation is removed the window is sharp.
+    let zero: id = msg_send![class!(NSNumber), numberWithDouble: 0.0f64];
+    let _: () = msg_send![filter, setValue: zero forKey: radius_key];
+    let filters: id = msg_send![class!(NSArray), arrayWithObject: filter];
+    let _: () = msg_send![layer, setFilters: filters];
+
+    let key_path = tahoe_ns_string("filters.entryBlur.inputRadius");
+    let anim: id = msg_send![anim_class, animationWithKeyPath: key_path];
+    if anim == nil {
+        return bail("animation_alloc_failed");
+    }
+    let from: id = msg_send![class!(NSNumber), numberWithDouble: radius];
+    let _: () = msg_send![anim, setFromValue: from];
+    let _: () = msg_send![anim, setToValue: zero];
+    let _: () = msg_send![anim, setDuration: duration];
+    // Ease-out: most of the defocus resolves early, matching the material
+    // onset curve rather than crawling to sharp at the very end.
+    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+        let name = tahoe_ns_string("easeOut");
+        if name != nil {
+            let timing: id = msg_send![timing_class, functionWithName: name];
+            if timing != nil {
+                let _: () = msg_send![anim, setTimingFunction: timing];
+            }
+        }
+    }
+    let _: () = msg_send![anim, setRemovedOnCompletion: true];
+    let anim_key = tahoe_ns_string("entryBlurRamp");
+    let _: () = msg_send![layer, addAnimation: anim forKey: anim_key];
+    radius
 }
 
 /// Remove any exit-dematerialize blur left on the window's content view
@@ -2549,6 +2723,50 @@ pub fn glass_morph_remaining() -> Option<std::time::Duration> {
     }
 }
 
+/// How long the floating footer stays ordered out before it fades back in.
+///
+/// The footer is a SEPARATE NSWindow tracking the main window's bounds, so it
+/// does not inherit the main entry's fade, blur, or geometry. It is parked
+/// (ordered fully out) and re-presented on its own schedule.
+///
+/// LEGACY (`SCRIPT_KIT_GLASS_FOOTER_SYNC=0`): park for the whole remaining
+/// morph plus a 60ms tail, then fade over 120ms — the footer is absent for the
+/// entire 149ms entry and finishes arriving ~180ms AFTER the main window has
+/// settled. That reads as a second, unrelated arrival (user report
+/// 2026-07-27: "why aren't the floating buttons fading/blurring too?").
+///
+/// The park exists because the footer would otherwise chase the animating
+/// frame — which mattered at the old `0.03` inset (106% -> 98%, tens of points
+/// of travel). The current calibration moves 4.5pt per side, so the chase it
+/// prevents is now far less visible than the late arrival it causes.
+///
+/// SYNCED (default): hold only to the main window's CONTENT-REVEAL anchor, so
+/// the footer fades up on the same clock as the main content and the whole
+/// surface materializes as one object.
+#[cfg(target_os = "macos")]
+fn glass_sibling_reveal_delay() -> Option<std::time::Duration> {
+    use std::sync::atomic::Ordering;
+    let synced = std::env::var("SCRIPT_KIT_GLASS_FOOTER_SYNC")
+        .ok()
+        .map(|raw| raw.trim() != "0")
+        .unwrap_or(true);
+    if !synced {
+        return glass_morph_remaining();
+    }
+    // Still in flight?
+    glass_morph_remaining()?;
+    let start = GLASS_MORPH_LAST_START_MS.load(Ordering::Relaxed);
+    if start == u64::MAX {
+        return None;
+    }
+    let anchor_ms = (GLASS_ENTRY_CONTENT_HOLD_DURATION * 1000.0).round() as u64;
+    let reveal_at = start.saturating_add(anchor_ms);
+    let now = glass_morph_now_ms();
+    Some(std::time::Duration::from_millis(
+        reveal_at.saturating_sub(now),
+    ))
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn glass_morph_remaining() -> Option<std::time::Duration> {
     None
@@ -2567,7 +2785,7 @@ pub fn glass_morph_remaining() -> Option<std::time::Duration> {
 /// locked 0.12s fade.
 #[cfg(target_os = "macos")]
 pub fn park_gpui_window_alpha_if_morphing(window: &gpui::Window) -> Option<std::time::Duration> {
-    let remaining = glass_morph_remaining()?;
+    let remaining = glass_sibling_reveal_delay()?;
     let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
     let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return None;
@@ -2602,9 +2820,16 @@ pub fn park_gpui_window_alpha_if_morphing(_window: &gpui::Window) -> Option<std:
     None
 }
 
-/// Re-present a previously parked sibling window and fade it back in (locked
-/// 0.12s ease-out). The park orders the window out, so restore orders it back
-/// in (without activating) before the fade.
+/// Re-present a previously parked sibling window and fade it back in.
+///
+/// The fade duration MATCHES the main window's content fade, so the floating
+/// footer materializes on the same clock as the content it belongs to. It was
+/// previously a hardcoded `0.12s` chosen independently of the entry, which —
+/// combined with the full-morph park delay — made the footer a visibly
+/// separate second arrival.
+///
+/// The park orders the window out, so restore orders it back in (without
+/// activating) before the fade.
 #[cfg(target_os = "macos")]
 pub fn restore_gpui_window_alpha_animated(window: &gpui::Window) {
     let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
@@ -2621,12 +2846,41 @@ pub fn restore_gpui_window_alpha_animated(window: &gpui::Window) {
             return;
         }
         let _: () = msg_send![ns_window, orderFrontRegardless];
+        // Same defocus the main window resolves out of, so the buttons
+        // materialize rather than simply appearing.
+        // The footer window IS the buttons, so its own content view is the
+        // right target — the main window's gutter is a different window and is
+        // unaffected.
+        let footer_content: id = msg_send![ns_window, contentView];
+        let footer_blur = ramp_entry_defocus(
+            footer_content,
+            glass_entry_content_fade_duration(),
+            glass_entry_blur_radius(),
+            "FOOTER",
+        );
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
         let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-        let _: () = msg_send![ctx, setDuration: 0.12f64];
+        let _: () = msg_send![ctx, setDuration: glass_entry_content_fade_duration()];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![ctx, setTimingFunction: timing];
+                }
+            }
+        }
         let animator: id = msg_send![ns_window, animator];
         let _: () = msg_send![animator, setAlphaValue: 1.0f64];
         let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+        logging::log(
+            "FOOTER",
+            &format!(
+                "event=glass_sibling_reveal fade_ns={} blur_radius={:.2}",
+                (glass_entry_content_fade_duration() * 1_000_000_000.0).round() as u64,
+                footer_blur
+            ),
+        );
     }
 }
 
@@ -3098,6 +3352,24 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             content_targets.push((child as usize, alpha));
         }
     }
+    // The same-host floating footer is neither a GPUI content root (it is
+    // hosted in an NSGlassEffectContainerView, which the loop above skips) nor
+    // part of the glass backdrop (which stops above the 8pt gutter), so it was
+    // the one surface that never faded or defocused with the rest of the
+    // window. Enrol it explicitly so the whole main surface materializes as one
+    // object.
+    let footer_entry_target = crate::footer_popup::main_window_footer_entry_target(window);
+    if footer_entry_target != nil {
+        let alpha: f64 = msg_send![footer_entry_target, alphaValue];
+        if alpha > 0.001 {
+            // Match the NSWindow's material-safe visible floor rather than
+            // disappearing completely. The footer is present from the first
+            // stage frame, then resolves 0.85 -> 1.0 with the shared content
+            // fade while the defocus supplies the stronger materialization.
+            let _: () = msg_send![footer_entry_target, setAlphaValue: tuning.start_alpha];
+            content_targets.push((footer_entry_target as usize, alpha));
+        }
+    }
     let content_root_count = content_targets.len();
     if let Ok(mut guard) = GLASS_ENTRY_CONTENT_TARGETS.lock() {
         guard.insert(window as usize, content_targets);
@@ -3128,6 +3400,31 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             },
         );
     }
+    // Entry defocus: resolve the whole window out of an 8pt blur across the
+    // FULL entry (onset + tail), so the material and geometry both arrive
+    // from softness instead of snapping in already sharp. Installed here —
+    // after the exit-blur cancel at the top of this function, which clears
+    // every layer filter.
+    let entry_blur_radius = ramp_entry_defocus(
+        glass_view,
+        tuning.total_entry_duration(),
+        glass_entry_blur_radius(),
+        log_target,
+    );
+    // Defocus the footer on the same ramp. It is its own view tree with no
+    // gutter beneath it, so unlike the main content view it is safe to filter
+    // directly — which also means the BUTTONS actually blur, where the main
+    // backdrop had almost no detail to lose.
+    let footer_blur_radius = if footer_entry_target != nil {
+        ramp_entry_defocus(
+            footer_entry_target,
+            tuning.total_entry_duration(),
+            glass_entry_blur_radius(),
+            log_target,
+        )
+    } else {
+        0.0
+    };
     let _: () = msg_send![
         glass_view,
         performSelector: sel!(revealOwnWindowEntryContent)
@@ -3143,8 +3440,12 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     logging::log(
         log_target,
         &format!(
-            "event=native_glass_entry_onset primitive=material_parameters supported={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
+            "event=native_glass_entry_onset primitive=material_parameters supported={} entry_blur_radius={:.2} footer_blur_radius={:.2} footer_enrolled={} entry_blur_duration_ns={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
             onset_supported,
+            entry_blur_radius,
+            footer_blur_radius,
+            footer_entry_target != nil,
+            (tuning.total_entry_duration() * 1_000_000_000.0).round() as u64,
             (tuning.material_onset_duration * 1_000_000_000.0).round() as u64,
             content_root_count,
             (tuning.content_hold_duration * 1_000_000_000.0).round() as u64,
@@ -3406,6 +3707,7 @@ pub(crate) enum NativeGlassStyleApplicationReason {
 #[derive(Clone, Copy, Debug)]
 struct NativeGlassStyleApplication {
     window_number: i64,
+    surface_id: usize,
     at_ns: u64,
     reason: NativeGlassStyleApplicationReason,
     signature: NativeGlassStyleSignature,
@@ -3444,21 +3746,44 @@ impl NativeGlassStyleLedger {
             .map(|(_, start, end)| (*start, *end))
     }
 
+    /// Whether an identical `Install` has already styled this exact native
+    /// surface during the active entry span. Reapplying the same signature can
+    /// still churn NSGlassEffectView's private material tree, so callers skip
+    /// it until the entry settles; distinct capsules in the same window remain
+    /// independent surfaces and must each receive their initial style.
+    fn has_identical_surface_style_during_entry(
+        &self,
+        window_number: i64,
+        surface_id: usize,
+        at_ns: u64,
+        signature: NativeGlassStyleSignature,
+    ) -> bool {
+        let in_span = self
+            .entry_span(window_number)
+            .is_some_and(|(start, end)| at_ns >= start && at_ns <= end);
+        in_span
+            && self.applications.iter().rev().any(|prior| {
+                prior.window_number == window_number
+                    && prior.surface_id == surface_id
+                    && prior.signature == signature
+            })
+    }
+
     /// Record one application; returns `true` when it is a forbidden
     /// mid-entry mutation: an `Install`-shaped (re)application inside the
-    /// window's morph span with any earlier application for the same window.
-    /// The initial installation (no prior application) and explicitly tagged
-    /// theme refreshes are the only allowed in-span shapes.
+    /// window's morph span with any earlier application for the same native
+    /// surface. The initial installation of each distinct surface and
+    /// explicitly tagged theme refreshes are the only allowed in-span shapes.
     fn record_application(&mut self, application: NativeGlassStyleApplication) -> bool {
         let in_span = self
             .entry_span(application.window_number)
             .is_some_and(|(start, end)| {
                 application.at_ns >= start && application.at_ns <= end
             });
-        let has_prior = self
-            .applications
-            .iter()
-            .any(|prior| prior.window_number == application.window_number);
+        let has_prior = self.applications.iter().any(|prior| {
+            prior.window_number == application.window_number
+                && prior.surface_id == application.surface_id
+        });
         let mutation = in_span
             && has_prior
             && application.reason == NativeGlassStyleApplicationReason::Install;
@@ -3473,10 +3798,12 @@ impl NativeGlassStyleLedger {
         let Some((start, end)) = self.entry_span(window_number) else {
             return 0;
         };
-        let mut seen_before_span = self
+        let mut seen_surfaces: std::collections::HashSet<usize> = self
             .applications
             .iter()
-            .any(|app| app.window_number == window_number && app.at_ns < start);
+            .filter(|app| app.window_number == window_number && app.at_ns < start)
+            .map(|app| app.surface_id)
+            .collect();
         let mut count = 0;
         for application in self
             .applications
@@ -3484,12 +3811,12 @@ impl NativeGlassStyleLedger {
             .filter(|app| app.window_number == window_number)
             .filter(|app| app.at_ns >= start && app.at_ns <= end)
         {
-            if seen_before_span
+            if seen_surfaces.contains(&application.surface_id)
                 && application.reason == NativeGlassStyleApplicationReason::Install
             {
                 count += 1;
             }
-            seen_before_span = true;
+            seen_surfaces.insert(application.surface_id);
         }
         count
     }
@@ -3569,6 +3896,34 @@ pub(crate) unsafe fn apply_native_glass_style_with_reason(
     let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setTintColor:)];
     if !responds {
         return false;
+    }
+    let window: id = msg_send![glass_view, window];
+    let window_number: i64 = if window != nil {
+        msg_send![window, windowNumber]
+    } else {
+        -1
+    };
+    let surface_id = glass_view as usize;
+    let at_ns = crate::platform::host_clock::host_time_ns();
+    let skip_identical_install = reason == NativeGlassStyleApplicationReason::Install
+        && with_native_glass_style_ledger(|ledger| {
+            ledger.has_identical_surface_style_during_entry(
+                window_number,
+                surface_id,
+                at_ns,
+                style.signature,
+            )
+        });
+    if skip_identical_install {
+        tracing::debug!(
+            target: "script_kit::native_glass",
+            event = "native_glass_style_identical_install_skipped_during_entry",
+            window_number,
+            surface_id,
+            at_ns,
+            "native_glass_style_identical_install_skipped_during_entry"
+        );
+        return true;
     }
     let transaction_class = objc::runtime::Class::get("CATransaction");
     if let Some(transaction_class) = transaction_class {
@@ -3665,16 +4020,10 @@ pub(crate) unsafe fn apply_native_glass_style_with_reason(
     if let Some(transaction_class) = transaction_class {
         let _: () = msg_send![transaction_class, commit];
     }
-    let window: id = msg_send![glass_view, window];
-    let window_number: i64 = if window != nil {
-        msg_send![window, windowNumber]
-    } else {
-        -1
-    };
-    let at_ns = crate::platform::host_clock::host_time_ns();
     let mid_entry_mutation = with_native_glass_style_ledger(|ledger| {
         ledger.record_application(NativeGlassStyleApplication {
             window_number,
+            surface_id,
             at_ns,
             reason,
             signature: style.signature,
@@ -3688,6 +4037,7 @@ pub(crate) unsafe fn apply_native_glass_style_with_reason(
         target: "script_kit::native_glass",
         event = "native_glass_style_applied",
         window_number,
+        surface_id,
         at_ns,
         role = role_name,
         reason = match reason {
@@ -3714,6 +4064,7 @@ pub(crate) unsafe fn apply_native_glass_style_with_reason(
             target: "script_kit::native_glass",
             event = "native_glass_style_mutation_during_entry",
             window_number,
+            surface_id,
             at_ns,
             role = role_name,
             "native_glass_style_mutation_during_entry"
@@ -4819,16 +5170,13 @@ mod secondary_window_config_tests {
             light_capsule.signature.effective_tint_alpha_bits
         );
         assert_eq!(light_backdrop.signature.dark, light_capsule.signature.dark);
-        // The native capsule veil is the calibrated 0.80 chrome token. The
-        // GPUI glass-mode veil CAP is a different constant with a different
-        // job; substituting it here would flatten the capsule to the backdrop.
+        // The native capsule veil resolves through the chrome token. It is
+        // 0.0 during the 2026-07-27 user-authorized "perfectly match the main
+        // window" experiment, so the capsule material intentionally equals the
+        // backdrop material; only the separation rim distinguishes them.
         assert_eq!(
             capsule.veil_alpha,
             crate::ui::chrome::LIQUID_GLASS_CAPSULE_VEIL_ALPHA
-        );
-        assert_ne!(
-            capsule.veil_alpha,
-            crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP
         );
         assert_eq!(
             backdrop.effective_tint_alpha,
@@ -4846,10 +5194,10 @@ mod secondary_window_config_tests {
         assert_eq!(backdrop.veil_alpha, 0.0);
         assert_eq!(backdrop.rim_width, 0.0);
         assert_eq!(backdrop.signature.rim_rgba, 0xFFFF_FF00);
-        assert_eq!(capsule.veil_alpha, 0.80);
+        assert_eq!(capsule.veil_alpha, 0.0);
         assert_eq!(capsule.rim_width, 1.0);
         assert_eq!(capsule.signature.rim_rgba, 0xFFFF_FF3D);
-        assert_eq!(light_capsule.veil_alpha, 0.80);
+        assert_eq!(light_capsule.veil_alpha, 0.0);
         assert_eq!(light_capsule.rim_width, 1.0);
         assert_eq!(light_capsule.signature.rim_rgba, 0x0000_002E);
         assert_ne!(backdrop.signature, explicit.signature);
@@ -4872,10 +5220,12 @@ mod secondary_window_config_tests {
         )
         .signature;
         let application = |window_number: i64,
+                           surface_id: usize,
                            at_ns: u64,
                            reason: super::NativeGlassStyleApplicationReason| {
             super::NativeGlassStyleApplication {
                 window_number,
+                surface_id,
                 at_ns,
                 reason,
                 signature,
@@ -4886,29 +5236,34 @@ mod secondary_window_config_tests {
         let mut ledger = super::NativeGlassStyleLedger::default();
         ledger.record_entry_span(7, 1_000, 2_000);
         // Initial install before the morph span: allowed.
-        assert!(!ledger.record_application(application(7, 900, Install)));
+        assert!(!ledger.record_application(application(7, 70, 900, Install)));
         // Pooled capsule views style themselves before attaching to a window
         // (window number -1): never counted against a real window's span.
-        assert!(!ledger.record_application(application(-1, 1_100, Install)));
+        assert!(!ledger.record_application(application(-1, 71, 1_100, Install)));
+        // A distinct capsule in the same window gets its own initial install;
+        // it is not a reapplication of surface 70.
+        assert!(!ledger.record_application(application(7, 71, 1_100, Install)));
         // Theme refresh mid-span is the explicitly recorded exception.
-        assert!(!ledger.record_application(application(7, 1_200, ThemeRefresh)));
+        assert!(!ledger.record_application(application(7, 70, 1_200, ThemeRefresh)));
         assert_eq!(ledger.style_mutation_count_during_entry(7), 0);
+        assert!(ledger.has_identical_surface_style_during_entry(7, 70, 1_300, signature));
+        assert!(!ledger.has_identical_surface_style_during_entry(7, 72, 1_300, signature));
         // A tint/veil/opacity animation during entry looks exactly like this:
-        // an Install-shaped re-application inside the span. It must be
-        // flagged — this is the assertion that fails if anyone temporarily
-        // mutates capsule tint during entry.
-        assert!(ledger.record_application(application(7, 1_500, Install)));
+        // an Install-shaped re-application of the same native surface inside
+        // the span. It must be flagged — this is the assertion that fails if
+        // anyone temporarily mutates capsule tint during entry.
+        assert!(ledger.record_application(application(7, 70, 1_500, Install)));
         assert_eq!(ledger.style_mutation_count_during_entry(7), 1);
         // After settle, re-applications are outside the entry contract.
-        assert!(!ledger.record_application(application(7, 2_500, Install)));
+        assert!(!ledger.record_application(application(7, 70, 2_500, Install)));
         assert_eq!(ledger.style_mutation_count_during_entry(7), 1);
         // A first-ever installation landing inside its own span (window whose
         // backdrop is created mid-morph) is the initial install, not a
         // mutation.
         ledger.record_entry_span(9, 1_000, 2_000);
-        assert!(!ledger.record_application(application(9, 1_050, Install)));
+        assert!(!ledger.record_application(application(9, 90, 1_050, Install)));
         assert_eq!(ledger.style_mutation_count_during_entry(9), 0);
-        assert!(ledger.record_application(application(9, 1_060, Install)));
+        assert!(ledger.record_application(application(9, 90, 1_060, Install)));
         assert_eq!(ledger.style_mutation_count_during_entry(9), 1);
     }
 

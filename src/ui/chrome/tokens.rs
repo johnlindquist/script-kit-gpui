@@ -23,9 +23,17 @@ pub const LIQUID_GLASS_PREFERRED_CENTER_GAP_PX: f32 = 60.0;
 pub const LIQUID_GLASS_STABILITY_TINT_ALPHA_FLOOR: f32 = 0.35;
 /// Small matched-color veil inside each discrete capsule. It damps local
 /// desktop hue sampling without replacing the native material or filling the
-/// transparent gaps between capsules. 0.80 is the pre-amplification value;
-/// the 0.94 bump (e1743576f) traded too much translucency for hue stability.
-pub const LIQUID_GLASS_CAPSULE_VEIL_ALPHA: f32 = 0.80;
+/// transparent gaps between capsules.
+///
+/// Lineage: 0.80 was the calibrated pre-amplification value; the 0.94 bump
+/// (e1743576f) traded too much translucency for hue stability. 0.0 is a
+/// user-authorized experiment (2026-07-27: "I never got to see what it looked
+/// like when it perfectly matched the main window, let's try that for now")
+/// — the capsule material now resolves IDENTICALLY to the WindowBackdrop role
+/// (native glass + 0.35 tint floor, no veil), accepting per-capsule desktop
+/// hue bleed until the user judges it. Restoring the darker capsule body =
+/// 0.80, not 0.94.
+pub const LIQUID_GLASS_CAPSULE_VEIL_ALPHA: f32 = 0.0;
 pub const LIQUID_GLASS_CAPSULE_RIM_WIDTH_PX: f32 = 1.0;
 pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_DARK: f32 = 0.24;
 pub const LIQUID_GLASS_CAPSULE_RIM_ALPHA_LIGHT: f32 = 0.18;
