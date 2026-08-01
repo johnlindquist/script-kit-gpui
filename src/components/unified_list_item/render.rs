@@ -27,8 +27,6 @@ pub struct UnifiedListItem {
     state: ItemState,
     density: Density,
     colors: UnifiedListItemColors,
-    a11y_label: Option<SharedString>,
-    a11y_hint: Option<SharedString>,
     direct_hover: bool,
 }
 
@@ -44,8 +42,6 @@ impl UnifiedListItem {
             state: ItemState::default(),
             density: Density::default(),
             colors: UnifiedListItemColors::default(),
-            a11y_label: None,
-            a11y_hint: None,
             direct_hover: true,
         }
     }
@@ -92,16 +88,6 @@ impl UnifiedListItem {
 
     pub fn colors(mut self, colors: UnifiedListItemColors) -> Self {
         self.colors = colors;
-        self
-    }
-
-    pub fn a11y_label(mut self, label: impl Into<SharedString>) -> Self {
-        self.a11y_label = Some(label.into());
-        self
-    }
-
-    pub fn a11y_hint(mut self, hint: impl Into<SharedString>) -> Self {
-        self.a11y_hint = Some(hint.into());
         self
     }
 
@@ -293,7 +279,6 @@ fn render_leading(
                 .bg(rgba((colors.accent_subtle << 8) | 0x40))
                 .rounded(px(4.0)),
         ),
-        Some(LeadingContent::Custom(_)) => None,
         None => None,
     }
 }
@@ -344,7 +329,6 @@ fn render_trailing(
                 .child("✓")
                 .into_any_element(),
         ),
-        Some(TrailingContent::Custom(_)) => None,
         None => None,
     }
 }
@@ -425,8 +409,6 @@ fn render_text_content(
                 .children(spans)
                 .into_any_element()
         }
-
-        TextContent::Custom(_) => div().into_any_element(),
     }
 }
 

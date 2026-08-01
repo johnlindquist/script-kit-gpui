@@ -1,6 +1,8 @@
 //! Unit tests for UnifiedListItem component types and layout helpers.
 
-use super::unified_list_item::{Density, ListItemLayout, TextContent, SECTION_HEADER_HEIGHT};
+use super::unified_list_item::{
+    Density, ListItemLayout, TextContent, TrailingContent, SECTION_HEADER_HEIGHT,
+};
 
 #[test]
 fn unified_rows_share_the_disabled_hover_tooltip_policy() {
@@ -11,7 +13,7 @@ fn unified_rows_share_the_disabled_hover_tooltip_policy() {
 fn highlighted_text_preserves_source_text_and_ranges() {
     let content = TextContent::highlighted("Hello World", vec![0..5, 6..11]);
 
-    assert_eq!(content.as_str(), Some("Hello World"));
+    assert_eq!(content.as_str(), "Hello World");
 
     match content {
         TextContent::Highlighted { ranges, .. } => assert_eq!(ranges, vec![0..5, 6..11]),
@@ -81,4 +83,16 @@ fn test_highlighted_text_precomputes_fragments_when_constructed() {
 fn test_plain_text_has_no_highlight_fragments() {
     let content = TextContent::plain("No highlights");
     assert!(content.highlight_fragments().is_none());
+}
+
+#[test]
+fn trailing_shortcut_caches_the_shared_canonical_tokens() {
+    let content = TrailingContent::shortcut("Cmd++");
+    match content {
+        TrailingContent::Shortcut { raw, tokens } => {
+            assert_eq!(raw, "Cmd++");
+            assert_eq!(tokens.as_ref(), &["⌘".to_string(), "+".to_string()]);
+        }
+        _ => panic!("expected shortcut trailing content"),
+    }
 }

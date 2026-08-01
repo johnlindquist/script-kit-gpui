@@ -1,8 +1,5 @@
 //! Type definitions for UnifiedListItem.
 
-// Allow dead_code - this is new code not yet integrated into the main app
-#![allow(dead_code)]
-
 use gpui::*;
 use std::ops::Range;
 use std::sync::Arc;
@@ -23,7 +20,6 @@ pub struct HighlightFragment {
 /// Ranges are **byte offsets** into the text. The fuzzy matcher must return valid
 /// UTF-8 boundaries. In debug builds, we assert that ranges land on char boundaries.
 ///
-/// Note: Custom variant prevents Clone; build fresh per render (normal for virtualized lists).
 pub enum TextContent {
     /// Plain text with no highlighting.
     Plain(SharedString),
@@ -34,9 +30,6 @@ pub enum TextContent {
         ranges: Vec<Range<usize>>,
         fragments: Arc<[HighlightFragment]>,
     },
-
-    /// Custom element (for special rendering needs).
-    Custom(AnyElement),
 }
 
 impl TextContent {
@@ -76,17 +69,11 @@ impl TextContent {
         }
     }
 
-    /// Create custom element content.
-    pub fn custom(element: impl IntoElement) -> Self {
-        Self::Custom(element.into_any_element())
-    }
-
-    /// Get the text string (for a11y labels). Returns None for Custom.
-    pub fn as_str(&self) -> Option<&str> {
+    /// Get the source text used by the renderer and host semantic projection.
+    pub fn as_str(&self) -> &str {
         match self {
-            Self::Plain(s) => Some(s.as_ref()),
-            Self::Highlighted { text, .. } => Some(text.as_ref()),
-            Self::Custom(_) => None,
+            Self::Plain(s) => s.as_ref(),
+            Self::Highlighted { text, .. } => text.as_ref(),
         }
     }
 
@@ -164,8 +151,6 @@ pub struct ItemState {
 // =============================================================================
 
 /// Content displayed on the left side of the list item.
-///
-/// Note: Custom variant prevents Clone; use standard variants when possible.
 pub enum LeadingContent {
     /// Emoji string (e.g., "📋").
     Emoji(SharedString),
@@ -181,9 +166,6 @@ pub enum LeadingContent {
 
     /// Placeholder while app icon loads.
     AppIconPlaceholder,
-
-    /// Custom element (use sparingly).
-    Custom(AnyElement),
 }
 
 // =============================================================================
@@ -191,8 +173,6 @@ pub enum LeadingContent {
 // =============================================================================
 
 /// Content displayed on the right side of the list item.
-///
-/// Note: Custom variant prevents Clone; use standard variants when possible.
 pub enum TrailingContent {
     /// Keyboard shortcut badge with tokens cached at model construction.
     Shortcut {
@@ -211,9 +191,6 @@ pub enum TrailingContent {
 
     /// Checkmark for selected items.
     Checkmark,
-
-    /// Custom element (use sparingly).
-    Custom(AnyElement),
 }
 
 impl TrailingContent {
