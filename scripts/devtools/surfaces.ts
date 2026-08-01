@@ -50,6 +50,8 @@ const root = new URL("../..", import.meta.url);
 
 const paths = {
   contracts: "docs/ai/contracts/surface-contracts.json",
+  featureMap: "FEATURE_MAP.md",
+  maintainedFeatureAtlas: "feature-map/index.md",
   coverage: "scripts/devtools/coverage.ts",
 };
 
@@ -298,7 +300,12 @@ function buildOracleBatches(contracts: SurfaceContract[], features: FeatureMapEn
   ];
 }
 
-function buildReport(contractsText: string, featureMapText: string, coverageText: string) {
+function buildReport(
+  contractsText: string,
+  featureMapText: string,
+  coverageText: string,
+  maintainedFeatureAtlasExists: boolean,
+) {
   const contracts = JSON.parse(contractsText) as {
     schemaVersion: number;
     generatedFrom: string;
@@ -309,6 +316,10 @@ function buildReport(contractsText: string, featureMapText: string, coverageText
   const coverageSurfaceIds = extractCoverageSurfaceIds(coverageText);
   const coveredNames = new Set(coverageSurfaceIds);
   const contractSurfaceKinds = contracts.entries.map((entry) => entry.surfaceKind);
+  const contractMappings = contracts.entries.flatMap((entry) =>
+    entry.appViewVariants.map((variant) => ({ surfaceKind: entry.surfaceKind, appViewVariant: variant })),
+  );
+  const uniqueAppViewVariants = [...new Set(contractMappings.map((entry) => entry.appViewVariant))].sort();
   const excludedAuditKinds = new Set(liquidGlassAuditExclusions.map((entry) => entry.surfaceKind));
   const auditContracts = contracts.entries.filter((entry) => !excludedAuditKinds.has(entry.surfaceKind));
   const contractFamilies = [...new Set(contracts.entries.map((entry) => entry.vocabulary?.family ?? "Unknown"))].sort();
@@ -353,14 +364,37 @@ function buildReport(contractsText: string, featureMapText: string, coverageText
         role: "Currently checked-in DevTools domain and surface coverage.",
       },
     ],
+    evidenceStatus: "SOURCE-CONFIRMED" as const,
+    inventoryNamespaces: {
+      contractKindCount: contracts.entries.length,
+      contractMappingCount: contractMappings.length,
+      uniqueAppViewVariantCount: uniqueAppViewVariants.length,
+      runtimeCoverageProfileCount: coverageSurfaceIds.length,
+      orientationAliasCount: coverageSurfaceAliases.length,
+    },
     totals: {
       surfaceContractCount: contracts.entries.length,
       liquidGlassAuditSurfaceCount: auditContracts.length,
-      appViewVariantCount: contracts.entries.reduce((count, entry) => count + entry.appViewVariants.length, 0),
+      contractMappingCount: contractMappings.length,
+      appViewVariantCount: uniqueAppViewVariants.length,
       featureMapCount: featureMap.length,
       ownerSkillCount: ownerSkills.length,
       currentlyCoveredSurfacesCount: coverageSurfaceIds.length,
+      orientationAliasCount: coverageSurfaceAliases.length,
       oracleBatchCount: batches.length,
+    },
+    featureMapSource: {
+      path: paths.featureMap,
+      compatibilityIndexExists: featureMapText.trim().length > 0,
+      parsedEntryCount: featureMap.length,
+      maintainedAtlasPath: paths.maintainedFeatureAtlas,
+      maintainedAtlasExists: maintainedFeatureAtlasExists,
+      status:
+        featureMap.length > 0
+          ? "ready"
+          : maintainedFeatureAtlasExists
+            ? "maintained-atlas-unparsed"
+            : "compatibility-index-points-to-missing-atlas",
     },
     surfaceContracts: contracts.entries.map(serializeContract),
     auditSurfaceContracts: auditContracts.map(serializeContract),
@@ -396,12 +430,15 @@ function markdown(report: ReturnType<typeof buildReport>) {
     "",
     "## Totals",
     "",
-    `- Surface contracts: ${report.totals.surfaceContractCount}`,
+    `- Contract kinds: ${report.inventoryNamespaces.contractKindCount}`,
+    `- Contract mappings: ${report.inventoryNamespaces.contractMappingCount}`,
+    `- Unique AppView variants: ${report.inventoryNamespaces.uniqueAppViewVariantCount}`,
+    `- Runtime coverage profiles: ${report.inventoryNamespaces.runtimeCoverageProfileCount}`,
+    `- Non-counting orientation aliases: ${report.inventoryNamespaces.orientationAliasCount}`,
     `- Liquid Glass audit surfaces: ${report.totals.liquidGlassAuditSurfaceCount}`,
-    `- AppView variants: ${report.totals.appViewVariantCount}`,
     `- Feature-map entries: ${report.totals.featureMapCount}`,
+    `- Feature-map source status: ${report.featureMapSource.status}`,
     `- Owner skills: ${report.totals.ownerSkillCount}`,
-    `- Current explicit coverage surfaces: ${report.totals.currentlyCoveredSurfacesCount}`,
     `- Oracle batches: ${report.totals.oracleBatchCount}`,
     "",
     "## Surface Contracts",
@@ -444,7 +481,13 @@ function markdown(report: ReturnType<typeof buildReport>) {
 }
 
 const args = parseArgs(Bun.argv.slice(2));
-const report = buildReport(await readText(paths.contracts), "", await readText(paths.coverage));
+const maintainedFeatureAtlasExists = await Bun.file(new URL(paths.maintainedFeatureAtlas, root)).exists();
+const report = buildReport(
+  await readText(paths.contracts),
+  await readText(paths.featureMap),
+  await readText(paths.coverage),
+  maintainedFeatureAtlasExists,
+);
 
 if (args.markdown) {
   console.log(markdown(report));

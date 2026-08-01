@@ -597,11 +597,26 @@ function filteredCoverage(args: ReturnType<typeof parseArgs>) {
     ? filteredDomains
     : filteredDomains.filter((domain) => referencedDomainIds.has(domain.id) || !args.surface);
 
+  const statusCounts = surfaces.reduce<Record<CoverageStatus, number>>(
+    (counts, surface) => {
+      counts[surface.status] += 1;
+      return counts;
+    },
+    { supported: 0, partial: 0, missing: 0, planned: 0 },
+  );
+
   return {
     schemaVersion: 1,
     tool: "script-kit-devtools.coverage",
     generatedAt: new Date().toISOString(),
+    evidenceStatus: "SOURCE-CONFIRMED" as const,
     philosophy: "Chrome DevTools-style protocol and API coverage first; recipes are smoke/regression wrappers after direct primitives exist.",
+    inventoryNamespaces: {
+      runtimeCoverageProfileCount: surfaces.length,
+      selectedRuntimeCoverageProfileCount: filteredSurfaces.length,
+      statusCounts,
+      note: "Runtime coverage profiles are not contract kinds, contract mappings, unique AppView variants, or orientation aliases.",
+    },
     primitiveFamilies: ["devtools.inspect", "devtools.measure", "devtools.act", "devtools.compare", "devtools.investigate"],
     domains: scopedDomains,
     surfaces: filteredSurfaces,
@@ -626,6 +641,13 @@ function markdown(report: ReturnType<typeof filteredCoverage>) {
     "# Script Kit DevTools Coverage",
     "",
     report.philosophy,
+    "",
+    "## Inventory namespace",
+    "",
+    `- Runtime coverage profiles: ${report.inventoryNamespaces.runtimeCoverageProfileCount}`,
+    `- Selected runtime coverage profiles: ${report.inventoryNamespaces.selectedRuntimeCoverageProfileCount}`,
+    `- Statuses: supported ${report.inventoryNamespaces.statusCounts.supported}, partial ${report.inventoryNamespaces.statusCounts.partial}, missing ${report.inventoryNamespaces.statusCounts.missing}, planned ${report.inventoryNamespaces.statusCounts.planned}`,
+    `- ${report.inventoryNamespaces.note}`,
     "",
     "## Domains",
     "",
