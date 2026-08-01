@@ -29,7 +29,7 @@ pub struct Button {
     label: SharedString,
     colors: ButtonColors,
     variant: ButtonVariant,
-    shortcut: Option<String>,
+    shortcut_tokens: Option<Vec<String>>,
     id: Option<SharedString>,
     disabled: bool,
     loading: bool,
@@ -46,7 +46,7 @@ impl Button {
             label: label.into(),
             colors,
             variant: ButtonVariant::default(),
-            shortcut: None,
+            shortcut_tokens: None,
             id: None,
             disabled: false,
             loading: false,
@@ -63,15 +63,20 @@ impl Button {
         self
     }
 
+    pub(crate) fn resolve_shortcut_tokens(shortcut: &str) -> Vec<String> {
+        crate::components::hint_strip::shortcut_tokens_from_hint(shortcut)
+    }
+
     /// Set the keyboard shortcut display text
     pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
-        self.shortcut = Some(shortcut.into());
+        let shortcut = shortcut.into();
+        self.shortcut_tokens = Some(Self::resolve_shortcut_tokens(&shortcut));
         self
     }
 
     /// Set an optional shortcut (convenience for Option<String>)
     pub fn shortcut_opt(mut self, shortcut: Option<String>) -> Self {
-        self.shortcut = shortcut;
+        self.shortcut_tokens = shortcut.map(|shortcut| Self::resolve_shortcut_tokens(&shortcut));
         self
     }
 
@@ -184,7 +189,7 @@ impl RenderOnce for Button {
             label,
             colors,
             variant,
-            shortcut,
+            shortcut_tokens,
             id,
             disabled,
             loading,
@@ -276,15 +281,25 @@ impl RenderOnce for Button {
             label_element = label_element.cursor_pointer();
         }
 
-        // Build shortcut element if present - smaller than label, same accent color
-        // Use flex + items_center to ensure vertical alignment with the label
-        let shortcut_element = if let Some(sc) = shortcut {
+        // Render cached canonical tokens through the same compact shortcut owner
+        // used by rows, Actions, the recorder, and footer adapters.
+        let shortcut_element = if let Some(tokens) = shortcut_tokens {
+            let shortcut_color = match variant {
+                ButtonVariant::Primary | ButtonVariant::Icon => colors.accent,
+                ButtonVariant::Ghost => colors.text_color,
+            };
             let mut el = div()
                 .flex()
                 .items_center()
-                .text_xs()
                 .ml(px(BUTTON_SHORTCUT_MARGIN_LEFT_PX))
-                .child(sc);
+                .child(crate::components::hint_strip::render_inline_shortcut_keys(
+                    tokens.iter().map(String::as_str),
+                    crate::components::hint_strip::whisper_inline_shortcut_colors(
+                        rgba((shortcut_color << 8) | 0xCC).into(),
+                        rgba((shortcut_color << 8) | 0xFF).into(),
+                        true,
+                    ),
+                ));
             if show_pointer {
                 el = el.cursor_pointer();
             }

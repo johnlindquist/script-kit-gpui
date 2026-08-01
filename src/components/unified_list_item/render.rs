@@ -305,30 +305,48 @@ fn render_leading(
 fn render_trailing(
     trailing: &Option<TrailingContent>,
     colors: &UnifiedListItemColors,
-) -> Option<Div> {
+) -> Option<AnyElement> {
     let hint_color = rgb(colors.text_dimmed);
 
     match trailing {
-        Some(TrailingContent::Shortcut(shortcut)) => Some(
+        Some(TrailingContent::Shortcut { raw: _, tokens }) => {
+            Some(crate::components::hint_strip::render_inline_shortcut_keys(
+                tokens.iter().map(String::as_str),
+                crate::components::hint_strip::whisper_inline_shortcut_colors(
+                    rgba((colors.text_dimmed << 8) | 0xCC).into(),
+                    rgba((colors.text_dimmed << 8) | 0xFF).into(),
+                    true,
+                ),
+            ))
+        }
+        Some(TrailingContent::Hint(hint)) => Some(
             div()
                 .text_xs()
-                .font_family(crate::list_item::FONT_MONO)
                 .text_color(hint_color)
-                .child(shortcut.clone()),
+                .child(hint.clone())
+                .into_any_element(),
         ),
-        Some(TrailingContent::Hint(hint)) => {
-            Some(div().text_xs().text_color(hint_color).child(hint.clone()))
-        }
         Some(TrailingContent::Count(count)) => Some(
             div()
                 .text_xs()
                 .text_color(hint_color)
-                .child(format!("{}", count)),
+                .child(format!("{}", count))
+                .into_any_element(),
         ),
-        Some(TrailingContent::Chevron) => Some(div().text_xs().text_color(hint_color).child("→")),
-        Some(TrailingContent::Checkmark) => {
-            Some(div().text_sm().text_color(rgb(colors.accent)).child("✓"))
-        }
+        Some(TrailingContent::Chevron) => Some(
+            div()
+                .text_xs()
+                .text_color(hint_color)
+                .child("→")
+                .into_any_element(),
+        ),
+        Some(TrailingContent::Checkmark) => Some(
+            div()
+                .text_sm()
+                .text_color(rgb(colors.accent))
+                .child("✓")
+                .into_any_element(),
+        ),
         Some(TrailingContent::Custom(_)) => None,
         None => None,
     }

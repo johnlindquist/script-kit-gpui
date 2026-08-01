@@ -295,14 +295,11 @@ impl Render for SelectPrompt {
                                             &choice.name,
                                             &this.filter_text,
                                         );
-                                        let trailing =
-                                            indexed_choice.metadata.shortcut.clone().map(
-                                                |shortcut| {
-                                                    TrailingContent::Shortcut(SharedString::from(
-                                                        shortcut,
-                                                    ))
-                                                },
-                                            );
+                                        let trailing = indexed_choice
+                                            .metadata
+                                            .shortcut
+                                            .clone()
+                                            .map(TrailingContent::shortcut);
                                         let hover_handler = cx.listener(
                                             move |this: &mut SelectPrompt,
                                                   hovered: &bool,

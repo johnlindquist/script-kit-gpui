@@ -1981,26 +1981,13 @@ impl ActionsDialog {
         )
     }
 
-    /// Parse a shortcut string into individual keycap characters
-    /// e.g., "⌘↵" → vec!["⌘", "↵"], "⌘I" → vec!["⌘", "I"]
+    /// Resolve a shortcut into canonical keycap tokens.
+    ///
+    /// Actions owns no parser: multi-character keys and literal punctuation
+    /// follow the same token stream used by rows, buttons, recorders, and
+    /// native/GPUI footers.
     pub(crate) fn parse_shortcut_keycaps(shortcut: &str) -> Vec<String> {
-        let mut keycaps = Vec::new();
-
-        for ch in shortcut.chars() {
-            // Handle modifier symbols (single character)
-            match ch {
-                '⌘' | '⌃' | '⌥' | '⇧' | '↵' | '⎋' | '⇥' | '⌫' | '␣' | '↑' | '↓' | '←' | '→' =>
-                {
-                    keycaps.push(ch.to_string());
-                }
-                // Regular characters (letters, numbers)
-                _ => {
-                    keycaps.push(ch.to_uppercase().to_string());
-                }
-            }
-        }
-
-        keycaps
+        crate::components::hint_strip::shortcut_tokens_from_hint(shortcut)
     }
 }
 

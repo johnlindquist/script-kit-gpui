@@ -935,15 +935,19 @@ fn parse_shortcut_keycaps_modifier_plus_arrow() {
 }
 
 #[test]
-fn parse_shortcut_keycaps_multi_char_key_like_f12() {
-    let caps = ActionsDialog::parse_shortcut_keycaps("⌘F12");
-    // parse_shortcut_keycaps treats each non-modifier character individually:
-    // ⌘ is a modifier (single keycap), then F, 1, 2 are each separate keycaps
-    assert_eq!(caps.len(), 4);
-    assert_eq!(caps[0], "⌘");
-    assert_eq!(caps[1], "F");
-    assert_eq!(caps[2], "1");
-    assert_eq!(caps[3], "2");
+fn parse_shortcut_keycaps_preserves_multi_character_and_literal_keys() {
+    assert_eq!(
+        ActionsDialog::parse_shortcut_keycaps("⌘F12"),
+        vec!["⌘", "F12"]
+    );
+    assert_eq!(
+        ActionsDialog::parse_shortcut_keycaps("cmd++"),
+        vec!["⌘", "+"]
+    );
+    assert_eq!(
+        ActionsDialog::parse_shortcut_keycaps("ctrl+\\"),
+        vec!["⌃", "\\"]
+    );
 }
 
 // =========================================================================

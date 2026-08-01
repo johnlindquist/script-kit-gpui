@@ -962,8 +962,10 @@ mod tests {
         assert_eq!(split_footer_shortcut("↵"), vec!["↵"]);
         assert_eq!(split_footer_shortcut("⌘K"), vec!["⌘", "K"]);
         assert_eq!(split_footer_shortcut("⌥↵"), vec!["⌥", "↵"]);
-        assert_eq!(split_footer_shortcut("Enter"), vec!["Enter"]);
-        assert_eq!(split_footer_shortcut("Cmd+K"), vec!["Cmd", "K"]);
+        assert_eq!(split_footer_shortcut("Enter"), vec!["↵"]);
+        assert_eq!(split_footer_shortcut("Cmd+K"), vec!["⌘", "K"]);
+        assert_eq!(split_footer_shortcut("cmd++"), vec!["⌘", "+"]);
+        assert_eq!(split_footer_shortcut("ctrl+\\"), vec!["⌃", "\\"]);
         assert_eq!(split_footer_shortcut("⌘F1"), vec!["⌘", "F1"]);
         assert_eq!(split_footer_shortcut("⌥⌘I"), vec!["⌥", "⌘", "I"]);
     }

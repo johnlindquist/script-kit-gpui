@@ -130,6 +130,13 @@ fn test_should_show_focus_indicator_does_not_render_for_non_interactive_states()
 }
 
 #[test]
+fn test_button_shortcuts_use_canonical_shared_tokens() {
+    assert_eq!(Button::resolve_shortcut_tokens("Cmd+K"), vec!["⌘", "K"]);
+    assert_eq!(Button::resolve_shortcut_tokens("cmd++"), vec!["⌘", "+"]);
+    assert_eq!(Button::resolve_shortcut_tokens("ctrl+\\"), vec!["⌃", "\\"]);
+}
+
+#[test]
 fn test_button_layout_tokens_stay_consistent_when_render_spacing_is_updated() {
     assert_eq!(BUTTON_PRIMARY_PADDING_X, 12.0);
     assert_eq!(BUTTON_PRIMARY_PADDING_Y, 6.0);

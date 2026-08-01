@@ -1,6 +1,6 @@
 //! Unit tests for UnifiedListItem component types and layout helpers.
 
-use super::{Density, ListItemLayout, TextContent, SECTION_HEADER_HEIGHT};
+use super::{Density, ListItemLayout, SECTION_HEADER_HEIGHT, TextContent, TrailingContent};
 
 #[test]
 fn highlighted_text_preserves_source_text_and_ranges() {
@@ -74,4 +74,16 @@ fn test_highlighted_text_precomputes_fragments_when_constructed() {
 fn test_plain_text_has_no_highlight_fragments() {
     let content = TextContent::plain("No highlights");
     assert!(content.highlight_fragments().is_none());
+}
+
+#[test]
+fn trailing_shortcut_caches_canonical_shared_tokens() {
+    let content = TrailingContent::shortcut("Cmd++");
+    match content {
+        TrailingContent::Shortcut { raw, tokens } => {
+            assert_eq!(raw, "Cmd++");
+            assert_eq!(tokens.as_ref(), &["⌘".to_string(), "+".to_string()]);
+        }
+        _ => panic!("expected shortcut trailing content"),
+    }
 }

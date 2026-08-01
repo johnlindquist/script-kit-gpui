@@ -278,9 +278,41 @@ fn normalize_shortcut_part(part: &str) -> String {
         "pagedown" => "⇟".to_string(),
         "home" => "↖".to_string(),
         "end" => "↘".to_string(),
+        "click" => "click".to_string(),
         other if other.chars().all(is_symbol_shortcut_char) => other.to_string(),
         other => other.to_uppercase(),
     }
+}
+
+fn plus_notation_parts(shortcut: &str) -> Vec<String> {
+    let chars: Vec<char> = shortcut.chars().collect();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch != '+' {
+            current.push(ch);
+            continue;
+        }
+
+        if !current.trim().is_empty() {
+            parts.push(current.trim().to_string());
+            current.clear();
+        }
+
+        // A plus with no following key is the key itself. This covers both
+        // "⌘+" and the second plus in "cmd++" without manufacturing an
+        // empty token.
+        if index + 1 == chars.len() {
+            parts.push("+".to_string());
+        }
+    }
+
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+
+    parts
 }
 
 pub(crate) fn shortcut_tokens_from_hint(shortcut: &str) -> Vec<String> {
@@ -289,16 +321,24 @@ pub(crate) fn shortcut_tokens_from_hint(shortcut: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    // "cmd+shift+k" style
-    if trimmed.contains('+') || trimmed.chars().any(char::is_whitespace) {
+    // Config-style notation. Parse separators without replacing them so a
+    // trailing or doubled plus remains a literal Plus keycap.
+    if trimmed.contains('+') {
+        return plus_notation_parts(trimmed)
+            .into_iter()
+            .map(|part| normalize_shortcut_part(&part))
+            .collect();
+    }
+
+    // Space-delimited config notation ("cmd shift k").
+    if trimmed.chars().any(char::is_whitespace) {
         return trimmed
-            .replace('+', " ")
             .split_whitespace()
             .map(normalize_shortcut_part)
             .collect();
     }
 
-    // Display-style input: "⌘F1", "⌘PAGEUP", "⌃⌘↑"
+    // Display-style input: "⌘F1", "⌘PAGEUP", "⌃⌘↑".
     // Preserve contiguous text runs so multi-character keys stay grouped.
     if trimmed.chars().any(is_symbol_shortcut_char) {
         let mut tokens = Vec::new();
@@ -473,14 +513,28 @@ mod inline_shortcut_tests {
     };
 
     #[test]
-    fn shortcut_tokens_handle_raw_and_symbol_inputs() {
-        assert_eq!(
-            shortcut_tokens_from_hint("cmd+shift+k"),
-            vec!["⌘", "⇧", "K"]
-        );
-        assert_eq!(shortcut_tokens_from_hint("⌃⌘↑"), vec!["⌃", "⌘", "↑"]);
-        assert_eq!(shortcut_tokens_from_hint("cmd+pageup"), vec!["⌘", "⇞"]);
-        assert_eq!(shortcut_tokens_from_hint("cmd+home"), vec!["⌘", "↖"]);
+    fn shortcut_tokens_handle_raw_symbol_and_literal_key_inputs() {
+        let cases = [
+            ("cmd+shift+k", vec!["⌘", "⇧", "K"]),
+            ("cmd shift k", vec!["⌘", "⇧", "K"]),
+            ("cmd+k", vec!["⌘", "K"]),
+            ("cmd k", vec!["⌘", "K"]),
+            ("⌘K", vec!["⌘", "K"]),
+            ("⌃⌘↑", vec!["⌃", "⌘", "↑"]),
+            ("cmd+pageup", vec!["⌘", "⇞"]),
+            ("cmd+home", vec!["⌘", "↖"]),
+            ("cmd++", vec!["⌘", "+"]),
+            ("⌘+", vec!["⌘", "+"]),
+            ("cmd+-", vec!["⌘", "-"]),
+            ("ctrl+\\", vec!["⌃", "\\"]),
+            ("F12", vec!["F12"]),
+            ("Escape", vec!["⎋"]),
+            ("Enter", vec!["↵"]),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(shortcut_tokens_from_hint(input), expected, "input={input}");
+        }
     }
 
     #[test]
@@ -501,6 +555,69 @@ mod inline_shortcut_tests {
         assert_eq!(canonical_shortcut_hint("⌘F1"), "cmd+f1");
         assert_eq!(canonical_shortcut_hint("⌃⇧↵"), "ctrl+shift+enter");
         assert_eq!(canonical_shortcut_hint("cmd+shift+k"), "cmd+shift+k");
+        assert_eq!(canonical_shortcut_hint("cmd++"), "cmd++");
+        assert_eq!(canonical_shortcut_hint("ctrl+\\"), "ctrl+\\");
+    }
+
+    #[test]
+    fn shortcut_consumers_share_one_alias_and_literal_key_stream() {
+        use crate::actions::{Action, ActionCategory, ActionsDialog};
+        use crate::components::button::Button;
+        use crate::components::unified_list_item::TrailingContent;
+
+        for input in [
+            "Cmd+K",
+            "cmd+k",
+            "⌘K",
+            "cmd++",
+            "ctrl+\\",
+            "⌘F12",
+            "cmd+pageup",
+            "cmd+home",
+            "Escape",
+            "Enter",
+        ] {
+            let expected = shortcut_tokens_from_hint(input);
+            assert_eq!(
+                crate::components::footer_chrome::split_footer_shortcut(input),
+                expected,
+                "footer input={input}"
+            );
+            assert_eq!(
+                Button::resolve_shortcut_tokens(input),
+                expected,
+                "button input={input}"
+            );
+            assert_eq!(
+                ActionsDialog::parse_shortcut_keycaps(input),
+                expected,
+                "Actions input={input}"
+            );
+
+            let action =
+                Action::new("test", "Test", None, ActionCategory::GlobalOps).with_shortcut(input);
+            assert_eq!(
+                action.shortcut_tokens.as_deref(),
+                Some(expected.as_slice()),
+                "action model input={input}"
+            );
+
+            match TrailingContent::shortcut(input) {
+                TrailingContent::Shortcut { tokens, .. } => assert_eq!(
+                    tokens.as_ref(),
+                    expected.as_slice(),
+                    "unified row input={input}"
+                ),
+                _ => unreachable!("shortcut constructor always returns Shortcut"),
+            }
+        }
+
+        let recorder = crate::components::shortcut_recorder::RecordedShortcut {
+            cmd: true,
+            key: Some("+".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(recorder.to_keycaps(), vec!["⌘", "+"]);
     }
 
     #[test]

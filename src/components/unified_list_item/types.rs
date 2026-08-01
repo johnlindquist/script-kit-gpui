@@ -194,8 +194,11 @@ pub enum LeadingContent {
 ///
 /// Note: Custom variant prevents Clone; use standard variants when possible.
 pub enum TrailingContent {
-    /// Keyboard shortcut badge (e.g., "⌘O").
-    Shortcut(SharedString),
+    /// Keyboard shortcut badge with tokens cached at model construction.
+    Shortcut {
+        raw: SharedString,
+        tokens: Arc<[String]>,
+    },
 
     /// Navigation hint (e.g., "Enter").
     Hint(SharedString),
@@ -211,6 +214,17 @@ pub enum TrailingContent {
 
     /// Custom element (use sparingly).
     Custom(AnyElement),
+}
+
+impl TrailingContent {
+    pub fn shortcut(shortcut: impl Into<SharedString>) -> Self {
+        let raw = shortcut.into();
+        let tokens = crate::components::hint_strip::shortcut_tokens_from_hint(raw.as_ref());
+        Self::Shortcut {
+            raw,
+            tokens: tokens.into(),
+        }
+    }
 }
 
 // =============================================================================

@@ -168,28 +168,9 @@ impl RecordedShortcut {
         parts.join("+")
     }
 
-    /// Get individual keycaps for display
+    /// Get individual keycaps for display through the shared shortcut parser.
     pub fn to_keycaps(&self) -> Vec<String> {
-        let mut keycaps = Vec::new();
-
-        if self.ctrl {
-            keycaps.push("⌃".to_string());
-        }
-        if self.alt {
-            keycaps.push("⌥".to_string());
-        }
-        if self.cmd {
-            keycaps.push("⌘".to_string());
-        }
-        if self.shift {
-            keycaps.push("⇧".to_string());
-        }
-
-        if let Some(ref key) = self.key {
-            keycaps.push(Self::format_key_display(key));
-        }
-
-        keycaps
+        crate::components::hint_strip::shortcut_tokens_from_hint(&self.to_config_string())
     }
 
     /// Format as the transient SDK `HotkeyInfo` payload.
@@ -209,22 +190,7 @@ impl RecordedShortcut {
 
     /// Format a key for display (uppercase letters, special key names)
     pub(super) fn format_key_display(key: &str) -> String {
-        match key.to_lowercase().as_str() {
-            "enter" | "return" => "↵".to_string(),
-            "escape" | "esc" => "⎋".to_string(),
-            "tab" => "⇥".to_string(),
-            "backspace" | "delete" => "⌫".to_string(),
-            "space" => "␣".to_string(),
-            "up" | "arrowup" => "↑".to_string(),
-            "down" | "arrowdown" => "↓".to_string(),
-            "left" | "arrowleft" => "←".to_string(),
-            "right" | "arrowright" => "→".to_string(),
-            "pageup" => "⇞".to_string(),
-            "pagedown" => "⇟".to_string(),
-            "home" => "↖".to_string(),
-            "end" => "↘".to_string(),
-            _ => key.to_uppercase(),
-        }
+        crate::components::hint_strip::shortcut_tokens_from_hint(key).join("")
     }
 }
 
