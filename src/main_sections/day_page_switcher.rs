@@ -128,7 +128,8 @@ impl DayPageView {
                     crate::actions::ActionsDialogActivation::DrillDownPushed { .. } => {
                         crate::actions::resize_actions_window(cx, &resize_dialog);
                     }
-                    crate::actions::ActionsDialogActivation::NoSelection => {}
+                    crate::actions::ActionsDialogActivation::Blocked { .. }
+                    | crate::actions::ActionsDialogActivation::NoSelection => {}
                 }
             }));
         });

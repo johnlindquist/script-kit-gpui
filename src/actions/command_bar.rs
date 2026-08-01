@@ -28,7 +28,10 @@
 // ```
 
 use super::constants::NOTES_RECENT_POPUP_MAX_HEIGHT;
-use super::dialog::GroupedActionItem;
+use super::dialog::{
+    first_selectable_index, last_selectable_index, selectable_index_at_or_after,
+    selectable_index_at_or_before, GroupedActionItem,
+};
 use super::types::{Action, ActionsDialogConfig, AnchorPosition, SearchPosition, SectionStyle};
 use super::window::{
     close_actions_window, is_actions_window_open, notify_actions_window, open_actions_window,
@@ -151,35 +154,6 @@ fn command_bar_key_intent(key: &str, modifiers: &gpui::Modifiers) -> Option<Comm
     }
 
     None
-}
-
-#[inline]
-fn is_selectable_row(row: &GroupedActionItem) -> bool {
-    matches!(row, GroupedActionItem::Item(_))
-}
-
-fn first_selectable_index(rows: &[GroupedActionItem]) -> Option<usize> {
-    rows.iter().position(is_selectable_row)
-}
-
-fn last_selectable_index(rows: &[GroupedActionItem]) -> Option<usize> {
-    rows.iter().rposition(is_selectable_row)
-}
-
-fn selectable_index_at_or_before(rows: &[GroupedActionItem], start: usize) -> Option<usize> {
-    if rows.is_empty() {
-        return None;
-    }
-    let clamped = start.min(rows.len() - 1);
-    (0..=clamped).rev().find(|&ix| is_selectable_row(&rows[ix]))
-}
-
-fn selectable_index_at_or_after(rows: &[GroupedActionItem], start: usize) -> Option<usize> {
-    if rows.is_empty() {
-        return None;
-    }
-    let clamped = start.min(rows.len() - 1);
-    (clamped..rows.len()).find(|&ix| is_selectable_row(&rows[ix]))
 }
 
 // --- Chrome contract audit ------------------------------------------------
@@ -636,11 +610,11 @@ impl CommandBar {
             *sections.entry(section).or_insert(0) += 1;
         }
         let configured_section_count = sections.len();
-        let configured_shortcut_count = self
-            .actions
-            .iter()
-            .filter(|action| action.shortcut.is_some())
-            .count();
+        let configured_shortcut_count = super::dialog::action_shortcut_parity_report(
+            &self.actions,
+            &(0..self.actions.len()).collect::<Vec<_>>(),
+        )
+        .displayed_shortcut_count;
 
         let base = serde_json::json!({
             "schemaVersion": 1,
@@ -762,7 +736,9 @@ impl CommandBar {
 
         if let Some(dialog) = &self.dialog {
             dialog.update(cx, |d, cx| {
+                let previously_selected_action_id = d.get_selected_action_id();
                 d.actions = actions;
+                super::dialog::append_disabled_action_test_fixture(&mut d.actions);
                 d.reset_filter_to_all();
                 d.search_text.clear();
                 d.grouped_items = rebuild_grouped_items_for_command_bar(
@@ -773,10 +749,8 @@ impl CommandBar {
 
                 let old_count = d.list_state.item_count();
                 d.list_state.splice(0..old_count, d.grouped_items.len());
-                d.selected_index = first_selectable_index(&d.grouped_items).unwrap_or(0);
-                if !d.grouped_items.is_empty() {
-                    d.list_state.scroll_to_reveal_item(d.selected_index);
-                }
+                d.apply_refresh_selection(previously_selected_action_id.as_deref());
+                d.scroll_to_selected();
                 cx.notify();
             });
 
@@ -1032,8 +1006,8 @@ impl CommandBar {
         if let Some(dialog) = &self.dialog {
             dialog.update(cx, |d, cx| {
                 if let Some(first) = first_selectable_index(&d.grouped_items) {
-                    d.selected_index = first;
-                    d.list_state.scroll_to_reveal_item(d.selected_index);
+                    d.selected_index = Some(first);
+                    d.scroll_to_selected();
                     cx.notify();
                 }
             });
@@ -1046,8 +1020,8 @@ impl CommandBar {
         if let Some(dialog) = &self.dialog {
             dialog.update(cx, |d, cx| {
                 if let Some(last) = last_selectable_index(&d.grouped_items) {
-                    d.selected_index = last;
-                    d.list_state.scroll_to_reveal_item(d.selected_index);
+                    d.selected_index = Some(last);
+                    d.scroll_to_selected();
                     cx.notify();
                 }
             });
@@ -1063,12 +1037,16 @@ impl CommandBar {
                     return;
                 }
 
-                let target = d.selected_index.saturating_sub(COMMAND_BAR_PAGE_JUMP);
+                let current = d
+                    .selected_index
+                    .or_else(|| first_selectable_index(&d.grouped_items))
+                    .unwrap_or(0);
+                let target = current.saturating_sub(COMMAND_BAR_PAGE_JUMP);
                 if let Some(next_index) = selectable_index_at_or_before(&d.grouped_items, target)
                     .or_else(|| first_selectable_index(&d.grouped_items))
                 {
-                    d.selected_index = next_index;
-                    d.list_state.scroll_to_reveal_item(d.selected_index);
+                    d.selected_index = Some(next_index);
+                    d.scroll_to_selected();
                     cx.notify();
                 }
             });
@@ -1085,12 +1063,16 @@ impl CommandBar {
                 }
 
                 let last_index = d.grouped_items.len() - 1;
-                let target = (d.selected_index + COMMAND_BAR_PAGE_JUMP).min(last_index);
+                let current = d
+                    .selected_index
+                    .or_else(|| first_selectable_index(&d.grouped_items))
+                    .unwrap_or(0);
+                let target = (current + COMMAND_BAR_PAGE_JUMP).min(last_index);
                 if let Some(next_index) = selectable_index_at_or_after(&d.grouped_items, target)
                     .or_else(|| last_selectable_index(&d.grouped_items))
                 {
-                    d.selected_index = next_index;
-                    d.list_state.scroll_to_reveal_item(d.selected_index);
+                    d.selected_index = Some(next_index);
+                    d.scroll_to_selected();
                     cx.notify();
                 }
             });
@@ -1156,21 +1138,12 @@ mod command_bar_set_actions_tests {
     use crate::actions::types::ActionCategory;
 
     fn test_action(id: &str, section: Option<&str>) -> Action {
-        Action {
-            id: id.to_string(),
-            title: id.to_string(),
-            description: None,
-            category: ActionCategory::ScriptContext,
-            shortcut: None,
-            shortcut_tokens: None,
-            has_action: true,
-            value: None,
-            icon: None,
-            section: section.map(str::to_string),
-            title_lower: id.to_lowercase(),
-            description_lower: None,
-            shortcut_lower: None,
+        let mut action = Action::new(id, id, None, ActionCategory::ScriptContext);
+        action.has_action = true;
+        if let Some(section) = section {
+            action = action.with_section(section);
         }
+        action
     }
 
     #[test]

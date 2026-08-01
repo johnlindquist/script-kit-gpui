@@ -623,6 +623,97 @@ impl SourceChipStatusKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowEligibility {
+    pub focusable: bool,
+    pub selectable: bool,
+    pub activatable: bool,
+}
+
+impl RowEligibility {
+    pub const fn inert() -> Self {
+        Self {
+            focusable: false,
+            selectable: false,
+            activatable: false,
+        }
+    }
+
+    pub const fn enabled_action() -> Self {
+        Self {
+            focusable: true,
+            selectable: true,
+            activatable: true,
+        }
+    }
+
+    pub const fn disabled_explanation() -> Self {
+        Self {
+            focusable: true,
+            selectable: true,
+            activatable: false,
+        }
+    }
+
+    pub fn new(focusable: bool, selectable: bool, activatable: bool) -> Self {
+        assert!(
+            !activatable || selectable,
+            "activatable rows must be selectable"
+        );
+        assert!(
+            !selectable || focusable,
+            "selectable rows must be focusable"
+        );
+        Self {
+            focusable,
+            selectable,
+            activatable,
+        }
+    }
+}
+
+pub fn first_selectable_eligibility_index(rows: &[RowEligibility]) -> Option<usize> {
+    rows.iter().position(|row| row.selectable)
+}
+
+pub fn last_selectable_eligibility_index(rows: &[RowEligibility]) -> Option<usize> {
+    rows.iter().rposition(|row| row.selectable)
+}
+
+pub fn selectable_eligibility_index_at_or_before(
+    rows: &[RowEligibility],
+    start: usize,
+) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    let clamped = start.min(rows.len() - 1);
+    (0..=clamped).rev().find(|&ix| rows[ix].selectable)
+}
+
+pub fn selectable_eligibility_index_at_or_after(
+    rows: &[RowEligibility],
+    start: usize,
+) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    let clamped = start.min(rows.len() - 1);
+    (clamped..rows.len()).find(|&ix| rows[ix].selectable)
+}
+
+pub fn coerce_eligibility_selection(rows: &[RowEligibility], index: usize) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    let index = index.min(rows.len() - 1);
+    if rows[index].selectable {
+        return Some(index);
+    }
+    selectable_eligibility_index_at_or_after(rows, index.saturating_add(1))
+        .or_else(|| selectable_eligibility_index_at_or_before(rows, index.saturating_sub(1)))
+}
+
 #[derive(Clone, Debug)]
 pub enum GroupedListItem {
     /// A section header (e.g., "SUGGESTED", "MAIN")
@@ -632,6 +723,14 @@ pub enum GroupedListItem {
     /// A regular list item - usize is the index in the flat results array
     Item(usize),
 }
+
+pub fn grouped_list_item_eligibility(item: &GroupedListItem) -> RowEligibility {
+    match item {
+        GroupedListItem::Item(_) => RowEligibility::enabled_action(),
+        GroupedListItem::SectionHeader(..) | GroupedListItem::Status(_) => RowEligibility::inert(),
+    }
+}
+
 /// Coerce a selection index to land on a selectable (non-header) row.
 ///
 /// When the given index lands on a header or is out of bounds:
@@ -648,34 +747,8 @@ pub enum GroupedListItem {
 /// - `Some(index)` - Valid selectable index
 /// - `None` - No selectable items exist (list is empty or contains only headers)
 pub fn coerce_selection(rows: &[GroupedListItem], ix: usize) -> Option<usize> {
-    if rows.is_empty() {
-        return None;
-    }
-
-    // Clamp to valid range first
-    let ix = ix.min(rows.len() - 1);
-
-    // If already on a selectable item, done
-    if matches!(rows[ix], GroupedListItem::Item(_)) {
-        return Some(ix);
-    }
-
-    // Search down for next selectable
-    for (j, item) in rows.iter().enumerate().skip(ix + 1) {
-        if matches!(item, GroupedListItem::Item(_)) {
-            return Some(j);
-        }
-    }
-
-    // Search up for previous selectable
-    for (j, item) in rows.iter().enumerate().take(ix).rev() {
-        if matches!(item, GroupedListItem::Item(_)) {
-            return Some(j);
-        }
-    }
-
-    // No selectable items found
-    None
+    let eligibility: Vec<_> = rows.iter().map(grouped_list_item_eligibility).collect();
+    coerce_eligibility_selection(&eligibility, ix)
 }
 /// Pre-computed grouped list state for efficient navigation
 ///
@@ -1315,6 +1388,7 @@ pub struct ListItem {
     icon: Option<IconKind>,
     destructive_text_color: Option<u32>,
     selected: bool,
+    disabled: bool,
     /// Whether this item is being hovered (subtle visual feedback, separate from selected)
     hovered: bool,
     colors: ListItemColors,
@@ -1393,6 +1467,7 @@ impl ListItem {
             icon: None,
             destructive_text_color: None,
             selected: false,
+            disabled: false,
             hovered: false,
             colors,
             index: None,
@@ -1541,6 +1616,11 @@ impl ListItem {
         self
     }
 
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     /// Set whether this item is hovered (visual feedback)
     ///
     /// Hovered items show a visible background tint (25% opacity).
@@ -1661,10 +1741,11 @@ impl RenderOnce for ListItem {
         let semantic_id = self.semantic_id;
         let shortcut_visibility_policy = self.shortcut_visibility_policy;
         let destructive_text_color = self.destructive_text_color;
+        let disabled = self.disabled;
 
         // GPUI input modality: suppress hover visuals during keyboard navigation.
-        // This replaces per-view InputMode::Mouse gating — GPUI tracks modality natively.
-        let hover_visible = self.hovered && !window.last_input_was_keyboard();
+        // Disabled explanatory rows remain selectable but never brighten on hover.
+        let hover_visible = self.hovered && !disabled && !window.last_input_was_keyboard();
 
         // Live main-menu theme exploration. Every variation shares one baseline
         // — no left-edge bar — then coordinates row, icon, text, and metadata.
@@ -1678,6 +1759,7 @@ impl RenderOnce for ListItem {
             row_kind,
             MainMenuRowKind::CarbonNeon | MainMenuRowKind::OceanGlass
         ) && selected
+            && !disabled
             && matches!(row_kind, MainMenuRowKind::CarbonNeon);
         let icon_is_accent_bright = matches!(
             row_kind,
@@ -1686,14 +1768,16 @@ impl RenderOnce for ListItem {
                 | MainMenuRowKind::OceanGlass
                 | MainMenuRowKind::CarbonNeon
                 | MainMenuRowKind::OperatorMonoGlass
-        ) && selected;
+        ) && selected
+            && !disabled;
         let icon_all_accent = matches!(row_kind, MainMenuRowKind::OperatorMonoGlass);
         let icon_tile = !matches!(
             row_kind,
             MainMenuRowKind::Smoke
                 | MainMenuRowKind::GraphitePill
                 | MainMenuRowKind::OperatorMonoGlass
-        ) && selected;
+        ) && selected
+            && !disabled;
         let ring = matches!(
             row_kind,
             MainMenuRowKind::BlueGlass
@@ -1704,7 +1788,8 @@ impl RenderOnce for ListItem {
                 | MainMenuRowKind::CarbonNeon
                 | MainMenuRowKind::StudioPaperGlass
                 | MainMenuRowKind::OperatorMonoGlass
-        ) && selected;
+        ) && selected
+            && !disabled;
         let badges_accent = matches!(
             row_kind,
             MainMenuRowKind::FrostedCommand
@@ -1729,12 +1814,23 @@ impl RenderOnce for ListItem {
                 primary_name_alpha: colors.alpha_name as u8,
             },
         );
-        let selected_bg: Hsla = rgba(
+        let resolved_row_state = row_states.for_flags(crate::theme::RowStateFlags {
+            selected,
+            hovered: hover_visible,
+            active: selected && !disabled,
+            disabled,
+        });
+        let selected_bg: Hsla = rgba(if disabled {
+            row_states
+                .disabled_selected
+                .background_rgba
+                .expect("selected disabled main-menu rows always have a background")
+        } else {
             row_states
                 .active
                 .background_rgba
-                .expect("active main-menu rows always have a background"),
-        )
+                .expect("active main-menu rows always have a background")
+        })
         .into();
         let hover_bg: Hsla = rgba(
             row_states
@@ -1746,7 +1842,9 @@ impl RenderOnce for ListItem {
 
         // Icon element (if present) - displayed on the left
         // Supports both emoji strings and PNG image data
-        let icon_text_color = if let Some(color) = destructive_text_color {
+        let icon_text_color = if disabled {
+            rgba(resolved_row_state.icon_foreground_rgba)
+        } else if let Some(color) = destructive_text_color {
             rgb(color)
         } else if on_accent_text || icon_tile {
             // On a solid accent fill/tile, the glyph flips to the contrast color.
@@ -1860,14 +1958,14 @@ impl RenderOnce for ListItem {
         };
         let name_element = if let Some(ref indices) = self.highlight_indices {
             // Build StyledText with highlighted matched characters.
-            let highlight_color = if let Some(color) = destructive_text_color {
+            let highlight_color = if disabled {
+                rgba(resolved_row_state.primary_foreground_rgba)
+            } else if let Some(color) = destructive_text_color {
                 rgb(color)
             } else if on_accent_text {
                 rgb(colors.text_on_accent)
-            } else if self.selected {
-                rgba(row_states.active.primary_foreground_rgba)
             } else {
-                rgba(row_states.rest.primary_foreground_rgba)
+                rgba(resolved_row_state.primary_foreground_rgba)
             };
             let highlight_style = HighlightStyle {
                 color: Some(highlight_color.into()),
@@ -1883,7 +1981,9 @@ impl RenderOnce for ListItem {
             }
 
             // Base text color is more muted when highlighting to create contrast
-            let base_color = if on_accent_text {
+            let base_color = if disabled {
+                rgba(resolved_row_state.secondary_foreground_rgba)
+            } else if on_accent_text {
                 rgba((colors.text_on_accent << 8) | 0xCC)
             } else if self.selected {
                 rgba((colors.text_primary << 8) | colors.alpha_muted)
@@ -1909,14 +2009,14 @@ impl RenderOnce for ListItem {
                 .child(styled)
         } else {
             // Plain text rendering (no search active)
-            let name_color = if let Some(color) = destructive_text_color {
+            let name_color = if disabled {
+                rgba(resolved_row_state.primary_foreground_rgba)
+            } else if let Some(color) = destructive_text_color {
                 rgb(color)
             } else if on_accent_text {
                 rgb(colors.text_on_accent)
-            } else if self.selected {
-                rgba(row_states.active.primary_foreground_rgba)
             } else {
-                rgba(row_states.rest.primary_foreground_rgba)
+                rgba(resolved_row_state.primary_foreground_rgba)
             };
             div()
                 .text_size(px(metrics.name_font_size))
@@ -1934,7 +2034,8 @@ impl RenderOnce for ListItem {
         };
 
         // Accent Name: optional underline beneath the bright-accent title.
-        let name_underline_selected = selected && metrics.row_selected_name_underline_width > 0.0;
+        let name_underline_selected =
+            selected && !disabled && metrics.row_selected_name_underline_width > 0.0;
         let name_element = if name_underline_selected {
             name_element
                 .border_b(px(metrics.row_selected_name_underline_width))
@@ -1960,23 +2061,19 @@ impl RenderOnce for ListItem {
                 // Selected: use primary text (readable against selection bg)
                 // Unselected: use secondary text (recedes in the list)
                 // All descriptions use text_primary — opacity alone controls brightness
-                let desc_color = if on_accent_text {
+                let desc_color = if on_accent_text && !disabled {
                     rgba((colors.text_on_accent << 8) | 0xCC)
-                } else if self.selected {
-                    rgba((colors.text_primary << 8) | colors.alpha_muted)
                 } else {
-                    rgba((colors.text_primary << 8) | colors.alpha_hint)
+                    rgba(resolved_row_state.secondary_foreground_rgba)
                 };
                 let desc_element = if let Some(ref desc_indices) =
                     self.description_highlight_indices
                 {
                     // Build StyledText with highlighted matched characters in description.
-                    let highlight_color = if on_accent_text {
+                    let highlight_color = if on_accent_text && !disabled {
                         rgb(colors.text_on_accent)
-                    } else if self.selected {
-                        rgba((colors.text_primary << 8) | colors.alpha_strong)
                     } else {
-                        rgba((colors.text_primary << 8) | colors.alpha_muted)
+                        rgba(resolved_row_state.primary_foreground_rgba)
                     };
                     let highlight_style = HighlightStyle {
                         color: Some(highlight_color.into()),
@@ -1992,12 +2089,7 @@ impl RenderOnce for ListItem {
                         }
                     }
 
-                    let base_alpha = if self.selected {
-                        ALPHA_DESC_SELECTED
-                    } else {
-                        metrics.desc_quiet_alpha
-                    };
-                    let base_color = rgba((colors.text_secondary << 8) | base_alpha);
+                    let base_color = rgba(resolved_row_state.secondary_foreground_rgba);
                     let full_desc = desc.clone();
                     let styled = StyledText::new(full_desc.clone()).with_highlights(highlights);
 
@@ -2052,21 +2144,22 @@ impl RenderOnce for ListItem {
         let shortcut_element: AnyElement = if let Some(shortcut_tokens) =
             resolved_shortcut_tokens.as_ref()
         {
-            let show_shortcut =
-                should_show_row_shortcut(shortcut_visibility_policy, self.selected, hover_visible);
+            let show_shortcut = !disabled
+                && should_show_row_shortcut(
+                    shortcut_visibility_policy,
+                    self.selected,
+                    hover_visible,
+                );
             if show_shortcut {
                 crate::components::hint_strip::emit_shortcut_chrome_audit(
                     "list_item",
                     "footer-keycap-selected-only",
                 );
                 let theme = crate::theme::get_cached_theme();
-                let shortcut_state = row_states.for_state(
-                    crate::theme::main_menu_row_state_from_flags(selected, hover_visible),
-                );
                 crate::components::footer_chrome::render_footer_row_shortcut_keycaps_from_tokens(
                     shortcut_tokens.iter().map(String::as_str),
                     &theme,
-                    shortcut_state.primary_foreground_rgba,
+                    resolved_row_state.primary_foreground_rgba,
                 )
             } else {
                 div().into_any_element()
@@ -2239,7 +2332,7 @@ impl RenderOnce for ListItem {
             );
         }
 
-        if !self.selected {
+        if !self.selected && !disabled {
             inner_content = inner_content.hover(move |s| s.bg(hover_bg));
         }
 

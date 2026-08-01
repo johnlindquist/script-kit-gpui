@@ -99,7 +99,23 @@ mod tests {
         assert_eq!(action.title, "title");
         assert_eq!(action.description, Some("desc".to_string()));
         assert_eq!(action.category, ActionCategory::ScriptContext);
+        assert!(action.is_enabled());
+        assert_eq!(action.disabled_reason(), None);
         assert!(action.shortcut.is_none());
+    }
+
+    #[test]
+    fn disabled_action_requires_and_exposes_a_reason() {
+        let action = Action::new("id", "title", None, ActionCategory::ScriptContext)
+            .disabled("Requires a selected file");
+        assert!(!action.is_enabled());
+        assert_eq!(action.disabled_reason(), Some("Requires a selected file"));
+    }
+
+    #[test]
+    #[should_panic(expected = "disabled actions require a non-empty reason")]
+    fn disabled_action_rejects_blank_reason() {
+        let _ = Action::new("id", "title", None, ActionCategory::ScriptContext).disabled("  ");
     }
 
     #[test]

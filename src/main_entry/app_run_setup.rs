@@ -2610,45 +2610,76 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 // popup through Cmd+K / arrow-nav / Enter. AFK harnesses and
                                 // other agentic-testing clients discover valid ids via
                                 // `getElements` on the actions-dialog window, then fire via
-                                // this command to avoid flaky key simulation.
-                                let resolved_host = match host.as_deref() {
-                                    Some("argPrompt") => Some(ActionsDialogHost::ArgPrompt),
-                                    Some("divPrompt") => Some(ActionsDialogHost::DivPrompt),
-                                    Some("editorPrompt") => Some(ActionsDialogHost::EditorPrompt),
-                                    Some("templatePrompt") => {
-                                        Some(ActionsDialogHost::TemplatePrompt)
+                                // this command to avoid flaky key simulation. When the detached
+                                // Actions dialog is live, route through its typed availability
+                                // guard instead of closing it and calling the host directly.
+                                let detached_window_open = crate::actions::is_actions_window_open();
+                                let actions_surface_open =
+                                    detached_window_open || view.show_actions_popup;
+                                let detached_activation = if detached_window_open {
+                                    crate::actions::activate_detached_actions_window_action(
+                                        action_id.clone(),
+                                        ctx,
+                                    )
+                                } else {
+                                    None
+                                };
+                                let resolved_host = if !actions_surface_open {
+                                    match host.as_deref() {
+                                        Some("argPrompt") => Some(ActionsDialogHost::ArgPrompt),
+                                        Some("divPrompt") => Some(ActionsDialogHost::DivPrompt),
+                                        Some("editorPrompt") => {
+                                            Some(ActionsDialogHost::EditorPrompt)
+                                        }
+                                        Some("templatePrompt") => {
+                                            Some(ActionsDialogHost::TemplatePrompt)
+                                        }
+                                        Some("termPrompt") => Some(ActionsDialogHost::TermPrompt),
+                                        Some("formPrompt") => Some(ActionsDialogHost::FormPrompt),
+                                        Some("chatPrompt") => Some(ActionsDialogHost::ChatPrompt),
+                                        Some("mainList") => Some(ActionsDialogHost::MainList),
+                                        Some("fileSearch") => Some(ActionsDialogHost::FileSearch),
+                                        Some("clipboardHistory") => {
+                                            Some(ActionsDialogHost::ClipboardHistory)
+                                        }
+                                        Some("dictationHistory") => {
+                                            Some(ActionsDialogHost::DictationHistory)
+                                        }
+                                        Some("emojiPicker") => {
+                                            Some(ActionsDialogHost::EmojiPicker)
+                                        }
+                                        Some("appLauncher") => {
+                                            Some(ActionsDialogHost::AppLauncher)
+                                        }
+                                        Some("builtinList") => {
+                                            Some(ActionsDialogHost::BuiltinList)
+                                        }
+                                        Some("webcamPrompt") => {
+                                            Some(ActionsDialogHost::WebcamPrompt)
+                                        }
+                                        Some("agentChatChat") => {
+                                            Some(ActionsDialogHost::AgentChat)
+                                        }
+                                        Some("agent_chatHistory") => {
+                                            Some(ActionsDialogHost::AgentChatHistory)
+                                        }
+                                        Some("agentChatDetached") => {
+                                            Some(ActionsDialogHost::AgentChatDetached)
+                                        }
+                                        Some(other) => {
+                                            logging::log(
+                                                "STDIN",
+                                                &format!(
+                                                    "TriggerAction: unknown host '{}'; falling back to current view host",
+                                                    other
+                                                ),
+                                            );
+                                            view.current_actions_host()
+                                        }
+                                        None => view.current_actions_host(),
                                     }
-                                    Some("termPrompt") => Some(ActionsDialogHost::TermPrompt),
-                                    Some("formPrompt") => Some(ActionsDialogHost::FormPrompt),
-                                    Some("chatPrompt") => Some(ActionsDialogHost::ChatPrompt),
-                                    Some("mainList") => Some(ActionsDialogHost::MainList),
-                                    Some("fileSearch") => Some(ActionsDialogHost::FileSearch),
-                                    Some("clipboardHistory") => {
-                                        Some(ActionsDialogHost::ClipboardHistory)
-                                    }
-                                    Some("dictationHistory") => {
-                                        Some(ActionsDialogHost::DictationHistory)
-                                    }
-                                    Some("emojiPicker") => Some(ActionsDialogHost::EmojiPicker),
-                                    Some("appLauncher") => Some(ActionsDialogHost::AppLauncher),
-                                    Some("builtinList") => Some(ActionsDialogHost::BuiltinList),
-                                    Some("webcamPrompt") => Some(ActionsDialogHost::WebcamPrompt),
-                                    Some("agentChatChat") => Some(ActionsDialogHost::AgentChat),
-                                    Some("agent_chatHistory") => Some(ActionsDialogHost::AgentChatHistory),
-                                    Some("agentChatDetached") => {
-                                        Some(ActionsDialogHost::AgentChatDetached)
-                                    }
-                                    Some(other) => {
-                                        logging::log(
-                                            "STDIN",
-                                            &format!(
-                                                "TriggerAction: unknown host '{}'; falling back to current view host",
-                                                other
-                                            ),
-                                        );
-                                        view.current_actions_host()
-                                    }
-                                    None => view.current_actions_host(),
+                                } else {
+                                    None
                                 };
 
                                 let mut receipt_host = None;
@@ -2656,36 +2687,70 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 let mut receipt_error_code = None;
                                 let mut popup_closed = false;
 
-                                match resolved_host {
-                                    Some(host_value) => {
-                                        receipt_host = Some(format!("{host_value:?}"));
-                                        receipt_ok = true;
-                                        logging::log(
-                                            "STDIN",
-                                            &format!(
-                                                "TriggerAction: host={:?} action_id='{}' popup_open={}",
-                                                host_value,
-                                                action_id,
-                                                view.show_actions_popup
-                                            ),
-                                        );
-                                        if view.show_actions_popup {
-                                            view.close_actions_popup(host_value, window, ctx);
-                                            popup_closed = true;
+                                if actions_surface_open {
+                                    receipt_host = Some("ActionsDialog".to_string());
+                                    match detached_activation {
+                                        Some(crate::actions::ActionsDialogActivation::Executed {
+                                            should_close, ..
+                                        }) => {
+                                            receipt_ok = true;
+                                            popup_closed = should_close;
                                         }
-                                        view.execute_action_for_actions_host(
-                                            host_value,
-                                            action_id.clone(),
-                                            window,
-                                            ctx,
-                                        );
+                                        Some(
+                                            crate::actions::ActionsDialogActivation::DrillDownPushed {
+                                                ..
+                                            },
+                                        ) => {
+                                            receipt_ok = true;
+                                        }
+                                        Some(crate::actions::ActionsDialogActivation::Blocked {
+                                            ..
+                                        }) => {
+                                            receipt_error_code = Some("action_disabled".to_string());
+                                        }
+                                        Some(crate::actions::ActionsDialogActivation::NoSelection) => {
+                                            receipt_error_code = Some("action_not_found".to_string());
+                                        }
+                                        None => {
+                                            // Fail closed if the host still reports an Actions
+                                            // surface but no detached dialog handle can activate it.
+                                            // Falling through would bypass the availability guard.
+                                            receipt_error_code =
+                                                Some("actions_dialog_unavailable".to_string());
+                                        }
                                     }
-                                    None => {
-                                        receipt_error_code = Some("no_host".to_string());
-                                        logging::log(
-                                            "STDIN",
-                                            "TriggerAction: no host supplied and current view has no shared-actions host; skipping",
-                                        );
+                                } else {
+                                    match resolved_host {
+                                        Some(host_value) => {
+                                            receipt_host = Some(format!("{host_value:?}"));
+                                            receipt_ok = true;
+                                            logging::log(
+                                                "STDIN",
+                                                &format!(
+                                                    "TriggerAction: host={:?} action_id='{}' popup_open={}",
+                                                    host_value,
+                                                    action_id,
+                                                    view.show_actions_popup
+                                                ),
+                                            );
+                                            if view.show_actions_popup {
+                                                view.close_actions_popup(host_value, window, ctx);
+                                                popup_closed = true;
+                                            }
+                                            view.execute_action_for_actions_host(
+                                                host_value,
+                                                action_id.clone(),
+                                                window,
+                                                ctx,
+                                            );
+                                        }
+                                        None => {
+                                            receipt_error_code = Some("no_host".to_string());
+                                            logging::log(
+                                                "STDIN",
+                                                "TriggerAction: no host supplied and current view has no shared-actions host; skipping",
+                                            );
+                                        }
                                     }
                                 }
                                 if let Some(ref rid) = request_id {

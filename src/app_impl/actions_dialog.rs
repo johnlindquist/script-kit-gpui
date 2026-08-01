@@ -204,6 +204,14 @@ impl ScriptListApp {
                 }
                 self.execute_action_for_actions_host(host, action_id, window, cx);
             }
+            crate::actions::ActionsDialogActivation::Blocked { action_id, reason } => {
+                tracing::info!(
+                    target: "script_kit::actions",
+                    action_id = %action_id,
+                    reason_fingerprint = %crate::actions::ActionsDialog::devtools_text_fingerprint(&reason),
+                    "actions_dialog_host_activation_blocked"
+                );
+            }
             crate::actions::ActionsDialogActivation::NoSelection => {}
         }
     }
@@ -1121,7 +1129,8 @@ impl ScriptListApp {
                         should_close,
                     };
                 }
-                crate::actions::ActionsDialogActivation::NoSelection => {
+                crate::actions::ActionsDialogActivation::Blocked { .. }
+                | crate::actions::ActionsDialogActivation::NoSelection => {
                     return ActionsRoute::Handled;
                 }
             }
@@ -1244,7 +1253,8 @@ impl ScriptListApp {
                         should_close,
                     };
                 }
-                crate::actions::ActionsDialogActivation::NoSelection => {
+                crate::actions::ActionsDialogActivation::Blocked { .. }
+                | crate::actions::ActionsDialogActivation::NoSelection => {
                     return ActionsRoute::Handled;
                 }
             }

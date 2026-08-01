@@ -6,10 +6,51 @@
 #[cfg(test)]
 mod tests {
     use crate::list_item::{
-        format_shortcut_display, should_show_row_shortcut, should_show_search_description,
-        should_show_search_shortcut, RowShortcutVisibilityPolicy,
-        LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED,
+        coerce_eligibility_selection, first_selectable_eligibility_index, format_shortcut_display,
+        last_selectable_eligibility_index, selectable_eligibility_index_at_or_after,
+        selectable_eligibility_index_at_or_before, should_show_row_shortcut,
+        should_show_search_description, should_show_search_shortcut, RowEligibility,
+        RowShortcutVisibilityPolicy, LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED,
     };
+
+    #[test]
+    fn row_eligibility_navigation_skips_inert_rows_and_keeps_disabled_explanations() {
+        let rows = [
+            RowEligibility::inert(),
+            RowEligibility::enabled_action(),
+            RowEligibility::inert(),
+            RowEligibility::disabled_explanation(),
+        ];
+
+        assert_eq!(first_selectable_eligibility_index(&rows), Some(1));
+        assert_eq!(last_selectable_eligibility_index(&rows), Some(3));
+        assert_eq!(selectable_eligibility_index_at_or_before(&rows, 2), Some(1));
+        assert_eq!(selectable_eligibility_index_at_or_after(&rows, 2), Some(3));
+        assert_eq!(coerce_eligibility_selection(&rows, 0), Some(1));
+        assert_eq!(coerce_eligibility_selection(&rows, 2), Some(3));
+        assert_eq!(coerce_eligibility_selection(&rows, 99), Some(3));
+        assert!(!rows[3].activatable);
+    }
+
+    #[test]
+    fn row_eligibility_navigation_returns_none_without_selectable_rows() {
+        let rows = [RowEligibility::inert(), RowEligibility::inert()];
+        assert_eq!(first_selectable_eligibility_index(&rows), None);
+        assert_eq!(last_selectable_eligibility_index(&rows), None);
+        assert_eq!(coerce_eligibility_selection(&rows, 0), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "activatable rows must be selectable")]
+    fn row_eligibility_rejects_activatable_non_selectable_rows() {
+        let _ = RowEligibility::new(true, false, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "selectable rows must be focusable")]
+    fn row_eligibility_rejects_selectable_non_focusable_rows() {
+        let _ = RowEligibility::new(false, true, false);
+    }
 
     #[test]
     fn legacy_rows_share_the_disabled_hover_tooltip_policy() {

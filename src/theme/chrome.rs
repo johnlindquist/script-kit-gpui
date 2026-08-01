@@ -236,6 +236,8 @@ pub(crate) struct MainMenuRowStatePalette {
     pub rest: MainMenuRowStateColors,
     pub hover: MainMenuRowStateColors,
     pub active: MainMenuRowStateColors,
+    pub disabled: MainMenuRowStateColors,
+    pub disabled_selected: MainMenuRowStateColors,
 }
 
 impl MainMenuRowStatePalette {
@@ -244,6 +246,16 @@ impl MainMenuRowStatePalette {
             MainMenuRowState::Rest => self.rest,
             MainMenuRowState::Hover => self.hover,
             MainMenuRowState::Active => self.active,
+        }
+    }
+
+    pub(crate) fn for_flags(self, flags: RowStateFlags) -> MainMenuRowStateColors {
+        match row_visual_state_from_flags(flags) {
+            RowVisualState::Rest => self.rest,
+            RowVisualState::Hovered => self.hover,
+            RowVisualState::Selected | RowVisualState::Active => self.active,
+            RowVisualState::Disabled => self.disabled,
+            RowVisualState::DisabledSelected => self.disabled_selected,
         }
     }
 }
@@ -362,6 +374,8 @@ pub(crate) fn resolve_main_menu_row_state_palette_from_parts(
         rest: shared.rest,
         hover: shared.hovered,
         active: shared.active,
+        disabled: shared.disabled,
+        disabled_selected: shared.disabled_selected,
     }
 }
 

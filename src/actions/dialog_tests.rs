@@ -438,7 +438,21 @@ fn initial_selection_index_skips_header_row() {
         GroupedActionItem::SectionHeader("Actions".into()),
         GroupedActionItem::Item(0),
     ];
-    assert_eq!(initial_selection_index(&rows), 1);
+    assert_eq!(initial_selection_index(&rows), Some(1));
+}
+
+#[test]
+fn initial_selection_is_none_for_headers_only() {
+    let rows = vec![GroupedActionItem::SectionHeader("Actions".into())];
+    assert_eq!(initial_selection_index(&rows), None);
+}
+
+#[test]
+fn disabled_explanatory_actions_remain_selectable_rows() {
+    let actions = vec![make_action("disabled", "Unavailable", Some("Actions"))
+        .disabled("Requires a selected file")];
+    let grouped = build_grouped_items_static(&actions, &[0], SectionStyle::Headers);
+    assert_eq!(initial_selection_index(&grouped), Some(1));
 }
 
 #[test]

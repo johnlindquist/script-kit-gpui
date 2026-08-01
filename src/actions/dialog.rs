@@ -114,6 +114,9 @@ pub(crate) fn action_subtitle_for_display(action: &Action, show_subtitles: bool)
 /// `shortcut_tokens`. Falls back to on-demand parsing when tokens are missing.
 /// This helper runs in the render path, so it must stay side-effect free.
 fn action_shortcut_tokens_for_render(action: &Action) -> Option<std::borrow::Cow<'_, [String]>> {
+    if !action.is_enabled() {
+        return None;
+    }
     if let Some(tokens) = action.shortcut_tokens.as_deref() {
         return Some(std::borrow::Cow::Borrowed(tokens));
     }
@@ -153,6 +156,9 @@ pub(crate) struct DisplayedShortcutKeyBindingSpec {
 }
 
 fn action_canonical_shortcut(action: &Action) -> Option<String> {
+    if !action.is_enabled() {
+        return None;
+    }
     let display_shortcut = action.shortcut.as_deref()?;
     let canonical = crate::components::hint_strip::canonical_shortcut_hint(display_shortcut);
     if canonical.is_empty() {
@@ -178,6 +184,9 @@ pub(crate) fn visible_action_shortcut_bindings(
         let Some(action) = actions.get(action_idx) else {
             continue;
         };
+        if !action.is_enabled() {
+            continue;
+        }
         let Some(shortcut) = action.shortcut.clone() else {
             continue;
         };
@@ -213,13 +222,23 @@ pub(crate) fn visible_action_shortcut_bindings(
     bindings
 }
 
+fn action_has_routable_shortcut(
+    actions: &[Action],
+    filtered_actions: &[usize],
+    action_id: &str,
+) -> bool {
+    visible_action_shortcut_bindings(actions, filtered_actions)
+        .into_iter()
+        .any(|binding| binding.action_id == action_id && binding.routable)
+}
+
 pub(crate) fn action_shortcut_parity_report(
     actions: &[Action],
     filtered_actions: &[usize],
 ) -> ActionShortcutParityReport {
     let bindings = visible_action_shortcut_bindings(actions, filtered_actions);
-    let displayed_shortcut_count = bindings.len();
     let routable_shortcut_count = bindings.iter().filter(|binding| binding.routable).count();
+    let displayed_shortcut_count = routable_shortcut_count;
     let duplicate_shortcut_count = bindings
         .iter()
         .filter(|binding| {
@@ -231,11 +250,9 @@ pub(crate) fn action_shortcut_parity_report(
                     > 1
         })
         .count();
-    let unroutable_displayed_shortcuts = bindings
-        .iter()
-        .filter(|binding| !binding.routable)
-        .cloned()
-        .collect();
+    // Unroutable candidates are intentionally not displayed: a visible keycap
+    // without one executable route is a false promise.
+    let unroutable_displayed_shortcuts = Vec::new();
 
     ActionShortcutParityReport {
         displayed_shortcut_count,
@@ -376,81 +393,65 @@ pub enum GroupedActionItem {
 }
 
 #[inline]
-pub(super) fn is_selectable_row(row: &GroupedActionItem) -> bool {
-    matches!(row, GroupedActionItem::Item(_))
+pub(super) fn grouped_action_item_eligibility(
+    row: &GroupedActionItem,
+) -> crate::list_item::RowEligibility {
+    match row {
+        GroupedActionItem::SectionHeader(_) => crate::list_item::RowEligibility::inert(),
+        GroupedActionItem::Item(_) => crate::list_item::RowEligibility::enabled_action(),
+    }
+}
+
+fn grouped_action_eligibilities(
+    rows: &[GroupedActionItem],
+) -> Vec<crate::list_item::RowEligibility> {
+    rows.iter().map(grouped_action_item_eligibility).collect()
+}
+
+fn action_row_eligibility(action: &Action) -> crate::list_item::RowEligibility {
+    if action.is_enabled() {
+        crate::list_item::RowEligibility::enabled_action()
+    } else {
+        crate::list_item::RowEligibility::disabled_explanation()
+    }
 }
 
 pub(super) fn first_selectable_index(rows: &[GroupedActionItem]) -> Option<usize> {
-    rows.iter().position(is_selectable_row)
+    crate::list_item::first_selectable_eligibility_index(&grouped_action_eligibilities(rows))
 }
 
 pub(super) fn last_selectable_index(rows: &[GroupedActionItem]) -> Option<usize> {
-    rows.iter().rposition(is_selectable_row)
+    crate::list_item::last_selectable_eligibility_index(&grouped_action_eligibilities(rows))
 }
 
 pub(super) fn selectable_index_at_or_before(
     rows: &[GroupedActionItem],
     start: usize,
 ) -> Option<usize> {
-    if rows.is_empty() {
-        return None;
-    }
-    let clamped = start.min(rows.len() - 1);
-    (0..=clamped).rev().find(|&ix| is_selectable_row(&rows[ix]))
+    crate::list_item::selectable_eligibility_index_at_or_before(
+        &grouped_action_eligibilities(rows),
+        start,
+    )
 }
 
 pub(super) fn selectable_index_at_or_after(
     rows: &[GroupedActionItem],
     start: usize,
 ) -> Option<usize> {
-    if rows.is_empty() {
-        return None;
-    }
-    let clamped = start.min(rows.len() - 1);
-    (clamped..rows.len()).find(|&ix| is_selectable_row(&rows[ix]))
+    crate::list_item::selectable_eligibility_index_at_or_after(
+        &grouped_action_eligibilities(rows),
+        start,
+    )
 }
 
-/// Coerce action selection to skip section headers during navigation
-///
-/// When the given index lands on a header:
-/// 1. First tries searching DOWN to find the next Item
-/// 2. If not found, searches UP to find the previous Item
-/// 3. If still not found, returns None
 pub(super) fn coerce_action_selection(rows: &[GroupedActionItem], ix: usize) -> Option<usize> {
-    if rows.is_empty() {
-        return None;
-    }
-
-    let ix = ix.min(rows.len() - 1);
-
-    // If already on a selectable item, done
-    if matches!(rows[ix], GroupedActionItem::Item(_)) {
-        return Some(ix);
-    }
-
-    // Search down for next selectable
-    for (j, item) in rows.iter().enumerate().skip(ix + 1) {
-        if matches!(item, GroupedActionItem::Item(_)) {
-            return Some(j);
-        }
-    }
-
-    // Search up for previous selectable
-    for (j, item) in rows.iter().enumerate().take(ix).rev() {
-        if matches!(item, GroupedActionItem::Item(_)) {
-            return Some(j);
-        }
-    }
-
-    None
+    crate::list_item::coerce_eligibility_selection(&grouped_action_eligibilities(rows), ix)
 }
 
-/// Compute the initial selected row for grouped items.
-///
-/// Constructors should use this helper so initial selection behavior remains
-/// consistent across all dialog entry points.
-pub(super) fn initial_selection_index(rows: &[GroupedActionItem]) -> usize {
-    coerce_action_selection(rows, 0).unwrap_or(0)
+/// Compute the initial selected row for grouped items. `None` is the only
+/// representation of a list with no selectable action row.
+pub(super) fn initial_selection_index(rows: &[GroupedActionItem]) -> Option<usize> {
+    coerce_action_selection(rows, 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -684,6 +685,9 @@ pub enum ActionsDialogActivation {
         action_id: String,
         should_close: bool,
     },
+    /// The row remains selected so its explanation can be read, but execution
+    /// is blocked at the one shared activation guard.
+    Blocked { action_id: String, reason: String },
     /// Nothing was selected.
     NoSelection,
 }
@@ -747,7 +751,7 @@ pub struct ActionsDialog {
     /// Description match char indices, aligned with `filtered_actions`.
     /// Only rendered when `config.show_subtitles` is set.
     pub(crate) filtered_description_match_indices: Vec<Vec<usize>>,
-    pub selected_index: usize, // Index within grouped_items (visual row index)
+    pub selected_index: Option<usize>, // Index within grouped_items; None when no row is selectable
     pub search_text: String,
     pub focus_handle: FocusHandle,
     pub on_select: ActionCallback,
@@ -830,6 +834,34 @@ pub struct ActionsDialog {
 fn actions_dialog_footerless_config(mut config: ActionsDialogConfig) -> ActionsDialogConfig {
     config.show_footer = false;
     config
+}
+
+pub(super) fn append_disabled_action_test_fixture(actions: &mut Vec<Action>) {
+    let test_status = std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() == Some("1");
+    let fixture_enabled = std::env::var("SCRIPT_KIT_TEST_DISABLED_ACTION_FIXTURE")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if !test_status
+        || !fixture_enabled
+        || actions
+            .iter()
+            .any(|action| action.id == "consistency_disabled_action")
+    {
+        return;
+    }
+
+    actions.push(
+        Action::new(
+            "consistency_disabled_action",
+            "Unavailable Test Action",
+            Some("Deterministic disabled-action fixture".to_string()),
+            ActionCategory::GlobalOps,
+        )
+        .with_shortcut("⌘⌥⇧9")
+        .with_section("Test Fixtures")
+        .disabled("Requires an unavailable test capability"),
+    );
 }
 
 // --- merged from part_02.rs ---
@@ -923,8 +955,9 @@ impl ActionsDialog {
     }
 
     fn selected_row_content_range(&self, row_height: f32) -> Option<(f32, f32)> {
-        let item = self.grouped_items.get(self.selected_index)?;
-        let top = self.scroll_top_y_for_item_index(self.selected_index, row_height);
+        let selected_index = self.selected_index?;
+        let item = self.grouped_items.get(selected_index)?;
+        let top = self.scroll_top_y_for_item_index(selected_index, row_height);
         Some((top, top + Self::row_height_for_scroll(item, row_height)))
     }
 
@@ -937,7 +970,7 @@ impl ActionsDialog {
     }
 
     fn update_pending_scrollbar_reveal_offset(&mut self, row_height: f32) {
-        if first_selectable_index(&self.grouped_items) == Some(self.selected_index) {
+        if first_selectable_index(&self.grouped_items) == self.selected_index {
             self.pending_scrollbar_scroll_top_y = Some(0.0);
             return;
         }
@@ -962,6 +995,12 @@ impl ActionsDialog {
 
     fn clear_pending_scrollbar_offset(&mut self) {
         self.pending_scrollbar_scroll_top_y = None;
+    }
+
+    pub(crate) fn scroll_to_selected(&self) {
+        if let Some(selected_index) = self.selected_index {
+            self.list_state.scroll_to_reveal_item(selected_index);
+        }
     }
 
     fn search_placeholder_text(&self) -> SharedString {
@@ -1032,7 +1071,7 @@ impl ActionsDialog {
             search_at_top,
             show_footer: false,
             items,
-            selected_index: self.selected_index,
+            selected_index: self.selected_index.unwrap_or_default(),
             hovered_index: None,
             input_mode_mouse: true,
         }
@@ -1085,7 +1124,7 @@ impl ActionsDialog {
     pub fn from_actions_with_context(
         focus_handle: FocusHandle,
         on_select: ActionCallback,
-        actions: Vec<Action>,
+        mut actions: Vec<Action>,
         focused_script: Option<ScriptInfo>,
         focused_scriptlet: Option<Scriptlet>,
         theme: Arc<theme::Theme>,
@@ -1094,6 +1133,7 @@ impl ActionsDialog {
         config: ActionsDialogConfig,
     ) -> Self {
         let config = actions_dialog_footerless_config(config);
+        append_disabled_action_test_fixture(&mut actions);
         let filtered_actions: Vec<usize> = (0..actions.len()).collect();
         let grouped_items =
             build_grouped_items_static(&actions, &filtered_actions, config.section_style);
@@ -1494,7 +1534,7 @@ impl ActionsDialog {
             self.rebuild_grouped_items();
             self.apply_refresh_selection(previously_selected_action_id.as_deref());
             if !self.grouped_items.is_empty() {
-                self.list_state.scroll_to_reveal_item(self.selected_index);
+                self.scroll_to_selected();
             }
         }
 
@@ -1697,6 +1737,27 @@ impl ActionsDialog {
         action_id: String,
         cx: &mut Context<Self>,
     ) -> ActionsDialogActivation {
+        let Some(action) = self.actions.iter().find(|action| action.id == action_id) else {
+            tracing::info!(
+                target: "script_kit::actions",
+                action_id = %action_id,
+                outcome = "missing_action",
+                "actions_dialog_activation"
+            );
+            return ActionsDialogActivation::NoSelection;
+        };
+        if let Some(reason) = action.disabled_reason() {
+            let reason = reason.to_string();
+            tracing::info!(
+                target: "script_kit::actions",
+                action_id = %action_id,
+                reason_fingerprint = %Self::devtools_text_fingerprint(&reason),
+                outcome = "blocked",
+                "actions_dialog_activation"
+            );
+            return ActionsDialogActivation::Blocked { action_id, reason };
+        }
+
         // Check for a registered drill-down route
         if let Some(route) = self.drill_down_routes.get(&action_id).cloned() {
             let route_id = route.id.clone();
@@ -1715,7 +1776,7 @@ impl ActionsDialog {
             };
         }
 
-        let should_close = self.selected_action_should_close();
+        let should_close = self.action_should_close(&action_id);
         (self.on_select)(action_id.clone());
         tracing::info!(
             target: "script_kit::actions",
@@ -1733,7 +1794,7 @@ impl ActionsDialog {
 
     /// Try to select an action by ID without requiring `cx`.
     /// Returns `true` if the action was found and selected.
-    fn restore_selected_action_id(&mut self, action_id: &str) -> bool {
+    pub(super) fn restore_selected_action_id(&mut self, action_id: &str) -> bool {
         let Some(action_index) = self
             .filtered_actions
             .iter()
@@ -1748,19 +1809,26 @@ impl ActionsDialog {
         else {
             return false;
         };
-        self.selected_index = grouped_index;
+        self.selected_index = Some(grouped_index);
         self.clear_mouse_submit_arm();
         true
     }
 
-    fn apply_refresh_selection(&mut self, previously_selected_action_id: Option<&str>) {
+    pub(super) fn apply_refresh_selection(&mut self, previously_selected_action_id: Option<&str>) {
         let policy = actions_refresh_selection_policy(self.actions_selection_user_moved);
+        let previous_visual_index = self.selected_index;
         let restored = matches!(policy, ActionsRefreshSelectionPolicy::RestoreIdentity)
             && previously_selected_action_id
                 .map(|id| self.restore_selected_action_id(id))
                 .unwrap_or(false);
         if !restored {
-            self.selected_index = initial_selection_index(&self.grouped_items);
+            self.selected_index = match (policy, previous_visual_index) {
+                (ActionsRefreshSelectionPolicy::RestoreIdentity, Some(index)) => {
+                    coerce_action_selection(&self.grouped_items, index)
+                        .or_else(|| initial_selection_index(&self.grouped_items))
+                }
+                _ => initial_selection_index(&self.grouped_items),
+            };
             self.clear_mouse_submit_arm();
         }
 
@@ -1776,6 +1844,7 @@ impl ActionsDialog {
     /// Apply a route's actions/title/placeholder to the live dialog (no state restore).
     fn apply_route_state_from_route(&mut self, route: &ActionsDialogRoute) {
         self.actions = route.actions.clone();
+        append_disabled_action_test_fixture(&mut self.actions);
         self.reset_filter_to_all();
         self.search_text.clear();
         self.context_title = route.context_title.clone();
@@ -1792,13 +1861,14 @@ impl ActionsDialog {
         self.clear_mouse_submit_arm();
 
         if !self.grouped_items.is_empty() {
-            self.list_state.scroll_to_reveal_item(self.selected_index);
+            self.scroll_to_selected();
         }
     }
 
     /// Restore a full route state snapshot (search text + selection).
     fn apply_route_state(&mut self, state: &ActionsDialogRouteState, _cx: &mut Context<Self>) {
         self.actions = state.route.actions.clone();
+        append_disabled_action_test_fixture(&mut self.actions);
         self.reset_filter_to_all();
         self.search_text = state.search_text.clone();
         self.context_title = state.route.context_title.clone();
@@ -1822,7 +1892,7 @@ impl ActionsDialog {
         }
 
         if !self.grouped_items.is_empty() {
-            self.list_state.scroll_to_reveal_item(self.selected_index);
+            self.scroll_to_selected();
         }
     }
 
@@ -1960,7 +2030,7 @@ impl ActionsDialog {
         logging::log(
             "ACTIONS",
             &format!(
-                "ActionsDialog created with config: {} actions, search={:?}, section_style={:?}, initial_selection={}",
+                "ActionsDialog created with config: {} actions, search={:?}, section_style={:?}, initial_selection={:?}",
                 actions.len(),
                 config.search_position,
                 config.section_style,
@@ -2095,13 +2165,23 @@ impl ActionsDialog {
                         .filtered_actions
                         .get(*filter_idx)
                         .and_then(|action_idx| self.actions.get(*action_idx));
+                    let display_shortcut = action.is_some_and(|action| {
+                        action_has_routable_shortcut(
+                            &self.actions,
+                            &self.filtered_actions,
+                            &action.id,
+                        )
+                    });
                     (
                         "action",
                         style.row_height,
                         action.map(|action| action.title.as_str()),
                         action.map(|action| action.id.as_str()),
-                        action.and_then(|action| action.shortcut.as_deref()),
                         action
+                            .filter(|_| display_shortcut)
+                            .and_then(|action| action.shortcut.as_deref()),
+                        action
+                            .filter(|_| display_shortcut)
                             .and_then(|action| {
                                 action_shortcut_tokens_for_render(action)
                                     .map(|tokens| tokens.iter().cloned().collect::<Vec<_>>())
@@ -2110,6 +2190,18 @@ impl ActionsDialog {
                     )
                 }
             };
+            let action_for_row = match item {
+                GroupedActionItem::Item(filter_idx) => self
+                    .filtered_actions
+                    .get(*filter_idx)
+                    .and_then(|action_idx| self.actions.get(*action_idx)),
+                GroupedActionItem::SectionHeader(_) => None,
+            };
+            let eligibility = action_for_row
+                .map(action_row_eligibility)
+                .unwrap_or_else(crate::list_item::RowEligibility::inert);
+            let enabled = action_for_row.is_none_or(Action::is_enabled);
+            let disabled_reason = action_for_row.and_then(Action::disabled_reason);
             let viewport_y = list_top + content_y - scroll_top_content_y;
             let rect = Self::devtools_rect(0.0, viewport_y, POPUP_WIDTH, height);
             let inner_rect = if kind == "action" {
@@ -2167,7 +2259,7 @@ impl ActionsDialog {
                 None
             };
             let visible = viewport_y + height > list_top && viewport_y < viewport_bottom;
-            let is_selected = visual_index == self.selected_index;
+            let is_selected = self.selected_index == Some(visual_index);
             let row = serde_json::json!({
                 "semanticId": if kind == "action" {
                     action_id.map(|id| format!("choice:{visual_index}:{id}"))
@@ -2180,6 +2272,11 @@ impl ActionsDialog {
                 "labelLength": label.map(|value| value.chars().count()),
                 "labelFingerprint": label.map(Self::devtools_text_fingerprint),
                 "actionId": action_id,
+                "enabled": enabled,
+                "disabledReason": disabled_reason,
+                "focusable": eligibility.focusable,
+                "selectable": eligibility.selectable,
+                "activatable": eligibility.activatable,
                 "selected": is_selected,
                 "hovered": self.hovered_row == Some(visual_index),
                 "mouseArmed": self.mouse_armed_row == Some(visual_index),
@@ -2199,7 +2296,13 @@ impl ActionsDialog {
                     .and_then(|layout| layout.get("bounds"))
                     .cloned(),
                 "shortcutLayout": shortcut_layout,
-                "disabledReasonBoundsAvailable": false,
+                "disabledReasonBoundsAvailable": disabled_reason.is_some(),
+                "disabledReasonBounds": disabled_reason.map(|_| Self::devtools_rect(
+                    ACTION_ROW_INSET + (POPUP_WIDTH - (ACTION_ROW_INSET * 2.0) - 132.0).max(0.0),
+                    viewport_y,
+                    132.0,
+                    height,
+                )),
             });
 
             if kind == "section" {
@@ -2384,7 +2487,7 @@ impl ActionsDialog {
         }
     }
 
-    fn devtools_text_fingerprint(value: &str) -> String {
+    pub(crate) fn devtools_text_fingerprint(value: &str) -> String {
         let mut hash = 0xcbf29ce484222325_u64;
         for byte in value.as_bytes() {
             hash ^= u64::from(*byte);
@@ -2393,11 +2496,13 @@ impl ActionsDialog {
         format!("fnv1a64:{hash:016x}")
     }
 
-    fn devtools_action_summary(action: &Action) -> serde_json::Value {
-        let canonical_shortcut = action
-            .shortcut
-            .as_deref()
-            .map(crate::components::hint_strip::canonical_shortcut_hint);
+    fn devtools_action_summary(action: &Action, shortcut_routable: bool) -> serde_json::Value {
+        let eligibility = action_row_eligibility(action);
+        let displayed_shortcut = shortcut_routable
+            .then_some(action.shortcut.as_deref())
+            .flatten();
+        let canonical_shortcut =
+            displayed_shortcut.map(crate::components::hint_strip::canonical_shortcut_hint);
         serde_json::json!({
             "id": action.id.as_str(),
             "titleLength": action.title.chars().count(),
@@ -2406,8 +2511,13 @@ impl ActionsDialog {
             "descriptionFingerprint": action.description.as_ref().map(|value| Self::devtools_text_fingerprint(value)),
             "section": action.section.as_deref(),
             "category": format!("{:?}", action.category),
-            "hasShortcut": action.shortcut.is_some(),
-            "shortcut": action.shortcut.as_deref(),
+            "enabled": action.is_enabled(),
+            "disabledReason": action.disabled_reason(),
+            "focusable": eligibility.focusable,
+            "selectable": eligibility.selectable,
+            "activatable": eligibility.activatable,
+            "hasShortcut": displayed_shortcut.is_some(),
+            "shortcut": displayed_shortcut,
             "canonicalShortcut": canonical_shortcut,
             "hasAction": action.has_action,
         })
@@ -2657,7 +2767,12 @@ impl ActionsDialog {
             .iter()
             .filter_map(|idx| self.actions.get(*idx))
             .take(20)
-            .map(Self::devtools_action_summary)
+            .map(|action| {
+                Self::devtools_action_summary(
+                    action,
+                    action_has_routable_shortcut(&self.actions, &self.filtered_actions, &action.id),
+                )
+            })
             .collect();
         let section_count = self.count_section_headers();
         let mut sections = std::collections::BTreeMap::<String, usize>::new();
@@ -2716,7 +2831,7 @@ impl ActionsDialog {
                 "sections": sections,
                 "visibleSampleLimit": visible_actions.len(),
                 "visibleSample": visible_actions,
-                "shortcutCount": self.actions.iter().filter(|action| action.shortcut.is_some()).count(),
+                "shortcutCount": shortcut_parity.displayed_shortcut_count,
                 "shortcutParity": {
                     "displayedShortcutCount": shortcut_parity.displayed_shortcut_count,
                     "routableShortcutCount": shortcut_parity.routable_shortcut_count,
@@ -2791,7 +2906,7 @@ impl ActionsDialog {
         let mut seen_names: HashSet<String> = HashSet::new();
         let mut duplicate_names = Vec::new();
 
-        let converted: Vec<Action> = actions
+        let mut converted: Vec<Action> = actions
             .iter()
             .enumerate()
             .filter_map(|(protocol_index, pa)| {
@@ -2803,27 +2918,19 @@ impl ActionsDialog {
                 }
                 sdk_action_indices.push(protocol_index);
                 let shortcut = pa.shortcut.as_ref().map(|s| Self::format_shortcut_hint(s));
-                let shortcut_tokens = shortcut
-                    .as_ref()
-                    .map(|s| crate::components::hint_strip::shortcut_tokens_from_hint(s));
-                Some(Action {
-                    id: pa.name.clone(),
-                    title: pa.name.clone(),
-                    description: pa.description.clone(),
-                    category: ActionCategory::ScriptContext,
-                    shortcut: shortcut.clone(),
-                    shortcut_tokens,
-                    has_action: pa.has_action,
-                    value: pa.value.clone(),
-                    icon: None,    // SDK actions don't currently have icons
-                    section: None, // SDK actions don't currently have sections
-                    // Pre-compute lowercase for fast filtering (performance optimization)
-                    title_lower: pa.name.to_lowercase(),
-                    description_lower: pa.description.as_ref().map(|d| d.to_lowercase()),
-                    shortcut_lower: shortcut.as_ref().map(|s| s.to_lowercase()),
-                })
+                let mut action = Action::new(
+                    pa.name.clone(),
+                    pa.name.clone(),
+                    pa.description.clone(),
+                    ActionCategory::ScriptContext,
+                )
+                .with_shortcut_opt(shortcut);
+                action.has_action = pa.has_action;
+                action.value = pa.value.clone();
+                Some(action)
             })
             .collect();
+        append_disabled_action_test_fixture(&mut converted);
         let visible_count = converted.len();
 
         if !duplicate_names.is_empty() {
@@ -2938,6 +3045,7 @@ impl ActionsDialog {
         if let Some(section) = menu_syntax_section {
             actions.extend(power_syntax_section_to_actions(section));
             if section.mode == SectionMode::Replace {
+                append_disabled_action_test_fixture(&mut actions);
                 return actions;
             }
         }
@@ -2966,6 +3074,7 @@ impl ActionsDialog {
             actions.extend(get_global_actions());
         }
 
+        append_disabled_action_test_fixture(&mut actions);
         actions
     }
 
@@ -3043,6 +3152,15 @@ impl ActionsDialog {
             &self.host_section,
         );
         self.refilter_with_previous_selection(previously_selected_action_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_actions_for_test(&mut self, actions: Vec<Action>) {
+        let previously_selected_action_id = self.get_selected_action_id();
+        self.actions = actions;
+        self.reset_filter_to_all();
+        self.rebuild_grouped_items();
+        self.apply_refresh_selection(previously_selected_action_id.as_deref());
     }
 
     /// Update the theme when hot-reloading
@@ -3131,13 +3249,13 @@ impl ActionsDialog {
         // Only scroll if we have results
         if !self.grouped_items.is_empty() {
             self.update_pending_scrollbar_reveal_offset(self.effective_row_height());
-            self.list_state.scroll_to_reveal_item(self.selected_index);
+            self.scroll_to_selected();
         }
 
         logging::log_debug(
             "ACTIONS_SCROLL",
             &format!(
-                "Filter changed: {} results, selected={}",
+                "Filter changed: {} results, selected={:?}",
                 self.filtered_actions.len(),
                 self.selected_index
             ),
@@ -3189,7 +3307,7 @@ impl ActionsDialog {
     /// Get the filtered_actions index for the current selection
     /// Returns None if selection is on a section header
     pub fn get_selected_filtered_index(&self) -> Option<usize> {
-        match self.grouped_items.get(self.selected_index) {
+        match self.grouped_items.get(self.selected_index?) {
             Some(GroupedActionItem::Item(filter_idx)) => Some(*filter_idx),
             _ => None,
         }
@@ -3400,11 +3518,11 @@ impl ActionsDialog {
             .iter()
             .position(|item| matches!(item, GroupedActionItem::Item(fi) if *fi == filter_pos))?;
 
-        self.selected_index = grouped_idx;
+        self.selected_index = Some(grouped_idx);
         self.actions_selection_user_moved = true;
         self.clear_mouse_submit_arm();
         self.update_pending_scrollbar_reveal_offset(self.effective_row_height());
-        self.list_state.scroll_to_reveal_item(self.selected_index);
+        self.scroll_to_selected();
         cx.notify();
         Some(action_id.to_string())
     }
@@ -3713,7 +3831,7 @@ impl ActionsDialog {
         self.actions_selection_user_moved = true;
         self.clear_mouse_submit_arm();
         self.update_pending_scrollbar_reveal_offset(self.effective_row_height());
-        self.list_state.scroll_to_reveal_item(self.selected_index);
+        self.scroll_to_selected();
         self.trigger_scrollbar_activity(cx);
         cx.notify();
     }
@@ -3724,37 +3842,51 @@ impl ActionsDialog {
     /// (not downward) to find the previous selectable item. This ensures
     /// navigation past section headers works correctly.
     pub fn move_up(&mut self, cx: &mut Context<Self>) {
-        if self.selected_index == 0 {
+        let Some(selected_index) = self.selected_index else {
+            self.selected_index = last_selectable_index(&self.grouped_items);
+            if self.selected_index.is_some() {
+                self.reveal_selection_after_navigation(cx);
+            }
+            return;
+        };
+        if selected_index == 0 {
             return;
         }
 
-        if let Some(i) = selectable_index_at_or_before(&self.grouped_items, self.selected_index - 1)
+        if let Some(index) = selectable_index_at_or_before(&self.grouped_items, selected_index - 1)
         {
-            self.selected_index = i;
+            self.selected_index = Some(index);
             self.reveal_selection_after_navigation(cx);
             logging::log_debug(
                 "ACTIONS_SCROLL",
-                &format!("Up: selected_index={}", self.selected_index),
+                &format!("Up: selected_index={:?}", self.selected_index),
             );
         }
     }
 
     /// Move selection down, skipping section headers
     pub fn move_down(&mut self, cx: &mut Context<Self>) {
-        if self.selected_index >= self.grouped_items.len().saturating_sub(1) {
+        let Some(selected_index) = self.selected_index else {
+            self.selected_index = first_selectable_index(&self.grouped_items);
+            if self.selected_index.is_some() {
+                self.reveal_selection_after_navigation(cx);
+            }
+            return;
+        };
+        if selected_index >= self.grouped_items.len().saturating_sub(1) {
             return;
         }
 
-        let Some(start) = self.selected_index.checked_add(1) else {
+        let Some(start) = selected_index.checked_add(1) else {
             return;
         };
 
-        if let Some(i) = selectable_index_at_or_after(&self.grouped_items, start) {
-            self.selected_index = i;
+        if let Some(index) = selectable_index_at_or_after(&self.grouped_items, start) {
+            self.selected_index = Some(index);
             self.reveal_selection_after_navigation(cx);
             logging::log_debug(
                 "ACTIONS_SCROLL",
-                &format!("Down: selected_index={}", self.selected_index),
+                &format!("Down: selected_index={:?}", self.selected_index),
             );
         }
     }
@@ -3775,25 +3907,43 @@ impl ActionsDialog {
         self.sdk_actions.as_ref()?.get(protocol_action_index)
     }
 
+    fn action_should_close(&self, action_id: &str) -> bool {
+        let Some(action_index) = self
+            .actions
+            .iter()
+            .position(|action| action.id == action_id)
+        else {
+            return false;
+        };
+        if !self.actions[action_index].is_enabled() {
+            return false;
+        }
+        self.sdk_actions
+            .as_ref()
+            .and_then(|actions| {
+                self.sdk_action_indices
+                    .get(action_index)
+                    .and_then(|protocol_index| actions.get(*protocol_index))
+            })
+            .map(ProtocolAction::should_close)
+            .unwrap_or(true)
+    }
+
     /// Check if the currently selected action should close the dialog
     /// Returns true if the action has close: true (or no close field, which defaults to true)
     /// Returns true for built-in actions (they always close)
     pub fn selected_action_should_close(&self) -> bool {
+        if self
+            .get_selected_action()
+            .is_some_and(|action| !action.is_enabled())
+        {
+            return false;
+        }
         if let Some(protocol_action) = self.get_selected_protocol_action() {
             protocol_action.should_close()
         } else {
             // Built-in actions always close
             true
-        }
-    }
-
-    /// Submit the selected action
-    pub fn submit_selected(&mut self) {
-        // Get action from grouped_items -> filtered_actions -> actions chain
-        if let Some(action) = self.get_selected_action() {
-            let action_id = action.id.clone();
-            logging::log("ACTIONS", &format!("Action selected: {}", action_id));
-            (self.on_select)(action_id);
         }
     }
 
@@ -3806,14 +3956,14 @@ impl ActionsDialog {
     /// Select a grouped item by index without submitting.
     /// Skips the update if the row is already selected.
     fn select_grouped_item(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if self.selected_index == ix {
+        if self.selected_index == Some(ix) {
             return;
         }
-        self.selected_index = ix;
+        self.selected_index = Some(ix);
         self.actions_selection_user_moved = true;
         self.clear_mouse_submit_arm();
         self.update_pending_scrollbar_reveal_offset(self.effective_row_height());
-        self.list_state.scroll_to_reveal_item(self.selected_index);
+        self.scroll_to_selected();
         let action_id = self
             .get_selected_action()
             .map(|action| action.id.clone())
@@ -3842,7 +3992,7 @@ impl ActionsDialog {
 
         self.actions_selection_user_moved = true;
 
-        let was_selected = self.selected_index == ix;
+        let was_selected = self.selected_index == Some(ix);
         let was_mouse_armed = self.mouse_armed_row == Some(ix);
         if !was_selected {
             self.select_grouped_item(ix, cx);
@@ -4270,7 +4420,7 @@ impl Render for ActionsDialog {
                                 // Action rows reuse the shared main-search ListItem chrome.
                                 if let Some(&action_idx) = this.filtered_actions.get(*filter_idx) {
                                     if let Some(action) = this.actions.get(action_idx) {
-                                        let is_selected = ix == current_selected;
+                                        let is_selected = Some(ix) == current_selected;
                                         let is_destructive = is_destructive_action(action);
 
                                         if is_destructive && style.shortcut_visible && action.shortcut.is_some() {
@@ -4291,7 +4441,12 @@ impl Render for ActionsDialog {
                                                 &popup_theme,
                                                 main_menu_theme.def(),
                                             );
-                                        let shortcut = if style.shortcut_visible {
+                                        let shortcut_routable = action_has_routable_shortcut(
+                                            &this.actions,
+                                            &this.filtered_actions,
+                                            &action.id,
+                                        );
+                                        let shortcut = if style.shortcut_visible && shortcut_routable {
                                             action.shortcut.clone()
                                         } else {
                                             None
@@ -4313,6 +4468,7 @@ impl Render for ActionsDialog {
                                         )
                                         .index(ix)
                                         .selected(is_selected)
+                                        .disabled(!action.is_enabled())
                                         .hovered(this.hovered_row == Some(ix))
                                         .main_menu_theme(main_menu_theme)
                                         .metrics_override(actions_row_metrics)
@@ -4330,6 +4486,25 @@ impl Render for ActionsDialog {
                                         .shortcut_visibility_policy(
                                             crate::list_item::RowShortcutVisibilityPolicy::AllRows,
                                         );
+
+                                        if let Some(reason) = action.disabled_reason() {
+                                            list_item = list_item.trailing_accessory(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "disabled-reason:{}",
+                                                        action.id
+                                                    )))
+                                                    .w(px(132.0))
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .whitespace_nowrap()
+                                                    .text_size(px(11.0))
+                                                    .text_color(rgba(
+                                                        (this.theme.colors.text.dimmed << 8) | 0xFF,
+                                                    ))
+                                                    .child(reason.to_string()),
+                                            );
+                                        }
 
                                         if is_destructive {
                                             let destructive_text =
@@ -4947,16 +5122,16 @@ fn emit_actions_dialog_runtime_audit(audit: &ActionsDialogRuntimeAudit) {
 #[cfg(test)]
 mod tests {
     use super::{
-        action_shortcut_parity_report, action_subtitle_for_display,
+        action_has_routable_shortcut, action_shortcut_parity_report, action_subtitle_for_display,
         actions_dialog_revealed_scroll_top, actions_dialog_scrollbar_fade_duration,
         actions_dialog_scrollbar_fade_opacity, actions_dialog_scrollbar_viewport_height,
         clear_duplicate_action_shortcuts, displayed_action_keybinding_specs,
         first_selectable_index, is_destructive_action, last_selectable_index,
         matching_action_id_for_keystroke, matching_filtered_action_id_for_keystroke,
         resolve_visible_action_shortcut, selectable_index_at_or_after,
-        selectable_index_at_or_before, should_render_section_separator, ActionsDialog,
-        ActionsDialogChromeAudit, ActionsDialogRuntimeAudit, GroupedActionItem,
-        MainListDisplayedActionShortcut,
+        selectable_index_at_or_before, should_render_section_separator,
+        visible_action_shortcut_bindings, ActionsDialog, ActionsDialogChromeAudit,
+        ActionsDialogRuntimeAudit, GroupedActionItem, MainListDisplayedActionShortcut,
     };
     use crate::actions::types::{Action, ActionCategory, ScriptInfo, SectionStyle};
     use crate::menu_syntax::{MenuSyntaxAction, MenuSyntaxActionKind};
@@ -5454,6 +5629,29 @@ mod tests {
     }
 
     #[test]
+    fn disabled_action_shortcut_is_neither_displayed_nor_routable() {
+        let actions = vec![Action::new(
+            "disabled",
+            "Unavailable",
+            None,
+            ActionCategory::ScriptContext,
+        )
+        .with_shortcut("⌘D")
+        .disabled("Requires a selected file")];
+        let mut command = gpui::Modifiers::default();
+        command.platform = true;
+
+        assert!(visible_action_shortcut_bindings(&actions, &[0]).is_empty());
+        assert_eq!(
+            resolve_visible_action_shortcut(&actions, &[0], "d", &command),
+            None
+        );
+        let report = action_shortcut_parity_report(&actions, &[0]);
+        assert_eq!(report.displayed_shortcut_count, 0);
+        assert_eq!(report.routable_shortcut_count, 0);
+    }
+
+    #[test]
     fn duplicate_visible_shortcuts_do_not_create_two_executable_routes() {
         let actions = vec![
             Action::new(
@@ -5480,10 +5678,20 @@ mod tests {
             None
         );
         let report = action_shortcut_parity_report(&actions, &[0, 1]);
-        assert_eq!(report.displayed_shortcut_count, 2);
+        assert_eq!(report.displayed_shortcut_count, 0);
         assert_eq!(report.routable_shortcut_count, 0);
         assert_eq!(report.duplicate_shortcut_count, 2);
-        assert_eq!(report.unroutable_displayed_shortcuts.len(), 2);
+        assert!(report.unroutable_displayed_shortcuts.is_empty());
+        assert!(!action_has_routable_shortcut(
+            &actions,
+            &[0, 1],
+            "add_shortcut"
+        ));
+        assert!(!action_has_routable_shortcut(
+            &actions,
+            &[0, 1],
+            "update_shortcut"
+        ));
     }
 
     #[test]

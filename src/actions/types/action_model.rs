@@ -42,6 +42,34 @@ use crate::actions::constants::POPUP_MAX_HEIGHT;
 /// action.has_action = true;
 /// action.value = Some("copy-to-clipboard".to_string());
 /// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActionAvailability {
+    Enabled,
+    Disabled { reason: String },
+}
+
+impl ActionAvailability {
+    pub fn disabled(reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        assert!(
+            !reason.trim().is_empty(),
+            "disabled actions require a non-empty reason"
+        );
+        Self::Disabled { reason }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+
+    pub fn disabled_reason(&self) -> Option<&str> {
+        match self {
+            Self::Enabled => None,
+            Self::Disabled { reason } => Some(reason.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
     /// Unique identifier for action routing.
@@ -58,6 +86,10 @@ pub struct Action {
 
     /// Category for grouping actions in the menu
     pub category: ActionCategory,
+
+    /// Explicit execution availability. Disabled actions remain visible and
+    /// selectable so their explanation can be read, but cannot activate.
+    availability: ActionAvailability,
 
     /// Optional keyboard shortcut hint (e.g., "⌘E", "⇧⌘K")
     /// Displayed as a badge next to the action title
@@ -222,6 +254,7 @@ impl Action {
             title: title_str,
             description,
             category,
+            availability: ActionAvailability::Enabled,
             shortcut: None,
             shortcut_tokens: None,
             has_action: false,
@@ -233,6 +266,19 @@ impl Action {
             description_lower,
             shortcut_lower: None,
         }
+    }
+
+    pub fn disabled(mut self, reason: impl Into<String>) -> Self {
+        self.availability = ActionAvailability::disabled(reason);
+        self
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.availability.is_enabled()
+    }
+
+    pub fn disabled_reason(&self) -> Option<&str> {
+        self.availability.disabled_reason()
     }
 
     pub fn with_shortcut(mut self, shortcut: impl Into<String>) -> Self {

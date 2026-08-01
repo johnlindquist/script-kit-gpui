@@ -929,7 +929,8 @@ pub fn toggle_detached_actions(cx: &mut App) {
                     crate::actions::close_actions_window(cx);
                 }
             }
-            crate::actions::ActionsDialogActivation::NoSelection => {}
+            crate::actions::ActionsDialogActivation::Blocked { .. }
+            | crate::actions::ActionsDialogActivation::NoSelection => {}
         }));
         dialog.set_on_close(std::sync::Arc::new(|cx| {
             activate_chat_window(cx);
@@ -1076,6 +1077,7 @@ fn open_detached_history_actions(cx: &mut App) -> bool {
                 }
             }
             crate::actions::ActionsDialogActivation::DrillDownPushed { .. }
+            | crate::actions::ActionsDialogActivation::Blocked { .. }
             | crate::actions::ActionsDialogActivation::NoSelection => {}
         }));
         dialog.set_on_close(std::sync::Arc::new(|cx| {

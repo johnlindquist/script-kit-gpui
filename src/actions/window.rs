@@ -620,7 +620,7 @@ impl ActionsWindow {
             Some(ActionsWindowKeyIntent::MoveHome) => {
                 self.dialog.update(cx, |d, cx| {
                     if let Some(first) = first_selectable_index(&d.grouped_items) {
-                        d.selected_index = first;
+                        d.selected_index = Some(first);
                         d.reveal_selection_after_navigation(cx);
                     }
                 });
@@ -629,7 +629,7 @@ impl ActionsWindow {
             Some(ActionsWindowKeyIntent::MoveEnd) => {
                 self.dialog.update(cx, |d, cx| {
                     if let Some(last) = last_selectable_index(&d.grouped_items) {
-                        d.selected_index = last;
+                        d.selected_index = Some(last);
                         d.reveal_selection_after_navigation(cx);
                     }
                 });
@@ -641,12 +641,16 @@ impl ActionsWindow {
                         return;
                     }
 
-                    let target = d.selected_index.saturating_sub(ACTIONS_WINDOW_PAGE_JUMP);
+                    let current = d
+                        .selected_index
+                        .or_else(|| first_selectable_index(&d.grouped_items))
+                        .unwrap_or(0);
+                    let target = current.saturating_sub(ACTIONS_WINDOW_PAGE_JUMP);
                     if let Some(next_index) =
                         selectable_index_at_or_before(&d.grouped_items, target)
                             .or_else(|| first_selectable_index(&d.grouped_items))
                     {
-                        d.selected_index = next_index;
+                        d.selected_index = Some(next_index);
                         d.reveal_selection_after_navigation(cx);
                     }
                 });
@@ -659,11 +663,15 @@ impl ActionsWindow {
                     }
 
                     let last_index = d.grouped_items.len() - 1;
-                    let target = (d.selected_index + ACTIONS_WINDOW_PAGE_JUMP).min(last_index);
+                    let current = d
+                        .selected_index
+                        .or_else(|| first_selectable_index(&d.grouped_items))
+                        .unwrap_or(0);
+                    let target = (current + ACTIONS_WINDOW_PAGE_JUMP).min(last_index);
                     if let Some(next_index) = selectable_index_at_or_after(&d.grouped_items, target)
                         .or_else(|| last_selectable_index(&d.grouped_items))
                     {
-                        d.selected_index = next_index;
+                        d.selected_index = Some(next_index);
                         d.reveal_selection_after_navigation(cx);
                     }
                 });
@@ -876,6 +884,13 @@ impl ActionsWindow {
                 if should_close {
                     self.request_close(window, cx, close_reason, true);
                 }
+            }
+            super::dialog::ActionsDialogActivation::Blocked { action_id, reason } => {
+                tracing::info!(
+                    event = "actions_window_activation_blocked",
+                    action = %action_id,
+                    reason_fingerprint = %super::dialog::ActionsDialog::devtools_text_fingerprint(&reason),
+                );
             }
             super::dialog::ActionsDialogActivation::NoSelection => {}
         }
@@ -2112,6 +2127,26 @@ pub fn route_key_to_detached_actions_window(
             handled
         })
         .unwrap_or(false)
+}
+
+/// Activate an action exposed by the live detached Actions dialog. Direct
+/// automation IDs must cross the same availability guard as Enter, click, and
+/// displayed shortcuts; bypassing the dialog would execute disabled rows and
+/// close the popup before their explanation can be read.
+pub(crate) fn activate_detached_actions_window_action(
+    action_id: String,
+    cx: &mut gpui::App,
+) -> Option<super::dialog::ActionsDialogActivation> {
+    let handle = get_actions_window_handle()?;
+    handle
+        .update(cx, |this, window, cx| {
+            let activation = this
+                .dialog
+                .update(cx, |dialog, cx| dialog.activate_action_id(action_id, cx));
+            this.handle_dialog_activation(activation.clone(), window, cx, "direct_action_id");
+            activation
+        })
+        .ok()
 }
 
 /// Get the actions window handle if it exists

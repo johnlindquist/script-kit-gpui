@@ -569,7 +569,7 @@ pub(crate) fn collect_actions_dialog_elements(
                     ElementType::Panel,
                     Some(label.clone()),
                     None,
-                    Some(dialog.selected_index == visual_index),
+                    Some(dialog.selected_index == Some(visual_index)),
                     None,
                     Some(visual_index),
                 ));
@@ -581,7 +581,7 @@ pub(crate) fn collect_actions_dialog_elements(
                 let Some(action) = dialog.actions.get(action_idx) else {
                     continue;
                 };
-                let is_selected = dialog.selected_index == visual_index;
+                let is_selected = dialog.selected_index == Some(visual_index);
                 let semantic_id = format!("choice:{visual_index}:{}", action.id);
 
                 if is_selected {
@@ -597,6 +597,17 @@ pub(crate) fn collect_actions_dialog_elements(
                     None,
                     Some(visual_index),
                 ));
+                if let Some(reason) = action.disabled_reason() {
+                    elements.push(element(
+                        &format!("disabled-reason:{}", action.id),
+                        ElementType::Panel,
+                        Some(reason.to_string()),
+                        None,
+                        None,
+                        None,
+                        Some(visual_index),
+                    ));
+                }
             }
         }
     }

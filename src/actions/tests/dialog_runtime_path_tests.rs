@@ -1,6 +1,6 @@
 use super::dialog::{ActionsDialog, GroupedActionItem};
 use super::types::{Action, ActionCallback, ActionCategory, ActionsDialogConfig, SectionStyle};
-use crate::theme;
+use crate::{protocol::ProtocolAction, theme};
 use gpui::{App, AppContext, Entity};
 use gpui_platform::headless;
 use std::sync::{Arc, Mutex};
@@ -57,7 +57,7 @@ fn build_dialog_entity(
 
 #[test]
 #[cfg_attr(target_os = "macos", ignore = "requires main thread (run via GPUI)")]
-fn test_submit_selected_does_emit_action_id_when_item_is_selected() {
+fn test_activate_selected_emits_action_id_when_item_is_selected() {
     let selected_ids = Arc::new(Mutex::new(Vec::new()));
     let selected_ids_for_test = Arc::clone(&selected_ids);
 
@@ -72,9 +72,15 @@ fn test_submit_selected_does_emit_action_id_when_item_is_selected() {
             Arc::clone(&selected_ids_for_test),
         );
 
-        cx.update_entity(&dialog, |dialog, _| {
-            dialog.selected_index = 1;
-            dialog.submit_selected();
+        cx.update_entity(&dialog, |dialog, entity_cx| {
+            dialog.selected_index = Some(1);
+            assert!(matches!(
+                dialog.activate_selected(entity_cx),
+                crate::actions::ActionsDialogActivation::Executed {
+                    action_id,
+                    should_close: true,
+                } if action_id == "action_beta"
+            ));
         });
     });
 
@@ -84,6 +90,154 @@ fn test_submit_selected_does_emit_action_id_when_item_is_selected() {
             .expect("submit_selected assertion lock poisoned"),
         vec!["action_beta".to_string()]
     );
+}
+
+#[gpui::test]
+fn disabled_action_blocks_selected_and_direct_activation_without_callback(
+    cx: &mut gpui::TestAppContext,
+) {
+    let selected_ids = Arc::new(Mutex::new(Vec::new()));
+    let dialog = cx.update(|cx| {
+        build_dialog_entity(
+            cx,
+            vec![sample_action("disabled", "Unavailable", None)
+                .with_shortcut("⌘D")
+                .disabled("Requires a selected file")],
+            ActionsDialogConfig::default(),
+            Arc::clone(&selected_ids),
+        )
+    });
+
+    let (selected_outcome, direct_outcome, selected_index) = cx.update(|cx| {
+        dialog.update(cx, |dialog, entity_cx| {
+            let selected_outcome = dialog.activate_selected(entity_cx);
+            let direct_outcome =
+                dialog.activate_action_id("disabled".to_string(), entity_cx);
+            (selected_outcome, direct_outcome, dialog.selected_index)
+        })
+    });
+
+    for outcome in [selected_outcome, direct_outcome] {
+        assert!(matches!(
+            outcome,
+            crate::actions::ActionsDialogActivation::Blocked {
+                action_id,
+                reason,
+            } if action_id == "disabled" && reason == "Requires a selected file"
+        ));
+    }
+    assert_eq!(selected_index, Some(0));
+    assert!(selected_ids.lock().expect("disabled callback lock").is_empty());
+}
+
+#[gpui::test]
+fn direct_activation_uses_the_activated_actions_close_policy(
+    cx: &mut gpui::TestAppContext,
+) {
+    let selected_ids = Arc::new(Mutex::new(Vec::new()));
+    let dialog = cx.update(|cx| {
+        build_dialog_entity(
+            cx,
+            Vec::new(),
+            ActionsDialogConfig::default(),
+            Arc::clone(&selected_ids),
+        )
+    });
+
+    let outcome = cx.update(|cx| {
+        dialog.update(cx, |dialog, entity_cx| {
+            let mut stays_open = ProtocolAction::new("stays_open".to_string());
+            stays_open.close = Some(false);
+            let mut closes = ProtocolAction::new("closes".to_string());
+            closes.close = Some(true);
+            dialog.set_sdk_actions(vec![stays_open, closes]);
+
+            assert_eq!(dialog.get_selected_action_id().as_deref(), Some("stays_open"));
+            dialog.activate_action_id("closes".to_string(), entity_cx)
+        })
+    });
+
+    assert!(matches!(
+        outcome,
+        crate::actions::ActionsDialogActivation::Executed {
+            action_id,
+            should_close: true,
+        } if action_id == "closes"
+    ));
+    assert_eq!(
+        *selected_ids.lock().expect("direct callback lock"),
+        vec!["closes".to_string()]
+    );
+}
+
+#[gpui::test]
+fn refresh_restores_identity_then_uses_nearest_eligible_row(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dialog = cx.update(|cx| {
+        build_dialog_entity(
+            cx,
+            vec![
+                sample_action("a", "A", None),
+                sample_action("b", "B", None),
+                sample_action("c", "C", None),
+            ],
+            ActionsDialogConfig::default(),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+    });
+
+    cx.update(|cx| {
+        dialog.update(cx, |dialog, entity_cx| {
+            assert_eq!(dialog.select_action_by_id("b", entity_cx), Some("b".to_string()));
+            dialog.replace_actions_for_test(vec![
+                sample_action("x", "X", None),
+                sample_action("a", "A", None),
+                sample_action("b", "B", None).disabled("Temporarily unavailable"),
+                sample_action("c", "C", None),
+            ]);
+            assert_eq!(dialog.get_selected_action_id().as_deref(), Some("b"));
+            assert_eq!(dialog.selected_index, Some(2));
+            assert!(!dialog.get_selected_action().expect("selected b").is_enabled());
+
+            dialog.replace_actions_for_test(vec![
+                sample_action("x", "X", None),
+                sample_action("a", "A", None),
+                sample_action("c", "C", None),
+            ]);
+            assert_eq!(dialog.get_selected_action_id().as_deref(), Some("c"));
+            assert_eq!(dialog.selected_index, Some(2));
+
+            dialog.replace_actions_for_test(Vec::new());
+            assert_eq!(dialog.selected_index, None);
+            assert_eq!(dialog.get_selected_action_id(), None);
+        });
+    });
+}
+
+#[gpui::test]
+fn empty_actions_dialog_has_no_selected_row_and_cannot_activate(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dialog = cx.update(|cx| {
+        build_dialog_entity(
+            cx,
+            Vec::new(),
+            ActionsDialogConfig::default(),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+    });
+
+    let (selected_index, outcome) = cx.update(|cx| {
+        dialog.update(cx, |dialog, entity_cx| {
+            (dialog.selected_index, dialog.activate_selected(entity_cx))
+        })
+    });
+    assert_eq!(selected_index, None);
+    assert!(matches!(
+        outcome,
+        crate::actions::ActionsDialogActivation::NoSelection
+    ));
 }
 
 #[test]
@@ -141,18 +295,18 @@ fn test_move_navigation_does_skip_headers_when_moving_up_and_down() {
                 dialog.grouped_items.get(3),
                 Some(GroupedActionItem::SectionHeader(section)) if section == "Global"
             ));
-            assert_eq!(dialog.selected_index, 1);
+            assert_eq!(dialog.selected_index, Some(1));
 
-            dialog.selected_index = 2;
+            dialog.selected_index = Some(2);
             dialog.move_down(entity_cx);
-            assert_eq!(dialog.selected_index, 4);
+            assert_eq!(dialog.selected_index, Some(4));
 
             dialog.move_up(entity_cx);
-            assert_eq!(dialog.selected_index, 2);
+            assert_eq!(dialog.selected_index, Some(2));
 
-            dialog.selected_index = 1;
+            dialog.selected_index = Some(1);
             dialog.move_up(entity_cx);
-            assert_eq!(dialog.selected_index, 1);
+            assert_eq!(dialog.selected_index, Some(1));
         });
     });
 }

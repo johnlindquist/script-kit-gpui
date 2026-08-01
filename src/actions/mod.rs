@@ -76,7 +76,10 @@ pub use types::{
 };
 
 // Window functions for separate vibrancy window
-pub(crate) use window::{actions_popup_automation_snapshot, get_actions_dialog_entity};
+pub(crate) use window::{
+    actions_popup_automation_snapshot, activate_detached_actions_window_action,
+    get_actions_dialog_entity,
+};
 pub use window::{
     close_actions_window, is_actions_window, is_actions_window_open,
     is_actions_window_open_for_main, notify_actions_window, open_actions_window,
