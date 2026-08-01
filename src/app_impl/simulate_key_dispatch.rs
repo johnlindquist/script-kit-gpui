@@ -472,6 +472,10 @@ impl ScriptListApp {
                                     && view.spine_enabled
                                     && !view.show_actions_popup
                                     && view.filter_text.trim().is_empty()
+                                    && view.main_view_context_chip_has_action(
+                                        crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                                        crate::components::main_view_chrome::SemanticChipAction::OpenSelector,
+                                    )
                                 {
                                     tracing::info!(
                                         target: "script_kit::spine",
@@ -498,6 +502,10 @@ impl ScriptListApp {
                                     && !view.filter_text.trim().is_empty()
                                     && !crate::file_search::looks_like_root_directory_browse_query(
                                         &view.filter_text,
+                                    )
+                                    && view.main_view_context_chip_has_action(
+                                        crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+                                        crate::components::main_view_chrome::SemanticChipAction::OpenSurface,
                                     )
                                 {
                                     tracing::info!(
@@ -599,6 +607,10 @@ impl ScriptListApp {
                                     && view.spine_enabled
                                     && !view.show_actions_popup
                                     && view.filter_text.trim().is_empty()
+                                    && view.main_view_context_chip_has_action(
+                                        crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                                        crate::components::main_view_chrome::SemanticChipAction::OpenSelector,
+                                    )
                                 {
                                     tracing::info!(
                                         target: "script_kit::spine",
@@ -625,6 +637,10 @@ impl ScriptListApp {
                                     && !view.filter_text.trim().is_empty()
                                     && !crate::file_search::looks_like_root_directory_browse_query(
                                         &view.filter_text,
+                                    )
+                                    && view.main_view_context_chip_has_action(
+                                        crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+                                        crate::components::main_view_chrome::SemanticChipAction::OpenSurface,
                                     )
                                 {
                                     tracing::info!(

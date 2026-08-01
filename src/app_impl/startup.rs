@@ -1523,6 +1523,10 @@ impl ScriptListApp {
                                 && this.spine_enabled
                                 && !this.show_actions_popup
                                 && this.filter_text.trim().is_empty()
+                                && this.main_view_context_chip_has_action(
+                                    crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                                    crate::components::main_view_chrome::SemanticChipAction::OpenSelector,
+                                )
                             {
                                 tracing::info!(
                                     target: "script_kit::spine",
@@ -1573,6 +1577,10 @@ impl ScriptListApp {
                                 && !this.filter_text.trim().is_empty()
                                 && !crate::file_search::looks_like_root_directory_browse_query(
                                     &this.filter_text,
+                                )
+                                && this.main_view_context_chip_has_action(
+                                    crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+                                    crate::components::main_view_chrome::SemanticChipAction::OpenSurface,
                                 )
                             {
                                 let query = this.filter_text.clone();

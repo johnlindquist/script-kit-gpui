@@ -108,6 +108,10 @@ impl ScriptListApp {
         if !self.spine_enabled
             || self.show_actions_popup
             || self.menu_syntax_capture_form_owns_input()
+            || !self.main_view_context_chip_has_action(
+                crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+                crate::components::main_view_chrome::SemanticChipAction::OpenSelector,
+            )
         {
             return false;
         }

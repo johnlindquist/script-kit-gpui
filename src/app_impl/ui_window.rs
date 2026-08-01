@@ -2088,18 +2088,29 @@ impl ScriptListApp {
     /// sniff found selected text in the app the user came from.
     pub(crate) fn selection_hint_chip(
         &self,
-    ) -> Option<crate::components::main_view_chrome::MainViewSelectionHintChip> {
+    ) -> Option<crate::components::main_view_chrome::SemanticChipSpec> {
         if !matches!(self.current_view, AppView::ScriptList) {
             return None;
         }
-        let text = self.shown_selection_hint_text.as_deref()?;
+        let fixture_text = (std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() == Some("1")
+            && std::env::var("SCRIPT_KIT_TEST_CONTEXT_CHIP_FIXTURE")
+                .ok()
+                .as_deref()
+                == Some("selection"))
+        .then_some("Fixture selected text");
+        let text = self
+            .shown_selection_hint_text
+            .as_deref()
+            .or(fixture_text)?;
         Some(
-            crate::components::main_view_chrome::MainViewSelectionHintChip {
-                label: format!(
-                    "Rewrite \u{201c}{}\u{201d}",
+            crate::components::main_view_chrome::SemanticChipSpec::context_attachment(
+                crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID,
+                format!(
+                    "Selected: \u{201c}{}\u{201d}",
                     crate::components::main_view_chrome::selection_hint_snippet(text, 24)
                 ),
-            },
+                false,
+            ),
         )
     }
 
@@ -2144,24 +2155,39 @@ impl ScriptListApp {
             && !self.show_actions_popup
     }
 
-    pub(crate) fn main_view_context_labels(
+    pub(crate) fn main_view_context_zone_spec(
         &self,
-    ) -> crate::components::main_view_chrome::MainViewContextLabels {
-        let cwd_label = self
-            .global_footer_cwd_chip()
-            .map(|chip| chip.label)
+    ) -> crate::components::main_view_chrome::MainViewContextZoneSpec {
+        use crate::components::main_view_chrome::{
+            MainViewContextZoneSpec, MainViewTabChipAction, SemanticChipAction, SemanticChipSpec,
+            MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL, MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+            MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID, MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+            MAIN_VIEW_CWD_UNAVAILABLE_LABEL, MAIN_VIEW_QUICK_AI_CHIP_LABEL,
+        };
+
+        let fixture_unavailable = std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref()
+            == Some("1")
+            && std::env::var("SCRIPT_KIT_TEST_CONTEXT_CHIP_FIXTURE")
+                .ok()
+                .as_deref()
+                == Some("unavailable");
+        let cwd = (!fixture_unavailable)
+            .then(|| self.global_footer_cwd_chip().map(|chip| chip.label))
+            .flatten()
             .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|cwd| crate::file_search::shorten_path(&cwd.to_string_lossy()))
-            })
-            .unwrap_or_else(|| {
-                crate::components::main_view_chrome::MAIN_VIEW_CWD_UNAVAILABLE_LABEL.to_string()
+                (!fixture_unavailable)
+                    .then(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .map(|cwd| crate::file_search::shorten_path(&cwd.to_string_lossy()))
+                    })
+                    .flatten()
             });
+        let cwd_available = cwd.is_some();
+        let cwd_label = cwd.unwrap_or_else(|| MAIN_VIEW_CWD_UNAVAILABLE_LABEL.to_string());
 
         // In a flow session the active agent IS the flow: the shared
-        // Agent·Model chip carries "<flow> · <engine>" (the engine label
-        // grows the model once the thread reports it) instead of the global
+        // Agent·Model chip carries "<flow> · <engine>" rather than the global
         // spine agent, which is not what this conversation talks to.
         let flow_session_label = match &self.current_view {
             AppView::FlowSessionView { session_id } => self
@@ -2171,19 +2197,96 @@ impl ScriptListApp {
                 .map(|(meta, _)| format!("{} · {}", meta.friendly_name, meta.engine)),
             _ => None,
         };
-        let agent_model_label = flow_session_label
-            .or_else(|| self.agent_model_footer_label())
-            .unwrap_or_else(|| {
-                crate::components::main_view_chrome::MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL
-                    .to_string()
-            });
+        let agent_model = (!fixture_unavailable)
+            .then(|| flow_session_label.or_else(|| self.agent_model_footer_label()))
+            .flatten();
+        let agent_model_available = agent_model.is_some();
+        let agent_model_label = agent_model
+            .unwrap_or_else(|| MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL.to_string());
 
-        crate::components::main_view_chrome::MainViewContextLabels::new(
-            cwd_label,
-            agent_model_label,
+        let leading_identity = if fixture_unavailable {
+            SemanticChipSpec::disabled_identity(
+                MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                cwd_label,
+                "No working directory is available",
+            )
+        } else {
+            match self.main_header_tab_chip_action() {
+            MainViewTabChipAction::QuickAi => SemanticChipSpec::enabled_identity(
+                MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+                MAIN_VIEW_QUICK_AI_CHIP_LABEL,
+                SemanticChipAction::OpenSurface,
+                "⇥",
+            ),
+            MainViewTabChipAction::ChangeCwd if cwd_available => {
+                SemanticChipSpec::enabled_identity(
+                    MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                    cwd_label,
+                    SemanticChipAction::OpenSelector,
+                    "⇥",
+                )
+            }
+                MainViewTabChipAction::ChangeCwd | MainViewTabChipAction::Inactive => {
+                    SemanticChipSpec::disabled_identity(
+                        MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                        cwd_label,
+                        if cwd_available {
+                            "Tab is owned by the current surface"
+                        } else {
+                            "No working directory is available"
+                        },
+                    )
+                }
+            }
+        };
+        let trailing_identity = if self.main_header_shift_tab_key_active()
+            && agent_model_available
+        {
+            SemanticChipSpec::enabled_identity(
+                MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+                agent_model_label,
+                SemanticChipAction::OpenSelector,
+                "⇧⇥",
+            )
+        } else {
+            SemanticChipSpec::disabled_identity(
+                MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+                agent_model_label,
+                if agent_model_available {
+                    "The profile selector is unavailable on this surface"
+                } else {
+                    "No agent model is available"
+                },
+            )
+        };
+
+        MainViewContextZoneSpec::try_new(
+            leading_identity,
+            self.selection_hint_chip(),
+            trailing_identity,
         )
-        .with_tab_action(self.main_header_tab_chip_action())
-        .with_shift_tab_key_active(self.main_header_shift_tab_key_active())
+        .expect("main context zone owns unique typed chips")
+    }
+
+    pub(crate) fn main_view_context_chip_has_action(
+        &self,
+        semantic_id: &str,
+        action: crate::components::main_view_chrome::SemanticChipAction,
+    ) -> bool {
+        let zone = self.main_view_context_zone_spec();
+        let enabled = [
+            Some(&zone.leading_identity),
+            zone.context_attachment.as_ref(),
+            Some(&zone.trailing_identity),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|chip| {
+            chip.semantic_id.as_ref() == semantic_id
+                && chip.enabled
+                && chip.body_action == Some(action)
+        });
+        enabled
     }
 
     pub(crate) fn render_clickable_main_view_context_zone(
@@ -2191,48 +2294,63 @@ impl ScriptListApp {
         menu_def: crate::designs::MainMenuThemeDef,
         cx: &mut gpui::Context<Self>,
     ) -> gpui::AnyElement {
+        let zone = self.main_view_context_zone_spec();
+        let app = cx.entity().downgrade();
+        let handler: crate::components::main_view_chrome::SemanticChipActionHandler =
+            std::rc::Rc::new(move |invocation, window, cx| {
+                let Some(app) = app.upgrade() else {
+                    return;
+                };
+                app.update(cx, |this, cx| {
+                    use crate::components::main_view_chrome::{
+                        SemanticChipAction, MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                        MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID, MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+                        MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID,
+                    };
+                    match (invocation.semantic_id.as_ref(), invocation.action) {
+                        (MAIN_VIEW_CONTEXT_CWD_BUTTON_ID, SemanticChipAction::OpenSelector) => {
+                            this.dispatch_main_window_footer_action(
+                                crate::footer_popup::FooterAction::Cwd,
+                                window,
+                                cx,
+                                "main_view_context_click",
+                            );
+                        }
+                        (MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID, SemanticChipAction::OpenSelector) => {
+                            this.dispatch_main_window_footer_action(
+                                crate::footer_popup::FooterAction::AgentModel,
+                                window,
+                                cx,
+                                "main_view_context_click",
+                            );
+                        }
+                        (MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID, SemanticChipAction::OpenSurface) => {
+                            let query = this.filter_text.clone();
+                            this.open_quick_ai_from_launcher(query, window, cx);
+                        }
+                        (MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID, SemanticChipAction::OpenDetails) => {
+                            tracing::info!(
+                                target: "script_kit::selection_hint",
+                                event = "selection_context_details_opened",
+                            );
+                            this.open_selection_context_details("selection_hint_chip", cx);
+                        }
+                        _ => {
+                            tracing::warn!(
+                                target: "script_kit::main_view_chrome",
+                                semantic_id = %invocation.semantic_id,
+                                action = ?invocation.action,
+                                "Ignored unsupported semantic chip invocation"
+                            );
+                        }
+                    }
+                });
+            });
         crate::components::main_view_chrome::render_main_view_context_zone_required(
             &self.theme,
             menu_def,
-            self.main_view_context_labels(),
-            self.selection_hint_chip(),
-            cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                // The chip is a button for whatever Tab currently does:
-                // Quick AI submit when the input has text, cwd picker otherwise.
-                if matches!(
-                    this.main_header_tab_chip_action(),
-                    crate::components::main_view_chrome::MainViewTabChipAction::QuickAi
-                ) {
-                    let query = this.filter_text.clone();
-                    this.open_quick_ai_from_launcher(query, window, cx);
-                    return;
-                }
-                this.dispatch_main_window_footer_action(
-                    crate::footer_popup::FooterAction::Cwd,
-                    window,
-                    cx,
-                    "main_view_context_click",
-                );
-            }),
-            cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                this.dispatch_main_window_footer_action(
-                    crate::footer_popup::FooterAction::AgentModel,
-                    window,
-                    cx,
-                    "main_view_context_click",
-                );
-            }),
-            cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                // Single-click on-ramp into the instant rewrite mini: capture
-                // the focused text and immediately stream three rewrite
-                // variations. No `.` sigil is surfaced to the user.
-                tracing::info!(
-                    target: "script_kit::selection_hint",
-                    event = "selection_hint_chip_clicked",
-                );
-                let _ = window;
-                this.open_instant_rewrite_mini("selection_hint_chip", cx);
-            }),
+            zone,
+            handler,
         )
     }
 
@@ -2255,11 +2373,8 @@ impl ScriptListApp {
         crate::components::main_view_chrome::render_main_view_context_zone_required(
             &self.theme,
             menu_def,
-            self.main_view_context_labels(),
-            None,
-            |_event, _window, _cx| {},
-            |_event, _window, _cx| {},
-            |_event, _window, _cx| {},
+            self.main_view_context_zone_spec(),
+            std::rc::Rc::new(|_, _, _| {}),
         )
     }
 

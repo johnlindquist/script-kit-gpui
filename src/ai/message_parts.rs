@@ -124,6 +124,42 @@ impl AiContextPart {
             _ => None,
         }
     }
+
+    /// Renderer-neutral context-chip identity. Content never participates: the
+    /// digest uses only part kind, source identity, and the user-visible label.
+    pub(crate) fn semantic_chip_projection(&self, removable: bool) -> AiContextChipProjection {
+        let kind = match self {
+            Self::ResourceUri { .. } => "resource",
+            Self::FilePath { .. } => "file",
+            Self::SkillFile { .. } => "skill",
+            Self::FocusedTarget { .. } => "focused",
+            Self::AmbientContext { .. } => "ambient",
+            Self::TextBlock { .. } => "text",
+        };
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in kind
+            .bytes()
+            .chain([0])
+            .chain(self.source().bytes())
+            .chain([0])
+            .chain(self.label().bytes())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        AiContextChipProjection {
+            semantic_id: format!("agent-chat-context-{kind}-{hash:016x}"),
+            label: self.label().to_string(),
+            removable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AiContextChipProjection {
+    pub(crate) semantic_id: String,
+    pub(crate) label: String,
+    pub(crate) removable: bool,
 }
 
 /// Extract file paths from a slice of context parts.
@@ -946,6 +982,55 @@ pub fn prepare_user_message_from_sources_with_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_chip_projection_is_stable_redacted_and_capability_neutral() {
+        let a = AiContextPart::TextBlock {
+            label: "Terminal output".to_string(),
+            source: "terminal://session/42".to_string(),
+            text: "secret first body".to_string(),
+            mime_type: Some("text/plain".to_string()),
+        };
+        let b = AiContextPart::TextBlock {
+            label: "Terminal output".to_string(),
+            source: "terminal://session/42".to_string(),
+            text: "different secret body".to_string(),
+            mime_type: Some("application/json".to_string()),
+        };
+        let removable = a.semantic_chip_projection(true);
+        let retained = b.semantic_chip_projection(false);
+
+        assert_eq!(removable.semantic_id, retained.semantic_id);
+        assert_eq!(removable.label, "Terminal output");
+        assert!(removable.removable);
+        assert!(!retained.removable);
+        assert!(!removable.semantic_id.contains("secret"));
+        assert!(!removable.semantic_id.contains("Terminal output"));
+        assert!(removable
+            .semantic_id
+            .starts_with("agent-chat-context-text-"));
+    }
+
+    #[test]
+    fn semantic_chip_projection_changes_with_part_identity_not_content() {
+        let first = AiContextPart::FilePath {
+            path: "/tmp/one.txt".to_string(),
+            label: "Notes".to_string(),
+        };
+        let same = first.clone();
+        let other = AiContextPart::FilePath {
+            path: "/tmp/two.txt".to_string(),
+            label: "Notes".to_string(),
+        };
+        assert_eq!(
+            first.semantic_chip_projection(true).semantic_id,
+            same.semantic_chip_projection(true).semantic_id
+        );
+        assert_ne!(
+            first.semantic_chip_projection(true).semantic_id,
+            other.semantic_chip_projection(true).semantic_id
+        );
+    }
 
     #[test]
     fn test_serde_roundtrip_resource_uri() {

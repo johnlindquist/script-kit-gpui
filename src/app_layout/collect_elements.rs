@@ -246,6 +246,57 @@ impl ScriptListApp {
         elements
     }
 
+    fn main_view_context_elements(
+        zone: &crate::components::main_view_chrome::MainViewContextZoneSpec,
+    ) -> Vec<protocol::ElementInfo> {
+        use crate::components::main_view_chrome::{SemanticChipAction, SemanticChipRole};
+        let mut chips = vec![&zone.leading_identity];
+        if let Some(context) = zone.context_attachment.as_ref() {
+            chips.push(context);
+        }
+        chips.push(&zone.trailing_identity);
+
+        chips
+            .into_iter()
+            .map(|chip| {
+                let role = match chip.role {
+                    SemanticChipRole::ContextAttachment => "contextAttachment",
+                    SemanticChipRole::Identity => "identity",
+                    SemanticChipRole::DestinationSelector => "destinationSelector",
+                };
+                let action = chip.body_action.map(|action| match action {
+                    SemanticChipAction::OpenDetails => "openDetails",
+                    SemanticChipAction::RemoveContext => "removeContext",
+                    SemanticChipAction::OpenSelector => "openSelector",
+                    SemanticChipAction::OpenSurface => "openSurface",
+                    SemanticChipAction::SelectDestination => "selectDestination",
+                });
+                protocol::ElementInfo {
+                    semantic_id: chip.semantic_id.to_string(),
+                    element_type: if chip.enabled && chip.body_action.is_some() {
+                        protocol::ElementType::Button
+                    } else {
+                        protocol::ElementType::Panel
+                    },
+                    text: Some(chip.label.to_string()),
+                    value: (!chip.shortcut_tokens.is_empty())
+                        .then(|| chip.shortcut_tokens.join("")),
+                    selected: None,
+                    focused: None,
+                    index: None,
+                    role: Some(role.to_string()),
+                    kind: action.map(str::to_string),
+                    source: Some("MainViewContextZone".to_string()),
+                    source_name: None,
+                    selectable: Some(chip.enabled && chip.body_action.is_some()),
+                    status_kind: None,
+                    action_disabled: chip.disabled_reason.as_ref().map(ToString::to_string),
+                    style: None,
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn collect_visible_elements(
         &self,
         limit: usize,
@@ -265,9 +316,18 @@ impl ScriptListApp {
     ) -> ElementCollectionOutcome {
         let mut outcome = match &self.current_view {
             AppView::ScriptList => {
-                let (elements, total_count) =
-                    self.collect_script_list_elements(limit, include_headers);
-                ElementCollectionOutcome::new(elements, total_count)
+                let context = Self::main_view_context_elements(&self.main_view_context_zone_spec());
+                let context_count = context.len();
+                let (list_elements, list_total) = self.collect_script_list_elements(
+                    limit.saturating_sub(context_count),
+                    include_headers,
+                );
+                let elements = context
+                    .into_iter()
+                    .chain(list_elements)
+                    .take(limit)
+                    .collect();
+                ElementCollectionOutcome::new(elements, context_count + list_total)
             }
 
             AppView::AgentChatView { entity } => {

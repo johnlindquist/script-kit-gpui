@@ -11288,16 +11288,16 @@ impl AgentChatView {
             .px(px(12.0))
             .pb(px(6.0));
 
-        for (chip_idx, &(remove_idx, part)) in chip_parts.iter().enumerate() {
-            let label = SharedString::from(part.label().to_string());
+        for &(remove_idx, part) in &chip_parts {
+            let projection = part.semantic_chip_projection(true);
+            let label = SharedString::from(projection.label);
             let remove_id = ElementId::Name(SharedString::from(format!(
-                "agent_chat-ctx-remove-{chip_idx}"
+                "{}:remove",
+                projection.semantic_id
             )));
 
             let chip = div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "agent_chat-ctx-chip-{chip_idx}"
-                ))))
+                .id(ElementId::Name(SharedString::from(projection.semantic_id)))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -16205,31 +16205,63 @@ impl Render for AgentChatView {
                 cx,
             );
             let footer_snapshot = self.footer_snapshot(cx);
-            let context_labels = crate::components::main_view_chrome::MainViewContextLabels::new(
+            use crate::components::main_view_chrome::{
+                MainViewContextZoneSpec, SemanticChipAction, SemanticChipSpec,
+                MAIN_VIEW_CONTEXT_CWD_BUTTON_ID, MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+                MAIN_VIEW_CWD_UNAVAILABLE_LABEL,
+            };
+            // Plain Tab belongs to the composer. Keep cwd visible as inert
+            // identity, while the real Shift+Tab profile route stays enabled.
+            let cwd = SemanticChipSpec::disabled_identity(
+                MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
                 footer_snapshot
                     .cwd_display
                     .as_ref()
                     .cloned()
-                    .unwrap_or_else(|| {
-                        crate::components::main_view_chrome::MAIN_VIEW_CWD_UNAVAILABLE_LABEL
+                    .unwrap_or_else(|| MAIN_VIEW_CWD_UNAVAILABLE_LABEL.to_string()),
+                "Tab is owned by the Agent Chat composer",
+            );
+            let model_label = footer_snapshot.agent_model_header_label();
+            let model = if footer_snapshot.profile_switch_enabled && !model_label.trim().is_empty()
+            {
+                SemanticChipSpec::enabled_identity(
+                    MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+                    model_label,
+                    SemanticChipAction::OpenSelector,
+                    "⇧⇥",
+                )
+            } else {
+                SemanticChipSpec::disabled_identity(
+                    MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+                    if model_label.trim().is_empty() {
+                        crate::components::main_view_chrome::MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL
                             .to_string()
-                    }),
-                footer_snapshot.agent_model_header_label(),
-            )
-            // In Agent Chat plain Tab is owned locally (picker accept /
-            // swallowed) and never opens the cwd picker — hide the ⇥ keycap.
-            // Shift+Tab does open the in-chat profile picker, so ⇧⇥ stays.
-            .with_tab_action(crate::components::main_view_chrome::MainViewTabChipAction::Inactive);
+                    } else {
+                        model_label
+                    },
+                    "The profile selector is unavailable in this chat",
+                )
+            };
+            let zone = MainViewContextZoneSpec::try_new(cwd, None, model)
+                .expect("Agent Chat context-zone identities are unique");
+            let view = cx.entity().downgrade();
+            let handler: crate::components::main_view_chrome::SemanticChipActionHandler =
+                std::rc::Rc::new(move |invocation, window, cx| {
+                    if invocation.semantic_id.as_ref() != MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID
+                        || invocation.action != SemanticChipAction::OpenSelector
+                    {
+                        return;
+                    }
+                    if let Some(view) = view.upgrade() {
+                        view.update(cx, |chat, cx| {
+                            chat.open_profile_picker_in_window(window, cx);
+                        });
+                    }
+                });
             let header = crate::components::main_view_chrome::MainViewHeaderChrome::canonical(
                 menu_def,
                 crate::components::main_view_chrome::render_main_view_context_zone_required(
-                    &theme,
-                    menu_def,
-                    context_labels,
-                    None,
-                    |_event, _window, _cx| {},
-                    |_event, _window, _cx| {},
-                    |_event, _window, _cx| {},
+                    &theme, menu_def, zone, handler,
                 ),
                 input,
             );

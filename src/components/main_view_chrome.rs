@@ -1,8 +1,10 @@
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, px, rgb, rgba, AnyElement, ClickEvent, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled,
 };
 use gpui_component::{input::Input, Sizable as _, Size};
+use std::rc::Rc;
 
 use crate::designs::{MainMenuSearchTokens, MainMenuThemeDef};
 
@@ -15,6 +17,8 @@ pub(crate) const MAIN_VIEW_CONTEXT_ZONE_ID: &str = "main-view-context-zone";
 pub(crate) const MAIN_VIEW_CONTEXT_LOGO_ID: &str = "main-view-context-logo";
 #[allow(dead_code)]
 pub(crate) const MAIN_VIEW_CONTEXT_CWD_BUTTON_ID: &str = "main-view-context-cwd-button";
+#[allow(dead_code)]
+pub(crate) const MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID: &str = "main-view-context-quick-ai-button";
 #[allow(dead_code)]
 pub(crate) const MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID: &str = "main-view-context-model-button";
 #[allow(dead_code)]
@@ -30,6 +34,254 @@ pub(crate) const MAIN_VIEW_MAIN_ID: &str = "main-view-main";
 pub(crate) const MAIN_VIEW_OVERLAY_CLIP_ID: &str = "main-view-overlay-clip";
 #[allow(dead_code)] // Used by the binary target through include!-merged built-in render code.
 pub(crate) const MAIN_VIEW_SCROLL_FLOW_ID: &str = "main-view-scroll-flow";
+
+/// Semantic meaning of a compact chip. Role determines which actions are legal;
+/// rendering style never grants capabilities the role does not own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SemanticChipRole {
+    ContextAttachment,
+    Identity,
+    DestinationSelector,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SemanticChipAction {
+    OpenDetails,
+    RemoveContext,
+    OpenSelector,
+    OpenSurface,
+    SelectDestination,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SemanticChipSpec {
+    pub(crate) semantic_id: SharedString,
+    pub(crate) role: SemanticChipRole,
+    pub(crate) label: SharedString,
+    pub(crate) shortcut_tokens: Vec<String>,
+    pub(crate) enabled: bool,
+    pub(crate) disabled_reason: Option<SharedString>,
+    pub(crate) body_action: Option<SemanticChipAction>,
+    pub(crate) trailing_action: Option<SemanticChipAction>,
+}
+
+impl SemanticChipSpec {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new(
+        semantic_id: impl Into<SharedString>,
+        role: SemanticChipRole,
+        label: impl Into<SharedString>,
+        shortcut_tokens: Vec<String>,
+        enabled: bool,
+        disabled_reason: Option<SharedString>,
+        body_action: Option<SemanticChipAction>,
+        trailing_action: Option<SemanticChipAction>,
+    ) -> Result<Self, &'static str> {
+        let semantic_id = semantic_id.into();
+        let label = label.into();
+        if semantic_id.trim().is_empty() {
+            return Err("semantic chip IDs must not be blank");
+        }
+        if label.trim().is_empty() {
+            return Err("semantic chip labels must not be blank");
+        }
+        if enabled {
+            if disabled_reason.is_some() {
+                return Err("enabled semantic chips cannot carry a disabled reason");
+            }
+        } else {
+            if disabled_reason
+                .as_ref()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err("disabled semantic chips require a reason");
+            }
+            if body_action.is_some() || trailing_action.is_some() || !shortcut_tokens.is_empty() {
+                return Err("disabled semantic chips cannot expose actions or shortcuts");
+            }
+        }
+        if !shortcut_tokens.is_empty() && body_action.is_none() {
+            return Err("semantic chip shortcuts require an enabled body action");
+        }
+
+        let body_allowed = match role {
+            SemanticChipRole::ContextAttachment => {
+                matches!(body_action, None | Some(SemanticChipAction::OpenDetails))
+            }
+            SemanticChipRole::Identity => matches!(
+                body_action,
+                None | Some(SemanticChipAction::OpenDetails)
+                    | Some(SemanticChipAction::OpenSelector)
+                    | Some(SemanticChipAction::OpenSurface)
+            ),
+            SemanticChipRole::DestinationSelector => {
+                matches!(
+                    body_action,
+                    None | Some(SemanticChipAction::SelectDestination)
+                )
+            }
+        };
+        if !body_allowed {
+            return Err("semantic chip body action is invalid for its role");
+        }
+        let trailing_allowed = match role {
+            SemanticChipRole::ContextAttachment => {
+                matches!(
+                    trailing_action,
+                    None | Some(SemanticChipAction::RemoveContext)
+                )
+            }
+            SemanticChipRole::Identity | SemanticChipRole::DestinationSelector => {
+                trailing_action.is_none()
+            }
+        };
+        if !trailing_allowed {
+            return Err("semantic chip trailing action is invalid for its role");
+        }
+
+        Ok(Self {
+            semantic_id,
+            role,
+            label,
+            shortcut_tokens,
+            enabled,
+            disabled_reason,
+            body_action,
+            trailing_action,
+        })
+    }
+
+    pub(crate) fn enabled_identity(
+        semantic_id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        action: SemanticChipAction,
+        shortcut_hint: &str,
+    ) -> Self {
+        Self::try_new(
+            semantic_id,
+            SemanticChipRole::Identity,
+            label,
+            crate::components::hint_strip::shortcut_tokens_from_hint(shortcut_hint),
+            true,
+            None,
+            Some(action),
+            None,
+        )
+        .expect("valid enabled identity chip")
+    }
+
+    pub(crate) fn disabled_identity(
+        semantic_id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        reason: impl Into<SharedString>,
+    ) -> Self {
+        Self::try_new(
+            semantic_id,
+            SemanticChipRole::Identity,
+            label,
+            Vec::new(),
+            false,
+            Some(reason.into()),
+            None,
+            None,
+        )
+        .expect("valid disabled identity chip")
+    }
+
+    pub(crate) fn context_attachment(
+        semantic_id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        removable: bool,
+    ) -> Self {
+        Self::try_new(
+            semantic_id,
+            SemanticChipRole::ContextAttachment,
+            label,
+            Vec::new(),
+            true,
+            None,
+            Some(SemanticChipAction::OpenDetails),
+            removable.then_some(SemanticChipAction::RemoveContext),
+        )
+        .expect("valid context attachment chip")
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn destination_selector(
+        semantic_id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        Self::try_new(
+            semantic_id,
+            SemanticChipRole::DestinationSelector,
+            label,
+            Vec::new(),
+            true,
+            None,
+            Some(SemanticChipAction::SelectDestination),
+            None,
+        )
+        .expect("valid destination selector chip")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MainViewContextZoneSpec {
+    pub(crate) leading_identity: SemanticChipSpec,
+    pub(crate) context_attachment: Option<SemanticChipSpec>,
+    pub(crate) trailing_identity: SemanticChipSpec,
+}
+
+impl MainViewContextZoneSpec {
+    pub(crate) fn try_new(
+        leading_identity: SemanticChipSpec,
+        context_attachment: Option<SemanticChipSpec>,
+        trailing_identity: SemanticChipSpec,
+    ) -> Result<Self, &'static str> {
+        if leading_identity.role != SemanticChipRole::Identity
+            || trailing_identity.role != SemanticChipRole::Identity
+        {
+            return Err("main context edge chips must have the identity role");
+        }
+        if context_attachment
+            .as_ref()
+            .is_some_and(|chip| chip.role != SemanticChipRole::ContextAttachment)
+        {
+            return Err("main context middle chip must have the context-attachment role");
+        }
+        if context_attachment
+            .as_ref()
+            .is_some_and(|chip| chip.trailing_action.is_some())
+        {
+            return Err("main context zone does not expose a trailing context action");
+        }
+        let mut ids = vec![
+            leading_identity.semantic_id.as_ref(),
+            trailing_identity.semantic_id.as_ref(),
+        ];
+        if let Some(chip) = context_attachment.as_ref() {
+            ids.push(chip.semantic_id.as_ref());
+        }
+        ids.sort_unstable();
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err("main context chip IDs must be unique");
+        }
+        Ok(Self {
+            leading_identity,
+            context_attachment,
+            trailing_identity,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SemanticChipInvocation {
+    pub(crate) semantic_id: SharedString,
+    pub(crate) action: SemanticChipAction,
+}
+
+pub(crate) type SemanticChipActionHandler =
+    Rc<dyn Fn(SemanticChipInvocation, &mut gpui::Window, &mut gpui::App)>;
 
 /// What pressing Tab actually does on the surface rendering the context row.
 /// The header Tab chip must always advertise the real action, so the owning
@@ -50,49 +302,47 @@ pub(crate) enum MainViewTabChipAction {
 pub(crate) const MAIN_VIEW_QUICK_AI_CHIP_LABEL: &str = "Quick AI";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MainViewContextLabels {
-    pub(crate) cwd_label: String,
-    pub(crate) agent_model_label: String,
-    pub(crate) tab_action: MainViewTabChipAction,
+struct MainViewContextLabels {
+    cwd_id: SharedString,
+    cwd_label: String,
+    cwd_enabled: bool,
+    agent_model_id: SharedString,
+    agent_model_label: String,
+    agent_model_enabled: bool,
+    tab_action: MainViewTabChipAction,
     /// Whether Shift+Tab actually opens the agent/model (profile) picker on
     /// this surface. When false the agent-model chip drops its ⇧⇥ keycap.
-    pub(crate) shift_tab_key_active: bool,
+    shift_tab_key_active: bool,
 }
 
 impl MainViewContextLabels {
-    pub(crate) fn new(cwd_label: impl Into<String>, agent_model_label: impl Into<String>) -> Self {
-        let cwd_label = non_empty_label(cwd_label.into(), MAIN_VIEW_CWD_UNAVAILABLE_LABEL);
-        let agent_model_label = non_empty_label(
-            agent_model_label.into(),
-            MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL,
-        );
-
+    fn from_zone_spec(spec: &MainViewContextZoneSpec) -> Self {
+        let tab_action = match spec.leading_identity.body_action {
+            Some(SemanticChipAction::OpenSelector) => MainViewTabChipAction::ChangeCwd,
+            Some(SemanticChipAction::OpenSurface) => MainViewTabChipAction::QuickAi,
+            _ => MainViewTabChipAction::Inactive,
+        };
         Self {
-            cwd_label,
-            agent_model_label,
-            tab_action: MainViewTabChipAction::ChangeCwd,
-            shift_tab_key_active: true,
+            cwd_id: spec.leading_identity.semantic_id.clone(),
+            cwd_label: spec.leading_identity.label.to_string(),
+            cwd_enabled: spec.leading_identity.enabled,
+            agent_model_id: spec.trailing_identity.semantic_id.clone(),
+            agent_model_label: spec.trailing_identity.label.to_string(),
+            agent_model_enabled: spec.trailing_identity.enabled,
+            tab_action,
+            shift_tab_key_active: spec.trailing_identity.enabled
+                && spec.trailing_identity.body_action == Some(SemanticChipAction::OpenSelector),
         }
-    }
-
-    pub(crate) fn with_tab_action(mut self, tab_action: MainViewTabChipAction) -> Self {
-        self.tab_action = tab_action;
-        self
-    }
-
-    #[allow(dead_code)] // WIP builder for the Quick AI Tab chip; caller lands with the mode.
-    pub(crate) fn with_shift_tab_key_active(mut self, active: bool) -> Self {
-        self.shift_tab_key_active = active;
-        self
     }
 }
 
-/// Conditional "I see you have text selected" hint chip for the context zone.
-/// Present only when the show-time passive AX sniff found a selection in the
-/// app the user came from; clicking it routes into the `.style` rewrite flow.
+/// Private renderer adapter for a typed selected-text context attachment.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MainViewSelectionHintChip {
-    pub(crate) label: String,
+struct MainViewSelectionHintChip {
+    semantic_id: SharedString,
+    label: String,
+    key: SharedString,
+    enabled: bool,
 }
 
 /// Single-line preview of captured selected text for hint labels: whitespace
@@ -715,38 +965,29 @@ pub(crate) fn render_main_view_context_header(
     )
 }
 
-fn non_empty_label(label: String, fallback: &'static str) -> String {
-    let trimmed = label.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        label
-    }
-}
-
 #[allow(dead_code)]
 pub(crate) fn render_main_view_context_zone(
     theme: &crate::theme::Theme,
     def: MainMenuThemeDef,
     cwd_label: Option<String>,
     agent_model_label: Option<String>,
-    on_cwd_click: impl Fn(&ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-    on_agent_model_click: impl Fn(&ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
-    let labels = MainViewContextLabels::new(
-        cwd_label.unwrap_or_else(|| MAIN_VIEW_CWD_UNAVAILABLE_LABEL.to_string()),
-        agent_model_label.unwrap_or_else(|| MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL.to_string()),
-    );
-
-    render_main_view_context_zone_required(
-        theme,
-        def,
-        labels,
+    let zone = MainViewContextZoneSpec::try_new(
+        SemanticChipSpec::disabled_identity(
+            MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+            cwd_label.unwrap_or_else(|| MAIN_VIEW_CWD_UNAVAILABLE_LABEL.to_string()),
+            "Context interaction is unavailable on this surface",
+        ),
         None,
-        on_cwd_click,
-        on_agent_model_click,
-        |_event, _window, _cx| {},
+        SemanticChipSpec::disabled_identity(
+            MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+            agent_model_label
+                .unwrap_or_else(|| MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL.to_string()),
+            "Identity interaction is unavailable on this surface",
+        ),
     )
+    .expect("valid inert main context zone");
+    render_main_view_context_zone_required(theme, def, zone, Rc::new(|_, _, _| {}))
 }
 
 /// Context-zone keycap sizing, shared with the design-contract exporter so
@@ -762,6 +1003,70 @@ pub(crate) fn context_zone_keycap_height(info: &crate::designs::HeaderInfoBarTok
 pub(crate) fn render_main_view_context_zone_required(
     theme: &crate::theme::Theme,
     def: MainMenuThemeDef,
+    zone: MainViewContextZoneSpec,
+    on_action: SemanticChipActionHandler,
+) -> AnyElement {
+    let labels = MainViewContextLabels::from_zone_spec(&zone);
+    let selection_hint = zone
+        .context_attachment
+        .as_ref()
+        .map(|chip| MainViewSelectionHintChip {
+            semantic_id: chip.semantic_id.clone(),
+            label: chip.label.to_string(),
+            key: chip.shortcut_tokens.join("").into(),
+            enabled: chip.enabled,
+        });
+
+    let leading_invocation =
+        zone.leading_identity
+            .body_action
+            .map(|action| SemanticChipInvocation {
+                semantic_id: zone.leading_identity.semantic_id.clone(),
+                action,
+            });
+    let trailing_invocation =
+        zone.trailing_identity
+            .body_action
+            .map(|action| SemanticChipInvocation {
+                semantic_id: zone.trailing_identity.semantic_id.clone(),
+                action,
+            });
+    let context_invocation = zone.context_attachment.as_ref().and_then(|chip| {
+        chip.body_action.map(|action| SemanticChipInvocation {
+            semantic_id: chip.semantic_id.clone(),
+            action,
+        })
+    });
+
+    let leading_handler = on_action.clone();
+    let trailing_handler = on_action.clone();
+    let context_handler = on_action;
+    render_main_view_context_zone_legacy(
+        theme,
+        def,
+        labels,
+        selection_hint,
+        move |_event, window, cx| {
+            if let Some(invocation) = leading_invocation.clone() {
+                leading_handler(invocation, window, cx);
+            }
+        },
+        move |_event, window, cx| {
+            if let Some(invocation) = trailing_invocation.clone() {
+                trailing_handler(invocation, window, cx);
+            }
+        },
+        move |_event, window, cx| {
+            if let Some(invocation) = context_invocation.clone() {
+                context_handler(invocation, window, cx);
+            }
+        },
+    )
+}
+
+fn render_main_view_context_zone_legacy(
+    theme: &crate::theme::Theme,
+    def: MainMenuThemeDef,
     labels: MainViewContextLabels,
     selection_hint: Option<MainViewSelectionHintChip>,
     on_cwd_click: impl Fn(&ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
@@ -774,12 +1079,17 @@ pub(crate) fn render_main_view_context_zone_required(
     let rest_bg = rgba((theme.colors.background.search_box << 8) | info.pill_bg_alpha);
     let _hover_bg = rgba((theme.colors.text.primary << 8) | info.pill_hover_bg_alpha);
     let text_color = rgba((theme.colors.text.primary << 8) | text_alpha);
+    let disabled_text_color = rgb(theme.colors.text.dimmed);
     let _hover_text_color = rgba((theme.colors.text.primary << 8) | info.pill_hover_text_alpha);
     let show_pills = info.pill_padding_x > 0.0 || info.pill_border_alpha > 0;
     let header_keycap_font_size = context_zone_keycap_font_size(&info);
     let header_keycap_height = context_zone_keycap_height(&info);
 
+    let cwd_id = labels.cwd_id;
+    let cwd_enabled = labels.cwd_enabled;
+    let agent_model_id = labels.agent_model_id;
     let agent_model_label = labels.agent_model_label;
+    let agent_model_enabled = labels.agent_model_enabled;
 
     // The Tab chip always advertises the actual Tab action: the cwd label
     // when Tab opens the cwd picker, "Quick AI" when Tab submits the typed
@@ -788,7 +1098,8 @@ pub(crate) fn render_main_view_context_zone_required(
         MainViewTabChipAction::QuickAi => MAIN_VIEW_QUICK_AI_CHIP_LABEL.to_string(),
         MainViewTabChipAction::ChangeCwd | MainViewTabChipAction::Inactive => labels.cwd_label,
     };
-    let tab_key_active = !matches!(labels.tab_action, MainViewTabChipAction::Inactive);
+    let tab_key_active =
+        cwd_enabled && !matches!(labels.tab_action, MainViewTabChipAction::Inactive);
 
     // Inactive keeps rendering through the same hint-button component with an
     // empty key (which renders zero keycaps) instead of a bare text div: the
@@ -840,7 +1151,7 @@ pub(crate) fn render_main_view_context_zone_required(
                 crate::components::footer_chrome::render_footer_hint_button_like_shrinkable(
                     crate::components::footer_chrome::FooterHintButtonSpec {
                         label: agent_model_label.clone().into(),
-                        key: if labels.shift_tab_key_active {
+                        key: if agent_model_enabled && labels.shift_tab_key_active {
                             "⇧⇥"
                         } else {
                             ""
@@ -870,9 +1181,10 @@ pub(crate) fn render_main_view_context_zone_required(
             .into_any_element()
     };
 
+    let cwd_debug_id = cwd_id.clone();
     let mut cwd_chip = div()
-        .id(MAIN_VIEW_CONTEXT_CWD_BUTTON_ID)
-        .debug_selector(|| MAIN_VIEW_CONTEXT_CWD_BUTTON_ID.to_string())
+        .id(cwd_id)
+        .debug_selector(move || cwd_debug_id.to_string())
         .min_w(px(0.0))
         .flex_shrink()
         .overflow_hidden()
@@ -886,16 +1198,21 @@ pub(crate) fn render_main_view_context_zone_required(
         .font_family(info.font_family)
         .text_size(px(info.font_size))
         .text_color(text_color)
-        .cursor_pointer()
-        .on_click(on_cwd_click)
+        .when(cwd_enabled, |chip| {
+            chip.cursor_pointer().on_click(on_cwd_click)
+        })
+        .when(!cwd_enabled, |chip| {
+            chip.cursor_default().text_color(disabled_text_color)
+        })
         .child(cwd_key);
     if show_pills {
         cwd_chip = cwd_chip.border_1().border_color(border).bg(rest_bg);
     }
 
+    let model_debug_id = agent_model_id.clone();
     let mut model_chip = div()
-        .id(MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID)
-        .debug_selector(|| MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID.to_string())
+        .id(agent_model_id)
+        .debug_selector(move || model_debug_id.to_string())
         .min_w(px(0.0))
         .flex_shrink()
         .overflow_hidden()
@@ -909,16 +1226,24 @@ pub(crate) fn render_main_view_context_zone_required(
         .font_family(info.font_family)
         .text_size(px(info.font_size))
         .text_color(text_color)
-        .cursor_pointer()
-        .on_click(on_agent_model_click)
+        .when(agent_model_enabled, |chip| {
+            chip.cursor_pointer().on_click(on_agent_model_click)
+        })
+        .when(!agent_model_enabled, |chip| {
+            chip.cursor_default().text_color(disabled_text_color)
+        })
         .child(model_key);
     if show_pills {
         model_chip = model_chip.border_1().border_color(border).bg(rest_bg);
     }
 
     let selection_chip = selection_hint.map(|hint| {
+        let body_id = SharedString::from(format!("{}:body", hint.semantic_id));
+        let body_debug_id = body_id.clone();
         let key_slot = if info.show_keys {
             div()
+                .id(body_id.clone())
+                .debug_selector(move || body_debug_id.to_string())
                 .flex_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
@@ -927,7 +1252,7 @@ pub(crate) fn render_main_view_context_zone_required(
                     crate::components::footer_chrome::render_footer_hint_button_like_shrinkable(
                         crate::components::footer_chrome::FooterHintButtonSpec {
                             label: hint.label.clone().into(),
-                            key: ".".into(),
+                            key: hint.key.clone(),
                             slot_width_px: None,
                             key_first: false,
                             justify:
@@ -946,6 +1271,7 @@ pub(crate) fn render_main_view_context_zone_required(
                 .into_any_element()
         } else {
             div()
+                .id(body_id)
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .text_ellipsis()
@@ -953,8 +1279,10 @@ pub(crate) fn render_main_view_context_zone_required(
                 .into_any_element()
         };
 
+        let selection_debug_id = hint.semantic_id.clone();
         let mut chip = div()
-            .id(MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID)
+            .id(hint.semantic_id.clone())
+            .debug_selector(move || selection_debug_id.to_string())
             .min_w(px(0.0))
             .flex_shrink()
             .overflow_hidden()
@@ -968,8 +1296,12 @@ pub(crate) fn render_main_view_context_zone_required(
             .font_family(info.font_family)
             .text_size(px(info.font_size))
             .text_color(text_color)
-            .cursor_pointer()
-            .on_click(on_selection_click)
+            .when(hint.enabled, |chip| {
+                chip.cursor_pointer().on_click(on_selection_click)
+            })
+            .when(!hint.enabled, |chip| {
+                chip.cursor_default().text_color(disabled_text_color)
+            })
             .child(key_slot);
         if show_pills {
             chip = chip.border_1().border_color(border).bg(rest_bg);
@@ -1042,14 +1374,7 @@ pub(crate) fn render_main_view_context_zone_inert(
     cwd_label: Option<String>,
     agent_model_label: Option<String>,
 ) -> AnyElement {
-    render_main_view_context_zone(
-        theme,
-        def,
-        cwd_label,
-        agent_model_label,
-        |_event, _window, _cx| {},
-        |_event, _window, _cx| {},
-    )
+    render_main_view_context_zone(theme, def, cwd_label, agent_model_label)
 }
 
 #[allow(dead_code)]
@@ -1417,6 +1742,203 @@ mod tests {
     fn snippet_short_text_passes_through_unchanged() {
         assert_eq!(selection_hint_snippet("short", 24), "short");
         assert_eq!(selection_hint_snippet("  padded  ", 24), "padded");
+    }
+
+    #[test]
+    fn semantic_chip_role_action_matrix_rejects_cross_role_behavior() {
+        use super::{SemanticChipAction as Action, SemanticChipRole as Role, SemanticChipSpec};
+        let actions = [
+            Action::OpenDetails,
+            Action::RemoveContext,
+            Action::OpenSelector,
+            Action::OpenSurface,
+            Action::SelectDestination,
+        ];
+        let body_allowed = |role, action| match role {
+            Role::ContextAttachment => action == Action::OpenDetails,
+            Role::Identity => matches!(
+                action,
+                Action::OpenDetails | Action::OpenSelector | Action::OpenSurface
+            ),
+            Role::DestinationSelector => action == Action::SelectDestination,
+        };
+
+        for role in [
+            Role::ContextAttachment,
+            Role::Identity,
+            Role::DestinationSelector,
+        ] {
+            for action in actions {
+                let result = SemanticChipSpec::try_new(
+                    format!("chip-{role:?}-{action:?}"),
+                    role,
+                    "Chip",
+                    Vec::new(),
+                    true,
+                    None,
+                    Some(action),
+                    None,
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    body_allowed(role, action),
+                    "{role:?}/{action:?} body action"
+                );
+            }
+            for action in actions {
+                let result = SemanticChipSpec::try_new(
+                    format!("trailing-{role:?}-{action:?}"),
+                    role,
+                    "Chip",
+                    Vec::new(),
+                    true,
+                    None,
+                    None,
+                    Some(action),
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    role == Role::ContextAttachment && action == Action::RemoveContext,
+                    "{role:?}/{action:?} trailing action"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_chip_disabled_and_shortcut_contract_fails_closed() {
+        use super::{SemanticChipAction, SemanticChipRole, SemanticChipSpec};
+        assert!(SemanticChipSpec::try_new(
+            "disabled",
+            SemanticChipRole::Identity,
+            "No cwd",
+            Vec::new(),
+            false,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(SemanticChipSpec::try_new(
+            "disabled",
+            SemanticChipRole::Identity,
+            "No cwd",
+            vec!["⇥".to_string()],
+            false,
+            Some("Unavailable".into()),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(SemanticChipSpec::try_new(
+            "disabled",
+            SemanticChipRole::Identity,
+            "No cwd",
+            Vec::new(),
+            false,
+            Some("Unavailable".into()),
+            Some(SemanticChipAction::OpenSelector),
+            None,
+        )
+        .is_err());
+        assert!(SemanticChipSpec::try_new(
+            "orientation",
+            SemanticChipRole::Identity,
+            "Project",
+            vec!["⇥".to_string()],
+            true,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn main_context_zone_requires_unique_role_correct_ids() {
+        use super::{
+            MainViewContextZoneSpec, SemanticChipAction, SemanticChipSpec,
+            MAIN_VIEW_CONTEXT_CWD_BUTTON_ID, MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+            MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID, MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID,
+        };
+        let cwd = SemanticChipSpec::enabled_identity(
+            MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+            "Project",
+            SemanticChipAction::OpenSelector,
+            "⇥",
+        );
+        let model = SemanticChipSpec::enabled_identity(
+            MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+            "Agent · Model",
+            SemanticChipAction::OpenSelector,
+            "⇧⇥",
+        );
+        let context = SemanticChipSpec::context_attachment(
+            MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID,
+            "Selected text",
+            false,
+        );
+        let zone = MainViewContextZoneSpec::try_new(cwd.clone(), Some(context), model)
+            .expect("valid main context zone");
+        assert_eq!(zone.leading_identity.shortcut_tokens, vec!["⇥"]);
+        assert_eq!(zone.trailing_identity.shortcut_tokens, vec!["⇧", "⇥"]);
+
+        let quick = SemanticChipSpec::enabled_identity(
+            MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+            "Quick AI",
+            SemanticChipAction::OpenSurface,
+            "⇥",
+        );
+        assert_ne!(quick.semantic_id, cwd.semantic_id);
+        assert!(MainViewContextZoneSpec::try_new(
+            cwd.clone(),
+            None,
+            SemanticChipSpec::enabled_identity(
+                MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                "Duplicate",
+                SemanticChipAction::OpenSelector,
+                "⇧⇥",
+            ),
+        )
+        .is_err());
+        assert!(MainViewContextZoneSpec::try_new(
+            cwd,
+            Some(SemanticChipSpec::context_attachment(
+                MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID,
+                "Removable",
+                true,
+            )),
+            quick,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn destination_selector_cannot_remove_context_or_open_identity_surfaces() {
+        use super::{SemanticChipAction, SemanticChipRole, SemanticChipSpec};
+        let destination = SemanticChipSpec::destination_selector("destination", "Paste");
+        assert_eq!(
+            destination.body_action,
+            Some(SemanticChipAction::SelectDestination)
+        );
+        for action in [
+            SemanticChipAction::RemoveContext,
+            SemanticChipAction::OpenDetails,
+            SemanticChipAction::OpenSelector,
+            SemanticChipAction::OpenSurface,
+        ] {
+            assert!(SemanticChipSpec::try_new(
+                "destination",
+                SemanticChipRole::DestinationSelector,
+                "Paste",
+                Vec::new(),
+                true,
+                None,
+                Some(action),
+                None,
+            )
+            .is_err());
+        }
     }
 
     #[test]

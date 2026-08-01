@@ -438,6 +438,26 @@ impl ScriptListApp {
         }
     }
 
+    /// Open the selected-text context in the focused-text surface without
+    /// submitting a rewrite. Context-chip body actions are inspect/open actions;
+    /// only an explicit submit inside the destination surface may start AI work.
+    pub(crate) fn open_selection_context_details(
+        &mut self,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        match self.capture_rewrite_snapshot(source) {
+            Some(snapshot) => {
+                self.open_focused_text_agent_chat_from_snapshot(snapshot, None, source, cx)
+            }
+            None => self.show_hud(
+                "Selected text is no longer available".to_string(),
+                Some(2200),
+                cx,
+            ),
+        }
+    }
+
     /// Open the FocusedTextMini for `snapshot` and fire the three rewrite
     /// variations immediately with [`DEFAULT_REWRITE_INSTRUCTION`]. If the
     /// instant submit cannot start (e.g. context bootstrap still preparing),
