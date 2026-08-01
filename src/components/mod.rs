@@ -111,9 +111,10 @@ pub(crate) use info_state::{
     launcher_empty_or_no_results_spec, permission_onboarding_intro_spec,
     render_agent_chat_empty_guidance, render_info_state, render_info_state_full_width_panel,
     render_launcher_empty_or_no_results, render_shared_empty_state, shared_empty_state_spec,
-    InfoEmptySurface, InfoGuidanceItem, InfoMetrics, InfoSection, InfoStateDensity,
-    InfoStateLayout, InfoStateSpec, InfoStateTone, InfoTextMetric, InfoTypeScale, INFO_SPACING,
-    INFO_TYPE_SCALE,
+    InfoCue, InfoCueSemanticSnapshot, InfoCueValidationError, InfoEmptySurface, InfoGuidanceItem,
+    InfoMetrics, InfoSection, InfoStateDensity, InfoStateLayout, InfoStateSemanticSnapshot,
+    InfoStateSpec, InfoStateTone, InfoTextMetric, InfoTonePresentation, InfoTypeScale,
+    INFO_SPACING, INFO_TYPE_SCALE,
 };
 #[allow(unused_imports)]
 pub(crate) use inline_dropdown::{

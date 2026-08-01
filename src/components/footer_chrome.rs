@@ -1761,20 +1761,23 @@ fn render_footer_hint_content_impl(
     }
 }
 
-/// Measured keycap-run width: real glyph advances from the text system plus
-/// the same paddings/minimums `render_footer_keycap_with_metrics` applies.
-pub(crate) fn footer_shortcut_keycaps_measured_width_px(shortcut: &str, cx: &gpui::App) -> f32 {
+/// Measured keycap-run width from the canonical token stream: real glyph
+/// advances plus the same paddings/minimums the renderer applies.
+pub(crate) fn footer_shortcut_keycaps_measured_width_from_tokens<'a>(
+    tokens: impl IntoIterator<Item = &'a str>,
+    cx: &gpui::App,
+) -> f32 {
     let metrics = current_main_menu_footer_metrics();
-    let tokens = split_footer_shortcut(shortcut);
-    if tokens.is_empty() {
-        return 0.0;
+    let mut width = 0.0;
+    let mut count = 0usize;
+    for token in tokens {
+        if count > 0 {
+            width += metrics.content_gap;
+        }
+        width += footer_keycap_measured_width_px(token, cx);
+        count += 1;
     }
-
-    let keys_width = tokens
-        .iter()
-        .map(|token| footer_keycap_measured_width_px(token, cx))
-        .sum::<f32>();
-    keys_width + tokens.len().saturating_sub(1) as f32 * metrics.content_gap
+    width
 }
 
 /// Measured width of a single keycap: real glyph advances from the text

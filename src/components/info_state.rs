@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, Div, FontWeight, Rgba, SharedString};
+use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, Div, FontWeight, Rgba, SharedString};
 
 use crate::theme::{self, AppChromeColors};
 
@@ -100,6 +100,62 @@ pub(crate) enum InfoStateTone {
     About,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InfoTonePresentation {
+    pub semantic_kind: &'static str,
+    pub accessible_prefix: Option<&'static str>,
+    pub default_icon_hint: Option<&'static str>,
+    pub accent_foreground: bool,
+    pub background_wash: bool,
+}
+
+pub(crate) const fn resolve_info_tone(tone: InfoStateTone) -> InfoTonePresentation {
+    match tone {
+        InfoStateTone::Neutral => InfoTonePresentation {
+            semantic_kind: "neutral",
+            accessible_prefix: None,
+            default_icon_hint: None,
+            accent_foreground: false,
+            background_wash: false,
+        },
+        InfoStateTone::Help => InfoTonePresentation {
+            semantic_kind: "help",
+            accessible_prefix: Some("Help"),
+            default_icon_hint: Some("circle-help"),
+            accent_foreground: true,
+            background_wash: false,
+        },
+        InfoStateTone::Setup => InfoTonePresentation {
+            semantic_kind: "setup",
+            accessible_prefix: Some("Setup"),
+            default_icon_hint: Some("settings"),
+            accent_foreground: true,
+            background_wash: false,
+        },
+        InfoStateTone::Permission => InfoTonePresentation {
+            semantic_kind: "permission",
+            accessible_prefix: Some("Permission required"),
+            default_icon_hint: Some("shield-check"),
+            accent_foreground: true,
+            background_wash: false,
+        },
+        InfoStateTone::Recovery => InfoTonePresentation {
+            semantic_kind: "recovery",
+            accessible_prefix: Some("Recovery"),
+            default_icon_hint: Some("circle-alert"),
+            accent_foreground: true,
+            background_wash: false,
+        },
+        InfoStateTone::About => InfoTonePresentation {
+            semantic_kind: "about",
+            accessible_prefix: Some("About"),
+            default_icon_hint: Some("info"),
+            accent_foreground: true,
+            background_wash: false,
+        },
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct InfoMetrics {
     pub max_width: f32,
@@ -182,16 +238,174 @@ pub(crate) fn info_palette(theme: &theme::Theme) -> InfoPalette {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InfoCue {
+    Shortcut {
+        raw: SharedString,
+        tokens: Vec<String>,
+        canonical: String,
+        action_id: &'static str,
+    },
+    Trigger {
+        text: SharedString,
+        semantic_id: &'static str,
+    },
+    Syntax {
+        text: SharedString,
+        semantic_id: &'static str,
+    },
+    Label {
+        text: SharedString,
+        semantic_id: &'static str,
+    },
+}
+
+impl InfoCue {
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Shortcut { .. } => "shortcut",
+            Self::Trigger { .. } => "trigger",
+            Self::Syntax { .. } => "syntax",
+            Self::Label { .. } => "label",
+        }
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::Shortcut { raw, .. } => raw.as_ref(),
+            Self::Trigger { text, .. } | Self::Syntax { text, .. } | Self::Label { text, .. } => {
+                text.as_ref()
+            }
+        }
+    }
+
+    pub(crate) const fn semantic_id(&self) -> &'static str {
+        match self {
+            Self::Shortcut { action_id, .. } => action_id,
+            Self::Trigger { semantic_id, .. }
+            | Self::Syntax { semantic_id, .. }
+            | Self::Label { semantic_id, .. } => semantic_id,
+        }
+    }
+
+    pub(crate) fn canonical_shortcut(&self) -> Option<&str> {
+        match self {
+            Self::Shortcut { canonical, .. } => Some(canonical),
+            Self::Trigger { .. } | Self::Syntax { .. } | Self::Label { .. } => None,
+        }
+    }
+
+    pub(crate) const fn action_id(&self) -> Option<&'static str> {
+        match self {
+            Self::Shortcut { action_id, .. } => Some(action_id),
+            Self::Trigger { .. } | Self::Syntax { .. } | Self::Label { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InfoCueValidationError {
+    EmptyShortcut,
+    NonShortcutCue,
+    MissingActionId,
+}
+
+fn is_non_shortcut_info_cue(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    matches!(trimmed, "/" | "@")
+        || trimmed.eq_ignore_ascii_case("filter")
+        || trimmed.starts_with(':')
+        || trimmed.starts_with(';')
+        || trimmed.starts_with("type:")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InfoGuidanceItem {
-    pub shortcut: Option<&'static str>,
+    pub cue: InfoCue,
     pub label: SharedString,
     pub detail: Option<SharedString>,
 }
 
 impl InfoGuidanceItem {
-    pub(crate) fn new(shortcut: Option<&'static str>, label: impl Into<SharedString>) -> Self {
+    pub(crate) fn try_shortcut(
+        raw: &'static str,
+        action_id: &'static str,
+        label: impl Into<SharedString>,
+    ) -> Result<Self, InfoCueValidationError> {
+        if raw.trim().is_empty() {
+            return Err(InfoCueValidationError::EmptyShortcut);
+        }
+        if is_non_shortcut_info_cue(raw) {
+            return Err(InfoCueValidationError::NonShortcutCue);
+        }
+        if action_id.trim().is_empty() {
+            return Err(InfoCueValidationError::MissingActionId);
+        }
+        let tokens = crate::components::hint_strip::shortcut_tokens_from_hint(raw);
+        let canonical = crate::components::hint_strip::canonical_shortcut_hint(raw);
+        if tokens.is_empty() || canonical.is_empty() {
+            return Err(InfoCueValidationError::EmptyShortcut);
+        }
+        Ok(Self {
+            cue: InfoCue::Shortcut {
+                raw: raw.into(),
+                tokens,
+                canonical,
+                action_id,
+            },
+            label: label.into(),
+            detail: None,
+        })
+    }
+
+    pub(crate) fn shortcut(
+        raw: &'static str,
+        action_id: &'static str,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        Self::try_shortcut(raw, action_id, label)
+            .expect("InfoGuidanceItem::shortcut requires an executable keyboard cue")
+    }
+
+    pub(crate) fn trigger(
+        text: &'static str,
+        semantic_id: &'static str,
+        label: impl Into<SharedString>,
+    ) -> Self {
         Self {
-            shortcut,
+            cue: InfoCue::Trigger {
+                text: text.into(),
+                semantic_id,
+            },
+            label: label.into(),
+            detail: None,
+        }
+    }
+
+    pub(crate) fn syntax(
+        text: &'static str,
+        semantic_id: &'static str,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            cue: InfoCue::Syntax {
+                text: text.into(),
+                semantic_id,
+            },
+            label: label.into(),
+            detail: None,
+        }
+    }
+
+    pub(crate) fn label(
+        text: &'static str,
+        semantic_id: &'static str,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            cue: InfoCue::Label {
+                text: text.into(),
+                semantic_id,
+            },
             label: label.into(),
             detail: None,
         }
@@ -251,6 +465,32 @@ pub(crate) struct InfoStateSpec {
     pub footer_shortcut_note: Option<InfoShortcutNote>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InfoCueSemanticSnapshot {
+    pub semantic_id: &'static str,
+    pub cue_kind: &'static str,
+    pub cue_text: String,
+    pub canonical_shortcut: Option<String>,
+    pub action_id: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InfoStateSemanticSnapshot {
+    pub id: &'static str,
+    pub layout: InfoStateLayout,
+    pub density: InfoStateDensity,
+    pub tone: InfoStateTone,
+    pub semantic_kind: &'static str,
+    pub accessible_prefix: Option<&'static str>,
+    pub default_icon_hint: Option<&'static str>,
+    pub title_present: bool,
+    pub title_byte_len: usize,
+    pub body_present: bool,
+    pub body_byte_len: usize,
+    pub cues: Vec<InfoCueSemanticSnapshot>,
+    pub actions: Vec<&'static str>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InfoEmptySurface {
     ActionsSearch,
@@ -271,6 +511,37 @@ impl InfoStateSpec {
             sections: Vec::new(),
             footer_note: None,
             footer_shortcut_note: None,
+        }
+    }
+
+    pub(crate) fn semantic_snapshot(&self) -> InfoStateSemanticSnapshot {
+        let tone = resolve_info_tone(self.tone);
+        let cues = self
+            .sections
+            .iter()
+            .flat_map(|section| section.items.iter())
+            .map(|item| InfoCueSemanticSnapshot {
+                semantic_id: item.cue.semantic_id(),
+                cue_kind: item.cue.kind(),
+                cue_text: item.cue.text().to_string(),
+                canonical_shortcut: item.cue.canonical_shortcut().map(str::to_string),
+                action_id: item.cue.action_id(),
+            })
+            .collect();
+        InfoStateSemanticSnapshot {
+            id: self.id,
+            layout: self.layout,
+            density: self.density,
+            tone: self.tone,
+            semantic_kind: tone.semantic_kind,
+            accessible_prefix: tone.accessible_prefix,
+            default_icon_hint: tone.default_icon_hint,
+            title_present: self.title.is_some(),
+            title_byte_len: self.title.as_ref().map_or(0, |title| title.len()),
+            body_present: self.body.is_some(),
+            body_byte_len: self.body.as_ref().map_or(0, |body| body.len()),
+            cues,
+            actions: Vec::new(),
         }
     }
 
@@ -407,8 +678,12 @@ pub(crate) fn permission_onboarding_intro_spec(
         .section(InfoSection::titled(
             "Actions",
             vec![
-                InfoGuidanceItem::new(Some("↵"), "Grant selected permission"),
-                InfoGuidanceItem::new(Some("Esc"), "Finish setup"),
+                InfoGuidanceItem::shortcut(
+                    "↵",
+                    "permissions-grant-selected",
+                    "Grant selected permission",
+                ),
+                InfoGuidanceItem::shortcut("Esc", "permissions-finish", "Finish setup"),
             ],
         ))
         .footer_note(footer)
@@ -440,11 +715,19 @@ pub(crate) fn agent_chat_empty_guidance_spec() -> InfoStateSpec {
         .title("Ask with context")
         .body("Describe the result you want. Use / for skills or @ to attach context before you send.")
         .section(InfoSection::new(vec![
-            InfoGuidanceItem::new(Some("/"), "Use a skill or agent command"),
-            InfoGuidanceItem::new(Some("@"), "Attach files, scripts, clipboard, or history"),
-            InfoGuidanceItem::new(Some("⇧↵"), "Add a newline"),
-            InfoGuidanceItem::new(Some("⌘P"), "Open previous chats"),
-            InfoGuidanceItem::new(Some("⌘K"), "Show every chat action"),
+            InfoGuidanceItem::trigger(
+                "/",
+                "agent-chat-trigger-skills",
+                "Use a skill or agent command",
+            ),
+            InfoGuidanceItem::trigger(
+                "@",
+                "agent-chat-trigger-context",
+                "Attach files, scripts, clipboard, or history",
+            ),
+            InfoGuidanceItem::shortcut("⇧↵", "agent-chat-add-newline", "Add a newline"),
+            InfoGuidanceItem::shortcut("⌘P", "agent-chat-open-history", "Open previous chats"),
+            InfoGuidanceItem::shortcut("⌘K", "agent-chat-open-actions", "Show every chat action"),
         ]))
 }
 
@@ -489,11 +772,11 @@ fn launcher_no_scripts_spec() -> InfoStateSpec {
         .title("No scripts yet")
         .body("This launcher opens your Script Kit scripts and snippets. Create one now, ask Agent Chat to draft the workflow, or open Actions for setup and install options.")
         .section(InfoSection::new(vec![
-            InfoGuidanceItem::new(Some("⌘N"), "Create a script")
+            InfoGuidanceItem::shortcut("⌘N", "launcher-create-script", "Create a script")
                 .detail("Start a new automation in your scripts folder."),
-            InfoGuidanceItem::new(Some("⌘↵"), "Ask Agent Chat")
+            InfoGuidanceItem::shortcut("⌘↵", "launcher-ask-agent-chat", "Ask Agent Chat")
                 .detail("Describe the workflow you want and let AI draft it."),
-            InfoGuidanceItem::new(Some("⌘K"), "Open Actions")
+            InfoGuidanceItem::shortcut("⌘K", "launcher-open-actions", "Open Actions")
                 .detail("Find reload, install, and setup commands."),
         ]))
         .footer_note("After scripts exist, type here to search and run them.")
@@ -508,10 +791,14 @@ fn launcher_active_filter_no_results_spec(filter_text: &str) -> InfoStateSpec {
         .title(format!("No matches for \"{filter_display}\""))
         .body("The search is working, but an active filter is narrowing the launcher to zero results. Remove a filter chip or loosen the query to widen the set.")
         .section(InfoSection::new(vec![
-            InfoGuidanceItem::new(Some("Esc"), "Clear the search"),
-            InfoGuidanceItem::new(Some("Filter"), "Remove a filter chip")
-                .detail("Source and type filters apply before fuzzy matching."),
-            InfoGuidanceItem::new(Some("⌘K"), "Open Actions")
+            InfoGuidanceItem::shortcut("Esc", "launcher-clear-search", "Clear the search"),
+            InfoGuidanceItem::label(
+                "Filter",
+                "launcher-filter-chip-label",
+                "Remove a filter chip",
+            )
+            .detail("Source and type filters apply before fuzzy matching."),
+            InfoGuidanceItem::shortcut("⌘K", "launcher-open-actions", "Open Actions")
                 .detail("Use actions if you meant to manage scripts or filters."),
         ]))
         .footer_note("Filters narrow the library before the launcher ranks results.")
@@ -528,11 +815,20 @@ fn launcher_plain_hash_no_results_spec(filter_text: &str) -> InfoStateSpec {
         .section(InfoSection::titled(
             "Examples",
             vec![
-                InfoGuidanceItem::new(Some(":#"), "Filter tagged items").detail("Example: :#work"),
-                InfoGuidanceItem::new(Some(":tag:"), "Filter by tag name")
-                    .detail("Example: :tag:work"),
-                InfoGuidanceItem::new(Some(";todo"), "Create a tagged capture")
-                    .detail("Example: ;todo Buy milk #errands"),
+                InfoGuidanceItem::syntax(":#", "launcher-syntax-tag-prefix", "Filter tagged items")
+                    .detail("Example: :#work"),
+                InfoGuidanceItem::syntax(
+                    ":tag:",
+                    "launcher-syntax-tag-name",
+                    "Filter by tag name",
+                )
+                .detail("Example: :tag:work"),
+                InfoGuidanceItem::syntax(
+                    ";todo",
+                    "launcher-syntax-todo-capture",
+                    "Create a tagged capture",
+                )
+                .detail("Example: ;todo Buy milk #errands"),
             ],
         ))
         .footer_note("Keep #tag plain only when you want text search, not tag filtering.")
@@ -547,14 +843,18 @@ fn launcher_generic_no_results_spec(filter_text: &str) -> InfoStateSpec {
         .title(format!("No results for \"{filter_display}\""))
         .body("The launcher searches scripts, scriptlets, snippets, and built-in commands by name and metadata. Try fewer words, use a structured filter, capture the thought, or ask Agent Chat to turn it into a script.")
         .section(InfoSection::new(vec![
-            InfoGuidanceItem::new(Some("Esc"), "Clear the search"),
-            InfoGuidanceItem::new(Some(":"), "Search other sources")
+            InfoGuidanceItem::shortcut("Esc", "launcher-clear-search", "Clear the search"),
+            InfoGuidanceItem::syntax(":", "launcher-syntax-source", "Search other sources")
                 .detail(source_prefix_examples_detail()),
-            InfoGuidanceItem::new(Some("type:"), "Search by metadata")
-                .detail("Examples: type:script · type:scriptlet · shortcut:cmd+k"),
-            InfoGuidanceItem::new(Some(";todo"), "Capture instead")
+            InfoGuidanceItem::syntax(
+                "type:",
+                "launcher-syntax-metadata",
+                "Search by metadata",
+            )
+            .detail("Examples: type:script · type:scriptlet · shortcut:cmd+k"),
+            InfoGuidanceItem::syntax(";todo", "launcher-syntax-capture", "Capture instead")
                 .detail("Examples: ;todo · ;note"),
-            InfoGuidanceItem::new(Some("⌘↵"), "Ask Agent Chat")
+            InfoGuidanceItem::shortcut("⌘↵", "launcher-ask-agent-chat", "Ask Agent Chat")
                 .detail("Turn this search into a script request."),
         ]))
         .footer_note("Structured filters work best for metadata; plain words work best for names.")
@@ -703,6 +1003,55 @@ pub(crate) fn render_info_state_full_width_panel(
         .into_any_element()
 }
 
+fn render_info_tone_header(spec: &InfoStateSpec, palette: InfoPalette) -> Option<AnyElement> {
+    use crate::icons::IconNamed;
+
+    let presentation = resolve_info_tone(spec.tone);
+    let eyebrow = spec.eyebrow.clone().or_else(|| {
+        presentation
+            .accessible_prefix
+            .map(|prefix| SharedString::from(prefix.to_string()))
+    });
+    let icon = presentation
+        .default_icon_hint
+        .and_then(crate::icons::lucide_from_str);
+    if eyebrow.is_none() && icon.is_none() {
+        return None;
+    }
+
+    let color = if presentation.accent_foreground {
+        palette.accent
+    } else {
+        palette.strong
+    };
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(INFO_SPACING.xs))
+        .text_color(color);
+    if let Some(icon) = icon {
+        row = row.child(
+            svg()
+                .path(icon.path())
+                .size(px(INFO_TYPE_SCALE.subhead.size))
+                .flex_none()
+                .text_color(color),
+        );
+    }
+    if let Some(eyebrow) = eyebrow {
+        row = row.child(
+            div()
+                .text_size(px(INFO_TYPE_SCALE.micro.size))
+                .line_height(px(INFO_TYPE_SCALE.micro.line))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color)
+                .child(eyebrow),
+        );
+    }
+    Some(row.into_any_element())
+}
+
 fn render_info_content(
     spec: &InfoStateSpec,
     theme: &theme::Theme,
@@ -723,15 +1072,8 @@ fn render_info_content(
         stack = stack.max_w(px(metrics.max_width));
     }
 
-    if let Some(eyebrow) = spec.eyebrow.clone() {
-        stack = stack.child(
-            div()
-                .text_size(px(INFO_TYPE_SCALE.micro.size))
-                .line_height(px(INFO_TYPE_SCALE.micro.line))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(palette.strong)
-                .child(eyebrow),
-        );
+    if let Some(tone_header) = render_info_tone_header(spec, palette) {
+        stack = stack.child(tone_header);
     }
 
     if spec.title.is_some() || spec.body.is_some() {
@@ -783,7 +1125,7 @@ fn render_info_content(
             .iter()
             .flat_map(|section| section.items.iter().cloned())
             .collect();
-        let shortcut_slot_width_px = info_guidance_shortcut_slot_width_px(&guidance_items, cx);
+        let shortcut_slot_width_px = info_guidance_cue_slot_width_px(&guidance_items, cx);
         stack = stack.child(render_info_shortcut_note(
             note,
             metrics,
@@ -890,7 +1232,7 @@ pub(crate) fn render_info_guidance_items(
     cx: &gpui::App,
 ) -> AnyElement {
     let metrics = info_metrics(density);
-    let shortcut_slot_width_px = info_guidance_shortcut_slot_width_px(items, cx);
+    let shortcut_slot_width_px = info_guidance_cue_slot_width_px(items, cx);
     div()
         .id(id)
         .w_full()
@@ -904,29 +1246,100 @@ pub(crate) fn render_info_guidance_items(
         .into_any_element()
 }
 
-/// Shared column width for the shortcut slot: the widest keycap run across
-/// rows, with a floor of two square keycaps plus a gap. Width inputs come
-/// from real text-system measurement (see `footer_shortcut_keycaps_measured_width_px`),
-/// not per-character estimates.
-fn info_guidance_shortcut_slot_width_px(items: &[InfoGuidanceItem], cx: &gpui::App) -> f32 {
-    info_guidance_shortcut_slot_width_from_widths(items.iter().filter_map(|item| {
-        item.shortcut.map(|shortcut| {
-            crate::components::footer_chrome::footer_shortcut_keycaps_measured_width_px(
-                shortcut, cx,
-            )
-        })
-    }))
+/// Shared column width for every cue kind. Shortcut widths use footer keycap
+/// metrics; trigger, syntax, and label widths use the text system directly and
+/// never pass through shortcut/keycap measurement.
+fn info_guidance_cue_slot_width_px(items: &[InfoGuidanceItem], cx: &gpui::App) -> f32 {
+    info_guidance_cue_slot_width_from_widths(
+        items
+            .iter()
+            .map(|item| info_cue_measured_width_px(&item.cue, cx)),
+    )
 }
 
-fn info_guidance_shortcut_slot_width_from_widths(widths: impl Iterator<Item = f32>) -> f32 {
-    let min_shortcut_width = crate::components::footer_chrome::FOOTER_KEYCAP_HEIGHT_PX * 2.0
+fn info_cue_text_width_px(text: &str, font_family: &'static str, cx: &gpui::App) -> f32 {
+    let text_system = cx.text_system();
+    let font_id = text_system.resolve_font(&gpui::font(font_family));
+    let font_size = px(INFO_TYPE_SCALE.caption.size);
+    text.chars()
+        .map(|ch| f32::from(text_system.layout_width(font_id, font_size, ch)))
+        .sum::<f32>()
+        .ceil()
+}
+
+fn info_cue_measured_width_px(cue: &InfoCue, cx: &gpui::App) -> f32 {
+    match cue {
+        InfoCue::Shortcut { tokens, .. } => {
+            crate::components::footer_chrome::footer_shortcut_keycaps_measured_width_from_tokens(
+                tokens.iter().map(String::as_str),
+                cx,
+            )
+        }
+        InfoCue::Trigger { text, .. } => {
+            info_cue_text_width_px(text, crate::list_item::FONT_MONO, cx)
+        }
+        InfoCue::Syntax { text, .. } => {
+            info_cue_text_width_px(text, crate::list_item::FONT_MONO, cx) + INFO_SPACING.xs
+        }
+        InfoCue::Label { text, .. } => {
+            info_cue_text_width_px(text, crate::list_item::FONT_SYSTEM_UI, cx)
+        }
+    }
+}
+
+fn info_guidance_cue_slot_width_from_widths(widths: impl Iterator<Item = f32>) -> f32 {
+    let min_cue_width = crate::components::footer_chrome::FOOTER_KEYCAP_HEIGHT_PX * 2.0
         + crate::components::footer_chrome::FOOTER_ACTION_CONTENT_GAP_PX;
     let max_width = widths.fold(0.0, f32::max);
 
     if max_width > 0.0 {
-        max_width.max(min_shortcut_width)
+        max_width.max(min_cue_width)
     } else {
         0.0
+    }
+}
+
+fn render_info_cue(cue: &InfoCue, theme: &theme::Theme, palette: InfoPalette) -> AnyElement {
+    let semantic_id = SharedString::from(format!("info-cue-{}", cue.semantic_id()));
+    match cue {
+        InfoCue::Shortcut { tokens, .. } => div()
+            .id(semantic_id)
+            .flex()
+            .items_center()
+            .child(
+                crate::components::footer_chrome::render_footer_shortcut_keycaps_from_tokens(
+                    tokens.iter().map(String::as_str),
+                    theme,
+                ),
+            )
+            .into_any_element(),
+        InfoCue::Trigger { text, .. } => div()
+            .id(semantic_id)
+            .font_family(crate::list_item::FONT_MONO)
+            .text_size(px(INFO_TYPE_SCALE.caption.size))
+            .line_height(px(INFO_TYPE_SCALE.caption.line))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(palette.accent)
+            .child(text.clone())
+            .into_any_element(),
+        InfoCue::Syntax { text, .. } => div()
+            .id(semantic_id)
+            .font_family(crate::list_item::FONT_MONO)
+            .text_size(px(INFO_TYPE_SCALE.caption.size))
+            .line_height(px(INFO_TYPE_SCALE.caption.line))
+            .text_color(palette.accent)
+            .bg(palette.whisper)
+            .rounded(px(INFO_SPACING.xxs))
+            .px(px(INFO_SPACING.xxs))
+            .child(text.clone())
+            .into_any_element(),
+        InfoCue::Label { text, .. } => div()
+            .id(semantic_id)
+            .text_size(px(INFO_TYPE_SCALE.caption.size))
+            .line_height(px(INFO_TYPE_SCALE.caption.line))
+            .text_color(palette.strong)
+            .child(text.clone())
+            .into_any_element(),
     }
 }
 
@@ -935,36 +1348,27 @@ fn render_guidance_row(
     metrics: InfoMetrics,
     theme: &theme::Theme,
     palette: InfoPalette,
-    shortcut_slot_width_px: f32,
+    cue_slot_width_px: f32,
 ) -> Div {
-    let mut row = div()
+    div()
         .w_full()
         .min_h(px(metrics.row_min_h))
         .flex()
         .items_center()
-        .gap(px(INFO_SPACING.sm));
-
-    if let Some(shortcut) = item.shortcut {
-        row = row.child(
+        .gap(px(INFO_SPACING.sm))
+        .child(
             div()
-                .w(px(shortcut_slot_width_px))
+                .w(px(cue_slot_width_px))
                 .flex_none()
                 .flex()
                 .items_center()
-                .child(
-                    crate::components::footer_chrome::render_footer_shortcut_keycaps(
-                        shortcut.to_string(),
-                        theme,
-                    ),
-                ),
-        );
-    }
-
-    row.child(render_info_guidance_text(
-        item.label.clone(),
-        item.detail.clone(),
-        palette,
-    ))
+                .child(render_info_cue(&item.cue, theme, palette)),
+        )
+        .child(render_info_guidance_text(
+            item.label.clone(),
+            item.detail.clone(),
+            palette,
+        ))
 }
 
 fn render_info_guidance_text(
@@ -1056,6 +1460,157 @@ mod tests {
     }
 
     #[test]
+    fn info_cues_classify_shortcuts_triggers_syntax_and_labels_explicitly() {
+        let agent = agent_chat_empty_guidance_spec().semantic_snapshot();
+        assert!(agent
+            .cues
+            .iter()
+            .any(|cue| cue.cue_kind == "trigger" && cue.cue_text == "/"));
+        assert!(agent
+            .cues
+            .iter()
+            .any(|cue| cue.cue_kind == "trigger" && cue.cue_text == "@"));
+        assert!(agent.cues.iter().any(|cue| {
+            cue.cue_kind == "shortcut"
+                && cue.cue_text == "⌘K"
+                && cue.canonical_shortcut.as_deref() == Some("cmd+k")
+                && cue.action_id == Some("agent-chat-open-actions")
+        }));
+
+        let active =
+            launcher_empty_or_no_results_spec("type:script nope", true).semantic_snapshot();
+        assert!(active.cues.iter().any(|cue| {
+            cue.cue_kind == "label"
+                && cue.cue_text == "Filter"
+                && cue.canonical_shortcut.is_none()
+                && cue.action_id.is_none()
+        }));
+
+        let tag = launcher_empty_or_no_results_spec("#work", false).semantic_snapshot();
+        for syntax in [":#", ":tag:", ";todo"] {
+            assert!(tag.cues.iter().any(|cue| {
+                cue.cue_kind == "syntax"
+                    && cue.cue_text == syntax
+                    && cue.canonical_shortcut.is_none()
+                    && cue.action_id.is_none()
+            }));
+        }
+        assert_eq!(
+            tag.cues
+                .iter()
+                .filter(|cue| cue.cue_kind == "syntax" && cue.cue_text == ";todo")
+                .count(),
+            1,
+            ";todo must stay one semantic syntax element"
+        );
+
+        let generic = launcher_empty_or_no_results_spec("zzz", false).semantic_snapshot();
+        for syntax in [":", "type:", ";todo"] {
+            assert!(generic
+                .cues
+                .iter()
+                .any(|cue| cue.cue_kind == "syntax" && cue.cue_text == syntax));
+        }
+
+        let permission = permission_onboarding_intro_spec(0, 2, false);
+        for item in permission
+            .sections
+            .iter()
+            .flat_map(|section| &section.items)
+        {
+            match &item.cue {
+                InfoCue::Shortcut {
+                    tokens,
+                    canonical,
+                    action_id,
+                    ..
+                } => {
+                    assert!(!tokens.is_empty());
+                    assert!(!canonical.is_empty());
+                    assert!(!action_id.is_empty());
+                }
+                other => panic!("permission cue must be executable shortcut, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn info_shortcut_constructor_rejects_syntax_triggers_labels_and_missing_ids() {
+        for raw in [";todo", ":#", ":tag:", "type:", "/", "@", "Filter"] {
+            assert_eq!(
+                InfoGuidanceItem::try_shortcut(raw, "bad-action", "Bad cue"),
+                Err(InfoCueValidationError::NonShortcutCue),
+                "raw={raw}"
+            );
+        }
+        assert_eq!(
+            InfoGuidanceItem::try_shortcut("", "bad-action", "Empty"),
+            Err(InfoCueValidationError::EmptyShortcut)
+        );
+        assert_eq!(
+            InfoGuidanceItem::try_shortcut("⌘K", "", "Missing action"),
+            Err(InfoCueValidationError::MissingActionId)
+        );
+    }
+
+    #[test]
+    fn info_tones_resolve_to_distinct_semantics_without_background_washes() {
+        let cases = [
+            (InfoStateTone::Neutral, "neutral", None, None),
+            (
+                InfoStateTone::Help,
+                "help",
+                Some("Help"),
+                Some("circle-help"),
+            ),
+            (
+                InfoStateTone::Setup,
+                "setup",
+                Some("Setup"),
+                Some("settings"),
+            ),
+            (
+                InfoStateTone::Permission,
+                "permission",
+                Some("Permission required"),
+                Some("shield-check"),
+            ),
+            (
+                InfoStateTone::Recovery,
+                "recovery",
+                Some("Recovery"),
+                Some("circle-alert"),
+            ),
+            (InfoStateTone::About, "about", Some("About"), Some("info")),
+        ];
+        for (tone, kind, prefix, icon) in cases {
+            let presentation = resolve_info_tone(tone);
+            assert_eq!(presentation.semantic_kind, kind);
+            assert_eq!(presentation.accessible_prefix, prefix);
+            assert_eq!(presentation.default_icon_hint, icon);
+            assert!(!presentation.background_wash);
+        }
+        assert_ne!(
+            resolve_info_tone(InfoStateTone::Help).semantic_kind,
+            resolve_info_tone(InfoStateTone::Recovery).semantic_kind
+        );
+    }
+
+    #[test]
+    fn semantic_snapshot_is_redacted_and_does_not_manufacture_actions() {
+        let query = "private-search-canary";
+        let spec = launcher_empty_or_no_results_spec(query, false);
+        let snapshot = spec.semantic_snapshot();
+        assert_eq!(snapshot.semantic_kind, "recovery");
+        assert!(snapshot.title_present);
+        assert!(snapshot.title_byte_len > query.len());
+        assert!(snapshot.body_present);
+        assert!(snapshot.actions.is_empty());
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains(query));
+    }
+
+    #[test]
     fn agent_chat_empty_guidance_teaches_starting_context_not_window_management() {
         let spec = agent_chat_empty_guidance_spec();
         let copy = format!("{spec:?}");
@@ -1078,17 +1633,17 @@ mod tests {
 
         // The widest measured keycap run wins.
         let wide = min_shortcut_width + 24.0;
-        let width = info_guidance_shortcut_slot_width_from_widths([wide, 18.0, 30.0].into_iter());
+        let width = info_guidance_cue_slot_width_from_widths([wide, 18.0, 30.0].into_iter());
         assert_eq!(width, wide);
 
         // Narrow runs are floored at two square keycaps plus a gap so rows
         // with short shortcuts still align with wider neighbors.
-        let width = info_guidance_shortcut_slot_width_from_widths([10.0].into_iter());
+        let width = info_guidance_cue_slot_width_from_widths([10.0].into_iter());
         assert_eq!(width, min_shortcut_width);
 
         // No shortcuts at all collapses the slot entirely.
         assert_eq!(
-            info_guidance_shortcut_slot_width_from_widths(std::iter::empty()),
+            info_guidance_cue_slot_width_from_widths(std::iter::empty()),
             0.0
         );
     }
@@ -1109,8 +1664,13 @@ mod tests {
             .flat_map(|section| section.items.iter().cloned())
             .collect();
         assert!(
-            guidance_items.iter().any(|item| item.shortcut == Some("⌘K")
-                && item.label.as_ref() == "Show every chat action"),
+            guidance_items.iter().any(|item| {
+                matches!(
+                    &item.cue,
+                    InfoCue::Shortcut { raw, action_id, .. }
+                        if raw.as_ref() == "⌘K" && *action_id == "agent-chat-open-actions"
+                ) && item.label.as_ref() == "Show every chat action"
+            }),
             "⌘K actions guidance must be a normal guidance row"
         );
     }

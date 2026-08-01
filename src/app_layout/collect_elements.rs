@@ -160,6 +160,92 @@ impl ScriptListApp {
             .collect()
     }
 
+    fn info_state_elements(
+        snapshot: &crate::components::InfoStateSemanticSnapshot,
+    ) -> Vec<protocol::ElementInfo> {
+        let mut root = protocol::ElementInfo::panel(snapshot.id);
+        root.semantic_id = format!("info-state:{}", snapshot.id);
+        root.text = snapshot.accessible_prefix.map(str::to_string);
+        root.value = snapshot.default_icon_hint.map(str::to_string);
+        root.role = Some("info-state".to_string());
+        root.kind = Some(snapshot.semantic_kind.to_string());
+        root.source = Some("InfoState".to_string());
+        root.source_name = Some(snapshot.id.to_string());
+        root.selectable = Some(false);
+        root.status_kind = Some(snapshot.semantic_kind.to_string());
+
+        let mut elements = Vec::with_capacity(snapshot.cues.len() + 1);
+        elements.push(root);
+        elements.extend(snapshot.cues.iter().enumerate().map(|(index, cue)| {
+            protocol::ElementInfo {
+                semantic_id: format!("info-cue:{}", cue.semantic_id),
+                element_type: protocol::ElementType::Panel,
+                text: Some(cue.cue_text.clone()),
+                value: cue.canonical_shortcut.clone(),
+                selected: Some(false),
+                focused: Some(false),
+                index: Some(index),
+                role: Some("guidance-cue".to_string()),
+                kind: Some(cue.cue_kind.to_string()),
+                source: Some("InfoState".to_string()),
+                source_name: Some(snapshot.id.to_string()),
+                selectable: Some(false),
+                status_kind: Some(snapshot.semantic_kind.to_string()),
+                action_disabled: None,
+                style: None,
+            }
+        }));
+        elements
+    }
+
+    fn menu_syntax_guidance_elements(
+        snapshot: &crate::menu_syntax::MenuSyntaxMainHintSnapshot,
+    ) -> Vec<protocol::ElementInfo> {
+        let mut root = protocol::ElementInfo::panel("menu-syntax-main-hint");
+        root.role = Some("guidance-state".to_string());
+        root.kind = Some("syntax-guidance".to_string());
+        root.source = Some("MenuSyntaxMainHint".to_string());
+        root.source_name = Some(format!("{:?}", snapshot.kind));
+        root.selectable = Some(false);
+
+        let mut elements = vec![root];
+        let mut syntax_tokens = Vec::new();
+        if let Some(active_head) = snapshot.active_head.as_deref() {
+            syntax_tokens.push(active_head.to_string());
+        }
+        for example in &snapshot.examples {
+            if !syntax_tokens.contains(example) {
+                syntax_tokens.push(example.clone());
+            }
+        }
+        if syntax_tokens.is_empty() {
+            if let Some(example) = snapshot.example.as_deref() {
+                syntax_tokens.push(example.to_string());
+            }
+        }
+
+        elements.extend(syntax_tokens.into_iter().enumerate().map(|(index, syntax)| {
+            protocol::ElementInfo {
+                semantic_id: format!("menu-syntax-cue:{index}"),
+                element_type: protocol::ElementType::Panel,
+                text: Some(syntax),
+                value: None,
+                selected: Some(false),
+                focused: Some(false),
+                index: Some(index),
+                role: Some("guidance-cue".to_string()),
+                kind: Some("syntax".to_string()),
+                source: Some("MenuSyntaxMainHint".to_string()),
+                source_name: Some(format!("{:?}", snapshot.kind)),
+                selectable: Some(false),
+                status_kind: None,
+                action_disabled: None,
+                style: None,
+            }
+        }));
+        elements
+    }
+
     pub(crate) fn collect_visible_elements(
         &self,
         limit: usize,
@@ -204,6 +290,11 @@ impl ScriptListApp {
                         ),
                         protocol::ElementInfo::list("agent_chat-messages", state.message_count),
                     ];
+                    if state.message_count == 0 {
+                        let snapshot =
+                            crate::components::agent_chat_empty_guidance_spec().semantic_snapshot();
+                        elements.extend(Self::info_state_elements(&snapshot));
+                    }
                     // S12: the SHARED recovery card, reported with the same
                     // `ai-recovery-*` ids the flow session surface reports, so
                     // one probe can compare the two surfaces directly.
@@ -3095,7 +3186,7 @@ impl ScriptListApp {
         let handler_form_field_count = handler_form
             .as_ref()
             .map_or(0usize, |form| form.fields.len());
-        let total_count = total_rows + source_statuses.len() + handler_form_field_count + 2;
+        let mut total_count = total_rows + source_statuses.len() + handler_form_field_count + 2;
         let mut elements = Vec::with_capacity(limit.min(total_count));
 
         Self::push_limited_element(
@@ -3282,6 +3373,32 @@ impl ScriptListApp {
             }
         }
 
+        let main_hint_snapshot = (total_rows == 0)
+            .then(|| self.menu_syntax_main_hint_snapshot(&self.filter_text, true))
+            .flatten();
+        let guidance_elements = if let Some(snapshot) = main_hint_snapshot.as_ref() {
+            Self::menu_syntax_guidance_elements(snapshot)
+        } else if total_rows == 0 && handler_form.is_none() {
+            let has_active_filter = self
+                .menu_syntax_mode
+                .advanced_query_for(&self.filter_text)
+                .is_some_and(|query| query.has_source_filters() || query.has_predicates());
+            let snapshot = crate::components::launcher_empty_or_no_results_spec(
+                &self.filter_text,
+                has_active_filter,
+            )
+            .semantic_snapshot();
+            Self::info_state_elements(&snapshot)
+        } else {
+            Vec::new()
+        };
+        total_count += guidance_elements.len();
+        for element in guidance_elements {
+            if !Self::push_limited_element(&mut elements, limit, element) {
+                break;
+            }
+        }
+
         let mut row_index = 0usize;
         for (grouped_index, item) in grouped_items.iter().enumerate() {
             if elements.len() >= limit {
@@ -3424,6 +3541,51 @@ impl ScriptListApp {
     }
 }
 include!("prompt_and_script_list_collectors.rs");
+
+#[cfg(test)]
+mod info_state_semantic_tests {
+    use super::*;
+
+    #[test]
+    fn info_state_elements_project_cue_kind_without_action_fiction() {
+        let snapshot =
+            crate::components::launcher_empty_or_no_results_spec("#work", false).semantic_snapshot();
+        let elements = ScriptListApp::info_state_elements(&snapshot);
+        let root = elements
+            .iter()
+            .find(|element| element.role.as_deref() == Some("info-state"))
+            .expect("InfoState root");
+        assert_eq!(root.kind.as_deref(), Some("help"));
+        assert_eq!(root.status_kind.as_deref(), Some("help"));
+
+        let syntax: Vec<_> = elements
+            .iter()
+            .filter(|element| element.role.as_deref() == Some("guidance-cue"))
+            .collect();
+        assert_eq!(syntax.len(), 3);
+        assert!(syntax.iter().all(|element| element.kind.as_deref() == Some("syntax")));
+        assert!(syntax.iter().all(|element| element.selectable == Some(false)));
+        assert!(syntax.iter().all(|element| element.action_disabled.is_none()));
+        assert!(syntax.iter().any(|element| element.text.as_deref() == Some(";todo")));
+    }
+
+    #[test]
+    fn empty_agent_chat_elements_expose_trigger_and_shortcut_kinds() {
+        let snapshot = crate::components::agent_chat_empty_guidance_spec().semantic_snapshot();
+        let elements = ScriptListApp::info_state_elements(&snapshot);
+        assert!(elements.iter().any(|element| {
+            element.kind.as_deref() == Some("trigger")
+                && element.text.as_deref() == Some("/")
+                && element.value.is_none()
+        }));
+        assert!(elements.iter().any(|element| {
+            element.kind.as_deref() == Some("shortcut")
+                && element.text.as_deref() == Some("⌘K")
+                && element.value.as_deref() == Some("cmd+k")
+                && element.semantic_id == "info-cue:agent-chat-open-actions"
+        }));
+    }
+}
 
 #[cfg(test)]
 mod recent_files_semantic_tests {
