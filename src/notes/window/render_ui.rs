@@ -6,6 +6,11 @@ use crate::ui_foundation::{compact_action_row, log_ui_action, UiActionSpec, UiSu
 /// Opacity for toolbar section borders — matches Notes window token.
 const OPACITY_SECTION_BORDER: f32 = 0.2;
 
+pub(super) const NOTES_RESOURCE_HINT_OPEN_SOURCE_ID: &str =
+    "notes-kit-resource-preview-hint-open-source";
+pub(super) const NOTES_RESOURCE_HINT_COPY_URI_ID: &str = "notes-kit-resource-preview-hint-copy-uri";
+pub(super) const NOTES_RESOURCE_HINT_BACK_ID: &str = "notes-kit-resource-preview-hint-back";
+
 impl NotesApp {
     pub(super) fn render_kit_resource_preview(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::components::hint_strip::ClickableHint;
@@ -50,6 +55,7 @@ impl NotesApp {
         let mut footer_hints = Vec::new();
         if has_source_note {
             footer_hints.push(ClickableHint::new(
+                NOTES_RESOURCE_HINT_OPEN_SOURCE_ID,
                 "↵ Open Source",
                 cx.listener(|this, _, window, cx| {
                     this.open_kit_resource_preview_source(window, cx);
@@ -57,12 +63,14 @@ impl NotesApp {
             ));
         }
         footer_hints.push(ClickableHint::new(
+            NOTES_RESOURCE_HINT_COPY_URI_ID,
             "⌘C Copy URI",
             cx.listener(|this, _, _window, cx| {
                 this.copy_kit_resource_preview_uri(cx);
             }),
         ));
         footer_hints.push(ClickableHint::new(
+            NOTES_RESOURCE_HINT_BACK_ID,
             "Esc Back to Note",
             cx.listener(|this, _, window, cx| {
                 this.close_kit_resource_preview(window, cx);

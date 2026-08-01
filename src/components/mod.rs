@@ -102,8 +102,8 @@ pub use form_fields::{
 };
 #[allow(unused_imports)]
 pub use hint_strip::{
-    render_hint_icons, render_hint_icons_clickable, render_hint_icons_hsla,
-    render_selectable_hint_icons, ClickableHint, HintStrip, SelectableHint,
+    render_hint_icons_clickable, render_selectable_hint_icons, render_static_hint_icons,
+    render_static_hint_icons_hsla, ClickableHint, HintStrip, SelectableHint,
 };
 #[allow(unused_imports)]
 pub(crate) use info_state::{

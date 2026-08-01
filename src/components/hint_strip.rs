@@ -51,16 +51,50 @@ const KEYCAP_RADIUS: f32 = 5.0;
 const KEYCAP_BG_OPACITY: f32 = 0.12;
 const FOOTER_HINT_TEXT_SIZE: f32 = 12.5;
 
-/// A click handler for a single hint button.
+/// A click handler for a single hint action.
 pub(crate) type HintClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+struct HintAction {
+    action_id: SharedString,
+    on_click: HintClickHandler,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HintInteractionSnapshot {
+    pub action_id: Option<SharedString>,
+    pub pointer: bool,
+    pub hover: bool,
+    pub active: bool,
+    pub clickable: bool,
+}
+
+fn required_hint_action_id(action_id: impl Into<SharedString>) -> SharedString {
+    let action_id = action_id.into();
+    assert!(
+        !action_id.trim().is_empty(),
+        "interactive hints require a non-empty stable action ID"
+    );
+    action_id
+}
+
+fn hint_interaction_snapshot(action: Option<&HintAction>) -> HintInteractionSnapshot {
+    let interactive = action.is_some();
+    HintInteractionSnapshot {
+        action_id: action.map(|action| action.action_id.clone()),
+        pointer: interactive,
+        hover: interactive,
+        active: interactive,
+        clickable: interactive,
+    }
+}
 
 #[derive(IntoElement)]
 pub struct HintStrip {
     hints: Vec<SharedString>,
     leading: Option<AnyElement>,
-    /// Optional per-hint click handlers. When set, hints become clickable buttons
-    /// with ghost-bg hover feedback using the theme's hover token.
-    on_clicks: Vec<Option<HintClickHandler>>,
+    /// Interactive hints carry both a stable action identity and a required callback.
+    /// Static hints keep this slot empty and receive no pointer-event chrome.
+    actions: Vec<Option<HintAction>>,
 }
 
 impl HintStrip {
@@ -70,7 +104,7 @@ impl HintStrip {
         Self {
             hints,
             leading: None,
-            on_clicks: vec![None; len],
+            actions: std::iter::repeat_with(|| None).take(len).collect(),
         }
     }
 
@@ -79,31 +113,30 @@ impl HintStrip {
         self
     }
 
-    /// Attach a click handler to the hint at `index`.
-    /// When set, the hint renders as a clickable button with ghost-bg hover.
+    /// Make the hint at `index` interactive.
+    ///
+    /// Interactive hints require a stable action ID and a real callback. A hint
+    /// without both remains static and receives no pointer/hover/active affordance.
     pub fn on_hint_click(
         mut self,
         index: usize,
+        action_id: impl Into<SharedString>,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        if index < self.on_clicks.len() {
-            self.on_clicks[index] = Some(Rc::new(handler));
+        if index < self.actions.len() {
+            self.actions[index] = Some(HintAction {
+                action_id: required_hint_action_id(action_id),
+                on_click: Rc::new(handler),
+            });
         }
         self
     }
 
-    /// Attach click handlers to all hints at once.
-    /// Each entry maps to the hint at the same index. `None` entries remain non-interactive.
-    pub fn on_hint_clicks(
-        mut self,
-        handlers: Vec<Option<impl Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
-    ) -> Self {
-        for (i, handler) in handlers.into_iter().enumerate() {
-            if i < self.on_clicks.len() {
-                self.on_clicks[i] = handler.map(|h| Rc::new(h) as HintClickHandler);
-            }
-        }
-        self
+    pub(crate) fn interaction_snapshots(&self) -> Vec<HintInteractionSnapshot> {
+        self.actions
+            .iter()
+            .map(|action| hint_interaction_snapshot(action.as_ref()))
+            .collect()
     }
 }
 
@@ -798,6 +831,7 @@ impl RenderOnce for HintStrip {
         let hover_bg = rgba(chrome.hover_rgba);
         let active_bg = rgba(chrome.selection_rgba);
 
+        let has_interactive_hints = self.actions.iter().any(Option::is_some);
         let mut row = div()
             .id("hint-strip-footer")
             .w_full()
@@ -807,10 +841,14 @@ impl RenderOnce for HintStrip {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(HINT_STRIP_CONTENT_GAP))
-            .on_mouse_move(|_: &MouseMoveEvent, _window, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
-            .on_mouse_up(MouseButton::Left, |_, _window, cx| cx.stop_propagation());
+            .gap(px(HINT_STRIP_CONTENT_GAP));
+
+        if has_interactive_hints {
+            row = row
+                .on_mouse_move(|_: &MouseMoveEvent, _window, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Left, |_, _window, cx| cx.stop_propagation());
+        }
 
         if let Some(leading) = self.leading {
             row = row.child(leading);
@@ -823,30 +861,35 @@ impl RenderOnce for HintStrip {
             .items_center()
             .gap(px(HINT_STRIP_CONTENT_GAP));
 
-        for (i, (hint, on_click)) in self
-            .hints
-            .iter()
-            .zip(self.on_clicks.into_iter())
-            .enumerate()
-        {
+        for (index, (hint, action)) in self.hints.iter().zip(self.actions.into_iter()).enumerate() {
             let element = parse_hint(hint.as_ref());
             let hint_content = render_hint_element(element, text_rgba);
 
-            if let Some(handler) = on_click {
-                // Clickable hint button with ghost-bg hover from theme tokens.
+            if let Some(action) = action {
+                let HintAction {
+                    action_id,
+                    on_click,
+                } = action;
+                let debug_selector = action_id.clone();
                 let button = div()
-                    .id(SharedString::from(format!("hint-btn-{i}")))
+                    .id(action_id)
+                    .debug_selector(move || debug_selector.to_string())
                     .cursor_pointer()
                     .px(px(HINT_BUTTON_PADDING_X))
                     .py(px(HINT_BUTTON_PADDING_Y))
                     .rounded(px(HINT_BUTTON_RADIUS))
                     .hover(move |s| s.bg(hover_bg))
                     .active(move |s| s.bg(active_bg))
-                    .on_click(move |event, window, cx| handler(event, window, cx))
+                    .on_click(move |event, window, cx| (on_click)(event, window, cx))
                     .child(hint_content);
                 hints_row = hints_row.child(button);
             } else {
-                hints_row = hints_row.child(hint_content);
+                let debug_selector = format!("hint-static-{index}");
+                hints_row = hints_row.child(
+                    div()
+                        .debug_selector(move || debug_selector.clone())
+                        .child(hint_content),
+                );
             }
         }
 
@@ -854,68 +897,57 @@ impl RenderOnce for HintStrip {
     }
 }
 
-/// Render a list of hint strings as icon-aware elements in a flex row.
+/// Render static icon-aware hint content in a flex row.
 ///
-/// This is the shared entry point for any footer that needs keyboard glyph icons.
-/// Callers supply the hints (e.g. `["↵ Run", "⌘K Actions", "⌘↵ AI"]`) and the
-/// pre-computed RGBA text color. Returns a right-aligned flex row `AnyElement`.
-///
-/// Use this instead of rendering hint strings as plain text — it replaces Unicode
-/// keyboard glyphs (↵, ⌘, ⏎, ↩, Tab) with pixel-precise SVG icons.
-/// Hints are rendered as clickable buttons with ghost-bg hover.
-pub fn render_hint_icons(hints: &[&str], text_rgba: u32) -> AnyElement {
-    render_hint_icons_hsla(hints, rgba(text_rgba).into())
+/// Static hints explain keyboard grammar but are not controls: they intentionally
+/// have no pointer cursor, hover/active paint, click handler, or action identity.
+pub fn render_static_hint_icons(hints: &[&str], text_rgba: u32) -> AnyElement {
+    render_static_hint_icons_hsla(hints, rgba(text_rgba).into())
 }
 
-/// Like [`render_hint_icons`] but accepts an HSLA color directly.
-///
-/// Use this when the caller already has an `Hsla` (e.g. from `cx.theme()`).
-/// Hints are rendered as clickable buttons with ghost-bg hover.
-pub fn render_hint_icons_hsla(hints: &[&str], color: gpui::Hsla) -> AnyElement {
-    let theme = crate::theme::get_cached_theme();
-    let chrome = crate::theme::AppChromeColors::from_theme(&theme);
-    let hover_bg = rgba(chrome.hover_rgba);
-    let active_bg = rgba(chrome.selection_rgba);
-
+/// Like [`render_static_hint_icons`] but accepts an HSLA color directly.
+pub fn render_static_hint_icons_hsla(hints: &[&str], color: gpui::Hsla) -> AnyElement {
     let mut row = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(HINT_STRIP_CONTENT_GAP));
 
-    for (i, hint) in hints.iter().enumerate() {
+    for hint in hints {
         let element = parse_hint(hint);
-        let hint_content = render_hint_element_hsla(element, color);
-
-        let button = div()
-            .id(SharedString::from(format!("hint-icon-{i}")))
-            .cursor_pointer()
-            .px(px(HINT_BUTTON_PADDING_X))
-            .py(px(HINT_BUTTON_PADDING_Y))
-            .rounded(px(HINT_BUTTON_RADIUS))
-            .hover(move |s| s.bg(hover_bg))
-            .active(move |s| s.bg(active_bg))
-            .child(hint_content);
-        row = row.child(button);
+        row = row.child(render_hint_element_hsla(element, color));
     }
 
     row.into_any_element()
 }
 
-/// A hint label paired with an optional click handler for [`render_hint_icons_clickable`].
+/// An interactive hint with stable action identity and a required callback.
 pub struct ClickableHint {
-    pub label: &'static str,
-    pub on_click: Option<HintClickHandler>,
+    pub action_id: SharedString,
+    pub label: SharedString,
+    pub on_click: HintClickHandler,
 }
 
 impl ClickableHint {
     pub fn new(
-        label: &'static str,
+        action_id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
-            label,
-            on_click: Some(Rc::new(on_click)),
+            action_id: required_hint_action_id(action_id),
+            label: label.into(),
+            on_click: Rc::new(on_click),
+        }
+    }
+
+    pub(crate) fn interaction_snapshot(&self) -> HintInteractionSnapshot {
+        HintInteractionSnapshot {
+            action_id: Some(self.action_id.clone()),
+            pointer: true,
+            hover: true,
+            active: true,
+            clickable: true,
         }
     }
 }
@@ -936,45 +968,48 @@ pub fn render_hint_icons_clickable(hints: Vec<ClickableHint>, text_rgba: u32) ->
         .items_center()
         .gap(px(HINT_STRIP_CONTENT_GAP));
 
-    for (i, hint) in hints.into_iter().enumerate() {
-        let element = parse_hint(hint.label);
+    for hint in hints {
+        let element = parse_hint(hint.label.as_ref());
         let hint_content = render_hint_element_hsla(element, color);
+        let on_click = hint.on_click;
+        let debug_selector = hint.action_id.clone();
 
-        let mut button = div()
-            .id(SharedString::from(format!("hint-click-{i}")))
-            .cursor_pointer()
-            .px(px(HINT_BUTTON_PADDING_X))
-            .py(px(HINT_BUTTON_PADDING_Y))
-            .rounded(px(HINT_BUTTON_RADIUS))
-            .hover(move |s| s.bg(hover_bg))
-            .active(move |s| s.bg(active_bg))
-            .child(hint_content);
-
-        if let Some(handler) = hint.on_click {
-            button = button.on_click(move |event, window, cx| handler(event, window, cx));
-        }
-
-        row = row.child(button);
+        row = row.child(
+            div()
+                .id(hint.action_id)
+                .debug_selector(move || debug_selector.to_string())
+                .cursor_pointer()
+                .px(px(HINT_BUTTON_PADDING_X))
+                .py(px(HINT_BUTTON_PADDING_Y))
+                .rounded(px(HINT_BUTTON_RADIUS))
+                .hover(move |s| s.bg(hover_bg))
+                .active(move |s| s.bg(active_bg))
+                .on_click(move |event, window, cx| (on_click)(event, window, cx))
+                .child(hint_content),
+        );
     }
 
     row.into_any_element()
 }
 
-/// A hint label with click handler and optional selected/toggle state.
+/// An interactive hint with stable identity, required callback, and toggle state.
 pub struct SelectableHint {
-    pub label: &'static str,
-    pub on_click: Option<HintClickHandler>,
+    pub action_id: SharedString,
+    pub label: SharedString,
+    pub on_click: HintClickHandler,
     pub selected: bool,
 }
 
 impl SelectableHint {
     pub fn new(
-        label: &'static str,
+        action_id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
-            label,
-            on_click: Some(Rc::new(on_click)),
+            action_id: required_hint_action_id(action_id),
+            label: label.into(),
+            on_click: Rc::new(on_click),
             selected: false,
         }
     }
@@ -982,6 +1017,16 @@ impl SelectableHint {
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
+    }
+
+    pub(crate) fn interaction_snapshot(&self) -> HintInteractionSnapshot {
+        HintInteractionSnapshot {
+            action_id: Some(self.action_id.clone()),
+            pointer: true,
+            hover: true,
+            active: true,
+            clickable: true,
+        }
     }
 }
 
@@ -1002,28 +1047,130 @@ pub fn render_selectable_hint_icons(hints: Vec<SelectableHint>, text_rgba: u32) 
         .items_center()
         .gap(px(HINT_STRIP_CONTENT_GAP));
 
-    for (i, hint) in hints.into_iter().enumerate() {
-        let element = parse_hint(hint.label);
+    for hint in hints {
+        let element = parse_hint(hint.label.as_ref());
         let hint_content = render_hint_element_hsla(element, color);
         let is_selected = hint.selected;
+        let on_click = hint.on_click;
+        let debug_selector = hint.action_id.clone();
 
-        let mut button = div()
-            .id(SharedString::from(format!("hint-sel-{i}")))
-            .cursor_pointer()
-            .px(px(HINT_BUTTON_PADDING_X))
-            .py(px(HINT_BUTTON_PADDING_Y))
-            .rounded(px(HINT_BUTTON_RADIUS))
-            .when(is_selected, |d| d.bg(active_bg))
-            .hover(move |s| s.bg(hover_bg))
-            .active(move |s| s.bg(active_bg))
-            .child(hint_content);
-
-        if let Some(handler) = hint.on_click {
-            button = button.on_click(move |event, window, cx| handler(event, window, cx));
-        }
-
-        row = row.child(button);
+        row = row.child(
+            div()
+                .id(hint.action_id)
+                .debug_selector(move || debug_selector.to_string())
+                .cursor_pointer()
+                .px(px(HINT_BUTTON_PADDING_X))
+                .py(px(HINT_BUTTON_PADDING_Y))
+                .rounded(px(HINT_BUTTON_RADIUS))
+                .when(is_selected, |d| d.bg(active_bg))
+                .hover(move |s| s.bg(hover_bg))
+                .active(move |s| s.bg(active_bg))
+                .on_click(move |event, window, cx| (on_click)(event, window, cx))
+                .child(hint_content),
+        );
     }
 
     row.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Modifiers, Render, TestAppContext, VisualTestContext};
+    use std::cell::Cell;
+
+    struct HintStripPointerProbe {
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for HintStripPointerProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            HintStrip::new(vec!["Type to Search".into(), "↵ Run".into()]).on_hint_click(
+                1,
+                "probe-run-action",
+                move |_, _, _| clicks.set(clicks.get() + 1),
+            )
+        }
+    }
+
+    fn assert_static(snapshot: &HintInteractionSnapshot) {
+        assert_eq!(snapshot.action_id, None);
+        assert!(!snapshot.pointer);
+        assert!(!snapshot.hover);
+        assert!(!snapshot.active);
+        assert!(!snapshot.clickable);
+    }
+
+    fn assert_interactive(snapshot: &HintInteractionSnapshot, action_id: &str) {
+        assert!(snapshot
+            .action_id
+            .as_ref()
+            .is_some_and(|id| id.as_ref() == action_id));
+        assert!(snapshot.pointer);
+        assert!(snapshot.hover);
+        assert!(snapshot.active);
+        assert!(snapshot.clickable);
+    }
+
+    #[test]
+    fn static_hint_strip_has_no_pointer_or_action_semantics() {
+        let strip = HintStrip::new(vec!["Type to Search".into(), "↑↓ Navigate".into()]);
+        let snapshots = strip.interaction_snapshots();
+        assert_eq!(snapshots.len(), 2);
+        snapshots.iter().for_each(assert_static);
+    }
+
+    #[test]
+    fn real_gpui_dispatch_keeps_static_hint_inert_and_fires_action_once() {
+        let clicks = Rc::new(Cell::new(0));
+        let probe_clicks = clicks.clone();
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(move |_, _| HintStripPointerProbe {
+            clicks: probe_clicks,
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), &cx);
+        vcx.run_until_parked();
+
+        let static_bounds = vcx
+            .debug_bounds("hint-static-0")
+            .expect("static hint should publish measurement bounds");
+        vcx.simulate_click(static_bounds.center(), Modifiers::default());
+        assert_eq!(clicks.get(), 0, "static hint must not dispatch");
+
+        let action_bounds = vcx
+            .debug_bounds("probe-run-action")
+            .expect("interactive hint should publish its stable action bounds");
+        vcx.simulate_click(action_bounds.center(), Modifiers::default());
+        assert_eq!(clicks.get(), 1, "one click must dispatch exactly once");
+    }
+
+    #[test]
+    fn hint_strip_only_adds_pointer_semantics_with_stable_action_id_and_callback() {
+        let strip = HintStrip::new(vec!["↵ Run".into(), "Esc Dismiss".into()]).on_hint_click(
+            0,
+            "prompt-footer-run",
+            |_, _, _| {},
+        );
+        let snapshots = strip.interaction_snapshots();
+        assert_interactive(&snapshots[0], "prompt-footer-run");
+        assert_static(&snapshots[1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "interactive hints require a non-empty stable action ID")]
+    fn clickable_hint_rejects_empty_action_identity() {
+        let _hint = ClickableHint::new("", "⌘C Copy URI", |_, _, _| {});
+    }
+
+    #[test]
+    fn clickable_and_selectable_hints_require_action_identity() {
+        let clickable = ClickableHint::new("preview-copy-uri", "⌘C Copy URI", |_, _, _| {});
+        assert_interactive(&clickable.interaction_snapshot(), "preview-copy-uri");
+
+        let selectable =
+            SelectableHint::new("agent-chat-actions", "⌘K Actions", |_, _, _| {}).selected(true);
+        assert_interactive(&selectable.interaction_snapshot(), "agent-chat-actions");
+        assert!(selectable.selected);
+    }
 }

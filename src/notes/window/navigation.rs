@@ -652,21 +652,41 @@ impl NotesApp {
 
     fn automation_kit_resource_preview_state(&self) -> serde_json::Value {
         match self.kit_resource_preview.as_ref() {
-            Some(preview) => serde_json::json!({
-                "schemaVersion": 1,
-                "active": true,
-                "redacted": true,
-                "title": preview.title,
-                "uri": preview.uri,
-                "mimeType": preview.mime_type,
-                "readOnly": true,
-                "truncated": preview.truncated,
-                "textLength": preview.text.chars().count(),
-            }),
+            Some(preview) => {
+                let mut footer_hints = Vec::new();
+                if self.kit_resource_preview_note_source().is_some() {
+                    footer_hints.push(serde_json::json!({
+                        "actionId": super::render_ui::NOTES_RESOURCE_HINT_OPEN_SOURCE_ID,
+                        "interactive": true,
+                    }));
+                }
+                footer_hints.push(serde_json::json!({
+                    "actionId": super::render_ui::NOTES_RESOURCE_HINT_COPY_URI_ID,
+                    "interactive": true,
+                }));
+                footer_hints.push(serde_json::json!({
+                    "actionId": super::render_ui::NOTES_RESOURCE_HINT_BACK_ID,
+                    "interactive": true,
+                }));
+
+                serde_json::json!({
+                    "schemaVersion": 1,
+                    "active": true,
+                    "redacted": true,
+                    "title": preview.title,
+                    "uri": preview.uri,
+                    "mimeType": preview.mime_type,
+                    "readOnly": true,
+                    "truncated": preview.truncated,
+                    "textLength": preview.text.chars().count(),
+                    "footerHints": footer_hints,
+                })
+            }
             None => serde_json::json!({
                 "schemaVersion": 1,
                 "active": false,
                 "redacted": true,
+                "footerHints": [],
             }),
         }
     }

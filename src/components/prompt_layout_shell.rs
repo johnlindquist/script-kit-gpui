@@ -973,9 +973,9 @@ pub(crate) fn render_universal_prompt_hint_strip_clickable_with_primary_key_labe
         primary_key,
         primary_label,
     ))
-    .on_hint_click(0, on_run)
-    .on_hint_click(1, on_actions)
-    .on_hint_click(2, on_ai)
+    .on_hint_click(0, "prompt-footer-run", on_run)
+    .on_hint_click(1, "prompt-footer-actions", on_actions)
+    .on_hint_click(2, "prompt-footer-agent", on_ai)
     .into_any_element()
 }
 
