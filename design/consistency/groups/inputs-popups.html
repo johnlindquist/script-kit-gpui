@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-consistency-page="group" data-group-id="inputs-popups">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inputs, Actions, and popup lifecycle — Script Kit consistency review</title>
+  <link rel="stylesheet" href="../../mockups/generated/tokens.css">
+  <link rel="stylesheet" href="../../mockups/shared/components.css">
+  <link rel="stylesheet" href="../shared/explorer.css">
+</head>
+<body>
+  <a class="cx-skip" href="#review-scenes">Skip to proposals</a>
+  <main class="cx-page cx-page--group" id="consistency-app" data-manifest="../data/groups.json" data-group-id="inputs-popups">
+    <nav class="cx-breadcrumb" aria-label="Breadcrumb"><a href="../index.html">All proposals</a><span aria-hidden="true">/</span><span>Inputs</span></nav>
+    <header class="cx-group-hero" data-group-header aria-busy="true"></header>
+    <nav class="cx-task-nav" aria-label="Tasks in this group" data-task-nav></nav>
+    <section class="cx-compare-toolbar" aria-label="Comparison controls">
+      <div class="cx-segmented" role="group" aria-label="Comparison mode">
+        <button type="button" aria-pressed="true" data-view-mode="split">Split</button>
+        <button type="button" aria-pressed="false" data-view-mode="before">Before</button>
+        <button type="button" aria-pressed="false" data-view-mode="after">After</button>
+        <button type="button" aria-pressed="false" data-view-mode="overlay">Scrub</button>
+      </div>
+      <label class="cx-scrub-control" hidden>Reveal proposal <input type="range" min="0" max="100" value="50" data-scrubber><output>50%</output></label>
+      <label class="cx-filter-control">Filter tasks <input type="search" placeholder="ID, title, owner…" data-task-filter></label>
+    </section>
+    <section class="cx-scenes" id="review-scenes" data-scene-list></section>
+    <footer class="cx-group-footer">
+      <a href="../index.html">Back to all groups</a>
+      <button type="button" class="cx-button" data-export-decisions>Export decisions</button>
+    </footer>
+  </main>
+  <div class="cx-live" aria-live="polite" aria-atomic="true" data-live-region></div>
+  <script type="module" src="../shared/explorer.js"></script>
+</body>
+</html>

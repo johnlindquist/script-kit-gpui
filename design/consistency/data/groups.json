@@ -1,0 +1,1122 @@
+{
+  "schemaVersion": 1,
+  "title": "Script Kit consistency proposals",
+  "summary": "Truthful before/after visual proposals for every task in .notes/CONSISTENCY-FIXES.md.",
+  "truthLabels": {
+    "before": "CURRENT · SOURCE-DERIVED",
+    "after": "PROPOSAL · NOT IMPLEMENTED",
+    "reference": "CURRENT FIXTURE · UNMODIFIED",
+    "negative": "NEGATIVE CONTROL"
+  },
+  "groupCount": 12,
+  "taskCount": 75,
+  "groups": [
+    {
+      "id": "proof-truth",
+      "title": "Proof and truth",
+      "shortTitle": "Proof",
+      "question": "Can evidence earn its status without coverage, screenshots, or invalid observers being mistaken for proof?",
+      "tasks": [
+        "RPT-001",
+        "PF-001",
+        "PF-002",
+        "PF-003",
+        "PF-004",
+        "PF-005",
+        "PF-009",
+        "PF-010",
+        "PF-011",
+        "PF-012",
+        "GOV-006"
+      ],
+      "fixture": "../mockups/screens/main-menu/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "RPT-001",
+          "title": "Publish evidence status and corrected inventory language",
+          "status": "P0 documentation; SOURCE-CONFIRMED.",
+          "owners": ".notes/CONSISTENCY.md, .notes/CONSISTENCY-FIXES.md, scripts/devtools/surfaces.ts, scripts/devtools/coverage.ts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Label conclusions SOURCE-CONFIRMED, LOCAL-VERIFY, RUNTIME-CONFIRMED, or PROJECTION-ONLY; distinguish 37 kinds, 54 mappings, unique enum variants, 11 profiles, and four orientation aliases.",
+          "acceptance": "No task starts with a pre-decided product edit when its first necessary step is reproduction; no /tmp artifact is treated as durable proof.",
+          "proof": "Run bun scripts/devtools/surfaces.ts and bun scripts/devtools/coverage.ts; validate every task in this report names evidence status and proof.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-001",
+          "title": "Make DevTools receipt schemas executable",
+          "status": "P0 proof; SOURCE-CONFIRMED; F-004/F-005/F-016.",
+          "owners": "scripts/devtools/schema.ts, scripts/devtools/lib/client.ts, scripts/devtools/lib/receipt-output.ts, and classifiers in elements.ts, layout.ts, scroll.ts, focus.ts, text.ts, keyboard.ts, actions.ts, act.ts, compare.ts, notes.ts, dictation.ts, surface.ts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Success is impossible with missing/null required fields, failed predicates, missing required primitives, or disallowed disposition; blocked/invalid/fail exits nonzero.",
+          "acceptance": "Success is impossible with missing/null required fields, failed predicates, missing required primitives, or disallowed disposition; blocked/invalid/fail exits nonzero.",
+          "proof": "bun test scripts/devtools/schema.test.ts scripts/devtools/surface.test.ts scripts/devtools/scroll.test.ts scripts/devtools/driver-lifecycle.test.ts plus a schema.ts validate command.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-002",
+          "title": "Bind each proof stack to one target and generation transaction",
+          "status": "P0 proof; SOURCE-CONFIRMED.",
+          "owners": "scripts/devtools/lib/target-identity.ts, scripts/devtools/lib/client.ts, scripts/devtools/targets.ts, scripts/devtools/inspect.ts, scripts/devtools/surface.ts, scripts/devtools/compare.ts, src/protocol/**.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Screenshot, semantics, state, layout, AX, and activation receipts share one transaction; close/reopen with reused automation ID is not comparable; host identity remains explicit.",
+          "acceptance": "Screenshot, semantics, state, layout, AX, and activation receipts share one transaction; close/reopen with reused automation ID is not comparable; host identity remains explicit.",
+          "proof": "Existing client/surface/lifecycle/window foundation tests and compare.ts redgreen --require-fixed.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-003",
+          "title": "Redact generic semantic and text receipts by default",
+          "status": "P0 privacy; SOURCE-CONFIRMED; F-017.",
+          "owners": "scripts/devtools/elements.ts, scripts/devtools/text.ts, scripts/devtools/inspect.ts, src/app_layout/collect_elements.rs, protocol element/result types.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Default receipts/stdout contain no raw Notes, clipboard, AI, file-path, secret prompt, or external-app content; product-owned static labels may remain.",
+          "acceptance": "Default receipts/stdout contain no raw Notes, clipboard, AI, file-path, secret prompt, or external-app content; product-owned static labels may remain.",
+          "proof": "Privacy-redaction tests and canary scan over complete JSON/stdout.",
+          "guardrail": "redacted: true is insufficient if raw data survives in nested raw, value, or diagnostics.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-004",
+          "title": "Make AppView semantic projection exhaustive and quality-graded",
+          "status": "P0 semantics; SOURCE-CONFIRMED; F-005/F-019/G-017.",
+          "owners": "src/app_layout/collect_elements.rs, protocol semantic result types, scripts/devtools/elements.ts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Remove wildcard current-view fallback; exhaustive match every AppView; replace opaque panel-only warnings with typed quality/reason codes; expose stable action ID, enabled state, disabled reason, owner, and measurement ID.",
+          "acceptance": "Adding an AppView requires compiler-visible projection ownership; proof requiring actions/focus cannot pass Partial/Unsupported; duplicate semantic IDs fail.",
+          "proof": "./scripts/agentic/agent-cargo.sh test --lib app_layout, protocol tests, schema/surface Bun tests.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-005",
+          "title": "Join intended contract, model truth, and rendered truth",
+          "status": "P0 geometry substrate; SOURCE-CONFIRMED; F-002/F-006/F-007.",
+          "owners": "src/app_layout/build_layout_info.rs, src/app_layout/build_component_bounds.rs, src/app_layout/paint_measurements.rs, scripts/devtools/layout.ts, protocol layout types.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Model and paint are captured in one transaction; rendered clipping cannot be hidden by model success; stale model cannot be hidden by rendered success when parity is the task; unlike metric roles cannot compare.",
+          "acceptance": "Model and paint are captured in one transaction; rendered clipping cannot be hidden by model success; stale model cannot be hidden by rendered success when parity is the task; unlike metric roles cannot compare.",
+          "proof": "app-layout tests and strict layout.ts measure including nodes/regions/scroll/anchors/resize/overlaps.",
+          "guardrail": "Do not filter paint-time measurements out of clipping/overlap analysis.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-009",
+          "title": "Generate typed coverage bindings for all 37 kinds and 54 mappings",
+          "status": "P1 coverage; SOURCE-CONFIRMED; F-004.",
+          "owners": "scripts/devtools/surfaces.ts, scripts/devtools/coverage.ts, scripts/devtools/investigate.ts, generated surface contracts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Exactly 37 kinds and 54 mappings reported; unique variants counted separately; each mapping has one binding; aliases cannot masquerade as direct; feature map source is real/non-empty; supported means zero required missing primitives.",
+          "acceptance": "Exactly 37 kinds and 54 mappings reported; unique variants counted separately; each mapping has one binding; aliases cannot masquerade as direct; feature map source is real/non-empty; supported means zero required missing primitives.",
+          "proof": "surface/schema tests; generate surfaces/coverage artifacts; run investigation against Settings.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-010",
+          "title": "Build deterministic family fixtures instead of one probe per surface",
+          "status": "P1 coverage; SOURCE-CONFIRMED.",
+          "owners": "scripts/devtools/**, fixtures under scripts/agentic/**, surface contracts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Every coverage binding names a family or justified unique fixture; applicable states include empty/populated/filtered/disabled/overflow/selected/focused/resized/popup/error; fixtures are sandboxed, deterministic, network-free, and clean up.",
+          "acceptance": "Every coverage binding names a family or justified unique fixture; applicable states include empty/populated/filtered/disabled/overflow/selected/focused/resized/popup/error; fixtures are sandboxed, deterministic, network-free, and clean up.",
+          "proof": "family-fixture tests and a future consistency.ts verify-family command.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-011",
+          "title": "Make glass observers fail closed without changing motion",
+          "status": "P0 proof; RUNTIME-CONFIRMED; F-001/F-018/G-015.",
+          "owners": "scripts/devtools/actions-entry-filmstrip.ts, scripts/devtools/glass-lifecycle-filmstrip.ts, motion evidence helpers, locked fixture; source owners remain src/theme/opacity.rs and src/platform/secondary_window_config.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Actions requires rendered geometry pass; Main has multiple distinct evaluable widths; Notes captures pre-mask and post-body phases; fixture/timings/curves/geometry/alpha/thresholds remain byte-identical.",
+          "acceptance": "Actions requires rendered geometry pass; Main has multiple distinct evaluable widths; Notes captures pre-mask and post-body phases; fixture/timings/curves/geometry/alpha/thresholds remain byte-identical.",
+          "proof": "Existing glass contract/lifecycle/rapid-toggle tests and all three runtime probes with named fixture and SCRIPT_KIT_TEST_STATUS=1.",
+          "guardrail": "Logged source geometry diagnoses only; it cannot upgrade rendered invalidity.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-012",
+          "title": "Execute browser-pixel rectEquals story assertions",
+          "status": "P2 proof; PROJECTION-ONLY; F-014.",
+          "owners": "design/mockups/stories/10-conversation-three-modes/**, design/mockups/stories/11-launcher-flows-and-scripts/**, story player, design/mockups/tests/story-assertions.test.mjs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Both pending claims produce browser receipts at existing tolerance; no structural replacement; all seek/DOM gates remain green.",
+          "acceptance": "Both pending claims produce browser receipts at existing tolerance; no structural replacement; all seek/DOM gates remain green.",
+          "proof": "Existing story tests plus proposed story-browser-geometry.test.mjs.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GOV-006",
+          "title": "Add a final consistency completion auditor",
+          "status": "P1 final gate; PROJECTION-ONLY new tool.",
+          "owners": "proposed scripts/devtools/consistency.ts, PF-001 registry, PF-009 bindings, task receipts, this report’s metadata.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Every task pass or explicitly approved defer; no missing primitive, failed negative control, invalid/interference counted as pass; every finding/mapping/conflict/exception disposed; commit/binary/fixture/task identities match.",
+          "acceptance": "Every task pass or explicitly approved defer; no missing primitive, failed negative control, invalid/interference counted as pass; every finding/mapping/conflict/exception disposed; commit/binary/fixture/task identities match.",
+          "proof": "bun scripts/devtools/consistency.ts verify-all --fixes .notes/CONSISTENCY-FIXES.md --receipts .artifacts/consistency --out .artifacts/consistency/completion.json after implementation.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "cues-actions",
+      "title": "Cues, shortcuts, and action promises",
+      "shortTitle": "Cues",
+      "question": "Can every keycap, trigger, syntax token, hint, toast, and footer verb tell the truth?",
+      "tasks": [
+        "UX-001",
+        "UX-002",
+        "UX-004",
+        "UX-015",
+        "UX-016"
+      ],
+      "fixture": "../mockups/screens/actions-dialog/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "UX-001",
+          "title": "Render shortcuts, syntax, triggers, and labels as distinct cue types",
+          "status": "P1; SOURCE-CONFIRMED; G-007/G-010/G-017.",
+          "owners": "src/components/info_state.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Replace overloaded InfoGuidanceItem.shortcut with typed Shortcut, Trigger, Syntax, Label; migrate Agent Chat, launcher no-results/filter/tag guidance, permission onboarding.",
+          "acceptance": "“Filter” is not a keycap; :#work, type:script, ;todo are syntax; / and @ are triggers; remaining keycaps execute.",
+          "proof": "Unit tests for every built-in spec; project cueKind to semantics; runtime launcher/Agent Chat snapshots.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-002",
+          "title": "Establish one canonical shortcut token stream",
+          "status": "P1; SOURCE-CONFIRMED; G-007/G-008.",
+          "owners": "parser in src/components/hint_strip.rs; paint/measurement in src/components/footer_chrome.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Make duplicate splitters delegate to shortcut_tokens_from_hint; cache/render token vectors rather than raw strings.",
+          "acceptance": "Cmd+K, cmd+k, and ⌘K display identically; aliases, plus/minus/backslash, function keys, Page Up/Home, Escape/Enter remain stable.",
+          "proof": "Cross-consumer table over representative values; focused Rust tests through agent-cargo.",
+          "guardrail": "Preserve native glyph offsets/padding and locked optical geometry.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-004",
+          "title": "Drive footer verbs, shortcuts, enabled state, and handlers from one descriptor",
+          "status": "P1; LOCAL-VERIFY; F-003/G-006–G-008.",
+          "owners": "src/components/footer_chrome.rs, src/footer_popup.rs, src/components/prompt_layout_shell.rs, src/render_script_list/mod.rs, src/app_impl/ui_window.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Shared action descriptor supplies ID, verb, tokens, enabled/reason, and route to GPUI/native peers; PromptChromeAudit records IDs/tokens, not only strings.",
+          "acceptance": "Footer click and shown key produce the same action/result; native and GPUI labels agree; disabled action cannot route.",
+          "proof": "Representative surface element/footer snapshots plus target-scoped key and GPUI click receipts comparing actionId/label/shortcut/result.",
+          "guardrail": "Share semantics, not renderer implementation.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-015",
+          "title": "Remove fake pointer affordances from static hints",
+          "status": "P2; SOURCE-CONFIRMED.",
+          "owners": "src/components/hint_strip.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Static hint renderers lose pointer/hover/active button paint; clickable/selectable variants retain it; temporary renames clarify intent.",
+          "acceptance": "Non-clickable hints look static; clickable hints preserve feedback and action semantics.",
+          "proof": "GPUI pointer-event/render tests plus semantics for interactive action ID.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-016",
+          "title": "Make Button, Toast, and shortcut feedback keyboard-operable and uniquely identified",
+          "status": "P1 accessibility; Button/Toast SOURCE-CONFIRMED, recorder LOCAL-VERIFY.",
+          "owners": "src/components/button/component.rs, src/components/toast/**, src/components/shortcut_recorder/**.",
+          "before": "Toast focus vs auto-dismiss; split stable IDs from timing if rollback needed.",
+          "after": "Canonical tokens; stable context IDs rather than label-only identity; keyboard focus/Enter/Space; toast model IDs; visible dismiss at rest/focus.",
+          "acceptance": "Toast actions/dismiss reachable with keyboard; focus visible; duplicate labels/messages do not collide; loading/disabled semantics truthful.",
+          "proof": "Component tests, unique-ID elements checks, Enter/Space real dispatch, focus-return check.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "context-identity",
+      "title": "Context, identity, and destinations",
+      "shortTitle": "Context",
+      "question": "Can prompt context, configuration identity, and delivery destination look related without behaving alike?",
+      "tasks": [
+        "SAFE-001",
+        "UX-005",
+        "WF-001",
+        "WF-002",
+        "WF-003",
+        "WF-004",
+        "WF-008"
+      ],
+      "fixture": "../mockups/screens/agent-chat/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "SAFE-001",
+          "title": "Resolve every AI context part through one sanitized preparation path",
+          "status": "P0 safety; SOURCE-CONFIRMED; WF-F-001, G-011.",
+          "owners": "See .notes/CONSISTENCY-FIXES.md",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Embedded base64 is stripped; oversized text is truncated; primary failure blocks Send; supplemental failure yields explicit Partial; user copy contains no raw URI/path/adapter/provider text.",
+          "acceptance": "Embedded base64 is stripped; oversized text is truncated; primary failure blocks Send; supplemental failure yields explicit Partial; user copy contains no raw URI/path/adapter/provider text.",
+          "proof": "Focused unit tests in the owning module with >200k-character JSON/base64, injected raw errors, mixed primary/supplemental results; run through ./scripts/agentic/agent-cargo.sh.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-005",
+          "title": "Give context chips, identity badges, and destination selectors explicit roles",
+          "status": "P1; SOURCE-CONFIRMED; omitted core family plus WF-F-005.",
+          "owners": "main zone in src/components/main_view_chrome.rs; cross-workflow projection in src/ai/message_parts.rs; surface renderers remain domain-owned.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Typed spec includes role, ID, label, tokens, enabled/reason, action; context alone supports remove; identity opens selector/details; destination selects only.",
+          "acceptance": "“No cwd” and unavailable model are inert; Quick AI has its own semantic ID; Tab keycap only when active; chip body never removes or submits.",
+          "proof": "GPUI tests for enabled/inactive/unavailable/Quick AI/selection; strict elements/focus and Tab/Shift+Tab activation receipts.",
+          "guardrail": "Do not build a global chip state store.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-001",
+          "title": "Add provenance, state, and lifetime to staged context",
+          "status": "P1; SOURCE-CONFIRMED; WF-F-005.",
+          "owners": "src/ai/message_parts.rs; extend wrapper around AiContextPart, ContextAssemblyOrigin, ContextAssemblyReceipt rather than bloating every payload variant.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Every prompt-bearing item visible before send; says suggested/added/inherited/captures-on-send; body opens safe details; trailing remove only removes; Quick Question has zero parts.",
+          "acceptance": "Every prompt-bearing item visible before send; says suggested/added/inherited/captures-on-send; body opens safe details; trailing remove only removes; Quick Question has zero parts.",
+          "proof": "Semantic context fields and strict Agent Chat fixture; unchanged quick_question_entry_suppresses_all_implicit_context negative test.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-002",
+          "title": "Return a truthful typed result from Agent Chat entry dispatch",
+          "status": "P1; SOURCE-CONFIRMED for unconditional success seam; WF-F-006.",
+          "owners": "src/app_impl/agent_handoff/agent_chat_entry.rs; AgentChatEntryRequest, origin/thread/seed policy, dispatcher.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "AgentChatEntryOutcome reports opened/reused/fresh, context/text staged, submitted, destination identity, blocked reason.",
+          "acceptance": "Source data/cart is consumed only after intended staging succeeds; feedback verbs say Opened/Added/Asked truthfully; failed fresh thread leaves prior draft/surface unchanged.",
+          "proof": "Per-origin strict receipts; no source content; Quick Question negative remains.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-003",
+          "title": "Define attachment lifecycle through send, retry, host switch, and new thread",
+          "status": "P1; LOCAL-VERIFY for omitted storage call sites.",
+          "owners": "staged context owner from WF-001 plus Agent Chat pending parts and retry/thread reset paths.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "No duplicate mention+portal part; removal does not erase sent-turn receipt; portal cancel restores draft/focus; transient focused snapshots are never silently recaptured after restart.",
+          "acceptance": "No duplicate mention+portal part; removal does not erase sent-turn receipt; portal cancel restores draft/focus; transient focused snapshots are never silently recaptured after restart.",
+          "proof": "Multi-step Driver scenario: duplicate stage, partial failure, retry, fresh thread, counts/IDs each step.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-004",
+          "title": "Separate context, conversation identity, and delivery destination semantics",
+          "status": "P1; SOURCE-CONFIRMED conceptual gap.",
+          "owners": "existing Agent Chat profile/thread state, FlowSessionMeta, Notes/Today document sessions, DictationTarget; semantic roles in src/app_layout/collect_elements.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Elements distinguish contextChip, identityBadge, destinationSelector; identity click opens selector/details; no ambiguous ×; changing identity does not mutate pending context/composer.",
+          "acceptance": "Elements distinguish contextChip, identityBadge, destinationSelector; identity click opens selector/details; no ambiguous ×; changing identity does not mutate pending context/composer.",
+          "proof": "Strict receipts across Agent Chat, Flow, Notes, Day Page, Dictation; raw cwd/path excluded.",
+          "guardrail": "Shared semantic roles, not a shared global store.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-008",
+          "title": "Bind auto-submit to explicit entry verbs",
+          "status": "P1; SOURCE-CONFIRMED policy risk.",
+          "owners": "AgentChatSeedPolicy, request constructors, launcher/Quick AI/Notes/Dictation/File Search/Actions/plugin callers.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Each entry has verb, seed, context, return policy; composer-only preserves exact draft; auto-submit clears only after accepted dispatch.",
+          "acceptance": "Each entry has verb, seed, context, return policy; composer-only preserves exact draft; auto-submit clears only after accepted dispatch.",
+          "proof": "Constructor table and runtime submitted flag; negative launcher-query → Open Agent Chat starts zero turns.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "rows-sections",
+      "title": "Rows, sections, selection, and scroll",
+      "shortTitle": "Rows",
+      "question": "Can rows share state meaning while keeping family-specific anatomy, density, and geometry?",
+      "tasks": [
+        "UX-006",
+        "UX-007",
+        "UX-008",
+        "UX-009",
+        "UX-010",
+        "GEO-009"
+      ],
+      "fixture": "../mockups/screens/main-menu/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "UX-006",
+          "title": "Share one row-state palette across general and compact families",
+          "status": "P1; SOURCE-CONFIRMED; G-002/G-004.",
+          "owners": "src/theme/chrome.rs, src/list_item/mod.rs, src/components/unified_list_item/render.rs, src/components/inline_dropdown/row.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Generalize current row-state resolver; families provide geometry and alpha inputs; migrate paint semantics without changing density.",
+          "acceptance": "Hover/selected/active/disabled ordering is identical; compact 36px rows remain compact; no local selected-state formulas.",
+          "proof": "Parameterized state ordering tests for each family under light/dark/accent themes.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-007",
+          "title": "Resolve selected-row visual policy only at the shared owner",
+          "status": "P2; DECISION-GATED.",
+          "owners": "src/designs/core/main_menu_theme.rs, src/list_item/mod.rs, UX-006 resolver.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "After no-pixel consolidation, optionally add tokenized leading-marker fields at launcher-row owner; other row families opt in explicitly.",
+          "acceptance": "Launcher-family selection unmistakable and identical for keyboard/click; no built-in-local bars or opacity overrides.",
+          "proof": "Theme signature/bounds tests and visual comparison across Main, Actions, one built-in.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the launcher-family marker concept after the zero-pixel state consolidation."
+        },
+        {
+          "id": "UX-008",
+          "title": "Give section headers one semantic grammar and stable slot",
+          "status": "P1; source divergence plus DECISION-GATED visual policy; G-005/F-006.",
+          "owners": "src/designs/core/main_menu_theme.rs, src/list_item/mod.rs, src/components/unified_list_item/render.rs, src/actions/command_bar.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Shared presentation resolver for label/count/icon tiers and transform; family-owned height/padding; stable launcher leading slot while filter labels change.",
+          "acceptance": "First selectable row does not jump during filter/group transitions; counts/icons use predictable emphasis; compact popups are not forced to add headers.",
+          "proof": "Header/command bar tests and layout receipt comparing first-row Y across query states.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-009",
+          "title": "Replace header-index shortcuts with explicit selection eligibility",
+          "status": "P1; SOURCE-CONFIRMED; G-004.",
+          "owners": "src/list_item/mod.rs, src/actions/command_bar.rs, reference behavior in src/components/inline_picker.rs, Unified row types.",
+          "before": "Wrong index can run wrong action; migrate state and callers atomically.",
+          "after": "One predicate/model per typed row for focusable/selectable/activatable; derive index set rather than tracking only section headers.",
+          "acceptance": "Navigation never lands on section/status rows; disabled explanation can be focused but not run; insertion/removal preserves selection safely.",
+          "proof": "Table tests for header/status/item/disabled/all-disabled/refresh/wrap.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-010",
+          "title": "Remove silently discarded UnifiedListItem API branches",
+          "status": "P1 API/semantics; SOURCE-CONFIRMED.",
+          "owners": "src/components/unified_list_item/**.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Inventory custom/a11y builders; delete unused false branches or render them fully; route shortcuts through UX-002; expose role/selected/disabled/action.",
+          "acceptance": "Supplied content never disappears; retained accessibility labels are observable; unsupported builders do not exist.",
+          "proof": "rg caller inventory, component tests, elements snapshot; every retained enum branch has a render test.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GEO-009",
+          "title": "Require explicit list presentation mode for predictive metrics",
+          "status": "P2; SOURCE-CONFIRMED ambiguity; F-006.",
+          "owners": "src/list_item/**, src/designs/**, row-state resolver, resize/layout model consumers, design contract.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Every sizing/model call declares mode; generic legacy constant cannot predict themed row; section first/ordinary slots explicit; selected paint is component-resolved with derivation metadata.",
+          "acceptance": "Every sizing/model call declares mode; generic legacy constant cannot predict themed row; section first/ordinary slots explicit; selected paint is component-resolved with derivation metadata.",
+          "proof": "list_item/window_resize/design-contract tests and consumer inventory.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "inputs-popups",
+      "title": "Inputs, Actions, and popup lifecycle",
+      "shortTitle": "Inputs",
+      "question": "Can Actions search, disabled reasons, forms, popup dismissal, and focus return use shared owners?",
+      "tasks": [
+        "UX-003",
+        "UX-011",
+        "UX-012",
+        "UX-013",
+        "UX-014",
+        "GEO-008"
+      ],
+      "fixture": "../mockups/screens/actions-dialog/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "UX-003",
+          "title": "Give Actions typed availability and disabled explanations",
+          "status": "P1; shared model SOURCE-CONFIRMED, consumers LOCAL-VERIFY.",
+          "owners": "src/actions/types/action_model.rs, src/actions/command_bar.rs, src/actions/dialog.rs, src/actions/window.rs.",
+          "before": "Routing-critical; paint and execution predicates must land together.",
+          "after": "Add Enabled | Disabled { reason }; separate focusable, selectable, activatable; never overload callback presence as user availability.",
+          "acceptance": "Disabled rows are visible/focusable when explanation is useful, never activate, and update in place when capability changes.",
+          "proof": "action model/command bar tests; Actions runtime receipt exposes enabled, reason, focusable, activatable; negative activation receipt.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-011",
+          "title": "Render menu-syntax forms through shared form fields",
+          "status": "P2; SOURCE-CONFIRMED local reimplementation.",
+          "owners": "src/components/form_fields/**, src/render_script_list/mod.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Minimal adapter for existing entity-backed input/read-only value, single/multiline sizing, semantic ID; remove local field box/label/placeholder paint.",
+          "acceptance": "Focus, placeholder, border, label, multiline, disabled, and validation states match other forms.",
+          "proof": "Form/menu-syntax tests and real GPUI Tab/Shift+Tab, paste, multiline, Enter dispatch.",
+          "guardrail": "Keep parsing/order/submission domain-owned.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-012",
+          "title": "Route Actions search through an existing input owner",
+          "status": "P1; manual mutation SOURCE-CONFIRMED, exact renderer LOCAL-VERIFY.",
+          "owners": "src/actions/command_bar.rs, src/actions/dialog.rs; reuse TextInputState or existing real InputState adapter.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Remove separate char/backspace/word/paste editing paths where the input owner can handle them; keep only required parent-host commands.",
+          "acceptance": "Unicode, punctuation, paste, selection, cursor movement, undo, IME, and focus behave like other search; paste never auto-submits; parent refocus works.",
+          "proof": "Command-bar tests and Driver open/type/paste/edit/dismiss/type-parent scenario.",
+          "guardrail": "Do not create ActionsTextInputState.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-013",
+          "title": "Put searchable Actions at top and freeze the shell",
+          "status": "P1; SOURCE-CONFIRMED conflict; G-009.",
+          "owners": "src/actions/command_bar.rs, src/actions/window.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Intent-named searchable preset uses top search; filter edits update scroll content without resizing detached shell; host anchoring remains separate.",
+          "acceptance": "Search is predictable; typing/clear/empty results never move popup bounds or pointer target.",
+          "proof": "Config tests and Actions runtime sequence recording rect after every mutation; all rects equal within platform tolerance.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-014",
+          "title": "Complete popup lifecycle: attach, dismiss one layer, restore focus",
+          "status": "P1; owner incompleteness SOURCE-CONFIRMED, consumers LOCAL-VERIFY.",
+          "owners": "src/components/inline_popup_window.rs plus each consumer’s state owner.",
+          "before": "High native lifecycle; no motion changes.",
+          "after": "Inventory parent, prior focus, Escape, click-outside, focus-loss, cleanup, and reconciliation; add narrow shared lifecycle spec only where repeated.",
+          "acceptance": "Escape closes only top popup; external AppKit dismissal clears is_open; next typed character reaches parent; no pre-attach focus theft.",
+          "proof": "Open/inspect/Escape/refocus/reopen/click-outside/type Driver scenarios for representative popup families.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GEO-008",
+          "title": "Remove inert writable Actions row-style fields",
+          "status": "P2; consumers LOCAL-VERIFY; F-010.",
+          "owners": "src/designs/core/actions_popup_theme.rs, src/actions/dialog.rs, shared ListItem, src/design_contract/mod.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Inventory radius/selection/hover/section padding; delete no-op fields or mark compatibility-only/non-writable; keep shared row renderer.",
+          "acceptance": "Every writable exported token has a live resolved consumer; no intended pixel change; workbench cannot promise a no-op.",
+          "proof": "caller search, lib check, design-contract test, regenerated token byte comparison after source change.",
+          "guardrail": "Do not wire inert fields into a second Actions row style merely to preserve them.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "states-recovery",
+      "title": "Empty, setup, recovery, and rich states",
+      "shortTitle": "States",
+      "question": "Can semantic states become recognizable while rich guidance and actionful recovery stay capable?",
+      "tasks": [
+        "UX-017",
+        "UX-018",
+        "GOV-001"
+      ],
+      "fixture": "../mockups/screens/main-menu/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "UX-017",
+          "title": "Make InfoStateTone affect semantics and restrained anatomy",
+          "status": "P2; SOURCE-CONFIRMED inert field; G-010.",
+          "owners": "src/components/info_state.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Tone resolver provides semantic state kind, optional default icon, accent foreground, accessible prefix; no per-tone background washes; project tone/title/body/cues/actions.",
+          "acceptance": "Recovery differs from neutral empty through shared cue/wording; help does not look like error; unsupported action never appears.",
+          "proof": "Render all tones dark/light; semantics snapshot; no new decorative one-offs.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "UX-018",
+          "title": "Correct the semantic-state vs compositional-layout boundary",
+          "status": "P2 ownership; SOURCE-CONFIRMED correction to F-009.",
+          "owners": "src/components/info_state.rs, src/components/non_list_state.rs, src/components/ai_recovery.rs, exact list_item::EmptyState caller inventory.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Simple states remain consistent; rich menu-syntax/About content is not crushed into a generic empty card; dormant EmptyState deleted only after zero-use proof.",
+          "acceptance": "Simple states remain consistent; rich menu-syntax/About content is not crushed into a generic empty card; dormant EmptyState deleted only after zero-use proof.",
+          "proof": "Caller inventory and component behavior tests; no source-audit ban on module names.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GOV-001",
+          "title": "Freeze state ownership and migrate only legitimate consumers",
+          "status": "P2; corrected F-009.",
+          "owners": "src/components/non_list_state.rs, src/components/info_state.rs, launcher guidance, About renderer.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Freeze accidental new compositional consumers; migrate simple launcher states to InfoStateSpec; keep rich guidance in compositional toolkit; record caller inventory/removal trigger.",
+          "acceptance": "No third generic state system; About retains actions/content; semantics parity after migration.",
+          "proof": "info_state/render_script_list/About tests and typed caller inventory, not source string counts.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "conversations-flow",
+      "title": "Conversation commands and Flow",
+      "shortTitle": "Conversations",
+      "question": "Can Send, Stop, Retry, Back, New, Delete, copy, identity, and retention mean the same thing across hosts?",
+      "tasks": [
+        "SAFE-003",
+        "WF-005",
+        "WF-006",
+        "WF-007",
+        "WF-009",
+        "WF-010",
+        "WF-011"
+      ],
+      "fixture": "../mockups/screens/chat-prompt/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "SAFE-003",
+          "title": "Make New Conversation non-destructive and Delete explicit",
+          "status": "P0 data-loss; SOURCE-CONFIRMED; WF-F-003.",
+          "owners": "See .notes/CONSISTENCY-FIXES.md",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Remove unconfirmed destructive ⇧⌘Esc; split New Conversation, Terminate Runtime, Delete Conversation…; confirmation names affected history.",
+          "acceptance": "No command named Open/New/Close deletes history; old transcript remains after New; only confirmed Delete erases it.",
+          "proof": "Unit migration tests and sandbox Flow runtime fixture; no live conversations.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-005",
+          "title": "Make conversation commands executable descriptors",
+          "status": "P1; LOCAL-VERIFY; G-007/G-008/G-012/G-017.",
+          "owners": "extend src/components/conversation_actions.rs; host adapters in Agent Chat, src/render_prompts/other.rs, src/render_builtins/flow_ux.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Footer, Actions, key resolver, disabled reason, semantics all derive from one spec; unsupported commands absent; destructive command carries confirm policy.",
+          "acceptance": "Footer, Actions, key resolver, disabled reason, semantics all derive from one spec; unsupported commands absent; destructive command carries confirm policy.",
+          "proof": "Exhaustive command × capability tests and runtime visible-descriptor vs activation comparison.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-006",
+          "title": "Make Escape, Background, Back, and Close origin-aware",
+          "status": "P1; Flow SOURCE-CONFIRMED, other hosts LOCAL-VERIFY; WF-F-007.",
+          "owners": "existing DismissPolicy, src/render_builtins/flow_ux.rs, Agent Chat/ChatPrompt owners after inventory.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Footer says actual destination; draft/context/transcript/turn survive background; origin row/input regains focus.",
+          "acceptance": "Footer says actual destination; draft/context/transcript/turn survive background; origin row/input regains focus.",
+          "proof": "Runtime scenarios for desk, launcher, direct, Actions-open, Agent Chat, ChatPrompt.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-007",
+          "title": "Align Send, Stop, cancellation, Retry, and recovery phases",
+          "status": "P1 reliability; LOCAL-VERIFY cross-host.",
+          "owners": "rules/AI_RELIABILITY.md contract, AppFailureRecord, capability projection, Flow reliability, Agent Chat/ChatPrompt callbacks.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Stable footer slots; typed failure persists; raw provider/stderr absent; at least one real recovery reachable.",
+          "acceptance": "Stable footer slots; typed failure persists; raw provider/stderr absent; at least one real recovery reachable.",
+          "proof": "completed, stopped-partial, stopped-empty, provider failure, retry, rethread, exhausted, missing callback scenarios.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-009",
+          "title": "Normalize copy, selection, and branch-edit affordances",
+          "status": "P2; LOCAL-VERIFY.",
+          "owners": "src/components/conversation_actions.rs, src/components/conversation_text.rs, Agent transcript, Flow copy owner, ChatPrompt renderer.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Copy success acknowledges; no empty clipboard success; branch-edit with later turns confirms impact.",
+          "acceptance": "Copy success acknowledges; no empty clipboard success; branch-edit with later turns confirms impact.",
+          "proof": "Existing copy tests plus runtime clipboard fingerprint receipts without content.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-010",
+          "title": "Audit real ChatPrompt capabilities before claiming parity",
+          "status": "P1 evidence gap; LOCAL-VERIFY; WF-F-015.",
+          "owners": "src/render_prompts/other.rs; ChatPrompt, host modes, submit callback, recovery callback, streaming completion, cancellation/close routes.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Inventory all production callers; ordinary ChatPrompt adopts shared answer/copy/Stop/recovery/footer/semantics when capabilities exist; Flow TranscriptOnly keeps Flow lifecycle.",
+          "acceptance": "No local markdown/error path; every visible command has callback; unsupported Background/New absent; Escape follows DismissPolicy.",
+          "proof": "strict prompt ID scenarios for send/stream/stop/retry/copy/Actions/Escape/focus and callback-missing negative.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-011",
+          "title": "Make Flow identity, retention, and setup truth visible",
+          "status": "P1; SOURCE-CONFIRMED; WF-F-008.",
+          "owners": "src/flows/session.rs, src/render_builtins/flow_ux.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Session header exposes friendly flow, engine/model, cwd summary, project/global origin, stale-definition/rethread; separate Loading/missing/old/roster error/empty/no-match; remove silent 12-turn persistence cap or disclose it.",
+          "acceptance": "Desk grammar Enter Converse, Shift+Enter Run once, terminal action explicit; history retention truthful; setup recovery performable.",
+          "proof": "Flow desk/session receipts with row kind, primary action, identity, persisted/restored turn counts, stale transition.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "notes-today",
+      "title": "Notes, Today, Browse, and Agent Chat",
+      "shortTitle": "Notes & Today",
+      "question": "Can shared editing and search feel consistent while each host names its real destination and preserves state?",
+      "tasks": [
+        "SAFE-004",
+        "WF-012",
+        "WF-013",
+        "WF-014",
+        "WF-015",
+        "WF-016",
+        "WF-017",
+        "GEO-004",
+        "GEO-005"
+      ],
+      "fixture": "../mockups/screens/notes/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "SAFE-004",
+          "title": "Make NotesAction the executable shortcut owner",
+          "status": "P0 false-promise/destructive routing; SOURCE-CONFIRMED; WF-F-004.",
+          "owners": "src/notes/actions_panel.rs, src/notes/window/keyboard.rs, Notes footer/toolbar/Actions builders.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Remove ⇧⌘T from Format; make Format Actions-only until a free chord is chosen; align Delete descriptor with Shift-modified route; make ⌘Enter canonical for Ask AI and retire the duplicate advertised chord.",
+          "acceptance": "No duplicate visible shortcut in any Notes mode; every displayed chord resolves to exactly one current descriptor; destructive actions retain confirmation.",
+          "proof": "Table-driven action × mode test and target-scoped runtime activation for every visible chord.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-012",
+          "title": "Share Notes search results while naming host-specific destinations",
+          "status": "P1; LOCAL-VERIFY; WF-F-009.",
+          "owners": "Notes search/storage, src/render_builtins/notes_browse.rs, src/main_sections/day_page_switcher.rs, Notes window switcher owners.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Same seeded query yields same order; destination always visible; query/selection/scroll survives preview/return.",
+          "acceptance": "Same seeded query yields same order; destination always visible; query/selection/scroll survives preview/return.",
+          "proof": "One seeded fixture across Notes, Today, Browse, portal; compare IDs and distinct destinations/focus.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-013",
+          "title": "Give Notes and Today the same visible @ grammar",
+          "status": "P1; SOURCE-CONFIRMED host divergence; WF-F-010.",
+          "owners": "src/components/notes_editor/spine.rs; NotesEditorHostSpineContract, ContextMentionBehavior.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Notes resolves through local overlay; Today may retain main-menu round trip; result/insertion grammar identical; - remains Markdown bullet.",
+          "acceptance": "@ never silently does nothing; references render/delete atomically; selection/scroll/unsaved content survive round trip.",
+          "proof": "shared behavior tests and runtime Notes local-picker vs Today round-trip parity.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-014",
+          "title": "Name Notes/Today AI scope precisely",
+          "status": "P1; SOURCE-CONFIRMED wording/scope risk.",
+          "owners": "src/notes/window/ai_handoff.rs, src/main_sections/day_page_view.rs, shared resource preview.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Ask AI About This Note; Ask AI About Current Line/Selection; Add Resource to Agent Chat; Attach Note.",
+          "acceptance": "Add stages only; Ask submission policy explicit; chip/receipt agree on note/page/line/selection; current-line does not hide full-page payload.",
+          "proof": "Synthetic Notes/Today fixtures; range length/fingerprint only.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Revise the literal Ask wording; approve the Add/Attach stage-only proposal."
+        },
+        {
+          "id": "WF-015",
+          "title": "Preserve state and focus across Notes/Today host switches",
+          "status": "P1; LOCAL-VERIFY.",
+          "owners": "Notes keyboard/navigation/panels/focus/AI handoff, src/main_sections/day_page_view.rs, switcher/portal lifecycle.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Unsaved text, dirty flag, selection, scroll, document identity, aliases, query/selection, composer draft; Today entity remains authoritative.",
+          "acceptance": "No stale flash/duplicate entity/dead focus; preview/editor, past-day/Today, portal/composer, Notes/main-chat return paths are explicit.",
+          "proof": "Multi-window Driver receipts with semantic document ID, content fingerprint, selection, scroll, focus, visible window IDs.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-016",
+          "title": "Make Notes→Agent Chat staging transactional per attachment",
+          "status": "P1; current handoff partly supported, supplement gap SOURCE-CONFIRMED; WF-F-011.",
+          "owners": "src/notes/window/ai_handoff.rs and Agent Chat supplemental staging owner.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Destination returns primary plus per-supplement accepted/duplicate/failed receipt; Notes removes only accepted/deduped cart rows; retry preserves cart-retained feedback.",
+          "acceptance": "First main frame contains note chip; no cart row disappears without acceptance; suitable main chat preserves thread/draft/context; wrong-host detached chat untouched.",
+          "proof": "Extend Notes handoff fixture for initial/retry/partial/duplicate/cart-delete/blocked/unsuitable/wrong-host cases.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-017",
+          "title": "Make Notes Browse truthful standalone and in portals",
+          "status": "P1; SOURCE-CONFIRMED; WF-F-009/F-015.",
+          "owners": "src/render_builtins/notes_browse.rs and portal owner.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Typed Loading/Failed/ReadyEmpty/Ready; standalone Enter/second-click opens Notes; portal attaches/returns; error preserves current snapshot; footer names Open vs Attach.",
+          "acceptance": "Every selectable row has primary action; no error becomes empty results; portal cancel restores draft/focus.",
+          "proof": "Standalone/portal fixtures, error/no-match states, second click, destination and return focus.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GEO-004",
+          "title": "Derive Notes reservation/autosize from its painted footer action row",
+          "status": "P1; LOCAL-VERIFY; F-007.",
+          "owners": "Notes window contract/layout/resize owners, src/components/footer_chrome.rs, src/app_layout/build_layout_info.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Reserve same action-row role that Notes paints; keep native main host band distinct.",
+          "acceptance": "No editor/footer overlap at small/min height; autosize includes actual row; native/GPUI projection names roles correctly.",
+          "proof": "Notes unit tests, notes.ts resize-compare --start --sandbox, strict Notes layout measurement.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GEO-005",
+          "title": "Fix shared Notes/Today heading glyph clipping",
+          "status": "P1; PROJECTION-ONLY C2 pending fresh raster; F-008.",
+          "owners": "src/components/notes_editor/render.rs and shared typography/highlight metrics.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Shared line/glyph vertical policy preserves nominal typography and body/caret/selection spacing; applies to Notes and Today.",
+          "acceptance": "Heading glyph bounds inside clip at fixed scale; body baseline unchanged; Notes/Today parity.",
+          "proof": "Notes editor tests plus PF-006 native paint receipt; mockup follows only after native proof.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the shared target envelope; exact pixels remain proof-gated."
+        }
+      ]
+    },
+    {
+      "id": "dictation",
+      "title": "Dictation targets, delivery, and recovery",
+      "shortTitle": "Dictation",
+      "question": "Can Dictation aim safely, deliver explicitly, preserve transcripts, restore focus, and make History truthful?",
+      "tasks": [
+        "SAFE-002",
+        "WF-018",
+        "WF-019",
+        "WF-020",
+        "WF-021",
+        "WF-022",
+        "WF-023",
+        "WF-024"
+      ],
+      "fixture": "../mockups/screens/main-menu/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "SAFE-002",
+          "title": "Replace time-dependent Dictation Escape with one safe dismissal ladder",
+          "status": "P0 data-loss; SOURCE-CONFIRMED; WF-F-002, G-003/G-014/G-017.",
+          "owners": "See .notes/CONSISTENCY-FIXES.md",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Recording Escape always asks; confirming Escape resumes; explicit Discard aborts; processing Escape hides without relabeling work as cancellation.",
+          "acceptance": "No elapsed-time branch changes Escape; one key unwinds one layer; audio/transcript is never lost without explicit destructive activation; global and local routes agree.",
+          "proof": "Exhaustive phase × key behavior tests plus a target-scoped runtime fixture; no microphone capture required.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-018",
+          "title": "Consolidate Dictation target descriptors",
+          "status": "P1; SOURCE-CONFIRMED; WF-F-012.",
+          "owners": "src/dictation/types.rs, consumers in src/dictation/window.rs, src/dictation/delivery.rs, src/render_builtins/dictation_history.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "All eight targets exhaustive without wildcard; no local target labels/verbs; legacy AiChatComposer read-only migration alias; all targets in Actions, four common quick chips.",
+          "acceptance": "All eight targets exhaustive without wildcard; no local target labels/verbs; legacy AiChatComposer read-only migration alias; all targets in Actions, four common quick chips.",
+          "proof": "exhaustive descriptor/migration tests and semantic identity snapshots.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-019",
+          "title": "Make Dictation destination chips selection-only",
+          "status": "P1; SOURCE-CONFIRMED; WF-F-012.",
+          "owners": "src/dictation/window.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Remove mode/modifier-dependent send behavior; chip always selects; footer primary delivers; processing disables selectors truthfully.",
+          "acceptance": "Same chip means same thing in Recording/Confirming; click changes target generation, not stop/delivery generation; Option never secretly changes role.",
+          "proof": "Phase × armed × modifier behavior tests and runtime generation receipt.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-020",
+          "title": "Freeze actual Dictation destination identity",
+          "status": "P1; SOURCE-CONFIRMED gap; WF-F-013.",
+          "owners": "src/dictation/runtime.rs, src/dictation/window.rs, src/dictation/delivery.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Session-bound redacted identity for external app/window, prompt generation, Notes document, AI target policy, Today date/substrate, launcher input generation; capture at start/retarget.",
+          "acceptance": "Badge does not change with focus; stale target refuses rather than falling back; preferences persist target class only.",
+          "proof": "Synthetic target-change scenarios with refusal, unchanged delivery generation, redacted fingerprints.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-021",
+          "title": "Implement one explicit Dictation delivery contract per target",
+          "status": "P1; delivery actor LOCAL-VERIFY.",
+          "owners": "src/dictation/delivery.rs, destination adapters, Agent Chat entry request.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Exactly one destination receives one immutable transcript; wrong/stale gets zero attempts; insertion uses host undo where available.",
+          "acceptance": "Exactly one destination receives one immutable transcript; wrong/stale gets zero attempts; insertion uses host undo where available.",
+          "proof": "One sandbox fixture per target with identity, insertion range, transcript fingerprint, no content; Quick AI has zero focused context.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-022",
+          "title": "Preserve transcript and expose real Dictation delivery recovery",
+          "status": "P1; typed reasons exist but resolver incomplete SOURCE-CONFIRMED.",
+          "owners": "wrong-target draft/reason owner, delivery receipts, history, shared recovery projection.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Message says transcript is safe and names destination; technical code/fingerprint in details; failure still creates safe history unless explicit discard.",
+          "acceptance": "Message says transcript is safe and names destination; technical code/fingerprint in details; failure still creates safe history unless explicit discard.",
+          "proof": "Unknown label, vanished prompt, changed app, closed Notes, unavailable Today, Agent Chat setup failure.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-023",
+          "title": "Restore focus and return path after Dictation",
+          "status": "P1; LOCAL-VERIFY.",
+          "owners": "Dictation overlay open/close callbacks, microphone popup lifecycle, main/native focus helpers.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Capture return origin at open; retargeting does not rewrite it; cancel returns source; insertion returns destination input; AI focuses resulting composer; app paste returns frozen app.",
+          "acceptance": "Typing after every close reaches expected control; microphone picker returns to Dictation; no sibling panel surfaces accidentally.",
+          "proof": "Origin/focused semantic fingerprint receipts and popup open→Escape→type, delivery→type scenarios.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "WF-024",
+          "title": "Align Dictation History portal, copy, AI, and result-count grammar",
+          "status": "P1; SOURCE-CONFIRMED; WF-F-014.",
+          "owners": "src/render_builtins/dictation_history.rs, history search/load owner, portal owner, Dictation descriptor.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Standalone Paste; portal Attach Transcript; explicit Add to Agent Chat; truthful “Showing 100 of N” plus Load More; canonical target labels; confirmed delete.",
+          "acceptance": "No bare “AI” action; displayed count truthful; portal cancel restores draft/context/selection/focus; staged transcript deletion warns.",
+          "proof": ">100-row fixture, attach/cancel/paste/copy/delete/preview/load-more/scroll-anchor receipts.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "geometry-settings",
+      "title": "Geometry, Settings, and presentation modes",
+      "shortTitle": "Geometry",
+      "question": "Can reviewers compare like semantic layers and approve Settings language without flattening intentional geometry?",
+      "tasks": [
+        "GEO-001",
+        "GEO-002",
+        "GEO-003",
+        "GEO-006",
+        "GEO-007"
+      ],
+      "fixture": "../mockups/screens/settings/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "GEO-001",
+          "title": "Name geometry by semantic layer",
+          "status": "P1 foundation; SOURCE-CONFIRMED; G-019/F-006.",
+          "owners": "src/designs/core/main_menu_theme.rs, src/list_item/mod.rs, src/components/main_view_chrome.rs, src/components/footer_chrome.rs.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "No intended pixel change; later model repairs cannot substitute unlike layers.",
+          "acceptance": "No intended pixel change; later model repairs cannot substitute unlike layers.",
+          "proof": "Metric invariant tests explicitly relate but do not equate roles.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GEO-002",
+          "title": "Derive Arg mini/full sizing from active rendered metrics",
+          "status": "P1; LOCAL-VERIFY then repair; F-002.",
+          "owners": "src/render_prompts/arg/render.rs, src/render_prompts/arg/helpers.rs, Arg resize owners, shared row/footer metrics.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Resolve active header, row, painted padding, footer roles; remove dead modeled padding; explicit mini/full presentation modes.",
+          "acceptance": "Intended visible rows fit; sixth row reachable/visible per mode; no footer overlap; same-semantic model/render deltas zero.",
+          "proof": "Arg/window_resize/design-contract tests and deterministic six-choice runtime layout/scroll receipt.",
+          "guardrail": "Do not shrink canonical 44px row to appease 40px model.",
+          "recommendation": "Approve the presentation contract after the strict runtime geometry receipt."
+        },
+        {
+          "id": "GEO-003",
+          "title": "Repair Confirm model to renderer truth",
+          "status": "P1; PROJECTION-ONLY until strict runtime; F-006.",
+          "owners": "src/app_layout/build_layout_info.rs, src/confirm/**, src/components/confirm_modal_shell.rs, footer metrics.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "One resolved Confirm layout consumed by renderer/model; distinct title intrinsic, body reading column, gap, rail, slot, native inner frame.",
+          "acceptance": "Protocol/paint agree on comparable roles; title stays intrinsic; body bounded; danger title and neutral selected control remain separate semantics.",
+          "proof": "Confirm/app-layout/design-contract tests and non-destructive default/danger fixture.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve model parity; product pixels are intentionally unchanged."
+        },
+        {
+          "id": "GEO-006",
+          "title": "Give Settings one action descriptor and Open language",
+          "status": "P1; source disagreement SOURCE-CONFIRMED, active composition LOCAL-VERIFY; F-003.",
+          "owners": "src/render_builtins/settings.rs, src/render_builtins/settings_contract.rs, src/app_impl/ui_window.rs, src/footer_popup.rs, UX-004 descriptor.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Native/fallback/footer/Enter/click all say and perform Open on same selected ID; disabled reason prevents activation; Back/Escape refocuses.",
+          "acceptance": "Native/fallback/footer/Enter/click all say and perform Open on same selected ID; disabled reason prevents activation; Back/Escape refocuses.",
+          "proof": "Settings surface/focus/elements baseline then key/click destination parity.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GEO-007",
+          "title": "Make Settings section metrics and iconless policy explicit",
+          "status": "P2; LOCAL-VERIFY; F-006/F-011.",
+          "owners": "Settings renderer/contract, shared section/ListItem, icon resolver, design contract.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Active themed section metrics; explicit Iconless; remove hints; stable row text origins through filter/custom-position states.",
+          "acceptance": "Zero authored hints and zero empty AX image roles; no filter-time list shift; future parser cannot silently add icons.",
+          "proof": "Settings/design-contract tests and fixture state transitions.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "accessibility-semantics",
+      "title": "Accessibility, focus, text fit, and scroll proof",
+      "shortTitle": "Accessibility",
+      "question": "Can visual review expose AX parity, keyboard order, clipping, occlusion, and safe selected-row visibility?",
+      "tasks": [
+        "PF-006",
+        "PF-007",
+        "PF-008"
+      ],
+      "fixture": "../mockups/screens/main-menu/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "PF-006",
+          "title": "Add shared text-fit, glyph, and occlusion measurements",
+          "status": "P1 proof; SOURCE-CONFIRMED; F-008/F-014.",
+          "owners": "src/app_layout/paint_measurements.rs, shared text/markdown owners, src/components/notes_editor/render.rs, protocol text/layout types, scripts/devtools/text.ts, scripts/devtools/layout.ts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Full-display text has visible ratio 1 and no unintended truncation/occlusion; intentional ellipsis declares policy; native and GPUI peers compare by semantic ID/role.",
+          "acceptance": "Full-display text has visible ratio 1 and no unintended truncation/occlusion; intentional ellipsis declares policy; native and GPUI peers compare by semantic ID/role.",
+          "proof": "Notes editor tests, new text-fit tests, strict text.ts measure.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-007",
+          "title": "Add semantic-to-AX parity, focus graph, and activation proof",
+          "status": "P0 accessibility; SOURCE-CONFIRMED; F-003/F-005.",
+          "owners": "src/platform/accessibility/**, src/components/footer_chrome.rs, src/footer_popup.rs, src/platform/glass_button_host.rs, semantic projection, scripts/devtools/elements.ts, focus.ts, keyboard.ts, act.ts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Roles/labels/enabled states match; Tab/Shift+Tab reciprocal; disabled controls cannot activate and expose reason; shown keycap produces intended postcondition; focus ring intersects target bounds.",
+          "acceptance": "Roles/labels/enabled states match; Tab/Shift+Tab reciprocal; disabled controls cannot activate and expose reason; shown keycap produces intended postcondition; focus ring intersects target bounds.",
+          "proof": "AX/focus traversal tests plus strict focus/keyboard inspections.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "PF-008",
+          "title": "Standardize list and scroll geometry proof",
+          "status": "P1 proof; SOURCE-CONFIRMED; F-002/F-006/F-007.",
+          "owners": "list/scroll owners, src/components/scrollbar.rs, src/components/list_scroll_affordance.rs, semantic/layout projection, scripts/devtools/scroll.ts, scripts/devtools/layout.ts.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Lists cannot pass with unknown selected visibility; filter/resize preserves or explicitly reanchors selection; safe viewport uses rendered footer exclusion.",
+          "acceptance": "Lists cannot pass with unknown selected visibility; filter/resize preserves or explicitly reanchors selection; safe viewport uses rendered footer exclusion.",
+          "proof": "scroll/schema tests and strict scroll.ts inspect.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        }
+      ]
+    },
+    {
+      "id": "governance-contracts",
+      "title": "Tokens, ownership, conflicts, and locked glass",
+      "shortTitle": "Governance",
+      "question": "Can contracts distinguish compatibility debt, unit types, stale owner maps, conflict lifecycles, and protected calibration?",
+      "tasks": [
+        "GOV-002",
+        "GOV-003",
+        "GOV-004",
+        "GOV-005",
+        "GOV-007"
+      ],
+      "fixture": "../mockups/screens/main-menu/index.html?embed=story",
+      "taskRecords": [
+        {
+          "id": "GOV-002",
+          "title": "Delete compatibility façades when callers reach zero",
+          "status": "P3; LOCAL-VERIFY; F-012/G-018.",
+          "owners": "src/ai/agent_chat/ui/style_contract.rs, src/ai/agent_chat/ui/popup_window.rs, canonical conversation/popup owners.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "No new caller imports deprecated façade; no values live there; zero-caller façade removed in same change; persisted migration names retained only where necessary.",
+          "acceptance": "No new caller imports deprecated façade; no values live there; zero-caller façade removed in same change; persisted migration names retained only where necessary.",
+          "proof": "direct caller inventory and compiler/type tests.",
+          "guardrail": "Preserve intentional host and component divergences.",
+          "recommendation": "Approve the lifecycle rule; delete only after a verified zero-caller receipt."
+        },
+        {
+          "id": "GOV-003",
+          "title": "Introduce explicit authored alpha-byte typing",
+          "status": "P3 hygiene; original F-013 rejected as UX defect.",
+          "owners": "src/components/conversation_style.rs, alpha packers, Actions quantization, design serializer.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Distinguish AlphaByte(u8) from normalized opacity; preserve exact existing quantization and error background byte 0x32.",
+          "acceptance": "No visual change; serializer records units; type system rejects normalized value where byte required.",
+          "proof": "exact packed-byte component/design-contract tests.",
+          "guardrail": "No alpha/motion/material retuning.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GOV-004",
+          "title": "Validate owner-map paths and fix Notes Browse",
+          "status": "P3; SOURCE-CONFIRMED; F-015.",
+          "owners": "GLOSSARY.md, current owner src/render_builtins/notes_browse.rs, new narrow path validator under scripts/.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "Correct owner reference; parse owner-map table paths and verify current existence; explicit historical marker only when intentional.",
+          "acceptance": "All owner paths resolve; failures name row and near matches; no /tmp or glob fiction.",
+          "proof": "python3 -B scripts/validate-owner-map-paths.py GLOSSARY.md after implementation.",
+          "guardrail": "Path validator is not a source-audit behavior test.",
+          "recommendation": "Approve the contract; keep implementation proof and product changes separate from this review."
+        },
+        {
+          "id": "GOV-005",
+          "title": "Give every generated design-contract conflict a lifecycle",
+          "status": "P2; SOURCE-CONFIRMED projection need.",
+          "owners": "src/design_contract/mod.rs, src/bin/export_design_tokens.rs, generated tokens, mockup divergence/workbench data.",
+          "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
+          "after": "All 34 conflicts classified with owner/closure; high conflicts not unresolved; generated files source-derived/byte-compared; intentional ladders remain explicit.",
+          "acceptance": "All 34 conflicts classified with owner/closure; high conflicts not unresolved; generated files source-derived/byte-compared; intentional ladders remain explicit.",
+          "proof": "design-contract test, fresh export/cmp, mockup/story gates including PF-012 browser geometry.",
+          "guardrail": "Never delete a conflict to make count shrink; never hand-edit generated outputs.",
+          "recommendation": "Approve the lifecycle taxonomy; revise individual classifications as needed."
+        },
+        {
+          "id": "GOV-007",
+          "title": "Reconcile the protected glass veil contradiction without retuning",
+          "status": "P1 governance; SOURCE-CONFIRMED contradiction.",
+          "owners": "AGENTS.md, src/ui/chrome/tokens.rs, src/theme/opacity.rs, src/platform/secondary_window_config.rs, named fixture and probes.",
+          "before": "Governing text names a capsule veil value that differs from current source/test truth.",
+          "after": "Run unchanged anti-drift suite and trace the actual calibrated consumer. If source/fixture prove current value authorized, correct stale text/report. If source violates protected fixture, stop and obtain explicit retune authority before any value edit.",
+          "acceptance": "Documentation and calibrated runtime agree; no visible/motion change in this task.",
+          "proof": "Minimum locked Bun suite and agent-cargo calibration fixture test, then runtime probes only if relevant.",
+          "guardrail": "No timing, curve, geometry, alpha, fixture, or threshold changes without explicit authority.",
+          "recommendation": "Approve documentation-only reconciliation after unchanged anti-drift proof."
+        }
+      ]
+    }
+  ]
+}

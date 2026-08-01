@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" data-consistency-page="index">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Script Kit — Consistency proposals</title>
+  <link rel="stylesheet" href="../mockups/generated/tokens.css">
+  <link rel="stylesheet" href="../mockups/shared/components.css">
+  <link rel="stylesheet" href="./shared/explorer.css">
+</head>
+<body>
+  <a class="cx-skip" href="#consistency-groups">Skip to proposal groups</a>
+  <main class="cx-page cx-page--index" id="consistency-app" data-manifest="./data/groups.json">
+    <header class="cx-hero">
+      <div class="cx-hero__copy">
+        <p class="cx-kicker">Visual consistency review</p>
+        <h1>Before the fixes become product changes.</h1>
+        <p class="cx-hero__lede">Every proposal pairs today’s source-derived contract with a review-only after state. Nothing here is labeled shipped, and nothing is approved until you record a verdict.</p>
+      </div>
+      <section class="cx-hero__status" aria-label="Review status" data-review-summary>
+        <strong>Loading review manifest…</strong>
+      </section>
+    </header>
+
+    <section class="cx-truth-banner" aria-labelledby="truth-title">
+      <div>
+        <p class="cx-kicker">Truth boundary</p>
+        <h2 id="truth-title">Current fixtures stay immutable.</h2>
+      </div>
+      <div class="cx-truth-banner__items">
+        <span><i class="cx-truth-dot cx-truth-dot--current"></i> Current · source-derived</span>
+        <span><i class="cx-truth-dot cx-truth-dot--proposal"></i> Proposal · not implemented</span>
+        <span><i class="cx-truth-dot cx-truth-dot--proof"></i> Proof status stays fail-closed</span>
+      </div>
+    </section>
+
+    <section class="cx-groups" id="consistency-groups" aria-label="Consistency proposal groups" data-group-grid></section>
+
+    <section class="cx-review-actions" aria-labelledby="review-actions-title">
+      <div>
+        <p class="cx-kicker">Local review state</p>
+        <h2 id="review-actions-title">Your verdicts stay in this browser.</h2>
+        <p>Approve, revise, reject, or leave any task undecided. Notes and verdicts persist locally and can be exported without touching product source.</p>
+      </div>
+      <div class="cx-review-actions__buttons">
+        <button type="button" class="cx-button" data-export-decisions>Export decisions</button>
+        <button type="button" class="cx-button cx-button--quiet" data-reset-decisions>Reset review</button>
+      </div>
+    </section>
+  </main>
+  <div class="cx-live" aria-live="polite" aria-atomic="true" data-live-region></div>
+  <script type="module" src="./shared/explorer.js"></script>
+</body>
+</html>
