@@ -158,14 +158,36 @@ pub(crate) enum FooterAction {
     Tips,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FooterPlacement {
+    Leading,
+    Trailing,
+}
+
+/// Canonical behavior descriptor consumed by both the GPUI and AppKit footer
+/// renderers. `key` is retained as the raw display spelling; routing and audit
+/// use the cached canonical shortcut and token stream instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FooterButtonConfig {
+    /// Stable semantic control identity. Never derived from vector position.
+    pub id: SharedString,
+    /// Executable route shared by click and keyboard dispatch.
     pub action: FooterAction,
+    /// Raw shortcut/icon spelling supplied by the owning surface.
     pub key: SharedString,
+    /// Canonical shortcut tokens from the shared UX-002 parser.
+    pub shortcut_tokens: Vec<String>,
+    /// Canonical key route, or `None` for empty/icon-only controls.
+    pub canonical_shortcut: Option<String>,
+    /// False for disabled controls and canonical shortcut collisions. The raw
+    /// value remains available for diagnostics but is not rendered as a keycap.
+    pub shortcut_routable: bool,
+    /// User-facing action verb.
     pub label: SharedString,
     pub selected: bool,
     pub enabled: bool,
-    pub disabled_reason: Option<&'static str>,
+    pub disabled_reason: Option<SharedString>,
+    pub placement: FooterPlacement,
     /// Optional status dot rendered at the leading edge of the button, INSIDE
     /// the chip (e.g. the Agent Chat streaming/idle dot on the Agent·Model chip). When
     /// `Some(_)` a fixed-width dot lane is reserved so the chip's width stays
@@ -173,8 +195,6 @@ pub(crate) struct FooterButtonConfig {
     /// nothing. `None` reserves no lane (the common case — keeps ScriptList and
     /// every other button dot-free).
     pub leading_dot: Option<FooterDotStatus>,
-    /// Place this ordinary shared footer button on the leading rail.
-    pub left_pinned: bool,
 }
 
 pub(crate) const MAIN_WINDOW_FOOTER_MAX_ACTION_SLOTS: usize = 3;
@@ -191,6 +211,7 @@ pub(crate) struct MainWindowFooterSlotModel {
     pub button_count: usize,
     pub action_slot_count: usize,
     pub context_chip_count: usize,
+    pub duplicate_action_ids: Vec<String>,
     pub duplicate_shortcut_keys: Vec<String>,
     pub violation: Option<&'static str>,
 }
@@ -215,16 +236,47 @@ impl FooterButtonConfig {
         key: impl Into<SharedString>,
         label: impl Into<SharedString>,
     ) -> Self {
+        let key = key.into();
+        let icon_only = crate::components::footer_chrome::is_footer_icon_token(key.as_ref());
+        let shortcut_tokens = if key.trim().is_empty() || icon_only {
+            Vec::new()
+        } else {
+            crate::components::hint_strip::shortcut_tokens_from_hint(key.as_ref())
+        };
+        let canonical_shortcut = if shortcut_tokens.is_empty() {
+            None
+        } else {
+            let canonical = crate::components::hint_strip::canonical_shortcut_hint(key.as_ref());
+            (!canonical.is_empty()).then_some(canonical)
+        };
+        let placement = if matches!(action, FooterAction::Cwd | FooterAction::AgentModel)
+            || (matches!(action, FooterAction::Ai) && icon_only)
+        {
+            FooterPlacement::Leading
+        } else {
+            FooterPlacement::Trailing
+        };
         Self {
+            id: SharedString::from(format!("footer-action:{}", action.semantic_key())),
             action,
-            key: key.into(),
+            key,
+            shortcut_tokens,
+            shortcut_routable: canonical_shortcut.is_some(),
+            canonical_shortcut,
             label: label.into(),
             selected: false,
             enabled: true,
             disabled_reason: None,
+            placement,
             leading_dot: None,
-            left_pinned: false,
         }
+    }
+
+    pub(crate) fn id(mut self, id: impl Into<SharedString>) -> Self {
+        let id = id.into();
+        assert!(!id.trim().is_empty(), "footer action IDs must not be blank");
+        self.id = id;
+        self
     }
 
     pub(crate) fn selected(mut self, selected: bool) -> Self {
@@ -233,7 +285,7 @@ impl FooterButtonConfig {
     }
 
     pub(crate) fn left_pinned(mut self) -> Self {
-        self.left_pinned = true;
+        self.placement = FooterPlacement::Leading;
         self
     }
 
@@ -246,17 +298,99 @@ impl FooterButtonConfig {
 
     pub(crate) fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
+        self.shortcut_routable = enabled && self.canonical_shortcut.is_some();
+        if enabled {
+            self.disabled_reason = None;
+        }
         self
     }
 
-    pub(crate) fn disabled_reason(mut self, reason: &'static str) -> Self {
+    pub(crate) fn disabled_reason(mut self, reason: impl Into<SharedString>) -> Self {
+        let reason = reason.into();
+        assert!(
+            !reason.trim().is_empty(),
+            "disabled footer actions require a non-empty reason"
+        );
         self.disabled_reason = Some(reason);
         self.enabled = false;
+        self.shortcut_routable = false;
         self
     }
 }
 
+/// Apply deterministic descriptor variants for real runtime verification.
+///
+/// The fixture is double-gated so normal launches can never inherit test-only
+/// labels, disabled actions, or shortcut collisions.
+pub(crate) fn apply_footer_descriptor_test_fixture(buttons: &mut [FooterButtonConfig]) {
+    let test_status = std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() == Some("1");
+    let Ok(mode) = std::env::var("SCRIPT_KIT_TEST_FOOTER_DESCRIPTOR_FIXTURE") else {
+        return;
+    };
+    if !test_status {
+        return;
+    }
+
+    apply_footer_descriptor_test_fixture_mode(buttons, &mode);
+}
+
+fn apply_footer_descriptor_test_fixture_mode(buttons: &mut [FooterButtonConfig], mode: &str) {
+    match mode {
+        "disabled" => {
+            if let Some(button) = buttons
+                .iter_mut()
+                .find(|button| button.action == FooterAction::Actions)
+            {
+                *button = button
+                    .clone()
+                    .disabled_reason("Unavailable in the footer descriptor test fixture");
+            }
+        }
+        "collision" => {
+            if let Some(button) = buttons
+                .iter_mut()
+                .find(|button| button.action == FooterAction::Ai)
+            {
+                button.key = SharedString::from("⌘K");
+                button.shortcut_tokens =
+                    crate::components::hint_strip::shortcut_tokens_from_hint("⌘K");
+                button.canonical_shortcut = Some("cmd+k".to_string());
+                button.shortcut_routable = true;
+            }
+        }
+        "renamed" => {
+            if let Some(button) = buttons
+                .iter_mut()
+                .find(|button| button.action == FooterAction::Actions)
+            {
+                button.label = SharedString::from("More Actions");
+            }
+        }
+        _ => {}
+    }
+}
+
 impl FooterAction {
+    pub(crate) const fn semantic_key(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Actions => "actions",
+            Self::Ai => "ai",
+            Self::Apply => "apply",
+            Self::Replace => "replace",
+            Self::Append => "append",
+            Self::Copy => "copy",
+            Self::Expand => "expand",
+            Self::Retry => "retry",
+            Self::Close => "close",
+            Self::Stop => "stop",
+            Self::PasteResponse => "pasteResponse",
+            Self::Cwd => "cwd",
+            Self::AgentModel => "agentModel",
+            Self::Tips => "tips",
+        }
+    }
+
     pub(crate) fn is_actions(self) -> bool {
         matches!(self, Self::Actions)
     }
@@ -332,13 +466,37 @@ pub(crate) struct MainWindowFooterConfig {
 }
 
 impl MainWindowFooterConfig {
-    pub(crate) fn new(surface: &'static str, buttons: Vec<FooterButtonConfig>) -> Self {
+    pub(crate) fn new(surface: &'static str, mut buttons: Vec<FooterButtonConfig>) -> Self {
+        let mut shortcut_counts = BTreeMap::<String, usize>::new();
+        for button in &buttons {
+            assert!(
+                button.disabled_reason.is_none() || !button.enabled,
+                "footer actions with disabled reasons must be disabled"
+            );
+            if button.enabled {
+                if let Some(canonical) = button.canonical_shortcut.as_ref() {
+                    *shortcut_counts.entry(canonical.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        for button in &mut buttons {
+            button.shortcut_routable = button.enabled
+                && button.canonical_shortcut.as_ref().is_some_and(|canonical| {
+                    shortcut_counts.get(canonical).copied().unwrap_or_default() == 1
+                });
+        }
+
         let config = Self {
             surface,
             buttons,
             left_info: None,
         };
         let model = config.slot_model();
+        assert!(
+            model.duplicate_action_ids.is_empty(),
+            "main window footer action IDs must be unique on {surface}: {:?}",
+            model.duplicate_action_ids
+        );
         if let Some(violation) = model.violation {
             debug_assert!(
                 false,
@@ -349,9 +507,16 @@ impl MainWindowFooterConfig {
                 action_slot_count = model.action_slot_count,
                 context_chip_count = model.context_chip_count,
                 button_count = model.button_count,
+                duplicate_action_ids = ?model.duplicate_action_ids,
                 duplicate_shortcut_keys = ?model.duplicate_shortcut_keys,
                 violation,
                 "Main window footer slot contract violation"
+            );
+        } else if !model.duplicate_shortcut_keys.is_empty() {
+            tracing::warn!(
+                surface,
+                duplicate_shortcut_keys = ?model.duplicate_shortcut_keys,
+                "Footer shortcut collision hidden until the producer resolves it"
             );
         }
         config
@@ -360,43 +525,67 @@ impl MainWindowFooterConfig {
     pub(crate) fn slot_model(&self) -> MainWindowFooterSlotModel {
         let mut action_slot_count = 0usize;
         let mut context_chip_count = 0usize;
+        let mut id_counts = BTreeMap::<String, usize>::new();
         let mut shortcut_counts = BTreeMap::<String, usize>::new();
 
         for button in &self.buttons {
+            *id_counts.entry(button.id.to_string()).or_insert(0) += 1;
+            if button.enabled {
+                if let Some(canonical) = button.canonical_shortcut.as_ref() {
+                    *shortcut_counts.entry(canonical.clone()).or_insert(0) += 1;
+                }
+            }
             match footer_button_slot_role(button) {
-                FooterSlotRole::ActionSlot => {
-                    action_slot_count += 1;
-                    let key = button.key.trim();
-                    if !key.is_empty() {
-                        *shortcut_counts.entry(key.to_string()).or_insert(0) += 1;
-                    }
-                }
-                FooterSlotRole::ContextChip => {
-                    context_chip_count += 1;
-                }
+                FooterSlotRole::ActionSlot => action_slot_count += 1,
+                FooterSlotRole::ContextChip => context_chip_count += 1,
             }
         }
 
+        let duplicate_action_ids = id_counts
+            .into_iter()
+            .filter_map(|(id, count)| (count > 1).then_some(id))
+            .collect::<Vec<_>>();
         let duplicate_shortcut_keys = shortcut_counts
             .into_iter()
             .filter_map(|(key, count)| (count > 1).then_some(key))
             .collect::<Vec<_>>();
-        let violation = if action_slot_count > MAIN_WINDOW_FOOTER_MAX_ACTION_SLOTS {
-            Some("too_many_action_slots")
-        } else if !duplicate_shortcut_keys.is_empty() {
-            Some("duplicate_shortcut_keys")
-        } else {
-            None
-        };
+        let violation = (action_slot_count > MAIN_WINDOW_FOOTER_MAX_ACTION_SLOTS)
+            .then_some("too_many_action_slots");
 
         MainWindowFooterSlotModel {
             surface: self.surface,
             button_count: self.buttons.len(),
             action_slot_count,
             context_chip_count,
+            duplicate_action_ids,
             duplicate_shortcut_keys,
             violation,
         }
+    }
+
+    pub(crate) fn descriptor_for_action(
+        &self,
+        action: FooterAction,
+    ) -> Option<&FooterButtonConfig> {
+        self.buttons
+            .iter()
+            .find(|descriptor| descriptor.action == action)
+    }
+
+    pub(crate) fn has_canonical_shortcut_candidate(&self, canonical: &str) -> bool {
+        self.buttons
+            .iter()
+            .any(|descriptor| descriptor.canonical_shortcut.as_deref() == Some(canonical))
+    }
+
+    pub(crate) fn action_for_canonical_shortcut(&self, canonical: &str) -> Option<FooterAction> {
+        self.buttons
+            .iter()
+            .find(|descriptor| {
+                descriptor.shortcut_routable
+                    && descriptor.canonical_shortcut.as_deref() == Some(canonical)
+            })
+            .map(|descriptor| descriptor.action)
     }
 
     pub(crate) fn slot_contract_violation(&self) -> Option<&'static str> {
@@ -882,6 +1071,14 @@ impl GpuiFooterOverlay {
             crate::components::footer_chrome::resolved_footer_button_visual_colors(theme)
                 .row_states;
         let action = button.action;
+        let descriptor_id = button.id.clone();
+        let key_is_icon =
+            crate::components::footer_chrome::is_footer_icon_token(button.key.as_ref());
+        let displayed_key = if key_is_icon || button.shortcut_routable {
+            button.key.clone()
+        } else {
+            SharedString::from("")
+        };
         let selected_bg = rgba(
             row_states
                 .active
@@ -915,15 +1112,9 @@ impl GpuiFooterOverlay {
         // ellipsize under real layout pressure instead of against estimated
         // character widths.
         let min_width = footer_hint_slot_width(action) as f32;
-        let fidelity_id = format!(
-            "agent-chat.footer-overlay.button.{}",
-            footer_action_key(action)
-        );
+        let fidelity_id = format!("agent-chat.footer-overlay.{}", descriptor_id);
         let mut item = div()
-            .id(format!(
-                "gpui-footer-overlay-button-{}",
-                footer_action_key(action)
-            ))
+            .id(descriptor_id)
             .debug_selector(move || fidelity_id.clone())
             .min_w(px(min_width))
             .when(matches!(action, FooterAction::Run), |style| {
@@ -944,7 +1135,7 @@ impl GpuiFooterOverlay {
             .child(if button.selected {
                 crate::components::footer_chrome::render_footer_hint_content_flex_for_state(
                     button.label.clone(),
-                    button.key.clone(),
+                    displayed_key.clone(),
                     crate::components::footer_chrome::FooterHintKeyMode::Shortcut,
                     theme,
                     key_first,
@@ -954,7 +1145,7 @@ impl GpuiFooterOverlay {
             } else {
                 crate::components::footer_chrome::render_footer_hint_content_flex(
                     button.label.clone(),
-                    button.key.clone(),
+                    displayed_key.clone(),
                     crate::components::footer_chrome::FooterHintKeyMode::Shortcut,
                     theme,
                     key_first,
@@ -977,7 +1168,7 @@ impl GpuiFooterOverlay {
                     }),
                 );
         } else {
-            item = item.opacity(0.45);
+            item = item.opacity(0.45).cursor_default();
         }
 
         item.into_any_element()
@@ -1109,6 +1300,14 @@ fn should_use_gpui_footer_overlay(glass_mode: bool, overlay_enabled: bool) -> bo
 
 fn main_footer_gpui_overlay_active() -> bool {
     should_use_gpui_footer_overlay(glass_scroll_bands_active(), gpui_footer_overlay_enabled())
+}
+
+pub(crate) fn main_footer_gpui_overlay_visible() -> bool {
+    main_footer_gpui_overlay_active()
+        && MAIN_WINDOW_GPUI_FOOTER_OVERLAY
+            .get()
+            .and_then(|storage| storage.lock().ok())
+            .is_some_and(|slot| slot.is_some())
 }
 
 fn gpui_footer_overlay_bounds(parent_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -5383,22 +5582,7 @@ unsafe fn measure_native_footer_lanes(
 
 #[cfg(target_os = "macos")]
 fn is_footer_left_pinned_button(button_cfg: &FooterButtonConfig) -> bool {
-    if button_cfg.left_pinned {
-        return true;
-    }
-    if matches!(
-        button_cfg.action,
-        FooterAction::Cwd | FooterAction::AgentModel
-    ) {
-        // Cwd chip is rendered as a regular footer button (bordered label +
-        // bordered keycap + hover state, parity with trailing buttons) and
-        // pinned to the far left. Shares the left-pinned helper because the
-        // layout pass already handles the splitting of left- vs right-side
-        // items via this predicate.
-        return true;
-    }
-    matches!(button_cfg.action, FooterAction::Ai)
-        && button_cfg.key.as_ref() == crate::components::footer_chrome::FOOTER_MIC_ICON_TOKEN
+    matches!(button_cfg.placement, FooterPlacement::Leading)
 }
 
 /// Extra trailing slack added to a hint item's minimum width. The trailing
@@ -5759,7 +5943,7 @@ unsafe fn make_footer_hint_item(
     if container == nil {
         return nil;
     }
-    let action_key = footer_action_key(button_cfg.action);
+    let action_key = button_cfg.id.as_ref();
     let item_identifier = ns_string(&format!("{FOOTER_HINT_ITEM_ID_PREFIX}{action_key}"));
     if item_identifier != nil {
         let _: () = msg_send![container, setIdentifier: item_identifier];
@@ -5898,7 +6082,13 @@ unsafe fn make_footer_hint_item(
     ];
 
     let shortcut_keys =
-        crate::components::footer_chrome::split_footer_shortcut(button_cfg.key.as_ref());
+        if crate::components::footer_chrome::is_footer_icon_token(button_cfg.key.as_ref()) {
+            vec![button_cfg.key.to_string()]
+        } else if button_cfg.shortcut_routable {
+            button_cfg.shortcut_tokens.clone()
+        } else {
+            Vec::new()
+        };
 
     let keys_view: id = msg_send![class!(NSView), alloc];
     let keys_view: id = msg_send![
@@ -6629,11 +6819,9 @@ mod footer_layout_tests {
         assert_eq!(snapshot.target_kind, "footerOverlay");
         assert_eq!(snapshot.parent_target_id.as_deref(), Some("main"));
         assert!(snapshot.frame_generation > 0);
-        assert!(snapshot
-            .nodes
-            .iter()
-            .any(|node| node.id == "agent-chat.footer-overlay.button.run"
-                && node.primitive_count > 0));
+        assert!(snapshot.nodes.iter().any(|node| node.id
+            == "agent-chat.footer-overlay.footer-action:run"
+            && node.primitive_count > 0));
         assert!(snapshot
             .nodes
             .iter()
@@ -6644,6 +6832,131 @@ mod footer_layout_tests {
         }));
 
         super::clear_main_footer_overlay_fidelity_snapshot();
+    }
+
+    #[test]
+    fn footer_descriptor_caches_semantic_identity_and_canonical_shortcut() {
+        let descriptor = FooterButtonConfig::new(FooterAction::Actions, "cmd+k", "Open Menu");
+
+        assert_eq!(descriptor.id, "footer-action:actions");
+        assert_eq!(descriptor.action, FooterAction::Actions);
+        assert_eq!(descriptor.label, "Open Menu");
+        assert_eq!(descriptor.shortcut_tokens, vec!["⌘", "K"]);
+        assert_eq!(descriptor.canonical_shortcut.as_deref(), Some("cmd+k"));
+        assert!(descriptor.shortcut_routable);
+        assert_eq!(descriptor.placement, super::FooterPlacement::Trailing);
+    }
+
+    #[test]
+    fn disabled_footer_descriptor_hides_its_key_route_but_keeps_reason() {
+        let descriptor = FooterButtonConfig::new(FooterAction::Run, "↵", "Run")
+            .disabled_reason("Requires a selection");
+        let config = super::MainWindowFooterConfig::new("test", vec![descriptor]);
+        let descriptor = &config.buttons[0];
+
+        assert!(!descriptor.enabled);
+        assert_eq!(
+            descriptor
+                .disabled_reason
+                .as_ref()
+                .map(|reason| reason.as_ref()),
+            Some("Requires a selection")
+        );
+        assert!(!descriptor.shortcut_routable);
+        assert_eq!(config.action_for_canonical_shortcut("enter"), None);
+    }
+
+    #[test]
+    fn duplicate_footer_shortcuts_are_retained_for_diagnostics_but_not_routable() {
+        let config = super::MainWindowFooterConfig::new(
+            "test",
+            vec![
+                FooterButtonConfig::new(FooterAction::Run, "⌘↵", "Run"),
+                FooterButtonConfig::new(FooterAction::Ai, "cmd+enter", "Agent"),
+            ],
+        );
+        let model = config.slot_model();
+
+        assert_eq!(model.duplicate_shortcut_keys, vec!["cmd+enter"]);
+        assert!(config
+            .buttons
+            .iter()
+            .all(|button| !button.shortcut_routable));
+        assert_eq!(config.action_for_canonical_shortcut("cmd+enter"), None);
+        assert_eq!(config.slot_contract_violation(), None);
+    }
+
+    #[test]
+    fn footer_descriptor_runtime_fixture_preserves_identity_and_fails_closed() {
+        let base = || {
+            vec![
+                FooterButtonConfig::new(FooterAction::Run, "↵", "Run"),
+                FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions"),
+                FooterButtonConfig::new(FooterAction::Ai, "⌘↵", "Agent"),
+            ]
+        };
+
+        let mut disabled = base();
+        super::apply_footer_descriptor_test_fixture_mode(&mut disabled, "disabled");
+        let disabled = super::MainWindowFooterConfig::new("test", disabled);
+        let actions = disabled
+            .descriptor_for_action(FooterAction::Actions)
+            .expect("Actions descriptor");
+        assert_eq!(actions.id, "footer-action:actions");
+        assert!(!actions.enabled);
+        assert!(!actions.shortcut_routable);
+        assert!(actions.disabled_reason.is_some());
+        assert_eq!(disabled.action_for_canonical_shortcut("cmd+k"), None);
+
+        let mut collision = base();
+        super::apply_footer_descriptor_test_fixture_mode(&mut collision, "collision");
+        let collision = super::MainWindowFooterConfig::new("test", collision);
+        assert_eq!(
+            collision.slot_model().duplicate_shortcut_keys,
+            vec!["cmd+k"]
+        );
+        assert_eq!(collision.action_for_canonical_shortcut("cmd+k"), None);
+        assert!(collision
+            .buttons
+            .iter()
+            .filter(|button| button.canonical_shortcut.as_deref() == Some("cmd+k"))
+            .all(|button| !button.shortcut_routable));
+
+        let mut renamed = base();
+        super::apply_footer_descriptor_test_fixture_mode(&mut renamed, "renamed");
+        let renamed = super::MainWindowFooterConfig::new("test", renamed);
+        let actions = renamed
+            .descriptor_for_action(FooterAction::Actions)
+            .expect("renamed Actions descriptor");
+        assert_eq!(actions.id, "footer-action:actions");
+        assert_eq!(actions.label, "More Actions");
+        assert_eq!(actions.canonical_shortcut.as_deref(), Some("cmd+k"));
+        assert_eq!(
+            renamed.action_for_canonical_shortcut("cmd+k"),
+            Some(FooterAction::Actions)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "main window footer action IDs must be unique")]
+    fn duplicate_footer_descriptor_ids_fail_validation() {
+        let _ = super::MainWindowFooterConfig::new(
+            "test",
+            vec![
+                FooterButtonConfig::new(FooterAction::Run, "↵", "Run"),
+                FooterButtonConfig::new(FooterAction::Run, "⌘↵", "Run Again"),
+            ],
+        );
+    }
+
+    #[test]
+    fn footer_dispatch_identity_does_not_depend_on_the_visible_verb() {
+        let first = FooterButtonConfig::new(FooterAction::Run, "↵", "Run");
+        let renamed = FooterButtonConfig::new(FooterAction::Run, "↵", "Continue");
+
+        assert_eq!(first.id, renamed.id);
+        assert_eq!(first.action, renamed.action);
+        assert_ne!(first.label, renamed.label);
     }
 
     #[test]
@@ -7242,23 +7555,7 @@ unsafe fn footer_sender_window_title(sender: id) -> Option<String> {
 }
 
 fn footer_action_key(action: FooterAction) -> &'static str {
-    match action {
-        FooterAction::Run => "run",
-        FooterAction::Actions => "actions",
-        FooterAction::Ai => "ai",
-        FooterAction::Apply => "apply",
-        FooterAction::Replace => "replace",
-        FooterAction::Append => "append",
-        FooterAction::Copy => "copy",
-        FooterAction::Expand => "expand",
-        FooterAction::Retry => "retry",
-        FooterAction::Close => "close",
-        FooterAction::Stop => "stop",
-        FooterAction::PasteResponse => "pasteResponse",
-        FooterAction::Cwd => "cwd",
-        FooterAction::AgentModel => "agentModel",
-        FooterAction::Tips => "tips",
-    }
+    action.semantic_key()
 }
 
 #[cfg(target_os = "macos")]

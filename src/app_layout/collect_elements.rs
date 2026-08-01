@@ -2008,10 +2008,15 @@ impl ScriptListApp {
                 "popup" => "popupFooterButton",
                 _ => "contentFooterButton",
             };
+            let text = if button.shortcut_routable {
+                format!("{} {}", button.key, button.label)
+            } else {
+                button.label.clone()
+            };
             outcome.elements.push(protocol::ElementInfo {
-                semantic_id: format!("footer:{}:{}", footer.owner, button.action),
+                semantic_id: button.id.clone(),
                 element_type: protocol::ElementType::Button,
-                text: Some(format!("{} {}", button.key, button.label)),
+                text: Some(text),
                 value: Some(button.action.clone()),
                 selected: Some(button.selected),
                 focused: None,

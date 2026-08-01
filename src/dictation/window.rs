@@ -2435,23 +2435,22 @@ fn render_static_action_rail(
     let theme = get_cached_theme();
     let rail_chrome = footer_rail_chrome(&theme);
     let button_height = footer_button_height(rail_chrome.height_px);
-    let button_ids = [
-        "dictation-footer-action-0",
-        "dictation-footer-action-1",
-        "dictation-footer-action-2",
-        "dictation-footer-action-3",
-    ];
     let mut frames = Vec::new();
 
-    for (index, button) in buttons.into_iter().enumerate() {
+    for button in buttons {
+        let enabled = button.enabled && button.disabled_reason.is_none();
+        let key_is_icon =
+            crate::components::footer_chrome::is_footer_icon_token(button.key.as_ref());
+        let displayed_key = if key_is_icon || button.shortcut_routable {
+            button.key.clone()
+        } else {
+            gpui::SharedString::from("")
+        };
         let frame = render_footer_hint_action_button_frame(
             FooterHintActionButtonFrameSpec {
-                id: button_ids
-                    .get(index)
-                    .copied()
-                    .unwrap_or("dictation-footer-action-overflow"),
+                id: button.id,
                 label: button.label,
-                key: button.key,
+                key: displayed_key,
                 slot_width_px: footer_action_slot_width(FooterActionSlot::Run),
                 height_px: button_height,
                 selected: false,
@@ -2465,17 +2464,21 @@ fn render_static_action_rail(
             },
             &theme,
         );
-        if let Some(cx) = cx.as_mut() {
-            let action = button.action;
-            frames.push(
-                frame
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.handle_native_footer_action(action, window, cx);
-                    }))
-                    .into_any_element(),
-            );
+        if enabled {
+            if let Some(cx) = cx.as_mut() {
+                let action = button.action;
+                frames.push(
+                    frame
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.handle_native_footer_action(action, window, cx);
+                        }))
+                        .into_any_element(),
+                );
+            } else {
+                frames.push(frame.into_any_element());
+            }
         } else {
-            frames.push(frame.into_any_element());
+            frames.push(frame.opacity(0.45).cursor_default().into_any_element());
         }
     }
 

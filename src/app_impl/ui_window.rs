@@ -458,6 +458,37 @@ impl ScriptListApp {
         self.execute_day_page_action(action_id, window, cx)
     }
 
+    pub(crate) fn main_window_footer_shortcut_is_blocked(
+        &self,
+        canonical_shortcut: &str,
+        cx: &gpui::App,
+    ) -> bool {
+        self.main_window_footer_config_with_cx(Some(cx))
+            .is_some_and(|config| {
+                config.has_canonical_shortcut_candidate(canonical_shortcut)
+                    && config
+                        .action_for_canonical_shortcut(canonical_shortcut)
+                        .is_none()
+            })
+    }
+
+    pub(crate) fn dispatch_main_window_footer_shortcut(
+        &mut self,
+        canonical_shortcut: &str,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+        source: &'static str,
+    ) -> bool {
+        let Some(config) = self.main_window_footer_config_with_cx(Some(&*cx)) else {
+            return false;
+        };
+        let Some(action) = config.action_for_canonical_shortcut(canonical_shortcut) else {
+            return false;
+        };
+        self.dispatch_main_window_footer_action(action, window, cx, source);
+        true
+    }
+
     pub(crate) fn dispatch_main_window_footer_action(
         &mut self,
         action: crate::footer_popup::FooterAction,
@@ -465,6 +496,23 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
         source: &'static str,
     ) {
+        if let Some(config) = self.main_window_footer_config_with_cx(Some(&*cx)) {
+            if let Some(descriptor) = config.descriptor_for_action(action) {
+                if !descriptor.enabled {
+                    tracing::info!(
+                        target: "script_kit::footer_popup",
+                        event = "main_window_footer_action_blocked",
+                        source,
+                        action = ?action,
+                        descriptor_id = %descriptor.id,
+                        disabled_reason = ?descriptor.disabled_reason,
+                        "Ignored disabled main-window footer action"
+                    );
+                    return;
+                }
+            }
+        }
+
         tracing::info!(
             target: "script_kit::footer_popup",
             event = "main_window_footer_action_dispatch",
@@ -514,7 +562,19 @@ impl ScriptListApp {
                 }
             }
             crate::footer_popup::FooterAction::Run => {
-                if matches!(self.current_view, AppView::PermissionsWizardView { .. }) {
+                if matches!(self.current_view, AppView::ScriptList) {
+                    if self.should_consume_menu_syntax_trigger_picker_press_enter(source)
+                        || self.should_consume_script_list_enter_after_submit(source)
+                        || self.try_handle_spine_enter(window, cx)
+                    {
+                        return;
+                    }
+                    if self.main_menu_fallback_state.is_active() {
+                        self.execute_selected_fallback(cx);
+                    } else {
+                        self.execute_selected(cx);
+                    }
+                } else if matches!(self.current_view, AppView::PermissionsWizardView { .. }) {
                     self.dispatch_permissions_wizard_action(
                         crate::permissions_wizard::PermissionsWizardAction::GrantSelected,
                         window,
@@ -1031,6 +1091,7 @@ impl ScriptListApp {
                 );
             }
         }
+        crate::footer_popup::apply_footer_descriptor_test_fixture(&mut buttons);
         buttons
     }
 

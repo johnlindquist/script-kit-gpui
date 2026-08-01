@@ -299,7 +299,7 @@ pub(crate) struct FooterHintButtonLayoutOverrides {
 }
 
 pub(crate) struct FooterHintActionButtonFrameSpec {
-    pub(crate) id: &'static str,
+    pub(crate) id: SharedString,
     pub(crate) label: SharedString,
     pub(crate) key: SharedString,
     pub(crate) slot_width_px: f32,
@@ -472,12 +472,10 @@ fn footer_config_action_slot(action: crate::footer_popup::FooterAction) -> Foote
 }
 
 fn footer_config_button_is_left_pinned(button: &crate::footer_popup::FooterButtonConfig) -> bool {
-    use crate::footer_popup::FooterAction;
-
-    button.left_pinned
-        || matches!(button.action, FooterAction::Cwd | FooterAction::AgentModel)
-        || (matches!(button.action, FooterAction::Ai)
-            && button.key.as_ref() == FOOTER_MIC_ICON_TOKEN)
+    matches!(
+        button.placement,
+        crate::footer_popup::FooterPlacement::Leading
+    )
 }
 
 fn footer_config_dot_color(
@@ -771,14 +769,6 @@ where
     let theme = crate::theme::get_cached_theme();
     let rail = footer_rail_chrome(&theme);
     let button_height = footer_button_height(rail.height_px);
-    let button_ids = [
-        "config-footer-button-0",
-        "config-footer-button-1",
-        "config-footer-button-2",
-        "config-footer-button-3",
-        "config-footer-button-4",
-        "config-footer-button-overflow",
-    ];
     let mut left_buttons = Vec::new();
     let mut right_buttons = Vec::new();
     let mut active_left_info_groups = Vec::new();
@@ -805,9 +795,15 @@ where
     .filter(|group| !active_left_info_groups.contains(group))
     .collect::<Vec<_>>();
 
-    for (index, button) in config.buttons.into_iter().enumerate() {
+    for button in config.buttons {
         let action = button.action;
         let enabled = button.enabled && button.disabled_reason.is_none();
+        let key_is_icon = is_footer_icon_token(button.key.as_ref());
+        let displayed_key = if key_is_icon || button.shortcut_routable {
+            button.key.clone()
+        } else {
+            SharedString::from("")
+        };
         let left_pinned = footer_config_button_is_left_pinned(&button);
         let key_first = left_pinned
             && !matches!(
@@ -824,12 +820,9 @@ where
         };
         let mut frame = render_footer_hint_action_button_frame(
             FooterHintActionButtonFrameSpec {
-                id: button_ids
-                    .get(index)
-                    .copied()
-                    .unwrap_or("config-footer-button-overflow"),
+                id: button.id,
                 label: button.label,
-                key: button.key,
+                key: displayed_key,
                 slot_width_px: footer_action_slot_width(footer_config_action_slot(action)),
                 height_px: button_height,
                 selected: button.selected,
@@ -847,7 +840,7 @@ where
             let handler = on_action.clone();
             frame = frame.on_click(move |_event, window, cx| handler(action, window, cx));
         } else {
-            frame = frame.opacity(0.45);
+            frame = frame.opacity(0.45).cursor_default();
         }
         if left_pinned {
             left_buttons.push(frame.into_any_element());
@@ -959,7 +952,7 @@ pub(crate) fn render_static_footer_hint_action_rail_with_leading(
         buttons.push(
             render_footer_hint_action_button_frame(
                 FooterHintActionButtonFrameSpec {
-                    id: button_id,
+                    id: button_id.into(),
                     label,
                     key,
                     slot_width_px: footer_action_slot_width(FooterActionSlot::Run),
@@ -1016,7 +1009,7 @@ pub(crate) fn render_clickable_footer_hint_action_rail(
         let (label, key) = footer_hint_button_parts(hint.as_ref());
         let frame = render_footer_hint_action_button_frame(
             FooterHintActionButtonFrameSpec {
-                id: button_id,
+                id: button_id.into(),
                 label,
                 key,
                 slot_width_px: footer_action_slot_width(FooterActionSlot::Run),

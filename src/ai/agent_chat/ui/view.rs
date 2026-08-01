@@ -4321,7 +4321,7 @@ impl AgentChatView {
         );
         let mut button = crate::components::footer_chrome::render_footer_hint_action_button_frame(
             crate::components::footer_chrome::FooterHintActionButtonFrameSpec {
-                id,
+                id: id.into(),
                 label: SharedString::from(label),
                 key: SharedString::from(key),
                 slot_width_px,

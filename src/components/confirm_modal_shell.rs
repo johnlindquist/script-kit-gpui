@@ -100,7 +100,7 @@ pub(crate) fn modal_action_row(
         row = row.child(
             render_footer_hint_action_button_frame(
                 FooterHintActionButtonFrameSpec {
-                    id: button.id,
+                    id: button.id.into(),
                     label: button.label,
                     key: button.key,
                     slot_width_px: button.slot_width_px,

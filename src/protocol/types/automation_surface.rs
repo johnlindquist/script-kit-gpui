@@ -57,7 +57,7 @@ pub struct LauncherSurfaceContractSnapshot {
 }
 
 /// Schema version for the resolved active footer snapshot in `getState`.
-pub const ACTIVE_FOOTER_SCHEMA_VERSION: u32 = 1;
+pub const ACTIVE_FOOTER_SCHEMA_VERSION: u32 = 2;
 
 /// Resolved footer owner visible to automation after native-host installation
 /// and prompt fallback policy have both been applied.
@@ -75,6 +75,7 @@ pub struct ActiveFooterSnapshot {
     pub button_count: usize,
     pub action_slot_count: usize,
     pub context_chip_count: usize,
+    pub duplicate_action_ids: Vec<String>,
     pub duplicate_shortcut_keys: Vec<String>,
     pub slot_contract_violation: Option<String>,
     pub buttons: Vec<ActiveFooterButtonSnapshot>,
@@ -110,10 +111,15 @@ pub struct ActiveFooterCwdChipSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveFooterButtonSnapshot {
+    pub id: String,
     pub action: String,
     pub key: String,
+    pub shortcut_tokens: Vec<String>,
+    pub canonical_shortcut: Option<String>,
+    pub shortcut_routable: bool,
     pub label: String,
     pub enabled: bool,
     pub selected: bool,
+    pub placement: String,
     pub action_disabled: Option<String>,
 }

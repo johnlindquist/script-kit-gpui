@@ -1029,7 +1029,7 @@ fn universal_footer_button_frame(
     };
     render_footer_hint_action_button_frame(
         FooterHintActionButtonFrameSpec {
-            id,
+            id: id.into(),
             label,
             key: SharedString::from(key),
             slot_width_px,

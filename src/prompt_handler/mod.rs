@@ -8987,12 +8987,21 @@ impl ScriptListApp {
         button: &crate::footer_popup::FooterButtonConfig,
     ) -> crate::protocol::ActiveFooterButtonSnapshot {
         crate::protocol::ActiveFooterButtonSnapshot {
+            id: button.id.to_string(),
             action: Self::footer_action_name(button.action),
             key: button.key.to_string(),
+            shortcut_tokens: button.shortcut_tokens.clone(),
+            canonical_shortcut: button.canonical_shortcut.clone(),
+            shortcut_routable: button.shortcut_routable,
             label: button.label.to_string(),
             enabled: button.enabled,
             selected: button.selected,
-            action_disabled: button.disabled_reason.map(str::to_string),
+            placement: match button.placement {
+                crate::footer_popup::FooterPlacement::Leading => "leading",
+                crate::footer_popup::FooterPlacement::Trailing => "trailing",
+            }
+            .to_string(),
+            action_disabled: button.disabled_reason.as_ref().map(ToString::to_string),
         }
     }
 
@@ -9081,35 +9090,34 @@ impl ScriptListApp {
 
         let buttons = match owner {
             "native" | "prompt" if expected_surface.is_some() => native_buttons,
-            "prompt" => vec![
-                crate::protocol::ActiveFooterButtonSnapshot {
-                    action: "actions".to_string(),
-                    key: "⌘K".to_string(),
-                    label: "Actions".to_string(),
-                    enabled: true,
-                    selected: false,
-                    action_disabled: None,
-                },
-                crate::protocol::ActiveFooterButtonSnapshot {
-                    action: "close".to_string(),
-                    key: "Esc".to_string(),
-                    label: "Close".to_string(),
-                    enabled: true,
-                    selected: false,
-                    action_disabled: None,
-                },
-            ],
+            "prompt" => [
+                crate::footer_popup::FooterButtonConfig::new(
+                    crate::footer_popup::FooterAction::Actions,
+                    "⌘K",
+                    "Actions",
+                ),
+                crate::footer_popup::FooterButtonConfig::new(
+                    crate::footer_popup::FooterAction::Close,
+                    "Esc",
+                    "Close",
+                ),
+            ]
+            .iter()
+            .map(Self::active_footer_button_snapshot)
+            .collect(),
             _ => Vec::new(),
         };
         let (
             action_slot_count,
             context_chip_count,
+            duplicate_action_ids,
             duplicate_shortcut_keys,
             slot_contract_violation,
         ) = if let Some(model) = slot_model.as_ref() {
             (
                 model.action_slot_count,
                 model.context_chip_count,
+                model.duplicate_action_ids.clone(),
                 model.duplicate_shortcut_keys.clone(),
                 model.violation.map(str::to_string),
             )
@@ -9117,6 +9125,7 @@ impl ScriptListApp {
             (
                 buttons.len(),
                 0,
+                Vec::new(),
                 Vec::new(),
                 (buttons.len() > crate::footer_popup::MAIN_WINDOW_FOOTER_MAX_ACTION_SLOTS)
                     .then_some("too_many_action_slots".to_string()),
@@ -9140,11 +9149,12 @@ impl ScriptListApp {
             requested_surface: host.requested_surface.map(str::to_string),
             active_surface: host.installed_surface.map(str::to_string),
             native_footer_host_installed: native_ready,
-            gpui_fallback_visible: owner == "prompt",
+            gpui_fallback_visible: crate::footer_popup::main_footer_gpui_overlay_visible(),
             left_info,
             button_count: buttons.len(),
             action_slot_count,
             context_chip_count,
+            duplicate_action_ids,
             duplicate_shortcut_keys,
             slot_contract_violation,
             buttons,

@@ -91,7 +91,16 @@ impl ScriptListApp {
     ) -> bool {
         match intent {
             MainWindowActionsKeyIntent::ToggleActions => {
-                self.handle_cmd_k_actions_toggle(window, cx)
+                if self.dispatch_main_window_footer_shortcut(
+                    "cmd+k",
+                    window,
+                    cx,
+                    "footer_shortcut",
+                ) {
+                    true
+                } else {
+                    self.handle_cmd_k_actions_toggle(window, cx)
+                }
             }
             MainWindowActionsKeyIntent::CloseEmbeddedAgentChatWindow => {
                 tracing::info!(
@@ -508,6 +517,17 @@ impl ScriptListApp {
                         return;
                     }
 
+                    if this.main_window_footer_shortcut_is_blocked("enter", &*cx) {
+                        tracing::info!(
+                            target: "script_kit::footer_popup",
+                            event = "main_window_footer_shortcut_blocked",
+                            canonical_shortcut = "enter",
+                            source = "input_press_enter",
+                            "Ignored disabled or colliding visible footer shortcut"
+                        );
+                        return;
+                    }
+
                     if matches!(this.current_view, AppView::ThemeChooserView { .. }) {
                         if !this.show_actions_popup && !actions::is_actions_window_open() {
                             this.submit_theme_chooser_from_input_enter(window, cx);
@@ -575,11 +595,20 @@ impl ScriptListApp {
                             logging::log("KEY", "PressEnter: spine consumed");
                             return;
                         }
-                        // Check if we're in fallback mode first
-                        if this.main_menu_fallback_state.is_active() {
-                            this.execute_selected_fallback(cx);
-                        } else {
-                            this.execute_selected(cx);
+                        // The visible Enter hint resolves through the same footer
+                        // descriptor and dispatcher as a pointer click.
+                        if !this.dispatch_main_window_footer_shortcut(
+                            "enter",
+                            window,
+                            cx,
+                            "footer_shortcut",
+                        ) {
+                            // No visible descriptor: preserve the internal command path.
+                            if this.main_menu_fallback_state.is_active() {
+                                this.execute_selected_fallback(cx);
+                            } else {
+                                this.execute_selected(cx);
+                            }
                         }
                     }
                 }
@@ -2832,6 +2861,26 @@ impl ScriptListApp {
                                 ),
                             );
                         }
+                        let canonical_footer_shortcut =
+                            crate::shortcuts::keystroke_to_shortcut(
+                                key,
+                                &event.keystroke.modifiers,
+                            );
+                        if this.main_window_footer_shortcut_is_blocked(
+                            &canonical_footer_shortcut,
+                            &*cx,
+                        ) {
+                            tracing::info!(
+                                target: "script_kit::footer_popup",
+                                event = "main_window_footer_shortcut_blocked",
+                                canonical_shortcut = %canonical_footer_shortcut,
+                                source = "global_key_interceptor",
+                                "Ignored disabled or colliding visible footer shortcut"
+                            );
+                            cx.stop_propagation();
+                            return;
+                        }
+
                         // Route shared actions-dialog keys first; local actions
                         // key intents run only after the dialog declines the key.
                         if this.route_day_page_note_switcher_key(
