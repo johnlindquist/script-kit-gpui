@@ -324,6 +324,52 @@ impl UnifiedListItemColors {
             hover_opacity: opacity.hover,
         }
     }
+
+    pub(crate) fn row_state_palette(self) -> crate::theme::RowStatePalette {
+        use crate::theme::{resolve_row_state_palette, RowForegroundColors, RowStateColorInputs};
+
+        let opaque = |hex: u32| (hex << 8) | 0xFF;
+        let background = |opacity: f32| {
+            Some((self.accent_subtle << 8) | u32::from((opacity.clamp(0.0, 1.0) * 255.0) as u8))
+        };
+        let rest_foregrounds = RowForegroundColors {
+            primary_rgba: opaque(self.text_primary),
+            secondary_rgba: opaque(self.text_muted),
+            icon_rgba: opaque(self.text_secondary),
+            accessory_rgba: opaque(self.text_dimmed),
+        };
+        let selected_foregrounds = RowForegroundColors {
+            primary_rgba: opaque(self.text_primary),
+            secondary_rgba: opaque(self.text_muted),
+            icon_rgba: opaque(self.text_primary),
+            accessory_rgba: opaque(self.text_dimmed),
+        };
+        let disabled_foregrounds = RowForegroundColors {
+            primary_rgba: opaque(self.text_dimmed),
+            secondary_rgba: opaque(self.text_muted),
+            icon_rgba: opaque(self.text_secondary),
+            accessory_rgba: opaque(self.text_dimmed),
+        };
+        let disabled_selected_foregrounds = RowForegroundColors {
+            primary_rgba: opaque(self.text_dimmed),
+            secondary_rgba: opaque(self.text_muted),
+            // Preserve the existing selected-location icon emphasis even when
+            // the row itself is disabled; activation remains a separate model.
+            icon_rgba: opaque(self.text_primary),
+            accessory_rgba: opaque(self.text_dimmed),
+        };
+
+        resolve_row_state_palette(RowStateColorInputs {
+            rest_background_rgba: None,
+            hover_background_rgba: background(self.hover_opacity),
+            selected_background_rgba: background(self.selected_opacity),
+            active_background_rgba: background(self.selected_opacity),
+            rest_foregrounds,
+            selected_foregrounds,
+            disabled_foregrounds,
+            disabled_selected_foregrounds,
+        })
+    }
 }
 
 /// Height for section headers in grouped lists.
@@ -332,6 +378,7 @@ pub const SECTION_HEADER_HEIGHT: f32 = crate::list_item::SECTION_HEADER_HEIGHT;
 #[cfg(test)]
 mod tests {
     use super::UnifiedListItemColors;
+    use crate::theme::RowStateFlags;
 
     #[test]
     fn test_unified_list_item_colors_default_uses_cached_theme_tokens() {
@@ -348,5 +395,90 @@ mod tests {
         assert_eq!(resolved.background, expected.background);
         assert_eq!(resolved.selected_opacity, expected.selected_opacity);
         assert_eq!(resolved.hover_opacity, expected.hover_opacity);
+    }
+
+    #[test]
+    fn unified_row_palette_preserves_legacy_state_bytes() {
+        let palette = UnifiedListItemColors {
+            text_primary: 0x112233,
+            text_secondary: 0x223344,
+            text_muted: 0x334455,
+            text_dimmed: 0x445566,
+            text_highlight: 0x556677,
+            accent: 0x667788,
+            accent_subtle: 0x778899,
+            background: 0x010203,
+            selected_opacity: 0.23,
+            hover_opacity: 0.06,
+        }
+        .row_state_palette();
+
+        assert_eq!(palette.rest.background_rgba, None);
+        assert_eq!(palette.hovered.background_rgba, Some(0x7788990F));
+        assert_eq!(palette.selected.background_rgba, Some(0x7788993A));
+        assert_eq!(palette.active, palette.selected);
+        assert_eq!(palette.rest.primary_foreground_rgba, 0x112233FF);
+        assert_eq!(palette.rest.secondary_foreground_rgba, 0x334455FF);
+        assert_eq!(palette.rest.icon_foreground_rgba, 0x223344FF);
+        assert_eq!(palette.rest.accessory_foreground_rgba, 0x445566FF);
+        assert_eq!(palette.selected.icon_foreground_rgba, 0x112233FF);
+        assert_eq!(palette.disabled.primary_foreground_rgba, 0x445566FF);
+        assert_eq!(
+            palette.disabled_selected.icon_foreground_rgba, 0x112233FF,
+            "selected-disabled icon location feedback is preserved"
+        );
+    }
+
+    #[test]
+    fn unified_dark_and_light_palettes_follow_theme_bytes_and_state_order() {
+        for theme in [
+            crate::theme::Theme::dark_default(),
+            crate::theme::Theme::light_default(),
+        ] {
+            let colors = UnifiedListItemColors::from_theme(&theme);
+            let palette = colors.row_state_palette();
+            let opacity = theme.get_opacity();
+            let hover_alpha = (opacity.hover * 255.0) as u32;
+            let selected_alpha = (opacity.selected * 255.0) as u32;
+
+            assert_eq!(
+                palette.hovered.background_rgba,
+                Some((theme.colors.accent.selected_subtle << 8) | hover_alpha)
+            );
+            assert_eq!(
+                palette.selected.background_rgba,
+                Some((theme.colors.accent.selected_subtle << 8) | selected_alpha)
+            );
+            assert!(selected_alpha >= hover_alpha);
+            assert_eq!(palette.active, palette.selected);
+            assert_eq!(
+                palette.disabled.primary_foreground_rgba,
+                (theme.colors.text.dimmed << 8) | 0xFF
+            );
+        }
+    }
+
+    #[test]
+    fn unified_disabled_hover_resolves_to_disabled_paint() {
+        let palette = UnifiedListItemColors::default().row_state_palette();
+        assert_eq!(
+            palette.for_flags(RowStateFlags {
+                selected: false,
+                hovered: true,
+                active: false,
+                disabled: true,
+            }),
+            palette.disabled
+        );
+        assert_eq!(
+            palette.for_flags(RowStateFlags {
+                selected: true,
+                hovered: true,
+                active: true,
+                disabled: false,
+            }),
+            palette.active,
+            "active must outrank selection and hover"
+        );
     }
 }

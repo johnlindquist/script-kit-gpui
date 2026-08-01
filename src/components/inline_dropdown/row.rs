@@ -30,6 +30,50 @@ pub(crate) const CONTEXT_SELECTOR_SYNOPSIS_HEIGHT: f32 = 64.0;
 const CONTEXT_SELECTOR_SYNOPSIS_MAX_LINES: usize = 4;
 const CONTEXT_SELECTOR_SYNOPSIS_LINE_HEIGHT: f32 = 16.0;
 
+fn hsla_rgba(color: Hsla) -> u32 {
+    let rgba = gpui::Rgba::from(color);
+    let color_channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let alpha_channel = (rgba.a.clamp(0.0, 1.0) * 255.0) as u32;
+    (color_channel(rgba.r) << 24)
+        | (color_channel(rgba.g) << 16)
+        | (color_channel(rgba.b) << 8)
+        | alpha_channel
+}
+
+pub(super) fn picker_row_state_palette(
+    foreground: Hsla,
+    secondary_foreground: Hsla,
+    selected_opacity: f32,
+) -> crate::theme::RowStatePalette {
+    use crate::theme::{resolve_row_state_palette, RowForegroundColors, RowStateColorInputs};
+
+    let rest = RowForegroundColors {
+        primary_rgba: hsla_rgba(foreground.opacity(MUTED_OP)),
+        secondary_rgba: hsla_rgba(secondary_foreground),
+        icon_rgba: hsla_rgba(foreground.opacity(MUTED_OP)),
+        accessory_rgba: hsla_rgba(secondary_foreground),
+    };
+    let selected = RowForegroundColors {
+        primary_rgba: hsla_rgba(foreground),
+        secondary_rgba: hsla_rgba(secondary_foreground),
+        icon_rgba: hsla_rgba(foreground),
+        accessory_rgba: hsla_rgba(secondary_foreground),
+    };
+
+    resolve_row_state_palette(RowStateColorInputs {
+        rest_background_rgba: None,
+        hover_background_rgba: Some(hsla_rgba(foreground.opacity(GHOST))),
+        selected_background_rgba: Some(hsla_rgba(foreground.opacity(selected_opacity))),
+        active_background_rgba: Some(hsla_rgba(foreground.opacity(selected_opacity))),
+        rest_foregrounds: rest,
+        selected_foregrounds: selected,
+        // Inline pickers currently expose only enabled options. Supplying the
+        // muted tier keeps future disabled rows from brightening on hover.
+        disabled_foregrounds: rest,
+        disabled_selected_foregrounds: rest,
+    })
+}
+
 /// Render a single dense-monoline picker row.
 ///
 /// Shared by Agent Chat popups, model selectors, presets dropdowns, and any
@@ -128,13 +172,32 @@ pub(crate) fn render_soft_compact_picker_row(
 ) -> gpui::Stateful<gpui::Div> {
     let label_hits: HashSet<usize> = label_highlight_indices.iter().copied().collect();
     let meta_hits: HashSet<usize> = meta_highlight_indices.iter().copied().collect();
-    let foreground = if is_selected {
-        colors.foreground
-    } else {
-        colors.foreground.opacity(MUTED_OP)
-    };
-    let selected_row_bg = colors.foreground.opacity(SOFT_COMPACT_SELECTED_ROW_OPACITY);
-    let hover_row_bg = colors.foreground.opacity(GHOST);
+    let row_palette = picker_row_state_palette(
+        colors.foreground,
+        colors.muted_foreground,
+        SOFT_COMPACT_SELECTED_ROW_OPACITY,
+    );
+    let row_colors = row_palette.for_flags(crate::theme::RowStateFlags {
+        selected: is_selected,
+        hovered: false,
+        active: false,
+        disabled: false,
+    });
+    let foreground: Hsla = gpui::rgba(row_colors.primary_foreground_rgba).into();
+    let selected_row_bg: Hsla = gpui::rgba(
+        row_palette
+            .selected
+            .background_rgba
+            .expect("selected compact rows always have a background"),
+    )
+    .into();
+    let hover_row_bg: Hsla = gpui::rgba(
+        row_palette
+            .hovered
+            .background_rgba
+            .expect("hovered compact rows always have a background"),
+    )
+    .into();
 
     div()
         .id(id)
@@ -192,6 +255,32 @@ fn render_dense_monoline_picker_row_full(
     let meta_hits: HashSet<usize> = meta_highlight_indices.iter().copied().collect();
 
     let show_meta = accessory.is_none() && !meta.is_empty();
+    let row_palette = picker_row_state_palette(
+        foreground,
+        muted_foreground.opacity(COMMAND_OPACITY),
+        SELECTED_ROW_OPACITY,
+    );
+    let row_colors = row_palette.for_flags(crate::theme::RowStateFlags {
+        selected: is_selected,
+        hovered: false,
+        active: false,
+        disabled: false,
+    });
+    let label_foreground: Hsla = gpui::rgba(row_colors.primary_foreground_rgba).into();
+    let selected_row_bg: Hsla = gpui::rgba(
+        row_palette
+            .selected
+            .background_rgba
+            .expect("selected dense rows always have a background"),
+    )
+    .into();
+    let hover_row_bg: Hsla = gpui::rgba(
+        row_palette
+            .hovered
+            .background_rgba
+            .expect("hovered dense rows always have a background"),
+    )
+    .into();
 
     let mut left = div().flex().items_center().gap(px(6.0));
 
@@ -202,18 +291,12 @@ fn render_dense_monoline_picker_row_full(
     left = left.child(render_highlighted_text(
         &label,
         &label_hits,
-        if is_selected {
-            foreground
-        } else {
-            foreground.opacity(MUTED_OP)
-        },
+        label_foreground,
         accent,
     ));
 
-    // Interaction state ladder matches the launcher row contract:
-    // selected is visibly stronger than hover while both stay neutral.
-    let selected_row_bg = foreground.opacity(SELECTED_ROW_OPACITY);
-    let hover_row_bg = foreground.opacity(GHOST);
+    // Interaction state ladder comes from the shared row-state resolver while
+    // this family retains its dense geometry and local foreground tiers.
 
     let mut row = div()
         .id(id)

@@ -117,35 +117,35 @@ impl RenderOnce for UnifiedListItem {
         let colors = self.colors;
         let state = self.state;
 
-        let selected_alpha = (colors.selected_opacity * 255.0) as u32;
-        let hover_alpha = (colors.hover_opacity * 255.0) as u32;
-        let selected_bg = rgba((colors.accent_subtle << 8) | selected_alpha);
-        let hover_bg = rgba((colors.accent_subtle << 8) | hover_alpha);
+        let row_palette = colors.row_state_palette();
+        let resolved_state = row_palette.for_flags(crate::theme::RowStateFlags {
+            selected: state.is_selected,
+            hovered: state.is_hovered,
+            active: false,
+            disabled: state.is_disabled,
+        });
+        let hover_bg = rgba(
+            row_palette
+                .hovered
+                .background_rgba
+                .expect("hovered Unified rows always have a background"),
+        );
+        let bg_color = resolved_state
+            .background_rgba
+            .map(rgba)
+            .unwrap_or_else(|| rgba(TRANSPARENT));
 
-        let bg_color = if state.is_selected {
-            selected_bg
-        } else if state.is_hovered {
-            hover_bg
-        } else {
-            rgba(TRANSPARENT)
-        };
-
-        let title_color = if state.is_disabled {
-            rgb(colors.text_dimmed)
-        } else {
-            rgb(colors.text_primary)
-        };
-
-        let subtitle_color = rgb(colors.text_muted);
+        let title_color = rgba(resolved_state.primary_foreground_rgba);
+        let subtitle_color = rgba(resolved_state.secondary_foreground_rgba);
         let highlight_color = rgb(colors.text_highlight);
 
-        let leading_element = render_leading(&self.leading, &layout, &colors, state.is_selected);
+        let leading_element = render_leading(&self.leading, &layout, &colors, resolved_state);
         let title_element = render_text_content(&self.title, title_color, highlight_color, true);
         let subtitle_element = self
             .subtitle
             .as_ref()
             .map(|sub| render_text_content(sub, subtitle_color, highlight_color, false));
-        let trailing_element = render_trailing(&self.trailing, &colors);
+        let trailing_element = render_trailing(&self.trailing, &colors, resolved_state);
 
         let mut content_col = div()
             .flex_1()
@@ -226,13 +226,9 @@ fn render_leading(
     leading: &Option<LeadingContent>,
     layout: &ListItemLayout,
     colors: &UnifiedListItemColors,
-    is_selected: bool,
+    state_colors: crate::theme::RowStateColors,
 ) -> Option<Div> {
-    let icon_color = if is_selected {
-        rgb(colors.text_primary)
-    } else {
-        rgb(colors.text_secondary)
-    };
+    let icon_color = rgba(state_colors.icon_foreground_rgba);
 
     match leading {
         Some(LeadingContent::Emoji(emoji)) => Some(
@@ -305,8 +301,9 @@ fn render_leading(
 fn render_trailing(
     trailing: &Option<TrailingContent>,
     colors: &UnifiedListItemColors,
+    state_colors: crate::theme::RowStateColors,
 ) -> Option<AnyElement> {
-    let hint_color = rgb(colors.text_dimmed);
+    let hint_color = rgba(state_colors.accessory_foreground_rgba);
 
     match trailing {
         Some(TrailingContent::Shortcut { raw: _, tokens }) => {

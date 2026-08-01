@@ -89,6 +89,133 @@ pub enum MainMenuRowFillBase {
     Accent,
 }
 
+/// Renderer-neutral row state flags. Families keep their own geometry and
+/// provide only the paint inputs needed by the shared state resolver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RowStateFlags {
+    pub selected: bool,
+    pub hovered: bool,
+    pub active: bool,
+    pub disabled: bool,
+}
+
+/// Visual state resolved from [`RowStateFlags`].
+///
+/// The ordering is deliberate: disabled selection keeps location feedback,
+/// disabled rows cannot brighten on hover, and an active/pressed control never
+/// dims merely because the pointer remains over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowVisualState {
+    Rest,
+    Hovered,
+    Selected,
+    Active,
+    Disabled,
+    DisabledSelected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowStateColors {
+    pub background_rgba: Option<u32>,
+    pub primary_foreground_rgba: u32,
+    pub secondary_foreground_rgba: u32,
+    pub icon_foreground_rgba: u32,
+    pub accessory_foreground_rgba: u32,
+}
+
+/// Foreground tiers supplied by each row family. This is intentionally paint
+/// only: row height, padding, typography, icon sizing, and accessory geometry
+/// remain owned by the family renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowForegroundColors {
+    pub primary_rgba: u32,
+    pub secondary_rgba: u32,
+    pub icon_rgba: u32,
+    pub accessory_rgba: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowStateColorInputs {
+    pub rest_background_rgba: Option<u32>,
+    pub hover_background_rgba: Option<u32>,
+    pub selected_background_rgba: Option<u32>,
+    pub active_background_rgba: Option<u32>,
+    pub rest_foregrounds: RowForegroundColors,
+    pub selected_foregrounds: RowForegroundColors,
+    pub disabled_foregrounds: RowForegroundColors,
+    pub disabled_selected_foregrounds: RowForegroundColors,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowStatePalette {
+    pub rest: RowStateColors,
+    pub hovered: RowStateColors,
+    pub selected: RowStateColors,
+    pub active: RowStateColors,
+    pub disabled: RowStateColors,
+    pub disabled_selected: RowStateColors,
+}
+
+impl RowStatePalette {
+    pub(crate) fn for_state(self, state: RowVisualState) -> RowStateColors {
+        match state {
+            RowVisualState::Rest => self.rest,
+            RowVisualState::Hovered => self.hovered,
+            RowVisualState::Selected => self.selected,
+            RowVisualState::Active => self.active,
+            RowVisualState::Disabled => self.disabled,
+            RowVisualState::DisabledSelected => self.disabled_selected,
+        }
+    }
+
+    pub(crate) fn for_flags(self, flags: RowStateFlags) -> RowStateColors {
+        self.for_state(row_visual_state_from_flags(flags))
+    }
+}
+
+fn row_state_colors(
+    background_rgba: Option<u32>,
+    foregrounds: RowForegroundColors,
+) -> RowStateColors {
+    RowStateColors {
+        background_rgba,
+        primary_foreground_rgba: foregrounds.primary_rgba,
+        secondary_foreground_rgba: foregrounds.secondary_rgba,
+        icon_foreground_rgba: foregrounds.icon_rgba,
+        accessory_foreground_rgba: foregrounds.accessory_rgba,
+    }
+}
+
+pub(crate) fn resolve_row_state_palette(inputs: RowStateColorInputs) -> RowStatePalette {
+    RowStatePalette {
+        rest: row_state_colors(inputs.rest_background_rgba, inputs.rest_foregrounds),
+        hovered: row_state_colors(inputs.hover_background_rgba, inputs.rest_foregrounds),
+        selected: row_state_colors(inputs.selected_background_rgba, inputs.selected_foregrounds),
+        active: row_state_colors(inputs.active_background_rgba, inputs.selected_foregrounds),
+        disabled: row_state_colors(inputs.rest_background_rgba, inputs.disabled_foregrounds),
+        disabled_selected: row_state_colors(
+            inputs.selected_background_rgba,
+            inputs.disabled_selected_foregrounds,
+        ),
+    }
+}
+
+pub(crate) fn row_visual_state_from_flags(flags: RowStateFlags) -> RowVisualState {
+    if flags.disabled && flags.selected {
+        RowVisualState::DisabledSelected
+    } else if flags.disabled {
+        RowVisualState::Disabled
+    } else if flags.active {
+        RowVisualState::Active
+    } else if flags.selected {
+        RowVisualState::Selected
+    } else if flags.hovered {
+        RowVisualState::Hovered
+    } else {
+        RowVisualState::Rest
+    }
+}
+
 /// Semantic state shared by main-menu rows and floating footer buttons.
 ///
 /// Active deliberately wins over hover so an open/selected Actions button
@@ -100,13 +227,9 @@ pub(crate) enum MainMenuRowState {
     Active,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MainMenuRowStateColors {
-    pub background_rgba: Option<u32>,
-    /// One primary foreground serves labels and shortcut glyphs. Keeping one
-    /// field makes their parity structural rather than a rendering convention.
-    pub primary_foreground_rgba: u32,
-}
+/// Compatibility name retained for native footer and main-menu consumers.
+/// The underlying color record is the shared renderer-neutral row record.
+pub(crate) type MainMenuRowStateColors = RowStateColors;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MainMenuRowStatePalette {
@@ -210,19 +333,35 @@ pub(crate) fn resolve_main_menu_row_state_palette_from_parts(
     };
     let active_foreground_rgba = (active_foreground_hex << 8) | 0xFF;
 
+    let rest_foregrounds = RowForegroundColors {
+        primary_rgba: primary_foreground_rgba,
+        secondary_rgba: primary_foreground_rgba,
+        icon_rgba: primary_foreground_rgba,
+        accessory_rgba: primary_foreground_rgba,
+    };
+    let selected_foregrounds = RowForegroundColors {
+        primary_rgba: active_foreground_rgba,
+        secondary_rgba: active_foreground_rgba,
+        icon_rgba: active_foreground_rgba,
+        accessory_rgba: active_foreground_rgba,
+    };
+    let shared = resolve_row_state_palette(RowStateColorInputs {
+        rest_background_rgba: None,
+        hover_background_rgba: Some((fill_hex << 8) | u32::from(fill.hover_alpha)),
+        selected_background_rgba: Some((fill_hex << 8) | u32::from(fill.active_alpha)),
+        active_background_rgba: Some((fill_hex << 8) | u32::from(fill.active_alpha)),
+        rest_foregrounds,
+        selected_foregrounds,
+        // Main/footer compatibility consumers do not currently expose disabled
+        // state, so preserving their rest tier is the exact legacy behavior.
+        disabled_foregrounds: rest_foregrounds,
+        disabled_selected_foregrounds: rest_foregrounds,
+    });
+
     MainMenuRowStatePalette {
-        rest: MainMenuRowStateColors {
-            background_rgba: None,
-            primary_foreground_rgba,
-        },
-        hover: MainMenuRowStateColors {
-            background_rgba: Some((fill_hex << 8) | u32::from(fill.hover_alpha)),
-            primary_foreground_rgba,
-        },
-        active: MainMenuRowStateColors {
-            background_rgba: Some((fill_hex << 8) | u32::from(fill.active_alpha)),
-            primary_foreground_rgba: active_foreground_rgba,
-        },
+        rest: shared.rest,
+        hover: shared.hovered,
+        active: shared.active,
     }
 }
 
@@ -432,8 +571,9 @@ impl AppChromeColors {
 mod tests {
     use super::{
         main_menu_row_state_from_flags, resolve_main_menu_row_state_palette,
-        resolve_main_menu_row_state_palette_from_parts, AppChromeColors, MainMenuRowColorInputs,
-        MainMenuRowState,
+        resolve_main_menu_row_state_palette_from_parts, resolve_row_state_palette,
+        row_visual_state_from_flags, AppChromeColors, MainMenuRowColorInputs, MainMenuRowState,
+        RowForegroundColors, RowStateColorInputs, RowStateFlags, RowVisualState,
     };
     use crate::designs::{MainMenuRowKind, MainMenuThemeVariant};
     use crate::theme::Theme;
@@ -518,6 +658,81 @@ mod tests {
         assert_eq!(
             main_menu_row_state_from_flags(false, false),
             MainMenuRowState::Rest
+        );
+    }
+
+    #[test]
+    fn shared_row_state_precedence_is_disabled_selected_then_active_then_selected_then_hovered() {
+        let state = |selected, hovered, active, disabled| {
+            row_visual_state_from_flags(RowStateFlags {
+                selected,
+                hovered,
+                active,
+                disabled,
+            })
+        };
+
+        assert_eq!(
+            state(true, true, true, true),
+            RowVisualState::DisabledSelected
+        );
+        assert_eq!(state(false, true, true, true), RowVisualState::Disabled);
+        assert_eq!(state(true, true, true, false), RowVisualState::Active);
+        assert_eq!(state(true, true, false, false), RowVisualState::Selected);
+        assert_eq!(state(false, true, false, false), RowVisualState::Hovered);
+        assert_eq!(state(false, false, false, false), RowVisualState::Rest);
+    }
+
+    #[test]
+    fn shared_row_palette_preserves_selected_location_when_disabled_without_hover_brightening() {
+        let rest = RowForegroundColors {
+            primary_rgba: 0x112233FF,
+            secondary_rgba: 0x223344FF,
+            icon_rgba: 0x334455FF,
+            accessory_rgba: 0x445566FF,
+        };
+        let selected = RowForegroundColors {
+            primary_rgba: 0xAABBCCFF,
+            secondary_rgba: 0xBBCCDDEE,
+            icon_rgba: 0xCCDDEEFF,
+            accessory_rgba: 0xDDEEFFAA,
+        };
+        let disabled = RowForegroundColors {
+            primary_rgba: 0x11223366,
+            secondary_rgba: 0x22334466,
+            icon_rgba: 0x33445566,
+            accessory_rgba: 0x44556666,
+        };
+        let palette = resolve_row_state_palette(RowStateColorInputs {
+            rest_background_rgba: None,
+            hover_background_rgba: Some(0xFFFFFF10),
+            selected_background_rgba: Some(0xFFFFFF20),
+            active_background_rgba: Some(0xFFFFFF30),
+            rest_foregrounds: rest,
+            selected_foregrounds: selected,
+            disabled_foregrounds: disabled,
+            disabled_selected_foregrounds: disabled,
+        });
+
+        assert_eq!(palette.hovered.background_rgba, Some(0xFFFFFF10));
+        assert_eq!(palette.selected.background_rgba, Some(0xFFFFFF20));
+        assert_eq!(palette.active.background_rgba, Some(0xFFFFFF30));
+        assert_eq!(palette.disabled.background_rgba, None);
+        assert_eq!(palette.disabled.primary_foreground_rgba, 0x11223366);
+        assert_eq!(palette.disabled_selected.background_rgba, Some(0xFFFFFF20));
+        assert_eq!(
+            palette.disabled_selected.accessory_foreground_rgba,
+            0x44556666
+        );
+        assert_eq!(
+            palette.for_flags(RowStateFlags {
+                selected: false,
+                hovered: true,
+                active: false,
+                disabled: true,
+            }),
+            palette.disabled,
+            "hover must never brighten a disabled row"
         );
     }
 

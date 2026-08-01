@@ -2,7 +2,10 @@ use super::component::{
     inline_dropdown_clamp_selected_index, inline_dropdown_select_next, inline_dropdown_select_prev,
     inline_dropdown_visible_range, inline_dropdown_visible_range_from_start,
 };
-use super::row::{CONTEXT_SELECTOR_ROW_HEIGHT, SOFT_COMPACT_PICKER_ROW_HEIGHT};
+use super::row::{
+    picker_row_state_palette, CONTEXT_SELECTOR_ROW_HEIGHT, SELECTED_ROW_OPACITY,
+    SOFT_COMPACT_PICKER_ROW_HEIGHT, SOFT_COMPACT_SELECTED_ROW_OPACITY,
+};
 
 #[test]
 fn inline_dropdown_navigation_wraps() {
@@ -39,8 +42,44 @@ fn inline_dropdown_rows_match_launcher_row_height() {
 }
 
 #[test]
-fn soft_compact_picker_row_is_tighter_than_launcher_rows() {
+fn soft_compact_picker_row_is_exactly_36px_and_tighter_than_launcher_rows() {
+    assert_eq!(SOFT_COMPACT_PICKER_ROW_HEIGHT, 36.0);
     assert!(SOFT_COMPACT_PICKER_ROW_HEIGHT < CONTEXT_SELECTOR_ROW_HEIGHT);
+}
+
+#[test]
+fn dense_and_soft_compact_row_palettes_preserve_legacy_state_bytes() {
+    let foreground: gpui::Hsla = gpui::rgb(0x112233).into();
+    let muted: gpui::Hsla = gpui::rgb(0x445566).into();
+    let dense = picker_row_state_palette(foreground, muted, SELECTED_ROW_OPACITY);
+    let soft = picker_row_state_palette(foreground, muted, SOFT_COMPACT_SELECTED_ROW_OPACITY);
+
+    assert_eq!(dense.rest.background_rgba, None);
+    assert_eq!(dense.hovered.background_rgba, Some(0x1122330F));
+    assert_eq!(dense.selected.background_rgba, Some(0x1122333A));
+    assert_eq!(dense.active, dense.selected);
+    assert_eq!(dense.rest.primary_foreground_rgba, 0x112233A5);
+    assert_eq!(dense.selected.primary_foreground_rgba, 0x112233FF);
+
+    assert_eq!(soft.rest.background_rgba, None);
+    assert_eq!(soft.hovered.background_rgba, Some(0x1122330F));
+    assert_eq!(soft.selected.background_rgba, Some(0x1122332D));
+    assert_eq!(soft.active, soft.selected);
+}
+
+#[test]
+fn compact_row_disabled_hover_uses_disabled_state() {
+    let foreground: gpui::Hsla = gpui::rgb(0x112233).into();
+    let palette = picker_row_state_palette(foreground, foreground, SELECTED_ROW_OPACITY);
+    assert_eq!(
+        palette.for_flags(crate::theme::RowStateFlags {
+            selected: false,
+            hovered: true,
+            active: false,
+            disabled: true,
+        }),
+        palette.disabled
+    );
 }
 
 #[test]
