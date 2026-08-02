@@ -97,6 +97,12 @@ pub use focusable_prompt_wrapper::{
     match_focusable_prompt_intercepted_key, FocusablePrompt, FocusablePromptInterceptedKey,
 };
 #[allow(unused_imports)]
+pub(crate) use form_fields::{
+    apply_form_field_shell_test_fixture, menu_syntax_form_field_shell_spec,
+    render_form_field_shell, resolve_form_field_shell_style, FormFieldShellSpec,
+    FormFieldShellStyle, FormFieldValidation,
+};
+#[allow(unused_imports)]
 pub use form_fields::{
     FormCheckbox, FormFieldColors, FormFieldMetrics, FormFieldState, FormTextArea, FormTextField,
 };

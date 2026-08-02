@@ -3402,6 +3402,13 @@ impl ScriptListApp {
                 if elements.len() >= limit {
                     break;
                 }
+                let shell_spec = crate::components::menu_syntax_form_field_shell_spec(
+                    &form.target,
+                    field,
+                    crate::components::FormFieldMetrics::from_colors(
+                        crate::components::FormFieldColors::default(),
+                    ),
+                );
                 let (element_type, role, kind, selectable) = match field.kind {
                     crate::menu_syntax::MenuSyntaxFormFieldKind::Priority
                     | crate::menu_syntax::MenuSyntaxFormFieldKind::Tags
@@ -3419,20 +3426,27 @@ impl ScriptListApp {
                     ),
                 };
                 elements.push(protocol::ElementInfo {
-                    semantic_id: format!("handler-form:{}:{}", form.target, field.id),
+                    semantic_id: shell_spec.semantic_id.to_string(),
                     element_type,
                     text: Some(field.label.clone()),
                     value: Some(field.value.clone()),
                     selected: Some(false),
-                    focused: Some(field.focused && self.menu_syntax_form_input_active),
+                    focused: Some(
+                        shell_spec.focused
+                            && shell_spec.editable()
+                            && self.menu_syntax_form_input_active,
+                    ),
                     index: Some(index),
                     role: Some(role.to_string()),
                     kind: Some(kind.to_string()),
                     source: Some("menuSyntaxMainHint.form".to_string()),
                     source_name: Some(form.target.clone()),
-                    selectable: Some(selectable),
-                    status_kind: None,
-                    action_disabled: None,
+                    selectable: Some(selectable && shell_spec.editable()),
+                    status_kind: Some(shell_spec.validation.status_kind().to_string()),
+                    action_disabled: shell_spec
+                        .disabled_reason
+                        .as_ref()
+                        .map(ToString::to_string),
                     style: None,
                 });
             }

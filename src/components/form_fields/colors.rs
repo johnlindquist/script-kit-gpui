@@ -20,6 +20,10 @@ pub struct FormFieldColors {
     pub border_focused: u32,
     /// Cursor color.
     pub cursor: gpui::Rgba,
+    /// Error/invalid border and supporting-copy color.
+    pub error: u32,
+    /// Disabled text, placeholder, label, and supporting-copy color.
+    pub disabled: gpui::Rgba,
     /// Checkbox checked background
     pub checkbox_checked: u32,
     /// Checkbox check mark color.
@@ -44,6 +48,8 @@ impl FormFieldColors {
             border: theme.colors.ui.border,
             border_focused: chrome.accent_hex,
             cursor: gpui::rgb(chrome.accent_hex),
+            error: theme.colors.ui.error,
+            disabled: gpui::rgb(theme.colors.text.dimmed),
             checkbox_checked: chrome.accent_hex,
             checkbox_mark: gpui::rgb(theme.colors.background.main),
             input_font_size: (ui_font_size + 2.0).max(12.0),
@@ -72,6 +78,8 @@ impl FormFieldColors {
             border: colors.border,
             border_focused: colors.accent,
             cursor: gpui::rgb(colors.accent),
+            error: colors.error,
+            disabled: gpui::rgb(colors.text_dimmed),
             checkbox_checked: colors.accent,
             checkbox_mark: gpui::rgb(colors.background),
             input_font_size: typography.font_size_lg,
@@ -156,16 +164,10 @@ pub struct FormFieldMetrics {
     pub field_padding_y_px: f32,
     /// Radius for compact form field surfaces.
     pub field_radius_px: f32,
-    /// Horizontal gap between label-row items inside compact form field surfaces.
-    pub field_header_gap_px: f32,
     /// Cursor width for general text field renderers.
     pub cursor_width_px: f32,
     /// Cursor height for general text field renderers.
     pub cursor_height_rems: f32,
-    /// Height of one textarea row in rems.
-    pub text_area_row_height_rems: f32,
-    /// Additional textarea vertical padding in rems.
-    pub text_area_vertical_padding_rems: f32,
     /// Checkbox square size in rems.
     pub checkbox_box_size_rems: f32,
     /// Gap between checkbox square and label in rems.
@@ -218,11 +220,8 @@ impl FormFieldMetrics {
             field_padding_x_px: 10.0,
             field_padding_y_px: 8.0,
             field_radius_px: 6.0,
-            field_header_gap_px: 8.0,
             cursor_width_px: 2.0,
             cursor_height_rems: 1.125,
-            text_area_row_height_rems: 1.5,
-            text_area_vertical_padding_rems: 1.0,
             checkbox_box_size_rems: 1.125,
             checkbox_gap_rems: 0.75,
             checkbox_radius_px: 4.0,
@@ -232,11 +231,6 @@ impl FormFieldMetrics {
     /// Fixed single-line input height used by menu-syntax handler fields.
     pub fn menu_syntax_single_line_height_px(&self) -> f32 {
         self.input_line_height + (crate::panel::CURSOR_MARGIN_Y * 2.0)
-    }
-
-    /// Rendered text size for menu-syntax `Input` fields.
-    pub fn menu_syntax_input_rendered_font_size_px(&self) -> f32 {
-        self.input_font_size * 0.875
     }
 
     /// Multiline min/max heights used by menu-syntax handler fields.
@@ -254,8 +248,8 @@ impl FormFieldMetrics {
         self.menu_syntax_multiline_height_px(Self::MULTILINE_MAX_ROWS as f32)
     }
 
-    /// Height for general form textarea rows.
-    pub fn text_area_height_rems(&self, rows: usize) -> f32 {
-        (rows as f32) * self.text_area_row_height_rems + self.text_area_vertical_padding_rems
+    /// Exact pixel height for text areas rendered through the shared field shell.
+    pub fn text_area_height_px(&self, rows: usize) -> f32 {
+        (rows as f32 * self.input_line_height) + (self.field_padding_y_px * 2.0)
     }
 }

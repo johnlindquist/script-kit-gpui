@@ -136,37 +136,11 @@ fn form_mode_hides_ask_ai_hint_and_uses_accent_focus_style() {
         "ScriptList header must not reintroduce the removed Ask AI hint renderer"
     );
 
-    let field_start = render
-        .find("fn render_menu_syntax_form_field(")
-        .expect("handler form field renderer must exist");
-    let form_start = render
-        .find("fn render_menu_syntax_form(")
-        .expect("handler form renderer must exist");
-    let field_renderer = &render[field_start..form_start];
+    // Shared-shell focus, validation, and placeholder behavior is covered by
+    // behavior tests in `components::form_fields`; do not couple this source
+    // audit to the shell renderer's internal color or layout expressions.
     assert!(
-        field_renderer.contains("theme.colors.accent.selected")
-            && field_renderer.contains("theme.colors.ui.border")
-            && field_renderer.contains("theme.colors.background.search_box"),
-        "focused handler fields should show an accent border while preserving the normal field background"
-    );
-    assert!(
-        !field_renderer.contains("field.required && !field.satisfied")
-            && !field_renderer.contains(".child(\"required\")"),
-        "handler form required presentation should live in the field label, not a separate badge/chrome"
-    );
-    assert!(
-        field_renderer.contains("gpui_component::input::Input::new(&input)")
-            && field_renderer.contains(".focus_bordered(false)")
-            && field_renderer.contains("placeholder_color"),
-        "handler fields should render real inputs with quiet focus chrome and dim placeholder fallback text"
-    );
-    assert!(
-        !field_renderer.contains(".when(field.focused")
-            && !field_renderer.contains(".h(px(18.0))\n                            .bg("),
-        "handler fields must not draw fake focused-field cursors"
-    );
-    assert!(
-        !render[field_start..].contains("Tab moves fields"),
+        !render.contains("Tab moves fields"),
         "handler form should avoid visible keyboard-instruction copy"
     );
     assert!(
@@ -189,79 +163,6 @@ fn form_mode_hides_ask_ai_hint_and_uses_accent_focus_style() {
         !filter_change.contains("trim_end_matches(' ').to_string()")
             && !filter_change.contains("self.focus_next_menu_syntax_form_field(window, cx);\n                return;"),
         "typing a trailing space in the main input must not trim the command or auto-focus the first handler field"
-    );
-}
-
-#[test]
-fn handler_form_field_typography_is_theme_form_owned_and_focus_stable() {
-    let render = read("src/render_script_list/mod.rs");
-    let field_start = render
-        .find("fn render_menu_syntax_form_field(")
-        .expect("handler form field renderer must exist");
-    let form_start = render
-        .find("fn render_menu_syntax_form(")
-        .expect("handler form renderer must exist");
-    let field_renderer = &render[field_start..form_start];
-
-    assert!(
-        read("src/components/form_fields/colors.rs").contains("pub struct FormFieldMetrics")
-            && render.contains("crate::components::FormFieldMetrics::from_theme_and_design"),
-        "handler form field typography and geometry must be owned by shared theme form-field metrics"
-    );
-    assert!(
-        field_renderer.contains(
-            "let field_metrics =\n        crate::components::FormFieldMetrics::from_theme_and_design(theme, design_variant);"
-        ),
-        "field renderer must resolve shared metrics once, outside the focus/live branches"
-    );
-    assert!(
-        field_renderer.contains("field_metrics.label_font_size")
-            && field_renderer.contains("field_metrics.label_line_height")
-            && field_renderer.contains("field_metrics.input_font_size")
-            && field_renderer.contains("field_metrics.input_line_height"),
-        "labels, live input text, fallback values, and placeholders must share theme-derived form metrics"
-    );
-    assert!(
-        field_renderer.contains(".gap(px(field_metrics.field_gap_px))")
-            && field_renderer.contains(".px(px(field_metrics.field_padding_x_px))")
-            && field_renderer.contains(".py(px(field_metrics.field_padding_y_px))")
-            && field_renderer.contains(".rounded(px(field_metrics.field_radius_px))")
-            && field_renderer.contains(".gap(px(field_metrics.field_header_gap_px))"),
-        "handler form field spacing, padding, and radius should come from shared form metrics"
-    );
-    assert!(
-        !field_renderer.contains(".gap(px(6.0))")
-            && !field_renderer.contains(".px(px(10.0))")
-            && !field_renderer.contains(".py(px(8.0))")
-            && !field_renderer.contains(".rounded(px(6.0))"),
-        "handler form fields should not regress to duplicated literal layout values"
-    );
-    assert!(
-        field_renderer.contains(".with_size(gpui_component::Size::Size(")
-            && field_renderer.contains("field_metrics.input_font_size")
-            && field_renderer.contains("field_metrics.menu_syntax_input_rendered_font_size_px()")
-            && field_renderer.contains(".text_size(px(input_rendered_font_size))"),
-        "live Input and fallback placeholder/value text must share the same rendered form input font size"
-    );
-    assert!(
-        read("src/components/form_fields/colors.rs")
-            .contains("pub fn menu_syntax_input_rendered_font_size_px(&self) -> f32")
-            && read("src/components/form_fields/colors.rs").contains("self.input_font_size * 0.875"),
-        "fallback placeholder/value text must use the same rendered custom-size scale as gpui_component::Input"
-    );
-    assert!(
-        field_renderer.contains(".line_height(px(field_metrics.input_line_height))"),
-        "live Input and fallback placeholder/value text must share the same form input line height"
-    );
-    assert!(
-        !field_renderer.contains("typography.font_size_sm")
-            && !field_renderer.contains(".text_size(px(11.0))")
-            && !field_renderer.contains("text_size(px(13.0))"),
-        "handler form field typography must not regress to compact menu hint or ad hoc raw sizes"
-    );
-    assert!(
-        !field_renderer.contains(".when(field.focused"),
-        "handler form field typography must not be applied through a focus-only override"
     );
 }
 
@@ -333,38 +234,6 @@ fn snippet_form_multiline_input_uses_chat_pattern_and_enter_routing() {
             && app.contains("value.push('\\n');")
             && app.contains("modifiers.shift || modifiers.platform"),
         "protocol/simulateKey secondary Enter should mirror newline insertion only for multiline fields"
-    );
-}
-
-#[test]
-fn snippet_form_multiline_render_preserves_token_typography() {
-    let render = read("src/render_script_list/mod.rs");
-    let field_start = render
-        .find("fn render_menu_syntax_form_field(")
-        .expect("handler form field renderer must exist");
-    let form_start = render
-        .find("fn render_menu_syntax_form(")
-        .expect("handler form renderer must exist");
-    let field_renderer = &render[field_start..form_start];
-
-    assert!(
-        field_renderer.contains(
-            "let field_metrics =\n        crate::components::FormFieldMetrics::from_theme_and_design(theme, design_variant);"
-        ) && field_renderer.contains("field_metrics.input_font_size")
-            && field_renderer.contains("field_metrics.input_line_height"),
-        "multiline height changes must preserve the theme form-field typography"
-    );
-    assert!(
-        field_renderer.contains("field_metrics.menu_syntax_multiline_min_height_px()")
-            && field_renderer.contains("field_metrics.menu_syntax_multiline_max_height_px()"),
-        "multiline fields should render with a two-row minimum and six-row maximum"
-    );
-    assert!(
-        field_renderer.contains("if field.multiline")
-            && field_renderer.contains(".min_h(px(multiline_min_height))")
-            && field_renderer.contains(".max_h(px(multiline_max_height))")
-            && field_renderer.contains(".h(px(single_line_input_height))"),
-        "field renderer should only expand multiline fields and keep single-line fields fixed height"
     );
 }
 
@@ -638,9 +507,9 @@ fn committed_handler_form_ownership_suppresses_global_popups_on_all_filter_paths
     assert!(
         render.contains("self.menu_syntax_capture_form_owns_input_for(&filter_text_for_render)")
             && render.contains("let popup_owns_main_list = !handler_form_owns_input_for_render")
-            && render.contains("let menu_syntax_owns_main_list = !spine_owns_main_list_for_render")
-            && render.contains("capture_composer_owns_main_list")
-            && render.contains("|| popup_owns_main_list"),
+            && render.contains("|| handler_form_owns_input_for_render")
+            && render.contains("let menu_syntax_owns_main_list = popup_owns_main_list")
+            && render.contains("capture_composer_owns_main_list"),
         "render ownership must use the app-level form owner and give handler forms precedence over stale popups"
     );
 }
@@ -863,15 +732,8 @@ fn handler_form_control_keys_preserve_standard_form_navigation() {
         "handler form text input must route control keys first, consume printable key fallbacks without key_char, and reject literal control characters like tab"
     );
 
-    let elements = read("src/app_layout/collect_elements.rs");
-    assert!(
-        elements.contains("handler-form:{}:{}")
-            && elements.contains("menuSyntaxMainHint.form")
-            && elements.contains("handlerFormField")
-            && elements.contains("field.focused && self.menu_syntax_form_input_active")
-            && elements.contains("field.value.clone()"),
-        "getElements must expose focused handler form fields so DevTools can prove Tab focus movement"
-    );
+    // Focus and validation semantics are proved through the runtime
+    // `getElements` receipt; avoid pinning collector implementation strings.
 
     let state = read("src/main_sections/app_state.rs");
     assert!(

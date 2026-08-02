@@ -2,7 +2,9 @@ use gpui::*;
 use gpui_component::scroll::ScrollableElement;
 
 use super::super::helpers::{char_len, slice_by_char_range};
-use super::super::FormFieldMetrics;
+use super::super::{
+    render_form_field_shell, resolve_form_field_shell_style, FormFieldMetrics, FormFieldShellSpec,
+};
 use super::FormTextArea;
 
 impl Focusable for FormTextArea {
@@ -18,22 +20,23 @@ impl Render for FormTextArea {
         let is_focused = self.focus_handle.is_focused(window);
         let display_text = self.value.clone();
         let placeholder = self.field.placeholder.clone().unwrap_or_default();
-        let label = self.field.label.clone();
+        let label = self.field.label.clone().map(SharedString::from);
         let rows = self.rows;
         let has_value = !self.value.is_empty();
         let cursor_pos = self.cursor_position;
-
-        // Calculate border and background based on focus using shared whisper surface
-        let surface = colors.whisper_surface(is_focused);
-        let border_color = surface.border;
-        let bg_color = surface.background;
-
-        let height_rems = metrics.text_area_height_rems(rows);
-
         let field_name = self.field.name.clone();
-        let field_name_for_log = field_name.clone();
+        let field_height = metrics.text_area_height_px(rows);
+        let shell_spec = FormFieldShellSpec::neutral(
+            format!("form-textarea-{field_name}"),
+            label,
+            is_focused,
+            true,
+            field_height,
+            Some(field_height),
+        );
+        let shell_style = resolve_form_field_shell_style(&shell_spec, colors);
 
-        // Handle click to focus this field
+        let field_name_for_log = field_name.clone();
         let focus_handle_for_click = self.focus_handle.clone();
         let handle_click = cx.listener(
             move |_this: &mut Self,
@@ -48,20 +51,11 @@ impl Render for FormTextArea {
                 focus_handle_for_click.focus(window, cx);
             },
         );
-
-        // Keyboard handler for text input - use unified handler that properly
-        // handles char indexing, modifiers, selection, and clipboard
         let handle_key = cx.listener(
             |this: &mut Self,
              event: &KeyDownEvent,
              _window: &mut Window,
              cx: &mut Context<Self>| {
-                // Use the unified key event handler which:
-                // - Uses char indices (not byte indices) for cursor/selection
-                // - Handles Cmd/Ctrl modifiers correctly (won't insert "v" on Cmd+V)
-                // - Supports selection with Shift+Arrow
-                // - Supports clipboard operations
-                // - Handles Enter to insert newlines
                 this.handle_key_event(event, cx);
             },
         );
@@ -70,8 +64,6 @@ impl Render for FormTextArea {
             .w(px(metrics.cursor_width_px))
             .h(rems(metrics.cursor_height_rems))
             .bg(colors.cursor);
-
-        // Build text content with the same visible cursor affordance as text fields.
         let text_content: Div = if has_value {
             let display_len = char_len(&display_text);
             let safe_cursor = cursor_pos.min(display_len);
@@ -79,8 +71,8 @@ impl Render for FormTextArea {
             let text_after = slice_by_char_range(&display_text, safe_cursor, display_len);
             let mut content = div().flex().flex_row().items_start().child(
                 div()
-                    .text_size(px(colors.input_font_size))
-                    .text_color(colors.text)
+                    .text_size(px(metrics.input_font_size))
+                    .text_color(shell_style.text)
                     .child(text_before.to_string()),
             );
             if is_focused {
@@ -88,8 +80,8 @@ impl Render for FormTextArea {
             }
             content.child(
                 div()
-                    .text_size(px(colors.input_font_size))
-                    .text_color(colors.text)
+                    .text_size(px(metrics.input_font_size))
+                    .text_color(shell_style.text)
                     .child(text_after.to_string()),
             )
         } else {
@@ -99,47 +91,27 @@ impl Render for FormTextArea {
             }
             content.child(
                 div()
-                    .text_size(px(colors.input_font_size))
-                    .text_color(colors.placeholder)
+                    .text_size(px(metrics.input_font_size))
+                    .text_color(shell_style.placeholder)
                     .child(placeholder),
             )
         };
 
-        // Input surface - uses shared prompt_surface for consistent card chrome
-        let input_surface = crate::components::prompt_surface(bg_color, border_color)
-            .id(ElementId::Name(format!("textarea-{}", field_name).into()))
+        let body = div()
+            .id(ElementId::Name(format!("textarea-{field_name}").into()))
             .track_focus(&self.focus_handle)
             .on_key_down(handle_key)
             .on_click(handle_click)
+            .w_full()
+            .h_full()
             .flex()
             .flex_col()
-            .h(rems(height_rems))
             .cursor_text()
             .overflow_x_hidden()
             .overflow_y_scrollbar()
-            .child(text_content);
+            .child(text_content)
+            .into_any_element();
 
-        // Build the main container - stacked vertical layout with label above textarea
-        let mut container = div()
-            .id(ElementId::Name(
-                format!("form-textarea-{}", field_name).into(),
-            ))
-            .flex()
-            .flex_col()
-            .gap(px(metrics.field_gap_px))
-            .w_full();
-
-        // Add label above textarea if present
-        if let Some(label_text) = label {
-            container = container.child(
-                div()
-                    .text_size(px(colors.label_font_size))
-                    .text_color(colors.label)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(label_text),
-            );
-        }
-
-        container.child(input_surface)
+        render_form_field_shell(&shell_spec, colors, metrics, body)
     }
 }

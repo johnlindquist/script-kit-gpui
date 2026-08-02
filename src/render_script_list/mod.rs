@@ -294,81 +294,37 @@ fn render_menu_syntax_fragment_preview_row(
 
 fn render_menu_syntax_form_field(
     theme: &crate::theme::Theme,
-    list_tokens: crate::designs::MainMenuListTokens,
     design_variant: DesignVariant,
+    target: &str,
     field: &crate::menu_syntax::MenuSyntaxFormFieldSnapshot,
     input: Option<Entity<gpui_component::input::InputState>>,
 ) -> AnyElement {
-    let field_metrics =
+    let colors = crate::components::FormFieldColors::from_theme(theme);
+    let metrics =
         crate::components::FormFieldMetrics::from_theme_and_design(theme, design_variant);
-    let border_color = if field.focused {
-        rgba((theme.colors.accent.selected << 8) | list_tokens.main_hint_form_focused_border_alpha)
-    } else {
-        rgba((theme.colors.ui.border << 8) | list_tokens.main_hint_form_border_alpha)
-    };
-    let placeholder_color =
-        rgba(crate::theme::AppChromeColors::from_theme(theme).placeholder_text_rgba);
-    let single_line_input_height = field_metrics.menu_syntax_single_line_height_px();
-    let multiline_min_height = field_metrics.menu_syntax_multiline_min_height_px();
-    let multiline_max_height = field_metrics.menu_syntax_multiline_max_height_px();
-    let mut field_node = div()
-        .id(format!("menu-syntax-form-field-{}", field.id))
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(field_metrics.field_gap_px))
-        .px(px(field_metrics.field_padding_x_px))
-        .py(px(field_metrics.field_padding_y_px))
-        .rounded(px(field_metrics.field_radius_px))
-        .border_1()
-        .border_color(border_color)
-        .bg(if field.focused {
-            rgba(
-                (theme.colors.background.search_box << 8)
-                    | list_tokens.main_hint_form_focused_bg_alpha,
-            )
-        } else {
-            rgba((theme.colors.background.search_box << 8) | list_tokens.main_hint_form_bg_alpha)
-        })
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(field_metrics.field_header_gap_px))
-                .child(
-                    div()
-                        .text_size(px(list_tokens.main_hint_form_label_font_size))
-                        .line_height(px(list_tokens.main_hint_form_label_line_height))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgba(
-                            (theme.colors.text.muted << 8) | list_tokens.main_hint_form_label_alpha,
-                        ))
-                        .child(field.label.clone()),
-                ),
-        );
+    let shell_spec =
+        crate::components::menu_syntax_form_field_shell_spec(target, field, metrics);
+    let shell_style = crate::components::resolve_form_field_shell_style(&shell_spec, colors);
 
-    field_node = if let Some(input) = input {
+    let body = if let Some(input) = input {
         let input_element = gpui_component::input::Input::new(&input)
             .w_full()
-            .line_height(px(list_tokens.main_hint_form_input_line_height))
+            .line_height(px(metrics.input_line_height))
             .px(px(0.0))
             .py(px(0.0))
-            .with_size(gpui_component::Size::Size(px(
-                list_tokens.main_hint_form_input_font_size
-            )))
+            .with_size(gpui_component::Size::Size(px(metrics.input_font_size)))
             .appearance(false)
             .bordered(false)
-            .focus_bordered(false);
+            .focus_bordered(false)
+            .disabled(shell_spec.disabled);
         let input_element = if field.multiline {
             input_element
-                .min_h(px(multiline_min_height))
-                .max_h(px(multiline_max_height))
+                .min_h(px(shell_spec.min_height))
+                .max_h(px(shell_spec.max_height.unwrap_or(shell_spec.min_height)))
         } else {
-            input_element.h(px(single_line_input_height))
+            input_element.h(px(shell_spec.min_height))
         };
-        field_node.child(input_element)
+        input_element.into_any_element()
     } else {
         let has_value = !field.value.trim().is_empty();
         let display_value = if has_value {
@@ -376,35 +332,33 @@ fn render_menu_syntax_form_field(
         } else {
             field.placeholder.clone()
         };
-        field_node.child(
-            div()
-                .w_full()
-                .min_h(px(list_tokens.main_hint_form_input_line_height))
-                .flex()
-                .items_center()
-                .text_size(px(list_tokens.main_hint_form_value_font_size))
-                .line_height(px(list_tokens.main_hint_form_input_line_height))
-                .text_color(if has_value {
-                    rgba((theme.colors.text.primary << 8) | list_tokens.main_hint_form_value_alpha)
-                } else {
-                    placeholder_color
-                })
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(display_value),
-                ),
-        )
+        div()
+            .w_full()
+            .min_h(px(metrics.input_line_height))
+            .flex()
+            .items_center()
+            .text_size(px(metrics.input_font_size))
+            .line_height(px(metrics.input_line_height))
+            .text_color(if has_value {
+                shell_style.text
+            } else {
+                shell_style.placeholder
+            })
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(display_value),
+            )
+            .into_any_element()
     };
 
-    field_node.into_any_element()
+    crate::components::render_form_field_shell(&shell_spec, colors, metrics, body)
 }
 
 fn render_menu_syntax_form(
     theme: &crate::theme::Theme,
-    list_tokens: crate::designs::MainMenuListTokens,
     design_variant: DesignVariant,
     form: &crate::menu_syntax::MenuSyntaxFormSnapshot,
     inputs: &[(String, Entity<gpui_component::input::InputState>)],
@@ -436,7 +390,13 @@ fn render_menu_syntax_form(
                     let input = inputs
                         .iter()
                         .find_map(|(id, input)| (id == &field.id).then(|| input.clone()));
-                    render_menu_syntax_form_field(theme, list_tokens, design_variant, field, input)
+                    render_menu_syntax_form_field(
+                        theme,
+                        design_variant,
+                        &form.target,
+                        field,
+                        input,
+                    )
                 })),
         )
         .into_any_element()
@@ -555,7 +515,6 @@ fn render_menu_syntax_main_hint(
         .when_some(hint.form.as_ref(), |d, form| {
             d.child(render_menu_syntax_form(
                 theme,
-                list_tokens,
                 design_variant,
                 form,
                 form_inputs,

@@ -149,6 +149,9 @@ impl ScriptListApp {
                             }
                             gpui_component::input::InputEvent::PressEnter { secondary } => {
                                 if !field_multiline {
+                                    if !*secondary {
+                                        this.submit_menu_syntax_form_enter(window, cx);
+                                    }
                                     return;
                                 }
                                 if *secondary {
@@ -464,6 +467,20 @@ impl ScriptListApp {
         }
     }
 
+    fn menu_syntax_form_field_is_editable(
+        target: &str,
+        field: &crate::menu_syntax::MenuSyntaxFormFieldSnapshot,
+    ) -> bool {
+        crate::components::menu_syntax_form_field_shell_spec(
+            target,
+            field,
+            crate::components::FormFieldMetrics::from_colors(
+                crate::components::FormFieldColors::default(),
+            ),
+        )
+        .editable()
+    }
+
     fn focus_menu_syntax_form_input_preserving_selection(
         &mut self,
         index: usize,
@@ -471,6 +488,12 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(field) = form.fields.get(index) else {
+            return;
+        };
+        if !Self::menu_syntax_form_field_is_editable(&form.target, field) {
+            return;
+        }
         let Some(input) = self
             .menu_syntax_form_inputs
             .get(index)
@@ -536,6 +559,12 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(field) = form.fields.get(index) else {
+            return;
+        };
+        if !Self::menu_syntax_form_field_is_editable(&form.target, field) {
+            return;
+        }
         let Some((field_id, input)) = self.menu_syntax_form_inputs.get(index).cloned() else {
             return;
         };
@@ -626,6 +655,13 @@ impl ScriptListApp {
             })
             .unwrap_or_default();
         if resolved_field_id.is_empty() {
+            return false;
+        }
+        let Some(resolved_field) = form.fields.iter().find(|field| field.id == resolved_field_id)
+        else {
+            return false;
+        };
+        if !Self::menu_syntax_form_field_is_editable(&form.target, resolved_field) {
             return false;
         }
         let sync_from_focused_live_input = self.menu_syntax_form_syncing_from_input
@@ -876,10 +912,17 @@ impl ScriptListApp {
         };
         self.ensure_menu_syntax_form_inputs(&form, window, cx);
         let field_count = form.fields.len();
-        if field_count == 0 {
+        let editable_indices = form
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| {
+                Self::menu_syntax_form_field_is_editable(&form.target, field).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if editable_indices.is_empty() {
             self.menu_syntax_form_focused_index = 0;
-            self.menu_syntax_form_input_active = false;
-            self.close_menu_syntax_form_suggestions();
+            self.focus_menu_syntax_main_input(window, cx);
             return;
         }
         let current = if self.menu_syntax_form_input_active {
@@ -888,13 +931,17 @@ impl ScriptListApp {
         } else {
             None
         };
-        let next = match (current, delta < 0) {
-            (None, false) => Some(0),
-            (None, true) => Some(field_count - 1),
+        let current_position = current.and_then(|current| {
+            editable_indices
+                .iter()
+                .position(|editable| *editable == current)
+        });
+        let next = match (current_position, delta < 0) {
+            (None, false) => editable_indices.first().copied(),
+            (None, true) => editable_indices.last().copied(),
             (Some(0), true) => None,
-            (Some(index), true) => Some(index - 1),
-            (Some(index), false) if index + 1 < field_count => Some(index + 1),
-            (Some(_), false) => None,
+            (Some(position), true) => editable_indices.get(position - 1).copied(),
+            (Some(position), false) => editable_indices.get(position + 1).copied(),
         };
         if let Some(next_index) = next {
             self.focus_menu_syntax_form_input_at(next_index, &form, window, cx);

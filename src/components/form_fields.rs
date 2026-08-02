@@ -24,6 +24,8 @@ mod checkbox;
 mod colors;
 #[path = "form_fields/helpers.rs"]
 mod helpers;
+#[path = "form_fields/shell.rs"]
+mod shell;
 #[path = "form_fields/state.rs"]
 mod state;
 #[path = "form_fields/text_area/mod.rs"]
@@ -34,6 +36,11 @@ mod text_field;
 pub use checkbox::FormCheckbox;
 pub use colors::{FormFieldColors, FormFieldMetrics};
 pub(crate) use helpers::form_field_type_allows_candidate_value;
+pub(crate) use shell::{
+    apply_form_field_shell_test_fixture, menu_syntax_form_field_shell_spec,
+    render_form_field_shell, resolve_form_field_shell_style, FormFieldShellSpec,
+    FormFieldShellStyle, FormFieldValidation,
+};
 pub use state::FormFieldState;
 pub use text_area::FormTextArea;
 pub use text_field::FormTextField;

@@ -12,14 +12,14 @@ Comments and Rust source embedded inside fixture strings are lexically excluded.
 
 | Class | Files | Read sites | Meaning |
 |---|---:|---:|---|
-| `app-source-audit` | 357 | 2367 | Reads or walks `src/**`; guarded against additions |
+| `app-source-audit` | 352 | 2331 | Reads or walks `src/**`; guarded against additions |
 | `unresolved-reader` | 30 | 48 | Dynamic target the scanner cannot prove non-app; guarded conservatively |
-| `fixture-golden-reader` | 4 | 4 | Reads checked-in fixtures or golden cases |
+| `fixture-golden-reader` | 5 | 8 | Reads checked-in fixtures or golden cases |
 | `docs-policy-reader` | 19 | 99 | Reads Markdown, skills, or policy documentation |
 | `generated-runtime-artifact-reader` | 7 | 18 | Reads test/generated/runtime output |
 | `other-repo-artifact-reader` | 110 | 311 | Reads scripts, workflows, assets, or other non-app files |
 | `meta-ratchet` | 1 | 4 | Reads test source for the existing occurrence-count ratchet |
-| **All readers** | **416** | **2851** | Of 509 Rust files under `tests/` |
+| **All readers** | **412** | **2819** | Of 507 Rust files under `tests/` |
 
 On pull requests, the checker scans both the working tree and the exact base
 tree with the same scanner. It compares per-file multisets of normalized
