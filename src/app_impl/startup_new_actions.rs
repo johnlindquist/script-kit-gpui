@@ -531,7 +531,9 @@
                         // Handle Backspace for actions search
                         if key.eq_ignore_ascii_case("backspace") {
                             if let Some(ref dialog) = this.actions_dialog {
-                                dialog.update(cx, |d, cx| d.handle_backspace(cx));
+                                dialog.update(cx, |d, cx| {
+                                    d.backspace_search_input(window, cx);
+                                });
                                 crate::actions::notify_actions_window(cx);
                                 crate::actions::resize_actions_window(cx, dialog);
                             }
@@ -544,7 +546,9 @@
                             if let Some(ch) = chars.chars().next() {
                                 if ch.is_ascii_graphic() || ch == ' ' {
                                     if let Some(ref dialog) = this.actions_dialog {
-                                        dialog.update(cx, |d, cx| d.handle_char(ch, cx));
+                                        dialog.update(cx, |d, cx| {
+                                            d.insert_search_text(ch.to_string(), window, cx);
+                                        });
                                         crate::actions::notify_actions_window(cx);
                                         crate::actions::resize_actions_window(cx, dialog);
                                     }

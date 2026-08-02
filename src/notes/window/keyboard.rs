@@ -368,11 +368,33 @@ impl NotesApp {
                     cx.stop_propagation();
                     return;
                 }
+                key if (key.eq_ignore_ascii_case("left")
+                    || key.eq_ignore_ascii_case("arrowleft"))
+                    && !modifiers.platform
+                    && !modifiers.control
+                    && !modifiers.alt =>
+                {
+                    self.command_bar
+                        .move_search_cursor(false, modifiers.shift, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                key if (key.eq_ignore_ascii_case("right")
+                    || key.eq_ignore_ascii_case("arrowright"))
+                    && !modifiers.platform
+                    && !modifiers.control
+                    && !modifiers.alt =>
+                {
+                    self.command_bar
+                        .move_search_cursor(true, modifiers.shift, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 key if (is_key_backspace(key) || is_key_delete(key)) && !modifiers.platform => {
                     if modifiers.alt {
-                        self.command_bar.handle_backspace_word(cx);
+                        self.command_bar.handle_backspace_word(window, cx);
                     } else {
-                        self.command_bar.handle_backspace(cx);
+                        self.command_bar.handle_backspace(window, cx);
                     }
                     cx.stop_propagation();
                     return;
@@ -385,7 +407,7 @@ impl NotesApp {
                         if let Some(ch) = crate::ui_foundation::printable_char(
                             event.keystroke.key_char.as_deref(),
                         ) {
-                            self.command_bar.handle_char(ch, cx);
+                            self.command_bar.handle_char(ch, window, cx);
                             cx.stop_propagation();
                             return;
                         }
@@ -393,7 +415,7 @@ impl NotesApp {
                             let ch = ch.to_ascii_lowercase();
                             if ch.is_alphanumeric() || ch.is_whitespace() || ch == '-' || ch == '_'
                             {
-                                self.command_bar.handle_char(ch, cx);
+                                self.command_bar.handle_char(ch, window, cx);
                                 cx.stop_propagation();
                                 return;
                             }
@@ -429,7 +451,7 @@ impl NotesApp {
                         && !modifiers.alt
                         && key.eq_ignore_ascii_case("v")
                     {
-                        self.command_bar.handle_paste(cx);
+                        self.command_bar.handle_paste(window, cx);
                         cx.stop_propagation();
                         return;
                     }
@@ -471,9 +493,9 @@ impl NotesApp {
                 }
                 key if (is_key_backspace(key) || is_key_delete(key)) && !modifiers.platform => {
                     if modifiers.alt {
-                        self.note_switcher.handle_backspace_word(cx);
+                        self.note_switcher.handle_backspace_word(window, cx);
                     } else {
-                        self.note_switcher.handle_backspace(cx);
+                        self.note_switcher.handle_backspace(window, cx);
                     }
                     cx.stop_propagation();
                     return;
@@ -486,7 +508,7 @@ impl NotesApp {
                         if let Some(ch) = crate::ui_foundation::printable_char(
                             event.keystroke.key_char.as_deref(),
                         ) {
-                            self.note_switcher.handle_char(ch, cx);
+                            self.note_switcher.handle_char(ch, window, cx);
                             cx.stop_propagation();
                             return;
                         }
@@ -494,7 +516,7 @@ impl NotesApp {
                             let ch = ch.to_ascii_lowercase();
                             if ch.is_alphanumeric() || ch.is_whitespace() || ch == '-' || ch == '_'
                             {
-                                self.note_switcher.handle_char(ch, cx);
+                                self.note_switcher.handle_char(ch, window, cx);
                                 cx.stop_propagation();
                                 return;
                             }
@@ -511,7 +533,7 @@ impl NotesApp {
                         && !modifiers.alt
                         && key.eq_ignore_ascii_case("v")
                     {
-                        self.note_switcher.handle_paste(cx);
+                        self.note_switcher.handle_paste(window, cx);
                         cx.stop_propagation();
                         return;
                     }

@@ -157,15 +157,16 @@ impl<'a> TransactionStateProvider for ActionsDialogTransactionProvider<'a> {
 
     fn set_input(&mut self, text: &str) -> Result<()> {
         let text = text.to_string();
-        self.entity.update(self.cx, |dialog, cx| {
-            dialog.set_search_text(text.clone(), cx);
-            tracing::info!(
-                target: "script_kit::transaction",
-                event = "transaction_actions_dialog_set_input",
-                text_len = text.len(),
-                "ActionsDialog set_input"
-            );
-        });
+        anyhow::ensure!(
+            crate::actions::set_actions_dialog_search_text(&self.entity, text.clone(), self.cx,),
+            "ActionsDialog input owner is unavailable"
+        );
+        tracing::info!(
+            target: "script_kit::transaction",
+            event = "transaction_actions_dialog_set_input",
+            text_len = text.len(),
+            "ActionsDialog set_input"
+        );
         Ok(())
     }
 

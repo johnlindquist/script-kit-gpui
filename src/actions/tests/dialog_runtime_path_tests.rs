@@ -3,6 +3,8 @@ use super::types::{Action, ActionCallback, ActionCategory, ActionsDialogConfig, 
 use crate::{protocol::ProtocolAction, theme};
 use gpui::{App, AppContext, Entity};
 use gpui_platform::headless;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 fn sample_action(id: &str, title: &str, section: Option<&str>) -> Action {
@@ -240,6 +242,59 @@ fn empty_actions_dialog_has_no_selected_row_and_cannot_activate(
     ));
 }
 
+#[gpui::test]
+fn actions_search_edits_use_input_state_cursor_selection_and_history(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let dialog_slot = Rc::new(RefCell::new(None));
+    let dialog_slot_for_window = Rc::clone(&dialog_slot);
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), move |window, cx| {
+            let dialog = build_dialog_entity(
+                cx,
+                vec![sample_action("reopen", "Réopen File", None)],
+                ActionsDialogConfig::default(),
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            dialog.update(cx, |dialog, cx| {
+                dialog.ensure_search_input(window, cx);
+            });
+            *dialog_slot_for_window.borrow_mut() = Some(dialog);
+            cx.new(|_| gpui::Empty)
+        })
+        .expect("Actions search test window opens")
+    });
+    let dialog = dialog_slot
+        .borrow()
+        .clone()
+        .expect("Actions search dialog was installed");
+
+    window
+        .update(cx, |_empty, window, cx| {
+            dialog.update(cx, |dialog, cx| {
+                assert!(dialog.insert_search_text("réopen-file", window, cx));
+                for _ in 0..5 {
+                    assert!(dialog.move_search_cursor_left(false, window, cx));
+                }
+                assert!(dialog.insert_search_text("!", window, cx));
+                assert_eq!(dialog.search_text, "réopen!-file");
+
+                assert!(dialog.move_search_cursor_left(false, window, cx));
+                assert!(dialog.move_search_cursor_right(true, window, cx));
+                assert!(dialog.insert_search_text("?", window, cx));
+                assert_eq!(dialog.search_text, "réopen?-file");
+
+                assert!(dialog.undo_search_input(window, cx));
+                assert_eq!(dialog.search_text, "");
+                assert!(dialog.redo_search_input(window, cx));
+                assert_eq!(dialog.search_text, "réopen?-file");
+                assert_eq!(dialog.filtered_actions.len(), 0);
+            });
+        })
+        .expect("Actions search test window remains available");
+}
+
 #[test]
 #[cfg_attr(target_os = "macos", ignore = "requires main thread (run via GPUI)")]
 fn test_submit_cancel_does_emit_cancel_sentinel_when_cancel_is_triggered() {
@@ -313,7 +368,7 @@ fn test_move_navigation_does_skip_headers_when_moving_up_and_down() {
 
 #[test]
 #[cfg_attr(target_os = "macos", ignore = "requires main thread (run via GPUI)")]
-fn test_search_handlers_do_update_results_when_typing_and_backspacing() {
+fn test_search_model_replacement_updates_results_and_empty_state() {
     run_headless_dialog_test(|cx| {
         let dialog = build_dialog_entity(
             cx,
@@ -330,30 +385,22 @@ fn test_search_handlers_do_update_results_when_typing_and_backspacing() {
             assert_eq!(dialog.search_text, "");
             assert_eq!(dialog.filtered_actions.len(), 3);
 
-            dialog.handle_char('b', entity_cx);
+            dialog.set_search_text("b".to_string(), entity_cx);
             assert_eq!(dialog.search_text, "b");
             assert_eq!(dialog.filtered_actions.len(), 1);
             assert_eq!(
                 dialog
                     .get_selected_action()
-                    .expect("expected selected action after typing 'b'")
+                    .expect("expected selected action after searching 'b'")
                     .id,
                 "action_beta"
             );
 
-            dialog.handle_char('e', entity_cx);
+            dialog.set_search_text("be".to_string(), entity_cx);
             assert_eq!(dialog.search_text, "be");
             assert_eq!(dialog.filtered_actions.len(), 1);
 
-            dialog.handle_backspace(entity_cx);
-            assert_eq!(dialog.search_text, "b");
-            assert_eq!(dialog.filtered_actions.len(), 1);
-
-            dialog.handle_backspace(entity_cx);
-            assert_eq!(dialog.search_text, "");
-            assert_eq!(dialog.filtered_actions.len(), 3);
-
-            dialog.handle_backspace(entity_cx);
+            dialog.set_search_text(String::new(), entity_cx);
             assert_eq!(dialog.search_text, "");
             assert_eq!(dialog.filtered_actions.len(), 3);
         });
@@ -383,9 +430,7 @@ fn typing_snaps_to_first_scored_action_even_when_previous_identity_still_matches
             dialog
                 .select_action_by_id("save_filter", entity_cx)
                 .expect("fixture action should be selectable");
-            dialog.handle_char('d', entity_cx);
-            dialog.handle_char('e', entity_cx);
-            dialog.handle_char('l', entity_cx);
+            dialog.set_search_text("del".to_string(), entity_cx);
 
             assert_eq!(
                 dialog.get_selected_action_id().as_deref(),

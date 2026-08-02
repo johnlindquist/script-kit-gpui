@@ -17,9 +17,10 @@ use crate::theme;
 use crate::theme::types::BackgroundOpacity;
 use crate::theme::AppChromeColors;
 use gpui::{
-    div, list, prelude::*, px, rgb, rgba, App, BoxShadow, Context, ElementId, FocusHandle,
-    Focusable, ListAlignment, ListState, Render, SharedString, Window,
+    div, list, prelude::*, px, rgb, rgba, App, BoxShadow, Context, ElementId, Entity, FocusHandle,
+    Focusable, ListAlignment, ListState, Render, SharedString, Subscription, Window,
 };
+use gpui_component::Sizable as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -752,7 +753,12 @@ pub struct ActionsDialog {
     /// Only rendered when `config.show_subtitles` is set.
     pub(crate) filtered_description_match_indices: Vec<Vec<usize>>,
     pub selected_index: Option<usize>, // Index within grouped_items; None when no row is selectable
+    /// Renderer-neutral search value mirrored from the entity-backed input.
     pub search_text: String,
+    /// The sole text-editing owner for Actions search.
+    pub(crate) search_input: Option<Entity<gpui_component::input::InputState>>,
+    search_input_subscription: Option<Subscription>,
+    search_input_syncing: bool,
     pub focus_handle: FocusHandle,
     pub on_select: ActionCallback,
     /// Currently focused script for context-aware actions
@@ -1151,6 +1157,9 @@ impl ActionsDialog {
             filtered_description_match_indices: Vec::new(),
             selected_index,
             search_text: String::new(),
+            search_input: None,
+            search_input_subscription: None,
+            search_input_syncing: false,
             focus_handle,
             on_select,
             focused_script,
@@ -2803,6 +2812,19 @@ impl ActionsDialog {
             })
             .collect();
 
+        let search_input_state = self.search_input.as_ref().map(|input| {
+            let input = input.read(cx);
+            let selection = input.selection();
+            serde_json::json!({
+                "owner": "gpuiComponentInputState",
+                "valueLength": input.value().chars().count(),
+                "valueFingerprint": Self::devtools_text_fingerprint(input.value().as_ref()),
+                "valueInSync": input.value().as_ref() == self.search_text,
+                "selectionStart": selection.start,
+                "selectionEnd": selection.end,
+            })
+        });
+
         let mut state = serde_json::json!({
             "schemaVersion": 1,
             "surface": surface,
@@ -2814,6 +2836,7 @@ impl ActionsDialog {
                 "placeholderFingerprint": self.current_search_placeholder().map(Self::devtools_text_fingerprint),
                 "hidden": self.hide_search || matches!(self.config.search_position, SearchPosition::Hidden),
                 "position": actions_dialog_search_position_name(&self.config.search_position),
+                "inputState": search_input_state,
             },
             "selection": {
                 "groupedIndex": self.selected_index,
@@ -3182,6 +3205,220 @@ impl ActionsDialog {
         self.theme = theme;
     }
 
+    /// Install the entity-backed Actions search input once a host window exists.
+    pub(crate) fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input.is_some() || self.hide_search {
+            return;
+        }
+        let input = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder(self.search_placeholder_text())
+                .default_value(self.search_text.clone())
+                .tab_navigation(true)
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &gpui_component::input::InputEvent, _window, cx| {
+                if !matches!(event, gpui_component::input::InputEvent::Change)
+                    || this.search_input_syncing
+                {
+                    return;
+                }
+                let value = input.read(cx).value().to_string();
+                this.apply_search_input_value(value, cx);
+            },
+        );
+        self.search_input = Some(input);
+        self.search_input_subscription = Some(subscription);
+    }
+
+    pub(crate) fn focus_search_input(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(input) = self.search_input.as_ref() else {
+            return false;
+        };
+        input.update(cx, |state, cx| state.focus(window, cx));
+        true
+    }
+
+    pub(crate) fn search_input_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.search_input
+            .as_ref()
+            .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Reconcile route/automation model state into the real input owner.
+    pub(crate) fn sync_search_input_from_model(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.search_input.clone() else {
+            return;
+        };
+        let current = input.read(cx).value().to_string();
+        let placeholder = self.search_placeholder_text();
+        self.search_input_syncing = true;
+        input.update(cx, |state, cx| {
+            state.set_placeholder(placeholder, window, cx);
+            if current != self.search_text {
+                state.set_value(self.search_text.clone(), window, cx);
+            }
+        });
+        self.search_input_syncing = false;
+    }
+
+    fn apply_search_input_value(&mut self, value: String, cx: &mut Context<Self>) {
+        if self.search_text == value {
+            return;
+        }
+        self.search_text = value;
+        self.actions_selection_user_moved = false;
+        self.refilter();
+        cx.notify();
+    }
+
+    fn edit_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(
+            &mut gpui_component::input::InputState,
+            &mut Window,
+            &mut Context<gpui_component::input::InputState>,
+        ),
+    ) -> bool {
+        let Some(input) = self.search_input.clone() else {
+            return false;
+        };
+        self.search_input_syncing = true;
+        input.update(cx, |state, cx| edit(state, window, cx));
+        let value = input.read(cx).value().to_string();
+        self.search_input_syncing = false;
+        self.apply_search_input_value(value, cx);
+        true
+    }
+
+    pub(crate) fn insert_search_text(
+        &mut self,
+        text: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let text = text.into();
+        self.edit_search_input(window, cx, move |state, window, cx| {
+            state.replace(text, window, cx);
+        })
+    }
+
+    pub(crate) fn backspace_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_backspace(window, cx);
+        })
+    }
+
+    pub(crate) fn delete_previous_search_word(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_delete_previous_word(window, cx);
+        })
+    }
+
+    pub(crate) fn paste_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_paste(window, cx);
+        })
+    }
+
+    pub(crate) fn move_search_cursor_left(
+        &mut self,
+        select: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, move |state, window, cx| {
+            if select {
+                state.edit_select_left(window, cx);
+            } else {
+                state.edit_move_left(window, cx);
+            }
+        })
+    }
+
+    pub(crate) fn move_search_cursor_right(
+        &mut self,
+        select: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, move |state, window, cx| {
+            if select {
+                state.edit_select_right(window, cx);
+            } else {
+                state.edit_move_right(window, cx);
+            }
+        })
+    }
+
+    pub(crate) fn select_all_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_select_all(window, cx);
+        })
+    }
+
+    pub(crate) fn undo_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_undo(window, cx);
+        })
+    }
+
+    pub(crate) fn redo_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_redo(window, cx);
+        })
+    }
+
+    pub(crate) fn set_search_text_in_window(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_input.is_none() {
+            self.search_text = text;
+            self.actions_selection_user_moved = false;
+            self.refilter();
+            cx.notify();
+            return;
+        }
+        let _ = self.edit_search_input(window, cx, move |state, window, cx| {
+            state.set_value(text, window, cx);
+        });
+    }
+
     /// Refilter actions based on current search_text using ranked fuzzy matching.
     ///
     /// Matching uses the shared launcher matcher (`SearchHighlightMatchCtx`),
@@ -3429,69 +3666,11 @@ impl ActionsDialog {
         }
     }
 
-    /// Handle character input
-    pub fn handle_char(&mut self, ch: char, cx: &mut Context<Self>) {
-        self.search_text.push(ch);
-        self.actions_selection_user_moved = false;
-        self.refilter();
-        cx.notify();
-    }
-
-    /// Handle backspace
-    pub fn handle_backspace(&mut self, cx: &mut Context<Self>) {
-        if !self.search_text.is_empty() {
-            self.search_text.pop();
-            self.actions_selection_user_moved = false;
-            self.refilter();
-            cx.notify();
-        }
-    }
-
-    /// Delete the trailing word (Option+Backspace), matching the main
-    /// search-input convention: trim trailing whitespace, then delete back
-    /// to the previous word boundary.
-    pub fn handle_backspace_word(&mut self, cx: &mut Context<Self>) {
-        if self.search_text.is_empty() {
-            return;
-        }
-        let trimmed_len = self.search_text.trim_end().len();
-        let boundary = self.search_text[..trimmed_len]
-            .char_indices()
-            .rev()
-            .find(|(_, ch)| ch.is_whitespace())
-            .map(|(idx, ch)| idx + ch.len_utf8())
-            .unwrap_or(0);
-        self.search_text.truncate(boundary);
-        self.actions_selection_user_moved = false;
-        self.refilter();
-        cx.notify();
-    }
-
-    /// Paste clipboard text into the search (Cmd+V), matching the main
-    /// search-input convention: single-line surface, so newlines and other
-    /// control characters collapse to spaces.
-    pub fn handle_paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .filter(|text| !text.is_empty())
-        else {
-            return;
-        };
-        let mut sanitized = String::with_capacity(text.len());
-        for ch in text.chars() {
-            sanitized.push(if ch.is_control() { ' ' } else { ch });
-        }
-        self.search_text.push_str(&sanitized);
-        self.actions_selection_user_moved = false;
-        self.refilter();
-        cx.notify();
-    }
-
-    /// Set search text directly (for automation batch `setInput`).
-    ///
-    /// Replaces the full search string, refilters, and notifies.
-    pub fn set_search_text(&mut self, text: String, cx: &mut Context<Self>) {
+    /// Model-only replacement used by headless filtering tests. Production
+    /// window routes use `set_search_text_in_window` so InputState stays the
+    /// canonical editor and history owner.
+    #[cfg(test)]
+    pub(crate) fn set_search_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.search_text = text;
         self.actions_selection_user_moved = false;
         self.refilter();
@@ -4254,12 +4433,8 @@ impl Render for ActionsDialog {
         // which routes all keyboard events to this dialog's methods.
         // We do NOT attach our own on_key_down handler to avoid double-processing.
 
-        // Render search input - compact version
-        let search_display = if self.search_text.is_empty() {
-            self.search_placeholder_text()
-        } else {
-            SharedString::from(self.search_text.clone())
-        };
+        // The Actions chrome owns the row surface; InputState owns text editing,
+        // selection, cursor, clipboard, IME, and undo history.
 
         // Use helper method for design/theme color extraction
         let (_search_box_bg, border_color, _muted_text, hint_text, _strong_text) =
@@ -4272,20 +4447,6 @@ impl Render for ActionsDialog {
             rgb(colors.text_primary)
         };
 
-        // Get accent color for the search input focus indicator
-        let accent_color_hex = if self.design_variant == DesignVariant::Default {
-            self.theme.colors.accent.selected
-        } else {
-            colors.accent
-        };
-        let accent_color = rgb(accent_color_hex);
-
-        // Focus border color (accent with theme-aware transparency)
-        // Use border_active opacity for focused state, scaled for visibility
-        let opacity = self.theme.get_opacity();
-        let focus_border_alpha = ((opacity.border_active * 1.5).min(1.0) * 255.0) as u8;
-        let _focus_border_color = rgba(hex_with_alpha(accent_color_hex, focus_border_alpha));
-
         // Raycast-style footer search input: minimal styling, full-width, top separator line
         // No boxed input field - just text on a clean background with a thin top border
         // Use theme colors for both light and dark mode
@@ -4293,25 +4454,43 @@ impl Render for ActionsDialog {
         let separator_color = border_color;
         let hint_text_color = hint_text;
         let input_text_color = primary_text;
-        let search_is_empty = self.search_text.is_empty();
-        let build_search_content = |search_display: SharedString| {
-            crate::components::text_input::render_compact_search_text(
-                crate::components::text_input::CompactSearchTextConfig {
-                    display: search_display,
-                    is_placeholder: search_is_empty,
-                    prefix_marker: style.prefix_marker,
-                    prefix_gap: popup_theme.search.prefix_gap,
-                    mono_font: style.mono_font,
-                    font_size: popup_theme.search.font_size,
-                    inner_height: popup_theme.search.inner_height,
-                    cursor_width: popup_theme.search.cursor_width,
-                    cursor_height: popup_theme.search.cursor_height,
-                    cursor_visible: self.cursor_visible,
-                    cursor_color: accent_color,
-                    placeholder_color: hint_text_color,
-                    text_color: input_text_color,
-                },
-            )
+        let build_search_content = || {
+            if let Some(search_input) = self.search_input.as_ref() {
+                gpui_component::input::Input::new(search_input)
+                    .w_full()
+                    .h(px(popup_theme.search.inner_height))
+                    .line_height(px(popup_theme.search.inner_height))
+                    .px(px(0.0))
+                    .py(px(0.0))
+                    .with_size(gpui_component::Size::Size(px(popup_theme.search.font_size)))
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false)
+                    .text_color(input_text_color)
+                    .when_some(style.prefix_marker, |input, prefix_marker| {
+                        input.prefix(
+                            div()
+                                .flex_none()
+                                .mr(px(popup_theme.search.prefix_gap))
+                                .font_family(if style.mono_font {
+                                    crate::list_item::FONT_MONO
+                                } else {
+                                    crate::list_item::FONT_SYSTEM_UI
+                                })
+                                .text_size(px(popup_theme.search.font_size))
+                                .text_color(hint_text_color)
+                                .child(prefix_marker),
+                        )
+                    })
+                    .into_any_element()
+            } else {
+                // Hidden-search and model-only test dialogs never install a window-bound
+                // InputState. Keep their render inert rather than inventing another editor.
+                div()
+                    .w_full()
+                    .h(px(popup_theme.search.inner_height))
+                    .into_any_element()
+            }
         };
 
         let mut input_container = div()
@@ -4327,10 +4506,7 @@ impl Render for ActionsDialog {
             .flex()
             .flex_row()
             .items_center()
-            .child(
-                // Full-width search input - no box styling, just text.
-                build_search_content(search_display.clone()),
-            );
+            .child(build_search_content());
         // Drill-down depth is otherwise invisible: surface the Escape
         // contract ("Esc Back") inline at the search row's right edge while a
         // parent route exists (audit finding #28). The dialog stays
@@ -4766,10 +4942,7 @@ impl Render for ActionsDialog {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(
-                        // Full-width search input - no box styling, just text.
-                        build_search_content(search_display.clone()),
-                    );
+                    .child(build_search_content());
                 if style.show_search_divider {
                     top_input = top_input.border_b_1().border_color(separator_color);
                 }

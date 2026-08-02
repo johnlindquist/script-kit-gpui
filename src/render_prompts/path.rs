@@ -316,7 +316,9 @@ impl ScriptListApp {
                     } else if crate::ui_foundation::is_key_escape(key) {
                         this.path_prompt_close_actions_popup(window, cx, "escape");
                     } else if key.eq_ignore_ascii_case("backspace") {
-                        dialog.update(cx, |d, cx| d.handle_backspace(cx));
+                        dialog.update(cx, |d, cx| {
+                            d.backspace_search_input(window, cx);
+                        });
                         this.path_prompt_sync_actions_search_from_dialog(cx, "backspace");
                     } else {
                         // Check for printable character input (only when no modifiers are held)
@@ -325,7 +327,9 @@ impl ScriptListApp {
                             if let Some(ref key_char) = event.keystroke.key_char {
                                 if let Some(ch) = key_char.chars().next() {
                                     if !ch.is_control() {
-                                        dialog.update(cx, |d, cx| d.handle_char(ch, cx));
+                                        dialog.update(cx, |d, cx| {
+                                            d.insert_search_text(ch.to_string(), window, cx);
+                                        });
                                         this.path_prompt_sync_actions_search_from_dialog(
                                             cx,
                                             "printable_char",

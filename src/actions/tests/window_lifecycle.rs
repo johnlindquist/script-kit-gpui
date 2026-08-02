@@ -141,6 +141,15 @@ fn test_actions_window_key_intent_search_input_upgrades() {
         None
     );
 
+    assert_eq!(
+        actions_window_key_intent("left", None, &no_mods),
+        Some(ActionsWindowKeyIntent::MoveCursorLeft { select: false })
+    );
+    assert_eq!(
+        actions_window_key_intent("right", None, &shift_only),
+        Some(ActionsWindowKeyIntent::MoveCursorRight { select: true })
+    );
+
     // Full printable charset arrives via key_char (shifted symbols,
     // punctuation), matching the main search input.
     assert_eq!(

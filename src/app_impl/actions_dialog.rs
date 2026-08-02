@@ -1140,6 +1140,9 @@ impl ScriptListApp {
             let outcome = dialog.update(cx, |d, cx| d.handle_escape(cx));
             match outcome {
                 crate::actions::ActionsDialogEscapeOutcome::PoppedRoute => {
+                    dialog.update(cx, |d, cx| {
+                        d.sync_search_input_from_model(window, cx);
+                    });
                     crate::actions::notify_actions_window(cx);
                     crate::actions::resize_actions_window(cx, dialog);
                     let (route_id, search_placeholder, route_depth, escape_hint) = {
@@ -1174,24 +1177,53 @@ impl ScriptListApp {
             // bind it to destructive actions (e.g. Delete Note), so it falls
             // through to shortcut matching below.
             if modifiers.alt && !modifiers.platform && !modifiers.control {
-                dialog.update(cx, |d, cx| d.handle_backspace_word(cx));
+                dialog.update(cx, |d, cx| {
+                    d.delete_previous_search_word(window, cx);
+                });
                 crate::actions::notify_actions_window(cx);
                 crate::actions::resize_actions_window(cx, dialog);
                 return ActionsRoute::Handled;
             }
             if !modifiers.platform && !modifiers.control {
-                dialog.update(cx, |d, cx| d.handle_backspace(cx));
+                dialog.update(cx, |d, cx| {
+                    d.backspace_search_input(window, cx);
+                });
                 crate::actions::notify_actions_window(cx);
                 crate::actions::resize_actions_window(cx, dialog);
                 return ActionsRoute::Handled;
             }
         }
 
-        // Check for printable character input (only when no modifiers are held)
-        // This prevents Cmd+E from being treated as typing 'e' into the search
+        if key.eq_ignore_ascii_case("left")
+            && !modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+        {
+            dialog.update(cx, |d, cx| {
+                d.move_search_cursor_left(modifiers.shift, window, cx);
+            });
+            crate::actions::notify_actions_window(cx);
+            return ActionsRoute::Handled;
+        }
+        if key.eq_ignore_ascii_case("right")
+            && !modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+        {
+            dialog.update(cx, |d, cx| {
+                d.move_search_cursor_right(modifiers.shift, window, cx);
+            });
+            crate::actions::notify_actions_window(cx);
+            return ActionsRoute::Handled;
+        }
+
+        // Check for printable character input (only when no modifiers are held).
+        // The route chooses the character, but InputState owns insertion and selection.
         if !modifiers.platform && !modifiers.control && !modifiers.alt {
             if let Some(ch) = printable_char(key_char) {
-                dialog.update(cx, |d, cx| d.handle_char(ch, cx));
+                dialog.update(cx, |d, cx| {
+                    d.insert_search_text(ch.to_string(), window, cx);
+                });
                 crate::actions::notify_actions_window(cx);
                 crate::actions::resize_actions_window(cx, dialog);
                 return ActionsRoute::Handled;
@@ -1222,6 +1254,9 @@ impl ScriptListApp {
 
             match dialog.update(cx, |d, cx| d.activate_action_id(action_id.clone(), cx)) {
                 crate::actions::ActionsDialogActivation::DrillDownPushed { .. } => {
+                    dialog.update(cx, |d, cx| {
+                        d.sync_search_input_from_model(window, cx);
+                    });
                     crate::actions::notify_actions_window(cx);
                     crate::actions::resize_actions_window(cx, dialog);
                     let (route_id, search_placeholder, route_depth, escape_hint) = {
@@ -1269,7 +1304,39 @@ impl ScriptListApp {
             && !modifiers.alt
             && key.eq_ignore_ascii_case("v")
         {
-            dialog.update(cx, |d, cx| d.handle_paste(cx));
+            dialog.update(cx, |d, cx| {
+                d.paste_search_input(window, cx);
+            });
+            crate::actions::notify_actions_window(cx);
+            crate::actions::resize_actions_window(cx, dialog);
+            return ActionsRoute::Handled;
+        }
+
+        if modifiers.platform
+            && !modifiers.shift
+            && !modifiers.control
+            && !modifiers.alt
+            && key.eq_ignore_ascii_case("a")
+        {
+            dialog.update(cx, |d, cx| {
+                d.select_all_search_input(window, cx);
+            });
+            crate::actions::notify_actions_window(cx);
+            return ActionsRoute::Handled;
+        }
+
+        if modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && key.eq_ignore_ascii_case("z")
+        {
+            dialog.update(cx, |d, cx| {
+                if modifiers.shift {
+                    d.redo_search_input(window, cx);
+                } else {
+                    d.undo_search_input(window, cx);
+                }
+            });
             crate::actions::notify_actions_window(cx);
             crate::actions::resize_actions_window(cx, dialog);
             return ActionsRoute::Handled;

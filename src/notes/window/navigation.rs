@@ -1011,11 +1011,11 @@ impl NotesApp {
             original_token: span.token,
         });
         self.open_browse_panel(window, cx);
-        if let Some(dialog) = self.note_switcher.dialog() {
-            dialog.update(cx, |d, cx| {
+        if let Some(dialog) = self.note_switcher.dialog().cloned() {
+            dialog.update(cx, |d, _cx| {
                 d.set_context_title(Some("Replace @note".to_string()));
-                d.set_search_text(query, cx);
             });
+            crate::actions::set_actions_dialog_search_text(&dialog, query, cx);
         }
         cx.notify();
         true

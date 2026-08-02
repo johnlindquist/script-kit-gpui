@@ -1701,6 +1701,39 @@ impl ScriptListApp {
                                     );
                                     dialog.update(ctx, |d, cx| d.move_down(cx));
                                 }
+                                "left" | "arrowleft" if !has_cmd && !_has_alt && !_has_ctrl => {
+                                    dialog.update(ctx, |d, cx| {
+                                        d.move_search_cursor_left(has_shift, window, cx);
+                                    });
+                                }
+                                "right" | "arrowright" if !has_cmd && !_has_alt && !_has_ctrl => {
+                                    dialog.update(ctx, |d, cx| {
+                                        d.move_search_cursor_right(has_shift, window, cx);
+                                    });
+                                }
+                                "backspace" if !has_cmd && !_has_ctrl => {
+                                    dialog.update(ctx, |d, cx| {
+                                        if _has_alt {
+                                            d.delete_previous_search_word(window, cx);
+                                        } else {
+                                            d.backspace_search_input(window, cx);
+                                        }
+                                    });
+                                }
+                                "a" if has_cmd && !has_shift && !_has_alt && !_has_ctrl => {
+                                    dialog.update(ctx, |d, cx| {
+                                        d.select_all_search_input(window, cx);
+                                    });
+                                }
+                                "z" if has_cmd && !_has_alt && !_has_ctrl => {
+                                    dialog.update(ctx, |d, cx| {
+                                        if has_shift {
+                                            d.redo_search_input(window, cx);
+                                        } else {
+                                            d.undo_search_input(window, cx);
+                                        }
+                                    });
+                                }
                                 "enter" => {
                                     logging::log(
                                         "STDIN",
@@ -1740,8 +1773,9 @@ impl ScriptListApp {
                                 }
                                 _ => {
                                     // Handle printable characters for search
-                                    if let Some(ch) = key_lower.chars().next() {
-                                        if ch.is_alphanumeric()
+                                    if !has_cmd && !_has_alt && !_has_ctrl {
+                                        if let Some(ch) = key_lower.chars().next() {
+                                            if ch.is_alphanumeric()
                                             || ch.is_whitespace()
                                             || ch == '-'
                                             || ch == '_'
@@ -1753,7 +1787,9 @@ impl ScriptListApp {
                                                     ch
                                                 ),
                                             );
-                                            dialog.update(ctx, |d, cx| d.handle_char(ch, cx));
+                                            dialog.update(ctx, |d, cx| {
+                                                d.insert_search_text(ch.to_string(), window, cx);
+                                            });
                                         } else {
                                             logging::log(
                                                 "STDIN",
@@ -1764,6 +1800,7 @@ impl ScriptListApp {
                                             );
                                         }
                                     }
+                                }
                                 }
                             }
                             // Notify the actions window to re-render

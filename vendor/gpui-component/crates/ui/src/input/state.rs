@@ -889,6 +889,52 @@ impl InputState {
         self.selected_range = (self.selected_range.end..self.selected_range.end).into();
     }
 
+    /// Apply the input owner's normal Backspace semantics programmatically.
+    pub fn edit_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.backspace(&Backspace, window, cx);
+    }
+
+    /// Apply the input owner's normal previous-word deletion semantics.
+    pub fn edit_delete_previous_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_previous_word(&DeleteToPreviousWordStart, window, cx);
+    }
+
+    /// Apply the input owner's normal clipboard paste semantics.
+    pub fn edit_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste(&Paste, window, cx);
+    }
+
+    /// Apply the input owner's normal horizontal cursor movement semantics.
+    pub fn edit_move_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.left(&MoveLeft, window, cx);
+    }
+
+    pub fn edit_move_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.right(&MoveRight, window, cx);
+    }
+
+    /// Apply the input owner's normal horizontal selection semantics.
+    pub fn edit_select_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_left(&SelectLeft, window, cx);
+    }
+
+    pub fn edit_select_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_right(&SelectRight, window, cx);
+    }
+
+    /// Apply the input owner's normal select-all and history semantics.
+    pub fn edit_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_all(&SelectAll, window, cx);
+    }
+
+    pub fn edit_undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.undo(&Undo, window, cx);
+    }
+
+    pub fn edit_redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.redo(&Redo, window, cx);
+    }
+
     /// Replace text at the current cursor position.
     ///
     /// And the cursor will be moved to the end of replaced text.
@@ -2082,9 +2128,11 @@ impl InputState {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
         });
-        Root::update(window, cx, |root, _, _| {
-            root.focused_input = None;
-        });
+        if let Some(root) = window.root::<Root>().flatten() {
+            root.update(cx, |root, _cx| {
+                root.focused_input = None;
+            });
+        }
         cx.emit(InputEvent::Blur);
         cx.notify();
     }

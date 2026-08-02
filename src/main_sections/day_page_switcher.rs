@@ -260,15 +260,15 @@ impl DayPageView {
             return true;
         }
         if exact_plain && key == "backspace" {
-            self.note_switcher.handle_backspace(cx);
+            self.note_switcher.handle_backspace(window, cx);
             return true;
         }
         if alt && !cmd && !shift && !control && key == "backspace" {
-            self.note_switcher.handle_backspace_word(cx);
+            self.note_switcher.handle_backspace_word(window, cx);
             return true;
         }
         if cmd && !shift && !alt && !control && key == "v" {
-            self.note_switcher.handle_paste(cx);
+            self.note_switcher.handle_paste(window, cx);
             return true;
         }
         if !cmd && !control && !alt {
@@ -280,7 +280,7 @@ impl DayPageView {
                 None
             };
             if let Some(ch) = ch {
-                self.note_switcher.handle_char(ch, cx);
+                self.note_switcher.handle_char(ch, window, cx);
                 return true;
             }
         }

@@ -60,6 +60,12 @@ enum CommandBarKeyIntent {
     Backspace,
     /// Option+Backspace: delete the trailing word, like the main search input.
     BackspaceWord,
+    MoveCursorLeft {
+        select: bool,
+    },
+    MoveCursorRight {
+        select: bool,
+    },
     TypeChar(char),
 }
 
@@ -125,6 +131,24 @@ fn command_bar_key_intent(key: &str, modifiers: &gpui::Modifiers) -> Option<Comm
     }
     if is_key_escape(key) {
         return Some(CommandBarKeyIntent::Close);
+    }
+    if (key.eq_ignore_ascii_case("left") || key.eq_ignore_ascii_case("arrowleft"))
+        && !modifiers.platform
+        && !modifiers.control
+        && !modifiers.alt
+    {
+        return Some(CommandBarKeyIntent::MoveCursorLeft {
+            select: modifiers.shift,
+        });
+    }
+    if (key.eq_ignore_ascii_case("right") || key.eq_ignore_ascii_case("arrowright"))
+        && !modifiers.platform
+        && !modifiers.control
+        && !modifiers.alt
+    {
+        return Some(CommandBarKeyIntent::MoveCursorRight {
+            select: modifiers.shift,
+        });
     }
     if is_key_backspace(key) || key.eq_ignore_ascii_case("delete") {
         // Option+Backspace deletes a word like the main search input;
@@ -531,7 +555,7 @@ mod command_bar_key_intent_tests {
     use super::*;
 
     #[test]
-    fn test_command_bar_key_intent_does_not_treat_named_keys_as_typed_chars() {
+    fn test_command_bar_key_intent_routes_cursor_keys_without_typing_their_names() {
         let no_mods = gpui::Modifiers::default();
 
         assert_eq!(
@@ -539,7 +563,10 @@ mod command_bar_key_intent_tests {
             Some(CommandBarKeyIntent::TypeChar(' '))
         );
         assert_eq!(command_bar_key_intent("tab", &no_mods), None);
-        assert_eq!(command_bar_key_intent("arrowleft", &no_mods), None);
+        assert_eq!(
+            command_bar_key_intent("arrowleft", &no_mods),
+            Some(CommandBarKeyIntent::MoveCursorLeft { select: false })
+        );
         assert_eq!(
             command_bar_key_intent("backspace", &no_mods),
             Some(CommandBarKeyIntent::Backspace)
@@ -755,6 +782,7 @@ impl CommandBar {
             });
 
             if self.is_open {
+                crate::actions::set_actions_dialog_search_text(dialog, String::new(), cx);
                 resize_actions_window(cx, dialog);
             }
         }
@@ -953,34 +981,61 @@ impl CommandBar {
         Some(action_id)
     }
 
-    /// Handle character input
-    pub fn handle_char(&mut self, ch: char, cx: &mut App) {
+    pub fn move_search_cursor<V: 'static>(
+        &mut self,
+        right: bool,
+        select: bool,
+        window: &mut Window,
+        cx: &mut Context<V>,
+    ) {
         if let Some(dialog) = &self.dialog {
-            dialog.update(cx, |d, cx| d.handle_char(ch, cx));
+            dialog.update(cx, |d, cx| {
+                if right {
+                    d.move_search_cursor_right(select, window, cx);
+                } else {
+                    d.move_search_cursor_left(select, window, cx);
+                }
+            });
+            notify_actions_window(cx);
+        }
+    }
+
+    /// Forward character insertion to the entity-backed Actions search input.
+    pub fn handle_char<V: 'static>(&mut self, ch: char, window: &mut Window, cx: &mut Context<V>) {
+        if let Some(dialog) = &self.dialog {
+            dialog.update(cx, |d, cx| {
+                d.insert_search_text(ch.to_string(), window, cx);
+            });
             resize_actions_window(cx, dialog);
         }
     }
 
-    /// Handle backspace
-    pub fn handle_backspace(&mut self, cx: &mut App) {
+    /// Forward Backspace to the entity-backed Actions search input.
+    pub fn handle_backspace<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) {
         if let Some(dialog) = &self.dialog {
-            dialog.update(cx, |d, cx| d.handle_backspace(cx));
+            dialog.update(cx, |d, cx| {
+                d.backspace_search_input(window, cx);
+            });
             resize_actions_window(cx, dialog);
         }
     }
 
-    /// Handle Option+Backspace word deletion
-    pub fn handle_backspace_word(&mut self, cx: &mut App) {
+    /// Forward Option+Backspace to the entity-backed Actions search input.
+    pub fn handle_backspace_word<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) {
         if let Some(dialog) = &self.dialog {
-            dialog.update(cx, |d, cx| d.handle_backspace_word(cx));
+            dialog.update(cx, |d, cx| {
+                d.delete_previous_search_word(window, cx);
+            });
             resize_actions_window(cx, dialog);
         }
     }
 
-    /// Handle Cmd+V paste into the search input
-    pub fn handle_paste(&mut self, cx: &mut App) {
+    /// Forward Cmd+V to the entity-backed Actions search input.
+    pub fn handle_paste<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) {
         if let Some(dialog) = &self.dialog {
-            dialog.update(cx, |d, cx| d.handle_paste(cx));
+            dialog.update(cx, |d, cx| {
+                d.paste_search_input(window, cx);
+            });
             resize_actions_window(cx, dialog);
         }
     }
@@ -1279,15 +1334,25 @@ pub trait CommandBarHost {
                 true
             }
             Some(CommandBarKeyIntent::Backspace) => {
-                self.command_bar_mut().handle_backspace(cx);
+                self.command_bar_mut().handle_backspace(window, cx);
                 true
             }
             Some(CommandBarKeyIntent::BackspaceWord) => {
-                self.command_bar_mut().handle_backspace_word(cx);
+                self.command_bar_mut().handle_backspace_word(window, cx);
+                true
+            }
+            Some(CommandBarKeyIntent::MoveCursorLeft { select }) => {
+                self.command_bar_mut()
+                    .move_search_cursor(false, select, window, cx);
+                true
+            }
+            Some(CommandBarKeyIntent::MoveCursorRight { select }) => {
+                self.command_bar_mut()
+                    .move_search_cursor(true, select, window, cx);
                 true
             }
             Some(CommandBarKeyIntent::TypeChar(ch)) => {
-                self.command_bar_mut().handle_char(ch, cx);
+                self.command_bar_mut().handle_char(ch, window, cx);
                 true
             }
             None => false,

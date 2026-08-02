@@ -141,6 +141,12 @@ enum ActionsWindowKeyIntent {
     Backspace,
     /// Option+Backspace: delete the trailing word, like the main search input.
     BackspaceWord,
+    MoveCursorLeft {
+        select: bool,
+    },
+    MoveCursorRight {
+        select: bool,
+    },
     TypeChar(char),
 }
 
@@ -190,6 +196,24 @@ fn actions_window_key_intent(
         && key.eq_ignore_ascii_case("k")
     {
         return Some(ActionsWindowKeyIntent::Dismiss);
+    }
+    if key.eq_ignore_ascii_case("left")
+        && !modifiers.platform
+        && !modifiers.control
+        && !modifiers.alt
+    {
+        return Some(ActionsWindowKeyIntent::MoveCursorLeft {
+            select: modifiers.shift,
+        });
+    }
+    if key.eq_ignore_ascii_case("right")
+        && !modifiers.platform
+        && !modifiers.control
+        && !modifiers.alt
+    {
+        return Some(ActionsWindowKeyIntent::MoveCursorRight {
+            select: modifiers.shift,
+        });
     }
     if is_key_backspace(key) || key.eq_ignore_ascii_case("delete") {
         // Option+Backspace deletes a word like the main search input.
@@ -603,7 +627,32 @@ impl ActionsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        match actions_window_key_intent(key, key_char, modifiers) {
+        if key.eq_ignore_ascii_case("tab") {
+            // Actions has no tab stop traversal; consume the named key before
+            // AppKit can offer its control character to the single-line input.
+            return true;
+        }
+        let intent = actions_window_key_intent(key, key_char, modifiers);
+        let input_focused = self.dialog.read(cx).search_input_is_focused(window, cx);
+        if input_focused
+            && matches!(
+                intent,
+                Some(
+                    ActionsWindowKeyIntent::Backspace
+                        | ActionsWindowKeyIntent::BackspaceWord
+                        | ActionsWindowKeyIntent::MoveCursorLeft { .. }
+                        | ActionsWindowKeyIntent::MoveCursorRight { .. }
+                        | ActionsWindowKeyIntent::TypeChar(_)
+                )
+            )
+        {
+            // The rendered gpui-component Input receives the native action/text
+            // event directly. Returning false prevents the popup host from
+            // applying the same edit a second time.
+            return false;
+        }
+
+        match intent {
             Some(ActionsWindowKeyIntent::MoveUp) => {
                 crate::logging::log("ACTIONS", "ActionsWindow: handling UP arrow");
 
@@ -709,6 +758,9 @@ impl ActionsWindow {
                 let outcome = self.dialog.update(cx, |d, cx| d.handle_escape(cx));
                 match outcome {
                     super::dialog::ActionsDialogEscapeOutcome::PoppedRoute => {
+                        self.dialog.update(cx, |d, cx| {
+                            d.sync_search_input_from_model(window, cx);
+                        });
                         let (route_id, search_placeholder, route_depth, escape_hint) = {
                             let dialog = self.dialog.read(cx);
                             (
@@ -747,7 +799,9 @@ impl ActionsWindow {
             }
             Some(ActionsWindowKeyIntent::Backspace) => {
                 crate::logging::log("ACTIONS", "ActionsWindow: backspace pressed");
-                self.dialog.update(cx, |d, cx| d.handle_backspace(cx));
+                self.dialog.update(cx, |d, cx| {
+                    d.backspace_search_input(window, cx);
+                });
                 // Schedule resize after filter changes
                 let dialog = self.dialog.clone();
                 window.defer(cx, move |window, cx| {
@@ -759,7 +813,9 @@ impl ActionsWindow {
             }
             Some(ActionsWindowKeyIntent::BackspaceWord) => {
                 crate::logging::log("ACTIONS", "ActionsWindow: word backspace pressed");
-                self.dialog.update(cx, |d, cx| d.handle_backspace_word(cx));
+                self.dialog.update(cx, |d, cx| {
+                    d.delete_previous_search_word(window, cx);
+                });
                 let dialog = self.dialog.clone();
                 window.defer(cx, move |window, cx| {
                     resize_actions_window_direct(window, cx, &dialog);
@@ -767,9 +823,23 @@ impl ActionsWindow {
                 cx.notify();
                 true
             }
+            Some(ActionsWindowKeyIntent::MoveCursorLeft { select }) => {
+                self.dialog.update(cx, |d, cx| {
+                    d.move_search_cursor_left(select, window, cx);
+                });
+                true
+            }
+            Some(ActionsWindowKeyIntent::MoveCursorRight { select }) => {
+                self.dialog.update(cx, |d, cx| {
+                    d.move_search_cursor_right(select, window, cx);
+                });
+                true
+            }
             Some(ActionsWindowKeyIntent::TypeChar(ch)) => {
                 crate::logging::log("ACTIONS", &format!("ActionsWindow: char '{}' pressed", ch));
-                self.dialog.update(cx, |d, cx| d.handle_char(ch, cx));
+                self.dialog.update(cx, |d, cx| {
+                    d.insert_search_text(ch.to_string(), window, cx);
+                });
                 // Schedule resize after filter changes
                 let dialog = self.dialog.clone();
                 window.defer(cx, move |window, cx| {
@@ -805,6 +875,15 @@ impl ActionsWindow {
                         .update(cx, |d, cx| d.activate_action_id(action_id, cx));
                     self.handle_dialog_activation(activation, window, cx, "shortcut_execute");
                     true
+                } else if input_focused
+                    && modifiers.platform
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && matches!(key.to_ascii_lowercase().as_str(), "a" | "v" | "z")
+                {
+                    // The input's key context owns select-all, paste, undo, and
+                    // redo once row-shortcut matching has had first refusal.
+                    false
                 } else if modifiers.platform
                     && !modifiers.shift
                     && !modifiers.control
@@ -814,12 +893,41 @@ impl ActionsWindow {
                     // Cmd+V pastes into the popup search, like the main
                     // search input. Runs after shortcut matching so a host
                     // action that binds ⌘V keeps its row shortcut.
-                    self.dialog.update(cx, |d, cx| d.handle_paste(cx));
+                    self.dialog.update(cx, |d, cx| {
+                        d.paste_search_input(window, cx);
+                    });
                     let dialog = self.dialog.clone();
                     window.defer(cx, move |window, cx| {
                         resize_actions_window_direct(window, cx, &dialog);
                     });
                     cx.notify();
+                    true
+                } else if modifiers.platform
+                    && !modifiers.shift
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && key.eq_ignore_ascii_case("a")
+                {
+                    self.dialog.update(cx, |d, cx| {
+                        d.select_all_search_input(window, cx);
+                    });
+                    true
+                } else if modifiers.platform
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && key.eq_ignore_ascii_case("z")
+                {
+                    self.dialog.update(cx, |d, cx| {
+                        if modifiers.shift {
+                            d.redo_search_input(window, cx);
+                        } else {
+                            d.undo_search_input(window, cx);
+                        }
+                    });
+                    let dialog = self.dialog.clone();
+                    window.defer(cx, move |window, cx| {
+                        resize_actions_window_direct(window, cx, &dialog);
+                    });
                     true
                 } else {
                     false
@@ -846,6 +954,9 @@ impl ActionsWindow {
 
         match activation {
             super::dialog::ActionsDialogActivation::DrillDownPushed { .. } => {
+                self.dialog.update(cx, |d, cx| {
+                    d.sync_search_input_from_model(window, cx);
+                });
                 let (route_id, search_placeholder, route_depth, escape_hint) = {
                     let dialog = self.dialog.read(cx);
                     (
@@ -936,11 +1047,21 @@ impl Render for ActionsWindow {
         if !self.did_request_focus {
             self.did_request_focus = true;
             let focus_handle = self.focus_handle.clone();
+            let dialog = self.dialog.clone();
             window.defer(cx, move |window, cx| {
-                window.focus(&focus_handle, cx);
+                let focused_input = dialog.update(cx, |dialog, cx| {
+                    dialog.focus_search_input(window, cx)
+                });
+                if !focused_input {
+                    window.focus(&focus_handle, cx);
+                }
                 crate::logging::log(
                     "KEY_SETUP",
-                    "ACTIONS_POPUP_FOCUS_REQUESTED context=actions_popup focus_handle=requested",
+                    if focused_input {
+                        "ACTIONS_POPUP_FOCUS_REQUESTED context=actions_search input_owner=gpui_component"
+                    } else {
+                        "ACTIONS_POPUP_FOCUS_REQUESTED context=actions_popup focus_handle=requested"
+                    },
                 );
             });
         }
@@ -1893,7 +2014,11 @@ pub fn open_actions_window(
         dialog.fill_window_bounds = true;
     });
     let parent_automation_id_for_window = parent_automation_id.clone();
-    let handle = cx.open_window(window_options, |_window, cx| {
+    let handle = cx.open_window(window_options, |window, cx| {
+        dialog_entity.update(cx, |dialog, cx| {
+            dialog.ensure_search_input(window, cx);
+            dialog.sync_search_input_from_model(window, cx);
+        });
         cx.new(|cx| {
             ActionsWindow::new(
                 dialog_entity.clone(),
@@ -2168,6 +2293,29 @@ pub fn get_actions_dialog_entity(cx: &gpui::App) -> Option<Entity<ActionsDialog>
     handle
         .read_with(cx, |window, _cx| window.dialog.clone())
         .ok()
+}
+
+/// Replace Actions search text through the live entity-backed input owner.
+/// Returns false when the target is not hosted by the current Actions window.
+pub(crate) fn set_actions_dialog_search_text(
+    dialog: &Entity<ActionsDialog>,
+    text: String,
+    cx: &mut gpui::App,
+) -> bool {
+    let Some(handle) = get_actions_window_handle() else {
+        return false;
+    };
+    handle
+        .update(cx, |actions_window, window, cx| {
+            if actions_window.dialog.entity_id() != dialog.entity_id() {
+                return false;
+            }
+            dialog.update(cx, |dialog, cx| {
+                dialog.set_search_text_in_window(text, window, cx);
+            });
+            true
+        })
+        .unwrap_or(false)
 }
 
 /// Get the current actions window position mode

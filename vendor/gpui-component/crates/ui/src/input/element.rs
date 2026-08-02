@@ -1511,26 +1511,35 @@ impl Element for TextElement {
             cx,
         );
 
-        // Set Root focused_input when self is focused
+        // Keep Root's shared focused-input slot synchronized when this input is
+        // hosted under a gpui-component Root. Transparent native popup windows
+        // intentionally use their own root to preserve vibrancy, so the slot is
+        // optional there; Window::handle_input above remains the text/IME owner.
         if focused {
             let state = self.state.clone();
-            if Root::read(window, cx).focused_input.as_ref() != Some(&state) {
-                Root::update(window, cx, |root, _, cx| {
-                    root.focused_input = Some(state);
-                    cx.notify();
-                });
+            if let Some(root) = window.root::<Root>().flatten() {
+                if root.read(cx).focused_input.as_ref() != Some(&state) {
+                    root.update(cx, |root, cx| {
+                        root.focused_input = Some(state);
+                        cx.notify();
+                    });
+                }
             }
         }
 
-        // And reset focused_input when next_frame start
+        // And reset focused_input when next_frame starts.
         window.on_next_frame({
             let state = self.state.clone();
             move |window, cx| {
-                if !focused && Root::read(window, cx).focused_input.as_ref() == Some(&state) {
-                    Root::update(window, cx, |root, _, cx| {
-                        root.focused_input = None;
-                        cx.notify();
-                    });
+                if !focused {
+                    if let Some(root) = window.root::<Root>().flatten() {
+                        if root.read(cx).focused_input.as_ref() == Some(&state) {
+                            root.update(cx, |root, cx| {
+                                root.focused_input = None;
+                                cx.notify();
+                            });
+                        }
+                    }
                 }
             }
         });

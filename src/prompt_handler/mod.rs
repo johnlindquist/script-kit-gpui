@@ -6225,8 +6225,12 @@ impl ScriptListApp {
                                     let text = text.clone();
                                     let de = dialog_entity.clone();
                                     let result = this.update(cx, |_this, cx| {
-                                        let err = de.update(cx, |dialog, cx| {
-                                            dialog.set_search_text(text.clone(), cx);
+                                        let updated = crate::actions::set_actions_dialog_search_text(
+                                            &de,
+                                            text.clone(),
+                                            cx,
+                                        );
+                                        let err = if updated {
                                             tracing::info!(
                                                 target: "script_kit::transaction",
                                                 event = "transaction_actions_dialog_set_input",
@@ -6234,7 +6238,9 @@ impl ScriptListApp {
                                                 "ActionsDialog set_input"
                                             );
                                             String::new()
-                                        });
+                                        } else {
+                                            "ActionsDialog input owner is unavailable".to_string()
+                                        };
                                         // Keyboard TypeChar path (src/actions/window.rs:630-642)
                                         // defers resize_actions_window_direct; the batch SetInput
                                         // path bypassed that, leaving the popup frozen at the
