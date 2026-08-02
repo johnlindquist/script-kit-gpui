@@ -6241,11 +6241,6 @@ impl ScriptListApp {
                                         } else {
                                             "ActionsDialog input owner is unavailable".to_string()
                                         };
-                                        // Keyboard TypeChar path (src/actions/window.rs:630-642)
-                                        // defers resize_actions_window_direct; the batch SetInput
-                                        // path bypassed that, leaving the popup frozen at the
-                                        // pre-filter height when visibleChoiceCount drops.
-                                        crate::actions::resize_actions_window(cx, &de);
                                         err
                                     });
                                     match result {

@@ -918,7 +918,6 @@ pub fn toggle_detached_actions(cx: &mut App) {
                     search_placeholder = ?search_placeholder,
                     "actions_dialog_route_visible"
                 );
-                crate::actions::resize_actions_window(cx, &activation_dialog);
             }
             crate::actions::ActionsDialogActivation::Executed { should_close, .. } => {
                 if should_close {

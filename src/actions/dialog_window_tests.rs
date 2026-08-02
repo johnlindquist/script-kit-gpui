@@ -41,7 +41,7 @@ fn command_bar_config_default_values() {
     let config = CommandBarConfig::default();
     assert!(matches!(
         config.dialog_config.search_position,
-        SearchPosition::Bottom
+        SearchPosition::Top
     ));
     assert!(matches!(
         config.dialog_config.section_style,
@@ -63,7 +63,7 @@ fn command_bar_config_main_menu_style() {
     let config = CommandBarConfig::main_menu_style();
     assert!(matches!(
         config.dialog_config.search_position,
-        SearchPosition::Bottom
+        SearchPosition::Top
     ));
     assert!(matches!(
         config.dialog_config.section_style,

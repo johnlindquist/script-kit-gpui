@@ -26,9 +26,9 @@ use std::sync::{Mutex, OnceLock};
 use super::constants::POPUP_WIDTH;
 use super::dialog::{
     first_selectable_index, last_selectable_index, selectable_index_at_or_after,
-    selectable_index_at_or_before, ActionsDialog,
+    selectable_index_at_or_before, ActionsDialog, ActionsDialogShellSizingSnapshot,
 };
-use super::types::{Action, SectionStyle};
+use super::types::Action;
 
 /// Count the number of section headers in the filtered action list
 /// A section header appears when an action's section differs from the previous action's section
@@ -60,7 +60,7 @@ pub(super) fn count_section_headers(actions: &[Action], filtered_indices: &[usiz
 ///
 /// Every significant state transition emits one of these via
 /// [`emit_actions_popup_event`] under the `ACTIONS_POPUP` tracing target,
-/// giving agentic callers a machine-readable contract for open/route/resize/close.
+/// giving agentic callers a machine-readable contract for open/route/close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // Variants used from include!()-ed code in app_impl/
 pub(crate) enum ActionsPopupEvent {
@@ -72,8 +72,6 @@ pub(crate) enum ActionsPopupEvent {
     OpenFailed,
     /// A keyboard event was routed through the popup.
     RoutedKey,
-    /// The popup window was resized after filter/content change.
-    Resized,
     /// The popup was closed (via Cmd+K, Escape, blur, etc.).
     Closed,
 }
@@ -106,8 +104,6 @@ pub(crate) fn emit_actions_popup_event(
 /// Global singleton for the actions window handle
 static ACTIONS_WINDOW: OnceLock<Mutex<Option<WindowHandle<ActionsWindow>>>> = OnceLock::new();
 
-/// Track the position mode of the current actions window for resize behavior
-static ACTIONS_WINDOW_POSITION: OnceLock<Mutex<WindowPosition>> = OnceLock::new();
 /// Parent window kind of the currently open actions window (None when closed).
 /// The main app's key interceptors consult this so they only route keys for
 /// popups the main launcher actually hosts; popups hosted by secondary windows
@@ -415,15 +411,21 @@ pub struct ActionsWindow {
     close_requested: bool,
     parent_automation_id: String,
     parent_kind: AutomationWindowKind,
+    /// Authoritative outer size for this popup lifetime.
+    fixed_shell_size: Size<Pixels>,
+    /// Root/unfiltered inputs that produced `fixed_shell_size`.
+    opening_shell_basis: ActionsDialogShellSizingSnapshot,
     registered_displayed_shortcuts: HashSet<String>,
     did_request_focus: bool,
 }
 
 impl ActionsWindow {
-    pub fn new(
+    fn new(
         dialog: Entity<ActionsDialog>,
         parent_automation_id: String,
         parent_kind: AutomationWindowKind,
+        fixed_shell_size: Size<Pixels>,
+        opening_shell_basis: ActionsDialogShellSizingSnapshot,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -434,6 +436,8 @@ impl ActionsWindow {
             close_requested: false,
             parent_automation_id,
             parent_kind,
+            fixed_shell_size,
+            opening_shell_basis,
             registered_displayed_shortcuts: HashSet::new(),
             did_request_focus: false,
         }
@@ -516,7 +520,7 @@ impl ActionsWindow {
             crate::windows::remove_automation_window("actions-dialog");
             clear_actions_window_handle(reason);
             dialog_for_close.update(cx, |dialog, _cx| {
-                dialog.fill_window_bounds = false;
+                dialog.release_fixed_shell();
             });
             crate::platform::dematerialize_then_remove_gpui_window_from_app(
                 window,
@@ -779,13 +783,6 @@ impl ActionsWindow {
                             search_placeholder = ?search_placeholder,
                             "actions_dialog_route_visible"
                         );
-                        let dialog = self.dialog.clone();
-                        cx.spawn(async move |_this, cx| {
-                            cx.update(|cx| {
-                                resize_actions_window(cx, &dialog);
-                            })
-                        })
-                        .detach();
                     }
                     super::dialog::ActionsDialogEscapeOutcome::CloseDialog => {
                         self.request_close(window, cx, "escape", true);
@@ -802,12 +799,6 @@ impl ActionsWindow {
                 self.dialog.update(cx, |d, cx| {
                     d.backspace_search_input(window, cx);
                 });
-                // Schedule resize after filter changes
-                let dialog = self.dialog.clone();
-                window.defer(cx, move |window, cx| {
-                    crate::logging::log("ACTIONS", "ActionsWindow: defer - resizing directly");
-                    resize_actions_window_direct(window, cx, &dialog);
-                });
                 cx.notify();
                 true
             }
@@ -815,10 +806,6 @@ impl ActionsWindow {
                 crate::logging::log("ACTIONS", "ActionsWindow: word backspace pressed");
                 self.dialog.update(cx, |d, cx| {
                     d.delete_previous_search_word(window, cx);
-                });
-                let dialog = self.dialog.clone();
-                window.defer(cx, move |window, cx| {
-                    resize_actions_window_direct(window, cx, &dialog);
                 });
                 cx.notify();
                 true
@@ -839,12 +826,6 @@ impl ActionsWindow {
                 crate::logging::log("ACTIONS", &format!("ActionsWindow: char '{}' pressed", ch));
                 self.dialog.update(cx, |d, cx| {
                     d.insert_search_text(ch.to_string(), window, cx);
-                });
-                // Schedule resize after filter changes
-                let dialog = self.dialog.clone();
-                window.defer(cx, move |window, cx| {
-                    crate::logging::log("ACTIONS", "ActionsWindow: defer - resizing directly");
-                    resize_actions_window_direct(window, cx, &dialog);
                 });
                 cx.notify();
                 true
@@ -896,10 +877,6 @@ impl ActionsWindow {
                     self.dialog.update(cx, |d, cx| {
                         d.paste_search_input(window, cx);
                     });
-                    let dialog = self.dialog.clone();
-                    window.defer(cx, move |window, cx| {
-                        resize_actions_window_direct(window, cx, &dialog);
-                    });
                     cx.notify();
                     true
                 } else if modifiers.platform
@@ -923,10 +900,6 @@ impl ActionsWindow {
                         } else {
                             d.undo_search_input(window, cx);
                         }
-                    });
-                    let dialog = self.dialog.clone();
-                    window.defer(cx, move |window, cx| {
-                        resize_actions_window_direct(window, cx, &dialog);
                     });
                     true
                 } else {
@@ -975,13 +948,6 @@ impl ActionsWindow {
                     search_placeholder = ?search_placeholder,
                     "actions_dialog_route_visible"
                 );
-                let dialog = self.dialog.clone();
-                cx.spawn(async move |_this, cx| {
-                    cx.update(|cx| {
-                        resize_actions_window(cx, &dialog);
-                    })
-                })
-                .detach();
             }
             super::dialog::ActionsDialogActivation::Executed {
                 action_id,
@@ -1021,11 +987,17 @@ impl Render for ActionsWindow {
         // Log focus state AND window focus state
         let is_focused = self.focus_handle.is_focused(window);
         let window_is_active = window.is_window_active();
+        let fixed_width_px = f32::from(self.fixed_shell_size.width);
+        let fixed_height_px = f32::from(self.fixed_shell_size.height);
         crate::logging::log(
             "ACTIONS",
             &format!(
-                "ActionsWindow render: focus_handle.is_focused={}, window_is_active={}",
-                is_focused, window_is_active
+                "ActionsWindow render: focus_handle.is_focused={}, window_is_active={}, fixed_shell={:.0}x{:.0}, opening_actions={}",
+                is_focused,
+                window_is_active,
+                fixed_width_px,
+                fixed_height_px,
+                self.opening_shell_basis.action_count,
             ),
         );
 
@@ -1093,10 +1065,10 @@ impl Render for ActionsWindow {
             }
         });
 
-        // Render the shared dialog entity with key handling
-        // Don't use size_full() - the dialog calculates its own dynamic height
-        // This prevents unused window space from showing as a dark area
+        // Render inside the full hosting window. The native outer size is frozen
+        // at open; the dialog owns only interior flex/scroll changes.
         div()
+            .size_full()
             .key_context("actions_popup")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(
@@ -1248,10 +1220,9 @@ mod tests {
     }
 }
 
-/// Single source of truth for the actions popup shell height. Both the
-/// NSWindow sizing (`compute_popup_height`) and the dialog's interior
-/// container (`ActionsDialog::render`) derive from this formula so the
-/// rendered content can never drift from the window bounds.
+/// Single source of truth for Actions shell height. Detached windows evaluate
+/// it once from the opening root/unfiltered snapshot; inline dialogs use it for
+/// their local content-derived shell.
 #[inline]
 pub(super) fn actions_window_dynamic_height(
     num_actions: usize,
@@ -1319,30 +1290,6 @@ pub(crate) fn resolved_actions_popup_height(
         .min(max_height - search_box_height - header_height - footer_height);
     let border_height = tokens.shell.border_height;
     items_height + search_box_height + header_height + footer_height + border_height
-}
-
-#[inline]
-fn compute_popup_height(dialog: &ActionsDialog) -> f32 {
-    let num_actions = dialog.filtered_actions.len();
-    let hide_search = dialog.hide_search;
-    let has_header = dialog.config.show_context_header && dialog.context_title.is_some();
-    let show_footer = dialog.config.show_footer;
-
-    let section_header_count = if dialog.config.section_style == SectionStyle::Headers {
-        count_section_headers(&dialog.actions, &dialog.filtered_actions)
-    } else {
-        0
-    };
-
-    actions_window_dynamic_height(
-        num_actions,
-        section_header_count,
-        hide_search,
-        has_header,
-        show_footer,
-        dialog.config.max_height,
-        dialog.effective_row_height(),
-    )
 }
 
 /// Compute the origin point for the actions popup window.
@@ -1498,75 +1445,6 @@ fn log_actions_popup_placement(stage: &'static str, receipt: &ActionsPopupPlacem
     );
 }
 
-/// Pure resize origin calculation shared by both resize entry points.
-///
-/// For bottom-anchored positions the origin stays fixed (bottom edge is pinned).
-/// For top-anchored positions the top edge stays fixed, so origin.y shifts.
-fn resized_actions_window_origin_y(
-    current_origin_y: f64,
-    current_height: f64,
-    target_height: f64,
-    position: WindowPosition,
-) -> f64 {
-    match position {
-        WindowPosition::BottomRight => current_origin_y,
-        WindowPosition::TopRight | WindowPosition::TopCenter => {
-            let old_top = current_origin_y + current_height;
-            old_top - target_height
-        }
-    }
-}
-
-/// Compute the new GPUI `Bounds<Pixels>` of the actions popup after a
-/// resize. GPUI uses top-left origin, so the pinning semantics are
-/// inverted from `resized_actions_window_origin_y` which operates on
-/// AppKit's bottom-left NSRect frame:
-///
-/// - `TopRight` / `TopCenter` are pinned to the top edge → origin.y stays,
-///   height changes.
-/// - `BottomRight` is pinned to the bottom edge → origin.y shifts so
-///   `origin.y + height` is invariant.
-///
-/// Used to refresh `AutomationWindowInfo.bounds` after either resize
-/// path (keyboard TypeChar/Backspace → `resize_actions_window_direct`;
-/// batch SetInput → `resize_actions_window`) so `listAutomationWindows`
-/// reports the live frame. Without this refresh the registry would
-/// report the open-time bounds, silently lying to agentic callers.
-fn resized_actions_window_gpui_bounds(
-    current_bounds: Bounds<Pixels>,
-    new_height_px: f32,
-    new_width_px: f32,
-    position: WindowPosition,
-) -> Bounds<Pixels> {
-    let current_origin_y: f32 = current_bounds.origin.y.into();
-    let current_height: f32 = current_bounds.size.height.into();
-    let new_origin_y = match position {
-        WindowPosition::TopRight | WindowPosition::TopCenter => current_origin_y,
-        WindowPosition::BottomRight => current_origin_y + current_height - new_height_px,
-    };
-    Bounds {
-        origin: gpui::Point::new(current_bounds.origin.x, px(new_origin_y)),
-        size: Size {
-            width: px(new_width_px),
-            height: px(new_height_px),
-        },
-    }
-}
-
-/// Convert a GPUI popup bounds to the protocol shape and publish it
-/// into the automation registry under the stable `actions-dialog` ID.
-/// Keeps the float conversion site identical to the open-time
-/// conversion in `create_actions_popup_window`.
-fn publish_actions_popup_bounds_to_registry(bounds: Bounds<Pixels>) {
-    let registry_bounds = crate::protocol::AutomationWindowBounds {
-        x: f32::from(bounds.origin.x) as f64,
-        y: f32::from(bounds.origin.y) as f64,
-        width: f32::from(bounds.size.width) as f64,
-        height: f32::from(bounds.size.height) as f64,
-    };
-    crate::windows::set_automation_bounds("actions-dialog", Some(registry_bounds));
-}
-
 fn protocol_bounds_json(bounds: Bounds<Pixels>) -> serde_json::Value {
     serde_json::json!({
         "x": f32::from(bounds.origin.x) as f64,
@@ -1601,44 +1479,12 @@ fn unregister_actions_dialog_automation_surfaces() {
     crate::windows::remove_automation_window("actions-dialog");
 }
 
-fn update_actions_popup_automation_snapshot_for_resize(
-    popup_bounds: Bounds<Pixels>,
-    position: WindowPosition,
-) {
-    let storage = ACTIONS_POPUP_AUTOMATION_SNAPSHOT.get_or_init(|| Mutex::new(None));
-    let generation = next_actions_popup_automation_generation();
-    if let Ok(mut guard) = storage.lock() {
-        let Some(snapshot) = guard.as_mut() else {
-            return;
-        };
-        snapshot["generation"] = serde_json::json!(generation);
-        snapshot["updatedStage"] = serde_json::json!("resize");
-        snapshot["stale"] = serde_json::json!(false);
-        snapshot["position"] = serde_json::json!(format!("{position:?}"));
-        if let Some(geometry) = snapshot
-            .get_mut("geometry")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            geometry.insert("popupRect".to_string(), protocol_bounds_json(popup_bounds));
-            geometry.insert(
-                "position".to_string(),
-                serde_json::json!(format!("{position:?}")),
-            );
-            geometry.insert(
-                "pinnedEdge".to_string(),
-                serde_json::json!(match position {
-                    WindowPosition::BottomRight => "bottom",
-                    WindowPosition::TopRight | WindowPosition::TopCenter => "top",
-                }),
-            );
-        }
-    }
-}
-
 fn record_actions_popup_automation_snapshot(
     parent_automation_id: &str,
     parent_kind: AutomationWindowKind,
     receipt: &ActionsPopupPlacementReceipt,
+    fixed_shell_size: Size<Pixels>,
+    opening_shell_basis: &ActionsDialogShellSizingSnapshot,
 ) {
     let generation = next_actions_popup_automation_generation();
     let snapshot = serde_json::json!({
@@ -1659,6 +1505,13 @@ fn record_actions_popup_automation_snapshot(
         "parentKind": format!("{parent_kind:?}"),
         "position": format!("{:?}", receipt.position),
         "displayId": format!("{:?}", receipt.display_id),
+        "fixedShell": {
+            "fixedForLifetime": true,
+            "policy": "rootUnfilteredAtOpen",
+            "widthPx": f32::from(fixed_shell_size.width) as f64,
+            "heightPx": f32::from(fixed_shell_size.height) as f64,
+            "openingBasis": opening_shell_basis,
+        },
         "geometry": {
             "popupRect": protocol_bounds_json(receipt.popup_bounds),
             "parentRect": protocol_bounds_json(receipt.main_window_bounds),
@@ -1685,56 +1538,6 @@ pub(crate) fn actions_popup_automation_snapshot() -> Option<serde_json::Value> {
         .lock()
         .ok()
         .and_then(|guard| guard.clone())
-}
-
-#[cfg(target_os = "macos")]
-fn resized_actions_window_frame(
-    frame: cocoa::foundation::NSRect,
-    new_height_f32: f32,
-    new_width_f32: f32,
-    position: WindowPosition,
-) -> cocoa::foundation::NSRect {
-    use cocoa::foundation::{NSPoint, NSRect, NSSize};
-
-    let new_origin_y = resized_actions_window_origin_y(
-        frame.origin.y,
-        frame.size.height,
-        new_height_f32 as f64,
-        position,
-    );
-
-    NSRect::new(
-        NSPoint::new(frame.origin.x, new_origin_y),
-        NSSize::new(new_width_f32 as f64, new_height_f32 as f64),
-    )
-}
-
-fn log_actions_popup_resize(
-    stage: &'static str,
-    position: WindowPosition,
-    current_bounds: Bounds<Pixels>,
-    target_height_px: f32,
-) {
-    let current_origin_x_px: f32 = current_bounds.origin.x.into();
-    let current_origin_y_px: f32 = current_bounds.origin.y.into();
-    let current_width_px: f32 = current_bounds.size.width.into();
-    let current_height_px: f32 = current_bounds.size.height.into();
-
-    tracing::info!(
-        target: "ACTIONS_POPUP",
-        stage = stage,
-        position = ?position,
-        pinned_edge = match position {
-            WindowPosition::BottomRight => "bottom",
-            WindowPosition::TopRight | WindowPosition::TopCenter => "top",
-        },
-        current_origin_x_px,
-        current_origin_y_px,
-        current_width_px,
-        current_height_px,
-        target_height_px,
-        "actions popup resize receipt"
-    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1945,10 +1748,18 @@ pub fn open_actions_window(
         gpui::WindowBackgroundAppearance::Opaque
     };
 
-    // Calculate dynamic window height based on number of actions.
-    // Open and resize paths intentionally share compute_popup_height().
-    let dialog = dialog_entity.read(cx);
-    let dynamic_height = compute_popup_height(dialog);
+    // Freeze the detached shell once from the root, unfiltered route. Search,
+    // route, and action mutations reflow or scroll inside these outer bounds.
+    let opening_shell_basis = dialog_entity.read(cx).opening_shell_sizing_snapshot();
+    let fixed_height = actions_window_dynamic_height(
+        opening_shell_basis.action_count,
+        opening_shell_basis.section_header_count,
+        !opening_shell_basis.search_visible,
+        opening_shell_basis.context_header_visible,
+        opening_shell_basis.footer_visible,
+        opening_shell_basis.max_height_px,
+        opening_shell_basis.row_height_px,
+    );
 
     // Calculate window position:
     // - X: Right edge of main window, minus actions width, minus margin
@@ -1961,7 +1772,11 @@ pub fn open_actions_window(
     // When we pass display_id to WindowOptions, GPUI will position this window on the
     // same screen as the main window, using these screen-relative coordinates.
     let window_width = px(current_actions_window_width());
-    let window_height = px(dynamic_height);
+    let window_height = px(fixed_height);
+    let fixed_shell_size = Size {
+        width: window_width,
+        height: window_height,
+    };
 
     let receipt = actions_popup_placement_receipt(
         main_window_bounds,
@@ -2011,10 +1826,12 @@ pub fn open_actions_window(
     // Detached windows own their size: let the dialog fill the window bounds
     // so the list reflows WITH the glass morph (reset on close).
     dialog_entity.update(cx, |dialog, _cx| {
-        dialog.fill_window_bounds = true;
+        dialog.attach_to_fixed_shell(fixed_height);
     });
     let parent_automation_id_for_window = parent_automation_id.clone();
-    let handle = cx.open_window(window_options, |window, cx| {
+    let fixed_shell_size_for_window = fixed_shell_size;
+    let opening_shell_basis_for_window = opening_shell_basis.clone();
+    let handle = match cx.open_window(window_options, |window, cx| {
         dialog_entity.update(cx, |dialog, cx| {
             dialog.ensure_search_input(window, cx);
             dialog.sync_search_input_from_model(window, cx);
@@ -2024,10 +1841,19 @@ pub fn open_actions_window(
                 dialog_entity.clone(),
                 parent_automation_id_for_window.clone(),
                 parent_kind,
+                fixed_shell_size_for_window,
+                opening_shell_basis_for_window.clone(),
                 cx,
             )
         })
-    })?;
+    }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            dialog_entity.update(cx, |dialog, _cx| dialog.release_fixed_shell());
+            set_actions_window_parent_kind(None);
+            return Err(error.into());
+        }
+    };
 
     // Configure the window as non-movable on macOS
     // Use window.defer() to avoid RefCell borrow conflicts - GPUI may still have
@@ -2084,14 +1910,10 @@ pub fn open_actions_window(
         }
     }
 
-    // Store the handle and position globally
+    // Store the one fixed-size popup handle globally.
     let window_storage = ACTIONS_WINDOW.get_or_init(|| Mutex::new(None));
     if let Ok(mut guard) = window_storage.lock() {
         *guard = Some(handle);
-    }
-    let pos_storage = ACTIONS_WINDOW_POSITION.get_or_init(|| Mutex::new(WindowPosition::default()));
-    if let Ok(mut guard) = pos_storage.lock() {
-        *guard = position;
     }
 
     crate::logging::log("ACTIONS", "Actions popup window opened with vibrancy");
@@ -2099,13 +1921,9 @@ pub fn open_actions_window(
     // Register in the automation window registry with parent identity.
     // Fail-closed: if registration fails, close the popup and propagate the error.
     //
-    // `bounds` carries the placement-receipt's `popup_bounds` verbatim so
-    // `listAutomationWindows` / `inspectAutomationWindow` surface the popup
-    // frame without agents needing a second RPC to compute geometry. The
-    // resize paths below (`resize_actions_window` + `resize_actions_window_direct`)
-    // MUST re-publish bounds via `set_automation_bounds` after every frame
-    // change — otherwise the registry would lie about the popup's height as
-    // it shrinks on filter. See Pass #1 tool-gap note in `audits/afk/log.md`.
+    // `bounds` carries the lifetime-fixed placement receipt verbatim so
+    // `listAutomationWindows` / `inspectAutomationWindow` surface the same
+    // popup frame through every filter, route, and action-data mutation.
     let popup_automation_id = "actions-dialog".to_string();
     let popup_bounds_for_registry = crate::protocol::AutomationWindowBounds {
         x: f32::from(bounds.origin.x) as f64,
@@ -2138,22 +1956,23 @@ pub fn open_actions_window(
         &dialog_entity,
         cx,
     );
-    record_actions_popup_automation_snapshot(&parent_automation_id, parent_kind, &receipt);
+    record_actions_popup_automation_snapshot(
+        &parent_automation_id,
+        parent_kind,
+        &receipt,
+        fixed_shell_size,
+        &opening_shell_basis,
+    );
 
-    // Structured receipt for agentic verification
-    let dialog_ref = dialog_entity.read(cx);
-    let section_header_count = if dialog_ref.config.section_style == SectionStyle::Headers {
-        count_section_headers(&dialog_ref.actions, &dialog_ref.filtered_actions)
-    } else {
-        0
-    };
+    // Structured receipt reports the same root/unfiltered sizing basis that
+    // owns the lifetime-fixed shell.
     emit_actions_popup_event(
         ActionsPopupEvent::OpenSucceeded,
         None,
         Some(position),
-        Some(dialog_ref.filtered_actions.len()),
-        Some(section_header_count),
-        Some(dynamic_height),
+        Some(opening_shell_basis.action_count),
+        Some(opening_shell_basis.section_header_count),
+        Some(fixed_height),
     );
 
     Ok(handle)
@@ -2171,7 +1990,9 @@ pub fn close_actions_window(cx: &mut App) {
                 crate::logging::log("ACTIONS", "Closing actions popup window");
                 emit_actions_popup_event(ActionsPopupEvent::Closed, None, None, None, None, None);
                 // Close the window
-                let close_result = handle.update(cx, |_this, window, cx| {
+                let close_result = handle.update(cx, |this, window, cx| {
+                    this.dialog
+                        .update(cx, |dialog, _cx| dialog.release_fixed_shell());
                     crate::platform::dematerialize_then_remove_gpui_window(
                         window,
                         cx,
@@ -2318,16 +2139,6 @@ pub(crate) fn set_actions_dialog_search_text(
         .unwrap_or(false)
 }
 
-/// Get the current actions window position mode
-fn get_actions_window_position() -> WindowPosition {
-    if let Some(pos_storage) = ACTIONS_WINDOW_POSITION.get() {
-        if let Ok(guard) = pos_storage.lock() {
-            return *guard;
-        }
-    }
-    WindowPosition::default()
-}
-
 /// Notify the actions window to re-render (call after updating dialog entity)
 pub fn notify_actions_window(cx: &mut App) {
     if let Some(handle) = get_actions_window_handle() {
@@ -2351,362 +2162,8 @@ pub fn notify_actions_window(cx: &mut App) {
 
 // --- merged from part_03.rs ---
 
+#[allow(dead_code)] // Protected calibration sentinel; content resizing is intentionally gone.
 const ACTIONS_WINDOW_RESIZE_ANIMATE: bool = false;
-
-/// Resize the actions window directly using the window reference
-/// Use this from defer callbacks where we already have access to the window
-pub fn resize_actions_window_direct(
-    window: &mut Window,
-    cx: &mut App,
-    dialog_entity: &Entity<ActionsDialog>,
-) {
-    // Read dialog state to calculate new height
-    let dialog = dialog_entity.read(cx);
-    let num_actions = dialog.filtered_actions.len();
-    let hide_search = dialog.hide_search;
-    let has_header = dialog.config.show_context_header && dialog.context_title.is_some();
-
-    crate::logging::log(
-        "ACTIONS",
-        &format!(
-            "resize_actions_window_direct: num_actions={}, hide_search={}, has_header={}",
-            num_actions, hide_search, has_header
-        ),
-    );
-
-    let new_height_f32 = compute_popup_height(dialog);
-    let new_width_f32 = current_actions_window_width();
-
-    let current_bounds = window.bounds();
-    let current_height_f32: f32 = current_bounds.size.height.into();
-    let current_width_f32: f32 = current_bounds.size.width.into();
-
-    let position = get_actions_window_position();
-    log_actions_popup_resize(
-        "resize_direct_requested",
-        position,
-        current_bounds,
-        new_height_f32,
-    );
-
-    // Skip if height hasn't changed
-    if (current_height_f32 - new_height_f32).abs() < 1.0
-        && (current_width_f32 - new_width_f32).abs() < 1.0
-    {
-        tracing::debug!(
-            target: "ACTIONS_POPUP",
-            stage = "resize_direct_skipped",
-            position = ?position,
-            current_height_px = current_height_f32,
-            target_height_px = new_height_f32,
-            reason = "height_unchanged",
-            "actions popup resize skipped"
-        );
-        return;
-    }
-
-    // Resize via NSWindow using the shared geometry contract
-    #[cfg(target_os = "macos")]
-    {
-        use cocoa::appkit::NSScreen;
-        use cocoa::base::nil;
-        use objc::{msg_send, sel, sel_impl};
-
-        // SAFETY: accessing NSApp and iterating its windows array to find our
-        // popup by matching dimensions, then resizing it via setFrame:display:animate:.
-        // All ObjC pointers are nil-checked before use.
-        unsafe {
-            let ns_app: cocoa::base::id = cocoa::appkit::NSApp();
-            let windows: cocoa::base::id = msg_send![ns_app, windows];
-            let count: usize = msg_send![windows, count];
-
-            let mut found = false;
-            for i in 0..count {
-                let ns_window: cocoa::base::id = msg_send![windows, objectAtIndex: i];
-                if ns_window == nil {
-                    continue;
-                }
-
-                let frame: cocoa::foundation::NSRect = msg_send![ns_window, frame];
-
-                if (frame.size.width - current_width_f32 as f64).abs() < 2.0
-                    && (frame.size.height - current_height_f32 as f64).abs() < 2.0
-                {
-                    let window_screen: cocoa::base::id = msg_send![ns_window, screen];
-                    if window_screen == nil {
-                        let screens: cocoa::base::id = NSScreen::screens(nil);
-                        let _primary: cocoa::base::id = msg_send![screens, objectAtIndex: 0u64];
-                    }
-
-                    let new_frame = resized_actions_window_frame(
-                        frame,
-                        new_height_f32,
-                        new_width_f32,
-                        position,
-                    );
-
-                    let _: () = msg_send![
-                        ns_window,
-                        setFrame:new_frame
-                        display:true
-                        animate:ACTIONS_WINDOW_RESIZE_ANIMATE
-                    ];
-
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
-                tracing::warn!(
-                    target: "ACTIONS_POPUP",
-                    stage = "resize_direct_window_match_failed",
-                    position = ?position,
-                    current_width_px = current_width_f32,
-                    current_height_px = current_height_f32,
-                    target_height_px = new_height_f32,
-                    window_count = count,
-                    "actions popup NSWindow lookup failed"
-                );
-            }
-        }
-    }
-
-    // Also tell GPUI about the new size
-    window.resize(gpui::Size {
-        width: px(new_width_f32),
-        height: px(new_height_f32),
-    });
-
-    // Refresh automation registry bounds so `listAutomationWindows` /
-    // `inspectAutomationWindow` report the live popup frame after resize.
-    // See Pass #1 tool-gap note in `audits/afk/log.md`.
-    let post_resize_bounds =
-        resized_actions_window_gpui_bounds(current_bounds, new_height_f32, new_width_f32, position);
-    publish_actions_popup_bounds_to_registry(post_resize_bounds);
-    update_actions_popup_automation_snapshot_for_resize(post_resize_bounds, position);
-
-    crate::logging::log(
-        "ACTIONS",
-        &format!(
-            "resize_actions_window_direct complete: {} items, height={:.0}",
-            num_actions, new_height_f32
-        ),
-    );
-
-    // Structured receipt for resize
-    let dialog_for_receipt = dialog_entity.read(cx);
-    let section_header_count = if dialog_for_receipt.config.section_style == SectionStyle::Headers {
-        count_section_headers(
-            &dialog_for_receipt.actions,
-            &dialog_for_receipt.filtered_actions,
-        )
-    } else {
-        0
-    };
-    emit_actions_popup_event(
-        ActionsPopupEvent::Resized,
-        None,
-        Some(get_actions_window_position()),
-        Some(num_actions),
-        Some(section_header_count),
-        Some(new_height_f32),
-    );
-}
-
-/// Resize the actions window to fit the current number of filtered actions
-/// Call this after filtering changes the action count
-///
-/// The window is "pinned to bottom" - the search input stays in place and
-/// the window shrinks/grows from the top.
-///
-/// The resize is deferred: callers are frequently inside the actions
-/// window's own event dispatch (the main-window keystroke interceptor fires
-/// while the popup is the key window), and `WindowHandle::update` on a
-/// window from within its own dispatch fails with "window not found" —
-/// which silently froze the popup height for main-hosted popups. Same
-/// re-entrancy class as the activation-callback close path in
-/// `notes/window/panels.rs`.
-pub fn resize_actions_window(cx: &mut App, dialog_entity: &Entity<ActionsDialog>) {
-    let dialog_entity = dialog_entity.clone();
-    cx.defer(move |cx| resize_actions_window_now(cx, &dialog_entity));
-}
-
-fn resize_actions_window_now(cx: &mut App, dialog_entity: &Entity<ActionsDialog>) {
-    crate::logging::log("ACTIONS", "resize_actions_window called");
-    if let Some(handle) = get_actions_window_handle() {
-        // Read dialog state to calculate new height
-        let dialog = dialog_entity.read(cx);
-        let num_actions = dialog.filtered_actions.len();
-        let hide_search = dialog.hide_search;
-        let has_header = dialog.config.show_context_header && dialog.context_title.is_some();
-        crate::logging::log(
-            "ACTIONS",
-            &format!(
-                "resize_actions_window: num_actions={}, hide_search={}, has_header={}",
-                num_actions, hide_search, has_header
-            ),
-        );
-
-        let new_height_f32 = compute_popup_height(dialog);
-        let new_width_f32 = current_actions_window_width();
-
-        let update_result = handle.update(cx, |_this, window, cx| {
-            let current_bounds = window.bounds();
-            let current_height_f32: f32 = current_bounds.size.height.into();
-            let current_width_f32: f32 = current_bounds.size.width.into();
-
-            let position = get_actions_window_position();
-            log_actions_popup_resize("resize_requested", position, current_bounds, new_height_f32);
-
-            // Skip if height hasn't changed
-            if (current_height_f32 - new_height_f32).abs() < 1.0
-                && (current_width_f32 - new_width_f32).abs() < 1.0
-            {
-                tracing::debug!(
-                    target: "ACTIONS_POPUP",
-                    stage = "resize_skipped",
-                    position = ?position,
-                    current_height_px = current_height_f32,
-                    target_height_px = new_height_f32,
-                    reason = "height_unchanged",
-                    "actions popup resize skipped"
-                );
-                return;
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                use cocoa::appkit::NSScreen;
-                use cocoa::base::nil;
-                use objc::{msg_send, sel, sel_impl};
-
-                // SAFETY: accessing NSApp and iterating its windows array to find our
-                // popup by matching dimensions, then resizing via setFrame:display:animate:.
-                // All ObjC pointers are nil-checked before use.
-                unsafe {
-                    let ns_app: cocoa::base::id = cocoa::appkit::NSApp();
-                    let windows: cocoa::base::id = msg_send![ns_app, windows];
-                    let count: usize = msg_send![windows, count];
-
-                    let mut found = false;
-                    for i in 0..count {
-                        let ns_window: cocoa::base::id = msg_send![windows, objectAtIndex: i];
-                        if ns_window == nil {
-                            continue;
-                        }
-
-                        let frame: cocoa::foundation::NSRect = msg_send![ns_window, frame];
-
-                        if (frame.size.width - current_width_f32 as f64).abs() < 2.0
-                            && (frame.size.height - current_height_f32 as f64).abs() < 2.0
-                        {
-                            let window_screen: cocoa::base::id = msg_send![ns_window, screen];
-                            if window_screen == nil {
-                                let screens: cocoa::base::id = NSScreen::screens(nil);
-                                let _primary: cocoa::base::id =
-                                    msg_send![screens, objectAtIndex: 0u64];
-                            }
-
-                            let new_frame = resized_actions_window_frame(
-                                frame,
-                                new_height_f32,
-                                new_width_f32,
-                                position,
-                            );
-
-                            let _: () = msg_send![
-                                ns_window,
-                                setFrame:new_frame
-                                display:true
-                                animate:ACTIONS_WINDOW_RESIZE_ANIMATE
-                            ];
-
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        tracing::warn!(
-                            target: "ACTIONS_POPUP",
-                            stage = "resize_window_match_failed",
-                            position = ?position,
-                            current_width_px = current_width_f32,
-                            current_height_px = current_height_f32,
-                            target_height_px = new_height_f32,
-                            window_count = count,
-                            "actions popup NSWindow lookup failed"
-                        );
-                    }
-                }
-            }
-
-            // Also tell GPUI about the new size
-            window.resize(Size {
-                width: px(new_width_f32),
-                height: px(new_height_f32),
-            });
-
-            // Refresh automation registry bounds so `listAutomationWindows` /
-            // `inspectAutomationWindow` report the live popup frame after resize.
-            // See Pass #1 tool-gap note in `audits/afk/log.md`.
-            let post_resize_bounds = resized_actions_window_gpui_bounds(
-                current_bounds,
-                new_height_f32,
-                new_width_f32,
-                position,
-            );
-            publish_actions_popup_bounds_to_registry(post_resize_bounds);
-            update_actions_popup_automation_snapshot_for_resize(post_resize_bounds, position);
-
-            cx.notify();
-        });
-
-        if let Err(error) = update_result {
-            crate::logging::log(
-                "WARN",
-                &format!(
-                    "ACTIONS_WINDOW_OP_FAIL resize_actions_window update failed: operation=resize error={error:?}"
-                ),
-            );
-            crate::logging::log_debug(
-                "ACTIONS",
-                &format!(
-                    "ACTIONS_WINDOW_OP_FAIL resize_actions_window context: num_actions={}, hide_search={}, has_header={}, target_height={:.0}",
-                    num_actions, hide_search, has_header, new_height_f32
-                ),
-            );
-        }
-
-        crate::logging::log(
-            "ACTIONS",
-            &format!(
-                "Resized actions window: {} items, height={:.0}",
-                num_actions, new_height_f32
-            ),
-        );
-
-        let dialog_for_receipt = dialog_entity.read(cx);
-        let section_header_count =
-            if dialog_for_receipt.config.section_style == SectionStyle::Headers {
-                count_section_headers(
-                    &dialog_for_receipt.actions,
-                    &dialog_for_receipt.filtered_actions,
-                )
-            } else {
-                0
-            };
-        emit_actions_popup_event(
-            ActionsPopupEvent::Resized,
-            None,
-            Some(get_actions_window_position()),
-            Some(num_actions),
-            Some(section_header_count),
-            Some(new_height_f32),
-        );
-    }
-}
 
 #[cfg(test)]
 mod resize_instant_tests {
@@ -3003,26 +2460,6 @@ mod actions_popup_geometry_tests {
     }
 
     #[test]
-    fn top_anchored_resize_keeps_top_edge_fixed() {
-        assert_eq!(
-            resized_actions_window_origin_y(94.0, 180.0, 216.0, WindowPosition::TopCenter),
-            58.0
-        );
-        assert_eq!(
-            resized_actions_window_origin_y(94.0, 180.0, 216.0, WindowPosition::TopRight),
-            58.0
-        );
-    }
-
-    #[test]
-    fn bottom_anchored_resize_keeps_bottom_edge_fixed() {
-        assert_eq!(
-            resized_actions_window_origin_y(42.0, 180.0, 216.0, WindowPosition::BottomRight),
-            42.0
-        );
-    }
-
-    #[test]
     fn placement_receipt_captures_correct_pinned_edge() {
         let receipt = actions_popup_placement_receipt(
             test_main_window_bounds(),
@@ -3056,29 +2493,5 @@ mod actions_popup_geometry_tests {
         let h: f32 = bounds.size.height.into();
         assert_eq!(w, 320.0);
         assert_eq!(h, 180.0);
-    }
-
-    #[test]
-    fn resize_paths_use_shared_geometry_helpers() {
-        let source = std::fs::read_to_string("src/actions/window.rs")
-            .expect("Failed to read src/actions/window.rs");
-
-        let direct_start = source
-            .find("pub fn resize_actions_window_direct(")
-            .expect("resize_actions_window_direct not found");
-        let direct_body = &source[direct_start..];
-        assert!(
-            direct_body.contains("resized_actions_window_frame("),
-            "resize_actions_window_direct must use resized_actions_window_frame helper"
-        );
-
-        let indirect_start = source
-            .find("pub fn resize_actions_window(")
-            .expect("resize_actions_window not found");
-        let indirect_body = &source[indirect_start..];
-        assert!(
-            indirect_body.contains("resized_actions_window_frame("),
-            "resize_actions_window must use resized_actions_window_frame helper"
-        );
     }
 }

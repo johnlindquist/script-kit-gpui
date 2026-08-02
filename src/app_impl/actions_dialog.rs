@@ -140,7 +140,6 @@ impl ScriptListApp {
                 // nothing persists until a model is chosen.
                 crate::actions::notify_actions_window(cx);
                 if let Some(dialog) = self.actions_dialog.as_ref() {
-                    crate::actions::resize_actions_window(cx, dialog);
                     let (route_id, search_placeholder, route_depth, escape_hint) = {
                         let dialog_ref = dialog.read(cx);
                         (
@@ -1092,7 +1091,6 @@ impl ScriptListApp {
                     // — nothing persists until a model is chosen, because the
                     // provider is encoded in the namespaced model id.
                     crate::actions::notify_actions_window(cx);
-                    crate::actions::resize_actions_window(cx, dialog);
                     let (route_id, search_placeholder, route_depth, escape_hint) = {
                         let dialog_ref = dialog.read(cx);
                         (
@@ -1144,7 +1142,6 @@ impl ScriptListApp {
                         d.sync_search_input_from_model(window, cx);
                     });
                     crate::actions::notify_actions_window(cx);
-                    crate::actions::resize_actions_window(cx, dialog);
                     let (route_id, search_placeholder, route_depth, escape_hint) = {
                         let dialog_ref = dialog.read(cx);
                         (
@@ -1181,7 +1178,6 @@ impl ScriptListApp {
                     d.delete_previous_search_word(window, cx);
                 });
                 crate::actions::notify_actions_window(cx);
-                crate::actions::resize_actions_window(cx, dialog);
                 return ActionsRoute::Handled;
             }
             if !modifiers.platform && !modifiers.control {
@@ -1189,7 +1185,6 @@ impl ScriptListApp {
                     d.backspace_search_input(window, cx);
                 });
                 crate::actions::notify_actions_window(cx);
-                crate::actions::resize_actions_window(cx, dialog);
                 return ActionsRoute::Handled;
             }
         }
@@ -1225,7 +1220,6 @@ impl ScriptListApp {
                     d.insert_search_text(ch.to_string(), window, cx);
                 });
                 crate::actions::notify_actions_window(cx);
-                crate::actions::resize_actions_window(cx, dialog);
                 return ActionsRoute::Handled;
             }
         }
@@ -1258,7 +1252,6 @@ impl ScriptListApp {
                         d.sync_search_input_from_model(window, cx);
                     });
                     crate::actions::notify_actions_window(cx);
-                    crate::actions::resize_actions_window(cx, dialog);
                     let (route_id, search_placeholder, route_depth, escape_hint) = {
                         let dialog_ref = dialog.read(cx);
                         (
@@ -1308,7 +1301,6 @@ impl ScriptListApp {
                 d.paste_search_input(window, cx);
             });
             crate::actions::notify_actions_window(cx);
-            crate::actions::resize_actions_window(cx, dialog);
             return ActionsRoute::Handled;
         }
 
@@ -1338,7 +1330,6 @@ impl ScriptListApp {
                 }
             });
             crate::actions::notify_actions_window(cx);
-            crate::actions::resize_actions_window(cx, dialog);
             return ActionsRoute::Handled;
         }
 

@@ -1066,7 +1066,7 @@ impl ScriptListApp {
                     });
                 } else {
                     dialog.set_config(crate::actions::ActionsDialogConfig {
-                        search_position: crate::actions::SearchPosition::Bottom,
+                        search_position: crate::actions::SearchPosition::Top,
                         section_style: crate::actions::SectionStyle::Headers,
                         anchor: crate::actions::AnchorPosition::Bottom,
                         search_placeholder: script_info.as_ref().map(|script| script.name.clone()),
@@ -1201,7 +1201,7 @@ impl ScriptListApp {
             search_position: if is_mini {
                 crate::actions::SearchPosition::Top
             } else {
-                crate::actions::SearchPosition::Bottom
+                crate::actions::SearchPosition::Top
             },
             section_style: crate::actions::SectionStyle::Headers,
             anchor: if is_mini {
@@ -1382,7 +1382,7 @@ impl ScriptListApp {
             search_position: if is_mini {
                 crate::actions::SearchPosition::Top
             } else {
-                crate::actions::SearchPosition::Bottom
+                crate::actions::SearchPosition::Top
             },
             section_style: crate::actions::SectionStyle::Headers,
             anchor: if is_mini {

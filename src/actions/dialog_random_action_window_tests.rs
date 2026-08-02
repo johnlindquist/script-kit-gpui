@@ -1309,11 +1309,7 @@ fn section_header_count_matches_for_ai_actions() {
 
 #[test]
 fn search_position_all_variants_distinct() {
-    let variants = [
-        SearchPosition::Bottom,
-        SearchPosition::Top,
-        SearchPosition::Hidden,
-    ];
+    let variants = [SearchPosition::Top, SearchPosition::Hidden];
     for (i, a) in variants.iter().enumerate() {
         for (j, b) in variants.iter().enumerate() {
             if i != j {

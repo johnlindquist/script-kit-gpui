@@ -622,6 +622,42 @@ pub(super) fn actions_dialog_scrollbar_viewport_height(
     total_content_height.min(available_viewport_height)
 }
 
+/// List viewport inside an already-sized shell. Unlike the inline/dynamic
+/// helper above, this intentionally does not clamp to content height: short
+/// and empty results retain the same pointer target and outer popup bounds.
+pub(super) fn actions_dialog_fixed_shell_viewport_height(
+    shell_height: f32,
+    show_search: bool,
+    has_header: bool,
+    show_footer: bool,
+) -> f32 {
+    let tokens = crate::designs::current_actions_popup_theme();
+    let search_height = if show_search {
+        tokens.search.height
+    } else {
+        0.0
+    };
+    let header_height = if has_header {
+        tokens.context_header.height
+    } else {
+        0.0
+    };
+    let footer_height = if show_footer {
+        ACTIONS_DIALOG_FOOTER_HEIGHT
+    } else {
+        0.0
+    };
+    let list_padding_height = tokens.list.padding_top + tokens.list.padding_bottom;
+
+    (shell_height
+        - tokens.shell.border_height
+        - search_height
+        - header_height
+        - footer_height
+        - list_padding_height)
+        .max(0.0)
+}
+
 pub(super) fn actions_dialog_revealed_scroll_top(
     current_top: f32,
     viewport_height: f32,
@@ -674,6 +710,24 @@ impl ActionsDialogRouteState {
             selected_action_id,
         }
     }
+}
+
+/// Immutable inputs used to size one detached Actions shell at open time.
+///
+/// The snapshot intentionally excludes live filter text and child-route state.
+/// Once attached, all content changes reflow or scroll inside the resulting
+/// outer bounds for the lifetime of that popup.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ActionsDialogShellSizingSnapshot {
+    pub route_id: Option<String>,
+    pub action_count: usize,
+    pub section_header_count: usize,
+    pub search_visible: bool,
+    pub context_header_visible: bool,
+    pub footer_visible: bool,
+    pub max_height_px: f32,
+    pub row_height_px: f32,
 }
 
 /// The result of pressing Enter (or clicking) on the selected action.
@@ -737,7 +791,7 @@ pub(crate) struct ActionsHostContextSnapshot {
 ///
 /// # Configuration
 /// Use `ActionsDialogConfig` to customize appearance:
-/// - `search_position`: Top (AI chat style) or Bottom (main menu style)
+/// - `search_position`: Top for searchable Actions, or Hidden for external search
 /// - `section_style`: Headers (text labels) or Separators (subtle lines)
 /// - `anchor`: Top (list grows down) or Bottom (list grows up)
 /// - `show_icons`: Display icons next to actions
@@ -794,11 +848,12 @@ pub struct ActionsDialog {
     /// When true, skip track_focus in render (parent handles focus, e.g., ActionsWindow)
     pub skip_track_focus: bool,
     /// When true, the container fills the hosting window's bounds instead of
-    /// its fixed shell width/height. Set by the detached ActionsWindow so the
-    /// list reflows WITH the window during the glass grow-in morph — a fixed,
-    /// left-anchored shell leaves dead space on the growing edge
-    /// (frame-measured user report).
+    /// its token-derived inline shell. Detached Actions uses this so GPUI content
+    /// reflows with the calibrated native grow-in presentation.
     pub fill_window_bounds: bool,
+    /// Outer shell height frozen from the root, unfiltered route at open.
+    /// Content/filter/route mutations never rewrite this value.
+    fixed_shell_height_px: Option<f32>,
     /// When true, reuse the main window vibrancy alpha for the dialog container.
     /// This is for detached popup-window actions surfaces that should read like the
     /// same background/material stack as their parent window.
@@ -877,6 +932,63 @@ impl ActionsDialog {
         self.config.show_context_header && self.context_title.is_some()
     }
 
+    /// One canonical visibility predicate for rendering, focus, input setup,
+    /// geometry, and automation. Hidden/external-search variants never install
+    /// or focus a local input owner.
+    pub(crate) fn search_is_visible(&self) -> bool {
+        matches!(self.config.search_position, SearchPosition::Top) && !self.hide_search
+    }
+
+    /// Snapshot the root, unfiltered content that owns this popup lifetime's
+    /// outer shell size. A currently visible child route never rebases it.
+    pub(crate) fn opening_shell_sizing_snapshot(&self) -> ActionsDialogShellSizingSnapshot {
+        let (route_id, root_actions, root_context_title) =
+            if let Some(root) = self.route_stack.first() {
+                let mut actions = root.route.actions.clone();
+                append_disabled_action_test_fixture(&mut actions);
+                (
+                    Some(root.route.id.clone()),
+                    actions,
+                    root.route.context_title.as_ref(),
+                )
+            } else {
+                (None, self.actions.clone(), self.context_title.as_ref())
+            };
+        let root_indices: Vec<usize> = (0..root_actions.len()).collect();
+        let section_header_count = if self.config.section_style == SectionStyle::Headers {
+            super::window::count_section_headers(&root_actions, &root_indices)
+        } else {
+            0
+        };
+
+        ActionsDialogShellSizingSnapshot {
+            route_id,
+            action_count: root_actions.len(),
+            section_header_count,
+            search_visible: self.search_is_visible(),
+            context_header_visible: self.config.show_context_header
+                && root_context_title.is_some()
+                && actions_dialog_default_style().show_header,
+            footer_visible: self.config.show_footer,
+            max_height_px: self.config.max_height,
+            row_height_px: self.effective_row_height(),
+        }
+    }
+
+    pub(crate) fn attach_to_fixed_shell(&mut self, height_px: f32) {
+        self.fill_window_bounds = true;
+        self.fixed_shell_height_px = Some(height_px);
+    }
+
+    pub(crate) fn release_fixed_shell(&mut self) {
+        self.fill_window_bounds = false;
+        self.fixed_shell_height_px = None;
+    }
+
+    pub(crate) fn fixed_shell_height_px(&self) -> Option<f32> {
+        self.fixed_shell_height_px
+    }
+
     /// Row height for this host's action rows.
     ///
     /// Switcher-style hosts (`config.show_subtitles`) render two-line rows
@@ -928,15 +1040,24 @@ impl ActionsDialog {
     }
 
     fn actions_scroll_viewport_height(&self, row_height: f32) -> f32 {
-        let show_search =
-            !matches!(self.config.search_position, SearchPosition::Hidden) && !self.hide_search;
-        actions_dialog_scrollbar_viewport_height(
-            self.actions_scroll_content_height(row_height),
-            show_search,
-            self.shows_context_header() && actions_dialog_default_style().show_header,
-            self.config.show_footer,
-            self.config.max_height,
-        )
+        let show_search = self.search_is_visible();
+        let has_header = self.shows_context_header() && actions_dialog_default_style().show_header;
+        if let Some(shell_height) = self.fixed_shell_height_px {
+            actions_dialog_fixed_shell_viewport_height(
+                shell_height,
+                show_search,
+                has_header,
+                self.config.show_footer,
+            )
+        } else {
+            actions_dialog_scrollbar_viewport_height(
+                self.actions_scroll_content_height(row_height),
+                show_search,
+                has_header,
+                self.config.show_footer,
+                self.config.max_height,
+            )
+        }
     }
 
     fn scroll_top_y_for_item_index(&self, item_index: usize, row_height: f32) -> f32 {
@@ -1033,8 +1154,7 @@ impl ActionsDialog {
     #[cfg(feature = "storybook")]
     pub fn build_presentation_model(&self) -> crate::storybook::ActionsDialogPresentationModel {
         let search_placeholder = self.search_placeholder_text();
-        let show_search =
-            !matches!(self.config.search_position, SearchPosition::Hidden) && !self.hide_search;
+        let show_search = self.search_is_visible();
         let search_at_top = matches!(self.config.search_position, SearchPosition::Top);
 
         let items = self
@@ -1179,6 +1299,7 @@ impl ActionsDialog {
             config,
             skip_track_focus: false,
             fill_window_bounds: false,
+            fixed_shell_height_px: None,
             match_main_window_background: true,
             on_close: None,
             on_activation: None,
@@ -2021,7 +2142,7 @@ impl ActionsDialog {
     /// Create ActionsDialog with custom configuration and actions
     ///
     /// Use this for contexts like AI chat that need different appearance:
-    /// - Search at top instead of bottom
+    /// - Canonical top search or intentionally hidden search
     /// - Section headers instead of separators
     /// - Icons next to actions
     pub fn with_config(
@@ -2112,9 +2233,7 @@ impl ActionsDialog {
                     .get("generation")
                     .and_then(serde_json::Value::as_u64)
             });
-        let show_search =
-            !matches!(self.config.search_position, SearchPosition::Hidden) && !self.hide_search;
-        let search_at_top = matches!(self.config.search_position, SearchPosition::Top);
+        let show_search = self.search_is_visible();
         let popup_theme = crate::designs::current_actions_popup_theme();
         let search_height = if show_search {
             popup_theme.search.height
@@ -2126,7 +2245,7 @@ impl ActionsDialog {
         } else {
             0.0
         };
-        let list_top = if search_at_top { search_height } else { 0.0 } + header_height;
+        let list_top = search_height + header_height;
 
         let mut raw_content_height = 0.0;
         let mut action_count = 0_usize;
@@ -2146,6 +2265,16 @@ impl ActionsDialog {
 
         let content_height =
             raw_content_height.max(self.min_scroll_content_height(style.row_height));
+        let dynamic_shell_height = super::window::actions_window_dynamic_height(
+            action_count,
+            section_count,
+            !show_search,
+            header_height > 0.0,
+            self.config.show_footer,
+            self.config.max_height,
+            style.row_height,
+        );
+        let shell_height = self.fixed_shell_height_px.unwrap_or(dynamic_shell_height);
         let metrics = self.scrollbar_metrics(style.row_height);
         let viewport_height = metrics.viewport_height;
         let scroll_top_item_index = self.list_state.logical_scroll_top().item_ix;
@@ -2354,13 +2483,15 @@ impl ActionsDialog {
             "stopReason": null,
             "quality": "model",
             "popupWidth": POPUP_WIDTH,
+            "shellHeight": shell_height,
+            "fixedShellHeight": self.fixed_shell_height_px,
             "listViewportRect": Self::devtools_rect(0.0, list_top, POPUP_WIDTH, viewport_height),
             "viewport": {
-                "containerBounds": Self::devtools_rect(0.0, 0.0, POPUP_WIDTH, list_top + viewport_height),
+                "containerBounds": Self::devtools_rect(0.0, 0.0, POPUP_WIDTH, shell_height),
                 "searchBounds": if show_search {
                     Some(Self::devtools_rect(
                         0.0,
-                        if search_at_top { 0.0 } else { list_top + viewport_height },
+                        0.0,
                         POPUP_WIDTH,
                         search_height,
                     ))
@@ -2370,7 +2501,7 @@ impl ActionsDialog {
                 "contextHeaderBounds": if header_height > 0.0 {
                     Some(Self::devtools_rect(
                         0.0,
-                        if search_at_top { search_height } else { 0.0 },
+                        search_height,
                         POPUP_WIDTH,
                         header_height,
                     ))
@@ -2448,9 +2579,7 @@ impl ActionsDialog {
     fn update_hovered_row_from_popup_y(&mut self, popup_y: f32, cx: &mut Context<Self>) {
         let mut style = actions_dialog_default_style();
         style.row_height = self.effective_row_height();
-        let show_search =
-            !matches!(self.config.search_position, SearchPosition::Hidden) && !self.hide_search;
-        let search_at_top = matches!(self.config.search_position, SearchPosition::Top);
+        let show_search = self.search_is_visible();
         let popup_theme = crate::designs::current_actions_popup_theme();
         let search_height = if show_search {
             popup_theme.search.height
@@ -2462,7 +2591,7 @@ impl ActionsDialog {
         } else {
             0.0
         };
-        let list_top = if search_at_top { search_height } else { 0.0 } + header_height;
+        let list_top = search_height + header_height;
         let mut content_y = popup_y - list_top;
         if content_y < 0.0 {
             if self.hovered_row.take().is_some() {
@@ -2812,18 +2941,23 @@ impl ActionsDialog {
             })
             .collect();
 
-        let search_input_state = self.search_input.as_ref().map(|input| {
-            let input = input.read(cx);
-            let selection = input.selection();
-            serde_json::json!({
-                "owner": "gpuiComponentInputState",
-                "valueLength": input.value().chars().count(),
-                "valueFingerprint": Self::devtools_text_fingerprint(input.value().as_ref()),
-                "valueInSync": input.value().as_ref() == self.search_text,
-                "selectionStart": selection.start,
-                "selectionEnd": selection.end,
+        let search_input_state = self
+            .search_is_visible()
+            .then(|| {
+                self.search_input.as_ref().map(|input| {
+                    let input = input.read(cx);
+                    let selection = input.selection();
+                    serde_json::json!({
+                        "owner": "gpuiComponentInputState",
+                        "valueLength": input.value().chars().count(),
+                        "valueFingerprint": Self::devtools_text_fingerprint(input.value().as_ref()),
+                        "valueInSync": input.value().as_ref() == self.search_text,
+                        "selectionStart": selection.start,
+                        "selectionEnd": selection.end,
+                    })
+                })
             })
-        });
+            .flatten();
 
         let mut state = serde_json::json!({
             "schemaVersion": 1,
@@ -3207,7 +3341,7 @@ impl ActionsDialog {
 
     /// Install the entity-backed Actions search input once a host window exists.
     pub(crate) fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_input.is_some() || self.hide_search {
+        if self.search_input.is_some() || !self.search_is_visible() {
             return;
         }
         let input = cx.new(|cx| {
@@ -3234,6 +3368,9 @@ impl ActionsDialog {
     }
 
     pub(crate) fn focus_search_input(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.search_is_visible() {
+            return false;
+        }
         let Some(input) = self.search_input.as_ref() else {
             return false;
         };
@@ -3242,9 +3379,11 @@ impl ActionsDialog {
     }
 
     pub(crate) fn search_input_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
-        self.search_input
-            .as_ref()
-            .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        self.search_is_visible()
+            && self
+                .search_input
+                .as_ref()
+                .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// Reconcile route/automation model state into the real input owner.
@@ -4493,39 +4632,6 @@ impl Render for ActionsDialog {
             }
         };
 
-        let mut input_container = div()
-            .w_full() // Fill the container, which owns the shell width
-            .h(px(popup_theme.search.height)) // Fixed height for the input row
-            .min_h(px(popup_theme.search.height))
-            .max_h(px(popup_theme.search.height))
-            .overflow_hidden() // Prevent any content from causing shifts
-            .px(px(popup_theme.search.padding_x))
-            .py(px(
-                spacing.item_padding_y + popup_theme.search.padding_y_extra
-            ))
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(build_search_content());
-        // Drill-down depth is otherwise invisible: surface the Escape
-        // contract ("Esc Back") inline at the search row's right edge while a
-        // parent route exists (audit finding #28). The dialog stays
-        // footerless by contract, so this is the only chrome that may change
-        // with route depth.
-        if self.can_pop_route() {
-            input_container = input_container.child(
-                div()
-                    .flex_none()
-                    .ml(px(popup_theme.search.prefix_gap))
-                    .text_size(px(popup_theme.search.font_size))
-                    .text_color(hint_text_color)
-                    .child(self.route_hint_label()),
-            );
-        }
-        if style.show_search_divider {
-            input_container = input_container.border_t_1().border_color(separator_color);
-        }
-
         // Render action list using list() for variable-height items
         // Section headers are 22px, action items are 36px
         //
@@ -4846,10 +4952,7 @@ impl Render for ActionsDialog {
         let (main_bg, container_border, container_text) = self.get_container_colors(&colors);
         let use_vibrancy = self.theme.is_vibrancy_enabled();
 
-        // Get search position from config before height calculations
-        let search_at_top = matches!(self.config.search_position, SearchPosition::Top);
-        let show_search =
-            !matches!(self.config.search_position, SearchPosition::Hidden) && !self.hide_search;
+        let show_search = self.search_is_visible();
         // Count items and section headers separately for accurate height calculation
         let mut section_header_count = 0_usize;
         let mut action_item_count = 0_usize;
@@ -4864,7 +4967,7 @@ impl Render for ActionsDialog {
         // NSWindow (`compute_popup_height` in window.rs), so the rendered
         // interior can never drift from the window bounds. Action dialogs are
         // footerless by contract (`config.show_footer` is forced off).
-        let total_height = super::window::actions_window_dynamic_height(
+        let dynamic_height = super::window::actions_window_dynamic_height(
             action_item_count,
             section_header_count,
             !show_search,
@@ -4873,6 +4976,7 @@ impl Render for ActionsDialog {
             self.config.max_height,
             self.effective_row_height(),
         );
+        let total_height = self.fixed_shell_height_px.unwrap_or(dynamic_height);
 
         // Build header row (section header style - non-interactive label)
         // Styled to match render_section_header() from list_item.rs:
@@ -4925,9 +5029,9 @@ impl Render for ActionsDialog {
             &style,
         ));
 
-        // Top-positioned search input - clean Raycast-style matching the bottom search
-        // No boxed input field, no ⌘K prefix - just text on a clean background with bottom separator
-        let input_container_top = if search_at_top && show_search {
+        // Canonical top-positioned search input shared by every searchable Actions surface.
+        // No boxed input field or ⌘K prefix: text sits on clean chrome above the list separator.
+        let input_container_top = if show_search {
             Some({
                 let mut top_input = div()
                     .w_full() // Fill the container, which owns the shell width
@@ -4943,6 +5047,18 @@ impl Render for ActionsDialog {
                     .flex_row()
                     .items_center()
                     .child(build_search_content());
+                // Drill-down depth is otherwise invisible: surface the Escape
+                // contract inline at the search row's trailing edge.
+                if self.can_pop_route() {
+                    top_input = top_input.child(
+                        div()
+                            .flex_none()
+                            .ml(px(popup_theme.search.prefix_gap))
+                            .text_size(px(popup_theme.search.font_size))
+                            .text_color(hint_text_color)
+                            .child(self.route_hint_label()),
+                    );
+                }
                 if style.show_search_divider {
                     top_input = top_input.border_b_1().border_color(separator_color);
                 }
@@ -4954,13 +5070,12 @@ impl Render for ActionsDialog {
 
         let mut container = div().flex().flex_col();
         if self.fill_window_bounds {
-            // Width tracks the hosting window (glass morph reflow); height
-            // stays content-derived — the detached window can be taller than
-            // the content and a full-height stretch starves the list layout.
-            container = container.w_full().h(px(total_height));
+            // Detached Actions fills the hosting bounds. The native window's
+            // outer size is frozen at open; all later content mutations reflow
+            // or scroll inside this full-height shell.
+            container = container.w_full().h_full();
         } else {
             container = container.w(px(popup_theme.shell.width)).h(px(total_height));
-            // Use calculated height including footer
         }
         let mut container = container
             .when(!use_vibrancy, |d| d.bg(main_bg))
@@ -4989,9 +5104,6 @@ impl Render for ActionsDialog {
             container = container.child(header);
         }
         container = container.child(actions_container);
-        if show_search && !search_at_top {
-            container = container.child(input_container);
-        }
         container
     }
 }
@@ -5007,7 +5119,7 @@ impl Render for ActionsDialog {
 pub(crate) struct ActionsDialogChromeAudit {
     /// `"sharp"` (no rounded corners), `"rounded"`, or `"rounded_glass"`.
     pub container_mode: &'static str,
-    /// `"top"` or `"bottom"`.
+    /// `"top"` or `"hidden"`.
     pub search_position: &'static str,
     /// Whether the search row renders a visible border/divider.
     pub shows_search_divider: bool,
@@ -5089,7 +5201,6 @@ impl std::fmt::Display for ActionsDialogRuntimeViolation {
 fn actions_dialog_search_position_name(value: &super::types::SearchPosition) -> &'static str {
     match value {
         super::types::SearchPosition::Top => "top",
-        super::types::SearchPosition::Bottom => "bottom",
         super::types::SearchPosition::Hidden => "hidden",
     }
 }
@@ -5180,7 +5291,7 @@ impl ActionsDialogRuntimeAudit {
         expected: &ActionsDialogExpectedContract,
     ) -> Vec<ActionsDialogRuntimeViolation> {
         let mut violations = Vec::new();
-        if self.search_position != expected.search_position {
+        if self.search_position != expected.search_position && self.search_position != "hidden" {
             violations.push(ActionsDialogRuntimeViolation {
                 surface: self.surface,
                 field: "search_position",
@@ -5296,15 +5407,16 @@ fn emit_actions_dialog_runtime_audit(audit: &ActionsDialogRuntimeAudit) {
 mod tests {
     use super::{
         action_has_routable_shortcut, action_shortcut_parity_report, action_subtitle_for_display,
-        actions_dialog_revealed_scroll_top, actions_dialog_scrollbar_fade_duration,
-        actions_dialog_scrollbar_fade_opacity, actions_dialog_scrollbar_viewport_height,
-        clear_duplicate_action_shortcuts, displayed_action_keybinding_specs,
-        first_selectable_index, is_destructive_action, last_selectable_index,
-        matching_action_id_for_keystroke, matching_filtered_action_id_for_keystroke,
-        resolve_visible_action_shortcut, selectable_index_at_or_after,
-        selectable_index_at_or_before, should_render_section_separator,
-        visible_action_shortcut_bindings, ActionsDialog, ActionsDialogChromeAudit,
-        ActionsDialogRuntimeAudit, GroupedActionItem, MainListDisplayedActionShortcut,
+        actions_dialog_fixed_shell_viewport_height, actions_dialog_revealed_scroll_top,
+        actions_dialog_scrollbar_fade_duration, actions_dialog_scrollbar_fade_opacity,
+        actions_dialog_scrollbar_viewport_height, clear_duplicate_action_shortcuts,
+        displayed_action_keybinding_specs, first_selectable_index, is_destructive_action,
+        last_selectable_index, matching_action_id_for_keystroke,
+        matching_filtered_action_id_for_keystroke, resolve_visible_action_shortcut,
+        selectable_index_at_or_after, selectable_index_at_or_before,
+        should_render_section_separator, visible_action_shortcut_bindings, ActionsDialog,
+        ActionsDialogChromeAudit, ActionsDialogRuntimeAudit, GroupedActionItem,
+        MainListDisplayedActionShortcut,
     };
     use crate::actions::types::{Action, ActionCategory, ScriptInfo, SectionStyle};
     use crate::menu_syntax::{MenuSyntaxAction, MenuSyntaxActionKind};
@@ -5565,6 +5677,34 @@ mod tests {
         );
 
         assert_eq!(viewport_height, 120.0);
+    }
+
+    #[test]
+    fn ux13_fixed_shell_viewport_does_not_clamp_to_short_or_empty_content() {
+        let shell_height = 300.0;
+        let viewport = actions_dialog_fixed_shell_viewport_height(shell_height, true, true, false);
+        let tokens = crate::designs::current_actions_popup_theme();
+        let expected = shell_height
+            - tokens.shell.border_height
+            - tokens.search.height
+            - tokens.context_header.height
+            - tokens.list.padding_top
+            - tokens.list.padding_bottom;
+
+        assert_eq!(viewport, expected);
+        assert!(
+            viewport > 120.0,
+            "short content must leave safe empty space"
+        );
+    }
+
+    #[test]
+    fn ux13_hidden_search_preserves_the_same_shell_for_external_filtering() {
+        let tokens = crate::designs::current_actions_popup_theme();
+        let searchable = actions_dialog_fixed_shell_viewport_height(300.0, true, false, false);
+        let hidden = actions_dialog_fixed_shell_viewport_height(300.0, false, false, false);
+
+        assert_eq!(hidden - searchable, tokens.search.height);
     }
 
     #[test]
@@ -6173,6 +6313,22 @@ mod actions_dialog_spec_tests {
                 .any(|v| v.field == "search_position"),
             "bottom search position should fail verification"
         );
+    }
+
+    #[test]
+    fn ux13_runtime_audit_accepts_intentionally_hidden_search() {
+        let audit = ActionsDialogRuntimeAudit {
+            surface: "external_search_surface",
+            search_position: "hidden",
+            section_mode: "headers",
+            shows_search_divider: false,
+            show_footer: false,
+            show_icons: false,
+            show_container_border: false,
+            footer_hint_count: 0,
+        };
+
+        assert!(audit.validate().is_empty());
     }
 
     #[test]

@@ -35,7 +35,6 @@ use super::dialog::{
 use super::types::{Action, ActionsDialogConfig, AnchorPosition, SearchPosition, SectionStyle};
 use super::window::{
     close_actions_window, is_actions_window_open, notify_actions_window, open_actions_window,
-    resize_actions_window,
 };
 use super::ActionsDialog;
 use crate::logging;
@@ -214,7 +213,6 @@ impl std::fmt::Display for CommandBarChromeViolation {
 fn command_bar_search_position_name(position: &SearchPosition) -> &'static str {
     match position {
         SearchPosition::Top => "top",
-        SearchPosition::Bottom => "bottom",
         SearchPosition::Hidden => "hidden",
     }
 }
@@ -276,7 +274,7 @@ impl CommandBarChromeAudit {
                     &mut violations,
                     self.surface,
                     "search_position",
-                    "bottom",
+                    "top",
                     self.search_position,
                 );
                 push_command_bar_violation_if_mismatch(
@@ -441,11 +439,11 @@ impl Default for CommandBarConfig {
 
 #[allow(dead_code)] // Public API - methods for future main menu and other integrations
 impl CommandBarConfig {
-    /// Create config for main menu style (search at bottom, headers)
+    /// Create config for main menu style (top search, bottom host anchor, headers).
     pub fn main_menu_style() -> Self {
         let config = Self {
             dialog_config: ActionsDialogConfig {
-                search_position: SearchPosition::Bottom,
+                search_position: SearchPosition::Top,
                 section_style: SectionStyle::Headers,
                 anchor: AnchorPosition::Bottom,
                 ..ActionsDialogConfig::default()
@@ -783,7 +781,6 @@ impl CommandBar {
 
             if self.is_open {
                 crate::actions::set_actions_dialog_search_text(dialog, String::new(), cx);
-                resize_actions_window(cx, dialog);
             }
         }
     }
@@ -1006,7 +1003,7 @@ impl CommandBar {
             dialog.update(cx, |d, cx| {
                 d.insert_search_text(ch.to_string(), window, cx);
             });
-            resize_actions_window(cx, dialog);
+            notify_actions_window(cx);
         }
     }
 
@@ -1016,7 +1013,7 @@ impl CommandBar {
             dialog.update(cx, |d, cx| {
                 d.backspace_search_input(window, cx);
             });
-            resize_actions_window(cx, dialog);
+            notify_actions_window(cx);
         }
     }
 
@@ -1026,7 +1023,7 @@ impl CommandBar {
             dialog.update(cx, |d, cx| {
                 d.delete_previous_search_word(window, cx);
             });
-            resize_actions_window(cx, dialog);
+            notify_actions_window(cx);
         }
     }
 
@@ -1036,7 +1033,7 @@ impl CommandBar {
             dialog.update(cx, |d, cx| {
                 d.paste_search_input(window, cx);
             });
-            resize_actions_window(cx, dialog);
+            notify_actions_window(cx);
         }
     }
 
@@ -1398,7 +1395,7 @@ mod command_bar_config_tests {
         let config = CommandBarConfig::main_menu_style();
         assert!(matches!(
             config.dialog_config.search_position,
-            SearchPosition::Bottom
+            SearchPosition::Top
         ));
         assert!(matches!(
             config.dialog_config.section_style,
@@ -1443,7 +1440,7 @@ mod command_bar_config_tests {
     fn main_menu_style_emits_headers_contract() {
         let audit =
             CommandBarChromeAudit::from_config("main_menu", &CommandBarConfig::main_menu_style());
-        assert_eq!(audit.search_position, "bottom");
+        assert_eq!(audit.search_position, "top");
         assert_eq!(audit.section_mode, "headers");
         assert_eq!(audit.anchor, "bottom");
         assert!(audit.validate().is_empty());

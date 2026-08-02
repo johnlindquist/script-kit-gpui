@@ -18,7 +18,7 @@ pub use super::types::{
 };
 pub use super::window::{
     close_actions_window, is_actions_window, is_actions_window_open, notify_actions_window,
-    open_actions_window, resize_actions_window, WindowPosition,
+    open_actions_window, WindowPosition,
 };
 
 #[cfg(test)]

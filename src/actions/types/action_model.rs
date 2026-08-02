@@ -132,12 +132,10 @@ pub struct Action {
 #[allow(dead_code)] // Public API - will be used by AI window integration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchPosition {
-    /// Search input at top (AI chat style - list grows downward)
-    Top,
-    /// Search input at bottom (main menu style - list grows upward)
+    /// Canonical searchable Actions layout: input above the fixed list viewport.
     #[default]
-    Bottom,
-    /// No search input (external search handling)
+    Top,
+    /// No search input (external search handling).
     Hidden,
 }
 

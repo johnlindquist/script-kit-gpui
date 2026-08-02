@@ -867,11 +867,11 @@ mod from_dialog_builtin_action_validation_tests_21 {
     // ============================================================
 
     #[test]
-    fn batch21_config_default_search_bottom() {
+    fn batch21_config_default_search_top() {
         let c = CommandBarConfig::default();
         assert!(matches!(
             c.dialog_config.search_position,
-            SearchPosition::Bottom
+            SearchPosition::Top
         ));
     }
 
@@ -904,9 +904,9 @@ mod from_dialog_builtin_action_validation_tests_21 {
     // ============================================================
 
     #[test]
-    fn batch21_dialog_config_default_search_bottom() {
+    fn batch21_dialog_config_default_search_top() {
         let c = ActionsDialogConfig::default();
-        assert!(matches!(c.search_position, SearchPosition::Bottom));
+        assert!(matches!(c.search_position, SearchPosition::Top));
     }
 
     #[test]
@@ -2716,9 +2716,9 @@ mod from_dialog_builtin_action_validation_tests_22 {
     // ============================================================
 
     #[test]
-    fn batch22_command_bar_default_bottom_search() {
+    fn batch22_command_bar_default_top_search() {
         let cfg = CommandBarConfig::default();
-        assert_eq!(cfg.dialog_config.search_position, SearchPosition::Bottom);
+        assert_eq!(cfg.dialog_config.search_position, SearchPosition::Top);
     }
 
     #[test]
@@ -3000,9 +3000,9 @@ mod from_dialog_builtin_action_validation_tests_22 {
     // ============================================================
 
     #[test]
-    fn batch22_actions_dialog_config_default_search_bottom() {
+    fn batch22_actions_dialog_config_default_search_top() {
         let cfg = ActionsDialogConfig::default();
-        assert_eq!(cfg.search_position, SearchPosition::Bottom);
+        assert_eq!(cfg.search_position, SearchPosition::Top);
     }
 
     #[test]
@@ -5831,9 +5831,9 @@ mod from_dialog_builtin_action_validation_tests_24 {
     }
 
     #[test]
-    fn batch24_cmdbar_main_menu_search_bottom() {
+    fn batch24_cmdbar_main_menu_search_top() {
         let config = CommandBarConfig::main_menu_style();
-        assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+        assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
         assert!(!config.dialog_config.show_icons);
         assert!(!config.dialog_config.show_footer);
     }
@@ -10088,9 +10088,9 @@ mod from_dialog_builtin_action_validation_tests_28 {
     // =============================================================================
 
     #[test]
-    fn cat28_28_main_menu_search_bottom() {
+    fn cat28_28_main_menu_search_top() {
         let cfg = CommandBarConfig::main_menu_style();
-        assert_eq!(cfg.dialog_config.search_position, SearchPosition::Bottom);
+        assert_eq!(cfg.dialog_config.search_position, SearchPosition::Top);
     }
 
     #[test]

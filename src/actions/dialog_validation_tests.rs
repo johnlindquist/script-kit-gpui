@@ -543,7 +543,7 @@ fn test_popup_can_fit_at_least_5_items() {
 #[test]
 fn test_command_bar_config_default_values() {
     let config = CommandBarConfig::default();
-    assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+    assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
     assert_eq!(config.dialog_config.section_style, SectionStyle::Headers);
     assert_eq!(config.dialog_config.anchor, AnchorPosition::Bottom);
     assert!(!config.dialog_config.show_icons);
@@ -566,7 +566,7 @@ fn test_command_bar_config_ai_style_values() {
 #[test]
 fn test_command_bar_config_main_menu_style() {
     let config = CommandBarConfig::main_menu_style();
-    assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+    assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
     assert_eq!(config.dialog_config.section_style, SectionStyle::Headers);
     assert_eq!(config.dialog_config.anchor, AnchorPosition::Bottom);
     assert!(!config.dialog_config.show_icons);
@@ -1665,7 +1665,7 @@ fn test_all_clipboard_actions_use_script_context_category() {
 
 #[test]
 fn test_search_position_default() {
-    assert_eq!(SearchPosition::default(), SearchPosition::Bottom);
+    assert_eq!(SearchPosition::default(), SearchPosition::Top);
 }
 
 #[test]
@@ -1681,7 +1681,7 @@ fn test_anchor_position_default() {
 #[test]
 fn test_actions_dialog_config_default() {
     let config = ActionsDialogConfig::default();
-    assert_eq!(config.search_position, SearchPosition::Bottom);
+    assert_eq!(config.search_position, SearchPosition::Top);
     assert_eq!(config.section_style, SectionStyle::Headers);
     assert_eq!(config.anchor, AnchorPosition::Bottom);
     assert!(!config.show_icons);

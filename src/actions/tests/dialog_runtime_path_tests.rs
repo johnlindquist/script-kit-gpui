@@ -1,5 +1,7 @@
-use super::dialog::{ActionsDialog, GroupedActionItem};
-use super::types::{Action, ActionCallback, ActionCategory, ActionsDialogConfig, SectionStyle};
+use super::dialog::{ActionsDialog, ActionsDialogRoute, GroupedActionItem};
+use super::types::{
+    Action, ActionCallback, ActionCategory, ActionsDialogConfig, SearchPosition, SectionStyle,
+};
 use crate::{protocol::ProtocolAction, theme};
 use gpui::{App, AppContext, Entity};
 use gpui_platform::headless;
@@ -293,6 +295,105 @@ fn actions_search_edits_use_input_state_cursor_selection_and_history(
             });
         })
         .expect("Actions search test window remains available");
+}
+
+#[gpui::test]
+fn ux13_opening_shell_uses_root_unfiltered_actions_through_filter_and_routes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let root_actions = vec![
+        sample_action("alpha", "Alpha", Some("One")),
+        sample_action("beta", "Beta", Some("One")),
+        sample_action("gamma", "Gamma", Some("Two")),
+    ];
+    let dialog = cx.update(|cx| {
+        build_dialog_entity(
+            cx,
+            root_actions.clone(),
+            ActionsDialogConfig::default(),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+    });
+
+    cx.update(|cx| {
+        dialog.update(cx, |dialog, entity_cx| {
+            dialog.set_root_route(ActionsDialogRoute {
+                id: "root".to_string(),
+                actions: root_actions,
+                context_title: Some("Root".to_string()),
+                search_placeholder: None,
+                initial_selected_action_id: Some("alpha".to_string()),
+            });
+            let opening = dialog.opening_shell_sizing_snapshot();
+            assert_eq!(opening.route_id.as_deref(), Some("root"));
+            assert_eq!(opening.action_count, 3);
+            assert_eq!(opening.section_header_count, 2);
+            assert!(opening.search_visible);
+            assert!(opening.context_header_visible);
+
+            dialog.attach_to_fixed_shell(300.0);
+            dialog.set_search_text("no-match".to_string(), entity_cx);
+            assert!(dialog.filtered_actions.is_empty());
+            assert_eq!(dialog.fixed_shell_height_px(), Some(300.0));
+            assert_eq!(dialog.opening_shell_sizing_snapshot(), opening);
+
+            dialog.push_route(
+                ActionsDialogRoute {
+                    id: "child".to_string(),
+                    actions: vec![sample_action("child", "Child", None)],
+                    context_title: Some("Child".to_string()),
+                    search_placeholder: None,
+                    initial_selected_action_id: Some("child".to_string()),
+                },
+                entity_cx,
+            );
+            assert_eq!(dialog.route_depth(), 2);
+            assert_eq!(dialog.opening_shell_sizing_snapshot(), opening);
+            assert_eq!(dialog.fixed_shell_height_px(), Some(300.0));
+
+            dialog.release_fixed_shell();
+            assert_eq!(dialog.fixed_shell_height_px(), None);
+        });
+    });
+}
+
+#[gpui::test]
+fn ux13_hidden_search_never_installs_or_focuses_input(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let dialog_slot = Rc::new(RefCell::new(None));
+    let dialog_slot_for_window = Rc::clone(&dialog_slot);
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), move |window, cx| {
+            let dialog = build_dialog_entity(
+                cx,
+                vec![sample_action("alpha", "Alpha", None)],
+                ActionsDialogConfig {
+                    search_position: SearchPosition::Hidden,
+                    ..ActionsDialogConfig::default()
+                },
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            dialog.update(cx, |dialog, cx| {
+                dialog.ensure_search_input(window, cx);
+            });
+            *dialog_slot_for_window.borrow_mut() = Some(dialog);
+            cx.new(|_| gpui::Empty)
+        })
+        .expect("hidden Actions test window opens")
+    });
+    let dialog = dialog_slot.borrow().clone().expect("hidden dialog installed");
+
+    window
+        .update(cx, |_empty, window, cx| {
+            dialog.update(cx, |dialog, cx| {
+                assert!(!dialog.search_is_visible());
+                assert!(dialog.search_input.is_none());
+                assert!(!dialog.focus_search_input(window, cx));
+                assert!(!dialog.search_input_is_focused(window, cx));
+                assert!(!dialog.opening_shell_sizing_snapshot().search_visible);
+            });
+        })
+        .expect("hidden Actions test window remains available");
 }
 
 #[test]

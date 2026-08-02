@@ -535,7 +535,6 @@
                                     d.backspace_search_input(window, cx);
                                 });
                                 crate::actions::notify_actions_window(cx);
-                                crate::actions::resize_actions_window(cx, dialog);
                             }
                             cx.stop_propagation();
                             return;
@@ -550,8 +549,7 @@
                                             d.insert_search_text(ch.to_string(), window, cx);
                                         });
                                         crate::actions::notify_actions_window(cx);
-                                        crate::actions::resize_actions_window(cx, dialog);
-                                    }
+                                            }
                                     cx.stop_propagation();
                                 }
                             }

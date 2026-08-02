@@ -59,7 +59,6 @@ impl NotesApp {
         let Some(dialog) = bar.dialog().cloned() else {
             return;
         };
-        let resize_dialog = dialog.clone();
         let notes_app = cx.entity().downgrade();
         let notes_window = window.window_handle();
         let on_close_notes_app = notes_app.clone();
@@ -124,10 +123,8 @@ impl NotesApp {
                             }
                         });
                     }
-                    crate::actions::ActionsDialogActivation::DrillDownPushed { .. } => {
-                        crate::actions::resize_actions_window(cx, &resize_dialog);
-                    }
-                    crate::actions::ActionsDialogActivation::Blocked { .. }
+                    crate::actions::ActionsDialogActivation::DrillDownPushed { .. }
+                    | crate::actions::ActionsDialogActivation::Blocked { .. }
                     | crate::actions::ActionsDialogActivation::NoSelection => {}
                 }
             }));

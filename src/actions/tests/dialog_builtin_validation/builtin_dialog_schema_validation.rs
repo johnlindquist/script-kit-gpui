@@ -2554,11 +2554,11 @@ mod from_dialog_builtin_action_validation_tests_2 {
     }
 
     #[test]
-    fn command_bar_main_menu_has_search_bottom_and_separators() {
+    fn command_bar_main_menu_has_search_top_and_separators() {
         let config = CommandBarConfig::main_menu_style();
         assert!(matches!(
             config.dialog_config.search_position,
-            SearchPosition::Bottom
+            SearchPosition::Top
         ));
         assert!(matches!(
             config.dialog_config.section_style,
@@ -6793,7 +6793,7 @@ mod from_dialog_builtin_action_validation_tests_4 {
     #[test]
     fn command_bar_config_main_menu_style_fields() {
         let config = CommandBarConfig::main_menu_style();
-        assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+        assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
         assert_eq!(config.dialog_config.section_style, SectionStyle::Headers);
         assert!(!config.dialog_config.show_icons);
     }
@@ -8759,7 +8759,7 @@ mod from_dialog_builtin_action_validation_tests_5 {
         #[test]
         fn command_bar_config_main_menu_style_fields() {
             let config = CommandBarConfig::main_menu_style();
-            assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+            assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
             assert_eq!(config.dialog_config.section_style, SectionStyle::Headers);
             assert_eq!(config.dialog_config.anchor, AnchorPosition::Bottom);
             assert!(!config.dialog_config.show_icons);
@@ -11063,9 +11063,9 @@ mod from_dialog_builtin_action_validation_tests_6 {
         }
 
         #[test]
-        fn commandbar_main_menu_search_at_bottom() {
+        fn commandbar_main_menu_search_at_top() {
             let config = CommandBarConfig::main_menu_style();
-            assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+            assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
             assert_eq!(config.dialog_config.section_style, SectionStyle::Headers);
             assert!(!config.dialog_config.show_icons);
             assert!(!config.dialog_config.show_footer);
@@ -13229,11 +13229,11 @@ mod from_dialog_builtin_action_validation_tests_7 {
         }
 
         #[test]
-        fn command_bar_main_menu_search_bottom() {
+        fn command_bar_main_menu_search_top() {
             let config = CommandBarConfig::main_menu_style();
             assert_eq!(
                 config.dialog_config.search_position,
-                crate::actions::types::SearchPosition::Bottom
+                crate::actions::types::SearchPosition::Top
             );
         }
 
@@ -15389,7 +15389,7 @@ mod from_dialog_builtin_action_validation_tests_8 {
             assert!(config.close_on_escape);
             assert_eq!(
                 config.dialog_config.search_position,
-                crate::actions::types::SearchPosition::Bottom
+                crate::actions::types::SearchPosition::Top
             );
         }
 
@@ -15410,7 +15410,7 @@ mod from_dialog_builtin_action_validation_tests_8 {
             let config = CommandBarConfig::main_menu_style();
             assert_eq!(
                 config.dialog_config.search_position,
-                crate::actions::types::SearchPosition::Bottom
+                crate::actions::types::SearchPosition::Top
             );
             assert_eq!(config.dialog_config.section_style, SectionStyle::Headers);
             assert!(!config.dialog_config.show_icons);
@@ -16780,9 +16780,9 @@ mod from_dialog_builtin_action_validation_tests_9 {
         }
 
         #[test]
-        fn command_bar_config_main_menu_search_bottom() {
+        fn command_bar_config_main_menu_search_top() {
             let config = CommandBarConfig::main_menu_style();
-            assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+            assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
             assert_eq!(config.dialog_config.section_style, SectionStyle::Headers);
             assert!(!config.dialog_config.show_icons);
             assert!(!config.dialog_config.show_footer);
@@ -17847,7 +17847,7 @@ mod from_dialog_builtin_action_validation_tests_9 {
         #[test]
         fn actions_dialog_config_default_values() {
             let config = ActionsDialogConfig::default();
-            assert_eq!(config.search_position, SearchPosition::Bottom);
+            assert_eq!(config.search_position, SearchPosition::Top);
             assert_eq!(config.section_style, SectionStyle::Headers);
             assert_eq!(config.anchor, AnchorPosition::Bottom);
             assert!(!config.show_icons);
@@ -17855,9 +17855,8 @@ mod from_dialog_builtin_action_validation_tests_9 {
         }
 
         #[test]
-        fn search_position_hidden_not_eq_top_or_bottom() {
+        fn search_position_hidden_is_distinct_from_top() {
             assert_ne!(SearchPosition::Hidden, SearchPosition::Top);
-            assert_ne!(SearchPosition::Hidden, SearchPosition::Bottom);
         }
 
         #[test]
@@ -19234,9 +19233,9 @@ mod from_dialog_builtin_action_validation_tests_10 {
         // ========================================
 
         #[test]
-        fn actions_dialog_config_default_search_bottom() {
+        fn actions_dialog_config_default_search_top() {
             let config = ActionsDialogConfig::default();
-            assert_eq!(config.search_position, SearchPosition::Bottom);
+            assert_eq!(config.search_position, SearchPosition::Top);
         }
 
         #[test]
@@ -19430,9 +19429,9 @@ mod from_dialog_builtin_action_validation_tests_10 {
         }
 
         #[test]
-        fn command_bar_main_menu_search_bottom_separators() {
+        fn command_bar_main_menu_search_top_separators() {
             let c = CommandBarConfig::main_menu_style();
-            assert_eq!(c.dialog_config.search_position, SearchPosition::Bottom);
+            assert_eq!(c.dialog_config.search_position, SearchPosition::Top);
             assert_eq!(c.dialog_config.section_style, SectionStyle::Headers);
             assert!(!c.dialog_config.show_icons);
             assert!(!c.dialog_config.show_footer);

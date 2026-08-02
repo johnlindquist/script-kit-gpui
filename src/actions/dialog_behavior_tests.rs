@@ -316,7 +316,7 @@ fn command_bar_config_notes_style() {
 #[test]
 fn actions_dialog_config_default_values() {
     let config = ActionsDialogConfig::default();
-    assert!(matches!(config.search_position, SearchPosition::Bottom));
+    assert!(matches!(config.search_position, SearchPosition::Top));
     assert!(matches!(config.section_style, SectionStyle::Headers));
     assert!(matches!(config.anchor, AnchorPosition::Bottom));
     assert!(!config.show_icons);
@@ -823,7 +823,7 @@ fn action_category_partial_eq() {
 
 #[test]
 fn enum_defaults() {
-    assert!(matches!(SearchPosition::default(), SearchPosition::Bottom));
+    assert!(matches!(SearchPosition::default(), SearchPosition::Top));
     assert!(matches!(SectionStyle::default(), SectionStyle::Headers));
     assert!(matches!(AnchorPosition::default(), AnchorPosition::Bottom));
 }

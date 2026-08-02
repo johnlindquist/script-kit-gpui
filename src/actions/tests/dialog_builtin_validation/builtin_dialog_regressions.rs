@@ -1736,9 +1736,9 @@ mod from_dialog_builtin_action_validation_tests_33 {
     // =====================================================================
 
     #[test]
-    fn command_bar_main_menu_search_bottom() {
+    fn command_bar_main_menu_search_top() {
         let config = CommandBarConfig::main_menu_style();
-        assert_eq!(config.dialog_config.search_position, SearchPosition::Bottom);
+        assert_eq!(config.dialog_config.search_position, SearchPosition::Top);
     }
 
     #[test]
@@ -7941,11 +7941,11 @@ mod from_dialog_builtin_action_validation_tests_38 {
         // =========================================================================
 
         #[test]
-        fn actions_dialog_config_default_search_bottom() {
+        fn actions_dialog_config_default_search_top() {
             let cfg = crate::actions::types::ActionsDialogConfig::default();
             assert_eq!(
                 cfg.search_position,
-                crate::actions::types::SearchPosition::Bottom
+                crate::actions::types::SearchPosition::Top
             );
         }
 

@@ -1471,8 +1471,8 @@ fn global_actions_is_seeded() {
 // ============================================================================
 
 #[test]
-fn search_position_default_is_bottom() {
-    assert!(matches!(SearchPosition::default(), SearchPosition::Bottom));
+fn search_position_default_is_top() {
+    assert!(matches!(SearchPosition::default(), SearchPosition::Top));
 }
 
 #[test]
@@ -1488,7 +1488,7 @@ fn anchor_position_default_is_bottom() {
 #[test]
 fn actions_dialog_config_default_values() {
     let config = ActionsDialogConfig::default();
-    assert!(matches!(config.search_position, SearchPosition::Bottom));
+    assert!(matches!(config.search_position, SearchPosition::Top));
     assert!(matches!(config.section_style, SectionStyle::Headers));
     assert!(matches!(config.anchor, AnchorPosition::Bottom));
     assert!(!config.show_icons);

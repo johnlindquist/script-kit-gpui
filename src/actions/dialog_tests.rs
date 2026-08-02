@@ -419,7 +419,7 @@ fn score_fuzzy_match_subsequence_semantics() {
 #[test]
 fn action_config_default_values() {
     let config = super::types::ActionsDialogConfig::default();
-    assert_eq!(config.search_position, super::types::SearchPosition::Bottom);
+    assert_eq!(config.search_position, super::types::SearchPosition::Top);
     assert_eq!(config.section_style, SectionStyle::Headers);
     assert_eq!(config.anchor, super::types::AnchorPosition::Bottom);
     assert!(!config.show_icons);
@@ -486,7 +486,7 @@ fn config_change_requires_rebuild_when_section_style_changes() {
 #[test]
 fn config_change_does_not_require_rebuild_when_section_style_same() {
     let previous = ActionsDialogConfig {
-        search_position: super::types::SearchPosition::Bottom,
+        search_position: super::types::SearchPosition::Top,
         section_style: SectionStyle::Separators,
         ..ActionsDialogConfig::default()
     };
