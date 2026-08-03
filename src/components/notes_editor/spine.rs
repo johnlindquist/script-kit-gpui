@@ -556,6 +556,13 @@ where
                         )),
                 );
             }
+            crate::list_item::GroupedListItem::ReservedSectionSlot => {
+                rows = rows.child(div().h(px(
+                    crate::list_item::effective_first_section_header_height_for_theme(
+                        main_menu_theme,
+                    ),
+                )));
+            }
             crate::list_item::GroupedListItem::Status(status) => {
                 rows = rows.child(
                     div()

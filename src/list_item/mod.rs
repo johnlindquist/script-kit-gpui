@@ -763,20 +763,100 @@ pub fn coerce_eligibility_selection(rows: &[RowEligibility], index: usize) -> Op
         .or_else(|| selectable_eligibility_index_at_or_before(rows, index.saturating_sub(1)))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionPresentationFamily {
+    /// Launcher-family lists use presentation-only uppercase and strong label emphasis.
+    Launcher,
+    /// Other list families preserve authored casing and their quieter existing emphasis.
+    PreserveAuthored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionTextTier {
+    Strong,
+    Muted,
+}
+
+impl SectionTextTier {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Muted => "muted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionHeaderPresentation {
+    /// The exact authored source. Presentation transforms must never mutate this value.
+    pub semantic_label: SharedString,
+    pub display_label: SharedString,
+    pub count: Option<SharedString>,
+    pub icon: Option<SharedString>,
+    pub label_tier: SectionTextTier,
+    pub count_tier: SectionTextTier,
+    pub icon_tier: SectionTextTier,
+}
+
+/// Resolve section copy and emphasis without changing its semantic source.
+pub fn resolve_section_header_presentation(
+    label: &str,
+    icon: Option<&str>,
+    count: Option<&str>,
+    family: SectionPresentationFamily,
+) -> SectionHeaderPresentation {
+    let semantic_label: SharedString = label.to_string().into();
+    let display_label = match family {
+        SectionPresentationFamily::Launcher => label.to_uppercase().into(),
+        SectionPresentationFamily::PreserveAuthored => semantic_label.clone(),
+    };
+    SectionHeaderPresentation {
+        semantic_label,
+        display_label,
+        count: count.map(|value| value.to_string().into()),
+        icon: icon.map(|value| value.to_string().into()),
+        label_tier: match family {
+            SectionPresentationFamily::Launcher => SectionTextTier::Strong,
+            SectionPresentationFamily::PreserveAuthored => SectionTextTier::Muted,
+        },
+        count_tier: SectionTextTier::Muted,
+        icon_tier: SectionTextTier::Muted,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum GroupedListItem {
-    /// A section header (e.g., "SUGGESTED", "MAIN")
+    /// A semantic section header with authored source text and optional icon.
     SectionHeader(String, Option<String>),
+    /// A visual first-section slot with no semantic heading or accessible label.
+    ReservedSectionSlot,
     /// Transient source-chip status metadata produced during grouping.
     Status(SourceChipStatusRow),
     /// A regular list item - usize is the index in the flat results array
     Item(usize),
 }
 
+/// Reserve row zero for launcher section chrome without inventing an empty heading.
+pub fn ensure_launcher_section_slot(items: &mut Vec<GroupedListItem>) {
+    let has_result = items
+        .iter()
+        .any(|item| matches!(item, GroupedListItem::Item(_)));
+    if has_result
+        && !matches!(
+            items.first(),
+            Some(GroupedListItem::SectionHeader(..) | GroupedListItem::ReservedSectionSlot)
+        )
+    {
+        items.insert(0, GroupedListItem::ReservedSectionSlot);
+    }
+}
+
 pub fn grouped_list_item_eligibility(item: &GroupedListItem) -> RowEligibility {
     match item {
         GroupedListItem::Item(_) => RowEligibility::enabled_action(),
-        GroupedListItem::SectionHeader(..) | GroupedListItem::Status(_) => RowEligibility::inert(),
+        GroupedListItem::SectionHeader(..)
+        | GroupedListItem::ReservedSectionSlot
+        | GroupedListItem::Status(_) => RowEligibility::inert(),
     }
 }
 
@@ -849,7 +929,10 @@ impl GroupedListState {
         let mut header_indices = std::collections::HashSet::new();
 
         for (idx, item) in items.iter().enumerate() {
-            if matches!(item, GroupedListItem::SectionHeader(..)) {
+            if matches!(
+                item,
+                GroupedListItem::SectionHeader(..) | GroupedListItem::ReservedSectionSlot
+            ) {
                 header_indices.insert(idx);
             }
         }
@@ -2636,7 +2719,7 @@ pub fn icon_from_png(png_data: &[u8]) -> Option<IconKind> {
 /// Section headers render at 32px, regular items at 40px.
 ///
 /// # Arguments
-/// * `label` - The section label, rendered in its provided casing with quiet chrome styling
+/// * `label` - Authored section text; launcher presentation uppercases a derived display copy
 /// * `icon` - Optional icon name (lucide icon, e.g., "settings")
 /// * `colors` - ListItemColors for theme-aware styling
 /// * `_is_first` - Reserved for existing call sites; unused because headers no longer draw separators
@@ -2662,47 +2745,69 @@ pub fn render_section_header(
     // - ~12px text height
     // - pb(4px) bottom padding for visual separation from below item
 
-    // Parse label to separate name from count (e.g., "SUGGESTED · 5" → "SUGGESTED", "5")
+    // Parse count metadata without mutating the authored semantic label.
     let (section_name, count_text) = if let Some(dot_pos) = label.find(" · ") {
         (&label[..dot_pos], Some(&label[dot_pos + " · ".len()..]))
     } else {
         (label, None)
     };
+    let presentation = resolve_section_header_presentation(
+        section_name,
+        icon,
+        count_text,
+        SectionPresentationFamily::Launcher,
+    );
+    let tier_alpha = |tier| match tier {
+        SectionTextTier::Strong => colors.alpha_strong,
+        SectionTextTier::Muted => colors.alpha_muted,
+    };
 
-    // Build the inner content row: icon (optional) → section name → count (optional)
-    // Headers should whisper — subtle orientation labels, not attention-grabbers
-    let header_text_color = rgba((colors.text_primary << 8) | colors.alpha_muted);
+    // Launcher labels lead strongly; metadata remains quiet and never inherits label emphasis.
     let mut content = div()
         .flex()
         .flex_row()
         .items_center()
+        .min_w(px(0.0))
         .gap(px(metrics.section_gap))
         .text_size(px(metrics.section_header_font_size))
-        .font_weight(metrics.section_weight)
-        .text_color(header_text_color);
+        .font_weight(metrics.section_weight);
 
-    // Add icon before section name if provided — very quiet to avoid visual noise
-    if let Some(name) = icon {
+    if let Some(name) = presentation.icon.as_deref() {
         if let Some(icon_name) = icon_name_from_str(name) {
             content = content.child(
                 svg()
                     .path(icon_name.asset_path())
                     .size(px(metrics.section_icon_size))
-                    .text_color(rgba((colors.text_primary << 8) | colors.alpha_muted)),
+                    .text_color(rgba(
+                        (colors.text_primary << 8) | tier_alpha(presentation.icon_tier),
+                    )),
             );
         }
     }
 
-    content = content.child(section_name.to_string());
+    content = content.child(
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(rgba(
+                (colors.text_primary << 8) | tier_alpha(presentation.label_tier),
+            ))
+            .child(presentation.display_label.clone()),
+    );
 
-    // Add count badge if present
-    if let Some(count) = count_text {
+    if let Some(count) = presentation.count {
         content = content.child(
             div()
+                .flex_none()
                 .text_xs()
                 .font_weight(metrics.section_weight)
-                .text_color(rgba((colors.text_primary << 8) | colors.alpha_muted))
-                .child(count.to_string()),
+                .text_color(rgba(
+                    (colors.text_primary << 8) | tier_alpha(presentation.count_tier),
+                ))
+                .child(count),
         );
     }
 
@@ -2743,6 +2848,12 @@ pub fn render_section_header(
 
 #[cfg(test)]
 mod render_section_header_source_tests {
+    use super::{
+        ensure_launcher_section_slot, grouped_list_item_eligibility,
+        resolve_section_header_presentation, GroupedListItem, SectionPresentationFamily,
+        SectionTextTier,
+    };
+
     const SOURCE: &str = include_str!("mod.rs");
 
     fn render_section_header_source() -> String {
@@ -2757,24 +2868,57 @@ mod render_section_header_source_tests {
     }
 
     #[test]
-    fn section_headers_preserve_label_casing() {
-        let body = render_section_header_source();
-        assert!(
-            body.contains("section_name.to_string()"),
-            "section headers should preserve the provided label casing"
+    fn section_header_presentation_preserves_semantics_and_transforms_display_only() {
+        let authored = "Straße · résumé";
+        let launcher = resolve_section_header_presentation(
+            authored,
+            Some("star"),
+            Some("5"),
+            SectionPresentationFamily::Launcher,
         );
+        assert_eq!(launcher.semantic_label.as_ref(), authored);
+        assert_eq!(launcher.display_label.as_ref(), "STRASSE · RÉSUMÉ");
+        assert_eq!(launcher.label_tier, SectionTextTier::Strong);
+        assert_eq!(launcher.count_tier, SectionTextTier::Muted);
+        assert_eq!(launcher.icon_tier, SectionTextTier::Muted);
+
+        let preserved = resolve_section_header_presentation(
+            authored,
+            None,
+            None,
+            SectionPresentationFamily::PreserveAuthored,
+        );
+        assert_eq!(preserved.semantic_label.as_ref(), authored);
+        assert_eq!(preserved.display_label.as_ref(), authored);
+        assert_eq!(preserved.label_tier, SectionTextTier::Muted);
     }
 
     #[test]
-    fn section_headers_use_semibold_quiet_text() {
-        let body = render_section_header_source();
+    fn launcher_section_slot_is_stable_inert_and_non_semantic() {
+        let mut ungrouped = vec![GroupedListItem::Item(0)];
+        ensure_launcher_section_slot(&mut ungrouped);
+        assert!(matches!(
+            ungrouped.as_slice(),
+            [
+                GroupedListItem::ReservedSectionSlot,
+                GroupedListItem::Item(0)
+            ]
+        ));
+        let reserved = grouped_list_item_eligibility(&ungrouped[0]);
+        assert!(!reserved.focusable && !reserved.selectable && !reserved.activatable);
+
+        let mut grouped = vec![
+            GroupedListItem::SectionHeader("Recent".into(), None),
+            GroupedListItem::Item(0),
+        ];
+        ensure_launcher_section_slot(&mut grouped);
+        assert_eq!(grouped.len(), 2, "a real first header must keep the slot");
+
+        let mut empty = Vec::new();
+        ensure_launcher_section_slot(&mut empty);
         assert!(
-            body.contains("font_weight(metrics.section_weight)"),
-            "section headers should use the theme section weight for quiet but readable emphasis"
-        );
-        assert!(
-            body.contains("colors.alpha_muted"),
-            "section headers should use muted text alpha instead of stronger header emphasis"
+            empty.is_empty(),
+            "zero results must not expose an empty slot"
         );
     }
 

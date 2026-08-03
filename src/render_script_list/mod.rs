@@ -1193,6 +1193,17 @@ impl ScriptListApp {
                                         })
                                         .into_any_element()
                                 }
+                                GroupedListItem::ReservedSectionSlot => div()
+                                    .id(ElementId::NamedInteger(
+                                        format!("section-slot-reserved-gen-{row_generation}").into(),
+                                        ix as u64,
+                                    ))
+                                    .h(px(
+                                        crate::list_item::effective_first_section_header_height_for_theme(
+                                            current_main_menu_theme,
+                                        ),
+                                    ))
+                                    .into_any_element(),
                                 GroupedListItem::Status(status) => {
                                     div()
                                         .id(ElementId::NamedInteger(
@@ -1524,6 +1535,7 @@ impl ScriptListApp {
                                 section_header_height
                             }
                         }
+                        GroupedListItem::ReservedSectionSlot => first_section_header_height,
                         GroupedListItem::Status(..) => status_row_height,
                         GroupedListItem::Item(..) => list_item_height,
                     })

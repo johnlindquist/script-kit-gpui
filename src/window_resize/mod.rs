@@ -147,7 +147,7 @@ pub(crate) fn main_window_sizing_from_grouped_items(
             GroupedListItem::SectionHeader(..) => {
                 visible_section_headers += 1;
             }
-            GroupedListItem::Status(..) => {
+            GroupedListItem::ReservedSectionSlot | GroupedListItem::Status(..) => {
                 visible_section_headers += 1;
             }
             GroupedListItem::Item(_) => {

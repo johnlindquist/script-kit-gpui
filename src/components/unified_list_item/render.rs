@@ -502,10 +502,17 @@ impl SectionHeader {
 
 impl RenderOnce for SectionHeader {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let label_text = if let Some(count) = self.count {
-            format!("{} ({})", self.label, count)
+        let count = self.count.map(|value| value.to_string());
+        let presentation = crate::list_item::resolve_section_header_presentation(
+            self.label.as_ref(),
+            None,
+            count.as_deref(),
+            crate::list_item::SectionPresentationFamily::PreserveAuthored,
+        );
+        let label_text = if let Some(count) = presentation.count {
+            format!("{} ({})", presentation.display_label, count)
         } else {
-            self.label.to_string()
+            presentation.display_label.to_string()
         };
 
         div()

@@ -309,7 +309,8 @@ impl ScriptListApp {
             let mut row_index = 0usize;
             for (grouped_index, item) in grouped_items.iter().enumerate() {
                 match item {
-                    crate::list_item::GroupedListItem::SectionHeader(..) => {}
+                    crate::list_item::GroupedListItem::SectionHeader(..)
+                    | crate::list_item::GroupedListItem::ReservedSectionSlot => {}
                     crate::list_item::GroupedListItem::Item(result_idx) => {
                         if Some(grouped_index) == selected_grouped {
                             if let Some(result) = flat_results.get(*result_idx) {

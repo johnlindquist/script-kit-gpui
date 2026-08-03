@@ -3484,8 +3484,15 @@ impl ScriptListApp {
                 break;
             }
             match item {
-                crate::list_item::GroupedListItem::SectionHeader(label, _) => {
+                crate::list_item::GroupedListItem::SectionHeader(label, icon) => {
                     if include_headers {
+                        let presentation =
+                            crate::list_item::resolve_section_header_presentation(
+                                label,
+                                icon.as_deref(),
+                                None,
+                                crate::list_item::SectionPresentationFamily::Launcher,
+                            );
                         elements.push(protocol::ElementInfo {
                             semantic_id: protocol::generate_semantic_id(
                                 "section",
@@ -3493,8 +3500,8 @@ impl ScriptListApp {
                                 label,
                             ),
                             element_type: protocol::ElementType::Panel,
-                            text: Some(label.clone()),
-                            value: None,
+                            text: Some(presentation.display_label.to_string()),
+                            value: Some(presentation.semantic_label.to_string()),
                             selected: Some(false),
                             focused: None,
                             index: None,
@@ -3508,6 +3515,9 @@ impl ScriptListApp {
                             style: None,
                         });
                     }
+                }
+                crate::list_item::GroupedListItem::ReservedSectionSlot => {
+                    // Visual rhythm only: never expose an empty accessibility heading.
                 }
                 crate::list_item::GroupedListItem::Item(result_idx) => {
                     let Some(result) = flat_results.get(*result_idx) else {

@@ -1025,7 +1025,7 @@ fn append_missing_explicit_source_status_rows(
                 .get(*index)
                 .and_then(SearchResult::root_unified_source)
                 .is_some_and(|item_source| item_source == source),
-            GroupedListItem::SectionHeader(..) => false,
+            GroupedListItem::SectionHeader(..) | GroupedListItem::ReservedSectionSlot => false,
         });
         if !represented {
             grouped.push(GroupedListItem::Status(source_chip_result_status(
@@ -1059,6 +1059,9 @@ fn filter_grouped_results_by_root_sources(
         match item {
             GroupedListItem::SectionHeader(label, icon) => {
                 pending_header = Some(GroupedListItem::SectionHeader(label.clone(), icon.clone()));
+            }
+            GroupedListItem::ReservedSectionSlot => {
+                pending_header = Some(GroupedListItem::ReservedSectionSlot);
             }
             GroupedListItem::Item(old_index) => {
                 if let Some(Some(new_index)) = remap.get(*old_index) {
@@ -1221,7 +1224,7 @@ fn root_brain_passive_insertion_index(
     let mut item_indices: Vec<usize> = Vec::new();
     for (pos, entry) in grouped.iter().enumerate() {
         match entry {
-            GroupedListItem::SectionHeader(_, _) => {
+            GroupedListItem::SectionHeader(_, _) | GroupedListItem::ReservedSectionSlot => {
                 if let Some(start) = section_start {
                     if !item_indices.is_empty() && item_indices.iter().all(is_file_handoff) {
                         return start.min(default_index);
@@ -2154,7 +2157,9 @@ fn root_file_passive_insertion_index(
             GroupedListItem::SectionHeader(label, None) => {
                 label.starts_with("Use \"") && label.ends_with("\" with...")
             }
-            GroupedListItem::SectionHeader(_, Some(_)) => false,
+            GroupedListItem::SectionHeader(_, Some(_)) | GroupedListItem::ReservedSectionSlot => {
+                false
+            }
         })
         .unwrap_or(grouped.len())
 }
@@ -3498,7 +3503,8 @@ mod advanced_query_tests {
                 GroupedListItem::SectionHeader(label, None) => Some(label.as_str()),
                 GroupedListItem::SectionHeader(_, Some(_))
                 | GroupedListItem::Item(_)
-                | GroupedListItem::Status(_) => None,
+                | GroupedListItem::Status(_)
+                | GroupedListItem::ReservedSectionSlot => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -3659,7 +3665,8 @@ mod advanced_query_tests {
                 GroupedListItem::SectionHeader(label, None) => Some(label.as_str()),
                 GroupedListItem::SectionHeader(_, Some(_))
                 | GroupedListItem::Item(_)
-                | GroupedListItem::Status(_) => None,
+                | GroupedListItem::Status(_)
+                | GroupedListItem::ReservedSectionSlot => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -3957,7 +3964,8 @@ mod advanced_query_tests {
                     GroupedListItem::SectionHeader(label, None) => Some(label.as_str()),
                     GroupedListItem::SectionHeader(_, Some(_))
                     | GroupedListItem::Item(_)
-                    | GroupedListItem::Status(_) => None,
+                    | GroupedListItem::Status(_)
+                    | GroupedListItem::ReservedSectionSlot => None,
                 })
                 .collect::<Vec<_>>();
             assert_eq!(section_labels, vec![expected_section], "{source:?}");
@@ -4218,7 +4226,8 @@ mod advanced_query_tests {
                 GroupedListItem::SectionHeader(label, None) => Some(label.as_str()),
                 GroupedListItem::SectionHeader(_, Some(_))
                 | GroupedListItem::Item(_)
-                | GroupedListItem::Status(_) => None,
+                | GroupedListItem::Status(_)
+                | GroupedListItem::ReservedSectionSlot => None,
             })
             .collect::<Vec<_>>();
         // The passive budget is consumed greedily in passive-source order:

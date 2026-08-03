@@ -120,6 +120,7 @@ fn main_list_row_stable_key(
         GroupedListItem::SectionHeader(label, icon) => {
             format!("section/{label}/{}", icon.as_deref().unwrap_or("none"))
         }
+        GroupedListItem::ReservedSectionSlot => "section/reserved-leading-slot".to_string(),
         GroupedListItem::Status(status) => format!(
             "status/{}/{}/{}",
             status.source.receipt_label(),

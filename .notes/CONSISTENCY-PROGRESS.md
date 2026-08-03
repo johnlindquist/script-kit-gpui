@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 17 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 18 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -17,7 +17,7 @@
 
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
-| Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C14 complete; C15 pending |
+| Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C15 complete; C16 pending |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | Plan complete; C01 starting |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
@@ -491,6 +491,42 @@
   5. Open a protocol Select prompt and Dictation’s microphone picker. Unified Select and compact microphone rows should keep their existing selected fill and show no leading marker.
   6. Run `bun scripts/agentic/ux7-selection-marker-probe.ts`; expect `RUNTIME-CONFIRMED`, exact baseline geometry parity, one marker on Main/Actions/Process Manager, zero on Unified/compact rows, and all six `ownedProcessCount` values equal to zero.
 - **Intentional differences preserved:** Launcher-family `ListItem` opts in; Unified rows and soft-compact dropdown/popup rows do not. Existing selected fill, typography, icon/tile treatments, shortcuts, 44px Main/built-in rows, 36px Actions rows, and compact anatomy remain unchanged. No glass, footer optic, popup geometry, motion, host keyboard route, or generated-token ownership boundary changed.
+
+### UX-008 — Give section headers one semantic grammar and stable slot
+
+- **Status:** Complete for the UX-008 product contract; source/display separation, strong launcher presentation, stable leading geometry, Actions parity, compact opt-out, anti-drift, runtime visuals, and cleanup are green.
+- **Commit boundary:** C15 — `Implement UX-008: render launcher section labels strongly while preserving semantic source text and slot stability`. This section is committed atomically with that subject; use `git log -1 --oneline` for the immutable hash.
+- **Changed behavior:** Launcher-family section labels now derive uppercase display copy from the authored source and use the strong text tier; count/icon metadata stays muted. Main and Actions share that resolver, while Unified defaults to preserving authored casing. Main caches reserve a non-semantic first-section slot when results arrive without a real header, so the first selectable row cannot jump when grouping changes. Zero results expose no slot, and reserved slots never appear as empty accessibility headings.
+- **Exact owners:**
+  - `src/list_item/mod.rs::{SectionPresentationFamily,SectionTextTier,SectionHeaderPresentation,resolve_section_header_presentation,GroupedListItem::ReservedSectionSlot,ensure_launcher_section_slot,render_section_header}`
+  - `src/main_sections/app_state.rs::MainMenuResultCaches::store_grouped_results`
+  - `src/render_script_list/mod.rs` grouped row rendering and content-height projection
+  - `src/app_layout/collect_elements.rs` section semantic/display projection
+  - `src/actions/dialog.rs::{ActionsDialog::render,ActionsDialog::devtools_row_geometry}`
+  - `src/components/unified_list_item/render.rs::SectionHeader::render`
+  - grouped-list geometry/navigation owners in `src/{app_navigation,scrolling,window_resize,main_window_preflight}/**`
+  - `scripts/agentic/ux8-section-grammar-probe.ts`
+- **Focused tests:**
+  - `./scripts/agentic/agent-cargo.sh test --lib render_section_header` → PASS (5/5).
+  - `./scripts/agentic/agent-cargo.sh test --lib section_header_presentation` → PASS (1/1).
+  - `./scripts/agentic/agent-cargo.sh test --lib actions::command_bar` → PASS (16/16).
+  - `./scripts/agentic/agent-cargo.sh test --lib actions::dialog` → PASS (5,807 passed, 7 ignored, 0 failed).
+  - `./scripts/agentic/agent-cargo.sh test --lib components::unified_list_item` → PASS (17/17).
+  - `./scripts/agentic/agent-cargo.sh check --lib` and stable product build → PASS.
+- **Runtime/model receipt:** `.artifacts/consistency/UX-008/runtime-section-grammar.json` → `RUNTIME-CONFIRMED`. Empty, `section`, `notes`, and `type:script` states all place the first selectable row at exact logical `y=87`; `type:script __ux8_no_match_8f6c__` reaches zero results, and clearing restores `y=87`. Main semantics retain `Suggested`/`Results` while display text is `SUGGESTED`/`RESULTS`. Actions exposes `Actions/Edit/Copy/Share` separately from `ACTIONS/EDIT/COPY/SHARE`, with `labelTier:strong` and count/icon tiers muted.
+- **Visual receipts:** `.artifacts/consistency/UX-008/main-uppercase-stable-slot.png`, `actions-uppercase-sections.png`, and `compact-popup-remains-headerless.png` were captured from the final artifact and visually inspected. Actions keeps 24px section headers and 36px rows; the exact generation-scoped Dictation microphone popup remains an 80px two-row compact surface with no header.
+- **Negative controls:** Resolver tests prove `Straße · résumé` keeps its exact semantic bytes while launcher display expands to `STRASSE · RÉSUMÉ`; PreserveAuthored leaves it unchanged. Label tier is strong while count/icon are muted. Reserved slots are inert, zero-result lists do not receive one, and `getElements` never projects an empty heading. Existing `SectionStyle::Separators`/`None` tests remain green and Dictation reports zero section headings. The runtime fails on any one-pixel first-row movement.
+- **Binary:** `target-agent/artifacts/ux8-section-grammar/script-kit-gpui`; SHA-256 `9ce34b11ed6dc6e3a19204500d77ada296a13f8ed955d3730a3d0f04c79c68c1`.
+- **Governance/anti-drift:** Source-audit inventory remains 2,818 reader sites and its 18 tests pass. The hardcoded-visual inventory passes 16/16. Protected glass source diff is empty; static glass tests pass 40/40 and the production calibration fixture passes 1/1. No generated output, footer optic, popup geometry, motion value, fixture, threshold, or host keyboard route changed.
+- **Cleanup:** The final Driver reports `processExited:true`, `streamsDrained:true`, `logWriterClosed:true`, and exact artifact-path `ownedProcessCount:0`; clipboard was untouched and no signal was used.
+- **User test/view:**
+  1. Launch Script Kit and note the first selectable row's vertical position under the `SUGGESTED` header.
+  2. Type `section`, then `notes`, then `type:script`; the displayed section grammar should be uppercase/strong and the first selectable row should stay at the same vertical position.
+  3. Clear the filter, enter `type:script __ux8_no_match_8f6c__`, then clear again; the empty state must show no blank heading and the first result must return to the same position.
+  4. Press Cmd+K. Actions section labels should read `ACTIONS`, `EDIT`, `COPY`, and `SHARE` while row height and popup bounds remain unchanged. Press Escape.
+  5. Open Dictation's microphone picker; the two compact microphone rows must remain headerless.
+  6. Run `bun scripts/agentic/ux8-section-grammar-probe.ts`; expect `RUNTIME-CONFIRMED`, every non-empty first-row Y equal to `87`, zero-result count `0`, semantic/display label pairs, and `ownedProcessCount:0`.
+- **Intentional differences preserved:** Main and Actions use launcher presentation; Unified and compact popup families preserve authored casing/anatomy unless explicitly opted in. Actions keeps its specialized 24px headers and 36px rows. Semantic text is never uppercased in storage. Existing grouped labels, icons, counts, section ordering, selection behavior, scroll math, fixed Actions shell, popup lifecycle, and all locked glass/footer contracts remain unchanged.
 
 ## Verification ledger
 

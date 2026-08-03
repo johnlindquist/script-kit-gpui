@@ -2293,6 +2293,17 @@ impl ActionsDialog {
         );
 
         for (visual_index, item) in self.grouped_items.iter().enumerate() {
+            let section_presentation = match item {
+                GroupedActionItem::SectionHeader(label) => {
+                    Some(crate::list_item::resolve_section_header_presentation(
+                        label,
+                        None,
+                        None,
+                        crate::list_item::SectionPresentationFamily::Launcher,
+                    ))
+                }
+                GroupedActionItem::Item(_) => None,
+            };
             let (kind, height, label, action_id, shortcut, shortcut_tokens) = match item {
                 GroupedActionItem::SectionHeader(label) => (
                     "section",
@@ -2429,6 +2440,21 @@ impl ActionsDialog {
                 "kind": kind,
                 "labelLength": label.map(|value| value.chars().count()),
                 "labelFingerprint": label.map(Self::devtools_text_fingerprint),
+                "semanticLabel": section_presentation
+                    .as_ref()
+                    .map(|presentation| presentation.semantic_label.as_ref()),
+                "displayLabel": section_presentation
+                    .as_ref()
+                    .map(|presentation| presentation.display_label.as_ref()),
+                "labelTier": section_presentation
+                    .as_ref()
+                    .map(|presentation| presentation.label_tier.as_str()),
+                "countTier": section_presentation
+                    .as_ref()
+                    .map(|presentation| presentation.count_tier.as_str()),
+                "iconTier": section_presentation
+                    .as_ref()
+                    .map(|presentation| presentation.icon_tier.as_str()),
                 "actionId": action_id,
                 "enabled": enabled,
                 "disabledReason": disabled_reason,
@@ -4717,19 +4743,27 @@ impl Render for ActionsDialog {
                     if let Some(grouped_item) = grouped_items_clone.get(ix) {
                         match grouped_item {
                             GroupedActionItem::SectionHeader(label) => {
-                                // Section header at 22px height
+                                // Actions uses the shared launcher-family display grammar while
+                                // retaining its authored section string in the grouped model.
+                                let presentation =
+                                    crate::list_item::resolve_section_header_presentation(
+                                        label,
+                                        None,
+                                        None,
+                                        crate::list_item::SectionPresentationFamily::Launcher,
+                                    );
                                 let theme_opacity = this.theme.get_opacity();
                                 let header_text =
                                     if this.design_variant == DesignVariant::Default {
                                         semantic_text_rgba(
                                             this.theme.colors.text.primary,
-                                            theme_opacity.text_muted_alpha,
+                                            theme_opacity.text_strong,
                                         )
                                     } else {
                                         let tokens = get_tokens(this.design_variant);
                                         semantic_text_rgba(
                                             tokens.colors().text_primary,
-                                            theme_opacity.text_muted_alpha,
+                                            theme_opacity.text_strong,
                                         )
                                     };
                                 let section_header = div()
@@ -4745,8 +4779,12 @@ impl Render for ActionsDialog {
                                         div()
                                             .text_size(px(popup_theme.section.font_size))
                                             .font_weight(popup_theme.section.font_weight)
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .text_color(header_text)
-                                            .child(label.clone()),
+                                            .child(presentation.display_label),
                                     )
                                     .into_any_element()
                             }

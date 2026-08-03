@@ -479,7 +479,9 @@ impl MainMenuResultCacheState {
             .iter()
             .filter_map(|item| match item {
                 GroupedListItem::Item(result_idx) => self.search_result_for_flat_index(*result_idx),
-                GroupedListItem::SectionHeader(..) | GroupedListItem::Status(..) => None,
+                GroupedListItem::SectionHeader(..)
+                | GroupedListItem::ReservedSectionSlot
+                | GroupedListItem::Status(..) => None,
             })
     }
 
@@ -547,11 +549,15 @@ impl MainMenuResultCacheState {
         for item in grouped_items {
             match item {
                 GroupedListItem::Status(status) => source_statuses.push(status),
-                GroupedListItem::SectionHeader(..) | GroupedListItem::Item(_) => {
-                    display_items.push(item)
-                }
+                GroupedListItem::SectionHeader(..)
+                | GroupedListItem::ReservedSectionSlot
+                | GroupedListItem::Item(_) => display_items.push(item),
             }
         }
+
+        // Stabilize the first result's vertical origin across grouping/filter changes.
+        // A reserved slot is visual-only and is never projected as an empty heading.
+        crate::list_item::ensure_launcher_section_slot(&mut display_items);
 
         let mut first_selectable_index = None;
         let mut last_selectable_index = None;

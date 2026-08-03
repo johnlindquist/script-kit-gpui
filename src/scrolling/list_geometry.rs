@@ -32,6 +32,7 @@ impl GroupedListRowHeights {
                     self.section_header
                 }
             }
+            crate::list_item::GroupedListItem::ReservedSectionSlot => self.first_section_header,
             crate::list_item::GroupedListItem::Status(..) => self.status,
             crate::list_item::GroupedListItem::Item(..) => self.item,
         }

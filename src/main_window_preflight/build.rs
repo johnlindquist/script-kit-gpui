@@ -138,6 +138,9 @@ fn visible_row_fingerprint(app: &crate::ScriptListApp) -> String {
             GroupedListItem::SectionHeader(label, icon) => {
                 format!("h:{grouped_index}:{label}:{icon:?}")
             }
+            GroupedListItem::ReservedSectionSlot => {
+                format!("r:{grouped_index}:section-slot")
+            }
             GroupedListItem::Status(status) => {
                 format!(
                     "s:{grouped_index}:{}:{}",
