@@ -75,8 +75,8 @@ impl Render for ShortcutRecorder {
         let chrome = crate::theme::AppChromeColors::from_theme(&self.theme);
 
         // Determine button states
-        let can_save = self.shortcut.is_complete() && self.conflict.is_none();
-        let can_clear = !self.shortcut.is_empty();
+        let can_save = self.can_save();
+        let can_clear = self.can_clear();
 
         let title = self
             .command_name

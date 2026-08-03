@@ -6,7 +6,68 @@ use super::types::{
 use super::{Button, ButtonColors, ButtonVariant};
 use crate::designs::DesignColors;
 use crate::theme::Theme;
-use gpui::SharedString;
+use gpui::{
+    App, AppContext as _, ClickEvent, Context, FocusHandle, IntoElement, Keystroke, Render,
+    TestAppContext, Window,
+};
+use std::{cell::Cell, rc::Rc};
+
+struct KeyboardButtonProbe {
+    focus_handle: FocusHandle,
+    clicks: Rc<Cell<usize>>,
+    disabled: bool,
+    loading: bool,
+}
+
+impl Render for KeyboardButtonProbe {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let clicks = self.clicks.clone();
+        Button::new(
+            "keyboard-probe:activate",
+            "Duplicate",
+            ButtonColors::default(),
+        )
+        .focus_handle(self.focus_handle.clone())
+        .disabled(self.disabled)
+        .loading(self.loading)
+        .on_click(Box::new(
+            move |_: &ClickEvent, _: &mut Window, _: &mut App| {
+                clicks.set(clicks.get() + 1);
+            },
+        ))
+    }
+}
+
+fn dispatch_to_keyboard_probe(disabled: bool, loading: bool, keys: &[&str]) -> usize {
+    let clicks = Rc::new(Cell::new(0));
+    let probe_clicks = clicks.clone();
+    let mut cx = TestAppContext::single();
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|cx| KeyboardButtonProbe {
+                focus_handle: cx.focus_handle(),
+                clicks: probe_clicks,
+                disabled,
+                loading,
+            })
+        })
+        .expect("keyboard button test window should open")
+    });
+
+    window
+        .update(&mut cx, |probe, window, cx| {
+            window.focus(&probe.focus_handle, cx);
+        })
+        .expect("keyboard button test window should remain available");
+
+    for key in keys {
+        cx.dispatch_keystroke(
+            *window,
+            Keystroke::parse(key).expect("valid test keystroke"),
+        );
+    }
+    clicks.get()
+}
 
 #[test]
 fn test_should_show_pointer_only_when_button_is_interactive() {
@@ -27,15 +88,49 @@ fn test_can_activate_from_key_requires_interactive_activation_key() {
 }
 
 #[test]
-fn test_resolve_element_id_prefers_explicit_id_when_present() {
-    let label: SharedString = "Run".into();
-    let explicit_id: SharedString = "footer-run".into();
-
+fn real_gpui_enter_and_space_dispatch_once_each_to_the_focused_button() {
     assert_eq!(
-        Button::resolve_element_id(Some(&explicit_id), &label),
-        explicit_id
+        dispatch_to_keyboard_probe(false, false, &["enter", "space"]),
+        2
     );
-    assert_eq!(Button::resolve_element_id(None, &label), label);
+}
+
+#[test]
+fn real_gpui_keyboard_dispatch_keeps_disabled_and_loading_buttons_inert() {
+    assert_eq!(
+        dispatch_to_keyboard_probe(true, false, &["enter", "space"]),
+        0
+    );
+    assert_eq!(
+        dispatch_to_keyboard_probe(false, true, &["enter", "space"]),
+        0
+    );
+}
+
+#[test]
+fn button_identity_is_required_and_independent_from_duplicate_labels() {
+    let colors = ButtonColors::default();
+    let first = Button::new("dialog-a:open", "Open", colors);
+    let second = Button::new("dialog-b:open", "Open", colors);
+
+    assert_eq!(first.stable_id(), "dialog-a:open");
+    assert_eq!(second.stable_id(), "dialog-b:open");
+    assert_ne!(first.stable_id(), second.stable_id());
+}
+
+#[test]
+fn changing_button_label_does_not_change_identity() {
+    let button =
+        Button::new("download:primary", "Download", ButtonColors::default()).label("Downloading…");
+
+    assert_eq!(button.stable_id(), "download:primary");
+    assert_eq!(button.display_label(), "Downloading…");
+}
+
+#[test]
+#[should_panic(expected = "Button stable ID must not be empty")]
+fn empty_button_identity_is_rejected() {
+    let _ = Button::new("", "Open", ButtonColors::default());
 }
 
 #[test]

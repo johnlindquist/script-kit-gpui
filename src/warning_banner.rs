@@ -166,7 +166,7 @@ impl RenderOnce for WarningBanner {
                     OPACITY_SUBTLE,
                 ),
             };
-            Button::new("×", dismiss_colors)
+            Button::new("warning-banner:dismiss", "×", dismiss_colors)
                 .variant(ButtonVariant::Icon)
                 .on_click(Box::new(move |event, window, cx| {
                     cx.stop_propagation();

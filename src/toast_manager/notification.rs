@@ -1,55 +1,58 @@
-use gpui::{prelude::*, rgba};
-use gpui_component::notification::{Notification, NotificationType};
+use std::time::Duration;
 
-use crate::components::ToastVariant;
-use crate::theme::{get_cached_theme, AppChromeColors};
+use gpui::{App, IntoElement as _, Window};
+use gpui_component::notification::Notification;
+
+use crate::components::ToastAction;
 
 use super::PendingToast;
 
-/// Convert Script Kit's stripped-down queued toast into the active
-/// gpui-component notification runtime.
-fn toast_variant_to_notification_type(variant: ToastVariant) -> NotificationType {
-    match variant {
-        ToastVariant::Success => NotificationType::Success,
-        ToastVariant::Warning => NotificationType::Warning,
-        ToastVariant::Error => NotificationType::Error,
-        ToastVariant::Info => NotificationType::Info,
+struct ScriptKitToastNotification;
+
+/// Convert one queued Script Kit toast into the active entity-backed
+/// notification runtime without discarding actions, dismissal, identity, or
+/// the configured lifetime.
+pub fn pending_toast_to_notification(toast: PendingToast) -> Notification {
+    let model = toast.toast;
+    let notification_id = model.get_id().control_id("notification");
+    let duration_ms = toast.duration_ms;
+
+    let notification = Notification::new()
+        .id1::<ScriptKitToastNotification>(notification_id)
+        .dismissible(false)
+        .content_only(move |_notification, _window, cx| {
+            let mut rendered = model.clone().clear_actions().clear_on_dismiss();
+
+            for action in model.get_actions().iter().cloned() {
+                let original = action.callback.clone();
+                let action_id = action.id.as_str().to_string();
+                let label = action.label.clone();
+                let handler = cx.listener(move |notification, event, window, cx| {
+                    (original)(event, window, cx);
+                    notification.dismiss_from_control(window, cx);
+                });
+                rendered = rendered.action(ToastAction::new(action_id, label, Box::new(handler)));
+            }
+
+            if model.is_dismissible() {
+                let original = model.get_on_dismiss();
+                let notification = cx.weak_entity();
+                rendered =
+                    rendered.on_dismiss(Box::new(move |window: &mut Window, cx: &mut App| {
+                        if let Some(callback) = original.as_ref() {
+                            callback(window, cx);
+                        }
+                        let _ = notification.update(cx, |notification, cx| {
+                            notification.dismiss_from_control(window, cx);
+                        });
+                    }));
+            }
+
+            rendered.into_any_element()
+        });
+
+    match duration_ms {
+        Some(duration_ms) => notification.autohide_after(Duration::from_millis(duration_ms)),
+        None => notification.autohide(false),
     }
-}
-
-/// Convert a PendingToast to a gpui-component Notification.
-///
-/// The active notification runtime supports a binary autohide contract:
-/// non-persistent notifications use gpui-component's default duration,
-/// while persistent notifications disable autohide.
-pub fn pending_toast_to_notification(toast: &PendingToast) -> Notification {
-    let theme = get_cached_theme();
-    let chrome = AppChromeColors::from_theme(&theme);
-    let notification_type = toast_variant_to_notification_type(toast.variant);
-
-    let mut notification = Notification::new()
-        .message(&toast.message)
-        .with_type(notification_type)
-        .bg(rgba(chrome.popup_surface_rgba))
-        .border_color(rgba(chrome.border_rgba));
-
-    if theme.is_vibrancy_enabled() {
-        notification = notification.shadow_none();
-    }
-
-    match toast.variant {
-        ToastVariant::Error => {
-            notification = notification.title("Couldn't complete action");
-        }
-        ToastVariant::Warning => {
-            notification = notification.title("Warning");
-        }
-        _ => {}
-    }
-
-    if toast.persistent {
-        notification = notification.autohide(false);
-    }
-
-    notification
 }

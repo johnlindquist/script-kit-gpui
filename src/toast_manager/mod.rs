@@ -11,7 +11,6 @@ pub(crate) mod notification;
 use crate::components::{Toast, ToastVariant};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
 /// A wrapper around Toast with a generated identifier.
 pub struct ToastNotification {
@@ -35,7 +34,7 @@ impl ToastNotification {
     /// Create a new toast notification wrapping a Toast.
     pub fn new(toast: Toast) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: toast.get_id().as_str().to_string(),
             toast,
             repeats: 1,
         }
@@ -178,10 +177,13 @@ impl ToastManager {
                 // Runtime notifications currently preserve only simple message
                 // feedback. Any Some(duration) uses gpui-component's default
                 // autohide duration; None maps to a persistent notification.
+                let toast = notification.toast.message(message.clone());
                 PendingToast {
                     message,
-                    variant: notification.toast.get_variant(),
-                    persistent: notification.toast.get_duration_ms().is_none(),
+                    variant: toast.get_variant(),
+                    duration_ms: toast.get_duration_ms(),
+                    persistent: toast.get_duration_ms().is_none(),
+                    toast,
                 }
             })
             .collect();
@@ -200,17 +202,19 @@ impl ToastManager {
 }
 
 /// A pending toast ready to be converted to a gpui-component Notification.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PendingToast {
     pub message: String,
     pub variant: ToastVariant,
+    pub duration_ms: Option<u64>,
     pub persistent: bool,
+    pub toast: Toast,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::ToastColors;
+    use crate::components::{ToastAction, ToastColors};
     use std::thread;
 
     fn make_test_toast(message: &'static str, duration_ms: Option<u64>) -> Toast {
@@ -254,6 +258,25 @@ mod tests {
         assert_eq!(pending[1].message, "Second");
         assert_eq!(pending[1].variant, ToastVariant::Info);
         assert!(pending[1].persistent);
+    }
+
+    #[test]
+    fn drain_preserves_identity_actions_dismissibility_and_exact_duration() {
+        let mut manager = ToastManager::new();
+        let toast = Toast::new("Actionable", ToastColors::default())
+            .with_id("fixture:actionable")
+            .duration_ms(Some(1_234))
+            .action(ToastAction::new("retry", "Retry", Box::new(|_, _, _| {})));
+
+        manager.push(toast);
+        let pending = manager.drain_pending();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].toast.get_id().as_str(), "fixture:actionable");
+        assert_eq!(pending[0].toast.get_actions().len(), 1);
+        assert_eq!(pending[0].toast.get_actions()[0].id.as_str(), "retry");
+        assert!(pending[0].toast.is_dismissible());
+        assert_eq!(pending[0].duration_ms, Some(1_234));
     }
 
     #[test]

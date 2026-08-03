@@ -6,7 +6,7 @@
 - consult count: 1 / 1
 - plan status: complete (`plan.md`, 19/19 task IDs covered)
 - protocol/profile: v2 / `profile-a-2`
-- execution status: C01–C12 complete (`UX-002`, `UX-001`, `UX-017`, `UX-015`, `UX-006`, `UX-010`, `UX-003`, `UX-009`, `UX-004`, `UX-005`, `UX-011`, `UX-012`, `UX-013`, `UX-014`); starting C13
+- execution status: C01–C13 complete (`UX-002`, `UX-001`, `UX-017`, `UX-015`, `UX-006`, `UX-010`, `UX-003`, `UX-009`, `UX-004`, `UX-005`, `UX-011`, `UX-012`, `UX-013`, `UX-014`, `UX-016`); starting C14
 - audit verdict: pending
 
 ## Receipts
@@ -190,7 +190,7 @@
 
 ### C12 — UX-014 attached popup lifecycle
 
-- **Status:** Complete for the UX-014 product contract; final local commit pending.
+- **Status:** Complete for the UX-014 product contract; committed and verified.
 - **Implementation:** Added a monotonic generation-scoped lifecycle in `components::inline_popup_window` with hidden/non-key creation, three deferred parent-readiness turns, exact GPUI parent runtime-handle and AppKit parent-pointer verification, attach receipts, one idempotent close gate, exact prior-focus tokens, GPUI-plus-native-key focus-pair arming for nonactivating panels, and generation-conditional cleanup. Protocol schema v2 now carries exact popup instances through registry, runtime handles, semantic caches, screenshot/event dispatch, and PromptPopup batch routing. Agent Chat history and Dictation microphone own one exact lifetime each and centralize parent-owned versus child-owned close so callbacks cannot double-lease their parent entity. The obsolete Agent Chat popup registry module and brittle lifecycle source-reader assertions were deleted.
 - **Native close decision:** Borderless AppKit `performClose:` was a no-op without the closable mask, while synchronous `close` re-entered GPUI. The final exact-target path releases the GPUI borrow, schedules on the foreground executor, adds only the closable behavior bit, and calls `performClose:` so GPUI's should-close callback reconciles the owner.
 - **Build and focused receipts:** Final check/build succeeded via `agent-cargo`; stable binary `target-agent/artifacts/ux14-popup-life/script-kit-gpui`, SHA-256 `a2e667d19f8e5bc0b3c558995b93df1de69a96c241862ecbf6fa8b322eecc4c3`. Shared lifecycle tests passed 2/2 and retained Dictation contracts passed 3/3. Source-audit inventory shrank app-source sites `2331 → 2330` and total sites `2819 → 2818`; `git diff --check` passes. A redundant cold focused-test rebuild was terminated with exit 143 by the repository low-disk watcher after 7m38s; the infrastructure failure is preserved and was not bypassed with bare Cargo.
@@ -199,4 +199,16 @@
 - **Glass/Actions guardrails:** Protected glass source diff is empty and static tests pass 40/40. Final Actions-entry and rapid-toggle probes pass. The unchanged broad lifecycle observer remains `EVALUABLE_FAIL` on the known UX-013 main-entry/Notes capture cadence, and direct Actions inspector retries remain fail-closed on target ambiguity/stale-view instrumentation; neither was hidden or converted to green by changing product values or thresholds.
 - **Cleanup:** Both final Driver receipts report process exited, streams drained, log writer closed, exact owned process/child count zero, and clipboard untouched. Independent exact-path process inventory also reports zero; named Actions sessions were stopped without broad signals.
 - **Intentional differences preserved:** Actions remains independent; Confirm remains generationless and parent-key-routed; menu syntax remains a main-list projection; footer retains compatibility attach; UX-012 InputState, UX-013 fixed geometry/top search, host shortcuts/routes, and all locked glass values remain unchanged.
-- **Commit:** This single UX-014 prompt-style local commit; exact hash is recorded by the post-commit read-only receipt.
+- **Commit:** `90d2dae90` — `Implement UX-014: enforce generation-scoped popup lifecycle and exact focus return`.
+
+### C13 — UX-016 keyboard-operable, uniquely identified feedback controls
+
+- **Status:** Complete; focused model/dispatch tests, product build, real runtime/visual proof, anti-drift, and cleanup green.
+- **Implementation:** Script Kit Buttons now require non-empty stable IDs independent from labels, use keyed focus handles, register enabled interactive controls as real tab stops, and activate once on Enter/Return/Space while disabled/loading states stay inert. Typed `ToastId`/`ToastActionId` identities drive root/action/dismiss IDs; ToastManager preserves the full Toast model into entity-backed custom notifications. Prior focus is restored after action/dismiss, exact remaining auto-hide time pauses while controls contain focus, stale entity timers cannot dismiss replacements, and dismiss is visible at rest. Shortcut Recorder Tab traversal derives only eligible Save/Clear/Cancel actions. The main launcher now renders the Root notification layer.
+- **Local escalation:** Main-window Tab/Shift+Tab are established launcher/Profile commands, so an attempted notification-first Tab/Control-F6 routing path was removed rather than overriding host semantics. The retained reusable fix is actual Button tab-stop registration. Keyboard behavior is proven through real GPUI dispatch at the reusable Button/notification/recorder layers; the product runtime crosses the real launcher boundary for simultaneous duplicate Toast rendering, exact action/dismiss activation, lifetime removal, focus return, screenshot, and cleanup.
+- **Focused receipts:** Button `16/16`; Toast `8/8`; Shortcut Recorder `16/16`; ToastManager `9/9`; vendor Notification `4/4`; `agent-cargo check --lib` finished. Negative controls cover blank IDs, duplicate copy with distinct identity, disabled/loading inertness, unavailable recorder actions, exact-duration pause, focus return, and stale-timer replacement safety.
+- **Runtime/visual receipt:** `.artifacts/consistency/UX-016/runtime-keyboard-feedback.json` is `RUNTIME-CONFIRMED`; seven stable control IDs coexist across two identical messages and three identical action labels; one action and one dismiss each remove only their exact Toast; `input:filter` is focused before, after action, and after dismiss. Screenshot: `.artifacts/consistency/UX-016/runtime-keyboard-feedback.png` (`750×501`).
+- **Build:** `target-agent/artifacts/ux16-keyboard-feedback/script-kit-gpui`; SHA-256 `199911ec10b5c3d3876a046559f69ff12c6d963feae9339fbdcd3277ca2d7398`.
+- **Audit/guardrails:** No temporary F6/notification Tab route remains; host keyboard routing is unchanged; all Script Kit Button and ToastAction call sites supply stable IDs; no source-reader/count audit was added; protected glass owner diff is empty; static glass tests pass `40/40`; calibration fixture passes `1/1`.
+- **Cleanup:** Final Driver reports process exited, streams drained, log writer closed, and exact artifact-path `ownedProcessCount:0`; clipboard untouched and no broad signal used.
+- **Commit:** This section is committed atomically with `Implement UX-016: require stable control IDs and keyboard-operable toast and shortcut feedback`; use `git log -1 --oneline` for the immutable hash.

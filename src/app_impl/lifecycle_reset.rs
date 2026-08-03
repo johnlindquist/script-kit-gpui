@@ -1,5 +1,8 @@
 use super::*;
 
+static KEYBOARD_FEEDBACK_FIXTURE_ENQUEUED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 struct HiddenMainWindowResetRequest {
     _native_hidden: crate::platform::NativeMainWindowHidden,
     visibility_generation: u64,
@@ -134,6 +137,66 @@ impl ScriptListApp {
         logging::log("EXEC", "=== Script cancellation complete ===");
     }
 
+    fn enqueue_keyboard_feedback_fixture_if_requested(
+        &mut self,
+        window: &gpui::Window,
+        cx: &gpui::App,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        if std::env::var("SCRIPT_KIT_TEST_KEYBOARD_FEEDBACK")
+            .ok()
+            .as_deref()
+            != Some("1")
+            || window.focused(cx).is_none()
+            || KEYBOARD_FEEDBACK_FIXTURE_ENQUEUED.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+
+        let first = crate::components::Toast::new(
+            "Duplicate status",
+            crate::components::ToastColors::from_theme(
+                self.theme.as_ref(),
+                crate::components::ToastVariant::Info,
+            ),
+        )
+        .with_id("ux16-runtime-a")
+        .variant(crate::components::ToastVariant::Info)
+        .persistent()
+        .action(crate::components::ToastAction::new(
+            "open-local",
+            "Open",
+            Box::new(|_, _, _| logging::log("UX16_FIXTURE", "action=open-local")),
+        ))
+        .action(crate::components::ToastAction::new(
+            "open-details",
+            "Open",
+            Box::new(|_, _, _| logging::log("UX16_FIXTURE", "action=open-details")),
+        ))
+        .on_dismiss(Box::new(|_, _| {
+            logging::log("UX16_FIXTURE", "dismiss=ux16-runtime-a")
+        }));
+        let second = crate::components::Toast::new(
+            "Duplicate status",
+            crate::components::ToastColors::from_theme(
+                self.theme.as_ref(),
+                crate::components::ToastVariant::Warning,
+            ),
+        )
+        .with_id("ux16-runtime-b")
+        .variant(crate::components::ToastVariant::Warning)
+        .persistent()
+        .action(crate::components::ToastAction::new(
+            "open-remote",
+            "Open",
+            Box::new(|_, _, _| logging::log("UX16_FIXTURE", "action=open-remote")),
+        ));
+
+        self.toast_manager.push(first);
+        self.toast_manager.push(second);
+    }
+
     /// Flush pending toasts from ToastManager to gpui-component's NotificationList
     ///
     /// This should be called at the start of render() where we have window access.
@@ -142,6 +205,7 @@ impl ScriptListApp {
     pub(crate) fn flush_pending_toasts(&mut self, window: &mut gpui::Window, cx: &mut gpui::App) {
         use gpui_component::WindowExt;
 
+        self.enqueue_keyboard_feedback_fixture_if_requested(window, cx);
         let pending = self.toast_manager.drain_pending();
         let count = pending.len();
         if count > 0 {
@@ -153,7 +217,7 @@ impl ScriptListApp {
         for toast in pending {
             logging::log("UI", &format!("Pushing notification: {}", toast.message));
             let notification =
-                crate::toast_manager::notification::pending_toast_to_notification(&toast);
+                crate::toast_manager::notification::pending_toast_to_notification(toast);
             window.push_notification(notification, cx);
         }
     }

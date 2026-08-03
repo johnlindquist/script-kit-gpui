@@ -1210,6 +1210,17 @@ impl Render for ScriptListApp {
                             .inset_0()
                             .overflow_hidden()
                             .children(gpui_component::Root::render_dialog_layer(window, cx)),
+                    )
+                    .child(
+                        div()
+                            .id("main-window-notification-layer-boundary")
+                            .debug_selector(|| {
+                                "main-window-notification-layer-boundary".to_string()
+                            })
+                            .absolute()
+                            .inset_0()
+                            .overflow_hidden()
+                            .children(gpui_component::Root::render_notification_layer(window, cx)),
                     ),
             )
     }

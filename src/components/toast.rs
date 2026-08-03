@@ -5,8 +5,6 @@
 //! expandable details.
 //!
 
-#![allow(dead_code)]
-
 #[path = "toast/constructors.rs"]
 mod constructors;
 #[path = "toast/model.rs"]
@@ -20,4 +18,6 @@ mod tests;
 mod types;
 
 pub use model::Toast;
-pub use types::{ToastAction, ToastColors, ToastDismissCallback, ToastVariant};
+pub use types::{
+    ToastAction, ToastActionId, ToastColors, ToastDismissCallback, ToastId, ToastVariant,
+};

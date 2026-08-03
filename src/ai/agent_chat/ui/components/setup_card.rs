@@ -239,23 +239,29 @@ impl Render for AgentChatSetupCard {
         );
         let button_colors = crate::components::ButtonColors::from_theme(&theme);
 
-        let primary_button = crate::components::Button::new(primary.label, button_colors)
-            .id("agent-chat-setup-primary-action")
-            .shortcut("↵")
-            .on_click(Box::new(cx.listener(move |_this, _, _window, cx| {
-                cx.emit(AgentChatSetupCardEvent::ActivateAction(primary.activation));
-                cx.stop_propagation();
-            })));
+        let primary_button = crate::components::Button::new(
+            "agent-chat-setup-primary-action",
+            primary.label,
+            button_colors,
+        )
+        .shortcut("↵")
+        .on_click(Box::new(cx.listener(move |_this, _, _window, cx| {
+            cx.emit(AgentChatSetupCardEvent::ActivateAction(primary.activation));
+            cx.stop_propagation();
+        })));
 
         let secondary_button = secondary.map(|control| {
-            crate::components::Button::new(control.label, button_colors)
-                .id("agent-chat-setup-secondary-action")
-                .variant(crate::components::ButtonVariant::Ghost)
-                .on_click(Box::new(cx.listener(move |_this, _, _window, cx| {
-                    cx.emit(AgentChatSetupCardEvent::ActivateAction(control.activation));
-                    cx.stop_propagation();
-                })))
-                .into_any_element()
+            crate::components::Button::new(
+                "agent-chat-setup-secondary-action",
+                control.label,
+                button_colors,
+            )
+            .variant(crate::components::ButtonVariant::Ghost)
+            .on_click(Box::new(cx.listener(move |_this, _, _window, cx| {
+                cx.emit(AgentChatSetupCardEvent::ActivateAction(control.activation));
+                cx.stop_propagation();
+            })))
+            .into_any_element()
         });
 
         let actions = if self.agent_picker.is_none() {

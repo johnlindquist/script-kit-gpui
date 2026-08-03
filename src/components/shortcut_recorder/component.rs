@@ -82,7 +82,7 @@ impl ShortcutRecorder {
             pending_action: None,
             detached_window: false,
             capture_only: false,
-            focused_action: ShortcutRecorderFocusedAction::Save,
+            focused_action: ShortcutRecorderFocusedAction::Cancel,
         }
     }
 
@@ -146,7 +146,7 @@ impl ShortcutRecorder {
         self.shortcut = RecordedShortcut::new();
         self.conflict = None;
         self.is_recording = true;
-        self.focused_action = ShortcutRecorderFocusedAction::Save;
+        self.focused_action = ShortcutRecorderFocusedAction::Cancel;
         logging::log("SHORTCUT", "Shortcut cleared");
         cx.notify();
     }
@@ -178,21 +178,32 @@ impl ShortcutRecorder {
         }
     }
 
+    pub fn can_save(&self) -> bool {
+        self.shortcut.is_complete() && self.conflict.is_none()
+    }
+
+    pub fn can_clear(&self) -> bool {
+        !self.shortcut.is_empty()
+    }
+
     pub fn focus_next_action(&mut self, cx: &mut Context<Self>) {
-        self.focused_action = self.focused_action.next(true);
+        self.focused_action = self.focused_action.next(self.can_save(), self.can_clear());
         cx.notify();
     }
 
     pub fn focus_previous_action(&mut self, cx: &mut Context<Self>) {
-        self.focused_action = self.focused_action.previous(true);
+        self.focused_action = self
+            .focused_action
+            .previous(self.can_save(), self.can_clear());
         cx.notify();
     }
 
     pub fn activate_focused_action(&mut self, cx: &mut Context<Self>) {
         match self.focused_action {
-            ShortcutRecorderFocusedAction::Save => self.save(),
-            ShortcutRecorderFocusedAction::Clear => self.clear(cx),
+            ShortcutRecorderFocusedAction::Save if self.can_save() => self.save(),
+            ShortcutRecorderFocusedAction::Clear if self.can_clear() => self.clear(cx),
             ShortcutRecorderFocusedAction::Cancel => self.cancel(),
+            ShortcutRecorderFocusedAction::Save | ShortcutRecorderFocusedAction::Clear => {}
         }
         cx.notify();
     }
@@ -251,8 +262,15 @@ impl ShortcutRecorder {
                     ),
                 );
 
-                // Check for conflicts
+                // Check for conflicts and focus the first newly available action.
                 self.check_conflict();
+                self.focused_action = if self.can_save() {
+                    ShortcutRecorderFocusedAction::Save
+                } else if self.can_clear() {
+                    ShortcutRecorderFocusedAction::Clear
+                } else {
+                    ShortcutRecorderFocusedAction::Cancel
+                };
             } else {
                 self.shortcut.key = None;
                 logging::log(

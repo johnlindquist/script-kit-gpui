@@ -30,7 +30,7 @@ pub struct Button {
     colors: ButtonColors,
     variant: ButtonVariant,
     shortcut_tokens: Option<Vec<String>>,
-    id: Option<SharedString>,
+    id: SharedString,
     disabled: bool,
     loading: bool,
     loading_label: Option<SharedString>,
@@ -40,14 +40,20 @@ pub struct Button {
 }
 
 impl Button {
-    /// Create a new button with the given label and pre-computed colors
-    pub fn new(label: impl Into<SharedString>, colors: ButtonColors) -> Self {
+    /// Create a button with an explicit stable control ID, display label, and colors.
+    pub fn new(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        colors: ButtonColors,
+    ) -> Self {
+        let id = id.into();
+        assert!(!id.is_empty(), "Button stable ID must not be empty");
         Self {
             label: label.into(),
             colors,
             variant: ButtonVariant::default(),
             shortcut_tokens: None,
-            id: None,
+            id,
             disabled: false,
             loading: false,
             loading_label: None,
@@ -77,12 +83,6 @@ impl Button {
     /// Set an optional shortcut (convenience for Option<String>)
     pub fn shortcut_opt(mut self, shortcut: Option<String>) -> Self {
         self.shortcut_tokens = shortcut.map(|shortcut| Self::resolve_shortcut_tokens(&shortcut));
-        self
-    }
-
-    /// Set an optional id on the button root element
-    pub fn id(mut self, id: impl Into<SharedString>) -> Self {
-        self.id = Some(id.into());
         self
     }
 
@@ -128,11 +128,16 @@ impl Button {
         self
     }
 
-    pub(crate) fn resolve_element_id(
-        id: Option<&SharedString>,
-        label: &SharedString,
-    ) -> SharedString {
-        id.cloned().unwrap_or_else(|| label.clone())
+    pub(crate) fn resolve_element_id(id: &SharedString) -> SharedString {
+        id.clone()
+    }
+
+    pub(crate) fn stable_id(&self) -> &SharedString {
+        &self.id
+    }
+
+    pub(crate) fn display_label(&self) -> &SharedString {
+        &self.label
     }
 
     pub(crate) fn should_show_pointer(
@@ -184,7 +189,7 @@ impl Button {
 pub(crate) const TRANSPARENT: u32 = 0x00000000;
 
 impl RenderOnce for Button {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Button {
             label,
             colors,
@@ -202,8 +207,22 @@ impl RenderOnce for Button {
         let on_click_for_key = on_click;
         let has_click_handler = on_click_callback.is_some();
         let show_pointer = Self::should_show_pointer(has_click_handler, disabled, loading);
-        let element_id = Self::resolve_element_id(id.as_ref(), &label);
+        let element_id = Self::resolve_element_id(&id);
         let label_for_log = label.clone();
+        let focus_handle = if show_pointer {
+            focus_handle.or_else(|| {
+                Some(
+                    window
+                        .use_keyed_state(ElementId::Name(element_id.clone()), cx, |_, cx| {
+                            cx.focus_handle()
+                        })
+                        .read(cx)
+                        .clone(),
+                )
+            })
+        } else {
+            None
+        };
         let focused = Self::resolve_focus_state(
             focused,
             focus_handle
@@ -316,8 +335,10 @@ impl RenderOnce for Button {
         };
 
         // Build the button element
+        let debug_element_id = element_id.clone();
         let mut button = div()
             .id(ElementId::Name(element_id))
+            .debug_selector(move || debug_element_id.to_string())
             .flex()
             .flex_row()
             .items_center()
@@ -369,7 +390,7 @@ impl RenderOnce for Button {
 
         // Add focus tracking and keyboard handler if focus_handle is provided
         if let Some(handle) = focus_handle {
-            button = button.track_focus(&handle);
+            button = button.track_focus(&handle.tab_stop(show_pointer));
 
             if show_pointer {
                 if let Some(callback) = on_click_for_key {

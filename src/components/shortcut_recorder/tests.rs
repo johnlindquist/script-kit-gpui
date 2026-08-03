@@ -1,7 +1,81 @@
 use crate::theme::Theme;
+use gpui::{AppContext as _, Keystroke, TestAppContext};
+use std::sync::Arc;
 
-use super::types::ShortcutRecorderFocusedAction;
-use super::{RecordedShortcut, ShortcutRecorderColors};
+use super::types::{RecorderAction, ShortcutRecorderFocusedAction};
+use super::{RecordedShortcut, ShortcutRecorder, ShortcutRecorderColors};
+
+fn recorder_window(cx: &mut TestAppContext) -> gpui::WindowHandle<ShortcutRecorder> {
+    cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|cx| ShortcutRecorder::new(cx, Arc::new(Theme::default())))
+        })
+        .expect("shortcut recorder test window should open")
+    })
+}
+
+#[test]
+fn real_gpui_tab_skips_disabled_actions_and_enter_cancels() {
+    let mut cx = TestAppContext::single();
+    let window = recorder_window(&mut cx);
+    window
+        .update(&mut cx, |recorder, window, cx| {
+            window.focus(&recorder.focus_handle, cx);
+        })
+        .expect("shortcut recorder test window should remain available");
+
+    cx.dispatch_keystroke(
+        *window,
+        Keystroke::parse("tab").expect("valid Tab keystroke"),
+    );
+    cx.dispatch_keystroke(
+        *window,
+        Keystroke::parse("enter").expect("valid Enter keystroke"),
+    );
+
+    window
+        .read_with(&cx, |recorder, _| {
+            assert_eq!(
+                recorder.focused_action,
+                ShortcutRecorderFocusedAction::Cancel
+            );
+            assert!(matches!(
+                recorder.pending_action,
+                Some(RecorderAction::Cancel)
+            ));
+        })
+        .expect("shortcut recorder test window should remain available");
+}
+
+#[test]
+fn real_gpui_chord_then_enter_dispatches_save() {
+    let mut cx = TestAppContext::single();
+    let window = recorder_window(&mut cx);
+    window
+        .update(&mut cx, |recorder, window, cx| {
+            window.focus(&recorder.focus_handle, cx);
+        })
+        .expect("shortcut recorder test window should remain available");
+
+    cx.dispatch_keystroke(
+        *window,
+        Keystroke::parse("cmd-k").expect("valid shortcut chord"),
+    );
+    cx.dispatch_keystroke(
+        *window,
+        Keystroke::parse("enter").expect("valid Enter keystroke"),
+    );
+
+    window
+        .read_with(&cx, |recorder, _| {
+            assert_eq!(recorder.focused_action, ShortcutRecorderFocusedAction::Save);
+            assert!(matches!(
+                recorder.pending_action,
+                Some(RecorderAction::Save(_))
+            ));
+        })
+        .expect("shortcut recorder test window should remain available");
+}
 
 #[test]
 fn test_recorded_shortcut_to_display_string() {
@@ -84,29 +158,57 @@ fn test_shortcut_recorder_colors_from_theme_uses_theme_overlay_token() {
 }
 
 #[test]
-fn test_shortcut_recorder_focus_cycles_forward_through_actions() {
+fn test_shortcut_recorder_focus_cycles_forward_through_enabled_actions() {
     let mut focused = ShortcutRecorderFocusedAction::Save;
 
-    focused = focused.next(true);
+    focused = focused.next(true, true);
     assert_eq!(focused, ShortcutRecorderFocusedAction::Clear);
 
-    focused = focused.next(true);
+    focused = focused.next(true, true);
     assert_eq!(focused, ShortcutRecorderFocusedAction::Cancel);
 
-    focused = focused.next(true);
+    focused = focused.next(true, true);
     assert_eq!(focused, ShortcutRecorderFocusedAction::Save);
 }
 
 #[test]
-fn test_shortcut_recorder_focus_cycles_backward_through_actions() {
+fn test_shortcut_recorder_focus_cycles_backward_through_enabled_actions() {
     let mut focused = ShortcutRecorderFocusedAction::Save;
 
-    focused = focused.previous(true);
+    focused = focused.previous(true, true);
     assert_eq!(focused, ShortcutRecorderFocusedAction::Cancel);
 
-    focused = focused.previous(true);
+    focused = focused.previous(true, true);
     assert_eq!(focused, ShortcutRecorderFocusedAction::Clear);
 
-    focused = focused.previous(true);
+    focused = focused.previous(true, true);
     assert_eq!(focused, ShortcutRecorderFocusedAction::Save);
+}
+
+#[test]
+fn shortcut_recorder_focus_skips_unavailable_save_and_clear() {
+    assert_eq!(
+        ShortcutRecorderFocusedAction::Save.next(false, false),
+        ShortcutRecorderFocusedAction::Cancel
+    );
+    assert_eq!(
+        ShortcutRecorderFocusedAction::Clear.previous(false, false),
+        ShortcutRecorderFocusedAction::Cancel
+    );
+    assert_eq!(
+        ShortcutRecorderFocusedAction::eligible(false, false),
+        vec![ShortcutRecorderFocusedAction::Cancel]
+    );
+}
+
+#[test]
+fn shortcut_recorder_focus_skips_only_the_unavailable_action() {
+    assert_eq!(
+        ShortcutRecorderFocusedAction::Save.next(false, true),
+        ShortcutRecorderFocusedAction::Clear
+    );
+    assert_eq!(
+        ShortcutRecorderFocusedAction::Clear.next(true, false),
+        ShortcutRecorderFocusedAction::Save
+    );
 }

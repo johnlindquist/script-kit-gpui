@@ -5,22 +5,20 @@ use std::{
     time::Duration,
 };
 
-use gpui::{
-    Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, DismissEvent,
-    ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    Subscription, Window, div, prelude::FluentBuilder, px,
-};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use smol::Timer;
-
 use crate::{
     ActiveTheme as _, Anchor, Edges, Icon, IconName, Sizable as _, StyledExt, TITLE_BAR_HEIGHT,
     animation::cubic_bezier,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
+use gpui::{
+    Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, DismissEvent,
+    ElementId, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement, StyleRefinement,
+    Styled, Subscription, WeakFocusHandle, Window, div, prelude::FluentBuilder, px,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum NotificationType {
@@ -67,14 +65,20 @@ pub struct Notification {
     ///
     /// None means the notification will be added to the end of the list.
     id: NotificationId,
+    root_element_id: ElementId,
     style: StyleRefinement,
     type_: Option<NotificationType>,
     title: Option<SharedString>,
     message: Option<SharedString>,
     icon: Option<Icon>,
     autohide: bool,
+    autohide_duration: Duration,
     action_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> Button>>,
     content_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> AnyElement>>,
+    content_only: bool,
+    dismissible: bool,
+    focus_handle: Option<FocusHandle>,
+    previous_focused_handle: Option<WeakFocusHandle>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     closing: bool,
 }
@@ -117,18 +121,25 @@ impl Notification {
     /// The default id is a random UUID.
     pub fn new() -> Self {
         let id: SharedString = uuid::Uuid::new_v4().to_string().into();
-        let id = (TypeId::of::<DefaultIdType>(), id.into());
+        let root_element_id: ElementId = id.clone().into();
+        let id = (TypeId::of::<DefaultIdType>(), root_element_id.clone());
 
         Self {
             id: id.into(),
+            root_element_id,
             style: StyleRefinement::default(),
             title: None,
             message: None,
             type_: None,
             icon: None,
             autohide: true,
+            autohide_duration: Duration::from_secs(5),
             action_builder: None,
             content_builder: None,
+            content_only: false,
+            dismissible: true,
+            focus_handle: None,
+            previous_focused_handle: None,
             on_click: None,
             closing: false,
         }
@@ -176,12 +187,15 @@ impl Notification {
     /// ```
     pub fn id<T: Sized + 'static>(mut self) -> Self {
         self.id = TypeId::of::<T>().into();
+        self.root_element_id = std::any::type_name::<T>().into();
         self
     }
 
     /// Set the type and id of the notification, used to uniquely identify the notification.
     pub fn id1<T: Sized + 'static>(mut self, key: impl Into<ElementId>) -> Self {
-        self.id = (TypeId::of::<T>(), key.into()).into();
+        let key = key.into();
+        self.id = (TypeId::of::<T>(), key.clone()).into();
+        self.root_element_id = key;
         self
     }
 
@@ -210,6 +224,19 @@ impl Notification {
     /// Set the auto hide of the notification, default is true.
     pub fn autohide(mut self, autohide: bool) -> Self {
         self.autohide = autohide;
+        self
+    }
+
+    /// Set the exact active-focus time before automatic dismissal.
+    pub fn autohide_after(mut self, duration: Duration) -> Self {
+        self.autohide = true;
+        self.autohide_duration = duration;
+        self
+    }
+
+    /// Hide the built-in close control when custom content owns dismissal.
+    pub fn dismissible(mut self, dismissible: bool) -> Self {
+        self.dismissible = dismissible;
         self
     }
 
@@ -244,7 +271,9 @@ impl Notification {
 
         // Dismiss the notification after 0.15s to show the animation.
         cx.spawn(async move |view, cx| {
-            Timer::after(Duration::from_secs_f32(0.15)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
             cx.update(|cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |view, cx| {
@@ -265,6 +294,35 @@ impl Notification {
         self.content_builder = Some(Rc::new(content));
         self
     }
+
+    /// Render custom content as the notification root while retaining queue,
+    /// focus-return, and autohide lifecycle ownership.
+    pub fn content_only(
+        mut self,
+        content: impl Fn(&mut Self, &mut Window, &mut Context<Self>) -> AnyElement + 'static,
+    ) -> Self {
+        self.content_builder = Some(Rc::new(content));
+        self.content_only = true;
+        self.dismissible = false;
+        self
+    }
+
+    pub fn dismiss_from_control(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = self
+            .previous_focused_handle
+            .as_ref()
+            .and_then(WeakFocusHandle::upgrade)
+        {
+            window.focus(&handle, cx);
+        }
+        self.dismiss(window, cx);
+    }
+
+    pub(crate) fn controls_focused(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle
+            .as_ref()
+            .is_some_and(|handle| handle.contains_focused(window, cx))
+    }
 }
 impl EventEmitter<DismissEvent> for Notification {}
 impl FluentBuilder for Notification {}
@@ -275,10 +333,22 @@ impl Styled for Notification {
 }
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus_handle = window
+            .use_keyed_state(self.root_element_id.clone(), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        self.focus_handle = Some(focus_handle.clone());
         let content = self
             .content_builder
             .clone()
             .map(|builder| builder(self, window, cx));
+        if self.content_only {
+            return div()
+                .id(self.root_element_id.clone())
+                .track_focus(&focus_handle.tab_stop(false))
+                .when_some(content, |this, content| this.child(content))
+                .into_any_element();
+        }
         let action = self
             .action_builder
             .clone()
@@ -293,7 +363,8 @@ impl Render for Notification {
         let placement = cx.theme().notification.placement;
 
         h_flex()
-            .id("notification")
+            .id(self.root_element_id.clone())
+            .track_focus(&focus_handle.tab_stop(false))
             .group("")
             .occlude()
             .relative()
@@ -326,21 +397,19 @@ impl Render for Notification {
                     .when_some(content, |this, content| this.child(content)),
             )
             .when_some(action, |this, action| this.child(action))
-            .child(
-                div()
-                    .absolute()
-                    .top_1()
-                    .right_1()
-                    .invisible()
-                    .group_hover("", |this| this.visible())
-                    .child(
-                        Button::new("close")
+            .when(self.dismissible, |this| {
+                this.child(
+                    div().absolute().top_1().right_1().child(
+                        Button::new("notification-dismiss")
                             .icon(IconName::Close)
                             .ghost()
                             .xsmall()
-                            .on_click(cx.listener(|this, _, window, cx| this.dismiss(window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.dismiss_from_control(window, cx)
+                            })),
                     ),
-            )
+                )
+            })
             .when_some(self.on_click.clone(), |this, on_click| {
                 this.on_click(cx.listener(move |view, event, window, cx| {
                     view.dismiss(window, cx);
@@ -389,6 +458,7 @@ impl Render for Notification {
                     }
                 },
             )
+            .into_any_element()
     }
 }
 
@@ -442,9 +512,11 @@ impl NotificationList {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let notification = notification.into();
+        let mut notification = notification.into();
+        notification.previous_focused_handle = window.focused(cx).map(|handle| handle.downgrade());
         let id = notification.id.clone();
         let autohide = notification.autohide;
+        let autohide_duration = notification.autohide_duration;
 
         // Remove the notification by id, for keep unique.
         self.notifications.retain(|note| note.read(cx).id != id);
@@ -461,9 +533,25 @@ impl NotificationList {
 
         self.notifications.push_back(notification.clone());
         if autohide {
-            // Sleep for 5 seconds to autohide the notification
+            // Count only time when no notification control owns focus. This
+            // preserves the configured duration while keyboard users read and
+            // operate actions; replacing a notification cannot let its old
+            // entity timer dismiss the replacement generation.
             cx.spawn_in(window, async move |_, cx| {
-                Timer::after(Duration::from_secs(5)).await;
+                const TICK: Duration = Duration::from_millis(25);
+                let mut remaining = autohide_duration;
+                while remaining > Duration::ZERO {
+                    cx.background_executor().timer(TICK.min(remaining)).await;
+                    let controls_focused = match notification
+                        .update_in(cx, |note, window, cx| note.controls_focused(window, cx))
+                    {
+                        Ok(focused) => focused,
+                        Err(_) => return,
+                    };
+                    if !controls_focused {
+                        remaining = remaining.saturating_sub(TICK);
+                    }
+                }
 
                 if let Err(err) =
                     notification.update_in(cx, |note, window, cx| note.dismiss(window, cx))
@@ -541,5 +629,186 @@ impl Render for NotificationList {
                 cx.notify()
             }))
             .children(items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Keystroke, TestAppContext};
+
+    fn open_notification_list(cx: &mut TestAppContext) -> gpui::WindowHandle<NotificationList> {
+        cx.update(crate::init);
+        cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| NotificationList::new(window, cx))
+            })
+            .expect("notification test window should open")
+        })
+    }
+
+    fn push(
+        window_handle: &gpui::WindowHandle<NotificationList>,
+        cx: &mut TestAppContext,
+        notification: Notification,
+    ) -> Entity<Notification> {
+        window_handle
+            .update(cx, |list, window, cx| {
+                list.push(notification, window, cx);
+                list.notifications
+                    .back()
+                    .expect("pushed notification should be retained")
+                    .clone()
+            })
+            .expect("notification test window should remain available")
+    }
+
+    fn advance(cx: &mut TestAppContext, duration: Duration) {
+        let mut remaining = duration;
+        while remaining > Duration::ZERO {
+            let step = Duration::from_millis(25).min(remaining);
+            cx.background_executor.advance_clock(step);
+            cx.run_until_parked();
+            remaining = remaining.saturating_sub(step);
+        }
+    }
+
+    #[gpui::test]
+    fn focused_controls_pause_exact_autohide_budget_until_focus_leaves(cx: &mut TestAppContext) {
+        let window_handle = open_notification_list(cx);
+        let prior_focus = window_handle
+            .update(cx, |_, window, cx| {
+                let handle = cx.focus_handle();
+                window.focus(&handle, cx);
+                handle
+            })
+            .expect("notification test window should remain available");
+        let notification = push(
+            &window_handle,
+            cx,
+            Notification::new()
+                .id1::<u8>("focus-pause")
+                .message("Focus pauses me")
+                .autohide_after(Duration::from_millis(100)),
+        );
+        cx.run_until_parked();
+
+        window_handle
+            .update(cx, |_, window, cx| {
+                let notification_focus = notification
+                    .read(cx)
+                    .focus_handle
+                    .clone()
+                    .expect("rendered notification should publish a focus root");
+                window.focus(&notification_focus, cx);
+            })
+            .expect("notification test window should remain available");
+        advance(cx, Duration::from_millis(250));
+        assert!(!notification.read_with(cx, |note, _| note.closing));
+
+        window_handle
+            .update(cx, |_, window, cx| window.focus(&prior_focus, cx))
+            .expect("notification test window should remain available");
+        advance(cx, Duration::from_millis(75));
+        assert!(!notification.read_with(cx, |note, _| note.closing));
+        advance(cx, Duration::from_millis(25));
+        assert!(notification.read_with(cx, |note, _| note.closing));
+    }
+
+    #[gpui::test]
+    fn dismiss_from_control_restores_prior_focus_and_removes_the_entity(cx: &mut TestAppContext) {
+        let window_handle = open_notification_list(cx);
+        let prior_focus = window_handle
+            .update(cx, |_, window, cx| {
+                let handle = cx.focus_handle();
+                window.focus(&handle, cx);
+                handle
+            })
+            .expect("notification test window should remain available");
+        let notification = push(
+            &window_handle,
+            cx,
+            Notification::new()
+                .id1::<u8>("focus-return")
+                .message("Return focus")
+                .autohide_after(Duration::from_secs(10)),
+        );
+        cx.run_until_parked();
+
+        window_handle
+            .update(cx, |_, window, cx| {
+                let notification_focus = notification
+                    .read(cx)
+                    .focus_handle
+                    .clone()
+                    .expect("rendered notification should publish a focus root");
+                window.focus(&notification_focus, cx);
+                notification.update(cx, |note, cx| note.dismiss_from_control(window, cx));
+                assert!(prior_focus.is_focused(window));
+            })
+            .expect("notification test window should remain available");
+        cx.run_until_parked();
+        advance(cx, Duration::from_millis(150));
+        assert!(
+            window_handle
+                .read_with(cx, |list, _| list.notifications.is_empty())
+                .expect("notification test window should remain available")
+        );
+    }
+
+    #[gpui::test]
+    fn stale_timer_cannot_dismiss_same_id_replacement(cx: &mut TestAppContext) {
+        let window_handle = open_notification_list(cx);
+        let old = push(
+            &window_handle,
+            cx,
+            Notification::new()
+                .id1::<u8>("replace-me")
+                .message("Old")
+                .autohide_after(Duration::from_millis(50)),
+        );
+        advance(cx, Duration::from_millis(25));
+        let replacement = push(
+            &window_handle,
+            cx,
+            Notification::new()
+                .id1::<u8>("replace-me")
+                .message("Replacement")
+                .autohide(false),
+        );
+        assert_ne!(old.entity_id(), replacement.entity_id());
+
+        advance(cx, Duration::from_millis(175));
+        assert!(
+            window_handle
+                .read_with(cx, |list, _| {
+                    list.notifications.len() == 1
+                        && list.notifications[0].entity_id() == replacement.entity_id()
+                })
+                .expect("notification test window should remain available")
+        );
+    }
+
+    #[gpui::test]
+    fn built_in_dismiss_button_accepts_space_from_real_dispatch(cx: &mut TestAppContext) {
+        let window_handle = open_notification_list(cx);
+        let notification = push(
+            &window_handle,
+            cx,
+            Notification::new()
+                .id1::<u8>("keyboard-dismiss")
+                .message("Dismiss with Space")
+                .autohide(false),
+        );
+        cx.run_until_parked();
+
+        window_handle
+            .update(cx, |_, window, cx| window.focus_next(cx))
+            .expect("notification test window should remain available");
+        cx.dispatch_keystroke(
+            *window_handle,
+            Keystroke::parse("space").expect("valid Space keystroke"),
+        );
+        assert!(notification.read_with(cx, |note, _| note.closing));
     }
 }

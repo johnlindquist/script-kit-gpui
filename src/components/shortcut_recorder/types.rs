@@ -13,22 +13,30 @@ pub enum ShortcutRecorderFocusedAction {
 }
 
 impl ShortcutRecorderFocusedAction {
-    pub fn next(self, clear_visible: bool) -> Self {
-        match (self, clear_visible) {
-            (Self::Save, true) => Self::Clear,
-            (Self::Save, false) => Self::Cancel,
-            (Self::Clear, _) => Self::Cancel,
-            (Self::Cancel, _) => Self::Save,
+    pub fn eligible(save_enabled: bool, clear_enabled: bool) -> Vec<Self> {
+        let mut actions = Vec::with_capacity(3);
+        if save_enabled {
+            actions.push(Self::Save);
         }
+        if clear_enabled {
+            actions.push(Self::Clear);
+        }
+        actions.push(Self::Cancel);
+        actions
     }
 
-    pub fn previous(self, clear_visible: bool) -> Self {
-        match (self, clear_visible) {
-            (Self::Save, _) => Self::Cancel,
-            (Self::Clear, _) => Self::Save,
-            (Self::Cancel, true) => Self::Clear,
-            (Self::Cancel, false) => Self::Save,
-        }
+    pub fn next(self, save_enabled: bool, clear_enabled: bool) -> Self {
+        let actions = Self::eligible(save_enabled, clear_enabled);
+        let index = actions.iter().position(|action| *action == self);
+        actions[index.map_or(0, |index| (index + 1) % actions.len())]
+    }
+
+    pub fn previous(self, save_enabled: bool, clear_enabled: bool) -> Self {
+        let actions = Self::eligible(save_enabled, clear_enabled);
+        let index = actions.iter().position(|action| *action == self);
+        actions[index.map_or(actions.len() - 1, |index| {
+            index.checked_sub(1).unwrap_or(actions.len() - 1)
+        })]
     }
 }
 

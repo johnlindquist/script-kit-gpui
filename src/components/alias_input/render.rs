@@ -69,7 +69,7 @@ impl Render for AliasInput {
                 // Left side: Clear button (only if editing existing alias)
                 div().when(can_clear, |d| {
                     d.child(
-                        Button::new("Clear", button_colors)
+                        Button::new("alias-input:clear", "Clear", button_colors)
                             .variant(ButtonVariant::Ghost)
                             .on_click(Box::new(move |event, window, cx| {
                                 clear_handler(event, window, cx);
@@ -84,7 +84,7 @@ impl Render for AliasInput {
                     .flex_row()
                     .gap(px(BUTTON_GAP))
                     .child(
-                        Button::new("Cancel", button_colors)
+                        Button::new("alias-input:cancel", "Cancel", button_colors)
                             .variant(ButtonVariant::Ghost)
                             .shortcut("Esc")
                             .on_click(Box::new(move |event, window, cx| {
@@ -92,7 +92,7 @@ impl Render for AliasInput {
                             })),
                     )
                     .child(
-                        Button::new("Save", button_colors)
+                        Button::new("alias-input:save", "Save", button_colors)
                             .variant(ButtonVariant::Primary)
                             .shortcut("↵")
                             .disabled(!can_save)

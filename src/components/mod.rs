@@ -198,7 +198,7 @@ pub use shortcut_recorder::{
 #[allow(unused_imports)]
 pub use text_input::{TextInputState, TextSelection};
 #[allow(unused_imports)]
-pub use toast::{Toast, ToastAction, ToastColors, ToastVariant};
+pub use toast::{Toast, ToastAction, ToastActionId, ToastColors, ToastId, ToastVariant};
 #[allow(unused_imports)]
 pub use unified_list_item::{
     Density, ItemState, LeadingContent, ListItemLayout, SectionHeader, TextContent,

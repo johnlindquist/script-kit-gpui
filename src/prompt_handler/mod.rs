@@ -2564,6 +2564,7 @@ impl ScriptListApp {
                 let toast = if let Some(ref trace) = details_text {
                     let trace_clone = trace.clone();
                     toast.action(ToastAction::new(
+                        "copy-error",
                         "Copy Error",
                         Box::new(move |_, _, _| {
                             // Copy to clipboard
@@ -2637,6 +2638,7 @@ impl ScriptListApp {
                 if let Some(ref detail_text) = details {
                     let detail_clone = detail_text.clone();
                     toast = toast.action(ToastAction::new(
+                        "copy-details",
                         "Copy Details",
                         Box::new(move |_, _, _| {
                             use arboard::Clipboard;

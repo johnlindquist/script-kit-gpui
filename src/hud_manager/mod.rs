@@ -430,7 +430,7 @@ impl Render for HudView {
                     hover_overlay,
                 };
                 el.child(
-                    Button::new(label, button_colors)
+                    Button::new("hud:primary-action", label, button_colors)
                         .variant(ButtonVariant::Primary)
                         .on_click(Box::new(move |_event, _window, _cx| {
                             if let Some(ref action) = action {

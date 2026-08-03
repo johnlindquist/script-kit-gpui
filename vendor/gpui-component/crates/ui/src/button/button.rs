@@ -6,8 +6,8 @@ use crate::{
 };
 use gpui::{
     Action, AnyElement, App, ClickEvent, Corners, Div, Edges, ElementId, Hsla, InteractiveElement,
-    Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    Interactivity, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, RenderOnce,
+    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
 
@@ -425,6 +425,7 @@ impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style: ButtonVariant = self.variant;
         let clickable = self.clickable();
+        let on_click_for_key = self.on_click.clone();
         let is_disabled = self.disabled;
         let hoverable = self.hoverable();
         let normal_style = style.normal(self.outline, cx);
@@ -559,6 +560,20 @@ impl RenderOnce for Button {
                     }
 
                     on_click(event, window, cx);
+                })
+            })
+            .when_some(on_click_for_key.filter(|_| clickable), |this, on_click| {
+                this.on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if matches!(
+                        key,
+                        "enter" | "return" | "Enter" | "Return" | " " | "space" | "Space"
+                    ) {
+                        on_click(&ClickEvent::default(), window, cx);
+                        cx.stop_propagation();
+                    } else {
+                        cx.propagate();
+                    }
                 })
             })
             .when_some(self.on_hover.filter(|_| hoverable), |this, on_hover| {

@@ -151,11 +151,52 @@ impl Default for ToastColors {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ToastId(SharedString);
+
+impl ToastId {
+    pub fn new(id: impl Into<SharedString>) -> Self {
+        let id = id.into();
+        assert!(!id.is_empty(), "Toast ID must not be empty");
+        Self(id)
+    }
+
+    pub fn unique() -> Self {
+        Self::new(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
+
+    pub fn control_id(&self, suffix: impl std::fmt::Display) -> SharedString {
+        format!("toast:{}:{suffix}", self.as_str()).into()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ToastActionId(SharedString);
+
+impl ToastActionId {
+    pub fn new(id: impl Into<SharedString>) -> Self {
+        let id = id.into();
+        assert!(!id.is_empty(), "Toast action ID must not be empty");
+        Self(id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
 /// Callback type for toast action button clicks
 pub type ToastActionCallback = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// An action button that can be displayed on a toast
+#[derive(Clone)]
 pub struct ToastAction {
+    /// Stable identity independent from the display label.
+    pub id: ToastActionId,
     /// Label text for the action button
     pub label: SharedString,
     /// Callback when the action is clicked
@@ -163,9 +204,14 @@ pub struct ToastAction {
 }
 
 impl ToastAction {
-    /// Create a new toast action
-    pub fn new(label: impl Into<SharedString>, callback: ToastActionCallback) -> Self {
+    /// Create a toast action with identity independent from its display label.
+    pub fn new(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        callback: ToastActionCallback,
+    ) -> Self {
         Self {
+            id: ToastActionId::new(id),
             label: label.into(),
             callback: Rc::new(callback),
         }

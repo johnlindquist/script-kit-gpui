@@ -638,7 +638,11 @@ impl ScriptListApp {
         if total_count > 0 {
             let stop_all_button_entity = stop_all_button_entity.clone();
             trailing.push(
-                crate::components::Button::new("Stop All", stop_all_button_colors)
+                crate::components::Button::new(
+                    "process-manager:stop-all",
+                    "Stop All",
+                    stop_all_button_colors,
+                )
                     .variant(crate::components::ButtonVariant::Ghost)
                     .shortcut("⌘↵")
                     .on_click(Box::new(move |_event, _window, cx| {

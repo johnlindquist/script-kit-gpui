@@ -334,19 +334,27 @@ impl CreationFeedbackPanel {
         event_name: &'static str,
     ) -> Button {
         match callback {
-            Some(callback) => Button::new(label, button_colors)
-                .variant(ButtonVariant::Ghost)
-                .on_click(Box::new(move |_event, window, cx| {
-                    tracing::debug!(
-                        path = %path.display(),
-                        event = event_name,
-                        "creation_feedback_panel_action"
-                    );
-                    callback(&path, window, cx);
-                })),
-            None => Button::new(label, button_colors)
-                .variant(ButtonVariant::Ghost)
-                .disabled(true),
+            Some(callback) => Button::new(
+                format!("creation-feedback:{event_name}"),
+                label,
+                button_colors,
+            )
+            .variant(ButtonVariant::Ghost)
+            .on_click(Box::new(move |_event, window, cx| {
+                tracing::debug!(
+                    path = %path.display(),
+                    event = event_name,
+                    "creation_feedback_panel_action"
+                );
+                callback(&path, window, cx);
+            })),
+            None => Button::new(
+                format!("creation-feedback:{event_name}"),
+                label,
+                button_colors,
+            )
+            .variant(ButtonVariant::Ghost)
+            .disabled(true),
         }
     }
 }
@@ -405,12 +413,14 @@ impl RenderOnce for CreationFeedbackPanel {
             "edit_artifact",
         );
         let run_button = match on_run_artifact {
-            Some(callback) if run_disabled_reason.is_empty() => Button::new("Run", button_colors)
-                .variant(ButtonVariant::Ghost)
-                .on_click(Box::new(move |_event, window, cx| {
-                    callback(&artifact_path, window, cx);
-                })),
-            _ => Button::new("Run", button_colors)
+            Some(callback) if run_disabled_reason.is_empty() => {
+                Button::new("creation-feedback:run-artifact", "Run", button_colors)
+                    .variant(ButtonVariant::Ghost)
+                    .on_click(Box::new(move |_event, window, cx| {
+                        callback(&artifact_path, window, cx);
+                    }))
+            }
+            _ => Button::new("creation-feedback:run-artifact", "Run", button_colors)
                 .variant(ButtonVariant::Ghost)
                 .disabled(true),
         };
@@ -422,9 +432,13 @@ impl RenderOnce for CreationFeedbackPanel {
                 callback,
                 "copy_receipt_path",
             ),
-            (None, _) => Button::new("Copy Receipt Path", button_colors)
-                .variant(ButtonVariant::Ghost)
-                .disabled(true),
+            (None, _) => Button::new(
+                "creation-feedback:copy-receipt-path",
+                "Copy Receipt Path",
+                button_colors,
+            )
+            .variant(ButtonVariant::Ghost)
+            .disabled(true),
         };
         let open_receipt_button = match (receipt_path, on_open_receipt) {
             (Some(path), callback) => Self::path_button(
@@ -434,9 +448,13 @@ impl RenderOnce for CreationFeedbackPanel {
                 callback,
                 "open_receipt",
             ),
-            (None, _) => Button::new("Open Receipt", button_colors)
-                .variant(ButtonVariant::Ghost)
-                .disabled(true),
+            (None, _) => Button::new(
+                "creation-feedback:open-receipt",
+                "Open Receipt",
+                button_colors,
+            )
+            .variant(ButtonVariant::Ghost)
+            .disabled(true),
         };
 
         let tokens = crate::designs::get_tokens(design_variant);
