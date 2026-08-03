@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 16 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 17 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -17,7 +17,7 @@
 
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
-| Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C13 complete; C14 pending |
+| Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C14 complete; C15 pending |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | Plan complete; C01 starting |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
@@ -466,6 +466,31 @@
   5. In a surface without a host-owned Tab command, focus a Button and press Enter or Space; it should activate once with visible focus. Disabled/loading Buttons must remain inert.
   6. Open Shortcut Recorder empty and press Tab then Enter; unavailable Save/Clear are skipped and Cancel runs. Record a valid chord, then press Enter; Save runs.
 - **Intentional differences preserved:** The main launcher retains its established plain Tab and Shift+Tab commands rather than stealing them for Toast traversal. Keyboard operability is enforced at the reusable control and notification layers, while the product runtime proof validates real rendering, exact action/dismiss lifetimes, focus return, and cleanup. AppKit/native controls remain separate renderers, and all UX-012/UX-013/UX-014 ownership, fixed geometry, popup lifecycle, and host navigation semantics remain unchanged.
+
+### UX-007 — Add the approved launcher-family leading selection marker
+
+- **Status:** Complete for the UX-007 product contract; token ownership, overlay geometry, keyboard/pointer parity, Main/Actions/built-in visuals, family opt-out controls, generated design contracts, anti-drift, and exact cleanup are green.
+- **Baseline:** `3dbb3d224`.
+- **Commit:** This section is committed atomically with `Implement UX-007: add the approved launcher-family leading selection marker`; use `git log -1 --oneline` for the immutable hash.
+- **Decision branch:** The consistency explorer showed the approved marker shape but supplied no numeric production values. The Oracle plan’s fixed fallback therefore fired: `2×16px`, `6px` inset from the row surface, `1px` radius, full accent alpha, vertically centered.
+- **Observable before → after:** Selected launcher-family rows relied on fill/text emphasis alone. They now also show one narrow accent marker at the leading edge. Arrow-key selection and first-click selection use the same marker geometry; Actions and built-ins that render through `ListItem` inherit it automatically. The marker is an absolute overlay, so row height, padding, icon/text/accessory origins, hit bounds, and scroll measurements stay unchanged.
+- **Exact owners/symbols:** `src/designs/core/main_menu_theme.rs::{MainMenuRowTokens,MainMenuGeometrySignature,main_menu_row_tokens}`; `src/list_item/mod.rs::{ListItemMetricsOverride,ListItemSelectionMarkerGeometry,list_item_selection_marker_geometry,ListItem::render}`; `src/actions/dialog.rs::{resolved_actions_dialog_row_metrics,ActionsDialog::devtools_row_geometry,ActionsDialog::automation_layout_info}`; `src/design_contract/mod.rs`; generated `design/mockups/generated/{tokens.json,tokens.css}`; `scripts/agentic/ux7-selection-marker-probe.ts`.
+- **Token and render contract:** All 15 main-menu variants share explicit width/height/inset/radius/alpha tokens. `ListItem` paints the marker after row content in a relative outer container; the marker is absolute and appears whenever the row is selected, including selected-disabled location state. Unselected rows render no marker. Actions changes only the marker’s centering host height to its existing compact row height; its content metrics remain byte-for-byte unchanged.
+- **Generated design contract:** `export_design_tokens` now publishes marker width, height, inset, radius, opacity, and resolved accent color from Rust ownership. `tokens.json` and `tokens.css` were regenerated with the canonical wrapper command, not hand-edited.
+- **Focused verification:** `selection_marker` → 4 passed; `designs::core::main_menu_theme` → 9 passed; `list_item` → 42 passed; `design_contract` → 1 passed; `agent-cargo check --lib` and the final product build finished. Tests lock all variants to the approved values, overlay-only geometry, hidden unselected state, unchanged content metrics, and compact Actions centering.
+- **Product build:** `target-agent/artifacts/ux7-selection-marker/script-kit-gpui`; SHA-256 `9e9e7aafbebf60678ac532ea3cefd2710a34f940c3d5a74d055c4ac07c8168dc`.
+- **Runtime/visual receipt:** `.artifacts/consistency/UX-007/runtime-selection-marker.json` is `RUNTIME-CONFIRMED`. Main’s first seven row/content/hit geometry records exactly match the pre-marker UX-016 artifact. Keyboard Down and a real first-click selection move one paint-time marker while preserving `2×16` geometry and the same x-position. Actions exposes `ActionsSelectionMarker[1]` centered at `y=74` inside the existing `36px` `ActionsRow[1]`, with selected action `run_script`. Process Manager inherits the same paint-time marker. Screenshots: `main-before.png`, `main-after.png`, `actions-selection-marker.png`, and `process-manager-selection-marker.png`.
+- **Negative controls:** A real Unified Select prompt reports zero launcher markers. The exact generation-scoped Dictation microphone popup exposes both compact rows and zero launcher markers; `compact-no-selection-marker.png` confirms no local bar. Repository inventory finds no built-in-local selection bar/border implementation. A flex child, one-pixel non-marker geometry movement, different keyboard/click x-position, local built-in marker, Unified marker, or compact marker fails the tests/probe.
+- **Governance/anti-drift:** Source-audit inventory remains 2,818 reader sites with no additions against the baseline. The hardcoded-visual scanner and its 16 tests pass. Consistency explorer validation passes 6 tests, browser smoke renders 12 groups/75 scenes, mockup lint passes, and generated tokens stay token-derived. Protected glass owner diff is empty; static glass tests pass `40/40`; calibration fixture passes `1/1`.
+- **Cleanup:** Six isolated Driver runs—baseline, Main, Actions, Process Manager, Unified Select, and compact Dictation—each report process exited, streams drained, log writer closed, and exact executable-path `ownedProcessCount:0`. Final baseline/current process inventories are empty; no broad signal or clipboard mutation occurred.
+- **User test/view:**
+  1. Launch Script Kit and press Up/Down. The selected launcher row should show a narrow accent bar at its leading edge without moving its icon or text.
+  2. Single-click a different unselected row. The marker should move to that row with the same width/inset; the first click selects without changing row geometry.
+  3. Press Cmd+K. The selected Actions row should use the same marker, vertically centered in the existing compact 36px row. Press Escape to return focus.
+  4. Open Process Manager; its selected process row should inherit the same marker without built-in-local styling.
+  5. Open a protocol Select prompt and Dictation’s microphone picker. Unified Select and compact microphone rows should keep their existing selected fill and show no leading marker.
+  6. Run `bun scripts/agentic/ux7-selection-marker-probe.ts`; expect `RUNTIME-CONFIRMED`, exact baseline geometry parity, one marker on Main/Actions/Process Manager, zero on Unified/compact rows, and all six `ownedProcessCount` values equal to zero.
+- **Intentional differences preserved:** Launcher-family `ListItem` opts in; Unified rows and soft-compact dropdown/popup rows do not. Existing selected fill, typography, icon/tile treatments, shortcuts, 44px Main/built-in rows, 36px Actions rows, and compact anatomy remain unchanged. No glass, footer optic, popup geometry, motion, host keyboard route, or generated-token ownership boundary changed.
 
 ## Verification ledger
 

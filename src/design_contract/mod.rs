@@ -759,6 +759,50 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         metrics.accessory_gap,
         "MainMenuRowTokens.accessory_gap",
     );
+    b.source_len(
+        "mainMenu.row.selectedMarkerWidth",
+        "--sk-main-menu-row-selected-marker-width",
+        metrics.row_selected_marker_width,
+        "MainMenuRowTokens.selected_marker_width",
+    );
+    b.source_len(
+        "mainMenu.row.selectedMarkerHeight",
+        "--sk-main-menu-row-selected-marker-height",
+        metrics.row_selected_marker_height,
+        "MainMenuRowTokens.selected_marker_height",
+    );
+    b.source_len(
+        "mainMenu.row.selectedMarkerInsetX",
+        "--sk-main-menu-row-selected-marker-inset-x",
+        metrics.row_selected_marker_inset_x,
+        "MainMenuRowTokens.selected_marker_inset_x",
+    );
+    b.source_len(
+        "mainMenu.row.selectedMarkerRadius",
+        "--sk-main-menu-row-selected-marker-radius",
+        metrics.row_selected_marker_radius,
+        "MainMenuRowTokens.selected_marker_radius",
+    );
+    b.add(
+        "mainMenu.row.selectedMarkerOpacity",
+        TokenStage::Source,
+        Some("--sk-main-menu-row-selected-marker-opacity"),
+        TokenValue::Number {
+            value: metrics.row_selected_marker_alpha as f64 / 255.0,
+        },
+        Some("MainMenuRowTokens.selected_marker_alpha"),
+        true,
+        &[],
+    );
+    b.resolved_color(
+        "resolved.mainMenu.row.selectedMarker",
+        "--sk-main-menu-row-selected-marker",
+        (colors.accent.selected << 8) | metrics.row_selected_marker_alpha,
+        &[
+            "theme.colors.accent.selected",
+            "mainMenu.row.selectedMarkerOpacity",
+        ],
+    );
 
     let selected_fill = match fill.base {
         MainMenuRowFillBase::TextPrimary => (colors.text.primary << 8) | fill.selected_alpha as u32,

@@ -6,7 +6,7 @@
 - consult count: 1 / 1
 - plan status: complete (`plan.md`, 19/19 task IDs covered)
 - protocol/profile: v2 / `profile-a-2`
-- execution status: C01–C13 complete (`UX-002`, `UX-001`, `UX-017`, `UX-015`, `UX-006`, `UX-010`, `UX-003`, `UX-009`, `UX-004`, `UX-005`, `UX-011`, `UX-012`, `UX-013`, `UX-014`, `UX-016`); starting C14
+- execution status: C01–C14 complete (`UX-002`, `UX-001`, `UX-017`, `UX-015`, `UX-006`, `UX-010`, `UX-003`, `UX-009`, `UX-004`, `UX-005`, `UX-011`, `UX-012`, `UX-013`, `UX-014`, `UX-016`, `UX-007`); starting C15
 - audit verdict: pending
 
 ## Receipts
@@ -212,3 +212,15 @@
 - **Audit/guardrails:** No temporary F6/notification Tab route remains; host keyboard routing is unchanged; all Script Kit Button and ToastAction call sites supply stable IDs; no source-reader/count audit was added; protected glass owner diff is empty; static glass tests pass `40/40`; calibration fixture passes `1/1`.
 - **Cleanup:** Final Driver reports process exited, streams drained, log writer closed, and exact artifact-path `ownedProcessCount:0`; clipboard untouched and no broad signal used.
 - **Commit:** This section is committed atomically with `Implement UX-016: require stable control IDs and keyboard-operable toast and shortcut feedback`; use `git log -1 --oneline` for the immutable hash.
+
+### C14 — UX-007 approved launcher-family leading selection marker
+
+- **Status:** Complete; approved fallback tokens, absolute-overlay behavior, cross-surface runtime/visual proof, opt-out controls, generated contracts, governance, glass anti-drift, and cleanup green.
+- **Decision branch:** `design/consistency` contained the approved marker proposal but no numeric production values, so the fixed Oracle fallback fired: `2×16px`, `6px` surface inset, `1px` radius, `0xFF` accent alpha.
+- **Implementation:** Added marker fields to `MainMenuRowTokens` and its geometry signature, projected them through `ListItemMetricsOverride`, and rendered one paint-time absolute child only for selected `ListItem` rows. The marker does not enter flex, row/hit geometry, or scroll measurement. Actions changes only the marker centering host to its existing 36px row and exposes exact marker bounds in its runtime layout model. Process Manager inherits the shared owner. Unified and compact families remain opted out. The Rust design contract exports all marker values and resolved color; generated tokens were regenerated canonically.
+- **Focused receipts:** `selection_marker` 4/4; main-menu theme 9/9; `list_item` 42/42; `design_contract` 1/1; `agent-cargo check --lib` and final product build finished. Source-audit and hardcoded-visual guards report no additions. Consistency explorer 6/6, browser smoke 12 groups/75 scenes, and mockup lint are green.
+- **Runtime/visual receipt:** `.artifacts/consistency/UX-007/runtime-selection-marker.json` is `RUNTIME-CONFIRMED`. Main first-seven row/content/hit geometry exactly matches the pre-marker UX-016 artifact; keyboard and real first-click selection use identical `2×16` marker geometry/x-position. Actions exposes one centered marker in its selected 36px row. Process Manager inherits one marker. Unified Select and the exact generation-scoped Dictation microphone popup expose zero markers. Four after/negative screenshots were visually inspected.
+- **Build:** `target-agent/artifacts/ux7-selection-marker/script-kit-gpui`; SHA-256 `9e9e7aafbebf60678ac532ea3cefd2710a34f940c3d5a74d055c4ac07c8168dc`.
+- **Audit/guardrails:** No built-in-local marker/bar/border owner exists. Marker token changes cannot move item height, inner/outer padding, icon gap, text origin, accessory gap, or hit geometry. Protected glass owner diff is empty; static tests 40/40 and calibration fixture 1/1 pass. Existing row fills, typography, family density, footer optics, popup geometry, and host keyboard routes remain unchanged.
+- **Cleanup:** Six isolated Driver runs each report process exited, streams drained, log writer closed, and exact executable-path `ownedProcessCount:0`; final baseline/current process inventories are empty.
+- **Commit:** This section is committed atomically with `Implement UX-007: add the approved launcher-family leading selection marker`; use `git log -1 --oneline` for the immutable hash.

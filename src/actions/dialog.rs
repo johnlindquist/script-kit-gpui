@@ -2287,6 +2287,10 @@ impl ActionsDialog {
         let mut sections = Vec::new();
         let mut shortcut_layout_rows = Vec::new();
         let mut selected_row = None;
+        let marker_metrics = resolved_actions_dialog_row_metrics(
+            &popup_theme,
+            crate::designs::current_main_menu_theme().def(),
+        );
 
         for (visual_index, item) in self.grouped_items.iter().enumerate() {
             let (kind, height, label, action_id, shortcut, shortcut_tokens) = match item {
@@ -2398,6 +2402,22 @@ impl ActionsDialog {
             };
             let visible = viewport_y + height > list_top && viewport_y < viewport_bottom;
             let is_selected = self.selected_index == Some(visual_index);
+            let selection_marker_bounds = (kind == "action")
+                .then(|| {
+                    crate::list_item::list_item_selection_marker_geometry(
+                        marker_metrics,
+                        is_selected,
+                    )
+                })
+                .flatten()
+                .map(|marker| {
+                    Self::devtools_rect(
+                        ACTION_ROW_INSET + marker.left,
+                        viewport_y + marker.top,
+                        marker.width,
+                        marker.height,
+                    )
+                });
             let row = serde_json::json!({
                 "semanticId": if kind == "action" {
                     action_id.map(|id| format!("choice:{visual_index}:{id}"))
@@ -2416,6 +2436,7 @@ impl ActionsDialog {
                 "selectable": eligibility.selectable,
                 "activatable": eligibility.activatable,
                 "selected": is_selected,
+                "selectionMarkerBounds": selection_marker_bounds,
                 "hovered": self.hovered_row == Some(visual_index),
                 "mouseArmed": self.mouse_armed_row == Some(visual_index),
                 "visible": visible,
@@ -2832,6 +2853,35 @@ impl ActionsDialog {
                         .with_parent("ActionsList")
                         .with_explanation(
                             "Visible grouped action row measured from runtime ActionsDialog row geometry.",
+                        ),
+                    );
+                }
+
+                if let Some(marker_bounds) = row
+                    .get("selectionMarkerBounds")
+                    .filter(|value| !value.is_null())
+                {
+                    components.push(
+                        Self::devtools_layout_component_from_rect(
+                            format!("ActionsSelectionMarker[{visual_index}]"),
+                            LayoutComponentType::Other,
+                            marker_bounds,
+                        )
+                        .with_visual_style(
+                            chrome_tokens::CHROME_LAYER_CONTENT,
+                            chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
+                            Some(
+                                crate::designs::current_main_menu_theme()
+                                    .def()
+                                    .row
+                                    .selected_marker_radius,
+                            ),
+                        )
+                        .with_visual_token("content.selectionMarker")
+                        .with_depth(3)
+                        .with_parent(format!("ActionsRow[{visual_index}]"))
+                        .with_explanation(
+                            "Absolute launcher-family selected marker; excluded from flex, hit, and scroll geometry.",
                         ),
                     );
                 }
@@ -3954,7 +4004,8 @@ fn actions_dialog_main_window_background_alpha(theme: &theme::Theme) -> u8 {
 
 /// The exact `ListItemMetricsOverride` mutation the action-row render closure
 /// applies on top of the main-menu metrics: action titles use the popup title
-/// font size, and the line height never shrinks below it.
+/// font size, the line height never shrinks below it, and the absolute selected
+/// marker centers in the host's compact row without changing content geometry.
 ///
 /// Deliberately does NOT apply `popup.row.radius`, `inner_y`,
 /// `selection_opacity` or `hover_opacity`: production does not pass those into
@@ -3967,6 +4018,7 @@ pub(crate) fn resolved_actions_dialog_row_metrics(
     let mut metrics = crate::list_item::ListItemMetricsOverride::from_main_menu_def(main_menu);
     metrics.name_font_size = popup.row.title_font_size;
     metrics.name_line_height = metrics.name_line_height.max(popup.row.title_font_size);
+    metrics.row_selected_marker_center_height = popup.list.row_height;
     metrics
 }
 
@@ -5413,14 +5465,34 @@ mod tests {
         displayed_action_keybinding_specs, first_selectable_index, is_destructive_action,
         last_selectable_index, matching_action_id_for_keystroke,
         matching_filtered_action_id_for_keystroke, resolve_visible_action_shortcut,
-        selectable_index_at_or_after, selectable_index_at_or_before,
-        should_render_section_separator, visible_action_shortcut_bindings, ActionsDialog,
-        ActionsDialogChromeAudit, ActionsDialogRuntimeAudit, GroupedActionItem,
-        MainListDisplayedActionShortcut,
+        resolved_actions_dialog_row_metrics, selectable_index_at_or_after,
+        selectable_index_at_or_before, should_render_section_separator,
+        visible_action_shortcut_bindings, ActionsDialog, ActionsDialogChromeAudit,
+        ActionsDialogRuntimeAudit, GroupedActionItem, MainListDisplayedActionShortcut,
     };
     use crate::actions::types::{Action, ActionCategory, ScriptInfo, SectionStyle};
     use crate::menu_syntax::{MenuSyntaxAction, MenuSyntaxActionKind};
     use crate::menu_syntax_actions::{PowerSyntaxActionSection, SectionMode};
+
+    #[test]
+    fn actions_marker_centers_in_compact_host_without_changing_list_item_content_geometry() {
+        let popup = crate::designs::base_actions_popup_theme();
+        let main = crate::designs::MainMenuThemeVariant::InfoBarBase.def();
+        let baseline = crate::list_item::ListItemMetricsOverride::from_main_menu_def(main);
+        let metrics = resolved_actions_dialog_row_metrics(&popup, main);
+        let marker = crate::list_item::list_item_selection_marker_geometry(metrics, true)
+            .expect("selected Actions row has a marker");
+
+        assert_eq!(metrics.item_height, baseline.item_height);
+        assert_eq!(metrics.row_inner_padding_x, baseline.row_inner_padding_x);
+        assert_eq!(metrics.icon_text_gap, baseline.icon_text_gap);
+        assert_eq!(metrics.accessory_gap, baseline.accessory_gap);
+        assert_eq!(
+            metrics.row_selected_marker_center_height,
+            popup.list.row_height
+        );
+        assert_eq!(marker.top, (popup.list.row_height - marker.height) / 2.0);
+    }
 
     #[test]
     fn selectable_index_helpers_skip_section_headers_directionally() {
