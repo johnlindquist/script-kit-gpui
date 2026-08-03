@@ -220,6 +220,81 @@ enum AgentChatReadTarget {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptPopupSubtype {
+    AgentChatHistory,
+    DictationMicrophone,
+    Confirm,
+}
+
+fn resolve_prompt_popup_subtype(
+    resolved: &crate::protocol::AutomationWindowInfo,
+) -> Result<PromptPopupSubtype, crate::protocol::TransactionError> {
+    let subtype = match resolved.id.as_str() {
+        crate::ai::agent_chat::ui::history_popup::AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID => {
+            PromptPopupSubtype::AgentChatHistory
+        }
+        crate::dictation::DICTATION_MICROPHONE_POPUP_AUTOMATION_ID => {
+            PromptPopupSubtype::DictationMicrophone
+        }
+        "confirm-popup" => PromptPopupSubtype::Confirm,
+        other => {
+            return Err(crate::protocol::TransactionError::action_failed(format!(
+                "PromptPopup target {other} is not a batch-addressable popup subtype"
+            )))
+        }
+    };
+
+    let is_open = match subtype {
+        PromptPopupSubtype::AgentChatHistory => {
+            resolved.generation.is_some()
+                && crate::ai::agent_chat::ui::history_popup::is_history_popup_window_open()
+        }
+        PromptPopupSubtype::DictationMicrophone => {
+            resolved.generation.is_some()
+                && crate::dictation::is_dictation_microphone_popup_window_open()
+        }
+        PromptPopupSubtype::Confirm => crate::confirm::is_confirm_popup_window_open(),
+    };
+    if !is_open {
+        return Err(crate::protocol::TransactionError::action_failed(format!(
+            "PromptPopup target {} does not match a live {:?} lifetime",
+            resolved.id, subtype
+        )));
+    }
+
+    Ok(subtype)
+}
+
+fn revalidate_prompt_popup_target(
+    expected: &crate::protocol::AutomationWindowInfo,
+    subtype: PromptPopupSubtype,
+) -> Result<(), crate::protocol::TransactionError> {
+    let exact_target = match expected.generation {
+        Some(generation) => crate::protocol::AutomationWindowTarget::Instance {
+            id: expected.id.clone(),
+            generation,
+        },
+        None => crate::protocol::AutomationWindowTarget::Id {
+            id: expected.id.clone(),
+        },
+    };
+    let current = crate::windows::resolve_automation_window(Some(&exact_target)).map_err(|error| {
+        crate::protocol::TransactionError::action_failed(format!(
+            "PromptPopup target {} became stale: {error}",
+            expected.id
+        ))
+    })?;
+    let current_subtype = resolve_prompt_popup_subtype(&current)?;
+    if current_subtype != subtype || current.generation != expected.generation {
+        return Err(crate::protocol::TransactionError::action_failed(format!(
+            "PromptPopup target {} changed lifetime before command execution",
+            expected.id
+        )));
+    }
+    Ok(())
+}
+
 /// Resolved automation target for batch/waitFor operations.
 ///
 /// Extends `AgentChatReadTarget` to also accept Notes and ActionsDialog windows.
@@ -248,6 +323,7 @@ enum AutomationReadTarget {
     /// Prompt popup (composer picker, history popup, or confirm dialog).
     PromptPopup {
         info: crate::protocol::AutomationWindowInfo,
+        subtype: PromptPopupSubtype,
     },
 }
 
@@ -509,27 +585,20 @@ fn resolve_automation_read_target(
             }
         }
         crate::protocol::AutomationWindowKind::PromptPopup => {
-            // PromptPopup is a union of composer picker, history popup, and confirm dialog.
-            // We verify at least one popup is open. The specific sub-type is detected at
-            // batch-execution time since the popup could change between resolution and use.
-            let any_open = crate::ai::agent_chat::ui::history_popup::is_history_popup_window_open()
-                || crate::confirm::is_confirm_popup_window_open();
-            if any_open {
-                tracing::info!(
-                    target: "script_kit::automation",
-                    request_id = %request_id,
-                    op = op,
-                    window_id = %resolved.id,
-                    kind = ?resolved.kind,
-                    "automation.target.prompt_popup_resolved"
-                );
-                Ok(AutomationReadTarget::PromptPopup { info: resolved })
-            } else {
-                Err(crate::protocol::TransactionError::action_failed(format!(
-                    "{op} resolved PromptPopup target {} but no popup window is currently open",
-                    resolved.id
-                )))
-            }
+            let subtype = resolve_prompt_popup_subtype(&resolved)?;
+            tracing::info!(
+                target: "script_kit::automation",
+                request_id = %request_id,
+                op = op,
+                window_id = %resolved.id,
+                generation = ?resolved.generation,
+                subtype = ?subtype,
+                "automation.target.prompt_popup_resolved"
+            );
+            Ok(AutomationReadTarget::PromptPopup {
+                info: resolved,
+                subtype,
+            })
         }
         other_kind => {
             tracing::warn!(
@@ -726,6 +795,7 @@ fn build_notes_ui_snapshot(
             parent_window_id: None,
             parent_kind: None,
             pid: Some(std::process::id()),
+            generation: None,
         },
         200,
         cx,
@@ -5494,8 +5564,17 @@ impl ScriptListApp {
                     None
                 };
 
-                let is_prompt_popup_batch =
-                    batch_target_kind == AutomationBatchTargetKind::PromptPopup;
+                let prompt_popup_batch_target =
+                    if let AutomationReadTarget::PromptPopup {
+                        ref info,
+                        subtype,
+                    } = batch_target
+                    {
+                        Some((info.clone(), subtype))
+                    } else {
+                        None
+                    };
+                let is_prompt_popup_batch = prompt_popup_batch_target.is_some();
 
                 tracing::info!(
                     category = "AUTOMATION",
@@ -6523,6 +6602,8 @@ impl ScriptListApp {
                     // Supported: selectByValue, selectBySemanticId, waitFor.
                     // setInput fails closed (popups don't have independent input).
                     if is_prompt_popup_batch {
+                        let (prompt_popup_info, prompt_popup_subtype) = prompt_popup_batch_target
+                            .expect("PromptPopup batch target must accompany its kind");
                         let batch_started_at_ms = protocol::transaction_trace::now_epoch_ms();
                         let batch_start = std::time::Instant::now();
                         let batch_timeout = std::time::Duration::from_millis(opts.timeout);
@@ -6543,18 +6624,40 @@ impl ScriptListApp {
                                 break;
                             }
 
+                            if let Err(error) = revalidate_prompt_popup_target(
+                                &prompt_popup_info,
+                                prompt_popup_subtype,
+                            ) {
+                                results.push(protocol::BatchResultEntry {
+                                    index,
+                                    success: false,
+                                    command: batch_command_name(cmd),
+                                    elapsed: Some(0),
+                                    value: None,
+                                    error: Some(error),
+                                });
+                                failed = true;
+                                break;
+                            }
+
                             let cmd_start = std::time::Instant::now();
                             match cmd {
                                 protocol::BatchCommand::SelectByValue { value, submit: _ } => {
                                     let value = value.clone();
-                                    let selected = this.update(cx, |_this, cx| {
-                                        if let Some(v) = crate::confirm::batch_select_confirm_button_by_value(&value, cx) {
-                                            return Some(v);
+                                    let popup_generation = prompt_popup_info.generation;
+                                    let selected = this.update(cx, |_this, cx| match prompt_popup_subtype {
+                                        PromptPopupSubtype::Confirm => {
+                                            crate::confirm::batch_select_confirm_button_by_value(&value, cx)
                                         }
-                                        if let Some(v) = crate::dictation::batch_select_dictation_microphone_popup_row_by_value(&value, cx) {
-                                            return Some(v);
-                                        }
-                                        None
+                                        PromptPopupSubtype::DictationMicrophone => popup_generation
+                                            .and_then(|generation| {
+                                                crate::dictation::batch_select_dictation_microphone_popup_row_by_value(
+                                                    generation,
+                                                    &value,
+                                                    cx,
+                                                )
+                                            }),
+                                        PromptPopupSubtype::AgentChatHistory => None,
                                     });
                                     match selected {
                                         Ok(Some(v)) => {
@@ -6594,15 +6697,24 @@ impl ScriptListApp {
                                 }
                             protocol::BatchCommand::SelectBySemanticId { semantic_id, submit: _ } => {
                                 let semantic_id = semantic_id.clone();
-                                let selected = this.update(cx, |_this, cx| {
-                                        if let Some(v) = crate::confirm::batch_select_confirm_button_by_semantic_id(&semantic_id, cx) {
-                                            return Some(v);
-                                        }
-                                        if let Some(v) = crate::dictation::batch_select_dictation_microphone_popup_row_by_semantic_id(&semantic_id, cx) {
-                                            return Some(v);
-                                        }
-                                        None
-                                    });
+                                let popup_generation = prompt_popup_info.generation;
+                                let selected = this.update(cx, |_this, cx| match prompt_popup_subtype {
+                                    PromptPopupSubtype::Confirm => {
+                                        crate::confirm::batch_select_confirm_button_by_semantic_id(
+                                            &semantic_id,
+                                            cx,
+                                        )
+                                    }
+                                    PromptPopupSubtype::DictationMicrophone => popup_generation
+                                        .and_then(|generation| {
+                                            crate::dictation::batch_select_dictation_microphone_popup_row_by_semantic_id(
+                                                generation,
+                                                &semantic_id,
+                                                cx,
+                                            )
+                                        }),
+                                    PromptPopupSubtype::AgentChatHistory => None,
+                                });
                                     match selected {
                                         Ok(Some(v)) => {
                                             tracing::info!(

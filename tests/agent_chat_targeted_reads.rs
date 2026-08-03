@@ -42,6 +42,7 @@ fn agent_chat_detached_target_resolves_to_correct_kind() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     });
     script_kit_gpui::windows::upsert_automation_window(AutomationWindowInfo {
         id: format!("{p}:agent_chat-1"),
@@ -54,6 +55,7 @@ fn agent_chat_detached_target_resolves_to_correct_kind() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     });
 
     // Target by ID for deterministic resolution (avoids global registry index collisions)
@@ -91,6 +93,7 @@ fn non_agent_chat_secondary_target_does_not_resolve_as_agent_chat() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     });
 
     let resolved =
@@ -276,6 +279,7 @@ fn agent_chat_detached_target_by_id_resolves_correctly() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     });
 
     let resolved =
@@ -308,6 +312,7 @@ fn multiple_agent_chat_detached_windows_indexed_targeting() {
             parent_window_id: None,
             parent_kind: None,
             pid: None,
+            generation: None,
         });
     }
 

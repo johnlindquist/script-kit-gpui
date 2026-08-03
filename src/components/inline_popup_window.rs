@@ -13,9 +13,14 @@
 //! existing call sites and source-text audit tests continue to compile without
 //! edits.
 
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
+
 use gpui::{
-    px, AnyWindowHandle, App, AppContext, Bounds, DisplayId, Pixels, Window, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions,
+    px, AnyWindowHandle, App, AppContext, Bounds, DisplayId, FocusHandle, Pixels, Window,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 
 #[cfg(target_os = "macos")]
@@ -47,6 +52,262 @@ pub const INLINE_POPUP_LEFT_MARGIN: f32 = 8.0;
 
 #[cfg(target_os = "macos")]
 const NS_WINDOW_ABOVE: i64 = 1;
+
+static NEXT_INLINE_POPUP_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Exact identity for one native inline-popup lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize)]
+pub struct InlinePopupGeneration(u64);
+
+impl InlinePopupGeneration {
+    pub fn next() -> Self {
+        Self(NEXT_INLINE_POPUP_GENERATION.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Legal phases for one attached interactive popup lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InlinePopupPhase {
+    CreatedHidden,
+    AttachPending,
+    Open,
+    Closing,
+    Closed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlinePopupAttachReceipt {
+    pub generation: InlinePopupGeneration,
+    pub attempt_count: u8,
+    pub parent_window_number: i64,
+    pub child_window_number: i64,
+    pub parent_visible_at_attach: bool,
+    pub child_visible_before_attach: bool,
+    pub child_key_before_attach: bool,
+    pub parent_child_relation_verified: bool,
+    pub configured_after_attach: bool,
+    pub child_visible_after_show: bool,
+    pub child_key_after_show: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InlinePopupAttachFailure {
+    PopupWindowGone,
+    ChildNativeWindowMissing,
+    ParentWindowGone,
+    ParentNativeWindowMissing,
+    ParentRuntimeHandleMismatch,
+    ParentNotReady,
+    SameNativeWindow,
+    ChildVisibleBeforeAttach,
+    ParentChildRelationRejected,
+    ShowVerificationFailed,
+    StaleGeneration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InlinePopupAttachResult {
+    Ready(InlinePopupAttachReceipt),
+    Failed {
+        generation: InlinePopupGeneration,
+        failure: InlinePopupAttachFailure,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InlinePopupCloseGate {
+    Begin,
+    AlreadyClosing,
+    AlreadyClosed,
+    StaleGeneration,
+}
+
+#[derive(Clone, Debug)]
+pub struct InlinePopupLifecycle {
+    generation: InlinePopupGeneration,
+    phase: InlinePopupPhase,
+    attach_receipt: Option<InlinePopupAttachReceipt>,
+}
+
+pub type InlinePopupLifecycleHandle = Arc<Mutex<InlinePopupLifecycle>>;
+
+impl InlinePopupLifecycle {
+    pub fn new() -> InlinePopupLifecycleHandle {
+        Arc::new(Mutex::new(Self {
+            generation: InlinePopupGeneration::next(),
+            phase: InlinePopupPhase::CreatedHidden,
+            attach_receipt: None,
+        }))
+    }
+
+    pub fn generation(handle: &InlinePopupLifecycleHandle) -> InlinePopupGeneration {
+        handle
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .generation
+    }
+
+    pub fn snapshot(
+        handle: &InlinePopupLifecycleHandle,
+    ) -> (
+        InlinePopupGeneration,
+        InlinePopupPhase,
+        Option<InlinePopupAttachReceipt>,
+    ) {
+        let lifecycle = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        (
+            lifecycle.generation,
+            lifecycle.phase,
+            lifecycle.attach_receipt.clone(),
+        )
+    }
+
+    pub fn begin_attach(
+        handle: &InlinePopupLifecycleHandle,
+        generation: InlinePopupGeneration,
+    ) -> bool {
+        let mut lifecycle = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        if lifecycle.generation != generation || lifecycle.phase != InlinePopupPhase::CreatedHidden
+        {
+            return false;
+        }
+        lifecycle.phase = InlinePopupPhase::AttachPending;
+        true
+    }
+
+    pub fn mark_ready(
+        handle: &InlinePopupLifecycleHandle,
+        receipt: InlinePopupAttachReceipt,
+    ) -> bool {
+        let mut lifecycle = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        if lifecycle.generation != receipt.generation
+            || lifecycle.phase != InlinePopupPhase::AttachPending
+        {
+            return false;
+        }
+        lifecycle.phase = InlinePopupPhase::Open;
+        lifecycle.attach_receipt = Some(receipt);
+        true
+    }
+
+    pub fn request_close(
+        handle: &InlinePopupLifecycleHandle,
+        generation: InlinePopupGeneration,
+    ) -> InlinePopupCloseGate {
+        let mut lifecycle = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        if lifecycle.generation != generation {
+            return InlinePopupCloseGate::StaleGeneration;
+        }
+        match lifecycle.phase {
+            InlinePopupPhase::Closing => InlinePopupCloseGate::AlreadyClosing,
+            InlinePopupPhase::Closed => InlinePopupCloseGate::AlreadyClosed,
+            InlinePopupPhase::CreatedHidden
+            | InlinePopupPhase::AttachPending
+            | InlinePopupPhase::Open => {
+                lifecycle.phase = InlinePopupPhase::Closing;
+                InlinePopupCloseGate::Begin
+            }
+        }
+    }
+
+    pub fn mark_closed(
+        handle: &InlinePopupLifecycleHandle,
+        generation: InlinePopupGeneration,
+    ) -> bool {
+        let mut lifecycle = handle.lock().unwrap_or_else(|poison| poison.into_inner());
+        if lifecycle.generation != generation || lifecycle.phase != InlinePopupPhase::Closing {
+            return false;
+        }
+        lifecycle.phase = InlinePopupPhase::Closed;
+        true
+    }
+}
+
+/// Exact parent focus target captured before a popup lifetime starts.
+#[derive(Clone)]
+pub struct InlinePopupFocusReturn {
+    pub generation: InlinePopupGeneration,
+    pub parent_automation_id: String,
+    pub parent_window_handle: AnyWindowHandle,
+    pub focus_handle: FocusHandle,
+    pub semantic_id: &'static str,
+}
+
+impl InlinePopupFocusReturn {
+    pub fn restore(&self, expected_generation: InlinePopupGeneration, cx: &mut App) -> bool {
+        if self.generation != expected_generation
+            || crate::windows::get_runtime_window_handle(&self.parent_automation_id)
+                != Some(self.parent_window_handle)
+        {
+            return false;
+        }
+
+        cx.update_window(self.parent_window_handle, |_, window, cx| {
+            window.activate_window();
+            window.focus(&self.focus_handle, cx);
+            self.focus_handle.is_focused(window)
+        })
+        .unwrap_or(false)
+    }
+}
+
+/// Whether the exact parent/child pair currently owns keyboard activation.
+///
+/// GPUI activation alone is insufficient for the nonactivating AppKit panels
+/// used by attached popups: it can remain false while the parent is the native
+/// key window. The native supplement lets consumers arm focus-loss dismissal
+/// without treating the Accessory-mode false baseline as a real loss.
+pub fn inline_popup_focus_pair_is_active(
+    child_window: &mut Window,
+    parent_window_handle: AnyWindowHandle,
+    cx: &mut App,
+) -> bool {
+    if child_window.is_window_active() {
+        return true;
+    }
+
+    let parent_gpui_active = cx
+        .update_window(parent_window_handle, |_, parent_window, _cx| {
+            parent_window.is_window_active()
+        })
+        .ok()
+        .unwrap_or(false);
+    if parent_gpui_active {
+        return true;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let child_key = inline_popup_ns_window(child_window)
+            .map(|ns_window| unsafe {
+                let is_key: cocoa::base::BOOL = msg_send![ns_window, isKeyWindow];
+                is_key != cocoa::base::NO
+            })
+            .unwrap_or(false);
+        let parent_key = cx
+            .update_window(parent_window_handle, |_, parent_window, _cx| {
+                inline_popup_ns_window(parent_window)
+                    .map(|ns_window| unsafe {
+                        let is_key: cocoa::base::BOOL = msg_send![ns_window, isKeyWindow];
+                        is_key != cocoa::base::NO
+                    })
+                    .unwrap_or(false)
+            })
+            .ok()
+            .unwrap_or(false);
+        return child_key || parent_key;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    false
+}
 
 /// Compute popup height for a row count and row height.
 ///
@@ -111,7 +372,9 @@ pub fn inline_popup_window_options(
         titlebar: None,
         window_background,
         focus: false,
-        show: true,
+        // Interactive child popups remain hidden until the deferred AppKit
+        // handshake proves they are attached to the exact live parent.
+        show: false,
         kind: WindowKind::PopUp,
         // Popups size from row content via `set_inline_popup_window_bounds`; manual
         // edge resize would fight the left-drawer / dense-picker height contract.
@@ -162,6 +425,276 @@ pub fn configure_inline_popup_window<T: 'static>(
     let _ = (handle, cx, parent_window_handle);
 
     Ok(())
+}
+
+/// Configure an interactive popup through a generation-scoped hidden
+/// attach handshake. The result callback is the only point where consumers
+/// may publish target identity or treat the popup as open.
+pub fn configure_inline_popup_window_lifecycle<T: 'static>(
+    handle: WindowHandle<T>,
+    parent_window_handle: AnyWindowHandle,
+    parent_automation_id: String,
+    lifecycle: InlinePopupLifecycleHandle,
+    cx: &mut App,
+    on_result: impl FnOnce(InlinePopupAttachResult, &mut App) + 'static,
+) -> anyhow::Result<()> {
+    let generation = InlinePopupLifecycle::generation(&lifecycle);
+    if !InlinePopupLifecycle::begin_attach(&lifecycle, generation) {
+        anyhow::bail!("inline popup lifecycle rejected attach start");
+    }
+
+    type ResultCallback = Box<dyn FnOnce(InlinePopupAttachResult, &mut App)>;
+    let callback: Arc<Mutex<Option<ResultCallback>>> =
+        Arc::new(Mutex::new(Some(Box::new(on_result))));
+    handle
+        .update(cx, move |_popup, window, cx| {
+            window.defer(cx, move |window, cx| {
+                run_inline_popup_attach_attempt(
+                    window,
+                    cx,
+                    parent_window_handle,
+                    parent_automation_id,
+                    generation,
+                    lifecycle,
+                    1,
+                    callback,
+                );
+            });
+        })
+        .map_err(|_| anyhow::anyhow!("failed to schedule inline popup attach handshake"))?;
+
+    Ok(())
+}
+
+fn run_inline_popup_attach_attempt(
+    window: &mut Window,
+    cx: &mut App,
+    parent_window_handle: AnyWindowHandle,
+    parent_automation_id: String,
+    generation: InlinePopupGeneration,
+    lifecycle: InlinePopupLifecycleHandle,
+    attempt_count: u8,
+    callback: Arc<Mutex<Option<Box<dyn FnOnce(InlinePopupAttachResult, &mut App)>>>>,
+) {
+    if InlinePopupLifecycle::snapshot(&lifecycle).1 != InlinePopupPhase::AttachPending {
+        finish_inline_popup_attach(
+            InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::StaleGeneration,
+            },
+            callback,
+            cx,
+        );
+        return;
+    }
+
+    if crate::windows::get_runtime_window_handle(&parent_automation_id)
+        != Some(parent_window_handle)
+    {
+        finish_inline_popup_attach(
+            InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::ParentRuntimeHandleMismatch,
+            },
+            callback,
+            cx,
+        );
+        return;
+    }
+
+    let result = checked_attach_configure_and_show(
+        window,
+        cx,
+        parent_window_handle,
+        generation,
+        attempt_count,
+    );
+    if matches!(
+        result,
+        InlinePopupAttachResult::Failed {
+            failure: InlinePopupAttachFailure::ParentNotReady,
+            ..
+        }
+    ) && attempt_count < 3
+    {
+        window.defer(cx, move |window, cx| {
+            run_inline_popup_attach_attempt(
+                window,
+                cx,
+                parent_window_handle,
+                parent_automation_id,
+                generation,
+                lifecycle,
+                attempt_count + 1,
+                callback,
+            );
+        });
+        return;
+    }
+
+    let result = match result {
+        InlinePopupAttachResult::Ready(receipt) => {
+            if InlinePopupLifecycle::mark_ready(&lifecycle, receipt.clone()) {
+                InlinePopupAttachResult::Ready(receipt)
+            } else {
+                InlinePopupAttachResult::Failed {
+                    generation,
+                    failure: InlinePopupAttachFailure::StaleGeneration,
+                }
+            }
+        }
+        failed => failed,
+    };
+    finish_inline_popup_attach(result, callback, cx);
+}
+
+fn finish_inline_popup_attach(
+    result: InlinePopupAttachResult,
+    callback: Arc<Mutex<Option<Box<dyn FnOnce(InlinePopupAttachResult, &mut App)>>>>,
+    cx: &mut App,
+) {
+    let callback = callback
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
+    if let Some(callback) = callback {
+        callback(result, cx);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn checked_attach_configure_and_show(
+    child_window: &mut Window,
+    cx: &mut App,
+    parent_window_handle: AnyWindowHandle,
+    generation: InlinePopupGeneration,
+    attempt_count: u8,
+) -> InlinePopupAttachResult {
+    use cocoa::base::{id, nil, NO};
+
+    let Some(child_ns_window) = inline_popup_ns_window(child_window) else {
+        return InlinePopupAttachResult::Failed {
+            generation,
+            failure: InlinePopupAttachFailure::ChildNativeWindowMissing,
+        };
+    };
+
+    let parent = cx.update_window(parent_window_handle, move |_, parent_window, _cx| {
+        inline_popup_ns_window(parent_window)
+    });
+    let parent_ns_window = match parent {
+        Ok(Some(window)) => window,
+        Ok(None) => {
+            return InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::ParentNativeWindowMissing,
+            }
+        }
+        Err(_) => {
+            return InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::ParentWindowGone,
+            }
+        }
+    };
+
+    if parent_ns_window == nil || child_ns_window == nil {
+        return InlinePopupAttachResult::Failed {
+            generation,
+            failure: InlinePopupAttachFailure::ParentNativeWindowMissing,
+        };
+    }
+    if parent_ns_window == child_ns_window {
+        return InlinePopupAttachResult::Failed {
+            generation,
+            failure: InlinePopupAttachFailure::SameNativeWindow,
+        };
+    }
+
+    // SAFETY: both pointers came from live GPUI windows on the AppKit main
+    // thread. All state is observed before the child is ordered front.
+    unsafe {
+        let parent_visible: cocoa::base::BOOL = msg_send![parent_ns_window, isVisible];
+        let child_visible_before: cocoa::base::BOOL = msg_send![child_ns_window, isVisible];
+        let child_key_before: cocoa::base::BOOL = msg_send![child_ns_window, isKeyWindow];
+        if parent_visible == NO {
+            return InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::ParentNotReady,
+            };
+        }
+        if child_visible_before != NO || child_key_before != NO {
+            return InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::ChildVisibleBeforeAttach,
+            };
+        }
+
+        let _: () = msg_send![
+            parent_ns_window,
+            addChildWindow: child_ns_window
+            ordered: NS_WINDOW_ABOVE
+        ];
+        let actual_parent: id = msg_send![child_ns_window, parentWindow];
+        if actual_parent != parent_ns_window {
+            return InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::ParentChildRelationRejected,
+            };
+        }
+
+        crate::platform::configure_inline_dropdown_popup_window(
+            child_ns_window,
+            crate::theme::get_cached_theme().should_use_dark_vibrancy(),
+        );
+
+        let child_visible_after: cocoa::base::BOOL = msg_send![child_ns_window, isVisible];
+        let child_key_after: cocoa::base::BOOL = msg_send![child_ns_window, isKeyWindow];
+        if child_visible_after == NO {
+            return InlinePopupAttachResult::Failed {
+                generation,
+                failure: InlinePopupAttachFailure::ShowVerificationFailed,
+            };
+        }
+
+        let parent_window_number: i64 = msg_send![parent_ns_window, windowNumber];
+        let child_window_number: i64 = msg_send![child_ns_window, windowNumber];
+        InlinePopupAttachResult::Ready(InlinePopupAttachReceipt {
+            generation,
+            attempt_count,
+            parent_window_number,
+            child_window_number,
+            parent_visible_at_attach: true,
+            child_visible_before_attach: false,
+            child_key_before_attach: false,
+            parent_child_relation_verified: true,
+            configured_after_attach: true,
+            child_visible_after_show: true,
+            child_key_after_show: child_key_after != NO,
+        })
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn checked_attach_configure_and_show(
+    _child_window: &mut Window,
+    _cx: &mut App,
+    _parent_window_handle: AnyWindowHandle,
+    generation: InlinePopupGeneration,
+    attempt_count: u8,
+) -> InlinePopupAttachResult {
+    InlinePopupAttachResult::Ready(InlinePopupAttachReceipt {
+        generation,
+        attempt_count,
+        parent_window_number: 0,
+        child_window_number: 0,
+        parent_visible_at_attach: true,
+        child_visible_before_attach: false,
+        child_key_before_attach: false,
+        parent_child_relation_verified: true,
+        child_visible_after_show: true,
+        child_key_after_show: false,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -249,6 +782,74 @@ pub fn inline_popup_ns_window(window: &mut Window) -> Option<cocoa::base::id> {
     None
 }
 
+/// Ask AppKit to close one exact live popup window as if its native close
+/// affordance had been invoked. Automation callers must resolve and validate
+/// the popup generation before passing the handle here.
+#[cfg(target_os = "macos")]
+pub fn request_native_inline_popup_close(
+    handle: AnyWindowHandle,
+    cx: &mut App,
+) -> anyhow::Result<i64> {
+    let (ns_window_address, window_number) = cx
+        .update_window(handle, |_entity, window, _cx| {
+            let ns_window = inline_popup_ns_window(window)
+                .ok_or_else(|| anyhow::anyhow!("popup native NSWindow is unavailable"))?;
+            // SAFETY: the NSWindow comes from the exact live GPUI window on the
+            // AppKit main thread and remains retained by GPUI through this turn.
+            let window_number: i64 = unsafe { msg_send![ns_window, windowNumber] };
+            Ok::<_, anyhow::Error>((ns_window as usize, window_number))
+        })
+        .map_err(|error| anyhow::anyhow!("popup GPUI window is unavailable: {error}"))??;
+
+    cx.spawn(async move |_cx: &mut gpui::AsyncApp| {
+        let ns_window = ns_window_address as cocoa::base::id;
+        // SAFETY: the foreground executor runs this after the current GPUI
+        // RefCell borrow has been released. Borderless popup windows omit the
+        // closable mask, so temporarily add that behavior-only bit before
+        // `performClose:`; AppKit then traverses GPUI's should-close delegate.
+        unsafe {
+            use cocoa::base::nil;
+            const NS_WINDOW_STYLE_MASK_CLOSABLE: u64 = 1 << 1;
+            let style_mask: u64 = msg_send![ns_window, styleMask];
+            let _: () =
+                msg_send![ns_window, setStyleMask: style_mask | NS_WINDOW_STYLE_MASK_CLOSABLE];
+            let _: () = msg_send![ns_window, performClose: nil];
+        }
+    })
+    .detach();
+    Ok(window_number)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_native_inline_popup_close(
+    _handle: AnyWindowHandle,
+    _cx: &mut App,
+) -> anyhow::Result<i64> {
+    anyhow::bail!("native popup close is only available on macOS")
+}
+
+pub fn close_prompt_popup_target_natively(
+    target: &crate::protocol::AutomationWindowTarget,
+    cx: &mut App,
+) -> anyhow::Result<(String, u64, i64)> {
+    let crate::protocol::AutomationWindowTarget::Instance { id, generation } = target else {
+        anyhow::bail!("native popup close requires an exact instance target")
+    };
+    let resolved = crate::windows::resolve_automation_window(Some(target))?;
+    if resolved.kind != crate::protocol::AutomationWindowKind::PromptPopup
+        || resolved.generation != Some(*generation)
+    {
+        anyhow::bail!("native popup close target is not the exact live PromptPopup instance")
+    }
+    let handle =
+        crate::windows::get_valid_runtime_window_handle_for_generation(id, *generation, cx)
+            .ok_or_else(|| {
+                anyhow::anyhow!("native popup close runtime handle is stale or missing")
+            })?;
+    let native_window_number = request_native_inline_popup_close(handle, cx)?;
+    Ok((id.clone(), *generation, native_window_number))
+}
+
 /// Attach the popup NSWindow as a child of the parent launcher/composer
 /// window so it follows focus, space moves, and parent closes.
 #[cfg(target_os = "macos")]
@@ -289,7 +890,8 @@ pub fn attach_inline_popup_to_parent_window(
 mod tests {
     use super::{
         footer_anchored_inline_popup_top, inline_popup_bounds, inline_popup_height_for_row_height,
-        inline_popup_width_for_window, INLINE_POPUP_DEFAULT_WIDTH, INLINE_POPUP_MIN_WIDTH,
+        inline_popup_width_for_window, InlinePopupAttachReceipt, InlinePopupCloseGate,
+        InlinePopupLifecycle, InlinePopupPhase, INLINE_POPUP_DEFAULT_WIDTH, INLINE_POPUP_MIN_WIDTH,
     };
 
     #[test]
@@ -329,11 +931,85 @@ mod tests {
     }
 
     #[test]
-    fn inline_popup_window_options_disable_manual_resize() {
-        let source = include_str!("inline_popup_window.rs");
-        assert!(
-            source.contains("is_movable: false") && source.contains("is_resizable: false"),
-            "inline popup windows must be sized only by content-driven bounds updates"
+    fn inline_popup_window_options_start_hidden_nonactivating_and_fixed_size() {
+        let options = super::inline_popup_window_options(gpui::Bounds::default(), None);
+        assert!(!options.focus);
+        assert!(!options.show);
+        assert!(!options.is_movable);
+        assert!(!options.is_resizable);
+    }
+
+    fn ready_receipt(generation: super::InlinePopupGeneration) -> InlinePopupAttachReceipt {
+        InlinePopupAttachReceipt {
+            generation,
+            attempt_count: 1,
+            parent_window_number: 1,
+            child_window_number: 2,
+            parent_visible_at_attach: true,
+            child_visible_before_attach: false,
+            child_key_before_attach: false,
+            parent_child_relation_verified: true,
+            configured_after_attach: true,
+            child_visible_after_show: true,
+            child_key_after_show: false,
+        }
+    }
+
+    #[test]
+    fn inline_popup_lifecycle_follows_only_valid_transitions() {
+        let lifecycle = InlinePopupLifecycle::new();
+        let generation = InlinePopupLifecycle::generation(&lifecycle);
+        assert_eq!(
+            InlinePopupLifecycle::snapshot(&lifecycle).1,
+            InlinePopupPhase::CreatedHidden
+        );
+        assert!(InlinePopupLifecycle::begin_attach(&lifecycle, generation));
+        assert!(InlinePopupLifecycle::mark_ready(
+            &lifecycle,
+            ready_receipt(generation)
+        ));
+        assert_eq!(
+            InlinePopupLifecycle::snapshot(&lifecycle).1,
+            InlinePopupPhase::Open
+        );
+        assert_eq!(
+            InlinePopupLifecycle::request_close(&lifecycle, generation),
+            InlinePopupCloseGate::Begin
+        );
+        assert_eq!(
+            InlinePopupLifecycle::request_close(&lifecycle, generation),
+            InlinePopupCloseGate::AlreadyClosing
+        );
+        assert!(InlinePopupLifecycle::mark_closed(&lifecycle, generation));
+        assert_eq!(
+            InlinePopupLifecycle::request_close(&lifecycle, generation),
+            InlinePopupCloseGate::AlreadyClosed
+        );
+    }
+
+    #[test]
+    fn inline_popup_lifecycle_rejects_open_before_attach_and_stale_callbacks() {
+        let lifecycle = InlinePopupLifecycle::new();
+        let generation = InlinePopupLifecycle::generation(&lifecycle);
+        assert!(!InlinePopupLifecycle::mark_ready(
+            &lifecycle,
+            ready_receipt(generation)
+        ));
+        assert!(InlinePopupLifecycle::begin_attach(&lifecycle, generation));
+        assert_eq!(
+            InlinePopupLifecycle::request_close(&lifecycle, generation),
+            InlinePopupCloseGate::Begin
+        );
+        assert!(!InlinePopupLifecycle::mark_ready(
+            &lifecycle,
+            ready_receipt(generation)
+        ));
+        assert_eq!(
+            InlinePopupLifecycle::request_close(
+                &lifecycle,
+                super::InlinePopupGeneration(generation.get() + 1)
+            ),
+            InlinePopupCloseGate::StaleGeneration
         );
     }
 

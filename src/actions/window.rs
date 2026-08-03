@@ -1684,6 +1684,7 @@ fn resolve_actions_popup_parent_automation_id(
         parent_window_id: None,
         parent_kind: None,
         pid: Some(std::process::id()),
+        generation: None,
     });
     tracing::info!(
         target: "script_kit::actions",

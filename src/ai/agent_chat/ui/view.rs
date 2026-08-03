@@ -819,6 +819,19 @@ impl AgentChatAutomationProjection {
     }
 }
 
+#[derive(Clone)]
+struct AgentChatHistoryPopupLifetime {
+    lifecycle: crate::components::inline_popup_window::InlinePopupLifecycleHandle,
+    focus_return: crate::components::inline_popup_window::InlinePopupFocusReturn,
+    parent_automation_id: String,
+}
+
+impl AgentChatHistoryPopupLifetime {
+    fn generation(&self) -> crate::components::inline_popup_window::InlinePopupGeneration {
+        crate::components::inline_popup_window::InlinePopupLifecycle::generation(&self.lifecycle)
+    }
+}
+
 /// GPUI view entity wrapping an `AgentChatThread` for the Tab AI surface.
 pub(crate) struct AgentChatView {
     /// The Agent Chat session — either a live thread or inline setup state.
@@ -845,6 +858,8 @@ pub(crate) struct AgentChatView {
     _blink_task: Task<()>,
     /// Ranked history popup state. None = hidden.
     pub(crate) history_menu: Option<AgentChatHistoryMenuState>,
+    /// Exact native history-popup lifetime, retained through same-window updates.
+    history_popup_lifetime: Option<AgentChatHistoryPopupLifetime>,
     /// Most recent timestamp when the history popup was explicitly dismissed.
     history_closed_at: Option<Instant>,
     /// Whether the + attachment menu popup is open.
@@ -1259,14 +1274,49 @@ impl AgentChatView {
         cx.notify();
     }
 
+    pub(crate) fn close_history_popup_for_owner_transition(
+        &mut self,
+        reason: &'static str,
+        restore_focus: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self
+            .history_popup_lifetime
+            .take()
+            .map(|lifetime| lifetime.generation());
+        self.history_menu = None;
+        if let Some(generation) = generation {
+            crate::ai::agent_chat::ui::history_popup::close_history_popup_window_from_owner(
+                generation,
+                reason,
+                restore_focus,
+                cx,
+            );
+        }
+    }
+
     pub(crate) fn dismiss_history_popup(&mut self, cx: &mut Context<Self>) {
         if self.history_menu.is_none() {
             return;
         }
 
         let cancel_portal = self.has_pending_history_portal_session();
+        let generation = self
+            .history_popup_lifetime
+            .as_ref()
+            .map(AgentChatHistoryPopupLifetime::generation);
         self.mark_history_popup_closed(cx);
-        self.sync_history_popup_window_from_cached_parent(cx);
+        self.history_popup_lifetime = None;
+        if let Some(generation) = generation {
+            crate::ai::agent_chat::ui::history_popup::close_history_popup_window_from_owner(
+                generation,
+                "owner_dismissed",
+                true,
+                cx,
+            );
+        } else {
+            crate::ai::agent_chat::ui::history_popup::close_history_popup_window(cx);
+        }
         if cancel_portal {
             tracing::info!(
                 target: "script_kit::agent_chat",
@@ -1281,10 +1331,17 @@ impl AgentChatView {
 
     pub(crate) fn dismiss_history_popup_from_window(
         &mut self,
+        generation: crate::components::inline_popup_window::InlinePopupGeneration,
         reason: &'static str,
         cx: &mut Context<Self>,
     ) {
-        if self.history_menu.is_none() {
+        if self.history_menu.is_none()
+            || self
+                .history_popup_lifetime
+                .as_ref()
+                .map(AgentChatHistoryPopupLifetime::generation)
+                != Some(generation)
+        {
             return;
         }
 
@@ -1296,6 +1353,7 @@ impl AgentChatView {
             "Closed Agent Chat history popup from detached window lifecycle"
         );
         self.mark_history_popup_closed(cx);
+        self.history_popup_lifetime = None;
         if cancel_portal {
             tracing::info!(
                 target: "script_kit::agent_chat",
@@ -1344,8 +1402,7 @@ impl AgentChatView {
     fn sync_agent_chat_popup_windows_from_cached_parent(&mut self, cx: &mut Context<Self>) {
         if self.is_setup_mode() {
             self.composer_picker_session = None;
-            self.history_menu = None;
-            crate::ai::agent_chat::ui::history_popup::close_history_popup_window(cx);
+            self.close_history_popup_for_owner_transition("setup_mode", false, cx);
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_popup_sync_setup_mode_closed",
@@ -4949,7 +5006,7 @@ impl AgentChatView {
 
         self.attach_menu_open = false;
         self.permission_options_open = false;
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("session_transition", false, cx);
         self.pending_portal_session = None;
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::HostHide, cx);
 
@@ -5162,12 +5219,48 @@ impl AgentChatView {
 
     pub(super) fn sync_history_popup_window_from_cached_parent(&mut self, cx: &mut Context<Self>) {
         let Some(parent) = self.composer_parent_window else {
-            crate::ai::agent_chat::ui::history_popup::close_history_popup_window(cx);
+            crate::ai::agent_chat::ui::history_popup::close_history_popup_window_for_owner_loss(cx);
+            self.history_popup_lifetime = None;
             return;
         };
 
         let source_view = cx.entity().downgrade();
         if let Some(snapshot) = self.history_popup_snapshot() {
+            if self.history_popup_lifetime.is_none() {
+                let parent_automation_id =
+                    match super::popup_window::resolve_agent_chat_popup_parent_automation_id(
+                        parent.handle,
+                        parent.bounds,
+                    ) {
+                        Ok(id) => id,
+                        Err(error) => {
+                            tracing::error!(error = %error, "agent_chat_history_popup_parent_unresolved");
+                            self.mark_history_popup_closed(cx);
+                            return;
+                        }
+                    };
+                let lifecycle = crate::components::inline_popup_window::InlinePopupLifecycle::new();
+                let generation =
+                    crate::components::inline_popup_window::InlinePopupLifecycle::generation(
+                        &lifecycle,
+                    );
+                self.history_popup_lifetime = Some(AgentChatHistoryPopupLifetime {
+                    focus_return: crate::components::inline_popup_window::InlinePopupFocusReturn {
+                        generation,
+                        parent_automation_id: parent_automation_id.clone(),
+                        parent_window_handle: parent.handle,
+                        focus_handle: self.focus_handle.clone(),
+                        semantic_id: "input:agent-chat-composer",
+                    },
+                    lifecycle,
+                    parent_automation_id,
+                });
+            }
+            let lifetime = self
+                .history_popup_lifetime
+                .as_ref()
+                .expect("history popup lifetime should exist for visible menu")
+                .clone();
             if let Err(error) = crate::ai::agent_chat::ui::history_popup::sync_history_popup_window(
                 cx,
                 crate::ai::agent_chat::ui::history_popup::AgentChatHistoryPopupRequest {
@@ -5176,12 +5269,21 @@ impl AgentChatView {
                     display_id: parent.display_id,
                     source_view,
                     snapshot,
+                    lifecycle: lifetime.lifecycle,
+                    focus_return: lifetime.focus_return,
                 },
             ) {
-                tracing::error!(error = %error, "agent_chat_history_popup_sync_failed");
+                tracing::error!(
+                    error = %error,
+                    parent_automation_id = %lifetime.parent_automation_id,
+                    "agent_chat_history_popup_sync_failed"
+                );
+                self.mark_history_popup_closed(cx);
+                self.history_popup_lifetime = None;
             }
         } else {
             crate::ai::agent_chat::ui::history_popup::close_history_popup_window(cx);
+            self.history_popup_lifetime = None;
         }
     }
 
@@ -5220,8 +5322,15 @@ impl AgentChatView {
         entry: &super::history::AgentChatHistoryEntry,
         cx: &mut Context<Self>,
     ) {
-        self.history_menu = None;
-        self.sync_history_popup_window_from_cached_parent(cx);
+        self.close_history_popup_for_owner_transition("committed_selection", true, cx);
+        self.apply_selected_history_entry(entry, cx);
+    }
+
+    pub(crate) fn apply_selected_history_entry(
+        &mut self,
+        entry: &super::history::AgentChatHistoryEntry,
+        cx: &mut Context<Self>,
+    ) {
         let had_pending_history_portal = self.has_pending_history_portal_session();
         if had_pending_history_portal {
             if let Err(error) = self.attach_history_session(
@@ -5365,9 +5474,8 @@ impl AgentChatView {
             return;
         };
 
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("committed_selection", true, cx);
         self.history_closed_at = None;
-        self.sync_history_popup_window_from_cached_parent(cx);
 
         if modifiers.platform {
             self.select_history_from_popup(&entry, cx);
@@ -5483,12 +5591,19 @@ impl AgentChatView {
 
     pub(crate) fn sync_history_popup_state_from_window(
         &mut self,
+        generation: crate::components::inline_popup_window::InlinePopupGeneration,
         query: String,
         hits: Vec<super::history::AgentChatHistorySearchHit>,
         selected_index: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.history_menu.is_none() {
+        if self.history_menu.is_none()
+            || self
+                .history_popup_lifetime
+                .as_ref()
+                .map(AgentChatHistoryPopupLifetime::generation)
+                != Some(generation)
+        {
             return;
         }
 
@@ -5509,9 +5624,18 @@ impl AgentChatView {
 
     pub(crate) fn sync_history_popup_selection_from_window(
         &mut self,
+        generation: crate::components::inline_popup_window::InlinePopupGeneration,
         selected_index: usize,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .history_popup_lifetime
+            .as_ref()
+            .map(AgentChatHistoryPopupLifetime::generation)
+            != Some(generation)
+        {
+            return;
+        }
         let Some(menu) = self.history_menu.as_mut() else {
             return;
         };
@@ -5730,7 +5854,7 @@ impl AgentChatView {
         }
         if close_competing_popups {
             self.attach_menu_open = false;
-            self.history_menu = None;
+            self.close_history_popup_for_owner_transition("competing_picker_opened", true, cx);
         }
         if !self.is_setup_mode() {
             if clear_slash_input {
@@ -6834,6 +6958,7 @@ impl AgentChatView {
             cursor_visible: true,
             _blink_task: blink_task,
             history_menu: None,
+            history_popup_lifetime: None,
             history_closed_at: None,
             attach_menu_open: false,
             message_queue_expanded: false,
@@ -6945,6 +7070,7 @@ impl AgentChatView {
             cursor_visible: false,
             _blink_task: noop_blink,
             history_menu: None,
+            history_popup_lifetime: None,
             history_closed_at: None,
             attach_menu_open: false,
             message_queue_expanded: false,
@@ -8322,7 +8448,7 @@ impl AgentChatView {
         }
 
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::HostHide, cx);
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("plugin_skill_staged", true, cx);
         self.attach_menu_open = false;
         self.last_accepted_item = None;
         self.pending_history_resume = None;
@@ -8392,7 +8518,7 @@ impl AgentChatView {
     /// queued bootstrap work from the previous draft.
     pub(crate) fn submit_reused_entry_intent(&mut self, intent: String, cx: &mut Context<Self>) {
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::SubmitStarted, cx);
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("reused_entry_submitted", true, cx);
         self.attach_menu_open = false;
         self.last_accepted_item = None;
         self.pending_history_resume = None;
@@ -8436,7 +8562,7 @@ impl AgentChatView {
 
         self.refresh_composer_picker_state_after_parent_change(cx);
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::SubmitStarted, cx);
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("reused_host_entry_submitted", true, cx);
         self.attach_menu_open = false;
         self.last_accepted_item = None;
         self.pending_history_resume = None;
@@ -8525,7 +8651,7 @@ impl AgentChatView {
         }
 
         self.attach_menu_open = false;
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("composer_picker_opened", true, cx);
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::HostHide, cx);
         self.set_input(trigger.to_string(), cx);
         self.refresh_agent_chat_spine_from_composer(cx);
@@ -14169,7 +14295,7 @@ impl AgentChatView {
         cx: &mut Context<Self>,
     ) {
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::HostHide, cx);
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("draft_restored", true, cx);
         self.attach_menu_open = false;
         self.last_accepted_item = None;
         self.pending_history_resume = None;
@@ -14199,7 +14325,7 @@ impl AgentChatView {
         cx: &mut Context<Self>,
     ) {
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::HostHide, cx);
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("retry_draft_restored", true, cx);
         self.attach_menu_open = false;
         self.last_accepted_item = None;
         self.pending_history_resume = None;

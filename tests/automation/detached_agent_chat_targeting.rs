@@ -53,6 +53,7 @@ fn detached_agent_chat_targeting_flow() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(main);
 
@@ -68,6 +69,7 @@ fn detached_agent_chat_targeting_flow() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(agent_chat);
 
@@ -123,6 +125,7 @@ fn multiple_detached_agent_chat_windows_indexed() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(agent_chat0);
 
@@ -137,6 +140,7 @@ fn multiple_detached_agent_chat_windows_indexed() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(agent_chat1);
 
@@ -225,6 +229,7 @@ fn agent_chat_window_close_removes_from_registry() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(agent_chat);
 
@@ -266,6 +271,7 @@ fn agent_chat_visibility_toggle() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(agent_chat);
 

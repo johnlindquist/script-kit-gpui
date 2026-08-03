@@ -132,6 +132,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: None,
+            generation: None,
         }
     }
 

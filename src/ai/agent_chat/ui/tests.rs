@@ -1055,42 +1055,6 @@ fn agent_chat_history_toggle_uses_recent_close_debounce() {
 }
 
 #[test]
-fn agent_chat_history_popup_window_observes_focus_loss_and_escape() {
-    assert!(
-        AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("activation_subscription: Option<Subscription>")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("fn ensure_activation_subscription(")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("observe_window_activation(")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("this.request_close(window, cx, \"focus_lost\");"),
-        "Agent Chat history popup window should observe activation changes and close on focus loss"
-    );
-    assert!(
-        AGENT_CHAT_HISTORY_POPUP_SOURCE.contains(
-            ".on_mouse_down_out(cx.listener(|this, _event: &gpui::MouseDownEvent, window, cx| {"
-        ) && AGENT_CHAT_HISTORY_POPUP_SOURCE
-            .contains("this.request_close(window, cx, \"mouse_down_out\");")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("view.dismiss_history_popup_from_window(reason, cx);")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("this.request_close(window, cx, \"escape\");"),
-        "Agent Chat history popup window should close on outside clicks and sync dismissals back into Agent Chat state"
-    );
-    assert!(
-        AGENT_CHAT_HISTORY_POPUP_SOURCE
-            .contains("view.dismiss_history_popup_from_window(reason, cx);")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("this.request_close(window, cx, \"escape\");"),
-        "Agent Chat history popup window should sync dismissals back into Agent Chat state for both focus loss and Escape"
-    );
-    assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains(".id(\"agent_chat-history-popup-backdrop\")")
-            && AGENT_CHAT_VIEW_SOURCE.contains("this.dismiss_history_popup(cx);")
-            && AGENT_CHAT_VIEW_SOURCE.contains(".bottom(px(self.inline_footer_height()))"),
-        "Agent Chat host should render an outside-click backdrop above chat content so clicks outside the popup close it without swallowing the footer toggle"
-    );
-}
-
-#[test]
 fn agent_chat_history_popup_window_supports_actions_style_search_and_keyboard_navigation() {
     assert!(
         AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("enum AgentChatHistoryPopupKeyIntent")

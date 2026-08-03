@@ -32,6 +32,30 @@ fn automation_window_target_round_trip_id() {
 }
 
 #[test]
+fn automation_window_target_round_trip_instance() {
+    let target = AutomationWindowTarget::Instance {
+        id: "dictation-microphone-popup".into(),
+        generation: 42,
+    };
+    let json = serde_json::to_string(&target).expect("serialize");
+    assert_eq!(
+        json,
+        r#"{"type":"instance","id":"dictation-microphone-popup","generation":42}"#
+    );
+    let back: AutomationWindowTarget = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, target);
+}
+
+#[test]
+fn automation_window_target_instance_requires_generation() {
+    let error = serde_json::from_str::<AutomationWindowTarget>(
+        r#"{"type":"instance","id":"dictation-microphone-popup"}"#,
+    )
+    .expect_err("instance target without generation must fail closed");
+    assert!(error.to_string().contains("generation"));
+}
+
+#[test]
 fn automation_window_target_round_trip_kind() {
     let json = r#"{"type":"kind","kind":"agentChatDetached","index":0}"#;
     let parsed: AutomationWindowTarget =
@@ -111,8 +135,30 @@ fn automation_window_info_round_trip() {
         parent_window_id: None,
         parent_kind: None,
         pid: Some(1234),
+        generation: None,
     };
     let json = serde_json::to_string(&info).expect("serialize");
+    let back: AutomationWindowInfo = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, info);
+}
+
+#[test]
+fn automation_window_generation_round_trips_serde() {
+    let info = AutomationWindowInfo {
+        id: "agent_chat-history-popup".into(),
+        kind: AutomationWindowKind::PromptPopup,
+        title: Some("History".into()),
+        focused: false,
+        visible: true,
+        semantic_surface: Some("promptPopup".into()),
+        bounds: None,
+        parent_window_id: Some("main".into()),
+        parent_kind: Some(AutomationWindowKind::Main),
+        pid: Some(1234),
+        generation: Some(17),
+    };
+    let json = serde_json::to_string(&info).expect("serialize");
+    assert!(json.contains(r#""generation":17"#));
     let back: AutomationWindowInfo = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back, info);
 }
@@ -148,6 +194,7 @@ fn automation_window_info_with_bounds() {
         parent_window_id: None,
         parent_kind: None,
         pid: Some(1234),
+        generation: None,
     };
     let json = serde_json::to_string(&info).expect("serialize");
     assert!(json.contains("\"bounds\""));
@@ -390,6 +437,7 @@ fn automation_window_list_result_round_trip() {
                 parent_window_id: None,
                 parent_kind: None,
                 pid: Some(1001),
+                generation: None,
             },
             AutomationWindowInfo {
                 id: "agentChatDetached:thread-1".into(),
@@ -402,6 +450,7 @@ fn automation_window_list_result_round_trip() {
                 parent_window_id: None,
                 parent_kind: None,
                 pid: Some(1001),
+                generation: None,
             },
         ],
         Some("agentChatDetached:thread-1".into()),

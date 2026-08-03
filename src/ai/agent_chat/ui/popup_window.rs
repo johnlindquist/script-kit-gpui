@@ -67,7 +67,7 @@ pub(crate) fn automation_bounds(bounds: Bounds<Pixels>) -> crate::protocol::Auto
     }
 }
 
-fn resolve_agent_chat_popup_parent_automation_id(
+pub(crate) fn resolve_agent_chat_popup_parent_automation_id(
     parent_window_handle: AnyWindowHandle,
     parent_bounds: Bounds<Pixels>,
 ) -> anyhow::Result<String> {
@@ -98,6 +98,7 @@ fn resolve_agent_chat_popup_parent_automation_id(
             parent_window_id: None,
             parent_kind: None,
             pid: Some(std::process::id()),
+            generation: None,
         });
         return Ok(parent_id);
     }
@@ -113,22 +114,28 @@ pub(crate) fn register_agent_chat_prompt_popup_automation_window(
     parent_window_handle: AnyWindowHandle,
     parent_bounds: Bounds<Pixels>,
     popup_bounds: Bounds<Pixels>,
-) -> anyhow::Result<()> {
+    generation: u64,
+) -> anyhow::Result<String> {
     let parent_id =
         resolve_agent_chat_popup_parent_automation_id(parent_window_handle, parent_bounds)?;
-    crate::windows::register_attached_popup(
+    crate::windows::register_attached_popup_instance(
         automation_id.to_string(),
         crate::protocol::AutomationWindowKind::PromptPopup,
         Some(title.to_string()),
         Some("promptPopup".to_string()),
         Some(automation_bounds(popup_bounds)),
         Some(parent_id.as_str()),
-    )
+        Some(generation),
+    )?;
+    Ok(parent_id)
 }
 
-pub(crate) fn unregister_agent_chat_prompt_popup_automation_window(automation_id: &'static str) {
-    crate::windows::remove_runtime_window_handle(automation_id);
-    crate::windows::remove_automation_window(automation_id);
+pub(crate) fn unregister_agent_chat_prompt_popup_automation_window(
+    automation_id: &'static str,
+    generation: u64,
+) {
+    crate::windows::remove_runtime_window_handle_if_generation(automation_id, generation);
+    crate::windows::remove_automation_window_if_generation(automation_id, generation);
 }
 
 #[cfg(test)]

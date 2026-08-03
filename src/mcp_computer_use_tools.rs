@@ -6111,6 +6111,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: Some(1234),
+            generation: None,
         });
 
         let result =
@@ -6161,6 +6162,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: Some(1234),
+            generation: None,
         });
         assert!(crate::windows::set_automation_focus(&id));
 
@@ -6230,6 +6232,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: Some(1234),
+            generation: None,
         });
 
         let result = handle_computer_use_tool_call(

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the automation window targeting contract.
-pub const AUTOMATION_WINDOW_SCHEMA_VERSION: u32 = 1;
+pub const AUTOMATION_WINDOW_SCHEMA_VERSION: u32 = 2;
 
 /// Specifies which automation window a command should target.
 ///
@@ -14,8 +14,11 @@ pub enum AutomationWindowTarget {
     Main,
     /// Whichever window currently has focus (default when target is omitted).
     Focused,
-    /// A specific window by its stable automation ID.
+    /// A specific window by its stable automation ID. Resolves the current lifetime.
     Id { id: String },
+    /// One exact window lifetime. Reusing the stable ID for a reopened window
+    /// does not make an older instance target valid again.
+    Instance { id: String, generation: u64 },
     /// The first (or Nth) window of a given kind.
     Kind {
         kind: AutomationWindowKind,
@@ -98,6 +101,9 @@ pub struct AutomationWindowInfo {
     /// For attached popups: the kind of the parent window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_kind: Option<AutomationWindowKind>,
+    /// Monotonic lifetime generation for strict instance targeting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     /// Process ID of the window owner (useful for attaching profilers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,

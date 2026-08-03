@@ -38,6 +38,7 @@ fn actions_dialog_registered_as_popup() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(main);
 
@@ -53,6 +54,7 @@ fn actions_dialog_registered_as_popup() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(actions);
 
@@ -130,6 +132,7 @@ fn actions_dialog_close_removes_from_listing() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(actions);
 
@@ -160,6 +163,7 @@ fn prompt_popup_kind_resolves_independently() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(popup);
 
@@ -543,6 +547,7 @@ fn actions_dialog_records_parent_identity_from_main() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(main);
     script_kit_gpui::windows::register_attached_popup(
@@ -581,6 +586,7 @@ fn actions_dialog_records_parent_identity_from_non_main_host() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(agent_chat);
     script_kit_gpui::windows::register_attached_popup(
@@ -622,6 +628,7 @@ fn confirm_popup_records_parent_identity() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(main);
     script_kit_gpui::windows::register_attached_popup(
@@ -684,6 +691,7 @@ fn parent_identity_round_trips_through_serde() {
         parent_window_id: Some("main".into()),
         parent_kind: Some(AutomationWindowKind::Main),
         pid: None,
+        generation: None,
     };
     let json = serde_json::to_string(&info).expect("serialize");
     assert!(json.contains("\"parentWindowId\":\"main\""));
@@ -706,6 +714,7 @@ fn parent_identity_omitted_when_none_in_serde() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     let json = serde_json::to_string(&info).expect("serialize");
     assert!(!json.contains("parentWindowId"));

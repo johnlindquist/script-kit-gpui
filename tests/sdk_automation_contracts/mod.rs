@@ -608,6 +608,7 @@ fn make_window(
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     }
 }
 
@@ -830,6 +831,7 @@ fn inspect_no_bounds_produces_no_suggested_hits() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
 
     let target_bounds = script_kit_gpui::protocol::target_bounds_in_screenshot(&info);
@@ -982,6 +984,7 @@ fn inspect_suggested_hit_semantic_ids_per_kind() {
             parent_window_id: None,
             parent_kind: None,
             pid: None,
+            generation: None,
         };
 
         let hits = script_kit_gpui::protocol::default_suggested_hit_points(&info, Some(&bounds));

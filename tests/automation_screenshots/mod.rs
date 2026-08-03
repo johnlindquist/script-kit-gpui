@@ -81,6 +81,7 @@ fn make_info(
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     }
 }
 
@@ -282,6 +283,7 @@ fn make_registered(
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(info.clone());
     info

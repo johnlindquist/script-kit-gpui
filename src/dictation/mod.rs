@@ -58,8 +58,11 @@ pub(crate) use microphone_popup_window::{
     batch_select_dictation_microphone_popup_row_by_semantic_id,
     batch_select_dictation_microphone_popup_row_by_value,
     build_dictation_microphone_popup_snapshot, close_dictation_microphone_popup_window,
-    is_dictation_microphone_popup_window_open, sync_dictation_microphone_popup_window,
-    DictationMicrophonePopupRequest, DictationMicrophonePopupSnapshot,
+    close_dictation_microphone_popup_window_for_owner_loss,
+    dismiss_dictation_microphone_popup_from_parent, is_dictation_microphone_popup_window_open,
+    sync_dictation_microphone_popup_window, DictationMicrophonePopupRequest,
+    DictationMicrophonePopupSelectionMode, DictationMicrophonePopupSnapshot,
+    DictationPopupDismissOutcome, DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
 };
 pub(crate) use runtime::toggled_post_stop_restart;
 pub use runtime::{
@@ -93,12 +96,15 @@ pub use types::{
     DictationToggleOutcome, RawAudioChunk,
 };
 pub use visualizer::{animate_bars, silent_bars};
-pub(crate) use window::dictation_window_lifecycle_receipt;
 pub use window::{
     automation_layout_info, begin_overlay_session, close_dictation_overlay,
     is_dictation_overlay_open, open_dictation_overlay, overlay_generation,
     set_overlay_abort_callback, set_overlay_submit_callback, update_dictation_overlay,
     DictationOverlay, DictationOverlayState,
+};
+pub(crate) use window::{
+    dictation_overlay_fixture_mode, dictation_window_lifecycle_receipt,
+    open_dictation_microphone_popup_fixture, set_dictation_overlay_fixture_mode,
 };
 
 #[cfg(test)]

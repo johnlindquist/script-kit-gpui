@@ -337,6 +337,7 @@ fn register_hud_automation_window(hud_id: u64, text: &str, bounds: gpui::Bounds<
         parent_window_id: None,
         parent_kind: None,
         pid: Some(std::process::id()),
+        generation: None,
     });
 }
 impl Render for HudView {

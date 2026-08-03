@@ -121,6 +121,7 @@ fn upsert_agent_chat_detached_automation_window(
         parent_window_id: None,
         parent_kind: None,
         pid: Some(std::process::id()),
+        generation: None,
     });
 }
 
@@ -440,6 +441,10 @@ fn open_picker_in_detached_chat_window(
             });
         })
         .is_ok()
+}
+
+pub(crate) fn open_agent_chat_history_popup_fixture(cx: &mut App) -> bool {
+    open_history_portal_in_detached_chat_window(cx)
 }
 
 fn open_history_portal_in_detached_chat_window(cx: &mut App) -> bool {

@@ -128,6 +128,27 @@ pub fn register_attached_popup(
     bounds: Option<AutomationWindowBounds>,
     parent_id: Option<&str>,
 ) -> Result<()> {
+    register_attached_popup_instance(
+        popup_id,
+        popup_kind,
+        title,
+        semantic_surface,
+        bounds,
+        parent_id,
+        None,
+    )
+}
+
+/// Register one exact attached-popup lifetime.
+pub fn register_attached_popup_instance(
+    popup_id: String,
+    popup_kind: AutomationWindowKind,
+    title: Option<String>,
+    semantic_surface: Option<String>,
+    bounds: Option<AutomationWindowBounds>,
+    parent_id: Option<&str>,
+    generation: Option<u64>,
+) -> Result<()> {
     let pid = parent_id.ok_or_else(|| {
         tracing::warn!(
             target: "script_kit::automation",
@@ -172,6 +193,7 @@ pub fn register_attached_popup(
         bounds,
         parent_window_id: Some(parent_window_id.clone()),
         parent_kind: Some(parent_kind),
+        generation,
         pid: Some(std::process::id()),
     };
 
@@ -204,6 +226,29 @@ pub fn remove_automation_window(id: &str) -> Option<AutomationWindowInfo> {
             focused_id = ?state.focused_id,
             main_id = ?state.main_id,
             "automation_window_removed"
+        );
+    }
+    removed
+}
+
+/// Remove an automation entry only when it still names the expected popup
+/// lifetime. Delayed close callbacks cannot erase a reopened generation.
+pub fn remove_automation_window_if_generation(
+    id: &str,
+    generation: u64,
+) -> Option<AutomationWindowInfo> {
+    let mut state = AUTOMATION_WINDOWS.lock();
+    if state.windows.get(id).and_then(|info| info.generation) != Some(generation) {
+        return None;
+    }
+    let removed = state.windows.remove(id);
+    if removed.is_some() {
+        rebuild_indexes(&mut state);
+        tracing::debug!(
+            target: "script_kit::automation",
+            id = %id,
+            generation,
+            "automation_window_generation_removed"
         );
     }
     removed
@@ -389,6 +434,20 @@ pub fn resolve_automation_window(
                 .ok_or_else(|| anyhow!("Unknown automation window id: {id}")),
         ),
 
+        Some(AutomationWindowTarget::Instance { id, generation }) => (
+            "instance",
+            state
+                .windows
+                .get(id)
+                .filter(|info| info.generation == Some(*generation))
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Unknown or stale automation window instance: {id} generation {generation}"
+                    )
+                }),
+        ),
+
         Some(AutomationWindowTarget::Kind { kind, index }) => {
             let idx = index.unwrap_or(0);
             let result = state
@@ -501,6 +560,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: Some(std::process::id()),
+            generation: None,
         }
     }
 
@@ -744,6 +804,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: Some(std::process::id()),
+            generation: None,
         };
         upsert_automation_window(info.clone());
 
@@ -963,6 +1024,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: None,
+            generation: None,
         });
         upsert_automation_window(AutomationWindowInfo {
             id: format!("{p}:promptPopup:a"),
@@ -975,6 +1037,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: None,
+            generation: None,
         });
 
         // Index 0 must be :a (lexicographically first)
@@ -1038,6 +1101,69 @@ mod tests {
         remove_automation_window(&format!("{p}:main"));
         remove_automation_window(&format!("{p}:notes"));
         remove_automation_window(&format!("{p}:popup"));
+    }
+
+    #[test]
+    fn automation_window_instance_target_and_cleanup_require_exact_generation() {
+        let _registry_guard = registry_guard();
+        let p = test_prefix();
+        let parent_id = format!("{p}:main");
+        let popup_id = format!("{p}:popup");
+        upsert_automation_window(make_info(&p, "main", AutomationWindowKind::Main));
+
+        register_attached_popup_instance(
+            popup_id.clone(),
+            AutomationWindowKind::PromptPopup,
+            Some("Popup".into()),
+            Some("promptPopup".into()),
+            None,
+            Some(&parent_id),
+            Some(13),
+        )
+        .expect("generation 13 should register");
+        assert_eq!(
+            resolve_automation_window(Some(&AutomationWindowTarget::Instance {
+                id: popup_id.clone(),
+                generation: 13,
+            }))
+            .expect("exact generation should resolve")
+            .generation,
+            Some(13)
+        );
+
+        register_attached_popup_instance(
+            popup_id.clone(),
+            AutomationWindowKind::PromptPopup,
+            Some("Popup reopened".into()),
+            Some("promptPopup".into()),
+            None,
+            Some(&parent_id),
+            Some(14),
+        )
+        .expect("generation 14 should replace current ID lifetime");
+        assert!(
+            resolve_automation_window(Some(&AutomationWindowTarget::Instance {
+                id: popup_id.clone(),
+                generation: 13,
+            }))
+            .is_err()
+        );
+        assert!(remove_automation_window_if_generation(&popup_id, 13).is_none());
+        assert_eq!(
+            resolve_automation_window(Some(&AutomationWindowTarget::Id {
+                id: popup_id.clone(),
+            }))
+            .expect("legacy ID should resolve the current lifetime")
+            .generation,
+            Some(14)
+        );
+        assert!(remove_automation_window_if_generation(&popup_id, 14).is_some());
+        assert!(resolve_automation_window(Some(&AutomationWindowTarget::Id {
+            id: popup_id.clone(),
+        }))
+        .is_err());
+
+        remove_automation_window(&parent_id);
     }
 
     // -- Parent identity (register_attached_popup) ---------------------------

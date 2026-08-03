@@ -456,6 +456,15 @@ static DICTATION_OVERLAY_WINDOW: OnceLock<Mutex<Option<gpui::WindowHandle<Dictat
 static DICTATION_OVERLAY_EXIT_TICKET: Mutex<Option<crate::platform::GlassExitTicket>> =
     Mutex::new(None);
 static DICTATION_OVERLAY_EXIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static DICTATION_OVERLAY_FIXTURE_MODE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_dictation_overlay_fixture_mode(active: bool) {
+    DICTATION_OVERLAY_FIXTURE_MODE.store(active, Ordering::SeqCst);
+}
+
+pub(crate) fn dictation_overlay_fixture_mode() -> bool {
+    DICTATION_OVERLAY_FIXTURE_MODE.load(Ordering::SeqCst)
+}
 
 /// Callback type for overlay escape actions (abort dictation).
 type OverlayAbortCallback = Box<dyn Fn(&mut App) + Send + Sync + 'static>;
@@ -818,11 +827,24 @@ pub(crate) fn estimate_caption_lines(text: &str, chars_per_line: usize) -> usize
     lines.max(1)
 }
 
+#[derive(Clone)]
+struct DictationMicrophonePopupLifetime {
+    lifecycle: crate::components::inline_popup_window::InlinePopupLifecycleHandle,
+    focus_return: crate::components::inline_popup_window::InlinePopupFocusReturn,
+}
+
+impl DictationMicrophonePopupLifetime {
+    fn generation(&self) -> crate::components::inline_popup_window::InlinePopupGeneration {
+        crate::components::inline_popup_window::InlinePopupLifecycle::generation(&self.lifecycle)
+    }
+}
+
 /// The GPUI entity that renders the compact dictation pill.
 pub struct DictationOverlay {
     state: DictationOverlayState,
     display_bars: [f32; WAVEFORM_BAR_COUNT],
     focus_handle: FocusHandle,
+    microphone_popup_lifetime: Option<DictationMicrophonePopupLifetime>,
     last_render_logged_phase: Option<DictationSessionPhase>,
     /// When the processing (transcribing/delivering) animation started, for
     /// dot-stagger and caption-pulse phase computation.
@@ -861,6 +883,7 @@ impl DictationOverlay {
             state: DictationOverlayState::default(),
             display_bars: silent_bars(),
             focus_handle: cx.focus_handle(),
+            microphone_popup_lifetime: None,
             last_render_logged_phase: None,
             processing_started_at: None,
             reduced_motion: crate::platform::prefers_reduced_motion(),
@@ -1023,24 +1046,52 @@ impl DictationOverlay {
             return;
         }
 
-        let prefs = crate::config::load_user_preferences();
-        let selected_device_id = prefs.dictation.selected_device_id.as_deref();
-        let menu_items = match crate::dictation::list_input_device_menu_items(selected_device_id) {
-            Ok(items) if !items.is_empty() => items,
-            Ok(_) => {
-                tracing::warn!(
-                    category = "DICTATION",
-                    "Microphone selector found no input devices"
-                );
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    category = "DICTATION",
-                    error = %error,
-                    "Failed to list microphones from overlay selector"
-                );
-                return;
+        let selection_mode = if dictation_overlay_fixture_mode() {
+            crate::dictation::DictationMicrophonePopupSelectionMode::FixtureNoPersistence
+        } else {
+            crate::dictation::DictationMicrophonePopupSelectionMode::Production
+        };
+        let menu_items = if selection_mode
+            == crate::dictation::DictationMicrophonePopupSelectionMode::FixtureNoPersistence
+        {
+            vec![
+                crate::dictation::DictationDeviceMenuItem {
+                    title: "System Default".to_string(),
+                    subtitle: "Fixture current device".to_string(),
+                    action: crate::dictation::DictationDeviceSelectionAction::UseSystemDefault,
+                    is_selected: true,
+                },
+                crate::dictation::DictationDeviceMenuItem {
+                    title: "Studio Microphone".to_string(),
+                    subtitle: "Fixture alternate device".to_string(),
+                    action: crate::dictation::DictationDeviceSelectionAction::UseDevice(
+                        crate::dictation::DictationDeviceId(
+                            "fixture-studio-microphone".to_string(),
+                        ),
+                    ),
+                    is_selected: false,
+                },
+            ]
+        } else {
+            let prefs = crate::config::load_user_preferences();
+            let selected_device_id = prefs.dictation.selected_device_id.as_deref();
+            match crate::dictation::list_input_device_menu_items(selected_device_id) {
+                Ok(items) if !items.is_empty() => items,
+                Ok(_) => {
+                    tracing::warn!(
+                        category = "DICTATION",
+                        "Microphone selector found no input devices"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        category = "DICTATION",
+                        error = %error,
+                        "Failed to list microphones from overlay selector"
+                    );
+                    return;
+                }
             }
         };
 
@@ -1054,16 +1105,61 @@ impl DictationOverlay {
         );
         let snapshot =
             crate::dictation::build_dictation_microphone_popup_snapshot(menu_items, width);
+
+        let lifetime = self
+            .microphone_popup_lifetime
+            .as_ref()
+            .filter(|lifetime| {
+                !matches!(
+                    crate::components::inline_popup_window::InlinePopupLifecycle::snapshot(
+                        &lifetime.lifecycle,
+                    )
+                    .1,
+                    crate::components::inline_popup_window::InlinePopupPhase::Closing
+                        | crate::components::inline_popup_window::InlinePopupPhase::Closed
+                )
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                let lifecycle = crate::components::inline_popup_window::InlinePopupLifecycle::new();
+                let generation =
+                    crate::components::inline_popup_window::InlinePopupLifecycle::generation(
+                        &lifecycle,
+                    );
+                DictationMicrophonePopupLifetime {
+                    lifecycle,
+                    focus_return: crate::components::inline_popup_window::InlinePopupFocusReturn {
+                        generation,
+                        parent_automation_id: DICTATION_OVERLAY_AUTOMATION_ID.to_string(),
+                        parent_window_handle,
+                        focus_handle: self.focus_handle.clone(),
+                        semantic_id: "input:dictation-overlay",
+                    },
+                }
+            });
+        self.microphone_popup_lifetime = Some(lifetime.clone());
+
         let request = crate::dictation::DictationMicrophonePopupRequest {
             parent_window_handle,
+            parent_automation_id: DICTATION_OVERLAY_AUTOMATION_ID.to_string(),
             parent_bounds,
             display_bounds,
             display_id,
             source_view: cx.entity().downgrade(),
             snapshot,
+            selection_mode,
+            lifecycle: lifetime.lifecycle.clone(),
+            focus_return: lifetime.focus_return.clone(),
         };
 
         if let Err(error) = crate::dictation::sync_dictation_microphone_popup_window(cx, request) {
+            if self
+                .microphone_popup_lifetime
+                .as_ref()
+                .is_some_and(|current| current.generation() == lifetime.generation())
+            {
+                self.microphone_popup_lifetime = None;
+            }
             tracing::warn!(
                 category = "DICTATION",
                 error = %error,
@@ -1072,6 +1168,56 @@ impl DictationOverlay {
             return;
         }
 
+        cx.notify();
+    }
+
+    fn dismiss_microphone_popup_top_layer(
+        &mut self,
+        reason: &'static str,
+        cx: &mut Context<Self>,
+    ) -> crate::dictation::DictationPopupDismissOutcome {
+        let expected_generation = self
+            .microphone_popup_lifetime
+            .as_ref()
+            .map(DictationMicrophonePopupLifetime::generation);
+        let outcome = crate::dictation::dismiss_dictation_microphone_popup_from_parent(
+            expected_generation,
+            reason,
+            cx,
+        );
+        if let Some(generation) = expected_generation {
+            self.dismiss_microphone_popup_from_window(generation, reason, cx);
+        }
+        outcome
+    }
+
+    pub(crate) fn dismiss_microphone_popup_from_window(
+        &mut self,
+        generation: crate::components::inline_popup_window::InlinePopupGeneration,
+        reason: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .microphone_popup_lifetime
+            .as_ref()
+            .is_some_and(|lifetime| lifetime.generation() == generation)
+        {
+            tracing::debug!(
+                target: "script_kit::inline_popup",
+                event = "dictation_microphone_popup_stale_owner_callback",
+                generation = generation.get(),
+                reason,
+            );
+            return;
+        }
+
+        self.microphone_popup_lifetime = None;
+        tracing::info!(
+            target: "script_kit::inline_popup",
+            event = "dictation_microphone_popup_owner_reconciled",
+            generation = generation.get(),
+            reason,
+        );
         cx.notify();
     }
 
@@ -1085,7 +1231,7 @@ impl DictationOverlay {
     /// the global slot empty — causing stacked overlay windows on the
     /// next toggle.
     fn abort_overlay_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::dictation::close_dictation_microphone_popup_window(cx);
+        crate::dictation::close_dictation_microphone_popup_window_for_owner_loss(cx);
         let callback = OVERLAY_ABORT_CALLBACK.lock().take();
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
         remove_global_escape_monitor();
@@ -1108,6 +1254,7 @@ impl DictationOverlay {
     /// then run the native close prep and remove the overlay window. Falls
     /// back to instant close when glass/morph is unavailable.
     fn dematerialize_then_remove_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        set_dictation_overlay_fixture_mode(false);
         if let Some(ticket) = crate::platform::begin_gpui_window_exit_with_ticket(
             window,
             "DICTATION",
@@ -1159,7 +1306,7 @@ impl DictationOverlay {
     /// reopen/update the overlay into its transcribing state without reentrant
     /// updates to this entity.
     fn submit_overlay_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::dictation::close_dictation_microphone_popup_window(cx);
+        crate::dictation::close_dictation_microphone_popup_window_for_owner_loss(cx);
         let callback = OVERLAY_SUBMIT_CALLBACK.lock().take();
         *OVERLAY_ABORT_CALLBACK.lock() = None;
         remove_global_escape_monitor();
@@ -1182,7 +1329,7 @@ impl DictationOverlay {
     /// Same reentrant-borrow avoidance as `abort_overlay_session`, but
     /// without invoking the abort callback (used for non-recording phases).
     fn close_overlay_from_within(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::dictation::close_dictation_microphone_popup_window(cx);
+        crate::dictation::close_dictation_microphone_popup_window_for_owner_loss(cx);
         *OVERLAY_ABORT_CALLBACK.lock() = None;
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
         remove_global_escape_monitor();
@@ -1220,6 +1367,14 @@ impl DictationOverlay {
 
         if !ESCAPE_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return GlobalKeyProcessResult::None;
+        }
+
+        match self.dismiss_microphone_popup_top_layer("global_escape", cx) {
+            crate::dictation::DictationPopupDismissOutcome::ClosedCurrentTopLayer => {
+                return GlobalKeyProcessResult::StateChanged;
+            }
+            crate::dictation::DictationPopupDismissOutcome::ReconciledStaleSlot
+            | crate::dictation::DictationPopupDismissOutcome::NotPresent => {}
         }
 
         let elapsed = crate::dictation::dictation_elapsed().unwrap_or(self.state.elapsed);
@@ -1707,6 +1862,19 @@ impl DictationOverlay {
         row.into_any_element()
     }
 
+    fn handle_parent_mouse_down(
+        &mut self,
+        _event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dismiss_microphone_popup_top_layer("parent_mouse_down", cx)
+            == crate::dictation::DictationPopupDismissOutcome::ClosedCurrentTopLayer
+        {
+            cx.stop_propagation();
+        }
+    }
+
     /// Handle key-down events for the overlay.
     ///
     /// Escape semantics (vercel-voice 5-second threshold pattern):
@@ -1734,12 +1902,15 @@ impl DictationOverlay {
             "Overlay received key_down"
         );
 
-        if crate::ui_foundation::is_key_escape(key)
-            && crate::dictation::is_dictation_microphone_popup_window_open()
-        {
-            crate::dictation::close_dictation_microphone_popup_window(cx);
-            cx.stop_propagation();
-            return;
+        if crate::ui_foundation::is_key_escape(key) {
+            match self.dismiss_microphone_popup_top_layer("parent_escape", cx) {
+                crate::dictation::DictationPopupDismissOutcome::ClosedCurrentTopLayer => {
+                    cx.stop_propagation();
+                    return;
+                }
+                crate::dictation::DictationPopupDismissOutcome::ReconciledStaleSlot
+                | crate::dictation::DictationPopupDismissOutcome::NotPresent => {}
+            }
         }
 
         // Enter during Recording stops the session and transcribes, matching
@@ -2112,6 +2283,10 @@ impl Render for DictationOverlay {
         // NSWindow below it, so no follower window can lag during a drag.
         div()
             .track_focus(&self.focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::handle_parent_mouse_down),
+            )
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_modifiers_changed(cx.listener(
                 |_, event: &gpui::ModifiersChangedEvent, _window, cx| {
@@ -3236,6 +3411,7 @@ pub fn open_dictation_overlay(
         parent_window_id: None,
         parent_kind: None,
         pid: Some(std::process::id()),
+        generation: None,
     });
     tracing::info!(
         category = "DICTATION",
@@ -3253,6 +3429,23 @@ pub fn open_dictation_overlay(
         "Dictation overlay window opened"
     );
     Ok(handle)
+}
+
+pub(crate) fn open_dictation_microphone_popup_fixture(cx: &mut App) -> anyhow::Result<()> {
+    if !dictation_overlay_fixture_mode() {
+        anyhow::bail!("Dictation microphone fixture requires an active overlay fixture");
+    }
+    let handle = DICTATION_OVERLAY_WINDOW
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .as_ref()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("Dictation overlay fixture is not open"))?;
+    handle
+        .update(cx, |view, window, cx| {
+            view.open_microphone_picker(window, cx);
+        })
+        .map_err(|error| anyhow::anyhow!("Failed to open Dictation microphone fixture: {error}"))
 }
 
 /// Push a new state snapshot into the overlay (no-op if overlay is not open).
@@ -3285,7 +3478,8 @@ pub fn update_dictation_overlay(state: DictationOverlayState, cx: &mut App) -> a
 
 /// Close the dictation overlay window.
 pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
-    crate::dictation::close_dictation_microphone_popup_window(cx);
+    set_dictation_overlay_fixture_mode(false);
+    crate::dictation::close_dictation_microphone_popup_window_for_owner_loss(cx);
     *OVERLAY_ABORT_CALLBACK.lock() = None;
     *OVERLAY_SUBMIT_CALLBACK.lock() = None;
     ESCAPE_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);

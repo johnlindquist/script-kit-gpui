@@ -997,6 +997,7 @@ fn open_notes_window_with_close_behavior(
                             parent_window_id: None,
                             parent_kind: None,
                             pid: Some(std::process::id()),
+                            generation: None,
                         },
                     );
                     logging::log(
@@ -1332,6 +1333,7 @@ fn open_notes_window_with_close_behavior(
         parent_window_id: None,
         parent_kind: None,
         pid: Some(std::process::id()),
+        generation: None,
     });
 
     // Resolve and configure the exact GPUI-owned NSWindow before the body

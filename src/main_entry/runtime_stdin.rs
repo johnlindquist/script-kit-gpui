@@ -536,6 +536,39 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                     "Detached Agent Chat fixture open result"
                                 );
                             }
+                            ExternalCommand::OpenAgentChatHistoryPopupFixture { ref request_id } => {
+                                let rid = request_id.as_ref().map(|id| id.as_str());
+                                let opened = crate::ai::agent_chat::ui::chat_window::open_agent_chat_history_popup_fixture(ctx);
+                                tracing::info!(
+                                    category = "STDIN",
+                                    event = "agent_chat_history_popup_fixture_opened",
+                                    command = "openAgentChatHistoryPopupFixture",
+                                    request_id = ?rid,
+                                    opened,
+                                    "Detached Agent Chat history popup fixture result"
+                                );
+                            }
+                            ExternalCommand::ClosePromptPopupNatively { ref target, ref request_id } => {
+                                let rid = request_id.as_ref().map(|id| id.as_str());
+                                match crate::components::inline_popup_window::close_prompt_popup_target_natively(target, ctx) {
+                                    Ok((id, generation, native_window_number)) => tracing::info!(
+                                        category = "STDIN",
+                                        event = "prompt_popup_native_close_requested",
+                                        command = "closePromptPopupNatively",
+                                        request_id = ?rid,
+                                        window_id = %id,
+                                        generation,
+                                        native_window_number,
+                                    ),
+                                    Err(error) => tracing::warn!(
+                                        category = "STDIN",
+                                        event = "prompt_popup_native_close_refused",
+                                        command = "closePromptPopupNatively",
+                                        request_id = ?rid,
+                                        error = %error,
+                                    ),
+                                }
+                            }
                             ExternalCommand::OpenMiniAi => {
                                 logging::log("STDIN", "Opening Agent Chat via openMiniAi compatibility alias");
                                 view.open_tab_ai_agent_chat_with_entry_intent(None, ctx);
@@ -1293,6 +1326,7 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                             }
                             ExternalCommand::OpenDictationOverlayFixture { ref request_id } => {
                                 let rid = request_id.as_ref().map(|id| id.as_str());
+                                crate::dictation::set_dictation_overlay_fixture_mode(true);
                                 match crate::dictation::open_dictation_overlay(ctx) {
                                     Ok(handle) => {
                                         let fixture_bounds = gpui::Bounds {
@@ -1328,6 +1362,7 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                         );
                                     }
                                     Err(error) => {
+                                        crate::dictation::set_dictation_overlay_fixture_mode(false);
                                         tracing::error!(
                                             category = "STDIN",
                                             event = "dictation_overlay_fixture_failed",
@@ -1337,6 +1372,26 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                             "Dictation overlay fixture failed"
                                         );
                                     }
+                                }
+                            }
+                            ExternalCommand::OpenDictationMicrophonePopupFixture { ref request_id } => {
+                                let rid = request_id.as_ref().map(|id| id.as_str());
+                                match crate::dictation::open_dictation_microphone_popup_fixture(ctx) {
+                                    Ok(()) => tracing::info!(
+                                        category = "STDIN",
+                                        event = "dictation_microphone_popup_fixture_opened",
+                                        command = "openDictationMicrophonePopupFixture",
+                                        request_id = ?rid,
+                                        "Dictation microphone popup fixture opened without persistence"
+                                    ),
+                                    Err(error) => tracing::error!(
+                                        category = "STDIN",
+                                        event = "dictation_microphone_popup_fixture_failed",
+                                        command = "openDictationMicrophonePopupFixture",
+                                        request_id = ?rid,
+                                        error = %error,
+                                        "Dictation microphone popup fixture failed"
+                                    ),
                                 }
                             }
                             ExternalCommand::GetConfigFingerprint { ref request_id } => {

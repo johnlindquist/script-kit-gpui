@@ -10,6 +10,11 @@ use gpui::{
 };
 use gpui_component::scroll::ScrollableElement;
 
+use crate::components::inline_popup_window::{
+    InlinePopupAttachResult, InlinePopupCloseGate, InlinePopupFocusReturn, InlinePopupGeneration,
+    InlinePopupLifecycle, InlinePopupLifecycleHandle, InlinePopupPhase,
+};
+
 use super::history::{
     AgentChatHistoryEntry, AgentChatHistorySearchField, AgentChatHistorySearchHit,
 };
@@ -179,12 +184,15 @@ pub(crate) struct AgentChatHistoryPopupRequest {
     pub(crate) display_id: Option<DisplayId>,
     pub(crate) source_view: WeakEntity<AgentChatView>,
     pub(crate) snapshot: AgentChatHistoryPopupSnapshot,
+    pub(crate) lifecycle: InlinePopupLifecycleHandle,
+    pub(crate) focus_return: InlinePopupFocusReturn,
 }
 
 struct AgentChatHistoryPopupSlot {
     handle: WindowHandle<AgentChatHistoryPopupWindow>,
     parent_window_handle: AnyWindowHandle,
-    _registration: super::popup_registry::AgentChatPopupRegistration,
+    generation: InlinePopupGeneration,
+    lifecycle: InlinePopupLifecycleHandle,
 }
 
 static AGENT_CHAT_HISTORY_POPUP_WINDOW: OnceLock<Mutex<Option<AgentChatHistoryPopupSlot>>> =
@@ -205,33 +213,88 @@ pub(super) enum AgentChatHistoryPopupKeyIntent {
 }
 
 pub(crate) fn close_history_popup_window(cx: &mut App) {
-    unregister_history_popup_automation_window();
-    if let Some(storage) = AGENT_CHAT_HISTORY_POPUP_WINDOW.get() {
-        if let Ok(mut guard) = storage.lock() {
-            if let Some(slot) = guard.take() {
-                let _ = slot.handle.update(cx, |_popup, window, cx| {
-                    crate::platform::dematerialize_then_remove_gpui_window(
-                        window,
-                        cx,
-                        "AGENT_CHAT",
-                        "Agent Chat history popup",
-                    );
-                });
-            }
-        }
+    close_history_popup_window_with_policy("owner_state_closed", true, cx);
+}
+
+pub(crate) fn close_history_popup_window_for_owner_loss(cx: &mut App) {
+    close_history_popup_window_with_policy("owner_loss", false, cx);
+}
+
+pub(crate) fn close_history_popup_window_from_owner(
+    generation: InlinePopupGeneration,
+    reason: &'static str,
+    restore_focus: bool,
+    cx: &mut App,
+) {
+    let current = AGENT_CHAT_HISTORY_POPUP_WINDOW
+        .get()
+        .and_then(|storage| storage.lock().ok())
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|slot| (slot.handle, slot.generation, slot.lifecycle.clone()))
+        });
+    let Some((handle, current_generation, lifecycle)) = current else {
+        return;
+    };
+    if current_generation != generation {
+        return;
+    }
+    if handle
+        .update(cx, |popup, window, cx| {
+            popup.request_close(window, cx, reason, restore_focus, false);
+        })
+        .is_err()
+    {
+        let _ = InlinePopupLifecycle::request_close(&lifecycle, generation);
+        unregister_history_popup_automation_window(generation);
+        clear_history_popup_window_slot(generation);
+        let _ = InlinePopupLifecycle::mark_closed(&lifecycle, generation);
     }
 }
 
-fn unregister_history_popup_automation_window() {
+fn close_history_popup_window_with_policy(reason: &'static str, restore_focus: bool, cx: &mut App) {
+    let current = AGENT_CHAT_HISTORY_POPUP_WINDOW
+        .get()
+        .and_then(|storage| storage.lock().ok())
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|slot| (slot.handle, slot.generation, slot.lifecycle.clone()))
+        });
+    let Some((handle, generation, lifecycle)) = current else {
+        return;
+    };
+
+    if handle
+        .update(cx, |popup, window, cx| {
+            popup.request_close(window, cx, reason, restore_focus, true);
+        })
+        .is_err()
+    {
+        let _ = InlinePopupLifecycle::request_close(&lifecycle, generation);
+        unregister_history_popup_automation_window(generation);
+        clear_history_popup_window_slot(generation);
+        let _ = InlinePopupLifecycle::mark_closed(&lifecycle, generation);
+    }
+}
+
+fn unregister_history_popup_automation_window(generation: InlinePopupGeneration) {
     super::popup_window::unregister_agent_chat_prompt_popup_automation_window(
         AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
+        generation.get(),
     );
 }
 
-fn clear_history_popup_window_slot() {
+fn clear_history_popup_window_slot(generation: InlinePopupGeneration) {
     if let Some(storage) = AGENT_CHAT_HISTORY_POPUP_WINDOW.get() {
         if let Ok(mut guard) = storage.lock() {
-            *guard = None;
+            if guard
+                .as_ref()
+                .is_some_and(|slot| slot.generation == generation)
+            {
+                *guard = None;
+            }
         }
     }
 }
@@ -245,26 +308,35 @@ pub(crate) fn get_history_popup_snapshot(cx: &gpui::App) -> Option<AgentChatHist
         .ok()
 }
 
+pub(crate) fn history_popup_generation() -> Option<u64> {
+    AGENT_CHAT_HISTORY_POPUP_WINDOW
+        .get()
+        .and_then(|storage| storage.lock().ok())
+        .and_then(|guard| {
+            guard.as_ref().and_then(|slot| {
+                (InlinePopupLifecycle::snapshot(&slot.lifecycle).1 == InlinePopupPhase::Open)
+                    .then_some(slot.generation.get())
+            })
+        })
+}
+
 pub(crate) fn is_history_popup_window_open() -> bool {
-    if let Some(storage) = AGENT_CHAT_HISTORY_POPUP_WINDOW.get() {
-        if let Ok(guard) = storage.lock() {
-            return guard.is_some();
-        }
-    }
-    false
+    history_popup_generation().is_some()
 }
 
 fn register_history_popup_automation_window(
     parent_window_handle: AnyWindowHandle,
     parent_bounds: Bounds<Pixels>,
     popup_bounds: Bounds<Pixels>,
-) -> anyhow::Result<()> {
+    generation: InlinePopupGeneration,
+) -> anyhow::Result<String> {
     super::popup_window::register_agent_chat_prompt_popup_automation_window(
         AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
         "Agent Chat History Popup",
         parent_window_handle,
         parent_bounds,
         popup_bounds,
+        generation.get(),
     )
 }
 
@@ -302,6 +374,28 @@ fn popup_bounds(
     }
 }
 
+fn reconcile_history_popup_native_close(
+    generation: InlinePopupGeneration,
+    lifecycle: &InlinePopupLifecycleHandle,
+    source_view: &WeakEntity<AgentChatView>,
+    focus_return: &InlinePopupFocusReturn,
+    cx: &mut App,
+) {
+    match InlinePopupLifecycle::request_close(lifecycle, generation) {
+        InlinePopupCloseGate::StaleGeneration | InlinePopupCloseGate::AlreadyClosed => return,
+        InlinePopupCloseGate::Begin | InlinePopupCloseGate::AlreadyClosing => {}
+    }
+    unregister_history_popup_automation_window(generation);
+    if let Some(view) = source_view.upgrade() {
+        view.update(cx, |view, cx| {
+            view.dismiss_history_popup_from_window(generation, "native_close", cx);
+        });
+    }
+    let _ = focus_return.restore(generation, cx);
+    let _ = InlinePopupLifecycle::mark_closed(lifecycle, generation);
+    clear_history_popup_window_slot(generation);
+}
+
 pub(crate) fn sync_history_popup_window(
     cx: &mut App,
     request: AgentChatHistoryPopupRequest,
@@ -312,96 +406,130 @@ pub(crate) fn sync_history_popup_window(
         display_id,
         source_view,
         snapshot,
+        lifecycle,
+        focus_return,
     } = request;
-
+    let generation = InlinePopupLifecycle::generation(&lifecycle);
     let bounds = popup_bounds(parent_bounds, &snapshot);
     let storage = AGENT_CHAT_HISTORY_POPUP_WINDOW.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = storage.lock() {
+
+    if let Ok(guard) = storage.lock() {
         if let Some(slot) = guard.as_ref() {
-            if slot.parent_window_handle == parent_window_handle {
-                let update_result = slot.handle.update(cx, |popup, window, cx| {
+            if slot.parent_window_handle == parent_window_handle && slot.generation == generation {
+                let update_result = slot.handle.update(cx, |popup, _window, cx| {
                     popup.set_snapshot(snapshot.clone());
-                    let _ = window;
                     cx.notify();
                 });
-
                 if update_result.is_ok() {
-                    if let Err(error) = register_history_popup_automation_window(
-                        parent_window_handle,
-                        parent_bounds,
-                        bounds,
-                    ) {
-                        tracing::warn!(
-                            target: "script_kit::automation",
-                            event = "agent_chat_history_popup_registry_failed",
-                            error = %error,
-                            "Failed to refresh Agent Chat history popup automation registry entry"
-                        );
-                    }
+                    crate::windows::set_automation_bounds(
+                        AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
+                        Some(super::popup_window::automation_bounds(bounds)),
+                    );
                     return Ok(());
                 }
-
-                unregister_history_popup_automation_window();
-                *guard = None;
-            } else {
-                let _ = slot.handle.update(cx, |_popup, window, cx| {
-                    crate::platform::dematerialize_then_remove_gpui_window(
-                        window,
-                        cx,
-                        "AGENT_CHAT",
-                        "Agent Chat history popup",
-                    );
-                });
-                unregister_history_popup_automation_window();
-                *guard = None;
             }
+            anyhow::bail!(
+                "Agent Chat history popup lifetime is still owned by generation {}",
+                slot.generation.get()
+            );
         }
     }
 
     let window_options = super::popup_window::popup_window_options(bounds, display_id);
-
-    let handle = cx.open_window(window_options, |_window, cx| {
+    let native_source_view = source_view.clone();
+    let native_lifecycle = lifecycle.clone();
+    let native_focus_return = focus_return.clone();
+    let entity_source_view = source_view.clone();
+    let entity_lifecycle = lifecycle.clone();
+    let entity_focus_return = focus_return.clone();
+    let handle = cx.open_window(window_options, move |window, cx| {
+        window.on_window_should_close(cx, move |_window, cx| {
+            reconcile_history_popup_native_close(
+                generation,
+                &native_lifecycle,
+                &native_source_view,
+                &native_focus_return,
+                cx,
+            );
+            true
+        });
         cx.new(|cx| {
             AgentChatHistoryPopupWindow::new(
                 snapshot.clone(),
-                source_view.clone(),
+                entity_source_view.clone(),
                 parent_window_handle,
+                generation,
+                entity_lifecycle.clone(),
+                entity_focus_return.clone(),
                 cx,
             )
         })
     })?;
 
-    if let Err(error) =
-        super::popup_window::configure_popup_window(&handle, cx, parent_window_handle)
-    {
-        let _ = handle.update(cx, |_popup, window, _cx| {
-            window.remove_window();
-        });
-        unregister_history_popup_automation_window();
-        return Err(error.context("failed to configure Agent Chat history popup window"));
-    }
-
-    let any_handle: AnyWindowHandle = handle.into();
-    let registration = super::popup_registry::AgentChatPopupRegistration::register(
-        AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
-        any_handle,
-    );
-    if let Err(error) =
-        register_history_popup_automation_window(parent_window_handle, parent_bounds, bounds)
-    {
-        unregister_history_popup_automation_window();
-        let _ = handle.update(cx, |_popup, window, _cx| {
-            window.remove_window();
-        });
-        return Err(error);
-    }
-
     if let Ok(mut guard) = storage.lock() {
         *guard = Some(AgentChatHistoryPopupSlot {
             handle,
             parent_window_handle,
-            _registration: registration,
+            generation,
+            lifecycle: lifecycle.clone(),
         });
+    }
+
+    let any_handle: AnyWindowHandle = handle.into();
+    if let Err(error) =
+        crate::components::inline_popup_window::configure_inline_popup_window_lifecycle(
+            handle,
+            parent_window_handle,
+            focus_return.parent_automation_id.clone(),
+            lifecycle.clone(),
+            cx,
+            move |result, cx| match result {
+                InlinePopupAttachResult::Ready(receipt) => {
+                    crate::windows::upsert_runtime_window_handle_instance(
+                        AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
+                        any_handle,
+                        Some(receipt.generation.get()),
+                    );
+                    if let Err(error) = register_history_popup_automation_window(
+                        parent_window_handle,
+                        parent_bounds,
+                        bounds,
+                        receipt.generation,
+                    ) {
+                        tracing::warn!(
+                            target: "script_kit::automation",
+                            event = "agent_chat_history_popup_registry_failed",
+                            generation = receipt.generation.get(),
+                            error = %error,
+                        );
+                        let _ = handle.update(cx, |popup, window, cx| {
+                            popup.request_close(window, cx, "registry_failed", true, true);
+                        });
+                    }
+                }
+                InlinePopupAttachResult::Failed {
+                    generation,
+                    failure,
+                } => {
+                    tracing::warn!(
+                        target: "script_kit::inline_popup",
+                        event = "agent_chat_history_popup_attach_failed",
+                        generation = generation.get(),
+                        failure = ?failure,
+                    );
+                    let _ = handle.update(cx, |popup, window, cx| {
+                        popup.request_close(window, cx, "attach_failed", true, true);
+                    });
+                }
+            },
+        )
+    {
+        unregister_history_popup_automation_window(generation);
+        clear_history_popup_window_slot(generation);
+        let _ = InlinePopupLifecycle::request_close(&lifecycle, generation);
+        let _ = InlinePopupLifecycle::mark_closed(&lifecycle, generation);
+        let _ = handle.update(cx, |_popup, window, _cx| window.remove_window());
+        return Err(error.context("failed to schedule Agent Chat history popup attach"));
     }
 
     Ok(())
@@ -411,9 +539,13 @@ pub(crate) struct AgentChatHistoryPopupWindow {
     snapshot: AgentChatHistoryPopupSnapshot,
     source_view: WeakEntity<AgentChatView>,
     parent_window_handle: AnyWindowHandle,
+    generation: InlinePopupGeneration,
+    lifecycle: InlinePopupLifecycleHandle,
+    focus_return: InlinePopupFocusReturn,
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
     activation_subscription: Option<Subscription>,
+    focus_pair_was_active: bool,
 }
 
 impl AgentChatHistoryPopupWindow {
@@ -421,15 +553,22 @@ impl AgentChatHistoryPopupWindow {
         snapshot: AgentChatHistoryPopupSnapshot,
         source_view: WeakEntity<AgentChatView>,
         parent_window_handle: AnyWindowHandle,
+        generation: InlinePopupGeneration,
+        lifecycle: InlinePopupLifecycleHandle,
+        focus_return: InlinePopupFocusReturn,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             snapshot,
             source_view,
             parent_window_handle,
+            generation,
+            lifecycle,
+            focus_return,
             focus_handle: cx.focus_handle(),
             scroll_handle: UniformListScrollHandle::new(),
             activation_subscription: None,
+            focus_pair_was_active: false,
         }
     }
 
@@ -440,7 +579,7 @@ impl AgentChatHistoryPopupWindow {
     fn sync_selection_to_source_view(&self, selected_index: usize, cx: &mut App) {
         if let Some(view) = self.source_view.upgrade() {
             view.update(cx, |view, cx| {
-                view.sync_history_popup_selection_from_window(selected_index, cx);
+                view.sync_history_popup_selection_from_window(self.generation, selected_index, cx);
             });
         }
     }
@@ -454,7 +593,13 @@ impl AgentChatHistoryPopupWindow {
     ) {
         if let Some(view) = self.source_view.upgrade() {
             view.update(cx, |view, cx| {
-                view.sync_history_popup_state_from_window(query, hits, selected_index, cx);
+                view.sync_history_popup_state_from_window(
+                    self.generation,
+                    query,
+                    hits,
+                    selected_index,
+                    cx,
+                );
             });
         }
     }
@@ -471,9 +616,13 @@ impl AgentChatHistoryPopupWindow {
         );
         if let Some(view) = self.source_view.upgrade() {
             let session_id = entry.hit.entry.session_id.clone();
+            let generation = self.generation;
             view.update(cx, |view, cx| {
-                view.history_menu = None;
-                view.sync_history_popup_window_from_cached_parent(cx);
+                view.dismiss_history_popup_from_window(
+                    generation,
+                    "committed_summary_selection",
+                    cx,
+                );
                 if let Err(error) = view.attach_history_session(
                     &session_id,
                     super::history_attachment::AgentChatHistoryAttachMode::Summary,
@@ -490,7 +639,7 @@ impl AgentChatHistoryPopupWindow {
                 cx.notify();
             });
         }
-        close_history_popup_window(cx);
+        cx.defer(close_history_popup_window);
     }
 
     /// Shift+Enter: attach full transcript as a context chip.
@@ -505,9 +654,13 @@ impl AgentChatHistoryPopupWindow {
         );
         if let Some(view) = self.source_view.upgrade() {
             let session_id = entry.hit.entry.session_id.clone();
+            let generation = self.generation;
             view.update(cx, |view, cx| {
-                view.history_menu = None;
-                view.sync_history_popup_window_from_cached_parent(cx);
+                view.dismiss_history_popup_from_window(
+                    generation,
+                    "committed_transcript_selection",
+                    cx,
+                );
                 if let Err(error) = view.attach_history_session(
                     &session_id,
                     super::history_attachment::AgentChatHistoryAttachMode::Transcript,
@@ -524,7 +677,7 @@ impl AgentChatHistoryPopupWindow {
                 cx.notify();
             });
         }
-        close_history_popup_window(cx);
+        cx.defer(close_history_popup_window);
     }
 
     /// Enter: resume (load) the session into the Agent Chat thread.
@@ -539,11 +692,17 @@ impl AgentChatHistoryPopupWindow {
         );
         if let Some(view) = self.source_view.upgrade() {
             let history_entry = entry.hit.entry.clone();
+            let generation = self.generation;
             view.update(cx, |view, cx| {
-                view.select_history_from_popup(&history_entry, cx);
+                view.dismiss_history_popup_from_window(
+                    generation,
+                    "committed_resume_selection",
+                    cx,
+                );
+                view.apply_selected_history_entry(&history_entry, cx);
             });
         }
-        close_history_popup_window(cx);
+        cx.defer(close_history_popup_window);
     }
 
     fn navigate(&mut self, delta: i32, cx: &mut Context<Self>) {
@@ -630,22 +789,63 @@ impl AgentChatHistoryPopupWindow {
         self.set_query(query, cx);
     }
 
-    fn request_close(&self, window: &mut Window, cx: &mut Context<Self>, reason: &'static str) {
-        if let Some(view) = self.source_view.upgrade() {
-            view.update(cx, |view, cx| {
-                view.dismiss_history_popup_from_window(reason, cx);
+    fn request_close(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        reason: &'static str,
+        restore_focus: bool,
+        reconcile_owner: bool,
+    ) {
+        if InlinePopupLifecycle::request_close(&self.lifecycle, self.generation)
+            != InlinePopupCloseGate::Begin
+        {
+            return;
+        }
+
+        unregister_history_popup_automation_window(self.generation);
+        if reconcile_owner {
+            if let Some(view) = self.source_view.upgrade() {
+                view.update(cx, |view, cx| {
+                    view.dismiss_history_popup_from_window(self.generation, reason, cx);
+                });
+            }
+        }
+
+        if restore_focus {
+            let focus_return = self.focus_return.clone();
+            let generation = self.generation;
+            cx.defer(move |cx| {
+                let restored = focus_return.restore(generation, cx);
+                tracing::info!(
+                    target: "script_kit::inline_popup",
+                    event = "agent_chat_history_popup_focus_restore",
+                    generation = generation.get(),
+                    semantic_id = focus_return.semantic_id,
+                    restored,
+                );
             });
         }
 
-        window.defer(cx, |window, cx| {
-            clear_history_popup_window_slot();
-            unregister_history_popup_automation_window();
+        let generation = self.generation;
+        let lifecycle = self.lifecycle.clone();
+        window.defer(cx, move |window, cx| {
             crate::platform::dematerialize_then_remove_gpui_window_from_app(
                 window,
                 cx,
                 "AGENT_CHAT",
                 "Agent Chat history popup",
             );
+            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                cx.background_executor()
+                    .timer(crate::platform::glass_exit_remove_delay())
+                    .await;
+                cx.update(|_cx| {
+                    let _ = InlinePopupLifecycle::mark_closed(&lifecycle, generation);
+                    clear_history_popup_window_slot(generation);
+                });
+            })
+            .detach();
         });
     }
 
@@ -655,22 +855,28 @@ impl AgentChatHistoryPopupWindow {
         }
 
         let parent_window_handle = self.parent_window_handle;
+        self.focus_pair_was_active |=
+            crate::components::inline_popup_window::inline_popup_focus_pair_is_active(
+                window,
+                parent_window_handle,
+                cx,
+            );
         self.activation_subscription = Some(cx.observe_window_activation(
             window,
             move |this, window, cx| {
-                let popup_window_active = window.is_window_active();
-                let parent_window_active = cx
-                    .update_window(parent_window_handle, |_, parent_window, _cx| {
-                        parent_window.is_window_active()
-                    })
-                    .ok()
-                    .unwrap_or(false);
-
-                if parent_window_active || popup_window_active {
+                if crate::components::inline_popup_window::inline_popup_focus_pair_is_active(
+                    window,
+                    parent_window_handle,
+                    cx,
+                ) {
+                    this.focus_pair_was_active = true;
+                    return;
+                }
+                if !this.focus_pair_was_active {
                     return;
                 }
 
-                this.request_close(window, cx, "focus_lost");
+                this.request_close(window, cx, "focus_lost", true, true);
             },
         ));
     }
@@ -707,7 +913,7 @@ impl Render for AgentChatHistoryPopupWindow {
             .track_focus(&self.focus_handle)
             .id("agent_chat-history-popup")
             .on_mouse_down_out(cx.listener(|this, _event: &gpui::MouseDownEvent, window, cx| {
-                this.request_close(window, cx, "mouse_down_out");
+                this.request_close(window, cx, "mouse_down_out", true, true);
             }))
             .on_key_down(
                 cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
@@ -759,7 +965,7 @@ impl Render for AgentChatHistoryPopupWindow {
                             cx.stop_propagation();
                         }
                         Some(AgentChatHistoryPopupKeyIntent::Close) => {
-                            this.request_close(window, cx, "escape");
+                            this.request_close(window, cx, "escape", true, true);
                             cx.stop_propagation();
                         }
                         Some(AgentChatHistoryPopupKeyIntent::Backspace) => {
@@ -907,8 +1113,13 @@ impl Render for AgentChatHistoryPopupWindow {
                                                     this.sync_selection_to_source_view(entry_index, cx);
                                                     cx.notify();
                                                 } else if let Some(view) = row_view.upgrade() {
+                                                    let generation = this.generation;
                                                     view.update(cx, |view, cx| {
-                                                        view.sync_history_popup_selection_from_window(entry_index, cx);
+                                                        view.sync_history_popup_selection_from_window(
+                                                            generation,
+                                                            entry_index,
+                                                            cx,
+                                                        );
                                                     });
                                                 }
                                             }))
@@ -916,8 +1127,13 @@ impl Render for AgentChatHistoryPopupWindow {
                                                 cx.listener(move |this, _event, _window, cx| {
                                                     this.snapshot.selected_index = entry_index;
                                                     if let Some(view) = click_view.upgrade() {
+                                                        let generation = this.generation;
                                                         view.update(cx, |view, cx| {
-                                                            view.sync_history_popup_selection_from_window(entry_index, cx);
+                                                            view.sync_history_popup_selection_from_window(
+                                                                generation,
+                                                                entry_index,
+                                                                cx,
+                                                            );
                                                         });
                                                     }
                                                     this.attach_summary(&row_entry, cx);

@@ -1202,6 +1202,7 @@ fn resolve_confirm_popup_parent_automation_id(
         parent_window_id: None,
         parent_kind: None,
         pid: Some(std::process::id()),
+        generation: None,
     });
     tracing::info!(
         target: "script_kit::confirm",
@@ -1906,6 +1907,7 @@ mod tests {
             parent_window_id: None,
             parent_kind: None,
             pid: Some(std::process::id()),
+            generation: None,
         });
 
         let resolved = resolve_registered_parent_automation_id("notes", "Move note to Trash")

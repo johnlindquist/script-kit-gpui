@@ -178,7 +178,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         self.menu_syntax_trigger_picker_state = Default::default();
-        crate::ai::agent_chat::ui::history_popup::close_history_popup_window(cx);
+        crate::ai::agent_chat::ui::history_popup::close_history_popup_window_for_owner_loss(cx);
         tracing::info!(
             target: "script_kit::popup_owner",
             event = "floating_popups_closed_for_owner_loss",

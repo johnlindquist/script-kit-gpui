@@ -38,6 +38,7 @@ fn make_visible(prefix: &str, id: &str, kind: AutomationWindowKind) -> Automatio
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     }
 }
 
@@ -252,6 +253,7 @@ fn make_with_bounds(
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     }
 }
 
@@ -1004,6 +1006,7 @@ fn attached_popup_without_parent_metadata_fails_closed() {
         parent_window_id: None,
         parent_kind: None,
         pid: None,
+        generation: None,
     };
     script_kit_gpui::windows::upsert_automation_window(actions);
 

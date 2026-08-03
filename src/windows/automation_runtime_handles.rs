@@ -20,16 +20,33 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-static RUNTIME_WINDOW_HANDLES: LazyLock<Mutex<HashMap<String, AnyWindowHandle>>> =
+#[derive(Clone, Copy)]
+struct RuntimeWindowHandleEntry {
+    handle: AnyWindowHandle,
+    generation: Option<u64>,
+}
+
+static RUNTIME_WINDOW_HANDLES: LazyLock<Mutex<HashMap<String, RuntimeWindowHandleEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Register or update the GPUI window handle for an automation window ID.
 pub fn upsert_runtime_window_handle(id: impl Into<String>, handle: AnyWindowHandle) {
+    upsert_runtime_window_handle_instance(id, handle, None);
+}
+
+pub fn upsert_runtime_window_handle_instance(
+    id: impl Into<String>,
+    handle: AnyWindowHandle,
+    generation: Option<u64>,
+) {
     let id = id.into();
-    RUNTIME_WINDOW_HANDLES.lock().insert(id.clone(), handle);
+    RUNTIME_WINDOW_HANDLES
+        .lock()
+        .insert(id.clone(), RuntimeWindowHandleEntry { handle, generation });
     tracing::info!(
         target: "script_kit::automation",
         window_id = %id,
+        generation = ?generation,
         "automation.runtime_handle_upserted"
     );
 }
@@ -49,9 +66,40 @@ pub fn remove_runtime_window_handle(id: &str) -> bool {
     removed
 }
 
+pub fn remove_runtime_window_handle_if_generation(id: &str, generation: u64) -> bool {
+    let mut handles = RUNTIME_WINDOW_HANDLES.lock();
+    if handles.get(id).and_then(|entry| entry.generation) != Some(generation) {
+        return false;
+    }
+    let removed = handles.remove(id).is_some();
+    if removed {
+        tracing::info!(
+            target: "script_kit::automation",
+            window_id = %id,
+            generation,
+            "automation.runtime_handle_generation_removed"
+        );
+    }
+    removed
+}
+
 /// Get the runtime handle for an automation window ID without validation.
 pub fn get_runtime_window_handle(id: &str) -> Option<AnyWindowHandle> {
-    RUNTIME_WINDOW_HANDLES.lock().get(id).copied()
+    RUNTIME_WINDOW_HANDLES
+        .lock()
+        .get(id)
+        .map(|entry| entry.handle)
+}
+
+pub fn get_runtime_window_handle_for_generation(
+    id: &str,
+    generation: u64,
+) -> Option<AnyWindowHandle> {
+    RUNTIME_WINDOW_HANDLES
+        .lock()
+        .get(id)
+        .filter(|entry| entry.generation == Some(generation))
+        .map(|entry| entry.handle)
 }
 
 /// Get the runtime handle for an automation window ID, validating that it
@@ -66,6 +114,27 @@ pub fn get_valid_runtime_window_handle(id: &str, cx: &mut App) -> Option<AnyWind
                 target: "script_kit::automation",
                 window_id = %id,
                 "automation.runtime_handle_stale"
+            );
+            None
+        }
+    }
+}
+
+pub fn get_valid_runtime_window_handle_for_generation(
+    id: &str,
+    generation: u64,
+    cx: &mut App,
+) -> Option<AnyWindowHandle> {
+    let handle = get_runtime_window_handle_for_generation(id, generation)?;
+    match handle.update(cx, |_, _, _| {}) {
+        Ok(_) => Some(handle),
+        Err(_) => {
+            remove_runtime_window_handle_if_generation(id, generation);
+            tracing::warn!(
+                target: "script_kit::automation",
+                window_id = %id,
+                generation,
+                "automation.runtime_handle_generation_stale"
             );
             None
         }

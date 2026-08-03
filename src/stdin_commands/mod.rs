@@ -469,6 +469,17 @@ pub enum ExternalCommand {
         #[serde(default, rename = "requestId")]
         request_id: Option<ExternalCommandRequestId>,
     },
+    /// Open the detached Agent Chat history popup against fixture-owned history.
+    OpenAgentChatHistoryPopupFixture {
+        #[serde(default, rename = "requestId")]
+        request_id: Option<ExternalCommandRequestId>,
+    },
+    /// Close one exact generation-scoped PromptPopup through AppKit.
+    ClosePromptPopupNatively {
+        target: crate::protocol::AutomationWindowTarget,
+        #[serde(default, rename = "requestId")]
+        request_id: Option<ExternalCommandRequestId>,
+    },
     /// Open the Agent Chat window (for testing)
     OpenAi,
     /// Open the Mini Agent Chat window (for testing)
@@ -736,6 +747,12 @@ pub enum ExternalCommand {
         #[serde(default, rename = "requestId")]
         request_id: Option<ExternalCommandRequestId>,
     },
+    /// Open the synthetic, no-persistence microphone selector on the active
+    /// Dictation overlay fixture. Refuses production overlays.
+    OpenDictationMicrophonePopupFixture {
+        #[serde(default, rename = "requestId")]
+        request_id: Option<ExternalCommandRequestId>,
+    },
     /// Read-only probe exposing the current `~/.kit/config.ts`
     /// fingerprint so automation can verify a write landed on disk
     /// without shelling out to `bun` or `stat`. The handler emits a
@@ -829,12 +846,15 @@ impl ExternalCommand {
             | Self::InjectClipboardCaptureFixture { request_id, .. }
             | Self::PushDictationResult { request_id, .. }
             | Self::OpenDictationOverlayFixture { request_id, .. }
+            | Self::OpenDictationMicrophonePopupFixture { request_id, .. }
             | Self::GetConfigFingerprint { request_id, .. }
             | Self::OpenFocusedTextAgentChatWithMockData { request_id, .. }
             | Self::OpenFocusedTextAgentChatWithPiData { request_id, .. }
             | Self::OpenCreationFeedback { request_id, .. }
             | Self::OpenConfirmPrompt { request_id, .. }
             | Self::OpenAgentChatDetachedFixture { request_id, .. }
+            | Self::OpenAgentChatHistoryPopupFixture { request_id, .. }
+            | Self::ClosePromptPopupNatively { request_id, .. }
             | Self::PasteClipboardIntoAgentChat { request_id, .. } => {
                 request_id.as_ref().map(ExternalCommandRequestId::as_str)
             }
@@ -857,6 +877,8 @@ impl ExternalCommand {
             Self::OpenCreationFeedback { .. } => "openCreationFeedback",
             Self::OpenConfirmPrompt { .. } => "openConfirmPrompt",
             Self::OpenAgentChatDetachedFixture { .. } => "openAgentChatDetachedFixture",
+            Self::OpenAgentChatHistoryPopupFixture { .. } => "openAgentChatHistoryPopupFixture",
+            Self::ClosePromptPopupNatively { .. } => "closePromptPopupNatively",
             Self::OpenAi => "openAi",
             Self::OpenMiniAi => "openMiniAi",
             Self::OpenAiWithMockData => "openAiWithMockData",
@@ -890,6 +912,9 @@ impl ExternalCommand {
             Self::PasteClipboardIntoAgentChat { .. } => "pasteClipboardIntoAgentChat",
             Self::PushDictationResult { .. } => "pushDictationResult",
             Self::OpenDictationOverlayFixture { .. } => "openDictationOverlayFixture",
+            Self::OpenDictationMicrophonePopupFixture { .. } => {
+                "openDictationMicrophonePopupFixture"
+            }
             Self::GetConfigFingerprint { .. } => "getConfigFingerprint",
         }
     }
@@ -914,6 +939,8 @@ pub const EXTERNAL_COMMAND_VERBS: &[&str] = &[
     "openCreationFeedback",
     "openConfirmPrompt",
     "openAgentChatDetachedFixture",
+    "openAgentChatHistoryPopupFixture",
+    "closePromptPopupNatively",
     "openAi",
     "openMiniAi",
     "openAiWithMockData",
@@ -943,6 +970,7 @@ pub const EXTERNAL_COMMAND_VERBS: &[&str] = &[
     "pasteClipboardIntoAgentChat",
     "pushDictationResult",
     "openDictationOverlayFixture",
+    "openDictationMicrophonePopupFixture",
     "getConfigFingerprint",
 ];
 
@@ -1458,6 +1486,14 @@ mod tests {
                 request_id: None,
             },
             ExternalCommand::OpenAgentChatDetachedFixture { request_id: None },
+            ExternalCommand::OpenAgentChatHistoryPopupFixture { request_id: None },
+            ExternalCommand::ClosePromptPopupNatively {
+                target: crate::protocol::AutomationWindowTarget::Instance {
+                    id: "fixture-popup".to_string(),
+                    generation: 1,
+                },
+                request_id: None,
+            },
             ExternalCommand::OpenAi,
             ExternalCommand::OpenMiniAi,
             ExternalCommand::OpenAiWithMockData,
@@ -1562,6 +1598,7 @@ mod tests {
                 request_id: None,
             },
             ExternalCommand::OpenDictationOverlayFixture { request_id: None },
+            ExternalCommand::OpenDictationMicrophonePopupFixture { request_id: None },
             ExternalCommand::GetConfigFingerprint { request_id: None },
             ExternalCommand::SimulateMainHotkeyGesture {
                 phase: String::new(),

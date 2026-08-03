@@ -39,6 +39,7 @@ pub struct SurfaceElementSnapshot {
 
 #[derive(Clone, Debug, Default)]
 struct PromptPopupElementSnapshot {
+    generation: Option<u64>,
     elements: Vec<ElementInfo>,
     focused_semantic_id: Option<String>,
     selected_semantic_id: Option<String>,
@@ -65,6 +66,7 @@ pub(crate) fn upsert_actions_dialog_snapshot(
         cache.insert(
             window_id.to_string(),
             PromptPopupElementSnapshot {
+                generation: None,
                 elements: snapshot.elements,
                 focused_semantic_id: snapshot.focused_semantic_id,
                 selected_semantic_id: snapshot.selected_semantic_id,
@@ -83,6 +85,7 @@ pub(crate) fn remove_actions_dialog_snapshot(window_id: &str) {
 #[allow(dead_code)] // Binary dictation overlay uses this; lib-only builds do not.
 pub(crate) fn upsert_dictation_microphone_prompt_popup_snapshot(
     window_id: &str,
+    generation: u64,
     snapshot: &crate::dictation::DictationMicrophonePopupSnapshot,
 ) {
     let mut elements = Vec::new();
@@ -132,6 +135,7 @@ pub(crate) fn upsert_dictation_microphone_prompt_popup_snapshot(
         cache.insert(
             window_id.to_string(),
             PromptPopupElementSnapshot {
+                generation: Some(generation),
                 elements,
                 focused_semantic_id,
                 selected_semantic_id,
@@ -141,10 +145,20 @@ pub(crate) fn upsert_dictation_microphone_prompt_popup_snapshot(
 }
 
 #[allow(dead_code)] // Binary dictation overlay uses this; lib-only builds do not.
-pub(crate) fn remove_dictation_microphone_prompt_popup_snapshot(window_id: &str) {
+pub(crate) fn remove_dictation_microphone_prompt_popup_snapshot_if_generation(
+    window_id: &str,
+    generation: u64,
+) -> bool {
     if let Ok(mut cache) = prompt_popup_semantic_cache().lock() {
-        cache.remove(window_id);
+        if cache
+            .get(window_id)
+            .is_some_and(|snapshot| snapshot.generation == Some(generation))
+        {
+            cache.remove(window_id);
+            return true;
+        }
     }
+    false
 }
 
 impl SurfaceElementSnapshot {
@@ -225,15 +239,7 @@ pub fn collect_surface_snapshot(
                     "panel_only_actions_dialog",
                 )
             }),
-        AutomationWindowKind::PromptPopup => collect_cached_prompt_popup_snapshot(&resolved.id)
-            .or_else(|| collect_prompt_popup_snapshot(cx))
-            .unwrap_or_else(|| {
-                panel_only_fallback(
-                    "panel:prompt-popup",
-                    resolved.title.clone(),
-                    "panel_only_prompt_popup",
-                )
-            }),
+        AutomationWindowKind::PromptPopup => collect_exact_prompt_popup_snapshot(resolved, cx)?,
         AutomationWindowKind::Dictation => collect_dictation_snapshot(resolved),
         _ => return None,
     };
@@ -636,26 +642,40 @@ pub(crate) fn collect_actions_dialog_elements(
 // Prompt popup collector (composer picker, history popup, confirm)
 // ---------------------------------------------------------------------------
 
-/// Collect semantic elements from a known prompt popup type.
-///
-/// Tries each known popup kind in order and returns the first match.
-/// Returns `None` if no known popup is open, causing the caller to fall
-/// back to `panel_only_prompt_popup`.
-fn collect_prompt_popup_snapshot(cx: &gpui::App) -> Option<SurfaceElementSnapshot> {
-    if let Some(snapshot) = collect_history_popup_snapshot(cx) {
-        return Some(snapshot);
+/// Collect semantic elements only from the exact registered PromptPopup
+/// subtype and lifetime. There is deliberately no "whichever popup is open"
+/// fallback: a stale or mismatched target must fail closed.
+fn collect_exact_prompt_popup_snapshot(
+    resolved: &AutomationWindowInfo,
+    cx: &gpui::App,
+) -> Option<SurfaceElementSnapshot> {
+    match resolved.id.as_str() {
+        crate::ai::agent_chat::ui::history_popup::AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID => {
+            let generation = resolved.generation?;
+            if crate::ai::agent_chat::ui::history_popup::history_popup_generation()
+                != Some(generation)
+            {
+                return None;
+            }
+            collect_history_popup_snapshot(cx)
+        }
+        crate::dictation::DICTATION_MICROPHONE_POPUP_AUTOMATION_ID => {
+            collect_cached_prompt_popup_snapshot(&resolved.id, resolved.generation?)
+        }
+        "confirm-popup" if resolved.generation.is_none() => collect_confirm_popup_snapshot(cx),
+        _ => None,
     }
-    if let Some(snapshot) = collect_confirm_popup_snapshot(cx) {
-        return Some(snapshot);
-    }
-    None
 }
 
-fn collect_cached_prompt_popup_snapshot(window_id: &str) -> Option<SurfaceElementSnapshot> {
+fn collect_cached_prompt_popup_snapshot(
+    window_id: &str,
+    generation: u64,
+) -> Option<SurfaceElementSnapshot> {
     let cached = prompt_popup_semantic_cache()
         .lock()
         .ok()?
         .get(window_id)
+        .filter(|snapshot| snapshot.generation == Some(generation))
         .cloned()?;
     Some(SurfaceElementSnapshot {
         total_count: cached.elements.len(),
@@ -792,4 +812,38 @@ fn collect_confirm_popup_snapshot(cx: &gpui::App) -> Option<SurfaceElementSnapsh
         warnings: Vec::new(),
         quality: SnapshotQuality::Full,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        prompt_popup_semantic_cache,
+        remove_dictation_microphone_prompt_popup_snapshot_if_generation,
+        PromptPopupElementSnapshot,
+    };
+
+    #[test]
+    fn prompt_popup_cache_cleanup_requires_exact_generation() {
+        let id = "test:prompt-popup-cache-generation";
+        prompt_popup_semantic_cache().lock().unwrap().insert(
+            id.to_string(),
+            PromptPopupElementSnapshot {
+                generation: Some(14),
+                elements: Vec::new(),
+                focused_semantic_id: None,
+                selected_semantic_id: None,
+            },
+        );
+
+        assert!(!remove_dictation_microphone_prompt_popup_snapshot_if_generation(id, 13));
+        assert!(prompt_popup_semantic_cache()
+            .lock()
+            .unwrap()
+            .contains_key(id));
+        assert!(remove_dictation_microphone_prompt_popup_snapshot_if_generation(id, 14));
+        assert!(!prompt_popup_semantic_cache()
+            .lock()
+            .unwrap()
+            .contains_key(id));
+    }
 }

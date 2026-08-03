@@ -96,6 +96,7 @@ impl ScriptListApp {
                 parent_window_id: None,
                 parent_kind: None,
                 pid: None,
+                generation: None,
             };
             let layout = entity.read(cx).automation_layout_info(&target, cx);
             for component in layout.components {

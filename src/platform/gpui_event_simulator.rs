@@ -670,7 +670,15 @@ pub(crate) fn dispatch_gpui_event(
     //    so two detached Agent Chat windows can be targeted independently. Attached
     //    popup exact handles also receive popup-local mouse coordinates; only
     //    the parent-window fallback below rebases into parent dispatch space.
-    if let Some(handle) = crate::windows::get_valid_runtime_window_handle(&resolved.id, cx) {
+    let exact_runtime_handle = match resolved.generation {
+        Some(generation) => crate::windows::get_valid_runtime_window_handle_for_generation(
+            &resolved.id,
+            generation,
+            cx,
+        ),
+        None => crate::windows::get_valid_runtime_window_handle(&resolved.id, cx),
+    };
+    if let Some(handle) = exact_runtime_handle {
         tracing::info!(
             target: "script_kit::automation",
             request_id = %request_id,
@@ -681,6 +689,7 @@ pub(crate) fn dispatch_gpui_event(
             resolved.kind,
             crate::protocol::AutomationWindowKind::AgentChatDetached
                 | crate::protocol::AutomationWindowKind::Dictation
+                | crate::protocol::AutomationWindowKind::PromptPopup
         ) {
             return dispatch_with_any_handle_deferred(
                 handle,
@@ -702,6 +711,22 @@ pub(crate) fn dispatch_gpui_event(
             cx,
             "exact_handle",
         );
+    }
+
+    if resolved.generation.is_some() {
+        return GpuiEventDispatchResult {
+            success: false,
+            error_code: Some("stale_or_missing_instance_handle".to_string()),
+            error: Some(format!(
+                "Exact automation instance {} generation {:?} has no matching live runtime handle",
+                resolved.id, resolved.generation
+            )),
+            dispatch_path: None,
+            resolved_window_id: Some(resolved.id.clone()),
+            dispatch_completed: false,
+            dispatch_scheduled: false,
+            activation_proof: None,
+        };
     }
 
     // Rebase mouse coordinates for attached surfaces (ActionsDialog, PromptPopup)

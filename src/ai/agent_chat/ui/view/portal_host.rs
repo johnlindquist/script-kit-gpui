@@ -86,7 +86,7 @@ impl AgentChatView {
         self.attach_menu_open = false;
         self.permission_options_open = false;
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::PortalStaged, cx);
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("attachment_portal_opened", true, cx);
         if let Some(card) = &self.setup_card {
             card.update(cx, |view, cx| view.set_agent_picker(None, cx));
         }
@@ -171,7 +171,7 @@ impl AgentChatView {
             state: staged_state,
         });
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::PortalStaged, cx);
-        self.history_menu = None;
+        self.close_history_popup_for_owner_transition("portal_session_staged", true, cx);
         self.attach_menu_open = false;
 
         tracing::info!(

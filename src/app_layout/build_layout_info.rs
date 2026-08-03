@@ -118,6 +118,7 @@ impl ScriptListApp {
                 parent_window_id: None,
                 parent_kind: None,
                 pid: None,
+                generation: None,
             };
             return entity.read(cx).automation_layout_info(&target, &*cx);
         }
@@ -145,6 +146,7 @@ impl ScriptListApp {
                     parent_window_id: None,
                     parent_kind: None,
                     pid: None,
+                    generation: None,
                 };
                 let agent_chat_runtime_input_height = entity
                     .read(cx)

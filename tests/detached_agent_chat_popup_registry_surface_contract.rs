@@ -56,6 +56,7 @@ const CHAT_WINDOW_RS: &str = include_str!("../src/ai/agent_chat/ui/chat_window.r
 /// block in `src/ai/agent_chat/ui/chat_window.rs` that constructs an
 /// `AutomationWindowInfo` literal. We slice from the first
 /// `upsert_automation_window(crate::protocol::AutomationWindowInfo {` header
+/// up to the matching `    generation: None,
 /// up to the matching `});`, which conservatively captures the whole
 /// struct literal including both the `kind` and `semantic_surface` fields.
 fn upsert_block_body(src: &str) -> &str {

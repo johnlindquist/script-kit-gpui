@@ -79,6 +79,7 @@ fn sync_main_automation_window(
         parent_window_id: None,
         parent_kind: None,
         pid: Some(std::process::id()),
+        generation: None,
     });
 }
 

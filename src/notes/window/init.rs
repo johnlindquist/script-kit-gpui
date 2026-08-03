@@ -921,6 +921,7 @@ impl NotesApp {
                 parent_window_id: None,
                 parent_kind: None,
                 pid: Some(std::process::id()),
+                generation: None,
             });
             applied = true;
         }
