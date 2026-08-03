@@ -100,15 +100,15 @@ impl AgentChatThread {
 
         let mut seen_parts = HashSet::new();
         let context_parts = self
-            .pending_context_parts()
+            .pending_context_items()
             .iter()
-            .filter_map(|part| {
-                let stable_id = part.stable_export_id();
+            .filter_map(|item| {
+                let stable_id = item.part.stable_export_id();
                 seen_parts
                     .insert(stable_id.clone())
                     .then(|| ExportedContextPart {
                         stable_id,
-                        part: part.clone(),
+                        part: item.part.clone(),
                     })
             })
             .collect();

@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "classification": "RUNTIME-CONFIRMED",
+  "binaryArtifact": "cons-flow-c02",
+  "binarySha256": "6c5152045e079e239d46eba4cfa92088fb3631e301fef94017fa9bb0c33c8486",
+  "pendingDedupe": {
+    "count": 1,
+    "item": {
+      "id": "context-dacbb4649e1592b3-1",
+      "kind": "textBlock",
+      "label": "Added · Synthetic context",
+      "source": "Text",
+      "sourceFingerprint": "1c247adf835c27c633db6b6cdc33e349d4aa981f137ae3932aa1854787c1272d",
+      "provenance": "attachmentPortal",
+      "role": "supplemental",
+      "state": "pending",
+      "lifetime": "nextTurn",
+      "removable": true,
+      "generation": 1,
+      "failureCode": null,
+      "diagnosticFingerprint": null
+    },
+    "stablePositionPreserved": true,
+    "winningProvenance": "attachmentPortal"
+  },
+  "partialAcceptedSend": {
+    "pendingCount": 1,
+    "receiptCount": 1,
+    "receipt": {
+      "id": "context-5e6ffde7d8df53b0-3",
+      "kind": "textBlock",
+      "label": "Used in this turn · Required synthetic context",
+      "source": "Text",
+      "sourceFingerprint": "7ea631944af495959c00548e56add16a6a3413958177997c1090a8b77627c83c",
+      "provenance": "threadReceipt",
+      "role": "primary",
+      "state": "resolved",
+      "lifetime": "immutableReceipt",
+      "removable": false,
+      "generation": 3,
+      "failureCode": null,
+      "diagnosticFingerprint": null
+    },
+    "failedSupplemental": {
+      "id": "context-3abbbc98cacde70e-4",
+      "kind": "filePath",
+      "label": "Couldn’t add · Optional synthetic file",
+      "source": "File",
+      "sourceFingerprint": "314d963689b20cd05fd481861cf123e74d75b5434c6318014784b15a0d4314bc",
+      "provenance": "attachmentPortal",
+      "role": "supplemental",
+      "state": "failed",
+      "lifetime": "nextTurn",
+      "removable": true,
+      "generation": 4,
+      "failureCode": "ContextUnavailable",
+      "diagnosticFingerprint": "1f0ed693ff0f91ce077d24a675e37bbd08f4809b52c97d2e60ed3b3eb8636b13"
+    },
+    "preparedTurnFingerprint": "ef0cb73d202dbe64cddd70ba50453e51f4ad80905d81a73f59cae8f23669afe7"
+  },
+  "freshThread": {
+    "pendingCount": 0,
+    "receiptCount": 0,
+    "preparedTurnFingerprint": null
+  },
+  "portalCancellation": {
+    "portalSurface": "ScriptList",
+    "queryLength": 24,
+    "inputLengthBefore": 32,
+    "inputLengthAfter": 32,
+    "cursorBefore": 32,
+    "cursorAfter": 32,
+    "selectionBefore": null,
+    "selectionAfter": null,
+    "pendingBefore": [
+      {
+        "id": "context-dacbb4649e1592b3-5",
+        "kind": "textBlock",
+        "label": "Added · Synthetic context",
+        "source": "Text",
+        "sourceFingerprint": "1c247adf835c27c633db6b6cdc33e349d4aa981f137ae3932aa1854787c1272d",
+        "provenance": "attachmentPortal",
+        "role": "supplemental",
+        "state": "pending",
+        "lifetime": "nextTurn",
+        "removable": true,
+        "generation": 5,
+        "failureCode": null,
+        "diagnosticFingerprint": null
+      }
+    ],
+    "pendingAfter": [
+      {
+        "id": "context-dacbb4649e1592b3-5",
+        "kind": "textBlock",
+        "label": "Added · Synthetic context",
+        "source": "Text",
+        "sourceFingerprint": "1c247adf835c27c633db6b6cdc33e349d4aa981f137ae3932aa1854787c1272d",
+        "provenance": "attachmentPortal",
+        "role": "supplemental",
+        "state": "pending",
+        "lifetime": "nextTurn",
+        "removable": true,
+        "generation": 5,
+        "failureCode": null,
+        "diagnosticFingerprint": null
+      }
+    ],
+    "pickerRestored": true,
+    "focusBefore": {
+      "focusedSemanticId": "input:agent-chat-composer",
+      "composerFocused": true,
+      "composerValueLength": 32
+    },
+    "focusAfter": {
+      "focusedSemanticId": "input:agent-chat-composer",
+      "composerFocused": true,
+      "composerValueLength": 32
+    },
+    "openDispatchPath": "main_deferred",
+    "escapeDispatchPath": "main_deferred"
+  },
+  "negativeControls": {
+    "rawSourceUriAbsent": true,
+    "rawMissingPathAbsent": true,
+    "rawFailureTextAbsent": true,
+    "duplicateContextDidNotCreateSecondChip": true,
+    "immutableReceiptNotRemovable": true,
+    "freshThreadDidNotInheritContext": true
+  },
+  "cleanup": {
+    "processExited": true,
+    "streamsDrained": true,
+    "logWriterClosed": true,
+    "ownedProcessCount": 0,
+    "closeError": null,
+    "clipboardTouched": false
+  },
+  "taskId": "WF-001"
+}

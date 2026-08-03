@@ -65,6 +65,7 @@ use crate::ai::context_selector::{
     slash_command_rows_with_payloads,
 };
 use crate::ai::message_parts::AiContextPart;
+use crate::ai::staged_context::{ContextProvenance, ContextRole};
 use crate::list_item::{IconKind, ListItem, ListItemColors, TypeAccessory};
 use crate::spine::list::{SpineListAction, SpineListRow, SpineListRowKind, SpineListSection};
 
@@ -480,7 +481,7 @@ pub(crate) enum AgentChatSession {
 pub(crate) struct AgentChatRetryDraftState {
     pub input_text: String,
     pub input_cursor: usize,
-    pub pending_context_parts: Vec<crate::ai::message_parts::AiContextPart>,
+    pub pending_context_items: Vec<crate::ai::staged_context::StagedContextItem>,
     pub pasted_text_tokens: Vec<crate::pasted_text::PastedTextToken>,
     pub pasted_image_tokens: Vec<crate::pasted_image::PastedImageToken>,
     pub typed_mention_aliases:
@@ -5542,7 +5543,12 @@ impl AgentChatView {
         }
 
         self.live_thread().update(cx, |thread, cx| {
-            thread.add_context_part(part.clone(), cx);
+            thread.add_context_part_with_provenance(
+                part.clone(),
+                ContextProvenance::AttachmentPortal,
+                ContextRole::Supplemental,
+                cx,
+            );
         });
 
         tracing::info!(
@@ -6413,7 +6419,7 @@ impl AgentChatView {
         let context_ready =
             thread.context_bootstrap_state() != AgentChatContextBootstrapState::Preparing;
 
-        let pending_parts = thread.pending_context_parts();
+        let pending_items = thread.pending_context_items();
 
         let dictation_phase = crate::dictation::current_dictation_phase()
             .map(|phase| phase.as_automation_str().to_string());
@@ -6460,6 +6466,7 @@ impl AgentChatView {
             message_count: thread.messages.len(),
             composer_fingerprint: Some(composer_fingerprint),
             transcript_fingerprint: Some(transcript_fingerprint),
+            prepared_turn_fingerprint: thread.last_prepared_turn_fingerprint().map(str::to_string),
             reliability: Some(crate::ai::reliability::ai_operation_state_snapshot(
                 match &thread.reliability_state().identity {
                     sk_protocol::ai_reliability::AiSurfaceIdentity::QuickAi { .. } => "quickAi",
@@ -6474,12 +6481,17 @@ impl AgentChatView {
             picker: self.build_agent_chat_picker_state_snapshot(),
             spine: self.build_agent_chat_spine_state_snapshot(),
             last_accepted_item: self.last_accepted_item.clone(),
-            context_chip_count: pending_parts.len(),
-            context_parts: pending_parts
+            context_chip_count: pending_items.len(),
+            context_parts: pending_items
                 .iter()
                 .map(Self::context_part_identity_snapshot)
                 .collect(),
-            context_summary: Self::build_agent_chat_context_summary(pending_parts),
+            context_receipts: thread
+                .context_receipts()
+                .iter()
+                .map(Self::context_part_identity_snapshot)
+                .collect(),
+            context_summary: Self::build_agent_chat_context_summary(pending_items),
             dictation_phase,
             context_ready,
             has_pending_permission: thread.pending_permission.is_some(),
@@ -6684,9 +6696,10 @@ impl AgentChatView {
     /// focused-target identity so probes can prove the RIGHT chip is staged
     /// (e.g. the notes→main handoff's note part). Never part content.
     fn context_part_identity_snapshot(
-        part: &crate::ai::message_parts::AiContextPart,
+        item: &crate::ai::staged_context::StagedContextItem,
     ) -> crate::protocol::AgentChatContextPartSnapshot {
         use crate::ai::message_parts::AiContextPart;
+        let part = &item.part;
         let kind = match part {
             AiContextPart::ResourceUri { .. } => "resourceUri",
             AiContextPart::FilePath { .. } => "filePath",
@@ -6703,26 +6716,45 @@ impl AgentChatView {
             ),
             _ => (None, None, None),
         };
+        let failure = item.state.failure();
+        let source_kind = format!("{:?}", item.source_kind());
         crate::protocol::AgentChatContextPartSnapshot {
+            id: item.id.0.clone(),
             kind: kind.to_string(),
-            label: part.label().to_string(),
-            source: part.source().to_string(),
+            label: item.display_label(),
+            source: source_kind,
+            source_fingerprint: crate::ai::reliability::redacted_fingerprint(part.source()),
+            provenance: item.provenance.as_str().to_string(),
+            role: item.role.as_str().to_string(),
+            state: item.state.as_str().to_string(),
+            lifetime: item.lifetime.as_str().to_string(),
+            removable: item.can_remove(),
+            generation: item.generation,
+            failure_code: failure.map(|record| format!("{:?}", record.failure.code)),
+            diagnostic_fingerprint: failure
+                .and_then(|record| record.failure.diagnostic.as_ref())
+                .map(|diagnostic| diagnostic.fingerprint.0.clone()),
             target_kind,
             target_source,
-            target_semantic_id,
+            target_semantic_id: target_semantic_id.map(|semantic_id| {
+                format!(
+                    "fingerprint:{}",
+                    crate::ai::reliability::redacted_fingerprint(&semantic_id)
+                )
+            }),
         }
     }
 
     fn build_agent_chat_context_summary(
-        pending_parts: &[crate::ai::message_parts::AiContextPart],
+        pending_items: &[crate::ai::staged_context::StagedContextItem],
     ) -> Option<String> {
-        if pending_parts.is_empty() {
+        if pending_items.is_empty() {
             None
         } else {
             Some(
-                pending_parts
+                pending_items
                     .iter()
-                    .map(|part| part.label())
+                    .map(crate::ai::staged_context::StagedContextItem::display_label)
                     .collect::<Vec<_>>()
                     .join(", "),
             )
@@ -8144,7 +8176,13 @@ impl AgentChatView {
             .collect::<Vec<_>>();
 
         self.live_thread().update(cx, move |thread, cx| {
-            thread.replace_pending_context_parts(staged_parts, source, cx);
+            thread.replace_pending_context_parts_with_provenance(
+                staged_parts,
+                crate::ai::staged_context::ContextProvenance::HostHandoff,
+                crate::ai::staged_context::ContextRole::Primary,
+                source,
+                cx,
+            );
             thread.input.set_text(staged_text.clone());
             thread.input.set_cursor(staged_cursor);
             cx.notify();
@@ -8195,7 +8233,12 @@ impl AgentChatView {
         let staged_part = part.clone();
         let token_for_prefix = inline_token.clone();
         self.live_thread().update(cx, move |thread, cx| {
-            thread.add_context_part(staged_part, cx);
+            thread.add_context_part_with_provenance(
+                staged_part,
+                crate::ai::staged_context::ContextProvenance::HostHandoff,
+                crate::ai::staged_context::ContextRole::Primary,
+                cx,
+            );
             if !token_already_owned {
                 let existing = thread.input.text().to_string();
                 let new_text = if existing.trim().is_empty() {
@@ -8243,7 +8286,12 @@ impl AgentChatView {
         let count = parts.len();
         self.live_thread().update(cx, move |thread, cx| {
             for part in parts {
-                thread.add_context_part(part, cx);
+                thread.add_context_part_with_provenance(
+                    part,
+                    crate::ai::staged_context::ContextProvenance::HostHandoff,
+                    crate::ai::staged_context::ContextRole::Supplemental,
+                    cx,
+                );
             }
             cx.notify();
         });
@@ -8324,7 +8372,13 @@ impl AgentChatView {
         });
 
         self.live_thread().update(cx, move |thread, cx| {
-            thread.replace_pending_context_parts(vec![part], source, cx);
+            thread.replace_pending_context_parts_with_provenance(
+                vec![part],
+                crate::ai::staged_context::ContextProvenance::HostHandoff,
+                crate::ai::staged_context::ContextRole::Primary,
+                source,
+                cx,
+            );
             thread.input.set_text(input);
             thread.input.set_cursor(cursor);
             cx.notify();
@@ -8611,7 +8665,13 @@ impl AgentChatView {
         }
 
         self.live_thread().update(cx, move |thread, cx| {
-            thread.replace_pending_context_parts(staged_parts, source, cx);
+            thread.replace_pending_context_parts_with_provenance(
+                staged_parts,
+                crate::ai::staged_context::ContextProvenance::HostHandoff,
+                crate::ai::staged_context::ContextRole::Primary,
+                source,
+                cx,
+            );
             thread.input.set_text(staged_text.clone());
             thread.input.set_cursor(staged_cursor);
             if let Err(error) = thread.submit_input(cx) {
@@ -9479,7 +9539,12 @@ impl AgentChatView {
                     );
                     if ok {
                         self.live_thread().update(cx, |thread, cx| {
-                            thread.add_context_part(part.clone(), cx);
+                            thread.add_context_part_with_provenance(
+                                part.clone(),
+                                ContextProvenance::UserMention,
+                                ContextRole::Supplemental,
+                                cx,
+                            );
                             cx.notify();
                         });
                         self.sync_inline_mentions(cx);
@@ -9506,7 +9571,12 @@ impl AgentChatView {
                     );
                     if ok {
                         self.live_thread().update(cx, |thread, cx| {
-                            thread.add_context_part(part.clone(), cx);
+                            thread.add_context_part_with_provenance(
+                                part.clone(),
+                                ContextProvenance::UserMention,
+                                ContextRole::Supplemental,
+                                cx,
+                            );
                             cx.notify();
                         });
                         self.sync_inline_mentions(cx);
@@ -9726,7 +9796,7 @@ impl AgentChatView {
                 thread.input.cursor(),
                 thread.cwd().clone(),
                 thread.selected_model_id().map(str::to_string),
-                thread.pending_context_parts().to_vec(),
+                thread.pending_context_parts_cloned(),
             )
         };
 
@@ -11375,7 +11445,7 @@ impl AgentChatView {
         let (parts, input_text) = {
             let thread = self.live_thread().read(cx);
             (
-                thread.pending_context_parts().to_vec(),
+                thread.pending_context_parts_cloned(),
                 thread.input.text().to_string(),
             )
         };
@@ -13243,7 +13313,12 @@ impl AgentChatView {
                         self.live_thread().update(cx, |thread, cx| {
                             thread.input.set_text(next_text);
                             thread.input.set_cursor(next_cursor);
-                            thread.add_context_part(part, cx);
+                            thread.add_context_part_with_provenance(
+                                part,
+                                ContextProvenance::UserMention,
+                                ContextRole::Supplemental,
+                                cx,
+                            );
                             if submit {
                                 let _ = thread.submit_input(cx);
                             } else {
@@ -13280,7 +13355,12 @@ impl AgentChatView {
                         self.live_thread().update(cx, |thread, cx| {
                             thread.input.set_text(next_text);
                             thread.input.set_cursor(next_cursor);
-                            thread.add_context_part(part, cx);
+                            thread.add_context_part_with_provenance(
+                                part,
+                                ContextProvenance::UserMention,
+                                ContextRole::Supplemental,
+                                cx,
+                            );
                             if submit {
                                 let _ = thread.submit_input(cx);
                             } else {
@@ -13538,7 +13618,12 @@ impl AgentChatView {
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(next_text);
             thread.input.set_cursor(next_cursor);
-            thread.add_context_part(part.clone(), cx);
+            thread.add_context_part_with_provenance(
+                part.clone(),
+                ContextProvenance::UserMention,
+                ContextRole::Supplemental,
+                cx,
+            );
             cx.notify();
         });
 
@@ -13603,7 +13688,7 @@ impl AgentChatView {
     ) -> bool {
         crate::ai::context_mentions::should_claim_inline_mention_ownership(
             part,
-            self.live_thread().read(cx).pending_context_parts(),
+            &self.live_thread().read(cx).pending_context_parts_cloned(),
             &self.inline_owned_context_tokens,
         )
     }
@@ -13719,7 +13804,7 @@ impl AgentChatView {
     /// and adds new parts for freshly typed tokens.
     fn sync_inline_mentions(&mut self, cx: &mut Context<Self>) {
         let text = self.live_thread().read(cx).input.text().to_string();
-        let attached_parts = self.live_thread().read(cx).pending_context_parts().to_vec();
+        let attached_parts = self.live_thread().read(cx).pending_context_parts_cloned();
 
         let plan = crate::ai::context_mentions::build_inline_mention_sync_plan_with_aliases(
             &text,
@@ -13733,7 +13818,12 @@ impl AgentChatView {
                 thread.remove_context_part(ix, cx);
             }
             for part in &plan.added_parts {
-                thread.add_context_part(part.clone(), cx);
+                thread.add_context_part_with_provenance(
+                    part.clone(),
+                    ContextProvenance::UserMention,
+                    ContextRole::Supplemental,
+                    cx,
+                );
             }
         });
 
@@ -14267,7 +14357,7 @@ impl AgentChatView {
                 Some(AgentChatRetryDraftState {
                     input_text: thread.input.text().to_string(),
                     input_cursor: thread.input.cursor(),
-                    pending_context_parts: thread.pending_context_parts().to_vec(),
+                    pending_context_items: thread.pending_context_items().to_vec(),
                     pasted_text_tokens: self.pasted_text_tokens.clone(),
                     pasted_image_tokens: self.pasted_image_tokens.clone(),
                     typed_mention_aliases: self.typed_mention_aliases.clone(),
@@ -14339,17 +14429,18 @@ impl AgentChatView {
         let input_text = draft_state.input_text;
         let input_len = input_text.len();
         let input_cursor = draft_state.input_cursor.min(input_text.chars().count());
-        let pending_context_parts = draft_state.pending_context_parts;
+        let pending_context_items = draft_state.pending_context_items;
 
         self.live_thread().update(cx, move |thread, cx| {
-            thread.replace_pending_context_parts(
-                pending_context_parts,
-                "agent_chat_switch_agent_retry_restore",
+            thread.restore_draft_snapshot(
+                super::thread::AgentChatThreadDraftSnapshot {
+                    input: input_text.clone(),
+                    input_cursor,
+                    pending_context_items,
+                    pending_context_consumed: false,
+                },
                 cx,
             );
-            thread.input.set_text(input_text.clone());
-            thread.input.set_cursor(input_cursor);
-            cx.notify();
         });
 
         self.refresh_composer_picker_state_after_parent_change(cx);
@@ -16119,7 +16210,7 @@ impl Render for AgentChatView {
         let cursor_visible = self.cursor_visible && composer_active;
         let pending_permission = thread.pending_permission.clone();
         let plan_entries = thread.active_plan_entries().to_vec();
-        let attached_parts = thread.pending_context_parts().to_vec();
+        let attached_parts = thread.pending_context_parts_cloned();
         let messages: Vec<AgentChatThreadMessage> = thread.messages.clone();
         let history_popup_open = self.history_menu.is_some();
         let _colors = Self::prompt_colors();

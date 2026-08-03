@@ -150,6 +150,8 @@ impl AgentChatView {
         let thread = self.live_thread().read(cx);
         let composer_text = thread.input.text().to_string();
         let composer_cursor = thread.input.cursor();
+        let pending_context_items = thread.pending_context_items().to_vec();
+        let pending_context_consumed = thread.draft_snapshot().pending_context_consumed;
         let replace_label = contract.replacement.preview_label();
 
         let Some(staged_state) = crate::ai::agent_chat::ui::portal_contract::next_portal_state(
@@ -168,6 +170,8 @@ impl AgentChatView {
             contract: contract.clone(),
             composer_text,
             composer_cursor,
+            pending_context_items,
+            pending_context_consumed,
             state: staged_state,
         });
         self.clear_composer_picker(AgentChatComposerPickerDismissReason::PortalStaged, cx);
@@ -235,7 +239,12 @@ impl AgentChatView {
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(next_text);
             thread.input.set_cursor(next_cursor);
-            thread.add_context_part(part.clone(), cx);
+            thread.add_context_part_with_provenance(
+                part.clone(),
+                crate::ai::staged_context::ContextProvenance::AttachmentPortal,
+                crate::ai::staged_context::ContextRole::Supplemental,
+                cx,
+            );
             cx.notify();
         });
 
@@ -270,6 +279,8 @@ impl AgentChatView {
         };
         let restore_text = session.composer_text.clone();
         let restore_cursor = session.composer_cursor;
+        let restore_context_items = session.pending_context_items.clone();
+        let restore_context_consumed = session.pending_context_consumed;
         let cleared_state =
             crate::ai::agent_chat::ui::portal_contract::clear_terminal_portal_state(state);
         debug_assert_eq!(
@@ -278,10 +289,15 @@ impl AgentChatView {
         );
 
         self.live_thread().update(cx, |thread, cx| {
-            let cursor = restore_cursor.min(restore_text.chars().count());
-            thread.input.set_text(restore_text.clone());
-            thread.input.set_cursor(cursor);
-            cx.notify();
+            thread.restore_draft_snapshot(
+                super::super::thread::AgentChatThreadDraftSnapshot {
+                    input: restore_text.clone(),
+                    input_cursor: restore_cursor,
+                    pending_context_items: restore_context_items.clone(),
+                    pending_context_consumed: restore_context_consumed,
+                },
+                cx,
+            );
         });
 
         tracing::info!(

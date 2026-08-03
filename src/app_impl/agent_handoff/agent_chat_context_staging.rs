@@ -175,7 +175,12 @@ impl ScriptListApp {
                         label: crate::notes::NOTES_INSTRUCTIONS_LABEL.to_string(),
                     };
                     thread.update(cx, |thread, cx| {
-                        thread.add_context_part(part, cx);
+                        thread.add_context_part_with_provenance(
+                            part,
+                            crate::ai::staged_context::ContextProvenance::HostHandoff,
+                            crate::ai::staged_context::ContextRole::Supplemental,
+                            cx,
+                        );
                     });
                     tracing::info!(
                         target: "script_kit::tab_ai",
@@ -203,7 +208,12 @@ impl ScriptListApp {
                     thread.input.set_text(text.clone());
                     thread.input.set_cursor(text.len());
                 }
-                thread.add_context_part(part.clone(), cx);
+                thread.add_context_part_with_provenance(
+                    part.clone(),
+                    crate::ai::staged_context::ContextProvenance::ImplicitFocused,
+                    crate::ai::staged_context::ContextRole::Supplemental,
+                    cx,
+                );
             });
             if let Some(token) = inline_token {
                 view_entity_for_staging.update(cx, |view, _cx| {
@@ -225,7 +235,12 @@ impl ScriptListApp {
                 label: crate::ai::message_parts::ASK_ANYTHING_LABEL.to_string(),
             };
             thread.update(cx, |thread, cx| {
-                thread.add_context_part(part, cx);
+                thread.add_context_part_with_provenance(
+                    part,
+                    crate::ai::staged_context::ContextProvenance::DeferredAmbient,
+                    crate::ai::staged_context::ContextRole::Supplemental,
+                    cx,
+                );
             });
             tracing::info!(
                 target: "script_kit::tab_ai",
@@ -243,7 +258,12 @@ impl ScriptListApp {
                 label: chip_label,
             };
             thread.update(cx, |thread, cx| {
-                thread.add_context_part(part, cx);
+                thread.add_context_part_with_provenance(
+                    part,
+                    crate::ai::staged_context::ContextProvenance::DeferredAmbient,
+                    crate::ai::staged_context::ContextRole::Supplemental,
+                    cx,
+                );
             });
             tracing::info!(
                 target: "script_kit::tab_ai",

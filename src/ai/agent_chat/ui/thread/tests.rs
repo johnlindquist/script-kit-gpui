@@ -239,7 +239,9 @@ fn test_thread_with_profile(
         pending_permission: None,
         pending_context_blocks,
         pending_context_consumed,
-        pending_context_parts: Vec::new(),
+        pending_context_items: Vec::new(),
+        context_receipts: Vec::new(),
+        last_prepared_turn: None,
         pending_ambient_context_enabled: false,
         context_bootstrap_state: AgentChatContextBootstrapState::Ready,
         queued_submit_while_bootstrapping: false,
@@ -954,14 +956,12 @@ fn submit_while_streaming_queues_and_clears_composer() {
     let mut thread = test_thread(Vec::new(), true);
     thread.status = AgentChatThreadStatus::Streaming;
     thread.input.set_text("follow up".to_string());
-    thread
-        .pending_context_parts
-        .push(crate::ai::message_parts::AiContextPart::TextBlock {
-            label: "ctx".to_string(),
-            source: "test".to_string(),
-            text: "ctx".to_string(),
-            mime_type: None,
-        });
+    thread.add_context_part_test(crate::ai::message_parts::AiContextPart::TextBlock {
+        label: "ctx".to_string(),
+        source: "test".to_string(),
+        text: "ctx".to_string(),
+        mime_type: None,
+    });
 
     let text = thread.input.text().trim().to_string();
     thread.resume_queue_for_manual_submit();
@@ -969,9 +969,9 @@ fn submit_while_streaming_queues_and_clears_composer() {
 
     assert_eq!(thread.queued_messages().len(), 1);
     assert_eq!(thread.queued_messages()[0].text, "follow up");
-    assert_eq!(thread.queued_messages()[0].context_parts.len(), 1);
+    assert_eq!(thread.queued_messages()[0].context_items.len(), 1);
     assert!(thread.input.text().is_empty());
-    assert!(thread.pending_context_parts().is_empty());
+    assert!(thread.pending_context_parts_cloned().is_empty());
     assert_eq!(thread.status, AgentChatThreadStatus::Streaming);
 }
 
@@ -1170,6 +1170,7 @@ fn setup_required_uses_same_typed_recovery_projection_as_failed_turns() {
 fn repeated_manual_failures_exhaust_retry_without_duplicating_user_turn() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try once");
+    thread.seed_last_prepared_turn_test("please try once");
     for attempt in 0..2 {
         thread.apply_event_test(AgentChatEvent::failed(
             sk_protocol::ai_reliability::ProtocolComponent::Provider,
@@ -1208,15 +1209,31 @@ fn repeated_manual_failures_exhaust_retry_without_duplicating_user_turn() {
 fn retry_from_error_reenters_streaming_without_duplicate_user_message() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
+    thread.seed_last_prepared_turn_test("please try");
     thread.apply_event_test(AgentChatEvent::failed(
         sk_protocol::ai_reliability::ProtocolComponent::Provider,
         "connection lost",
     ));
     let before = thread.messages.len();
+    let prepared_fingerprint = thread
+        .last_prepared_turn_fingerprint()
+        .expect("accepted payload fingerprint")
+        .to_string();
+    thread.add_context_part_test(file_context_part());
+    let pending_generation = thread.pending_context_items[0].generation;
 
     thread.retry_last_user_turn_test().unwrap();
 
     assert_eq!(thread.status, AgentChatThreadStatus::Streaming);
+    assert_eq!(
+        thread.last_prepared_turn_fingerprint(),
+        Some(prepared_fingerprint.as_str()),
+        "Retry must reuse the accepted model payload"
+    );
+    assert_eq!(
+        thread.pending_context_items[0].generation,
+        pending_generation
+    );
     assert_eq!(thread.messages.len(), before);
     assert_eq!(
         thread
@@ -1233,6 +1250,7 @@ fn retry_from_error_reenters_streaming_without_duplicate_user_message() {
 fn dismiss_clears_failed_turn_recovery_card() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
+    thread.seed_last_prepared_turn_test("please try");
     thread.apply_event_test(AgentChatEvent::failed(
         sk_protocol::ai_reliability::ProtocolComponent::Provider,
         "connection lost",
@@ -1247,6 +1265,7 @@ fn dismiss_clears_failed_turn_recovery_card() {
 fn starting_new_turn_clears_failed_turn_recovery_card() {
     let mut thread = test_thread(Vec::new(), true);
     thread.push_message(AgentChatThreadMessageRole::User, "please try");
+    thread.seed_last_prepared_turn_test("please try");
     thread.apply_event_test(AgentChatEvent::failed(
         sk_protocol::ai_reliability::ProtocolComponent::Provider,
         "connection lost",
@@ -1453,7 +1472,7 @@ fn ask_anything_removed_before_capture_completes() {
         thread.context_bootstrap_state,
         AgentChatContextBootstrapState::Preparing
     );
-    assert_eq!(thread.pending_context_parts.len(), 1);
+    assert_eq!(thread.pending_context_items.len(), 1);
 
     // 2. User removes the chip before capture finishes.
     thread.remove_context_part_test(0);
@@ -1469,7 +1488,7 @@ fn ask_anything_removed_before_capture_completes() {
         thread.context_bootstrap_note.as_ref().map(|s| s.as_ref()),
         Some("Ask Anything removed")
     );
-    assert!(thread.pending_context_parts.is_empty());
+    assert!(thread.pending_context_items.is_empty());
 
     // 4. Deferred capture completes — should be a no-op.
     let blob = minimal_blob();
@@ -1507,9 +1526,11 @@ fn ask_anything_removed_after_ambient_promotion() {
         .expect("stage should succeed");
 
     // Verify promotion happened.
-    assert_eq!(thread.pending_context_parts.len(), 1);
+    assert_eq!(thread.pending_context_items.len(), 1);
     assert!(
-        thread.pending_context_parts[0].is_ambient_context_chip(),
+        thread.pending_context_items[0]
+            .part
+            .is_ambient_context_chip(),
         "chip should be promoted to AmbientContext"
     );
     assert!(
@@ -1530,7 +1551,7 @@ fn ask_anything_removed_after_ambient_promotion() {
         thread.pending_context_blocks.is_empty(),
         "removing promoted chip must clear hidden blocks"
     );
-    assert!(thread.pending_context_parts.is_empty());
+    assert!(thread.pending_context_items.is_empty());
 
     // 5. First submit should carry no ambient context.
     thread.input.set_text("hello");
@@ -1541,7 +1562,7 @@ fn ask_anything_removed_after_ambient_promotion() {
 /// Regression: Focused-target chip consumed on first submit.
 ///
 /// After a focused-target chip is staged and the first message is submitted,
-/// the chip must be consumed (removed from `pending_context_parts`) so the
+/// the chip must be consumed (removed from `pending_context_items`) so the
 /// composer shows no stale chips on the second turn.
 #[test]
 fn focused_target_chip_consumed_on_first_submit() {
@@ -1549,7 +1570,7 @@ fn focused_target_chip_consumed_on_first_submit() {
 
     // 1. Stage a focused-target chip (simulates Tab from a focused surface).
     thread.add_context_part_test(focused_target_part("my-script"));
-    assert_eq!(thread.pending_context_parts.len(), 1);
+    assert_eq!(thread.pending_context_items.len(), 1);
     assert!(!thread.pending_context_consumed);
 
     // Mark bootstrap as ready (focused path doesn't use deferred capture).
@@ -1568,7 +1589,7 @@ fn focused_target_chip_consumed_on_first_submit() {
 
     // 3. Chip stays visible after submit (not drained).
     assert_eq!(
-        thread.pending_context_parts.len(),
+        thread.pending_context_items.len(),
         1,
         "chip must persist after submit so it remains visible in the composer"
     );
@@ -1598,12 +1619,196 @@ fn submit_snapshot_consumes_context_without_resolving_it_on_the_caller() {
         .take_pending_context_for_background_resolution()
         .expect("staged context should produce a background job");
 
-    assert!(thread.pending_context_consumed);
-    assert!(!thread.pending_ambient_context_enabled);
-    assert!(thread.pending_context_blocks.is_empty());
+    assert!(
+        !thread.pending_context_consumed,
+        "preparation is not an accepted send"
+    );
+    assert!(
+        !thread.pending_ambient_context_enabled,
+        "snapshotting must preserve the pre-submit ambient flag"
+    );
+    assert_eq!(thread.pending_context_blocks.len(), 1);
+    assert!(matches!(
+        thread.pending_context_items[0].state,
+        ContextLifecycleState::Resolving
+    ));
     assert_eq!(job.blocks.len(), 1);
-    assert_eq!(job.parts, vec![screenshot_part()]);
+    assert_eq!(
+        job.items
+            .iter()
+            .map(|item| item.part.clone())
+            .collect::<Vec<_>>(),
+        vec![screenshot_part()]
+    );
     assert_eq!(job.attachments.len(), 1);
+}
+
+#[test]
+fn accepted_start_moves_resolved_items_to_immutable_receipts_and_retains_failed_supplements() {
+    let mut thread = test_thread(Vec::new(), false);
+    let primary = StagedContextItem::pending(
+        focused_target_part("required"),
+        ContextProvenance::HostHandoff,
+        ContextRole::Primary,
+    );
+    let supplemental = StagedContextItem::pending(
+        crate::ai::message_parts::AiContextPart::FilePath {
+            path: "/missing/supplemental.txt".to_string(),
+            label: "Optional file".to_string(),
+        },
+        ContextProvenance::AttachmentPortal,
+        ContextRole::Supplemental,
+    );
+    let primary_id = primary.id.clone();
+    let supplemental_id = supplemental.id.clone();
+    thread.pending_context_items = vec![primary, supplemental];
+    thread.pending_context_blocks = vec![ContentBlock::Text(TextContent::new("hidden"))];
+    let failure = crate::ai::reliability::context_unavailable_failure("missing optional file");
+    let transition = PreparedContextTransition {
+        attempted_items: thread.pending_context_items.clone(),
+        attempted_ids: vec![primary_id.clone(), supplemental_id.clone()],
+        resolved_ids: vec![primary_id.clone()],
+        failures: vec![(supplemental_id.clone(), failure.clone())],
+    };
+
+    thread.commit_context_after_runtime_start(&transition);
+
+    assert_eq!(thread.context_receipts.len(), 1);
+    assert_eq!(thread.context_receipts[0].id, primary_id);
+    assert_eq!(
+        thread.context_receipts[0].lifetime,
+        crate::ai::staged_context::ContextLifetime::ImmutableReceipt
+    );
+    assert!(!thread.context_receipts[0].can_remove());
+    assert_eq!(thread.pending_context_items.len(), 1);
+    assert_eq!(thread.pending_context_items[0].id, supplemental_id);
+    assert!(matches!(
+        &thread.pending_context_items[0].state,
+        ContextLifecycleState::Failed { failure: stored } if stored == &failure
+    ));
+    assert!(thread.pending_context_blocks.is_empty());
+    assert!(!thread.pending_context_consumed);
+}
+
+#[test]
+fn accepted_queued_context_commits_from_the_transition_snapshot() {
+    let mut thread = test_thread(Vec::new(), false);
+    let queued = StagedContextItem::pending(
+        file_context_part(),
+        ContextProvenance::UserMention,
+        ContextRole::Supplemental,
+    );
+    let queued_id = queued.id.clone();
+    let queued_generation = queued.generation;
+    let transition = PreparedContextTransition {
+        attempted_items: vec![queued],
+        attempted_ids: vec![queued_id.clone()],
+        resolved_ids: vec![queued_id.clone()],
+        failures: Vec::new(),
+    };
+
+    thread.commit_context_after_runtime_start(&transition);
+
+    assert!(thread.pending_context_items.is_empty());
+    assert_eq!(thread.context_receipts.len(), 1);
+    assert_eq!(thread.context_receipts[0].id, queued_id);
+    assert_eq!(thread.context_receipts[0].generation, queued_generation);
+    assert_eq!(
+        thread.context_receipts[0].provenance,
+        ContextProvenance::ThreadReceipt
+    );
+    assert!(!thread.context_receipts[0].can_remove());
+}
+
+#[test]
+fn saved_message_reload_drops_pending_receipts_and_retry_payload() {
+    let mut thread = test_thread(Vec::new(), false);
+    let pending = StagedContextItem::pending(
+        file_context_part(),
+        ContextProvenance::HostHandoff,
+        ContextRole::Primary,
+    );
+    let pending_id = pending.id.clone();
+    thread.pending_context_items = vec![pending.clone()];
+    thread.context_receipts = vec![pending.immutable_receipt_from()];
+    thread.seed_last_prepared_turn_test("accepted before reload");
+    assert!(thread.last_prepared_turn.is_some());
+
+    thread.clear_context_for_saved_messages();
+
+    assert!(thread.pending_context_items.is_empty());
+    assert!(thread.context_receipts.is_empty());
+    assert!(thread.last_prepared_turn.is_none());
+    assert!(!thread.pending_context_consumed);
+    assert!(thread
+        .pending_context_items
+        .iter()
+        .all(|item| item.id != pending_id));
+}
+
+#[test]
+fn unaccepted_send_restores_resolved_items_and_keeps_typed_failures_pending() {
+    let mut thread = test_thread(vec![ContentBlock::Text(TextContent::new("hidden"))], false);
+    let mut primary = StagedContextItem::pending(
+        focused_target_part("required"),
+        ContextProvenance::HostHandoff,
+        ContextRole::Primary,
+    );
+    primary.state = ContextLifecycleState::Resolving;
+    let mut supplemental = StagedContextItem::pending(
+        file_context_part(),
+        ContextProvenance::AttachmentPortal,
+        ContextRole::Supplemental,
+    );
+    supplemental.state = ContextLifecycleState::Resolving;
+    let primary_id = primary.id.clone();
+    let supplemental_id = supplemental.id.clone();
+    thread.pending_context_items = vec![primary, supplemental];
+    let failure = crate::ai::reliability::context_unavailable_failure("missing optional file");
+    let transition = PreparedContextTransition {
+        attempted_items: thread.pending_context_items.clone(),
+        attempted_ids: vec![primary_id, supplemental_id.clone()],
+        resolved_ids: Vec::new(),
+        failures: vec![(supplemental_id, failure)],
+    };
+    // Queued turns no longer live in the active composer collection. The
+    // transition snapshot must still restore their stable IDs/generations.
+    thread.pending_context_items.clear();
+
+    thread.restore_context_after_unaccepted_send(&transition);
+
+    assert_eq!(thread.pending_context_items.len(), 2);
+    assert!(matches!(
+        thread.pending_context_items[0].state,
+        ContextLifecycleState::Pending
+    ));
+    assert!(matches!(
+        thread.pending_context_items[1].state,
+        ContextLifecycleState::Failed { .. }
+    ));
+    assert_eq!(thread.pending_context_blocks.len(), 1);
+    assert!(!thread.pending_context_consumed);
+}
+
+#[test]
+fn failed_primary_is_detected_before_runtime_start() {
+    let mut thread = test_thread(Vec::new(), false);
+    let primary = StagedContextItem::pending(
+        file_context_part(),
+        ContextProvenance::HostHandoff,
+        ContextRole::Primary,
+    );
+    let primary_id = primary.id.clone();
+    thread.pending_context_items = vec![primary];
+    let failure = crate::ai::reliability::context_unavailable_failure("missing primary");
+    let transition = PreparedContextTransition {
+        attempted_items: thread.pending_context_items.clone(),
+        attempted_ids: vec![primary_id.clone()],
+        resolved_ids: Vec::new(),
+        failures: vec![(primary_id, failure)],
+    };
+    thread.pending_context_items.clear();
+    assert!(thread.context_transition_has_failed_primary(&transition));
 }
 
 #[test]
@@ -1693,7 +1898,7 @@ fn non_ambient_part_marks_bootstrap_ready_when_no_ambient_capture_is_pending() {
         thread.context_bootstrap_note, None,
         "manual non-ambient attachments should clear the queued bootstrap note"
     );
-    assert_eq!(thread.pending_context_parts.len(), 1);
+    assert_eq!(thread.pending_context_items.len(), 1);
 }
 
 #[test]
@@ -1738,7 +1943,7 @@ fn successful_context_resolution_clears_prior_failure_note() {
             .context_bootstrap_note
             .as_ref()
             .map(|note| note.as_ref()),
-        Some("1 context attachment unavailable · Missing Context")
+        Some("1 context attachment unavailable")
     );
 
     thread.remove_context_part_test(0);
@@ -1827,7 +2032,7 @@ fn current_setup_requirements_reflects_pending_parts() {
     let reqs = thread.current_setup_requirements();
     assert!(
         reqs.needs_embedded_context,
-        "pending_context_parts should set needs_embedded_context"
+        "pending_context_items should set needs_embedded_context"
     );
     assert!(
         !reqs.needs_image,
@@ -1892,7 +2097,7 @@ fn reset_pending_context_for_new_entry_intent_preserves_messages_but_clears_cont
 
     assert_eq!(thread.messages.len(), 1, "transcript history should remain");
     assert!(
-        thread.pending_context_parts.is_empty(),
+        thread.pending_context_items.is_empty(),
         "stale composer chips must be cleared before reusing the thread"
     );
     assert!(
@@ -1915,7 +2120,7 @@ fn reset_pending_context_for_new_entry_intent_preserves_messages_but_clears_cont
 }
 
 #[test]
-fn replace_pending_context_parts_clears_previous_parts_and_resets_consumption() {
+fn replace_pending_context_items_clears_previous_parts_and_resets_consumption() {
     let mut thread = test_thread(vec![ContentBlock::Text(TextContent::new("hidden"))], false);
     thread.add_context_part_test(focused_target_part("old-chip"));
     thread.pending_context_consumed = true;
@@ -1933,7 +2138,7 @@ fn replace_pending_context_parts_clears_previous_parts_and_resets_consumption() 
 
     thread.replace_pending_context_parts_test(replacement.clone(), "test_replace");
 
-    assert_eq!(thread.pending_context_parts, replacement);
+    assert_eq!(thread.pending_context_parts_cloned(), replacement);
     assert!(
         thread.pending_context_blocks.is_empty(),
         "replacing pending parts should clear hidden staged blocks"
@@ -2021,12 +2226,16 @@ fn quick_ai_restore_draft_rejects_cross_policy_context() {
     thread.restore_draft_snapshot_inner(AgentChatThreadDraftSnapshot {
         input: "what is rust".to_string(),
         input_cursor: 0,
-        pending_context_parts: vec![file_context_part()],
+        pending_context_items: vec![StagedContextItem::pending(
+            file_context_part(),
+            ContextProvenance::HostHandoff,
+            ContextRole::Supplemental,
+        )],
         pending_context_consumed: false,
     });
     assert_eq!(thread.input.text(), "what is rust");
     assert!(
-        thread.pending_context_parts().is_empty(),
+        thread.pending_context_parts_cloned().is_empty(),
         "cross-policy draft context must be stripped on restore"
     );
 
@@ -2035,10 +2244,14 @@ fn quick_ai_restore_draft_rejects_cross_policy_context() {
     full.restore_draft_snapshot_inner(AgentChatThreadDraftSnapshot {
         input: "keep".to_string(),
         input_cursor: 0,
-        pending_context_parts: vec![file_context_part()],
+        pending_context_items: vec![StagedContextItem::pending(
+            file_context_part(),
+            ContextProvenance::HostHandoff,
+            ContextRole::Supplemental,
+        )],
         pending_context_consumed: false,
     });
-    assert_eq!(full.pending_context_parts().len(), 1);
+    assert_eq!(full.pending_context_parts_cloned().len(), 1);
 }
 
 /// WP-B2: even if a part is force-planted into pending state, queueing the
@@ -2049,13 +2262,13 @@ fn quick_ai_queue_cannot_smuggle_context() {
     thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
     // Bypass the ingress guard to simulate a smuggled part already resident.
     thread.add_context_part_test(file_context_part());
-    assert_eq!(thread.pending_context_parts().len(), 1);
+    assert_eq!(thread.pending_context_parts_cloned().len(), 1);
 
     thread.queue_current_composer("follow up".to_string());
     let queued = thread.queued_messages();
     assert_eq!(queued.len(), 1);
     assert!(
-        queued[0].context_parts.is_empty(),
+        queued[0].context_items.is_empty(),
         "queued message must carry no forbidden context forward"
     );
 }
@@ -2067,7 +2280,7 @@ fn quick_ai_turn_request_contains_no_context_blocks() {
     thread.set_session_policy_test(AgentChatSessionPolicy::QuickAi);
     // Replace routes through the filtering ingress → denied → empty.
     thread.replace_pending_context_parts_test(vec![file_context_part()], "test");
-    assert!(thread.pending_context_parts().is_empty());
+    assert!(thread.pending_context_parts_cloned().is_empty());
 
     let blocks = thread.prepare_turn_blocks("what is rust");
     assert_eq!(
@@ -2201,7 +2414,7 @@ fn quick_ai_literal_flow_staging_remains_plain_user_text() {
 
     let blocks = thread.prepare_turn_blocks("- deploy the app");
     assert!(
-        thread.pending_context_parts().is_empty(),
+        thread.pending_context_parts_cloned().is_empty(),
         "literal flow text must not become a context part"
     );
     assert_eq!(blocks.len(), 1);

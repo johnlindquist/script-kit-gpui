@@ -365,7 +365,7 @@ fn escape_xml_attribute(value: &str) -> String {
     escaped
 }
 
-fn run_scoped_fingerprint(value: &str) -> String {
+pub(crate) fn run_scoped_fingerprint(value: &str) -> String {
     static SALT: OnceLock<String> = OnceLock::new();
     let salt = SALT.get_or_init(|| {
         let nanos = std::time::SystemTime::now()

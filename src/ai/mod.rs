@@ -53,6 +53,7 @@ pub mod result_cards;
 pub(crate) mod script_generation;
 pub(crate) mod sdk_handlers;
 pub(crate) mod session;
+pub mod staged_context;
 pub(crate) mod storage;
 pub(crate) mod subscriptions;
 pub(crate) mod tab_context;
@@ -113,6 +114,10 @@ pub use self::script_generation::{
     AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION, AI_SCRIPT_GENERATION_SYSTEM_PROMPT,
 };
 pub use self::sdk_handlers::try_handle_ai_message;
+pub use self::staged_context::{
+    stage_context_item, ContextItemId, ContextLifecycleState, ContextLifetime, ContextProvenance,
+    ContextRole, StageContextItemOutcome, StagedContextItem,
+};
 pub use self::storage::{
     clear_all_chats, create_chat, delete_chat, get_all_chats, get_chat, get_chat_messages,
     get_deleted_chats, get_last_message_preparation_audit, init_ai_db, insert_mock_data,

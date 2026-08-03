@@ -47,6 +47,10 @@ use super::{
     AgentChatEventRx,
 };
 use crate::ai::message_parts::AiContextPart;
+use crate::ai::staged_context::{
+    stage_context_item, ContextItemId, ContextLifecycleState, ContextProvenance, ContextRole,
+    StageContextItemOutcome, StagedContextItem,
+};
 
 fn truncate_chars_for_title_prompt(value: &str, max_chars: usize) -> String {
     let mut out: String = value.chars().take(max_chars).collect();
@@ -285,7 +289,7 @@ impl AgentChatToolCallState {
 pub(crate) struct AgentChatThreadDraftSnapshot {
     pub input: String,
     pub input_cursor: usize,
-    pub pending_context_parts: Vec<crate::ai::message_parts::AiContextPart>,
+    pub pending_context_items: Vec<StagedContextItem>,
     pub pending_context_consumed: bool,
 }
 
@@ -347,6 +351,7 @@ struct PendingContextTurn {
     /// Visible label+snippet receipts for the consumed parts, attached to the
     /// transcript user message.
     attachments: Vec<AgentChatMessageAttachment>,
+    context_transition: PreparedContextTransition,
 }
 
 /// Sendable snapshot of one-shot context state captured on the UI thread.
@@ -356,8 +361,24 @@ struct PendingContextTurn {
 /// work that must never run from `submit_input` on the GPUI main thread.
 struct PendingContextResolutionJob {
     blocks: Vec<ContentBlock>,
-    parts: Vec<crate::ai::message_parts::AiContextPart>,
+    items: Vec<StagedContextItem>,
     attachments: Vec<AgentChatMessageAttachment>,
+}
+
+#[derive(Clone)]
+struct PreparedTurnPayload {
+    display_text: String,
+    blocks: Vec<ContentBlock>,
+    attachments: Vec<AgentChatMessageAttachment>,
+    payload_fingerprint: String,
+}
+
+#[derive(Default)]
+struct PreparedContextTransition {
+    attempted_items: Vec<StagedContextItem>,
+    attempted_ids: Vec<ContextItemId>,
+    resolved_ids: Vec<ContextItemId>,
+    failures: Vec<(ContextItemId, AppFailureRecord)>,
 }
 
 /// Resolved turn-scoped context blocks plus the receipt describing
@@ -365,6 +386,7 @@ struct PendingContextResolutionJob {
 struct ResolvedPendingContext {
     blocks: Vec<ContentBlock>,
     receipt: crate::ai::message_parts::ContextResolutionReceipt,
+    transition: PreparedContextTransition,
 }
 
 /// Return value from `prepare_turn_blocks_with_receipt()`.
@@ -376,20 +398,21 @@ struct PreparedTurnBlocks {
     receipt: Option<crate::ai::message_parts::ContextResolutionReceipt>,
     /// Visible label+snippet receipts for the transcript user message.
     attachments: Vec<AgentChatMessageAttachment>,
+    context_transition: PreparedContextTransition,
 }
 
 /// A user submit captured while the current turn is locked.
 #[derive(Debug, Clone)]
 pub(crate) struct AgentChatQueuedMessage {
     pub(crate) text: String,
-    pub(crate) context_parts: Vec<crate::ai::message_parts::AiContextPart>,
+    pub(crate) context_items: Vec<StagedContextItem>,
 }
 
 impl AgentChatQueuedMessage {
-    fn new(text: String, context_parts: Vec<crate::ai::message_parts::AiContextPart>) -> Self {
+    fn new(text: String, context_items: Vec<StagedContextItem>) -> Self {
         Self {
             text,
-            context_parts,
+            context_items,
         }
     }
 }
@@ -451,10 +474,14 @@ pub(crate) struct AgentChatThread {
     /// Whether staged context has already been consumed.
     pending_context_consumed: bool,
 
-    /// Typed context parts visible as chips in the composer.
-    /// Resolved into prompt blocks at submit time via
-    /// `resolve_context_parts_with_receipt`. Supports add/remove/dedup.
-    pending_context_parts: Vec<crate::ai::message_parts::AiContextPart>,
+    /// Typed context items visible as chips in the composer. The wrapper owns
+    /// provenance, role, lifecycle, lifetime, stable identity, and removability;
+    /// the embedded `AiContextPart` remains the model-bound source.
+    pending_context_items: Vec<StagedContextItem>,
+    /// Immutable per-turn receipts created only after runtime start is accepted.
+    context_receipts: Vec<StagedContextItem>,
+    /// Exact accepted payload reused by Retry without rereading or recapturing.
+    last_prepared_turn: Option<PreparedTurnPayload>,
 
     /// Whether the Ask Anything ambient context path is still active.
     /// Set `true` when an Ask Anything chip is staged; cleared when the
@@ -651,14 +678,14 @@ impl AgentChatThread {
             key: WorkKey::from(self.ui_thread_id.clone()),
             transcript: Self::preserved(&transcript),
             draft: Self::preserved(self.input.text()),
-            attachments: if self.pending_context_parts.is_empty()
+            attachments: if self.pending_context_items.is_empty()
                 && self.pending_context_blocks.is_empty()
             {
                 PreservationReceipt::NotApplicable
             } else {
                 Self::preserved(&format!(
                     "{}:{}",
-                    self.pending_context_parts.len(),
+                    self.pending_context_items.len(),
                     self.pending_context_blocks.len()
                 ))
             },
@@ -832,7 +859,7 @@ impl AgentChatThread {
     // so the session policy is the AUTHORITATIVE layer beneath the view's UX
     // affordance gates: even if a call site (or a stale draft, or a queued
     // message) tries to smuggle context into a Quick AI thread, it is dropped
-    // here before it can reach `pending_context_parts` or the provider.
+    // here before it can reach `pending_context_items` or the provider.
 
     /// Adjudicate a single typed context part against the session policy.
     fn admit_context_part(&self, part: &AiContextPart) -> Result<(), ContextAdmissionError> {
@@ -863,13 +890,19 @@ impl AgentChatThread {
                             policy = ?policy,
                             context_class = ?class,
                             reason = error.as_str(),
-                            source = %part.source(),
-                            label = %part.label(),
+                            source_kind = ?part.source_kind(),
                         );
                         false
                     }
                 }
             })
+            .collect()
+    }
+
+    fn filter_admissible_items(&self, items: Vec<StagedContextItem>) -> Vec<StagedContextItem> {
+        items
+            .into_iter()
+            .filter(|item| self.admit_context_part(&item.part).is_ok())
             .collect()
     }
 
@@ -891,7 +924,7 @@ impl AgentChatThread {
         if self.admits_staged_context_blocks() {
             return;
         }
-        if self.pending_context_parts.is_empty() && self.pending_context_blocks.is_empty() {
+        if self.pending_context_items.is_empty() && self.pending_context_blocks.is_empty() {
             return;
         }
         tracing::error!(
@@ -899,10 +932,10 @@ impl AgentChatThread {
             event = "quick_ai_context_leak_prevented",
             site,
             policy = ?self.session_policy,
-            pending_part_count = self.pending_context_parts.len(),
+            pending_part_count = self.pending_context_items.len(),
             pending_block_count = self.pending_context_blocks.len(),
         );
-        self.pending_context_parts.clear();
+        self.pending_context_items.clear();
         self.pending_context_blocks.clear();
         self.pending_ambient_context_enabled = false;
     }
@@ -1098,10 +1131,21 @@ impl AgentChatThread {
             // WP-B2: the constructor is a context ingress. Drop any initial
             // parts the launch policy forbids so a Quick AI thread can never be
             // born holding ambient/file/skill context.
-            pending_context_parts: Self::filter_admissible_parts_for_policy(
+            pending_context_items: Self::filter_admissible_parts_for_policy(
                 init.session_policy,
                 init.initial_context_parts,
-            ),
+            )
+            .into_iter()
+            .map(|part| {
+                StagedContextItem::pending(
+                    part,
+                    ContextProvenance::HostHandoff,
+                    ContextRole::Supplemental,
+                )
+            })
+            .collect(),
+            context_receipts: Vec::new(),
+            last_prepared_turn: None,
             pending_ambient_context_enabled: false,
             context_bootstrap_state: AgentChatContextBootstrapState::Preparing,
             queued_submit_while_bootstrapping: false,
@@ -1407,28 +1451,34 @@ impl AgentChatThread {
     }
 
     fn current_ambient_chip_label(&self) -> Option<String> {
-        self.pending_context_parts
-            .iter()
-            .find_map(|part| part.ambient_chip_label().map(|value| value.to_string()))
+        self.pending_context_items.iter().find_map(|item| {
+            item.part
+                .ambient_chip_label()
+                .map(|value| value.to_string())
+        })
     }
 
     /// Replace the initial ambient bootstrap `ResourceUri` chip with a
     /// display-only `AmbientContext` chip, preserving the original label.
     /// If the resource chip was already removed, pushes a new ambient chip.
     fn promote_ask_anything_chip_to_ambient(&mut self) {
-        if let Some(part) = self
-            .pending_context_parts
+        if let Some(item) = self
+            .pending_context_items
             .iter_mut()
-            .find(|part| part.is_ambient_bootstrap_resource())
+            .find(|item| item.part.is_ambient_bootstrap_resource())
         {
-            let label = part.label().to_string();
-            *part = crate::ai::message_parts::AiContextPart::AmbientContext { label };
+            let label = item.part.label().to_string();
+            item.part = crate::ai::message_parts::AiContextPart::AmbientContext { label };
+            item.state = ContextLifecycleState::Resolved;
             return;
         }
-        self.pending_context_parts
-            .push(crate::ai::message_parts::AiContextPart::AmbientContext {
+        self.pending_context_items.push(StagedContextItem::pending(
+            crate::ai::message_parts::AiContextPart::AmbientContext {
                 label: crate::ai::message_parts::ASK_ANYTHING_LABEL.to_string(),
-            });
+            },
+            ContextProvenance::DeferredAmbient,
+            ContextRole::Supplemental,
+        ));
     }
 
     /// Mark the context bootstrap as ready without staging ambient context
@@ -1612,11 +1662,119 @@ impl AgentChatThread {
         // WP-B2 backstop: pending parts were already admitted at ingress, but
         // re-filter so a queued message can never carry policy-forbidden
         // context forward to its later submit.
-        let taken = std::mem::take(&mut self.pending_context_parts);
-        let parts = self.filter_admissible_parts(taken);
+        let taken = std::mem::take(&mut self.pending_context_items);
+        let items = self.filter_admissible_items(taken);
         self.queued_messages
-            .push_back(AgentChatQueuedMessage::new(text, parts));
+            .push_back(AgentChatQueuedMessage::new(text, items));
         self.input.clear();
+    }
+
+    fn store_prepared_turn_payload(
+        &mut self,
+        display_text: String,
+        blocks: Vec<ContentBlock>,
+        attachments: Vec<AgentChatMessageAttachment>,
+    ) {
+        self.last_prepared_turn = Some(PreparedTurnPayload {
+            payload_fingerprint: crate::ai::message_parts::run_scoped_fingerprint(&format!(
+                "{blocks:?}"
+            )),
+            display_text,
+            blocks,
+            attachments,
+        });
+    }
+
+    fn context_transition_has_failed_primary(
+        &self,
+        transition: &PreparedContextTransition,
+    ) -> bool {
+        transition.failures.iter().any(|(id, _)| {
+            self.pending_context_items
+                .iter()
+                .chain(transition.attempted_items.iter())
+                .any(|item| item.id == *id && item.role == ContextRole::Primary)
+        })
+    }
+
+    fn restore_context_after_unaccepted_send(&mut self, transition: &PreparedContextTransition) {
+        for attempted_id in &transition.attempted_ids {
+            let failure = transition
+                .failures
+                .iter()
+                .find(|(failed_id, _)| failed_id == attempted_id)
+                .map(|(_, failure)| failure.clone());
+            if let Some(item) = self
+                .pending_context_items
+                .iter_mut()
+                .find(|item| item.id == *attempted_id)
+            {
+                item.state = failure.map_or(ContextLifecycleState::Pending, |failure| {
+                    ContextLifecycleState::Failed { failure }
+                });
+                continue;
+            }
+            if let Some(mut item) = transition
+                .attempted_items
+                .iter()
+                .find(|item| item.id == *attempted_id)
+                .cloned()
+            {
+                item.state = failure.map_or(ContextLifecycleState::Pending, |failure| {
+                    ContextLifecycleState::Failed { failure }
+                });
+                self.pending_context_items.push(item);
+            }
+        }
+        self.pending_context_consumed = false;
+    }
+
+    fn commit_context_after_runtime_start(&mut self, transition: &PreparedContextTransition) {
+        let mut accepted_receipts = Vec::new();
+        for resolved_id in &transition.resolved_ids {
+            let accepted = self
+                .pending_context_items
+                .iter()
+                .position(|item| item.id == *resolved_id)
+                .map(|index| self.pending_context_items.remove(index))
+                .or_else(|| {
+                    transition
+                        .attempted_items
+                        .iter()
+                        .find(|item| item.id == *resolved_id)
+                        .cloned()
+                });
+            if let Some(item) = accepted {
+                accepted_receipts.push(item.immutable_receipt_from());
+            }
+        }
+        for (failed_id, failure) in &transition.failures {
+            if let Some(item) = self
+                .pending_context_items
+                .iter_mut()
+                .find(|item| item.id == *failed_id)
+            {
+                item.state = ContextLifecycleState::Failed {
+                    failure: failure.clone(),
+                };
+                continue;
+            }
+            if let Some(mut item) = transition
+                .attempted_items
+                .iter()
+                .find(|item| item.id == *failed_id)
+                .cloned()
+            {
+                item.state = ContextLifecycleState::Failed {
+                    failure: failure.clone(),
+                };
+                self.pending_context_items.push(item);
+            }
+        }
+        self.context_receipts.extend(accepted_receipts);
+        self.pending_context_blocks.clear();
+        self.pending_ambient_context_enabled = false;
+        self.pending_context_consumed = self.pending_context_items.is_empty();
     }
 
     fn start_prepared_turn(
@@ -1624,10 +1782,16 @@ impl AgentChatThread {
         display_text: String,
         blocks: Vec<ContentBlock>,
         attachments: Vec<AgentChatMessageAttachment>,
+        context_transition: PreparedContextTransition,
         clear_composer: bool,
         push_user_message: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.context_transition_has_failed_primary(&context_transition) {
+            self.restore_context_after_unaccepted_send(&context_transition);
+            return Err("primary_context_unavailable".to_string());
+        }
+
         let capability = if let Some(mismatch) = &self.model_selection_mismatch {
             let model = mismatch
                 .requested_model_id
@@ -1644,12 +1808,24 @@ impl AgentChatThread {
         } else {
             CapabilityDecision::Compatible
         };
-        let Some(start_command_id) = self.begin_reliability_turn(capability, cx)? else {
-            return Err("ai_model_selection_unavailable".to_string());
+        let start_command_id = match self.begin_reliability_turn(capability, cx) {
+            Ok(Some(command_id)) => command_id,
+            Ok(None) => {
+                self.restore_context_after_unaccepted_send(&context_transition);
+                return Err("ai_model_selection_unavailable".to_string());
+            }
+            Err(error) => {
+                self.restore_context_after_unaccepted_send(&context_transition);
+                return Err(error);
+            }
         };
-        let rx = match self.connection.start_turn(self.turn_request(blocks)) {
+        let rx = match self
+            .connection
+            .start_turn(self.turn_request(blocks.clone()))
+        {
             Ok(rx) => rx,
             Err(error) => {
+                self.restore_context_after_unaccepted_send(&context_transition);
                 let safe = error.failure.primary_message().to_string();
                 let error_code = error.to_string();
                 let _ = self
@@ -1658,7 +1834,7 @@ impl AgentChatThread {
                 return Err(error_code);
             }
         };
-        self.transition_reliability(
+        if let Err(error) = self.transition_reliability(
             AiOperationEvent::RuntimeStarted {
                 command_id: start_command_id,
                 turn: TurnRef::from(format!(
@@ -1668,8 +1844,14 @@ impl AgentChatThread {
                 )),
             },
             cx,
-        )
-        .map_err(|error| format!("ai_reliability_runtime_start:{:?}", error.reason))?;
+        ) {
+            let _ = self.connection.cancel_turn(self.ui_thread_id.clone());
+            self.restore_context_after_unaccepted_send(&context_transition);
+            return Err(format!("ai_reliability_runtime_start:{:?}", error.reason));
+        }
+
+        self.commit_context_after_runtime_start(&context_transition);
+        self.store_prepared_turn_payload(display_text.clone(), blocks, attachments.clone());
 
         if push_user_message {
             let msg_id = self.alloc_id();
@@ -1710,32 +1892,16 @@ impl AgentChatThread {
                 display_text.clone(),
                 vec![ContentBlock::Text(TextContent::new(display_text))],
                 Vec::new(),
+                PreparedContextTransition::default(),
                 clear_composer,
                 true,
                 cx,
             );
         }
 
-        let attachments = context_job
-            .as_ref()
-            .map(|job| job.attachments.clone())
-            .unwrap_or_default();
-        let msg_id = self.alloc_id();
-        let mut message = AgentChatThreadMessage::new(
-            msg_id,
-            AgentChatThreadMessageRole::User,
-            display_text.clone(),
-        );
-        message.attachments = attachments;
-        self.messages.push(message);
-        self.publish_sdk_new_message(
-            msg_id,
-            AgentChatThreadMessageRole::User,
-            display_text.clone(),
-        );
-        if clear_composer {
-            self.input.clear();
-        }
+        // Preparation is not an accepted send. Keep the composer, pending
+        // items, and transcript unchanged until the runtime returns a start
+        // receiver and the reliability state accepts RuntimeStarted.
         self.status = AgentChatThreadStatus::Streaming;
         self.setup_state = None;
         self.context_resolution_id = self.context_resolution_id.wrapping_add(1);
@@ -1789,12 +1955,34 @@ impl AgentChatThread {
                             if let Err(error) = this.start_prepared_turn(
                                 display_text,
                                 prepared.blocks,
-                                Vec::new(),
-                                false,
-                                false,
+                                prepared.attachments,
+                                prepared.context_transition,
+                                clear_composer,
+                                true,
                                 cx,
                             ) {
-                                this.fail_pending_turn_preparation(error, cx);
+                                if error == "primary_context_unavailable" {
+                                    this.status = AgentChatThreadStatus::Error;
+                                    let failure = this
+                                        .pending_context_items
+                                        .iter()
+                                        .filter(|item| item.role == ContextRole::Primary)
+                                        .find_map(|item| item.state.failure())
+                                        .cloned();
+                                    if let Some(failure) = failure {
+                                        let message = failure.primary_message().to_string();
+                                        let _ = this.transition_reliability(
+                                            AiOperationEvent::Failed(failure.failure),
+                                            cx,
+                                        );
+                                        this.push_message(
+                                            AgentChatThreadMessageRole::Error,
+                                            message,
+                                        );
+                                    }
+                                } else {
+                                    this.fail_pending_turn_preparation(error, cx);
+                                }
                             }
                         }
                         Err(error) => this.fail_pending_turn_preparation(error, cx),
@@ -1808,6 +1996,13 @@ impl AgentChatThread {
     }
 
     fn fail_pending_turn_preparation(&mut self, error: String, cx: &mut Context<Self>) {
+        for item in &mut self.pending_context_items {
+            if matches!(item.state, ContextLifecycleState::Resolving) {
+                item.state = ContextLifecycleState::Pending;
+            }
+        }
+        self.pending_context_consumed = false;
+        self.status = AgentChatThreadStatus::Error;
         let failure = process_failure(ProtocolComponent::Pi, ProcessFailureFacts::SpawnFailed);
         tracing::warn!(
             target: "script_kit::tab_ai",
@@ -1830,14 +2025,14 @@ impl AgentChatThread {
     ) -> Result<(), String> {
         // WP-B2 backstop: adjudicate the queued message's parts once more at
         // dequeue so nothing forbidden survives to the provider.
-        let context_parts = self.filter_admissible_parts(message.context_parts);
-        let context_job = (!context_parts.is_empty()).then(|| PendingContextResolutionJob {
-            attachments: context_parts
+        let context_items = self.filter_admissible_items(message.context_items);
+        let context_job = (!context_items.is_empty()).then(|| PendingContextResolutionJob {
+            attachments: context_items
                 .iter()
-                .map(AgentChatMessageAttachment::from_part)
+                .map(|item| AgentChatMessageAttachment::from_part(&item.part))
                 .collect(),
             blocks: Vec::new(),
-            parts: context_parts,
+            items: context_items,
         });
         self.submit_captured_turn(message.text, context_job, false, cx)
     }
@@ -1885,11 +2080,25 @@ impl AgentChatThread {
             return Err("context_bootstrap_pending".to_string());
         }
 
-        self.clear_all_pending_context("submit_blocks");
+        let context_transition = PreparedContextTransition {
+            attempted_items: self.pending_context_items.clone(),
+            attempted_ids: self
+                .pending_context_items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect(),
+            resolved_ids: self
+                .pending_context_items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect(),
+            failures: Vec::new(),
+        };
         self.start_prepared_turn(
             trimmed_display.to_string(),
             blocks,
             Vec::new(),
+            context_transition,
             true,
             true,
             cx,
@@ -1916,11 +2125,9 @@ impl AgentChatThread {
             return Ok(());
         }
 
-        let Some(display_text) = self.last_user_turn_text() else {
-            return Err("no_user_turn_to_retry".to_string());
+        let Some(prepared) = self.last_prepared_turn.clone() else {
+            return Err("no_immutable_prepared_turn_to_retry".to_string());
         };
-        let prepared = self.prepare_turn_blocks_with_receipt(display_text.trim());
-        self.set_context_resolution_note(prepared.receipt.as_ref());
         let retry_commands = self
             .transition_reliability(
                 AiOperationEvent::RecoverySelected(AiRecoveryAction::Retry),
@@ -2031,8 +2238,8 @@ impl AgentChatThread {
     }
 
     fn resume_recovered_turn(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        let Some(display_text) = self.last_user_turn_text() else {
-            return Ok(());
+        let Some(prepared) = self.last_prepared_turn.clone() else {
+            return Err("no_immutable_prepared_turn_to_resume".to_string());
         };
         let reset_commands = self
             .transition_reliability(AiOperationEvent::ResetForNextTurn, cx)
@@ -2056,8 +2263,6 @@ impl AgentChatThread {
                 _ => None,
             })
             .ok_or_else(|| "ai_reliability_missing_recovery_start".to_string())?;
-        let prepared = self.prepare_turn_blocks_with_receipt(display_text.trim());
-        self.set_context_resolution_note(prepared.receipt.as_ref());
         let rx = match self
             .connection
             .start_turn(self.turn_request(prepared.blocks))
@@ -2272,7 +2477,7 @@ impl AgentChatThread {
             target: "script_kit::tab_ai",
             event = "agent_chat_pending_context_armed",
             reason,
-            pending_part_count = self.pending_context_parts.len(),
+            pending_part_count = self.pending_context_items.len(),
             pending_block_count = self.pending_context_blocks.len(),
             ambient_enabled = self.pending_ambient_context_enabled,
         );
@@ -2289,15 +2494,15 @@ impl AgentChatThread {
             event = "agent_chat_pending_ambient_context_cleared",
             reason,
             cleared_block_count,
-            pending_part_count = self.pending_context_parts.len(),
+            pending_part_count = self.pending_context_items.len(),
         );
     }
 
     /// Clear all pending context state (parts, blocks, flags).
     fn clear_all_pending_context(&mut self, reason: &'static str) {
-        let cleared_part_count = self.pending_context_parts.len();
+        let cleared_part_count = self.pending_context_items.len();
         let cleared_block_count = self.pending_context_blocks.len();
-        self.pending_context_parts.clear();
+        self.pending_context_items.clear();
         self.pending_context_blocks.clear();
         self.pending_context_consumed = false;
         self.pending_ambient_context_enabled = false;
@@ -2367,8 +2572,8 @@ impl AgentChatThread {
     /// Most parts resolve into text prompt blocks. Explicit screenshot chips
     /// are upgraded to real Agent Chat attachment blocks first, with the canonical
     /// resource resolver kept as a fallback if image capture fails.
-    fn resolve_pending_context_parts_with<F>(
-        parts: &[crate::ai::message_parts::AiContextPart],
+    fn resolve_pending_context_items_with<F>(
+        items: &[StagedContextItem],
         mut special_block_resolver: F,
     ) -> ResolvedPendingContext
     where
@@ -2377,80 +2582,87 @@ impl AgentChatThread {
         let mut blocks = Vec::new();
         let mut prompt_blocks = Vec::new();
         let mut failures = Vec::new();
+        let mut transition = PreparedContextTransition {
+            attempted_items: items.to_vec(),
+            attempted_ids: items.iter().map(|item| item.id.clone()).collect(),
+            ..Default::default()
+        };
 
-        for (part_index, part) in parts.iter().enumerate() {
-            let mut resolved_as_special_block = false;
-
+        for item in items {
+            let part = &item.part;
             match special_block_resolver(part) {
                 Ok(Some(block)) => {
                     tracing::info!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_context_part_resolved_to_special_block",
+                        context_item_id = %item.id.as_str(),
                         source_kind = ?part.source_kind(),
                     );
                     blocks.push(block);
-                    resolved_as_special_block = true;
+                    transition.resolved_ids.push(item.id.clone());
+                    continue;
                 }
                 Ok(None) => {}
                 Err(error) => {
                     tracing::warn!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_context_special_block_capture_failed",
+                        context_item_id = %item.id.as_str(),
                         source_kind = ?part.source_kind(),
                         error_len = error.len(),
                     );
                 }
             }
 
-            if resolved_as_special_block {
-                continue;
-            }
-
             match crate::ai::message_parts::resolve_context_item_to_prompt_block(
                 part,
-                crate::ai::message_parts::ContextPreparationRole::Supplemental,
+                item.role.preparation_role(),
                 &[],
                 &[],
             ) {
                 Ok(block) => {
+                    transition.resolved_ids.push(item.id.clone());
                     if block.trim().is_empty() {
                         tracing::info!(
                             target: "script_kit::tab_ai",
                             event = "agent_chat_context_part_prompt_block_empty",
+                            context_item_id = %item.id.as_str(),
                             source_kind = ?part.source_kind(),
                         );
-                        continue;
+                    } else {
+                        prompt_blocks.push(block);
                     }
-                    prompt_blocks.push(block);
                 }
                 Err(failure) => {
                     tracing::warn!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_context_part_prompt_resolution_failed",
+                        context_item_id = %item.id.as_str(),
                         source_kind = ?part.source_kind(),
+                        role = item.role.as_str(),
                         failure_code = ?failure.failure.code,
                     );
+                    transition.failures.push((item.id.clone(), failure.clone()));
                     failures.push(crate::ai::message_parts::ContextResolutionFailure {
-                        part_id: format!("context-{part_index:04}"),
+                        part_id: item.id.0.clone(),
                         source_kind: part.source_kind(),
-                        role: crate::ai::message_parts::ContextPreparationRole::Supplemental,
+                        role: item.role.preparation_role(),
                         failure,
                     });
                 }
             }
         }
 
-        let resolved = blocks.len() + prompt_blocks.len();
         let prompt_prefix = prompt_blocks.join("\n\n");
-
         ResolvedPendingContext {
             blocks,
             receipt: crate::ai::message_parts::ContextResolutionReceipt {
-                attempted: parts.len(),
-                resolved,
+                attempted: items.len(),
+                resolved: transition.resolved_ids.len(),
                 failures,
                 prompt_prefix,
             },
+            transition,
         }
     }
 
@@ -2462,24 +2674,27 @@ impl AgentChatThread {
         &mut self,
     ) -> Option<PendingContextResolutionJob> {
         self.enforce_zero_context_before_turn("take_pending_context_for_background_resolution");
-        let has_pending_parts = !self.pending_context_parts.is_empty();
+        let has_pending_parts = !self.pending_context_items.is_empty();
         let has_pending_blocks = !self.pending_context_blocks.is_empty();
         if self.pending_context_consumed || (!has_pending_parts && !has_pending_blocks) {
             return None;
         }
 
-        let blocks = std::mem::take(&mut self.pending_context_blocks);
-        let parts = self.pending_context_parts.clone();
-        let attachments = parts
+        let blocks = self.pending_context_blocks.clone();
+        let items = self.pending_context_items.clone();
+        let attachments = items
             .iter()
-            .map(AgentChatMessageAttachment::from_part)
+            .map(|item| AgentChatMessageAttachment::from_part(&item.part))
             .collect();
-        self.pending_context_consumed = true;
-        self.pending_ambient_context_enabled = false;
+        for pending in &mut self.pending_context_items {
+            if items.iter().any(|item| item.id == pending.id) {
+                pending.state = ContextLifecycleState::Resolving;
+            }
+        }
 
         Some(PendingContextResolutionJob {
             blocks,
-            parts,
+            items,
             attachments,
         })
     }
@@ -2503,16 +2718,17 @@ impl AgentChatThread {
         }
 
         if let Some(job) = context_job {
-            let consumed_part_count = job.parts.len();
+            let consumed_part_count = job.items.len();
             let consumed_hidden_block_count = job.blocks.len();
             let attachments = job.attachments;
             blocks.extend(job.blocks);
-            let resolved = Self::resolve_pending_context_parts_with(
-                &job.parts,
+            let resolved = Self::resolve_pending_context_items_with(
+                &job.items,
                 Self::capture_special_context_block_for_part,
             );
             let consumed_special_block_count = resolved.blocks.len();
             let receipt = resolved.receipt;
+            let context_transition = resolved.transition;
             blocks.extend(resolved.blocks);
 
             tracing::info!(
@@ -2536,6 +2752,7 @@ impl AgentChatThread {
                 blocks,
                 receipt: Some(receipt),
                 attachments,
+                context_transition,
             };
         }
 
@@ -2550,6 +2767,7 @@ impl AgentChatThread {
             blocks,
             receipt: None,
             attachments: Vec::new(),
+            context_transition: PreparedContextTransition::default(),
         }
     }
 
@@ -2605,7 +2823,7 @@ impl AgentChatThread {
         F: FnMut(&crate::ai::message_parts::AiContextPart) -> Result<Option<ContentBlock>, String>,
     {
         self.enforce_zero_context_before_turn("take_pending_context_for_turn");
-        let has_pending_parts = !self.pending_context_parts.is_empty();
+        let has_pending_parts = !self.pending_context_items.is_empty();
         let has_pending_blocks = !self.pending_context_blocks.is_empty();
 
         if self.pending_context_consumed || (!has_pending_parts && !has_pending_blocks) {
@@ -2615,7 +2833,7 @@ impl AgentChatThread {
         let blocks = std::mem::take(&mut self.pending_context_blocks);
         // Clone parts so the chip remains visible after submit.
         // The `pending_context_consumed` flag prevents re-resolution.
-        let pending_parts = self.pending_context_parts.clone();
+        let pending_parts = self.pending_context_items.clone();
         let consumed_hidden_block_count = blocks.len();
         let consumed_part_count = pending_parts.len();
 
@@ -2628,14 +2846,16 @@ impl AgentChatThread {
                     failures: Vec::new(),
                     prompt_prefix: String::new(),
                 },
+                transition: PreparedContextTransition::default(),
             }
         } else {
-            Self::resolve_pending_context_parts_with(&pending_parts, |part| {
+            Self::resolve_pending_context_items_with(&pending_parts, |part| {
                 special_block_resolver(part)
             })
         };
         let consumed_special_block_count = resolved_pending_context.blocks.len();
         let receipt = resolved_pending_context.receipt;
+        let context_transition = resolved_pending_context.transition;
         let mut blocks = blocks;
         blocks.extend(resolved_pending_context.blocks);
 
@@ -2654,13 +2874,14 @@ impl AgentChatThread {
 
         let attachments = pending_parts
             .iter()
-            .map(AgentChatMessageAttachment::from_part)
+            .map(|item| AgentChatMessageAttachment::from_part(&item.part))
             .collect();
 
         Some(PendingContextTurn {
             blocks,
             receipt,
             attachments,
+            context_transition,
         })
     }
 
@@ -2722,6 +2943,7 @@ impl AgentChatThread {
         if let Some(turn) = self.take_pending_context_for_turn() {
             let receipt = turn.receipt;
             let attachments = turn.attachments;
+            let context_transition = turn.context_transition;
             blocks.extend(turn.blocks);
 
             if receipt.attempted > 0 {
@@ -2747,6 +2969,7 @@ impl AgentChatThread {
                 blocks,
                 receipt: Some(receipt),
                 attachments,
+                context_transition,
             };
         }
 
@@ -2761,6 +2984,7 @@ impl AgentChatThread {
             blocks,
             receipt: None,
             attachments: Vec::new(),
+            context_transition: PreparedContextTransition::default(),
         }
     }
 
@@ -3821,14 +4045,14 @@ impl AgentChatThread {
         &self,
     ) -> super::preflight::AgentChatLaunchRequirements {
         let needs_embedded_context = self.launch_requirements.needs_embedded_context
-            || !self.pending_context_parts.is_empty()
+            || !self.pending_context_items.is_empty()
             || !self.pending_context_blocks.is_empty();
 
         let needs_image = self.launch_requirements.needs_image
             || self
-                .pending_context_parts
+                .pending_context_items
                 .iter()
-                .any(Self::is_explicit_screenshot_part);
+                .any(|item| Self::is_explicit_screenshot_part(&item.part));
 
         super::preflight::AgentChatLaunchRequirements {
             needs_embedded_context,
@@ -4363,6 +4587,8 @@ impl AgentChatThread {
         self.active_tool_calls.clear();
         self.tool_call_lookup.clear();
         self.clear_all_pending_context("clear_messages");
+        self.context_receipts.clear();
+        self.last_prepared_turn = None;
         self.context_bootstrap_state = AgentChatContextBootstrapState::Ready;
         self.context_bootstrap_note = None;
 
@@ -4403,6 +4629,8 @@ impl AgentChatThread {
         self.usage_cost_usd = None;
         self.input.clear();
         self.clear_all_pending_context("set_agent_chat_test_fixture");
+        self.context_receipts.clear();
+        self.last_prepared_turn = None;
         self.context_bootstrap_state = AgentChatContextBootstrapState::Ready;
         self.context_bootstrap_note = None;
         self.queued_submit_while_bootstrapping = false;
@@ -4495,6 +4723,77 @@ impl AgentChatThread {
                     self.push_message(AgentChatThreadMessageRole::Assistant, String::new());
                     self.set_status(AgentChatThreadStatus::Idle);
                 }
+                "contextLifecyclePending" | "context-lifecycle-pending" => {
+                    let part = AiContextPart::TextBlock {
+                        label: "Synthetic context".to_string(),
+                        source: "fixture://context-lifecycle/shared".to_string(),
+                        text: "synthetic context body".to_string(),
+                        mime_type: Some("text/plain".to_string()),
+                    };
+                    stage_context_item(
+                        &mut self.pending_context_items,
+                        StagedContextItem::pending(
+                            part.clone(),
+                            ContextProvenance::ImplicitFocused,
+                            ContextRole::Supplemental,
+                        ),
+                    );
+                    stage_context_item(
+                        &mut self.pending_context_items,
+                        StagedContextItem::pending(
+                            part,
+                            ContextProvenance::AttachmentPortal,
+                            ContextRole::Supplemental,
+                        ),
+                    );
+                    self.set_status(AgentChatThreadStatus::Idle);
+                }
+                "contextLifecyclePartialAccepted" | "context-lifecycle-partial-accepted" => {
+                    let primary = StagedContextItem::pending(
+                        AiContextPart::TextBlock {
+                            label: "Required synthetic context".to_string(),
+                            source: "fixture://context-lifecycle/primary".to_string(),
+                            text: "required synthetic body".to_string(),
+                            mime_type: Some("text/plain".to_string()),
+                        },
+                        ContextProvenance::HostHandoff,
+                        ContextRole::Primary,
+                    );
+                    let supplemental = StagedContextItem::pending(
+                        AiContextPart::FilePath {
+                            path: "/missing/CONTEXT_LIFECYCLE_PATH_CANARY".to_string(),
+                            label: "Optional synthetic file".to_string(),
+                        },
+                        ContextProvenance::AttachmentPortal,
+                        ContextRole::Supplemental,
+                    );
+                    let primary_id = primary.id.clone();
+                    let supplemental_id = supplemental.id.clone();
+                    self.pending_context_items = vec![primary, supplemental];
+                    let failure = crate::ai::reliability::context_unavailable_failure(
+                        "CONTEXT_LIFECYCLE_ERROR_CANARY",
+                    );
+                    let transition = PreparedContextTransition {
+                        attempted_items: self.pending_context_items.clone(),
+                        attempted_ids: vec![primary_id.clone(), supplemental_id.clone()],
+                        resolved_ids: vec![primary_id],
+                        failures: vec![(supplemental_id, failure)],
+                    };
+                    self.commit_context_after_runtime_start(&transition);
+                    self.store_prepared_turn_payload(
+                        user_text.to_string(),
+                        vec![ContentBlock::Text(TextContent::new(user_text))],
+                        Vec::new(),
+                    );
+                    self.set_status(AgentChatThreadStatus::Error);
+                }
+                "contextLifecycleFreshThread" | "context-lifecycle-fresh-thread" => {
+                    self.messages.clear();
+                    self.clear_all_pending_context("context_lifecycle_fresh_thread_fixture");
+                    self.context_receipts.clear();
+                    self.last_prepared_turn = None;
+                    self.set_status(AgentChatThreadStatus::Idle);
+                }
                 "error" | "provider-error" => {
                     let error =
                         assistant_text.unwrap_or_else(|| "Fixture provider error".to_string());
@@ -4564,6 +4863,16 @@ impl AgentChatThread {
         let _ = self.transition_reliability(AiOperationEvent::RuntimeCancelled { partial }, cx);
     }
 
+    fn clear_context_for_saved_messages(&mut self) {
+        // Pending context has never been part of the persisted Agent Chat
+        // history schema. Fail closed at the reload boundary: neither a stale
+        // in-memory draft nor an accepted retry payload can become sendable in
+        // the loaded conversation.
+        self.clear_all_pending_context("load_saved_messages");
+        self.context_receipts.clear();
+        self.last_prepared_turn = None;
+    }
+
     /// Load saved messages from a conversation history file.
     /// Replaces current messages with the saved ones (read-only view).
     /// Clears all pending context state so loaded history does not inherit
@@ -4600,7 +4909,7 @@ impl AgentChatThread {
         self.usage_tokens = None;
         self.usage_cost_usd = None;
         self.next_message_id = 1;
-        self.clear_all_pending_context("load_saved_messages");
+        self.clear_context_for_saved_messages();
         self.messages.clear();
         for msg in saved {
             let role = match msg.role.as_str() {
@@ -4625,7 +4934,7 @@ impl AgentChatThread {
         AgentChatThreadDraftSnapshot {
             input: self.input.text().to_string(),
             input_cursor: self.input.cursor(),
-            pending_context_parts: self.pending_context_parts.clone(),
+            pending_context_items: self.pending_context_items.clone(),
             pending_context_consumed: self.pending_context_consumed,
         }
     }
@@ -4647,7 +4956,7 @@ impl AgentChatThread {
         // WP-B2: a restored draft is a context ingress. A snapshot captured
         // under a different (Full) surface must not smuggle context into a
         // Quick AI thread — admit only the policy-allowed parts.
-        self.pending_context_parts = self.filter_admissible_parts(snapshot.pending_context_parts);
+        self.pending_context_items = self.filter_admissible_items(snapshot.pending_context_items);
         self.pending_context_consumed = snapshot.pending_context_consumed;
         self.pending_context_blocks.clear();
         self.context_bootstrap_state = AgentChatContextBootstrapState::Ready;
@@ -4751,25 +5060,46 @@ impl AgentChatThread {
         self.context_bootstrap_note.as_ref().map(|s| s.as_ref())
     }
 
-    // ── Typed context parts (composer chips) ─────────────────────
+    // ── Typed staged context (composer chips) ───────────────────
 
-    /// Read the pending context parts (visible as chips in the composer).
-    pub(crate) fn pending_context_parts(&self) -> &[crate::ai::message_parts::AiContextPart] {
-        &self.pending_context_parts
+    pub(crate) fn pending_context_items(&self) -> &[StagedContextItem] {
+        &self.pending_context_items
     }
 
-    /// Add a typed context part. Deduplicates by value equality — if an
-    /// identical part already exists the call is a no-op.
-    ///
-    /// When an Ask Anything part is added, stale hidden ambient blocks are
-    /// cleared and the bootstrap state is set to `Preparing` so the deferred
-    /// capture path knows to arm.
-    pub(crate) fn add_context_part(
+    pub(crate) fn context_receipts(&self) -> &[StagedContextItem] {
+        &self.context_receipts
+    }
+
+    pub(crate) fn pending_context_parts_cloned(&self) -> Vec<AiContextPart> {
+        self.pending_context_items
+            .iter()
+            .map(|item| item.part.clone())
+            .collect()
+    }
+
+    pub(crate) fn last_prepared_turn_fingerprint(&self) -> Option<&str> {
+        self.last_prepared_turn
+            .as_ref()
+            .map(|payload| payload.payload_fingerprint.as_str())
+    }
+
+    /// Compatibility ingress for composer mentions and picker selections.
+    pub(crate) fn add_context_part(&mut self, part: AiContextPart, cx: &mut Context<Self>) {
+        self.add_context_part_with_provenance(
+            part,
+            ContextProvenance::UserMention,
+            ContextRole::Supplemental,
+            cx,
+        );
+    }
+
+    pub(crate) fn add_context_part_with_provenance(
         &mut self,
-        part: crate::ai::message_parts::AiContextPart,
+        part: AiContextPart,
+        provenance: ContextProvenance,
+        role: ContextRole,
         cx: &mut Context<Self>,
-    ) {
-        // WP-B2: authoritative admission beneath the view's affordance gates.
+    ) -> StageContextItemOutcome {
         if let Err(error) = self.admit_context_part(&part) {
             tracing::warn!(
                 target: "script_kit::quick_ai",
@@ -4777,32 +5107,15 @@ impl AgentChatThread {
                 policy = ?self.session_policy,
                 context_class = ?classify_context_part(&part),
                 reason = error.as_str(),
-                source = %part.source(),
-                label = %part.label(),
+                source_kind = ?part.source_kind(),
+                provenance = provenance.as_str(),
+                role = role.as_str(),
             );
-            return;
-        }
-
-        let already_present = self
-            .pending_context_parts
-            .iter()
-            .any(|existing| existing == &part);
-
-        if already_present {
-            tracing::info!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_context_part_add_skipped_duplicate",
-                source = %part.source(),
-                label = %part.label(),
-            );
-            return;
+            return StageContextItemOutcome::Duplicate { index: usize::MAX };
         }
 
         let is_ambient_bootstrap = part.is_ambient_bootstrap_resource();
-        let ambient_label = part.ambient_chip_label().map(|value| value.to_string());
-        let label = part.label().to_string();
-        let source = part.source().to_string();
-
+        let ambient_label = part.ambient_chip_label().map(str::to_string);
         if is_ambient_bootstrap {
             self.clear_pending_ambient_context("add_ambient_bootstrap_resource");
             self.pending_ambient_context_enabled = true;
@@ -4820,34 +5133,36 @@ impl AgentChatThread {
             self.context_bootstrap_note = None;
         }
 
-        self.pending_context_parts.push(part);
+        let source_kind = part.source_kind();
+        let outcome = stage_context_item(
+            &mut self.pending_context_items,
+            StagedContextItem::pending(part, provenance, role),
+        );
         self.arm_pending_context(if is_ambient_bootstrap {
             "add_ambient_bootstrap_part"
         } else {
             "add_context_part"
         });
-
         tracing::info!(
             target: "script_kit::tab_ai",
-            event = "agent_chat_context_part_added",
-            source = %source,
-            label = %label,
-            is_ambient_bootstrap,
-            ambient_label = ?ambient_label,
-            pending_part_count = self.pending_context_parts.len(),
+            event = "agent_chat_context_item_staged",
+            source_kind = ?source_kind,
+            provenance = provenance.as_str(),
+            role = role.as_str(),
+            outcome = ?outcome,
+            pending_part_count = self.pending_context_items.len(),
             pending_block_count = self.pending_context_blocks.len(),
         );
         cx.notify();
+        outcome
     }
 
     pub(crate) fn add_or_replace_skill_context(
         &mut self,
         identity: SkillContextIdentity,
-        part: crate::ai::message_parts::AiContextPart,
+        part: AiContextPart,
         cx: &mut Context<Self>,
     ) {
-        // WP-B2: skills are denied for Quick AI (Oracle seat 2 overrules the
-        // earlier slash-skill allowance). Refuse before mutating pending state.
         if let Err(error) = self.admit_context_part(&part) {
             tracing::warn!(
                 target: "script_kit::quick_ai",
@@ -4860,25 +5175,27 @@ impl AgentChatThread {
             return;
         }
 
-        let crate::ai::message_parts::AiContextPart::SkillFile {
+        let AiContextPart::SkillFile {
             path, slash_name, ..
         } = &part
         else {
             self.add_context_part(part, cx);
             return;
         };
-
-        self.pending_context_parts.retain(|existing| {
+        self.pending_context_items.retain(|existing| {
             !matches!(
-                existing,
-                crate::ai::message_parts::AiContextPart::SkillFile {
+                &existing.part,
+                AiContextPart::SkillFile {
                     path: existing_path,
                     slash_name: existing_slash,
                     ..
                 } if existing_path == path || existing_slash == slash_name
             )
         });
-
+        let provenance = match identity.staged_by {
+            SkillContextStagedBy::MainMenu => ContextProvenance::HostHandoff,
+            SkillContextStagedBy::SlashPicker => ContextProvenance::UserMention,
+        };
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_skill_context_bound_to_thread",
@@ -4887,27 +5204,40 @@ impl AgentChatThread {
             skill_file_hash = %identity.skill_file_hash,
             staged_by = ?identity.staged_by,
         );
-        self.add_context_part(part, cx);
+        self.add_context_part_with_provenance(part, provenance, ContextRole::Supplemental, cx);
     }
 
-    /// Replace all pending typed context parts in one host-owned handoff.
-    ///
-    /// Used by host surfaces that stage a fresh context payload on an
-    /// existing Agent Chat view and must not append onto stale chips from a prior
-    /// entry path.
     pub(crate) fn replace_pending_context_parts(
         &mut self,
-        parts: Vec<crate::ai::message_parts::AiContextPart>,
+        parts: Vec<AiContextPart>,
         reason: &'static str,
         cx: &mut Context<Self>,
     ) {
-        self.replace_pending_context_parts_inner(parts, reason);
+        self.replace_pending_context_parts_with_provenance(
+            parts,
+            ContextProvenance::HostHandoff,
+            ContextRole::Supplemental,
+            reason,
+            cx,
+        );
+    }
 
+    pub(crate) fn replace_pending_context_parts_with_provenance(
+        &mut self,
+        parts: Vec<AiContextPart>,
+        provenance: ContextProvenance,
+        role: ContextRole,
+        reason: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_pending_context_parts_inner(parts, provenance, role, reason);
         tracing::info!(
             target: "script_kit::tab_ai",
-            event = "agent_chat_pending_context_parts_replaced",
+            event = "agent_chat_pending_context_items_replaced",
             reason,
-            part_count = self.pending_context_parts.len(),
+            provenance = provenance.as_str(),
+            role = role.as_str(),
+            part_count = self.pending_context_items.len(),
             ambient_enabled = self.pending_ambient_context_enabled,
         );
         cx.notify();
@@ -4915,32 +5245,36 @@ impl AgentChatThread {
 
     fn replace_pending_context_parts_inner(
         &mut self,
-        parts: Vec<crate::ai::message_parts::AiContextPart>,
+        parts: Vec<AiContextPart>,
+        provenance: ContextProvenance,
+        role: ContextRole,
         reason: &'static str,
     ) {
-        // WP-B2: host handoffs are a bulk context ingress — filter to the
-        // policy-admissible subset before adopting them.
         let parts = self.filter_admissible_parts(parts);
         self.clear_all_pending_context(reason);
-        self.pending_context_parts = parts;
+        for part in parts {
+            stage_context_item(
+                &mut self.pending_context_items,
+                StagedContextItem::pending(part, provenance, role),
+            );
+        }
         self.pending_context_consumed = false;
         self.queued_submit_while_bootstrapping = false;
 
-        let ambient_label = self
-            .pending_context_parts
-            .iter()
-            .find_map(|part| part.ambient_chip_label().map(|value| value.to_string()));
+        let ambient_label = self.pending_context_items.iter().find_map(|item| {
+            item.part
+                .ambient_chip_label()
+                .map(|value| value.to_string())
+        });
         let has_ambient_bootstrap = self
-            .pending_context_parts
+            .pending_context_items
             .iter()
-            .any(|part| part.is_ambient_bootstrap_resource());
+            .any(|item| item.part.is_ambient_bootstrap_resource());
         let has_promoted_ambient_chip = self
-            .pending_context_parts
+            .pending_context_items
             .iter()
-            .any(|part| part.is_ambient_context_chip());
-
+            .any(|item| item.part.is_ambient_context_chip());
         self.pending_ambient_context_enabled = has_ambient_bootstrap || has_promoted_ambient_chip;
-
         if has_ambient_bootstrap {
             self.context_bootstrap_state = AgentChatContextBootstrapState::Preparing;
             self.context_bootstrap_note = ambient_label
@@ -4957,20 +5291,18 @@ impl AgentChatThread {
         }
     }
 
-    /// Remove a typed context part by index.
-    ///
-    /// When an Ask Anything or AmbientContext chip is removed, clears the
-    /// staged ambient blocks, disables ambient staging, updates the bootstrap
-    /// state/note, and prevents deferred ambient context from being submitted.
-    /// If a submit was queued while bootstrapping and the chip is removed,
-    /// re-evaluates whether to submit now (without ambient context).
     pub(crate) fn remove_context_part(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.pending_context_parts.len() {
+        let Some(item) = self.pending_context_items.get(index) else {
+            return;
+        };
+        if !item.can_remove() {
             return;
         }
-        let removed = self.pending_context_parts.remove(index);
-        let removed_ambient_label = removed.ambient_chip_label().map(|value| value.to_string());
-
+        let removed = self.pending_context_items.remove(index);
+        let removed_ambient_label = removed
+            .part
+            .ambient_chip_label()
+            .map(|value| value.to_string());
         if let Some(ref ambient_label) = removed_ambient_label {
             self.clear_pending_ambient_context("remove_ambient_context_part");
             self.finish_bootstrap(
@@ -4982,16 +5314,14 @@ impl AgentChatThread {
             self.arm_pending_context("remove_context_part");
             cx.notify();
         }
-
         tracing::info!(
             target: "script_kit::tab_ai",
-            event = "agent_chat_context_part_removed",
-            index,
-            source = %removed.source(),
-            label = %removed.label(),
-            removed_ambient = removed_ambient_label.is_some(),
-            ambient_label = ?removed_ambient_label,
-            pending_part_count = self.pending_context_parts.len(),
+            event = "agent_chat_context_item_removed",
+            context_item_id = %removed.id.as_str(),
+            source_kind = ?removed.source_kind(),
+            provenance = removed.provenance.as_str(),
+            role = removed.role.as_str(),
+            pending_part_count = self.pending_context_items.len(),
             pending_block_count = self.pending_context_blocks.len(),
         );
     }
@@ -5049,7 +5379,9 @@ impl AgentChatThread {
             pending_permission: None,
             pending_context_blocks: context_blocks,
             pending_context_consumed: false,
-            pending_context_parts: Vec::new(),
+            pending_context_items: Vec::new(),
+            context_receipts: Vec::new(),
+            last_prepared_turn: None,
             pending_ambient_context_enabled: false,
             context_bootstrap_state: AgentChatContextBootstrapState::Ready,
             queued_submit_while_bootstrapping: false,
@@ -5144,6 +5476,14 @@ impl AgentChatThread {
         self.transition_reliability_test(AiOperationEvent::DismissRequested);
     }
 
+    pub(super) fn seed_last_prepared_turn_test(&mut self, text: &str) {
+        self.store_prepared_turn_payload(
+            text.to_string(),
+            vec![ContentBlock::Text(TextContent::new(text))],
+            Vec::new(),
+        );
+    }
+
     pub(super) fn retry_last_user_turn_test(&mut self) -> Result<(), String> {
         if !matches!(
             self.reliability_state.phase,
@@ -5152,11 +5492,9 @@ impl AgentChatThread {
             return Ok(());
         }
 
-        let Some(display_text) = self.last_user_turn_text() else {
-            return Err("no_user_turn_to_retry".to_string());
+        let Some(prepared) = self.last_prepared_turn.clone() else {
+            return Err("no_immutable_prepared_turn_to_retry".to_string());
         };
-        let prepared = self.prepare_turn_blocks_with_receipt(display_text.trim());
-        self.set_context_resolution_note(prepared.receipt.as_ref());
         let _request = self.turn_request(prepared.blocks);
         let retry_transition = transition(
             self.reliability_state.clone(),
@@ -5200,14 +5538,6 @@ impl AgentChatThread {
 
     /// Add a context part without a GPUI context (skips `cx.notify()`).
     pub(super) fn add_context_part_test(&mut self, part: crate::ai::message_parts::AiContextPart) {
-        let already_present = self
-            .pending_context_parts
-            .iter()
-            .any(|existing| existing == &part);
-        if already_present {
-            return;
-        }
-
         let is_ambient_bootstrap = part.is_ambient_bootstrap_resource();
         self.pending_context_consumed = false;
 
@@ -5228,16 +5558,26 @@ impl AgentChatThread {
             self.context_bootstrap_note = None;
         }
 
-        self.pending_context_parts.push(part);
+        stage_context_item(
+            &mut self.pending_context_items,
+            StagedContextItem::pending(
+                part,
+                ContextProvenance::UserMention,
+                ContextRole::Supplemental,
+            ),
+        );
     }
 
     /// Remove a context part by index without a GPUI context (skips `cx.notify()`).
     pub(super) fn remove_context_part_test(&mut self, index: usize) {
-        if index >= self.pending_context_parts.len() {
+        if index >= self.pending_context_items.len() {
             return;
         }
-        let removed = self.pending_context_parts.remove(index);
-        let removed_ambient_label = removed.ambient_chip_label().map(|value| value.to_string());
+        let removed = self.pending_context_items.remove(index);
+        let removed_ambient_label = removed
+            .part
+            .ambient_chip_label()
+            .map(|value| value.to_string());
 
         if let Some(ref ambient_label) = removed_ambient_label {
             self.pending_ambient_context_enabled = false;
@@ -5253,7 +5593,12 @@ impl AgentChatThread {
         parts: Vec<crate::ai::message_parts::AiContextPart>,
         reason: &'static str,
     ) {
-        self.replace_pending_context_parts_inner(parts, reason);
+        self.replace_pending_context_parts_inner(
+            parts,
+            ContextProvenance::HostHandoff,
+            ContextRole::Supplemental,
+            reason,
+        );
     }
 
     /// Stage Ask Anything context without GPUI context (skips `cx.notify()`).

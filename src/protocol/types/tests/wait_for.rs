@@ -443,6 +443,7 @@ fn get_agent_chat_state_request_parses() {
 fn agent_chat_state_result_round_trips() {
     let snapshot = crate::protocol::AgentChatStateSnapshot {
         context_parts: Vec::new(),
+        context_receipts: Vec::new(),
         schema_version: crate::protocol::AGENT_CHAT_STATE_SCHEMA_VERSION,
         resolved_target: None,
         status: "idle".to_string(),
@@ -454,6 +455,7 @@ fn agent_chat_state_result_round_trips() {
         message_count: 2,
         composer_fingerprint: Some("composer-fingerprint".to_string()),
         transcript_fingerprint: Some("transcript-fingerprint".to_string()),
+        prepared_turn_fingerprint: Some("prepared-turn-fingerprint".to_string()),
         reliability: Some(crate::protocol::AiReliabilityStateSnapshot::ready(
             "agentChat",
         )),

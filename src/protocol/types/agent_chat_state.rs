@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the Agent Chat state response envelope.
-pub const AGENT_CHAT_STATE_SCHEMA_VERSION: u32 = 6;
+pub const AGENT_CHAT_STATE_SCHEMA_VERSION: u32 = 7;
 
 /// Resolved automation target echoed back in Agent Chat state/probe responses.
 ///
@@ -69,6 +69,10 @@ pub struct AgentChatStateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_fingerprint: Option<String>,
 
+    /// Run-scoped fingerprint of the immutable payload used by Retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_turn_fingerprint: Option<String>,
+
     /// Shared typed reliability state for the same resolved target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reliability: Option<super::AiReliabilityStateSnapshot>,
@@ -109,6 +113,11 @@ pub struct AgentChatStateSnapshot {
     /// never part content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_parts: Vec<AgentChatContextPartSnapshot>,
+
+    /// Immutable context receipts from accepted turns. These never re-enter the
+    /// pending collection and are never removable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_receipts: Vec<AgentChatContextPartSnapshot>,
 
     /// Human-readable summary of staged context chips (comma-joined labels).
     ///
@@ -166,13 +175,34 @@ pub struct AgentChatStateSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentChatContextPartSnapshot {
+    /// Stable, privacy-safe lifecycle identity.
+    #[serde(default)]
+    pub id: String,
     /// Part kind: `resourceUri`, `filePath`, `skillFile`, `focusedTarget`,
     /// `ambientContext`, or `textBlock`.
     pub kind: String,
-    /// Human-readable chip label (e.g. `Note: My Note`).
+    /// Human-readable chip label with truthful provenance cue.
     pub label: String,
-    /// Part source string (surface identity, never content).
+    /// Compatibility field: now contains only the privacy-safe source kind.
     pub source: String,
+    #[serde(default)]
+    pub source_fingerprint: String,
+    #[serde(default)]
+    pub provenance: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub lifetime: String,
+    #[serde(default)]
+    pub removable: bool,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_fingerprint: Option<String>,
     /// Focused-target kind (e.g. `note`) when `kind == focusedTarget`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_kind: Option<String>,
@@ -198,6 +228,7 @@ impl Default for AgentChatStateSnapshot {
             message_count: 0,
             composer_fingerprint: None,
             transcript_fingerprint: None,
+            prepared_turn_fingerprint: None,
             reliability: None,
             retained_thread_count: 0,
             fork_point_count: 0,
@@ -206,6 +237,7 @@ impl Default for AgentChatStateSnapshot {
             spine: None,
             last_accepted_item: None,
             context_parts: Vec::new(),
+            context_receipts: Vec::new(),
             context_chip_count: 0,
             context_summary: None,
             dictation_phase: None,
@@ -1112,6 +1144,7 @@ mod tests {
     fn agent_chat_state_snapshot_full_json_shape() {
         let snap = AgentChatStateSnapshot {
             context_parts: Vec::new(),
+            context_receipts: Vec::new(),
             schema_version: AGENT_CHAT_STATE_SCHEMA_VERSION,
             resolved_target: None,
             status: "streaming".to_string(),
@@ -1123,6 +1156,7 @@ mod tests {
             message_count: 3,
             composer_fingerprint: Some("composer-fingerprint".to_string()),
             transcript_fingerprint: Some("transcript-fingerprint".to_string()),
+            prepared_turn_fingerprint: Some("prepared-turn-fingerprint".to_string()),
             reliability: Some(crate::protocol::AiReliabilityStateSnapshot::ready(
                 "agentChat",
             )),

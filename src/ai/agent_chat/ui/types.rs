@@ -122,6 +122,8 @@ pub(crate) struct AgentChatPendingPortalSession {
     pub(crate) contract: crate::ai::agent_chat::ui::portal_contract::AgentChatPortalLaunchContract,
     pub(crate) composer_text: String,
     pub(crate) composer_cursor: usize,
+    pub(crate) pending_context_items: Vec<crate::ai::staged_context::StagedContextItem>,
+    pub(crate) pending_context_consumed: bool,
     pub(crate) state: crate::ai::agent_chat::ui::portal_contract::AgentChatPortalSessionState,
 }
 

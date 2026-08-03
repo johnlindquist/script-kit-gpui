@@ -2221,14 +2221,18 @@ mod agent_chat_spine_dispatch_tests {
                     entity.update(cx, |chat, cx| {
                         let thread = chat.thread().expect("fixture must have a live thread");
                         let mut draft = thread.read(cx).draft_snapshot();
-                        draft.pending_context_parts = vec![
-                            crate::ai::message_parts::AiContextPart::SkillFile {
-                                path: "/tmp/of35b-context.md".to_string(),
-                                label: "OF-35b context".to_string(),
-                                skill_name: "of35b-context".to_string(),
-                                owner_label: "test".to_string(),
-                                slash_name: "of35b-context".to_string(),
-                            },
+                        draft.pending_context_items = vec![
+                            crate::ai::staged_context::StagedContextItem::pending(
+                                crate::ai::message_parts::AiContextPart::SkillFile {
+                                    path: "/tmp/of35b-context.md".to_string(),
+                                    label: "OF-35b context".to_string(),
+                                    skill_name: "of35b-context".to_string(),
+                                    owner_label: "test".to_string(),
+                                    slash_name: "of35b-context".to_string(),
+                                },
+                                crate::ai::staged_context::ContextProvenance::UserMention,
+                                crate::ai::staged_context::ContextRole::Supplemental,
+                            ),
                         ];
                         thread.update(cx, |thread, cx| {
                             thread.restore_draft_snapshot(draft, cx);
